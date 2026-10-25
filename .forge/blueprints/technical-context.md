@@ -58,7 +58,7 @@ fixed PageProfile → layout/pages/source mappings → display list
 | Desktop host | Native desktop application | Framework unknown | desired / provisional |
 | Core boundary | Window-independent library or modules | Keep semantic behavior headless-capable | desired / inferred from analysis |
 | Native data | Versioned UTF-8 JSON-like owned project | Extension/schema not selected | desired / provisional |
-| Layout | One fixed named screenplay page profile initially | `us_letter_screenplay`: 612 × 792 units, margins top/bottom/left/right 72/72/90/72, nominal 55 columns × 55 lines; backend-neutral fixed metrics use 7-unit character cells and 12-unit lines | verified by WO-004 implementation; fresh validation pending |
+| Layout | One bounded named/versioned screenplay page profile initially | `us_letter_screenplay` v1: 72-point/inch US Letter (`612 × 792` points), margins top/bottom/left/right `72/72/108/72`, seven persisted role boxes, 12-point Courier-family target with deterministic monospace fallback, 7-unit default character metric, 12-unit same-element advance and 12-unit boundary gap; screen/PDF/caret consume shared layout and viewport scale is presentation-only | verified by WO-002a implementation; fresh validation pending |
 | Export | PDF plus deliberately lossy plain text | Exact library/contract unknown | desired / provisional |
 
 ## Cross-cutting concerns
@@ -110,7 +110,7 @@ fixed PageProfile → layout/pages/source mappings → display list
 
 ## WO-004 verified spacing facts
 
-- The fixed screenplay layout contract was measured without changing its production inputs: `612 × 792` units, margins top/bottom/left/right `72/72/90/72`, nominal `55` lines per page, seven-unit character cells, and twelve-unit line boxes.
+- The fixed screenplay layout contract uses inch-defined values converted at the format boundary: `612 × 792` points, margins top/bottom/left/right `72/72/108/72`, nominal `55` line capacity, seven-unit character cells, twelve-unit same-element line boxes, and twelve-unit boundary gaps. The profile name/version and bounded explicit values are native-serialized; viewport zoom remains presentation-only.
 - Structural layout, desktop viewport-transform, caret, and PDF coordinate regressions pass. Viewport zoom remains a presentation transform and is not an input to print pagination or source mappings.
 
 Evidence: [`WO-004-screenplay-spacing-contract.md`](../initiatives/2026-10-25-ui-quality-of-life/work-orders/WO-004-screenplay-spacing-contract.md), [`screenplay-core.md`](components/screenplay-core.md).

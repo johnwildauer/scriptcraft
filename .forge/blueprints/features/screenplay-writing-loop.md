@@ -86,8 +86,9 @@ constraints:
 
 - Model/session → layout: valid semantic project plus profile; output is temporary pages/lines/source mappings.
 - Layout → desktop/PDF: backend-neutral display data; consumers do not independently paginate.
-- The initial layout display data uses fixed integer metrics and carries source byte ranges, page assignment, role boxes, and valid-boundary hit/caret geometry; viewport zoom is not an input.
+- The layout display data uses the named/versioned `us_letter_screenplay` profile: inch-defined values become points at the format boundary, with explicit role boxes, source byte ranges, page assignment, valid-boundary hit/caret geometry, same-element single spacing, and a non-text twelve-point boundary gap. Viewport zoom is presentation-only and is not an input.
 - Persistence → session: successful native save changes clean/path state only after replacement succeeds; failures preserve prior state.
+- The persisted profile is also the geometry/font seam: layout, caret/hit testing, desktop selection/IME rendering, pagination, and PDF consume its role boxes, character metric, line advance, boundary gap, and font size. The desktop uses viewport scale only as a presentation transform and falls back to egui's deterministic monospace family when a named Courier face is unavailable.
 
 ## Requirement alignment
 

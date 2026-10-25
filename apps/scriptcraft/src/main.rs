@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use eframe::egui::{self, Color32, FontId, Key, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, FontFamily, FontId, Key, RichText, Sense, Stroke, Vec2};
 use scriptcraft_core::editing::{EditError, EditingSession, Position, Selection};
 use scriptcraft_core::exports;
-use scriptcraft_core::layout::{Caret, ScreenplayLayout, CHAR_WIDTH, LINE_HEIGHT};
+use scriptcraft_core::layout::{Caret, ScreenplayLayout};
 use scriptcraft_core::persistence::{self, FileSystem, StdFileSystem};
 use scriptcraft_core::{Project, Role};
 use std::path::PathBuf;
@@ -287,7 +287,7 @@ impl ScriptCraftApp {
         let page_height = layout.profile.paper_height as f32 * scale;
         let page_rect = ui.allocate_space(Vec2::new(page_width, page_height)).1;
         let painter = ui.painter_at(page_rect);
-        let char_width = CHAR_WIDTH as f32 * scale;
+        let char_width = layout.char_width as f32 * scale;
         painter.rect_filled(page_rect, 2.0, Color32::from_gray(246));
         painter.rect_stroke(page_rect, 2.0, Stroke::new(1.0_f32, Color32::GRAY));
 
@@ -317,7 +317,7 @@ impl ScriptCraftApp {
                 painter.rect_filled(
                     egui::Rect::from_min_size(
                         egui::pos2(left, y),
-                        Vec2::new(width.max(1.0), LINE_HEIGHT as f32 * scale),
+                        Vec2::new(width.max(1.0), layout.line_height as f32 * scale),
                     ),
                     0.0,
                     color,
@@ -327,7 +327,7 @@ impl ScriptCraftApp {
                 &painter,
                 egui::pos2(x, y),
                 &line.text,
-                FontId::monospace((10.0 * scale).max(5.0)),
+                renderer_font(layout, scale),
                 Color32::DARK_GRAY,
                 char_width,
             );
@@ -365,7 +365,7 @@ impl ScriptCraftApp {
                         egui::pos2(x, y),
                         egui::Align2::LEFT_TOP,
                         &self.ime_preedit,
-                        FontId::monospace((10.0 * scale).max(5.0)),
+                        renderer_font(layout, scale),
                         Color32::from_rgb(80, 80, 160),
                     );
                 }
@@ -694,11 +694,26 @@ impl ScriptCraftApp {
         } else {
             current_index.checked_sub(1)
         };
+        let current_line = lines[current_index];
         let Some(target_index) = target_index else {
             self.preferred_vertical_x = None;
-            return self.session.set_selection(selection);
+            let next = Position {
+                element: current_line.element,
+                offset: if down {
+                    current_line.source.end
+                } else {
+                    current_line.source.start
+                },
+            };
+            return self.session.set_selection(if extend {
+                Selection {
+                    anchor: selection.anchor,
+                    focus: next,
+                }
+            } else {
+                Selection::caret(next)
+            });
         };
-        let current_line = lines[current_index];
         let goal = self.preferred_vertical_x.unwrap_or_else(|| {
             let columns = current_line.text[..current.offset - current_line.source.start]
                 .chars()
@@ -785,6 +800,16 @@ fn paint_fixed_metric_text(
             color,
         );
     }
+}
+
+fn renderer_font(layout: &ScreenplayLayout, scale: f32) -> FontId {
+    FontId::new(
+        (layout.profile.font_size as f32 * scale).max(5.0),
+        // The persisted profile names the Courier-family target. egui's
+        // built-in monospace family is the deterministic headless fallback;
+        // viewport scale changes the display transform, not the base point size.
+        FontFamily::Monospace,
+    )
 }
 
 fn fixed_metric_x(origin: f32, column: usize, char_width: f32) -> f32 {
@@ -955,6 +980,7 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scriptcraft_core::layout::{CHAR_WIDTH, LINE_HEIGHT};
 
     #[test]
     fn app_has_one_live_surface_and_no_ui_text_buffer() {
@@ -1050,6 +1076,124 @@ mod tests {
             app.session.selection().anchor.offset,
             app.session.selection().focus.offset
         );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn vertical_navigation_clamps_single_line_document_edges() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session.insert("first and last").unwrap();
+
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 0,
+                offset: 7,
+            }))
+            .unwrap();
+        app.move_vertical(false, false).unwrap();
+        assert_eq!(
+            app.session.selection(),
+            Selection::caret(Position {
+                element: 0,
+                offset: 0,
+            })
+        );
+
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 0,
+                offset: 7,
+            }))
+            .unwrap();
+        app.move_vertical(true, false).unwrap();
+        assert_eq!(
+            app.session.selection(),
+            Selection::caret(Position {
+                element: 0,
+                offset: "first and last".len(),
+            })
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn vertical_navigation_clamps_wrapped_first_and_last_lines() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let text = "🙂abcdefghij".repeat(12);
+        app.session.insert(&text).unwrap();
+        let layout = ScreenplayLayout::build(app.session.project()).unwrap();
+        let lines: Vec<_> = layout
+            .pages
+            .iter()
+            .flat_map(|page| page.lines.iter())
+            .collect();
+        assert!(lines.len() > 1);
+
+        let first = lines[0];
+        let first_offset = first.source.start + first.text.chars().next().unwrap().len_utf8();
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: first.element,
+                offset: first_offset,
+            }))
+            .unwrap();
+        app.move_vertical(false, false).unwrap();
+        assert_eq!(app.session.selection().focus.offset, first.source.start);
+
+        let last = lines.last().unwrap();
+        let last_offset = last.source.start + last.text.chars().next().unwrap().len_utf8();
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: last.element,
+                offset: last_offset,
+            }))
+            .unwrap();
+        app.move_vertical(true, false).unwrap();
+        assert_eq!(app.session.selection().focus.offset, last.source.end);
+        assert!(text.is_char_boundary(app.session.selection().focus.offset));
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn vertical_edge_clamps_reset_goal_repeat_safely_and_preserve_shift_anchor() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session.insert(&"a🙂b".repeat(24)).unwrap();
+        let layout = ScreenplayLayout::build(app.session.project()).unwrap();
+        let lines: Vec<_> = layout
+            .pages
+            .iter()
+            .flat_map(|page| page.lines.iter())
+            .collect();
+        assert!(lines.len() > 1);
+
+        let first = lines[0];
+        let first_focus = Position {
+            element: first.element,
+            offset: first.source.start + first.text.chars().next().unwrap().len_utf8(),
+        };
+        app.session
+            .set_selection(Selection::caret(first_focus))
+            .unwrap();
+        app.move_vertical(false, true).unwrap();
+        let anchor = app.session.selection().anchor;
+        assert_eq!(app.session.selection().focus.offset, first.source.start);
+        app.move_vertical(false, false).unwrap();
+        assert_eq!(app.session.selection().focus.offset, first.source.start);
+        assert_eq!(app.preferred_vertical_x, None);
+        assert_eq!(anchor, first_focus);
+
+        let last = lines.last().unwrap();
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: last.element,
+                offset: last.source.start + last.text.chars().next().unwrap().len_utf8(),
+            }))
+            .unwrap();
+        app.move_vertical(true, true).unwrap();
+        assert_eq!(app.session.selection().focus.offset, last.source.end);
+        app.move_vertical(true, false).unwrap();
+        assert_eq!(app.session.selection().focus.offset, last.source.end);
+        assert_eq!(app.preferred_vertical_x, None);
     }
 
     #[test]
@@ -1423,8 +1567,20 @@ mod tests {
         assert_eq!(line.rect.y as f32 * small_scale, 72.0 * small_scale);
         assert_eq!(line.rect.y as f32 * large_scale, 72.0 * large_scale);
         assert_ne!(small_scale, large_scale);
-        assert_eq!(layout.pages[0].content_bounds.x, 90);
+        assert_eq!(layout.pages[0].content_bounds.x, 108);
         assert_eq!(layout.pages[0].content_bounds.y, 72);
+    }
+
+    #[test]
+    fn renderer_uses_profile_point_size_and_deterministic_monospace_fallback() {
+        let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let layout =
+            ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
+        let font = renderer_font(&layout, 0.5);
+        assert_eq!(layout.profile.font_family, "Courier New");
+        assert_eq!(layout.profile.font_size, 12);
+        assert_eq!(font.size, 6.0);
+        assert_eq!(font.family, FontFamily::Monospace);
     }
 
     #[test]

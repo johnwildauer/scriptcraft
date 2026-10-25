@@ -79,9 +79,10 @@ pub fn export_pdf(project: &Project) -> Result<Vec<u8>, ExportError> {
         kids.push_str(" 0 R");
     }
     objects.push(format!("<< /Type /Pages /Kids [{kids}] /Count {page_count} >>").into_bytes());
-    objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>".to_vec());
+    let font_name = pdf_font_name(&layout.profile.font_family);
+    objects.push(format!("<< /Type /Font /Subtype /Type1 /BaseFont /{font_name} >>").into_bytes());
     for page in &layout.pages {
-        let content = page_content(page, layout.profile.paper_height);
+        let content = page_content(page, layout.profile.paper_height, layout.profile.font_size);
         let length = content.len();
         objects.push(
             format!(
@@ -125,8 +126,17 @@ pub fn export_pdf(project: &Project) -> Result<Vec<u8>, ExportError> {
     Ok(pdf)
 }
 
-fn page_content(page: &crate::layout::LayoutPage, paper_height: u32) -> Vec<u8> {
-    let mut output = String::from("BT\n/F1 10 Tf\n");
+fn pdf_font_name(font_family: &str) -> &'static str {
+    match font_family {
+        "Courier" => "Courier",
+        "Courier New" => "CourierNew",
+        "Courier Prime" => "CourierPrime",
+        _ => "Courier",
+    }
+}
+
+fn page_content(page: &crate::layout::LayoutPage, paper_height: u32, font_size: u32) -> Vec<u8> {
+    let mut output = format!("BT\n/F1 {font_size} Tf\n");
     for line in &page.lines {
         let x = line.rect.x;
         let y = paper_height.saturating_sub(line.rect.y + line.rect.height);
@@ -200,19 +210,36 @@ mod tests {
         assert!(first.ends_with(b"%%EOF\n"));
         assert!(String::from_utf8_lossy(&first).contains("/Count 1"));
         assert!(String::from_utf8_lossy(&first).contains("INT. ROOM - DAY"));
+        assert!(String::from_utf8_lossy(&first).contains("/BaseFont /CourierNew"));
+    }
+
+    #[test]
+    fn pdf_font_metadata_round_trips_and_uses_safe_deterministic_mapping() {
+        let mut project = project();
+        project.page_profile.font_family = "Courier Prime".into();
+        let json = project.to_json().unwrap_or_else(|_| unreachable!());
+        let restored = Project::from_json(&json).unwrap_or_else(|_| unreachable!());
+        let pdf = export_pdf(&restored).unwrap_or_else(|_| unreachable!());
+        let pdf = String::from_utf8_lossy(&pdf);
+        assert_eq!(restored.page_profile.font_family, "Courier Prime");
+        assert!(pdf.contains("/BaseFont /CourierPrime"));
+        assert_eq!(pdf_font_name("untrusted"), "Courier");
     }
 
     #[test]
     fn pdf_line_transforms_preserve_layout_positions_and_spacing() {
         let mut project = project();
+        project.page_profile.font_size = 11;
         project.elements.push(
             crate::ScreenplayElement::new("action", Role::Action, "Second line")
                 .unwrap_or_else(|_| unreachable!()),
         );
         let layout = ScreenplayLayout::build(&project).unwrap_or_else(|_| unreachable!());
         let page = &layout.pages[0];
-        let content_bytes = page_content(page, layout.profile.paper_height);
+        let content_bytes =
+            page_content(page, layout.profile.paper_height, layout.profile.font_size);
         let content = String::from_utf8_lossy(&content_bytes);
+        assert!(content.starts_with("BT\n/F1 11 Tf\n"));
         let transforms: Vec<(u32, u32)> = content
             .lines()
             .filter_map(|line| {
@@ -235,7 +262,7 @@ mod tests {
                 layout.profile.paper_height - line.rect.y - line.rect.height
             );
         }
-        assert_eq!(transforms[0].1 - transforms[1].1, LINE_HEIGHT);
+        assert_eq!(transforms[0].1 - transforms[1].1, LINE_HEIGHT * 2);
     }
 
     #[test]

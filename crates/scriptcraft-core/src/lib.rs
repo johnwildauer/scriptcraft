@@ -16,6 +16,13 @@ pub const MAX_JSON_BYTES: usize = 1_048_576;
 pub const MAX_ELEMENTS: usize = 10_000;
 pub const MAX_TEXT_BYTES: usize = 262_144;
 pub const MAX_STRING_BYTES: usize = 262_144;
+pub const POINTS_PER_INCH: u32 = 72;
+
+const ROLE_BOX_COUNT: usize = 7;
+
+const fn points_from_eighths_of_an_inch(eighths: u32) -> u32 {
+    eighths * (POINTS_PER_INCH / 8)
+}
 
 pub const fn foundation_status() -> &'static str {
     FOUNDATION_STATUS
@@ -139,8 +146,15 @@ pub struct Metadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleBox {
+    pub x: u32,
+    pub width: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageProfile {
     pub name: String,
+    pub format_version: u32,
     pub paper_width: u32,
     pub paper_height: u32,
     pub margin_top: u32,
@@ -149,20 +163,41 @@ pub struct PageProfile {
     pub margin_right: u32,
     pub chars_per_line: u32,
     pub lines_per_page: u32,
+    pub line_advance: u32,
+    pub boundary_gap: u32,
+    pub font_family: String,
+    pub font_size: u32,
+    pub char_width: u32,
+    pub role_boxes: [RoleBox; ROLE_BOX_COUNT],
 }
 
 impl Default for PageProfile {
     fn default() -> Self {
         Self {
             name: "us_letter_screenplay".into(),
-            paper_width: 612,
-            paper_height: 792,
-            margin_top: 72,
-            margin_bottom: 72,
-            margin_left: 90,
-            margin_right: 72,
+            format_version: 1,
+            paper_width: points_from_eighths_of_an_inch(68),
+            paper_height: points_from_eighths_of_an_inch(88),
+            margin_top: points_from_eighths_of_an_inch(8),
+            margin_bottom: points_from_eighths_of_an_inch(8),
+            margin_left: points_from_eighths_of_an_inch(12),
+            margin_right: points_from_eighths_of_an_inch(8),
             chars_per_line: 55,
             lines_per_page: 55,
+            line_advance: 12,
+            boundary_gap: 12,
+            font_family: "Courier New".into(),
+            font_size: 12,
+            char_width: 7,
+            role_boxes: [
+                RoleBox { x: 108, width: 432 },
+                RoleBox { x: 108, width: 432 },
+                RoleBox { x: 259, width: 175 },
+                RoleBox { x: 180, width: 216 },
+                RoleBox { x: 216, width: 180 },
+                RoleBox { x: 432, width: 108 },
+                RoleBox { x: 108, width: 432 },
+            ],
         }
     }
 }
@@ -279,10 +314,25 @@ fn validate_strings(m: &Metadata) -> Result<(), ModelError> {
 }
 fn validate_profile(p: &PageProfile) -> Result<(), ModelError> {
     if p.name.len() > MAX_STRING_BYTES
+        || p.format_version == 0
         || p.paper_width == 0
         || p.paper_height == 0
         || p.chars_per_line == 0
         || p.lines_per_page == 0
+        || p.line_advance == 0
+        || p.line_advance > 1_000
+        || p.boundary_gap > 1_000
+        || !matches!(
+            p.font_family.as_str(),
+            "Courier" | "Courier New" | "Courier Prime"
+        )
+        || p.font_size == 0
+        || p.font_size > 72
+        || p.char_width == 0
+        || p.char_width > 100
+        || p.role_boxes
+            .iter()
+            .any(|box_| box_.width == 0 || box_.width > 1_000 || box_.x > 10_000)
     {
         return Err(ModelError::InvalidNumber);
     }
@@ -325,7 +375,14 @@ fn elements_json(items: &[ScreenplayElement]) -> String {
     items.iter().map(element_json).collect::<Vec<_>>().join(",")
 }
 fn encode_envelope(p: &Project) -> String {
-    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{}}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(p.id.as_str()), p.schema_version, quote(&p.metadata.title), quote(&p.metadata.author), quote(&p.metadata.contact), quote(&p.metadata.created_at), quote(&p.metadata.updated_at), elements_json(&p.title_page), quote(&p.page_profile.name), p.page_profile.paper_width, p.page_profile.paper_height, p.page_profile.margin_top, p.page_profile.margin_bottom, p.page_profile.margin_left, p.page_profile.margin_right, p.page_profile.chars_per_line, p.page_profile.lines_per_page, elements_json(&p.elements))
+    let role_boxes = p
+        .page_profile
+        .role_boxes
+        .iter()
+        .map(|box_| format!("{{\"x\":{},\"width\":{}}}", box_.x, box_.width))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(p.id.as_str()), p.schema_version, quote(&p.metadata.title), quote(&p.metadata.author), quote(&p.metadata.contact), quote(&p.metadata.created_at), quote(&p.metadata.updated_at), elements_json(&p.title_page), quote(&p.page_profile.name), p.page_profile.format_version, p.page_profile.paper_width, p.page_profile.paper_height, p.page_profile.margin_top, p.page_profile.margin_bottom, p.page_profile.margin_left, p.page_profile.margin_right, p.page_profile.chars_per_line, p.page_profile.lines_per_page, p.page_profile.line_advance, p.page_profile.boundary_gap, quote(&p.page_profile.font_family), p.page_profile.font_size, p.page_profile.char_width, role_boxes, elements_json(&p.elements))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -516,6 +573,25 @@ fn decode_elements(v: &Json) -> Result<Vec<ScreenplayElement>, ModelError> {
         _ => Err(ModelError::WrongType("elements")),
     }
 }
+
+fn decode_role_boxes(v: &Json) -> Result<[RoleBox; ROLE_BOX_COUNT], ModelError> {
+    let Json::Array(items) = v else {
+        return Err(ModelError::WrongType("role_boxes"));
+    };
+    if items.len() != ROLE_BOX_COUNT {
+        return Err(ModelError::InvalidNumber);
+    }
+    let boxes = items
+        .iter()
+        .map(|item| {
+            Ok(RoleBox {
+                x: num_field(item, "x")?,
+                width: num_field(item, "width")?,
+            })
+        })
+        .collect::<Result<Vec<_>, ModelError>>()?;
+    boxes.try_into().map_err(|_| ModelError::InvalidNumber)
+}
 fn decode_project(root: Json) -> Result<Project, ModelError> {
     let envelope_schema = num_field(&root, "schema_version")?;
     if envelope_schema != CURRENT_SCHEMA_VERSION {
@@ -538,6 +614,7 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
         title_page: decode_elements(obj(envelope, "title_page")?)?,
         page_profile: PageProfile {
             name: str_field(profile, "name")?,
+            format_version: num_field(profile, "format_version")?,
             paper_width: num_field(profile, "paper_width")?,
             paper_height: num_field(profile, "paper_height")?,
             margin_top: num_field(profile, "margin_top")?,
@@ -546,6 +623,12 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
             margin_right: num_field(profile, "margin_right")?,
             chars_per_line: num_field(profile, "chars_per_line")?,
             lines_per_page: num_field(profile, "lines_per_page")?,
+            line_advance: num_field(profile, "line_advance")?,
+            boundary_gap: num_field(profile, "boundary_gap")?,
+            font_family: str_field(profile, "font_family")?,
+            font_size: num_field(profile, "font_size")?,
+            char_width: num_field(profile, "char_width")?,
+            role_boxes: decode_role_boxes(obj(profile, "role_boxes")?)?,
         },
         elements: decode_elements(obj(envelope, "elements")?)?,
     })
@@ -569,6 +652,33 @@ mod tests {
         assert_eq!(a, b.to_json().unwrap_or_else(|_| unreachable!()));
         assert!(b.elements[0].is_boundary("naïve".len()));
         assert!(!b.elements[0].is_boundary("na".len() + 1));
+    }
+
+    #[test]
+    fn named_profile_round_trips_bounded_alternate_geometry() {
+        let mut project = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
+        project.page_profile.name = "alternate_screenplay".into();
+        project.page_profile.format_version = 2;
+        project.page_profile.font_family = "Courier Prime".into();
+        project.page_profile.font_size = 12;
+        project.page_profile.char_width = 8;
+        project.page_profile.line_advance = 14;
+        project.page_profile.boundary_gap = 10;
+        project.page_profile.role_boxes[1] = RoleBox { x: 120, width: 400 };
+        let json = project.to_json().unwrap_or_else(|_| unreachable!());
+        let restored = Project::from_json(&json).unwrap_or_else(|_| unreachable!());
+        assert_eq!(restored, project);
+        assert_eq!(json, restored.to_json().unwrap_or_else(|_| unreachable!()));
+    }
+
+    #[test]
+    fn profile_rejects_unbounded_role_geometry() {
+        let mut project = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
+        project.page_profile.role_boxes[0].width = 0;
+        assert_eq!(project.to_json(), Err(ModelError::InvalidNumber));
+        project.page_profile = PageProfile::default();
+        project.page_profile.role_boxes[0].width = 1_001;
+        assert_eq!(project.to_json(), Err(ModelError::InvalidNumber));
     }
     #[test]
     fn hostile_bounds_are_typed_errors_without_panics() {
