@@ -117,6 +117,16 @@
 - **Deferred follow-up:** A future native-capable run should exercise Unicode, editing keys, IME, caret blink/alignment, blank-space activation, and toolbar/dialog focus transfer.
 - **Next action/owner:** Closeout orchestrator — verify the final worktree, commit the initiative branch, merge into `master` where Git permits, and record the resulting commit/merge evidence before setting the initiative `closed`.
 
+### 2026-10-25 19:45 UTC — Initiative closeout
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `planning-session-2026-10-25`
+- **State transition:** Initiative `closeout/active → closed`; WO-011d and WO-011e remain explicitly tabled by owner
+- **Preconditions:** All implementation work is committed; validations and review artifacts are recorded; WO-011d/WO-011e native evidence blockers are explicitly accepted and documented as MVP follow-ups; no untracked or conflicting worktree changes remained before the closeout metadata update.
+- **Commit evidence:** `3e82149` — `Close screenplay MVP keyboard input loop`.
+- **Branch evidence:** The initiative branch `dev/2026-10-25-screenplay-mvp` was committed successfully. The recorded base `master` was unborn and had no reference, so a conventional fast-forward merge was unavailable; `master` was initialized at the initiative commit, with both refs now pointing to `3e82149`.
+- **Result:** The Screenplay MVP initiative is closed with the native macOS full-sequence limitation explicitly tabled as follow-up rather than misrepresented as validated.
+
 ### 2026-10-25 14:48 UTC — Planning and branch evidence
 
 - **Actor/role:** Orchestrator

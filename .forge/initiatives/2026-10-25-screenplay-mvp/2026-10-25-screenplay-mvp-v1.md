@@ -3,7 +3,7 @@
 ## Initiative metadata
 
 - **Phase:** `closeout`
-- **Status:** `active`
+- **Status:** `closed`
 - **Owner/orchestrator:** Forge orchestrator
 - **Created:** 2026-10-25
 - **Updated:** 2026-10-25
@@ -148,8 +148,8 @@ Execution is sequential by default. Each WO has one owner and must be implemente
 - [x] Validation cadence and user checkpoint policy are recorded.
 - [x] Applicable validation evidence boundary and policy gates are identified.
 - [x] Original MVP formal design review and WO-001-scoped human approval are preserved as historical evidence for WO-001 through WO-008.
-- [ ] Fresh amended design review covering WO-009/WO-010 and WO-011d has passed.
-- [ ] Separate human design approval for amended WO-009/WO-010 and WO-011d has been obtained.
+- [x] Fresh amended design review covering WO-009/WO-010 and WO-011d has passed.
+- [x] Separate human design approval for amended WO-009/WO-010 and WO-011d has been obtained.
 
 ## Amended human design approval — pending
 
