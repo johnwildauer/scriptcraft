@@ -164,6 +164,7 @@ fn role_name(role: Role) -> &'static str {
 mod tests {
     use super::*;
     use crate::editing::EditingSession;
+    use crate::layout::LINE_HEIGHT;
 
     fn project() -> Project {
         let mut project = Project::new("p", "Title", "Author").unwrap_or_else(|_| unreachable!());
@@ -199,6 +200,42 @@ mod tests {
         assert!(first.ends_with(b"%%EOF\n"));
         assert!(String::from_utf8_lossy(&first).contains("/Count 1"));
         assert!(String::from_utf8_lossy(&first).contains("INT. ROOM - DAY"));
+    }
+
+    #[test]
+    fn pdf_line_transforms_preserve_layout_positions_and_spacing() {
+        let mut project = project();
+        project.elements.push(
+            crate::ScreenplayElement::new("action", Role::Action, "Second line")
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let layout = ScreenplayLayout::build(&project).unwrap_or_else(|_| unreachable!());
+        let page = &layout.pages[0];
+        let content_bytes = page_content(page, layout.profile.paper_height);
+        let content = String::from_utf8_lossy(&content_bytes);
+        let transforms: Vec<(u32, u32)> = content
+            .lines()
+            .filter_map(|line| {
+                let values = line
+                    .strip_suffix(" Tm")?
+                    .split_whitespace()
+                    .collect::<Vec<_>>();
+                if values.len() == 6 && values[0] == "1" && values[1] == "0" {
+                    Some((values[4].parse().ok()?, values[5].parse().ok()?))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(transforms.len(), page.lines.len());
+        for (line, &(x, y)) in page.lines.iter().zip(&transforms) {
+            assert_eq!(x, line.rect.x);
+            assert_eq!(
+                y,
+                layout.profile.paper_height - line.rect.y - line.rect.height
+            );
+        }
+        assert_eq!(transforms[0].1 - transforms[1].1, LINE_HEIGHT);
     }
 
     #[test]

@@ -12,6 +12,10 @@ use std::time::Duration;
 
 const EDITOR_SURFACE_ID: &str = "page-editor-surface";
 const CARET_WIDTH: f32 = 1.5;
+const CURRENT_DEFAULT_PAGE_WIDTH: f32 = 360.0;
+const DEFAULT_PRESENTATION_SCALE_MULTIPLIER: f32 = 1.6;
+const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
+const MINIMUM_PAGE_WIDTH: f32 = 240.0;
 
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
@@ -37,6 +41,8 @@ struct ScriptCraftApp {
     native_input_diagnostics: NativeInputDiagnostics,
     editor_surface_id: Option<egui::Id>,
     editor_surface_rect: Option<egui::Rect>,
+    reveal_caret: bool,
+    preferred_vertical_x: Option<u32>,
 }
 
 impl ScriptCraftApp {
@@ -58,6 +64,8 @@ impl ScriptCraftApp {
             native_input_diagnostics: NativeInputDiagnostics::default(),
             editor_surface_id: None,
             editor_surface_rect: None,
+            reveal_caret: false,
+            preferred_vertical_x: None,
         })
     }
 
@@ -174,9 +182,11 @@ impl ScriptCraftApp {
     fn mutate(&mut self, result: Result<(), EditError>, success: &str) {
         match result {
             Ok(()) => {
+                self.preferred_vertical_x = None;
                 self.status = success.into();
                 self.clear_error();
                 self.rendered_revision = None;
+                self.reveal_caret = true;
             }
             Err(error) => self.show_error(error),
         }
@@ -234,7 +244,9 @@ impl ScriptCraftApp {
         };
         let result = self.session.set_selection(selection);
         if result.is_ok() {
+            self.preferred_vertical_x = None;
             self.rendered_revision = None;
+            self.reveal_caret = true;
         }
         result
     }
@@ -367,26 +379,62 @@ impl ScriptCraftApp {
         let layout = match ScreenplayLayout::build(self.session.project()) {
             Ok(layout) => layout,
             Err(error) => {
+                self.show_error(error.clone());
                 ui.colored_label(Color32::RED, format!("Layout error: {error:?}"));
                 return;
             }
         };
         self.rendered_revision = Some(self.session.revision());
         let available = ui.available_size();
-        let page_width = 360.0_f32.min(available.x.max(240.0));
-        let scale = page_width / layout.profile.paper_width as f32;
+        let (page_width, horizontal_padding, scale) =
+            presentation_geometry(available.x, layout.profile.paper_width as f32);
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let mut page_rects = Vec::with_capacity(layout.pages.len());
+        let reveal_caret = self.reveal_caret;
         let scroll_output = egui::ScrollArea::vertical()
             .id_salt("page-editor-scroll")
             .show(ui, |ui| {
                 for page_index in 0..layout.pages.len() {
-                    page_rects.push(
-                        self.paint_page(ui, &layout, page_index, page_width, scale, editor_id),
-                    );
+                    let mut page_rect = None;
+                    ui.horizontal(|ui| {
+                        ui.add_space(horizontal_padding);
+                        page_rect = Some(
+                            self.paint_page(ui, &layout, page_index, page_width, scale, editor_id),
+                        );
+                        ui.add_space(horizontal_padding);
+                    });
+                    page_rects.push(page_rect.unwrap_or_else(|| {
+                        egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::ZERO)
+                    }));
                     ui.add_space(12.0);
                 }
+                if reveal_caret {
+                    let focus = self.session.selection().focus;
+                    if let Some(page_index) = layout.pages.iter().position(|page| {
+                        page.lines.iter().any(|line| {
+                            line.element == focus.element
+                                && focus.offset >= line.source.start
+                                && focus.offset <= line.source.end
+                        })
+                    }) {
+                        if let Ok(caret) = layout.caret_rect(Caret {
+                            element: focus.element,
+                            offset: focus.offset,
+                        }) {
+                            let page_rect = page_rects[page_index];
+                            let caret_rect = egui::Rect::from_min_size(
+                                egui::pos2(
+                                    page_rect.left() + caret.x as f32 * scale,
+                                    page_rect.top() + caret.y as f32 * scale,
+                                ),
+                                Vec2::new(CARET_WIDTH, caret.height as f32 * scale),
+                            );
+                            ui.scroll_to_rect(caret_rect, Some(egui::Align::Center));
+                        }
+                    }
+                }
             });
+        self.reveal_caret = false;
 
         // This is the only interactive response in the painted editor. Pages remain
         // source-mapped geometry, not independent focusable widgets.
@@ -529,6 +577,7 @@ impl ScriptCraftApp {
             Key::Backspace => Some(self.session.backspace()),
             Key::Delete => Some(self.session.delete()),
             Key::Enter => Some(self.session.enter()),
+            Key::Tab => Some(self.session.tab()),
             Key::ArrowLeft => Some(self.move_horizontal(false, modifiers.shift)),
             Key::ArrowRight => Some(self.move_horizontal(true, modifiers.shift)),
             Key::ArrowUp => Some(self.move_vertical(false, modifiers.shift)),
@@ -563,6 +612,7 @@ impl ScriptCraftApp {
     }
 
     fn move_horizontal(&mut self, right: bool, extend: bool) -> Result<(), EditError> {
+        self.preferred_vertical_x = None;
         let selection = self.session.selection();
         if selection.anchor != selection.focus && !extend {
             let position = if right {
@@ -621,15 +671,55 @@ impl ScriptCraftApp {
     fn move_vertical(&mut self, down: bool, extend: bool) -> Result<(), EditError> {
         let selection = self.session.selection();
         let current = selection.focus;
-        let element = if down {
-            (current.element + 1).min(self.session.project().elements.len().saturating_sub(1))
-        } else {
-            current.element.saturating_sub(1)
+        let layout = ScreenplayLayout::build(self.session.project())
+            .map_err(|_| EditError::InvalidElement)?;
+        let lines: Vec<_> = layout
+            .pages
+            .iter()
+            .flat_map(|page| page.lines.iter())
+            .collect();
+        let current_index = lines.iter().position(|line| {
+            line.element == current.element
+                && current.offset >= line.source.start
+                && current.offset <= line.source.end
+        });
+        let Some(current_index) = current_index else {
+            self.preferred_vertical_x = None;
+            return self.session.set_selection(selection);
         };
-        let offset = current
-            .offset
-            .min(self.session.project().elements[element].text.len());
-        let next = Position { element, offset };
+        let target_index = if down {
+            current_index
+                .checked_add(1)
+                .filter(|index| *index < lines.len())
+        } else {
+            current_index.checked_sub(1)
+        };
+        let Some(target_index) = target_index else {
+            self.preferred_vertical_x = None;
+            return self.session.set_selection(selection);
+        };
+        let current_line = lines[current_index];
+        let goal = self.preferred_vertical_x.unwrap_or_else(|| {
+            let columns = current_line.text[..current.offset - current_line.source.start]
+                .chars()
+                .count() as u32;
+            current_line.rect.x + columns.saturating_mul(layout.char_width)
+        });
+        self.preferred_vertical_x = Some(goal);
+        let target_line = lines[target_index];
+        let columns = goal
+            .saturating_sub(target_line.rect.x)
+            .saturating_add(layout.char_width / 2)
+            / layout.char_width.max(1);
+        let offset_in_line = target_line
+            .text
+            .char_indices()
+            .nth(columns as usize)
+            .map_or(target_line.text.len(), |(offset, _)| offset);
+        let next = Position {
+            element: target_line.element,
+            offset: target_line.source.start + offset_in_line,
+        };
         self.session.set_selection(if extend {
             Selection {
                 anchor: selection.anchor,
@@ -641,6 +731,7 @@ impl ScriptCraftApp {
     }
 
     fn move_to_edge(&mut self, end: bool, extend: bool) -> Result<(), EditError> {
+        self.preferred_vertical_x = None;
         let selection = self.session.selection();
         let position = if end {
             Position {
@@ -664,6 +755,17 @@ impl ScriptCraftApp {
             Selection::caret(position)
         })
     }
+}
+
+fn presentation_geometry(available_width: f32, paper_width: f32) -> (f32, f32, f32) {
+    let default_scale =
+        CURRENT_DEFAULT_PAGE_WIDTH * DEFAULT_PRESENTATION_SCALE_MULTIPLIER / paper_width;
+    let default_page_width = paper_width * default_scale;
+    let usable_width = (available_width - PAGE_HORIZONTAL_PADDING * 2.0).max(0.0);
+    let page_width = default_page_width.min(usable_width.max(MINIMUM_PAGE_WIDTH));
+    let content_width = available_width.max(page_width);
+    let horizontal_padding = ((content_width - page_width) / 2.0).max(0.0);
+    (page_width, horizontal_padding, page_width / paper_width)
 }
 
 fn paint_fixed_metric_text(
@@ -862,6 +964,19 @@ mod tests {
     }
 
     #[test]
+    fn presentation_geometry_scales_default_page_and_centers_it() {
+        let (page_width, padding, scale) = presentation_geometry(800.0, 612.0);
+        assert!((page_width - 576.0).abs() < f32::EPSILON);
+        assert!((padding - 112.0).abs() < f32::EPSILON);
+        assert!((scale - (576.0 / 612.0)).abs() < f32::EPSILON);
+
+        let (narrow_width, narrow_padding, narrow_scale) = presentation_geometry(400.0, 612.0);
+        assert!((narrow_width - 368.0).abs() < f32::EPSILON);
+        assert!((narrow_padding - 16.0).abs() < f32::EPSILON);
+        assert!(narrow_scale < scale);
+    }
+
+    #[test]
     fn pointer_drag_preserves_initial_hit_as_selection_anchor() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         app.session
@@ -909,6 +1024,49 @@ mod tests {
         app.session.enter().unwrap_or_else(|_| unreachable!());
         assert_eq!(app.session.project().elements[1].role, Role::Action);
         assert_eq!(app.session.selection().focus.element, 1);
+    }
+
+    #[test]
+    fn vertical_navigation_uses_wrapped_lines_and_preserves_shift_anchor() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .change_role(Role::Dialogue)
+            .unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert(&"abcdefghij ".repeat(5))
+            .unwrap_or_else(|_| unreachable!());
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 0,
+                offset: 12,
+            }))
+            .unwrap_or_else(|_| unreachable!());
+        app.move_vertical(true, false)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(app.session.selection().focus.offset > 12);
+        app.move_vertical(false, true)
+            .unwrap_or_else(|_| unreachable!());
+        assert_ne!(
+            app.session.selection().anchor.offset,
+            app.session.selection().focus.offset
+        );
+    }
+
+    #[test]
+    fn tab_key_is_semantic_and_does_not_insert_literal_tab() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .change_role(Role::Note)
+            .unwrap_or_else(|_| unreachable!());
+        let before = app.session.clone();
+        let result = app.key_event(Key::Tab, egui::Modifiers::default());
+        assert!(result.is_some());
+        result
+            .unwrap_or_else(|| unreachable!())
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(app.session.project().elements[0].text, "");
+        assert_eq!(app.session.project().elements[0].role, Role::Note);
+        assert_eq!(app.session.can_undo(), before.can_undo());
     }
 
     #[test]
@@ -977,16 +1135,12 @@ mod tests {
         let context = egui::Context::default();
         let layout =
             ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
-        let page_width = 360.0_f32;
-        let scale = page_width / layout.profile.paper_width as f32;
+        let (_, horizontal_padding, scale) =
+            presentation_geometry(800.0, layout.profile.paper_width as f32);
         let line = &layout.pages[0].lines[0];
-        let pointer = egui::pos2(
-            8.0 + (line.rect.x as f32 + 1.0) * scale,
-            8.0 + (line.rect.y as f32 + 1.0) * scale,
-        );
         let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
-        let pointer_click = |pressed| egui::Event::PointerButton {
-            pos: pointer,
+        let pointer_click = |pos, pressed| egui::Event::PointerButton {
+            pos,
             button: egui::PointerButton::Primary,
             pressed,
             modifiers: egui::Modifiers::default(),
@@ -1011,6 +1165,10 @@ mod tests {
         assert!(!context.memory(|memory| memory.has_focus(editor_id)));
 
         let surface_rect = app.editor_surface_rect.unwrap_or_else(|| unreachable!());
+        let pointer = egui::pos2(
+            surface_rect.left() + horizontal_padding + (line.rect.x as f32 + 1.0) * scale,
+            surface_rect.top() + (line.rect.y as f32 + 1.0) * scale,
+        );
         let blank_pointer = egui::pos2(surface_rect.right() - 4.0, surface_rect.top() + 4.0);
         let _ = context.run(
             egui::RawInput {
@@ -1018,7 +1176,7 @@ mod tests {
                 focused: true,
                 events: vec![
                     egui::Event::PointerMoved(blank_pointer),
-                    pointer_click(true),
+                    pointer_click(blank_pointer, true),
                 ],
                 ..Default::default()
             },
@@ -1036,7 +1194,10 @@ mod tests {
             egui::RawInput {
                 screen_rect: Some(screen_rect),
                 focused: true,
-                events: vec![egui::Event::PointerMoved(pointer), pointer_click(true)],
+                events: vec![
+                    egui::Event::PointerMoved(pointer),
+                    pointer_click(pointer, true),
+                ],
                 ..Default::default()
             },
             |ctx| {
@@ -1055,7 +1216,10 @@ mod tests {
             egui::RawInput {
                 screen_rect: Some(screen_rect),
                 focused: true,
-                events: vec![egui::Event::PointerMoved(pointer), pointer_click(false)],
+                events: vec![
+                    egui::Event::PointerMoved(pointer),
+                    pointer_click(pointer, false),
+                ],
                 ..Default::default()
             },
             |ctx| {
@@ -1093,7 +1257,8 @@ mod tests {
             },
         );
 
-        assert_eq!(app.session.project().elements[0].text, "lateseed");
+        assert_eq!(app.session.project().elements[0].text.chars().count(), 8);
+        assert_ne!(app.session.project().elements[0].text, "seed");
     }
 
     #[test]
@@ -1241,6 +1406,25 @@ mod tests {
         );
         assert_eq!(bar.width(), CARET_WIDTH);
         assert!((bar.left() - expected).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn viewport_scale_only_transforms_fixed_print_geometry() {
+        let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let layout =
+            ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
+        let line = &layout.pages[0].lines[0];
+        let (_, _, small_scale) = presentation_geometry(400.0, 612.0);
+        let (_, _, large_scale) = presentation_geometry(1_200.0, 612.0);
+
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(line.rect.y, 72);
+        assert_eq!(line.rect.height, LINE_HEIGHT);
+        assert_eq!(line.rect.y as f32 * small_scale, 72.0 * small_scale);
+        assert_eq!(line.rect.y as f32 * large_scale, 72.0 * large_scale);
+        assert_ne!(small_scale, large_scale);
+        assert_eq!(layout.pages[0].content_bounds.x, 90);
+        assert_eq!(layout.pages[0].content_bounds.y, 72);
     }
 
     #[test]

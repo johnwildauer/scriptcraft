@@ -107,3 +107,10 @@ fixed PageProfile → layout/pages/source mappings → display list
 - `crates/scriptcraft-core/src/persistence.rs` is headless and contains no direct filesystem calls in its pure serialization functions; filesystem access is behind [`FileSystem`](../../crates/scriptcraft-core/src/persistence.rs).
 - The native file content is the existing versioned JSON envelope, bounded by `MAX_JSON_BYTES`; the host currently uses `scriptcraft.json` and the core recovery prefix `.scriptcraft-recovery-<revision>.json` with a maximum of three snapshots.
 - Recovery corruption is ignored during discovery and candidates are offered by revision; no recovery path silently overwrites the named project.
+
+## WO-004 verified spacing facts
+
+- The fixed screenplay layout contract was measured without changing its production inputs: `612 × 792` units, margins top/bottom/left/right `72/72/90/72`, nominal `55` lines per page, seven-unit character cells, and twelve-unit line boxes.
+- Structural layout, desktop viewport-transform, caret, and PDF coordinate regressions pass. Viewport zoom remains a presentation transform and is not an input to print pagination or source mappings.
+
+Evidence: [`WO-004-screenplay-spacing-contract.md`](../initiatives/2026-10-25-ui-quality-of-life/work-orders/WO-004-screenplay-spacing-contract.md), [`screenplay-core.md`](components/screenplay-core.md).

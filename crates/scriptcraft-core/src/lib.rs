@@ -217,7 +217,11 @@ impl Project {
     }
     pub fn to_json(&self) -> Result<String, ModelError> {
         self.validate()?;
-        Ok(encode_envelope(self))
+        let json = encode_envelope(self);
+        if json.len() > MAX_JSON_BYTES {
+            return Err(ModelError::StringTooLong);
+        }
+        Ok(json)
     }
     pub fn from_json(input: &str) -> Result<Self, ModelError> {
         if input.len() > MAX_JSON_BYTES {

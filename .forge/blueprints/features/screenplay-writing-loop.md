@@ -106,6 +106,12 @@ constraints:
 
 **Consequences:** The MVP can validate the writing loop without compatibility scope, but schema migration and export-loss contracts must be designed before implementation.
 
+### WO-003 verified integration facts
+
+- Multi-page editing, layout, and native persistence share the same validated semantic project. Controlled fixtures cover independent element count, text size, wrapped-line/page count, LF/CRLF/CR paste patterns, failed edits, invalid layout input, final-page caret geometry, and save/reopen semantics.
+- The bounded safety contract is preserved: no model limits were raised and schema version `1` was unchanged. `Project::to_json()` rejects encoded output over `MAX_JSON_BYTES`, while failed session/layout/persistence operations leave the prior valid state or destination usable.
+- The desktop layout error path now uses the existing recoverable error presentation (`Operation failed; document unchanged`) instead of only painting an untracked raw layout label.
+
 ## Completion evidence placeholder
 
 `TODO: link implementation symbols, acceptance test evidence for AC-WRITING-001.1 through AC-WRITING-004.3, comparable diff evidence, and independent blueprint review.`

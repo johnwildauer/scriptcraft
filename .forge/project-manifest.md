@@ -6,7 +6,7 @@ as implemented behavior.
 
 ## Metadata
 
-- **Status:** `blocked` — durable baseline populated; initialization review gates remain outstanding
+- **Status:** `complete` — initialization reviews and baseline command evidence are recorded; review warnings remain tracked follow-ups
 - **Path type:** `existing`
 - **Initialized on:** `2026-10-25`
 - **Last revised:** `2026-10-25`
@@ -138,10 +138,10 @@ the artifact blocked when safe comparison or a required gate is unavailable.
 - Technical context: [`blueprints/technical-context.md`](blueprints/technical-context.md)
 - Project policy: this manifest's Project policy section
 - First-initiative recommendation and roadmap: this manifest's Decisions and handoff/Roadmap sections
-- Requirements review findings: **not performed in this initialization; no review is claimed; fresh-context review remains a prerequisite before status can become `complete`**
-- Blueprint review findings: **not performed in this initialization; no review is claimed; fresh-context review remains a prerequisite before status can become `complete`**
-- Validation evidence and gate outcomes: **initialization validation not performed; Git evidence is recorded above; command and product smoke evidence remain placeholders for the first initiative**
-- Completion evidence placeholder: `[add requirements-review and blueprint-review links here when independently produced]`
+- Requirements review findings: [`requirements-review.md`](requirements/requirements-review.md) — independent fresh-context review completed with warnings; warning dispositions remain follow-ups.
+- Blueprint review findings: [`blueprint-review.md`](blueprints/blueprint-review.md) — independent fresh-context review completed with warnings; warning dispositions remain follow-ups.
+- Validation evidence and gate outcomes: Foundation commands are verified in the recorded baseline: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`, `cargo build --workspace`, `cargo run -p scriptcraft`, and `cargo clippy --workspace --all-targets -- -D warnings`. Product validation remains initiative-scoped.
+- Completion evidence: Initialization review artifacts and command evidence are linked above; remaining warnings are preserved as follow-up decisions rather than represented as missing reviews.
 
 ## Revision history
 
@@ -149,3 +149,4 @@ the artifact blocked when safe comparison or a required gate is unavailable.
 |---|---|---|---|---|---|
 | 2026-10-25 | Initialization baseline | Template TODOs | Existing ScriptCraft baseline with guided Rust desktop screenplay defaults, standard initiative mode, per-WO fresh validation, Git `master`, no known remote, and explicit command unknowns | User-approved initialization inputs and repository inventory | Forge initialization agent |
 | 2026-10-25 | Initialization status | `draft` | `blocked` pending independent requirements/blueprint reviews and verified non-Git command evidence | Do not claim reviews or validation that have not happened | Forge initialization agent |
+| 2026-10-25 | Initialization gate reconciliation | `blocked` | `complete` with warning follow-ups | Independent requirements/blueprint reviews and baseline command evidence now exist; the UI-quality-of-life design review required the manifest blocker to be reconciled before execution | Forge orchestrator, guided by user approval to proceed |

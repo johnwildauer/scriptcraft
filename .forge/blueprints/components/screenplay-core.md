@@ -64,6 +64,7 @@ adapts user input and consumes these results.
 - Element identity is stable and opaque; array position and page coordinates are not durable identity.
 - Valid edit offsets are checked UTF-8 boundaries.
 - A failed mutation restores project, selection, history, and dirty-state invariants.
+- `EditingSession` owns explicit Enter and Tab role policies; unlisted Tab cases are consumed no-ops and never insert literal tab text. Role transitions are transactional and undoable.
 - Layout is deterministic for the same project/profile/font inputs and has a safe oversized-element escape hatch.
 - Native save failure preserves the last valid destination; recovery is a candidate, never a silent overwrite.
 
@@ -72,6 +73,7 @@ adapts user input and consumes these results.
 - Desktop UI calls semantic operations and consumes pages/display records; it does not directly edit a parallel string.
 - PDF consumes print layout/display output; export does not become the native source.
 - Headless tests call the same core operations as the UI.
+- The desktop adapter derives visual-line vertical movement from `ScreenplayLayout` source ranges and geometry. Its preferred horizontal goal is transient UI/session state and is never serialized.
 
 ## Architecture Decision Records
 
@@ -111,3 +113,20 @@ adapts user input and consumes these results.
 - [`ScreenplayLayout`](../../../crates/scriptcraft-core/src/layout.rs:51) is a dependency-free, backend-neutral derived view over a validated project.
 - The initial deterministic metrics are `ScriptCraft Fixed Metrics`, seven units per character cell, twelve units per line, and the model's fixed US-letter profile (`612 × 792`, margins `90/72/72/72`, nominal 55 columns/lines).
 - Layout emits page/content bounds, role-aware line rectangles, source byte ranges, page assignment, title-page separation, keep-with-next flags, oversized flags, and safe hit/caret mappings. It never mutates canonical model text.
+
+## WO-003 verified long-document facts
+
+- Bounded pasted text remains transactional at the model/editing boundary: an oversized insertion returns `EditError::TextTooLong` before session state, selection, history, revision, or dirty state changes.
+- The existing bounds remain in force (`MAX_ELEMENTS = 10,000`, `MAX_TEXT_BYTES = 262,144`, `MAX_JSON_BYTES = 1,048,576`); `Project::to_json()` now enforces the JSON bound at the model serialization boundary as well as persistence serialization.
+- Layout treats LF, CRLF, and standalone CR as equivalent paragraph delimiters without emitting a phantom carriage-return line. Source ranges remain byte-based, so a bounded multi-page paste reaches its final-page caret and round-trips through native persistence without semantic changes.
+- Invalid layout/model and persistence results are reported as recoverable errors; the desktop surface presents layout failures through the same unchanged-document error path rather than replacing the last valid session.
+
+Evidence: [`wo003_long_document.rs`](../../../crates/scriptcraft-core/tests/wo003_long_document.rs), layout/model changes in [`layout.rs`](../../../crates/scriptcraft-core/src/layout.rs) and [`lib.rs`](../../../crates/scriptcraft-core/src/lib.rs), and desktop error routing in [`main.rs`](../../../apps/scriptcraft/src/main.rs).
+
+## WO-004 verified spacing and export facts
+
+- The fixed profile remains `612 × 792` units with top/bottom/left/right margins `72/72/90/72`, `55` nominal lines per page, seven-unit character cells, and twelve-unit line boxes. No metric correction was required.
+- Structural regressions cover content bounds, role indents/measures, adjacent line baselines, line boxes, caret heights, empty/wrapped/keep-with-next lines, and page-boundary resets. The desktop regression confirms viewport scale transforms fixed layout coordinates without changing page structure.
+- PDF export consumes the same `ScreenplayLayout` line rectangles; regression coverage verifies x positions and the PDF coordinate transform `paper_height - y - height`, including twelve-unit adjacent-line spacing. The shared screen/PDF contract therefore remains unchanged.
+
+Evidence: WO-004 regression coverage in [`layout.rs`](../../../crates/scriptcraft-core/src/layout.rs), [`exports.rs`](../../../crates/scriptcraft-core/src/exports.rs), and [`main.rs`](../../../apps/scriptcraft/src/main.rs); implementer evidence in [`WO-004-screenplay-spacing-contract.md`](../../initiatives/2026-10-25-ui-quality-of-life/work-orders/WO-004-screenplay-spacing-contract.md).

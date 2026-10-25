@@ -335,7 +335,11 @@ fn wrap_element(text: &str, element: usize, role: Role, width: u32) -> Vec<Wrapp
     let limit = width.max(1) as usize;
     let mut output = Vec::new();
     let mut paragraph_start = 0;
-    for (newline, _) in text.match_indices('\n') {
+    let mut delimiters = text.char_indices().peekable();
+    while let Some((newline, delimiter)) = delimiters.next() {
+        if delimiter != '\n' && delimiter != '\r' {
+            continue;
+        }
         wrap_segment(
             &text[paragraph_start..newline],
             paragraph_start,
@@ -344,7 +348,11 @@ fn wrap_element(text: &str, element: usize, role: Role, width: u32) -> Vec<Wrapp
             limit,
             &mut output,
         );
-        paragraph_start = newline + 1;
+        paragraph_start = newline + delimiter.len_utf8();
+        if delimiter == '\r' && delimiters.peek().is_some_and(|(_, next)| *next == '\n') {
+            let _ = delimiters.next();
+            paragraph_start += 1;
+        }
     }
     wrap_segment(
         text[paragraph_start..].as_ref(),
@@ -390,16 +398,12 @@ fn wrap_segment(
     while start < text.len() && output.len() < MAX_LINES_PER_ELEMENT {
         let mut end = text.len();
         let mut count = 0;
-        for (at, character) in text[start..].char_indices() {
+        for (at, _) in text[start..].char_indices() {
             if count == limit {
                 end = start + at;
                 break;
             }
             count += 1;
-            if character == '\r' {
-                end = start + at;
-                break;
-            }
         }
         if end == text.len() {
             end = text.len();
@@ -473,12 +477,96 @@ mod tests {
         let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
         let page = &layout.pages[0];
         assert_eq!(page.bounds.width, 612);
+        assert_eq!(page.bounds.height, 792);
         assert_eq!(page.content_bounds.x, 90);
+        assert_eq!(page.content_bounds.y, 72);
+        assert_eq!(page.content_bounds.width, 450);
+        assert_eq!(page.content_bounds.height, 648);
         assert_eq!(page.lines[0].rect.x, 90 + 15 * CHAR_WIDTH);
         assert!(page
             .lines
             .iter()
             .all(|line| line.rect.x + line.rect.width <= 540));
+    }
+
+    #[test]
+    fn fixed_metric_line_boxes_and_carets_have_twelve_unit_spacing() {
+        let p = project(&[(Role::Action, "first"), (Role::Dialogue, "second")]);
+        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let lines = &layout.pages[0].lines;
+        assert_eq!(layout.line_height, 12);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].rect.y, 72);
+        assert_eq!(lines[1].rect.y, 84);
+        assert_eq!(lines[1].rect.y - lines[0].rect.y, layout.line_height);
+        assert!(lines.iter().all(|line| line.rect.height == LINE_HEIGHT));
+        for line in lines {
+            let caret = layout
+                .caret_rect(Caret {
+                    element: line.element,
+                    offset: line.source.start,
+                })
+                .unwrap_or_else(|_| unreachable!());
+            assert_eq!(caret.height, LINE_HEIGHT);
+            assert_eq!(caret.y, line.rect.y);
+        }
+    }
+
+    #[test]
+    fn empty_wrapped_and_keep_lines_preserve_geometry_at_page_boundaries() {
+        let mut p = project(&[
+            (Role::SceneHeading, "INT. ROOM"),
+            (Role::Action, ""),
+            (Role::Action, "abcdefghij"),
+            (Role::Character, "BOB"),
+            (Role::Dialogue, "Hello"),
+        ]);
+        p.page_profile.chars_per_line = 4;
+        p.page_profile.lines_per_page = 3;
+        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+
+        assert!(layout.pages.len() > 1);
+        assert!(layout
+            .pages
+            .iter()
+            .flat_map(|page| page.lines.iter())
+            .any(|line| line.text.is_empty()));
+        assert!(layout.pages.iter().any(|page| {
+            page.lines.iter().any(|line| line.text == "abcd")
+                && page.lines.iter().any(|line| line.text == "efgh")
+        }));
+        assert!(layout.pages.iter().any(|page| {
+            page.lines
+                .iter()
+                .any(|line| line.role == Role::Character && line.keep_with_next)
+        }));
+        assert!(layout
+            .pages
+            .iter()
+            .all(|page| { page.lines.first().is_some_and(|line| line.rect.y == 72) }));
+        assert!(layout.pages.iter().all(|page| {
+            page.lines
+                .windows(2)
+                .all(|lines| lines[1].rect.y - lines[0].rect.y == LINE_HEIGHT)
+        }));
+    }
+
+    #[test]
+    fn nominal_fifty_five_line_page_resets_to_top_margin() {
+        let mut p = project(&[(Role::Action, "line")]);
+        p.elements = (0..56)
+            .map(|index| {
+                ScreenplayElement::new(format!("e-{index}"), Role::Action, "line")
+                    .unwrap_or_else(|_| unreachable!())
+            })
+            .collect();
+        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(layout.pages[0].lines.len(), 55);
+        assert_eq!(layout.pages[0].lines[0].rect.y, 72);
+        assert_eq!(layout.pages[0].lines[54].rect.y, 72 + 54 * LINE_HEIGHT);
+        assert_eq!(layout.pages[1].lines[0].rect.y, 72);
+        assert_eq!(layout.pages[1].lines[0].page, 1);
     }
 
     #[test]

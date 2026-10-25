@@ -45,6 +45,8 @@ formatting.
 - **AC-WRITING-001.2:** Given an element, the system shall preserve its explicit role and canonical UTF-8 text independently of capitalization, spaces, tabs, indentation, or font appearance.
 - **AC-WRITING-001.3:** Given a valid selection, the system shall support insertion, deletion, split, join, role change, undo, and redo while preserving valid text boundaries and element order.
 - **AC-WRITING-001.4:** Given a role transition such as scene heading → action or character → dialogue, the system shall apply an explicit, testable transition policy and make the operation undoable.
+- **AC-WRITING-001.4a:** Enter shall use the approved matrix: General/Note→same role, Scene Heading→Action, Action→Action, Character→Dialogue, Dialogue→Action, Parenthetical→Dialogue, and Transition→Scene Heading. Tab shall use Scene Heading→Action, Action→Character, blank Character→Transition, Transition→Scene Heading, Dialogue→Parenthetical, and Parenthetical→Dialogue; other Tab cases are consumed no-ops with no literal tab, mutation, or undo entry.
+- **AC-WRITING-001.4b:** Up/Down shall navigate adjacent wrapped visual lines using layout source ranges, retain a preferred horizontal goal across successful repeated moves, clamp to shorter lines and document/page edges, and support Shift selection. The transient goal resets after horizontal movement, edits, pointer selection, Home/End, role changes, undo/redo, or a boundary no-op.
 - **AC-WRITING-001.5:** Given malformed or out-of-bound input, the system shall return a bounded error without corrupting the project or session state.
 
 ### REQ-WRITING-LOOP-002: Shared deterministic writing and page views

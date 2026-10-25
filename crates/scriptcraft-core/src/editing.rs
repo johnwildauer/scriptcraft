@@ -221,8 +221,33 @@ impl EditingSession {
             }
             let role = project.elements[start.element].role;
             let next_role =
-                transition(role).ok_or(EditError::UnsupportedTransition { from: role })?;
+                enter_transition(role).ok_or(EditError::UnsupportedTransition { from: role })?;
             split_at(project, start, next_role)
+        })
+    }
+
+    /// Applies the explicit Tab policy. Unlisted roles are intentionally consumed
+    /// without changing the project, selection, or history.
+    pub fn tab(&mut self) -> Result<(), EditError> {
+        self.mutate(|project, selection| {
+            let (start, end) = selection.ordered();
+            if start != end {
+                return Ok(*selection);
+            }
+            let element = &project.elements[start.element];
+            let next_role = match element.role {
+                Role::SceneHeading => Some(Role::Action),
+                Role::Action => Some(Role::Character),
+                Role::Character if element.text.is_empty() => Some(Role::Transition),
+                Role::Transition => Some(Role::SceneHeading),
+                Role::Dialogue => Some(Role::Parenthetical),
+                Role::Parenthetical => Some(Role::Dialogue),
+                _ => None,
+            };
+            if let Some(role) = next_role {
+                project.elements[start.element].role = role;
+            }
+            Ok(*selection)
         })
     }
 
@@ -425,11 +450,15 @@ fn next_boundary(text: &str, offset: usize) -> usize {
 
 /// The supported Enter policy is intentionally explicit and finite.
 pub fn transition(role: Role) -> Option<Role> {
+    enter_transition(role)
+}
+
+pub fn enter_transition(role: Role) -> Option<Role> {
     Some(match role {
         Role::SceneHeading => Role::Action,
         Role::Action => Role::Action,
         Role::Character => Role::Dialogue,
-        Role::Dialogue => Role::Parenthetical,
+        Role::Dialogue => Role::Action,
         Role::Parenthetical => Role::Dialogue,
         Role::Transition => Role::SceneHeading,
         Role::Note => Role::Note,
@@ -479,6 +508,55 @@ mod tests {
         assert_eq!(s.project().elements.len(), 1);
         assert_eq!(s.redo(), Ok(()));
         assert_eq!(s.project().elements[1].text, "ug");
+    }
+
+    #[test]
+    fn enter_matrix_covers_every_role() {
+        let expected = [
+            (Role::SceneHeading, Role::Action),
+            (Role::Action, Role::Action),
+            (Role::Character, Role::Dialogue),
+            (Role::Dialogue, Role::Action),
+            (Role::Parenthetical, Role::Dialogue),
+            (Role::Transition, Role::SceneHeading),
+            (Role::Note, Role::Note),
+        ];
+        for (from, to) in expected {
+            let mut s = session("text", from);
+            set(&mut s, 0, 2);
+            s.enter().unwrap_or_else(|_| unreachable!());
+            assert_eq!(s.project().elements[1].role, to);
+        }
+    }
+
+    #[test]
+    fn tab_matrix_is_undoable_and_unspecified_roles_are_consumed_noops() {
+        let expected = [
+            (Role::SceneHeading, Role::Action, "text"),
+            (Role::Action, Role::Character, "text"),
+            (Role::Character, Role::Transition, ""),
+            (Role::Transition, Role::SceneHeading, "text"),
+            (Role::Dialogue, Role::Parenthetical, "text"),
+            (Role::Parenthetical, Role::Dialogue, "text"),
+        ];
+        for (from, to, text) in expected {
+            let mut s = session(text, from);
+            s.tab().unwrap_or_else(|_| unreachable!());
+            assert_eq!(s.project().elements[0].role, to);
+            assert!(s.undo().is_ok());
+            assert_eq!(s.project().elements[0].role, from);
+        }
+
+        let mut nonblank = session("BOB", Role::Character);
+        let before = nonblank.clone();
+        nonblank.tab().unwrap_or_else(|_| unreachable!());
+        assert_eq!(nonblank, before);
+        assert!(!nonblank.can_undo());
+
+        let mut note = session("note", Role::Note);
+        note.tab().unwrap_or_else(|_| unreachable!());
+        assert_eq!(note.project().elements[0].text, "note");
+        assert!(!note.can_undo());
     }
 
     #[test]
