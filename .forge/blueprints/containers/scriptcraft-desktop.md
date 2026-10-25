@@ -40,6 +40,13 @@ buffer.
 - Every semantic mutation goes through the core editing/session boundary and is undoable when it changes the project.
 - Viewport size and zoom do not redefine print pagination.
 - A failed open/save/export reports an error and does not silently replace valid in-memory or on-disk project state.
+- The painted page-layout editor has one stable whole-surface egui response/ID for
+  focus and keyboard ownership. Page rectangles remain render/hit-test geometry;
+  they are not independent focusable editors. While that response is focused, a
+  narrow egui focus-lock filter protects editor navigation and the shell dispatches
+  text, paste, key, and IME events through the existing editing session. Retained
+  native diagnostics expose only bounded focus/event categories and counters, never
+  document text or a second buffer.
 
 ### Integration Contracts
 
@@ -68,6 +75,7 @@ buffer.
 | 2026-10-25 | Created MVP desktop container boundary | User-approved desktop-first scope and `.analysis`; implementation/framework not claimed |
 | 2026-10-25 | Recorded foundation app seam | WO-001 verified a dependency-free native Rust binary and headless startup path; visible UI remains deferred |
 | 2026-10-25 | Recorded unified editor and named persistence host behavior | WO-009/WO-010 implementation evidence; app owns the optional current named path and native `rfd` selection, while core owns JSON and atomic-save semantics; recovery remains outside the UI |
+| 2026-10-25 | Recorded hardened painted-editor input boundary | WO-011d implementation evidence: one stable whole-surface response/ID, response-driven focus, egui focus-lock filtering, focused event ownership, and bounded privacy-safe diagnostics; native typing remains a separate unproven manual gate |
 
 ## WO-001 verified foundation facts
 

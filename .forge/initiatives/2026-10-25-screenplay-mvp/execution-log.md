@@ -15,6 +15,108 @@
 
 ## Execution log entries
 
+### 2026-10-25 18:56 UTC — Amended design-review gate opened for WO-011d
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `planning-session-2026-10-25`
+- **State transition:** Initiative `plan → review`; WO-011d remains `draft`
+- **Work order/review:** [`work-orders/WO-011d-native-input-capture-hardening.md`](work-orders/WO-011d-native-input-capture-hardening.md), [`reviews/design-review-wo-011d.md`](reviews/design-review-wo-011d.md)
+- **Action:** Reconciled the phase ledger after the owner approved the WO-011d plan. The work order and amended scope are now formally queued for a fresh design review. The earlier gate-readiness review remains preserved as blocked historical evidence and is not treated as the formal approval.
+- **Evidence:** User approved the WO-011d plan; the initiative plan records the amended `plan → review` transition and explicitly keeps WO-011d unimplemented. No product source was changed.
+- **Result:** Design review is required before the `review → execute` gate. Separate human approval remains pending and must explicitly cover the amended scope.
+- **Next action/owner:** Fresh-context design reviewer — assess the reconciled amended plan and WO set without implementing code.
+
+### 2026-10-25 19:01 UTC — Formal amended approval and WO-011d dispatch
+
+- **Actor/role:** User approver / Forge orchestrator
+- **Session/agent ID:** `planning-session-2026-10-25` → `code-session-2026-10-25-wo-011d`
+- **State transition:** Initiative `review → execute`; WO-011d `draft → in-progress`
+- **Work order/review:** [`work-orders/WO-011d-native-input-capture-hardening.md`](work-orders/WO-011d-native-input-capture-hardening.md), [`reviews/design-review-wo-011d-formal.md`](reviews/design-review-wo-011d-formal.md)
+- **Action:** Recorded separate human approval for the amended WO-009/WO-010 plus WO-011d scope after the fresh formal design review passed with warnings. Dispatched WO-011d to a fresh Code-mode implementer with strict scope, no hidden editor, and required native/manual evidence boundary.
+- **Approval evidence:** User explicitly authorized the `review → execute` transition and requested a fresh Code-mode implementer followed by a fresh validator.
+- **Result:** Implementation is authorized only for WO-011d. Native macOS typing remains unproven; synthetic/rendered tests cannot satisfy the native gate.
+- **Next action/owner:** Fresh WO-011d implementer — implement, run required gates, record changed files/evidence, and leave the work order `in-review` for separate validation.
+
+### 2026-10-25 19:04 UTC — WO-011d implementation completion
+
+- **Actor/role:** Desktop input-loop implementer
+- **Session/agent ID:** `code-session-2026-10-25-wo-011d`
+- **State transition:** WO-011d `in-progress → in-review`; initiative remains `execute`
+- **Action:** Hardened the existing single painted page-layout editor at its native egui boundary. Replaced per-page interactive responses with one stable enclosing response/ID over the scroll viewport while retaining per-page source-mapped hit testing and drag selection. Pointer activation requests focus; focus synchronizes from `response.has_focus()`; focused frames install a narrow egui focus-lock filter and only focused frames dispatch the existing event adapter. Added bounded labeled diagnostics with fixed event categories/counters and no raw document text or second buffer. Added rendered regression observability and reconciled the authorized desktop blueprint and handoff lifecycle records.
+- **Changed files:** [`apps/scriptcraft/src/main.rs`](../../../apps/scriptcraft/src/main.rs:1), [`blueprints/containers/scriptcraft-desktop.md`](../../../blueprints/containers/scriptcraft-desktop.md:1), [`keyboard-input-handoff.md`](keyboard-input-handoff.md:1), [`work-orders/WO-011d-native-input-capture-hardening.md`](work-orders/WO-011d-native-input-capture-hardening.md:1), and this log. No core, sibling WordCraft, validation, or unrelated UI files changed.
+- **Validation attempts/results:** `cargo fmt --all` passed after applying the formatter's one indentation correction; `cargo fmt --all -- --check` passed; `cargo check --workspace` passed; `cargo build --workspace` passed; `cargo test --workspace -- --nocapture` passed with 38 tests (13 app, 22 core unit, 3 integration; 0 doc tests) and no failures; `cargo clippy --workspace --all-targets -- -D warnings` passed with no warnings/errors. The earlier focused `cargo test -p scriptcraft -- --nocapture` passed with 12 tests; the final focused regression set contains 13 tests.
+- **Native/manual evidence:** bounded `cargo run -p scriptcraft` launch was attempted for 5 seconds. Cargo built and started `target/debug/scriptcraft`; the process remained alive and was stopped by the bounded smoke harness. No interactively observable window/input sequence was available in this execution context, so the native gate is unavailable. No native typing, Unicode, editing-key, IME, caret/layout success is claimed; the handoff closeout condition remains unresolved.
+- **Diagnostics retention decision:** retained as bounded status instrumentation. It reports focus/lock/dispatch booleans, saturating counters, and fixed event categories only; it does not log raw document text, event payloads, or hidden state. Removal requires a later authorized work order and blueprint reconciliation.
+- **Comparable diff evidence:** the app diff removes `ui.interact()` and focus ownership from `paint_page()` and adds exactly one enclosing `ui.interact()` in `live_document_surface()`, with the rendered test asserting the recorded stable ID and pointer activation. The work-order evidence contains the complete changed-file list and scope comparison.
+- **Result:** Implementation is within WO-011d scope. Work order is left `in-review`; no validation is claimed.
+- **Next action/owner:** Separate fresh validator — inspect changed-file/diff evidence, run required checks as appropriate, and determine whether WO-011d passes; native success must not be inferred from this record.
+
+### 2026-10-25 19:08 UTC — WO-011d fresh validation
+
+- **Actor/role:** Independent fresh-context Forge validator
+- **Session/agent ID:** `validation-session-2026-10-25-wo-011d`
+- **Work order/validation:** [`work-orders/WO-011d-native-input-capture-hardening.md`](work-orders/WO-011d-native-input-capture-hardening.md), [`validations/validation-WO-011d.md`](validations/validation-WO-011d.md)
+- **Action:** Inspected the authorized WO-011d behavior, current app source, changed-file/diff evidence, recorded Cargo gates, requirements/blueprints, formal design review, handoff, and sibling WordCraft focus/event references. No product source was modified.
+- **Result:** `BLOCKED`. The whole-surface response/ID, pointer-driven retained focus, focus-lock filter, focused-only event consumption, no-duplicate-editor boundary, bounded diagnostics lifecycle, rendered regressions, scope evidence, and recorded Cargo gates pass inspection. The required observable native macOS window interaction was unavailable, so native typing/Unicode/editing-key/IME/caret/layout success remains unclaimed.
+- **Next action/owner:** Orchestrator — keep WO-011d `in-review` and the initiative open; obtain observable native smoke evidence or record explicit owner acceptance of the documented limitation before closeout.
+
+### 2026-10-25 19:08 UTC — WO-011d validation blocked on native evidence
+
+- **Actor/role:** Independent fresh-context Forge validator
+- **Session/agent ID:** `validation-session-2026-10-25-wo-011d`
+- **State transition:** Initiative `execute → validate`; initiative status `active → blocked`; WO-011d remains `in-review`
+- **Work order/validation:** [`work-orders/WO-011d-native-input-capture-hardening.md`](work-orders/WO-011d-native-input-capture-hardening.md), [`validations/validation-WO-011d.md`](validations/validation-WO-011d.md)
+- **Action:** Independently inspected the implementation, stable whole-surface response invariant, focus filter, focused event dispatch, diagnostics lifecycle, scope/diff evidence, and recorded Cargo gates. All code/rendered acceptance checks passed inspection. The required native macOS smoke sequence could not be observed in this validation context.
+- **Result:** `BLOCKED`. Native typing, Unicode, editing-key, IME, caret, and visible rerender success remain unclaimed. No fix work order is indicated by the implementation inspection; the blocker is the required external/manual evidence gate.
+- **Next action/owner:** Owner/native-capable operator — run the observable macOS sequence, record the result, or explicitly accept the documented MVP limitation before closeout. Do not mark WO-011d complete or enter closeout on synthetic/rendered evidence alone.
+
+### 2026-10-25 19:37 UTC — WO-011e caret and editor focus polish implementation completion
+
+- **Actor/role:** Desktop editor implementer
+- **Session/agent ID:** `code-session-2026-10-25-wo-011e`
+- **State transition:** WO-011e `in-progress → in-review`; initiative remains `validate` and `blocked`
+- **Work order:** [`work-orders/WO-011e-caret-and-editor-focus-polish.md`](work-orders/WO-011e-caret-and-editor-focus-polish.md)
+- **Action:** Corrected only the existing desktop adapter's visible fixed-metric rendering and enclosing editor activation. [`paint_fixed_metric_text()`](../../../apps/scriptcraft/src/main.rs:669) places each glyph at an explicit fixed cell advance without changing [`CHAR_WIDTH`](../../../crates/scriptcraft-core/src/layout.rs:10) or core layout. The caret is a `1.5` device-pixel insertion bar; [`animate_bool_with_time()`](../../../apps/scriptcraft/src/main.rs:339) blinks it only for focused collapsed selections, requests repaint while active, and keys lifecycle reset to revision/caret identity. The enclosing stable response requests focus before optional page hit testing, including blank space, while valid hits and drag selection remain source mapped.
+- **Changed files:** [`apps/scriptcraft/src/main.rs`](../../../apps/scriptcraft/src/main.rs:1), [`work-orders/WO-011e-caret-and-editor-focus-polish.md`](work-orders/WO-011e-caret-and-editor-focus-polish.md:1), and this log. No core/layout, persistence, exports, IME, diagnostics, blueprint, requirements, or WordCraft files were changed by WO-011e.
+- **Rendered regression evidence:** [`rendered_page_editor_retains_focus_for_later_frame_input()`](../../../apps/scriptcraft/src/main.rs:972) now proves blank-space activation plus later focus retention/input; [`fixed_metric_rendering_and_caret_bar_do_not_accumulate_drift()`](../../../apps/scriptcraft/src/main.rs:1222) proves fixed long-column placement and narrow geometry; [`caret_blink_is_focused_collapsed_and_transient()`](../../../apps/scriptcraft/src/main.rs:1247) proves transient gating. Existing drag, Unicode, IME, editing-key, focus transfer, and single-surface tests remain passing.
+- **Validation evidence:** `cargo fmt --all -- --check` passed after `cargo fmt --all`; `cargo check --workspace` passed; `cargo build --workspace` passed; `cargo test --workspace -- --nocapture` passed with 15 app tests, 22 core tests, 3 integration tests, and zero doc-test failures; `cargo clippy --workspace --all-targets -- -D warnings` passed with no warnings.
+- **Native/manual evidence:** `cargo run -p scriptcraft` reached `target/debug/scriptcraft`; the process remained alive and was stopped by the five-second harness (`bounded_smoke_exit=143`). No interactive native window was observable in this context. Native caret drift/alignment, blink, blank-space focus, continued typing, selection, and toolbar/dialog transfer are therefore unclaimed; synthetic/rendered tests are not represented as native proof.
+- **Caret metric/blink record:** The app boundary uses explicit `CHAR_WIDTH * scale` glyph origins and retains fixed selection/caret source geometry; the bar is `1.5` device pixels. Blink is egui animation-only, focused/collapsed-only, repaint-driven, and reset by revision/caret ID changes without model mutation.
+- **Comparable diff evidence:** The WO-011e implementation diff is confined to the existing single painted editor response/render path and its focused tests; no second editor, hidden buffer, core algorithm, persistence/IME/diagnostics behavior, or sibling WordCraft source was added or changed.
+- **Result:** Implementation evidence is complete; WO-011e remains `in-review` and no validation is claimed.
+- **Next action/owner:** Separate fresh WO-011e validator; do not dispatch validation from this implementer session.
+
+### 2026-10-25 19:38 UTC — WO-011e fresh validation
+
+- **Actor/role:** Independent fresh-context Forge validator
+- **Session/agent ID:** `validation-session-2026-10-25-wo-011e`
+- **State transition:** WO-011e remains `in-review`; initiative remains `validate` and `blocked`
+- **Work order/validation:** [`work-orders/WO-011e-caret-and-editor-focus-polish.md`](work-orders/WO-011e-caret-and-editor-focus-polish.md), [`validations/validation-WO-011e.md`](validations/validation-WO-011e.md)
+- **Action:** Inspected the authorized fixed-metric rendering, narrow caret, focused collapsed-only blink/repaint, blank-space activation, retained ordinary input, focus transfer boundary, single-editor invariant, prior WO-011d evidence, current app/core source, WordCraft references, changed-file evidence, and recorded Cargo gates. No product source was modified.
+- **Result:** `BLOCKED`. Code alignment, rendered regressions, scope/diff evidence, and recorded Cargo gates pass inspection. The required observable native macOS smoke sequence was unavailable, so native caret alignment, blink, blank-space activation, continued typing, selection, and toolbar/dialog transfer remain unclaimed.
+- **Next action/owner:** Owner/native-capable operator — run and record the required native sequence, or obtain an authorized documented acceptance of the limitation. Do not mark WO-011e complete or clear the initiative blocker from synthetic/rendered evidence or bounded launch alone.
+
+### 2026-10-25 19:34 UTC — Native smoke feedback creates WO-011e
+
+- **Actor/role:** User / Forge orchestrator
+- **Session/agent ID:** `planning-session-2026-10-25`
+- **State transition:** WO-011e `not-created → draft`; initiative remains `validate` and `blocked`
+- **Work order:** [`work-orders/WO-011e-caret-and-editor-focus-polish.md`](work-orders/WO-011e-caret-and-editor-focus-polish.md)
+- **Action:** Recorded the first observable native typing result: text reaches the window, confirming the input path is active, but native smoke exposed three bounded editor defects: cumulative caret drift against the insertion position, focus requiring a precise text-line click, and a wide non-blinking caret. Created WO-011e to correct only the desktop caret rendering and editor focus activation boundary.
+- **Evidence:** User reported successful native text entry and the three visible defects. No core/layout contract change is authorized; fixed metrics remain the source of truth.
+- **Result:** WO-011e is `draft`; no implementation or validation is claimed. WO-011d remains blocked until its native evidence is reconciled against the observed defects.
+- **Next action/owner:** Fresh WO-011e implementer — implement the bounded fix after dispatch, then leave it `in-review` for fresh validation.
+
+### 2026-10-25 19:45 UTC — Owner acceptance and closeout preparation
+
+- **Actor/role:** User approver / Forge orchestrator
+- **Session/agent ID:** `planning-session-2026-10-25`
+- **State transition:** Initiative `validate → closeout`; WO-011d and WO-011e `in-review → tabled`
+- **Action:** The owner observed native text entry and the resulting caret/focus polish, then explicitly requested MVP closeout and commit. Recorded the unavailable full native-capability validation sequence as an accepted documented limitation rather than claiming unobserved native acceptance steps.
+- **Evidence:** Owner instruction: “good work, let's closeout the MVP initiative - go ahead and commit”; owner acceptance is also recorded in [`keyboard-input-handoff.md`](keyboard-input-handoff.md:126), WO-011d, and WO-011e.
+- **Deferred follow-up:** A future native-capable run should exercise Unicode, editing keys, IME, caret blink/alignment, blank-space activation, and toolbar/dialog focus transfer.
+- **Next action/owner:** Closeout orchestrator — verify the final worktree, commit the initiative branch, merge into `master` where Git permits, and record the resulting commit/merge evidence before setting the initiative `closed`.
+
 ### 2026-10-25 14:48 UTC — Planning and branch evidence
 
 - **Actor/role:** Orchestrator

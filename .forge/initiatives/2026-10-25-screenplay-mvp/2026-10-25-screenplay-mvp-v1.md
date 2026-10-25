@@ -2,7 +2,7 @@
 
 ## Initiative metadata
 
-- **Phase:** `plan`
+- **Phase:** `closeout`
 - **Status:** `active`
 - **Owner/orchestrator:** Forge orchestrator
 - **Created:** 2026-10-25
@@ -21,14 +21,14 @@
 - **Branch creation failure:** `none` — the initial explicit `master` start-point failed because `master` has no commit; the no-start-point branch creation succeeded and is recorded above.
 - **Validation cadence:** `per work order`
 - **User checkpoint policy:** No manual user checkpoint after each WO, but each WO is validated immediately after its implementation by a separate fresh validation agent; design review still occurs before execution, and a consolidated human confirmation/closeout occurs after all WOs.
-- **Phase transition evidence:** `draft → plan` on 2026-10-25: user requested formal creation of the first initiative and dependency-ordered WOs; plan and WO artifacts were created. The original MVP then passed `plan → review` and `review → execute` after the original formal design review and recorded human approval limited to WO-001; WO-001 through WO-008 were subsequently implemented and independently validated, with that approval and evidence preserved as historical records. On 2026-10-25, the user requested a post-MVP scope correction after inspecting the actual UI; the initiative returned from closeout preparation to `plan` to create WO-009 and WO-010. After those records were advanced, the user reported a manual hard stop: the page-layout view shows a caret but captures no keyboard text input. The initiative remains open in `plan`, with the closeout/forward execution gate held and WO-011 added as a draft correction. The amended design review remains `blocked` for ledger reconciliation, no amended `plan → review` transition has been recorded, and amended human design approval is pending. This correction does not invalidate or rewrite the original WO-001–WO-008 approval or validation evidence.
+- **Phase transition evidence:** `draft → plan` on 2026-10-25: user requested formal creation of the first initiative and dependency-ordered WOs; plan and WO artifacts were created. The original MVP then passed `plan → review` and `review → execute` after the original formal design review and recorded human approval limited to WO-001; WO-001 through WO-008 were subsequently implemented and independently validated, with that approval and evidence preserved as historical records. On 2026-10-25, the user requested a post-MVP scope correction after inspecting the actual UI; the initiative returned from closeout preparation to `plan` to create WO-009 and WO-010. After those records were advanced, the user reported a manual hard stop: the page-layout view shows a caret but captures no keyboard text input. The initiative then remained open in `plan`, with the closeout/forward execution gate held and WO-011 added as a draft correction. Following the user-approved WO-011d hardening plan, the amended work-order set entered `review` on 2026-10-25. The fresh formal design review passed with warnings in [`reviews/design-review-wo-011d-formal.md`](reviews/design-review-wo-011d-formal.md). The user then separately approved the amended WO-009/WO-010 plus WO-011d scope and authorized `review → execute`; WO-011d is now dispatched to a fresh implementer. The native macOS discrepancy remains unresolved and is not treated as proof of success. This correction does not invalidate or rewrite the original WO-001–WO-008 approval or validation evidence.
 - **Direct-translation confirmation:** `requested and confirmed` — this initiative and its WOs directly translate the user's approved MVP outcome and exclusions.
 
 ## Standard artifact locations
 
 - **Authoritative plan:** `2026-10-25-screenplay-mvp-v1.md`
-- **Design review:** [`reviews/design-review-ui-correction.md`](reviews/design-review-ui-correction.md) — amended initiative review is `blocked` pending ledger reconciliation; it does not authorize execution.
-- **Validations:** [`validations/`](validations/) — historical validation artifacts for WO-001 through WO-010 are preserved; no validation exists or is claimed for WO-011.
+- **Design review:** [`reviews/design-review-wo-011d-formal.md`](reviews/design-review-wo-011d-formal.md) — `PASS WITH WARNINGS`; the earlier gate-readiness review remains preserved as blocked historical evidence.
+- **Validations:** [`validations/`](validations/) — historical validation artifacts for WO-001 through WO-010 are preserved; WO-011d and WO-011e validation artifacts record code/rendered alignment and the owner-accepted native evidence limitation.
 - **Execution log:** [`execution-log.md`](execution-log.md)
 - **Work orders:** [`work-orders/`](work-orders/)
 - **Scope correction note:** [`scope-correction-2026-10-25.md`](scope-correction-2026-10-25.md)
@@ -122,8 +122,10 @@ Use a one-way dependency graph: workspace/app shell → reusable semantic core/s
 9. [`WO-009-unified-live-editing-surface.md`](work-orders/WO-009-unified-live-editing-surface.md) — correct the desktop interaction model to one primary live page-layout editing surface with caret, direct typing, selection, deletion, and role-aware editing.
 10. [`WO-010-basic-named-persistence-ui.md`](work-orders/WO-010-basic-named-persistence-ui.md) — replace hard-coded native `scriptcraft.json` UI behavior with basic user-selected/named Open, Save, and Save As while keeping recovery outside the UI.
 11. [`WO-011-keyboard-text-input-loop.md`](work-orders/WO-011-keyboard-text-input-loop.md) — restore egui keyboard/IME capture in the unified page editor and route events through the existing session/edit/layout loop.
+12. [`WO-011d-native-input-capture-hardening.md`](work-orders/WO-011d-native-input-capture-hardening.md) — harden the single native canvas focus/filter boundary and add bounded runtime diagnostics for the unresolved macOS input discrepancy.
+13. [`WO-011e-caret-and-editor-focus-polish.md`](work-orders/WO-011e-caret-and-editor-focus-polish.md) — correct fixed-metric caret alignment, narrow/blinking caret presentation, and blank-space editor focus activation reported during native smoke.
 
-Execution is sequential by default. Each WO has one owner and must be implemented in a fresh implementer session, marked `in-review` with changed-file and validation evidence, then immediately assessed by a separate fresh validation agent. WO-001 through WO-008 remain complete with their preserved passed validation artifacts and original approval history. WO-009/WO-009a and WO-010 retain their recorded implementation/validation history. WO-011 is a new `draft` work order only: it is not approved, implemented, `in-review`, complete, or validated. The user-reported keyboard-input hard stop holds the initiative open in `plan`; no WO-011 dispatch is authorized until the amended plan reaches `review`, the corrected design review passes, and separate human approval for the amended scope is recorded.
+Execution is sequential by default. Each WO has one owner and must be implemented in a fresh implementer session, marked `in-review` with changed-file and validation evidence, then immediately assessed by a separate fresh validation agent. WO-001 through WO-008 remain complete with their preserved passed validation artifacts and original approval history. WO-009/WO-009a and WO-010 retain their recorded implementation/validation history. WO-011 and its WO-011a/WO-011b/WO-011c fix chain are complete for the synthetic/rendered focus boundary, but native macOS input remains unproven. WO-011d is now a new `draft` hardening work order: it is not approved for implementation until the amended plan reaches `review`, the corrected design review passes, and separate human design approval for the amended scope is recorded. The user-reported keyboard-input hard stop continues to hold the initiative open in `plan`.
 
 ## Risks and decisions
 
@@ -146,8 +148,15 @@ Execution is sequential by default. Each WO has one owner and must be implemente
 - [x] Validation cadence and user checkpoint policy are recorded.
 - [x] Applicable validation evidence boundary and policy gates are identified.
 - [x] Original MVP formal design review and WO-001-scoped human approval are preserved as historical evidence for WO-001 through WO-008.
-- [ ] Amended WO-009/WO-010 formal design review has passed; the current amended review is blocked pending ledger reconciliation.
-- [ ] Separate human design approval for amended WO-009/WO-010 has been obtained.
+- [ ] Fresh amended design review covering WO-009/WO-010 and WO-011d has passed.
+- [ ] Separate human design approval for amended WO-009/WO-010 and WO-011d has been obtained.
+
+## Amended human design approval — pending
+
+- **Approval status:** `approved for execution`
+- **Requested scope:** WO-009/WO-010 historical amended scope and the newly authorized WO-011d native input capture hardening work order.
+- **Approver:** User
+- **Approval evidence:** User approval received on 2026-10-25 after the fresh formal review passed: “Approve the amended scope and authorize the Forge `review → execute` transition for WO-011d; dispatch a fresh Code-mode implementer, then a fresh validator.” The prior WO-001 approval remains limited and is not reused.
 
 ## Original human design approval — WO-001 only
 

@@ -8,6 +8,21 @@ use scriptcraft_core::layout::{Caret, ScreenplayLayout, CHAR_WIDTH, LINE_HEIGHT}
 use scriptcraft_core::persistence::{self, FileSystem, StdFileSystem};
 use scriptcraft_core::{Project, Role};
 use std::path::PathBuf;
+use std::time::Duration;
+
+const EDITOR_SURFACE_ID: &str = "page-editor-surface";
+const CARET_WIDTH: f32 = 1.5;
+
+#[derive(Debug, Default)]
+struct NativeInputDiagnostics {
+    pointer_activations: u32,
+    received_events: u32,
+    dispatched_frames: u32,
+    last_event_category: &'static str,
+    focused: bool,
+    focus_lock_installed: bool,
+    dispatch_enabled: bool,
+}
 
 struct ScriptCraftApp {
     session: EditingSession,
@@ -19,6 +34,9 @@ struct ScriptCraftApp {
     status: String,
     error: Option<String>,
     native_path: Option<PathBuf>,
+    native_input_diagnostics: NativeInputDiagnostics,
+    editor_surface_id: Option<egui::Id>,
+    editor_surface_rect: Option<egui::Rect>,
 }
 
 impl ScriptCraftApp {
@@ -37,6 +55,9 @@ impl ScriptCraftApp {
             status: "In-memory demo project".into(),
             error: None,
             native_path: None,
+            native_input_diagnostics: NativeInputDiagnostics::default(),
+            editor_surface_id: None,
+            editor_surface_rect: None,
         })
     }
 
@@ -142,6 +163,14 @@ impl ScriptCraftApp {
         self.error = None;
     }
 
+    fn record_native_event(&mut self, category: &'static str) {
+        self.native_input_diagnostics.received_events = self
+            .native_input_diagnostics
+            .received_events
+            .saturating_add(1);
+        self.native_input_diagnostics.last_event_category = category;
+    }
+
     fn mutate(&mut self, result: Result<(), EditError>, success: &str) {
         match result {
             Ok(()) => {
@@ -241,44 +270,18 @@ impl ScriptCraftApp {
         page_index: usize,
         page_width: f32,
         scale: f32,
-        surface_focused: &mut bool,
-    ) {
+        editor_id: egui::Id,
+    ) -> egui::Rect {
         let page_height = layout.profile.paper_height as f32 * scale;
         let page_rect = ui.allocate_space(Vec2::new(page_width, page_height)).1;
-        let page_id = egui::Id::new(("page-editor", page_index));
-        let response = ui.interact(page_rect, page_id, Sense::click_and_drag());
         let painter = ui.painter_at(page_rect);
+        let char_width = CHAR_WIDTH as f32 * scale;
         painter.rect_filled(page_rect, 2.0, Color32::from_gray(246));
         painter.rect_stroke(page_rect, 2.0, Stroke::new(1.0_f32, Color32::GRAY));
-
-        if let Some(pointer) = response.interact_pointer_pos() {
-            let pointer_active = response.clicked()
-                || response.drag_started()
-                || response.dragged()
-                || (response.hovered() && ui.input(|input| input.pointer.primary_down()));
-            if pointer_active && !layout.pages[page_index].title_page {
-                if let Some(position) =
-                    self.caret_from_pointer(layout, page_index, page_rect, scale, pointer)
-                {
-                    if let Err(error) = self.apply_pointer_selection(
-                        position,
-                        response.drag_started(),
-                        response.dragged(),
-                    ) {
-                        self.show_error(error);
-                    } else {
-                        response.request_focus();
-                        self.clear_error();
-                    }
-                }
-            }
-        }
-        *surface_focused |= response.has_focus();
 
         for line in &layout.pages[page_index].lines {
             let x = page_rect.left() + line.rect.x as f32 * scale;
             let y = page_rect.top() + line.rect.y as f32 * scale;
-            let char_width = CHAR_WIDTH as f32 * scale;
             if let Some(color) =
                 self.selection_color(line.source.start, line.source.end, line.element)
             {
@@ -308,12 +311,13 @@ impl ScriptCraftApp {
                     color,
                 );
             }
-            painter.text(
+            paint_fixed_metric_text(
+                &painter,
                 egui::pos2(x, y),
-                egui::Align2::LEFT_TOP,
                 &line.text,
                 FontId::monospace((10.0 * scale).max(5.0)),
                 Color32::DARK_GRAY,
+                char_width,
             );
         }
 
@@ -323,19 +327,30 @@ impl ScriptCraftApp {
                 element: selection.focus.element,
                 offset: selection.focus.offset,
             };
+            let blink_id = editor_id.with((
+                "caret-blink",
+                self.session.revision(),
+                caret.element,
+                caret.offset,
+            ));
             if let Ok(rect) = layout.caret_rect(caret) {
-                let x = page_rect.left() + rect.x as f32 * scale;
-                let y = page_rect.top() + rect.y as f32 * scale;
-                painter.line_segment(
-                    [
-                        egui::pos2(x, y),
-                        egui::pos2(x, y + rect.height as f32 * scale),
-                    ],
-                    Stroke::new(1.5_f32, Color32::from_rgb(20, 80, 150)),
-                );
+                let blink_active = self.surface_focused;
+                let blink_phase = ui.ctx().animate_bool_with_time(blink_id, blink_active, 0.5);
+                if blink_active {
+                    ui.ctx().request_repaint_after(Duration::from_millis(500));
+                }
+                if caret_should_paint(blink_active, true, blink_phase) {
+                    painter.rect_filled(
+                        caret_bar_rect(page_rect, rect, scale),
+                        0.0,
+                        Color32::from_rgb(20, 80, 150),
+                    );
+                }
                 if !self.ime_preedit.is_empty() {
+                    let x = page_rect.left() + rect.x as f32 * scale + char_width;
+                    let y = page_rect.top() + rect.y as f32 * scale;
                     painter.text(
-                        egui::pos2(x + rect.width as f32 * scale, y),
+                        egui::pos2(x, y),
                         egui::Align2::LEFT_TOP,
                         &self.ime_preedit,
                         FontId::monospace((10.0 * scale).max(5.0)),
@@ -344,6 +359,8 @@ impl ScriptCraftApp {
                 }
             }
         }
+
+        page_rect
     }
 
     fn live_document_surface(&mut self, ui: &mut egui::Ui) {
@@ -358,25 +375,92 @@ impl ScriptCraftApp {
         let available = ui.available_size();
         let page_width = 360.0_f32.min(available.x.max(240.0));
         let scale = page_width / layout.profile.paper_width as f32;
-        let mut surface_focused = false;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for page_index in 0..layout.pages.len() {
-                self.paint_page(
-                    ui,
-                    &layout,
-                    page_index,
-                    page_width,
-                    scale,
-                    &mut surface_focused,
-                );
-                ui.add_space(12.0);
+        let editor_id = ui.id().with(EDITOR_SURFACE_ID);
+        let mut page_rects = Vec::with_capacity(layout.pages.len());
+        let scroll_output = egui::ScrollArea::vertical()
+            .id_salt("page-editor-scroll")
+            .show(ui, |ui| {
+                for page_index in 0..layout.pages.len() {
+                    page_rects.push(
+                        self.paint_page(ui, &layout, page_index, page_width, scale, editor_id),
+                    );
+                    ui.add_space(12.0);
+                }
+            });
+
+        // This is the only interactive response in the painted editor. Pages remain
+        // source-mapped geometry, not independent focusable widgets.
+        self.editor_surface_id = Some(editor_id);
+        let response = ui.interact(scroll_output.inner_rect, editor_id, Sense::click_and_drag());
+        self.editor_surface_rect = Some(response.rect);
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let pointer_active = response.clicked()
+                || response.drag_started()
+                || response.dragged()
+                || (response.hovered() && ui.input(|input| input.pointer.primary_down()));
+            if pointer_active {
+                response.request_focus();
+                self.native_input_diagnostics.pointer_activations = self
+                    .native_input_diagnostics
+                    .pointer_activations
+                    .saturating_add(1);
+                if let Some(page_index) = page_rects.iter().position(|rect| rect.contains(pointer))
+                {
+                    if !layout.pages[page_index].title_page {
+                        if let Some(position) = self.caret_from_pointer(
+                            &layout,
+                            page_index,
+                            page_rects[page_index],
+                            scale,
+                            pointer,
+                        ) {
+                            if let Err(error) = self.apply_pointer_selection(
+                                position,
+                                response.drag_started(),
+                                response.dragged(),
+                            ) {
+                                self.show_error(error);
+                            } else {
+                                self.clear_error();
+                            }
+                        }
+                    }
+                }
             }
-        });
-        self.surface_focused = surface_focused;
+        }
+        self.surface_focused = response.has_focus();
+        self.native_input_diagnostics.focused = self.surface_focused;
+        if self.surface_focused {
+            ui.ctx().memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    editor_id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                );
+            });
+            self.native_input_diagnostics.focus_lock_installed = true;
+        } else {
+            self.native_input_diagnostics.focus_lock_installed = false;
+        }
     }
 
     fn dispatch_surface_events(&mut self, events: &[egui::Event], modifiers: egui::Modifiers) {
         for (index, event) in events.iter().enumerate() {
+            self.record_native_event(match event {
+                egui::Event::Text(_) => "text",
+                egui::Event::Paste(_) => "paste",
+                egui::Event::Ime(egui::ImeEvent::Preedit(_)) => "ime-preedit",
+                egui::Event::Ime(egui::ImeEvent::Commit(_)) => "ime-commit",
+                egui::Event::Ime(egui::ImeEvent::Enabled) => "ime-enabled",
+                egui::Event::Ime(egui::ImeEvent::Disabled) => "ime-disabled",
+                egui::Event::Key { pressed: true, .. } => "key-pressed",
+                egui::Event::Key { pressed: false, .. } => "key-released",
+                _ => "other",
+            });
             let result = match event {
                 egui::Event::Text(text)
                     if !text.is_empty()
@@ -456,9 +540,14 @@ impl ScriptCraftApp {
     }
 
     fn handle_surface_input(&mut self, ctx: &egui::Context) {
+        self.native_input_diagnostics.dispatch_enabled = self.surface_focused;
         if !self.surface_focused {
             return;
         }
+        self.native_input_diagnostics.dispatched_frames = self
+            .native_input_diagnostics
+            .dispatched_frames
+            .saturating_add(1);
         let events = ctx.input(|input| input.events.clone());
         let modifiers = ctx.input(|input| input.modifiers);
         self.dispatch_surface_events(&events, modifiers);
@@ -577,6 +666,47 @@ impl ScriptCraftApp {
     }
 }
 
+fn paint_fixed_metric_text(
+    painter: &egui::Painter,
+    origin: egui::Pos2,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    char_width: f32,
+) {
+    for (column, character) in text.chars().enumerate() {
+        painter.text(
+            egui::pos2(fixed_metric_x(origin.x, column, char_width), origin.y),
+            egui::Align2::LEFT_TOP,
+            character.to_string(),
+            font.clone(),
+            color,
+        );
+    }
+}
+
+fn fixed_metric_x(origin: f32, column: usize, char_width: f32) -> f32 {
+    origin + column as f32 * char_width
+}
+
+fn caret_should_paint(focused: bool, collapsed: bool, blink_phase: f32) -> bool {
+    focused && collapsed && blink_phase > 0.5
+}
+
+fn caret_bar_rect(
+    page_rect: egui::Rect,
+    caret: scriptcraft_core::layout::Rect,
+    scale: f32,
+) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::pos2(
+            page_rect.left() + caret.x as f32 * scale,
+            page_rect.top() + caret.y as f32 * scale,
+        ),
+        Vec2::new(CARET_WIDTH, caret.height as f32 * scale),
+    )
+}
+
 fn ordered_selection(selection: Selection) -> (Position, Position) {
     if (selection.anchor.element, selection.anchor.offset)
         <= (selection.focus.element, selection.focus.offset)
@@ -657,6 +787,21 @@ impl eframe::App for ScriptCraftApp {
                 if let Some(error) = &self.error {
                     ui.colored_label(Color32::RED, error);
                 }
+                let diagnostics = &self.native_input_diagnostics;
+                ui.label(format!(
+                    "Native input diagnostics: focus={} lock={} dispatch={} events={} frames={} activations={} last={}",
+                    diagnostics.focused,
+                    diagnostics.focus_lock_installed,
+                    diagnostics.dispatch_enabled,
+                    diagnostics.received_events,
+                    diagnostics.dispatched_frames,
+                    diagnostics.pointer_activations,
+                    if diagnostics.last_event_category.is_empty() {
+                        "none"
+                    } else {
+                        diagnostics.last_event_category
+                    }
+                ));
             });
         });
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -802,6 +947,25 @@ mod tests {
         assert_eq!(app.session.project().elements[0].text, "café🙂");
         assert_eq!(app.session.selection().focus.offset, "café🙂".len());
         assert_eq!(app.rendered_revision, None);
+        assert_eq!(app.native_input_diagnostics.received_events, 1);
+        assert_eq!(app.native_input_diagnostics.last_event_category, "text");
+    }
+
+    #[test]
+    fn unfocused_surface_does_not_consume_keyboard_events() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let context = egui::Context::default();
+        let _ = context.run(
+            egui::RawInput {
+                focused: true,
+                events: vec![egui::Event::Text("blocked".into())],
+                ..Default::default()
+            },
+            |ctx| app.handle_surface_input(ctx),
+        );
+        assert_eq!(app.session.project().elements[0].text, "");
+        assert_eq!(app.native_input_diagnostics.received_events, 0);
+        assert!(!app.native_input_diagnostics.dispatch_enabled);
     }
 
     #[test]
@@ -811,7 +975,6 @@ mod tests {
             .insert("seed")
             .unwrap_or_else(|_| unreachable!());
         let context = egui::Context::default();
-        let page_id = egui::Id::new(("page-editor", 0));
         let layout =
             ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
         let page_width = 360.0_f32;
@@ -843,8 +1006,31 @@ mod tests {
                 app.handle_surface_input(ctx);
             },
         );
+        let editor_id = app.editor_surface_id.unwrap_or_else(|| unreachable!());
         assert!(!app.surface_focused);
-        assert!(!context.memory(|memory| memory.has_focus(page_id)));
+        assert!(!context.memory(|memory| memory.has_focus(editor_id)));
+
+        let surface_rect = app.editor_surface_rect.unwrap_or_else(|| unreachable!());
+        let blank_pointer = egui::pos2(surface_rect.right() - 4.0, surface_rect.top() + 4.0);
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                focused: true,
+                events: vec![
+                    egui::Event::PointerMoved(blank_pointer),
+                    pointer_click(true),
+                ],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.live_document_surface(ui);
+                });
+            },
+        );
+        assert!(app.surface_focused);
+        assert!(context.memory(|memory| memory.has_focus(editor_id)));
+        assert_eq!(app.native_input_diagnostics.pointer_activations, 1);
 
         let _ = context.run(
             egui::RawInput {
@@ -861,7 +1047,9 @@ mod tests {
             },
         );
         assert!(app.surface_focused);
-        assert!(context.memory(|memory| memory.has_focus(page_id)));
+        assert!(context.memory(|memory| memory.has_focus(editor_id)));
+        assert!(app.native_input_diagnostics.focus_lock_installed);
+        assert_eq!(app.native_input_diagnostics.pointer_activations, 2);
 
         let _ = context.run(
             egui::RawInput {
@@ -875,7 +1063,7 @@ mod tests {
                     app.live_document_surface(ui);
                 });
                 assert!(app.surface_focused);
-                assert!(context.memory(|memory| memory.has_focus(page_id)));
+                assert!(context.memory(|memory| memory.has_focus(editor_id)));
                 app.handle_surface_input(ctx);
             },
         );
@@ -1028,6 +1216,39 @@ mod tests {
                 offset: 0
             })
             .is_ok());
+    }
+
+    #[test]
+    fn fixed_metric_rendering_and_caret_bar_do_not_accumulate_drift() {
+        let columns = 120;
+        let scale = 360.0 / 612.0;
+        let origin = 90.0 * scale;
+        let expected = origin + columns as f32 * CHAR_WIDTH as f32 * scale;
+        assert_eq!(
+            fixed_metric_x(origin, columns, CHAR_WIDTH as f32 * scale),
+            expected
+        );
+
+        let bar = caret_bar_rect(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(360.0, 460.0)),
+            scriptcraft_core::layout::Rect {
+                x: 90 + (columns as u32) * CHAR_WIDTH,
+                y: 72,
+                width: 1,
+                height: LINE_HEIGHT,
+            },
+            scale,
+        );
+        assert_eq!(bar.width(), CARET_WIDTH);
+        assert!((bar.left() - expected).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn caret_blink_is_focused_collapsed_and_transient() {
+        assert!(caret_should_paint(true, true, 0.75));
+        assert!(!caret_should_paint(false, true, 0.75));
+        assert!(!caret_should_paint(true, false, 0.75));
+        assert!(!caret_should_paint(true, true, 0.25));
     }
 
     #[test]
