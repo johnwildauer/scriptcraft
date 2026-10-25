@@ -13,6 +13,9 @@ struct ScriptCraftApp {
     session: EditingSession,
     surface_focused: bool,
     drag_anchor: Option<Position>,
+    ime_preedit: String,
+    ime_active: bool,
+    rendered_revision: Option<u64>,
     status: String,
     error: Option<String>,
     native_path: Option<PathBuf>,
@@ -28,6 +31,9 @@ impl ScriptCraftApp {
             session,
             surface_focused: false,
             drag_anchor: None,
+            ime_preedit: String::new(),
+            ime_active: false,
+            rendered_revision: None,
             status: "In-memory demo project".into(),
             error: None,
             native_path: None,
@@ -141,6 +147,7 @@ impl ScriptCraftApp {
             Ok(()) => {
                 self.status = success.into();
                 self.clear_error();
+                self.rendered_revision = None;
             }
             Err(error) => self.show_error(error),
         }
@@ -196,7 +203,11 @@ impl ScriptCraftApp {
             self.drag_anchor = None;
             Selection::caret(position)
         };
-        self.session.set_selection(selection)
+        let result = self.session.set_selection(selection);
+        if result.is_ok() {
+            self.rendered_revision = None;
+        }
+        result
     }
 
     fn selection_color(
@@ -230,18 +241,22 @@ impl ScriptCraftApp {
         page_index: usize,
         page_width: f32,
         scale: f32,
+        surface_focused: &mut bool,
     ) {
         let page_height = layout.profile.paper_height as f32 * scale;
-        let (page_rect, response) =
-            ui.allocate_exact_size(Vec2::new(page_width, page_height), Sense::click_and_drag());
+        let page_rect = ui.allocate_space(Vec2::new(page_width, page_height)).1;
+        let page_id = egui::Id::new(("page-editor", page_index));
+        let response = ui.interact(page_rect, page_id, Sense::click_and_drag());
         let painter = ui.painter_at(page_rect);
         painter.rect_filled(page_rect, 2.0, Color32::from_gray(246));
         painter.rect_stroke(page_rect, 2.0, Stroke::new(1.0_f32, Color32::GRAY));
 
         if let Some(pointer) = response.interact_pointer_pos() {
-            if (response.clicked() || response.drag_started() || response.dragged())
-                && !layout.pages[page_index].title_page
-            {
+            let pointer_active = response.clicked()
+                || response.drag_started()
+                || response.dragged()
+                || (response.hovered() && ui.input(|input| input.pointer.primary_down()));
+            if pointer_active && !layout.pages[page_index].title_page {
                 if let Some(position) =
                     self.caret_from_pointer(layout, page_index, page_rect, scale, pointer)
                 {
@@ -252,12 +267,13 @@ impl ScriptCraftApp {
                     ) {
                         self.show_error(error);
                     } else {
-                        self.surface_focused = true;
+                        response.request_focus();
                         self.clear_error();
                     }
                 }
             }
         }
+        *surface_focused |= response.has_focus();
 
         for line in &layout.pages[page_index].lines {
             let x = page_rect.left() + line.rect.x as f32 * scale;
@@ -317,6 +333,15 @@ impl ScriptCraftApp {
                     ],
                     Stroke::new(1.5_f32, Color32::from_rgb(20, 80, 150)),
                 );
+                if !self.ime_preedit.is_empty() {
+                    painter.text(
+                        egui::pos2(x + rect.width as f32 * scale, y),
+                        egui::Align2::LEFT_TOP,
+                        &self.ime_preedit,
+                        FontId::monospace((10.0 * scale).max(5.0)),
+                        Color32::from_rgb(80, 80, 160),
+                    );
+                }
             }
         }
     }
@@ -329,15 +354,105 @@ impl ScriptCraftApp {
                 return;
             }
         };
+        self.rendered_revision = Some(self.session.revision());
         let available = ui.available_size();
         let page_width = 360.0_f32.min(available.x.max(240.0));
         let scale = page_width / layout.profile.paper_width as f32;
+        let mut surface_focused = false;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for page_index in 0..layout.pages.len() {
-                self.paint_page(ui, &layout, page_index, page_width, scale);
+                self.paint_page(
+                    ui,
+                    &layout,
+                    page_index,
+                    page_width,
+                    scale,
+                    &mut surface_focused,
+                );
                 ui.add_space(12.0);
             }
         });
+        self.surface_focused = surface_focused;
+    }
+
+    fn dispatch_surface_events(&mut self, events: &[egui::Event], modifiers: egui::Modifiers) {
+        for (index, event) in events.iter().enumerate() {
+            let result = match event {
+                egui::Event::Text(text)
+                    if !text.is_empty()
+                        && !self.ime_active
+                        && !events[index + 1..].iter().any(|next| {
+                            matches!(next, egui::Event::Ime(egui::ImeEvent::Commit(commit)) if commit == text)
+                        })
+                        && !modifiers.command
+                        && !(modifiers.ctrl && !cfg!(target_os = "macos"))
+                        && text.chars().all(|character| !character.is_control()) =>
+                {
+                    Some(self.session.insert(text))
+                }
+                egui::Event::Paste(text) if !text.is_empty() => Some(self.session.insert(text)),
+                egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
+                    self.ime_active = true;
+                    self.ime_preedit.clone_from(text);
+                    self.rendered_revision = None;
+                    None
+                }
+                egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                    self.ime_active = false;
+                    self.ime_preedit.clear();
+                    (!text.is_empty()).then(|| self.session.insert(text))
+                }
+                egui::Event::Ime(egui::ImeEvent::Enabled) => {
+                    self.ime_active = true;
+                    None
+                }
+                egui::Event::Ime(egui::ImeEvent::Disabled) => {
+                    self.ime_active = false;
+                    self.ime_preedit.clear();
+                    None
+                }
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => self.key_event(*key, *modifiers),
+                _ => continue,
+            };
+            if let Some(result) = result {
+                self.mutate(result, "Edited through EditingSession");
+            }
+        }
+    }
+
+    fn key_event(&mut self, key: Key, modifiers: egui::Modifiers) -> Option<Result<(), EditError>> {
+        if modifiers.command || (modifiers.ctrl && !cfg!(target_os = "macos")) {
+            return match key {
+                Key::Z if modifiers.shift => Some(self.session.redo()),
+                Key::Z => Some(self.session.undo()),
+                Key::Y => Some(self.session.redo()),
+                Key::A => Some(self.session.set_selection(Selection {
+                    anchor: Position {
+                        element: 0,
+                        offset: 0,
+                    },
+                    focus: self.document_end(),
+                })),
+                _ => None,
+            };
+        }
+        match key {
+            Key::Backspace => Some(self.session.backspace()),
+            Key::Delete => Some(self.session.delete()),
+            Key::Enter => Some(self.session.enter()),
+            Key::ArrowLeft => Some(self.move_horizontal(false, modifiers.shift)),
+            Key::ArrowRight => Some(self.move_horizontal(true, modifiers.shift)),
+            Key::ArrowUp => Some(self.move_vertical(false, modifiers.shift)),
+            Key::ArrowDown => Some(self.move_vertical(true, modifiers.shift)),
+            Key::Home => Some(self.move_to_edge(false, modifiers.shift)),
+            Key::End => Some(self.move_to_edge(true, modifiers.shift)),
+            _ => None,
+        }
     }
 
     fn handle_surface_input(&mut self, ctx: &egui::Context) {
@@ -345,55 +460,22 @@ impl ScriptCraftApp {
             return;
         }
         let events = ctx.input(|input| input.events.clone());
-        for event in events {
-            let result = match event {
-                egui::Event::Text(text) if !text.is_empty() => self.session.insert(&text),
-                egui::Event::Key {
-                    key: Key::Backspace,
-                    pressed: true,
-                    ..
-                } => self.session.backspace(),
-                egui::Event::Key {
-                    key: Key::Delete,
-                    pressed: true,
-                    ..
-                } => self.session.delete(),
-                egui::Event::Key {
-                    key: Key::Enter,
-                    pressed: true,
-                    ..
-                } => self.session.enter(),
-                egui::Event::Key {
-                    key: Key::ArrowLeft,
-                    pressed: true,
-                    ..
-                } => self.move_horizontal(false),
-                egui::Event::Key {
-                    key: Key::ArrowRight,
-                    pressed: true,
-                    ..
-                } => self.move_horizontal(true),
-                egui::Event::Key {
-                    key: Key::Z,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } if modifiers.command => self.session.undo(),
-                egui::Event::Key {
-                    key: Key::Y,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } if modifiers.command => self.session.redo(),
-                _ => continue,
-            };
-            self.mutate(result, "Edited through EditingSession");
+        let modifiers = ctx.input(|input| input.modifiers);
+        self.dispatch_surface_events(&events, modifiers);
+        ctx.request_repaint();
+    }
+
+    fn document_end(&self) -> Position {
+        let element = self.session.project().elements.len().saturating_sub(1);
+        Position {
+            element,
+            offset: self.session.project().elements[element].text.len(),
         }
     }
 
-    fn move_horizontal(&mut self, right: bool) -> Result<(), EditError> {
+    fn move_horizontal(&mut self, right: bool, extend: bool) -> Result<(), EditError> {
         let selection = self.session.selection();
-        if selection.anchor != selection.focus {
+        if selection.anchor != selection.focus && !extend {
             let position = if right {
                 ordered_selection(selection).1
             } else {
@@ -437,7 +519,61 @@ impl ScriptCraftApp {
         } else {
             position
         };
-        self.session.set_selection(Selection::caret(next))
+        self.session.set_selection(if extend {
+            Selection {
+                anchor: selection.anchor,
+                focus: next,
+            }
+        } else {
+            Selection::caret(next)
+        })
+    }
+
+    fn move_vertical(&mut self, down: bool, extend: bool) -> Result<(), EditError> {
+        let selection = self.session.selection();
+        let current = selection.focus;
+        let element = if down {
+            (current.element + 1).min(self.session.project().elements.len().saturating_sub(1))
+        } else {
+            current.element.saturating_sub(1)
+        };
+        let offset = current
+            .offset
+            .min(self.session.project().elements[element].text.len());
+        let next = Position { element, offset };
+        self.session.set_selection(if extend {
+            Selection {
+                anchor: selection.anchor,
+                focus: next,
+            }
+        } else {
+            Selection::caret(next)
+        })
+    }
+
+    fn move_to_edge(&mut self, end: bool, extend: bool) -> Result<(), EditError> {
+        let selection = self.session.selection();
+        let position = if end {
+            Position {
+                element: selection.focus.element,
+                offset: self.session.project().elements[selection.focus.element]
+                    .text
+                    .len(),
+            }
+        } else {
+            Position {
+                element: selection.focus.element,
+                offset: 0,
+            }
+        };
+        self.session.set_selection(if extend {
+            Selection {
+                anchor: selection.anchor,
+                focus: position,
+            }
+        } else {
+            Selection::caret(position)
+        })
     }
 }
 
@@ -652,6 +788,225 @@ mod tests {
         assert_eq!(app.session.project().elements[0].text, "a🙂");
         app.session.backspace().unwrap_or_else(|_| unreachable!());
         assert_eq!(app.session.project().elements[0].text, "a");
+    }
+
+    #[test]
+    fn focused_event_dispatch_inserts_unicode_and_invalidates_render_state() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.surface_focused = true;
+        app.rendered_revision = Some(app.session.revision());
+        app.dispatch_surface_events(
+            &[egui::Event::Text("café🙂".into())],
+            egui::Modifiers::default(),
+        );
+        assert_eq!(app.session.project().elements[0].text, "café🙂");
+        assert_eq!(app.session.selection().focus.offset, "café🙂".len());
+        assert_eq!(app.rendered_revision, None);
+    }
+
+    #[test]
+    fn rendered_page_editor_retains_focus_for_later_frame_input() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert("seed")
+            .unwrap_or_else(|_| unreachable!());
+        let context = egui::Context::default();
+        let page_id = egui::Id::new(("page-editor", 0));
+        let layout =
+            ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
+        let page_width = 360.0_f32;
+        let scale = page_width / layout.profile.paper_width as f32;
+        let line = &layout.pages[0].lines[0];
+        let pointer = egui::pos2(
+            8.0 + (line.rect.x as f32 + 1.0) * scale,
+            8.0 + (line.rect.y as f32 + 1.0) * scale,
+        );
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let pointer_click = |pressed| egui::Event::PointerButton {
+            pos: pointer,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                focused: true,
+                events: Vec::new(),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.live_document_surface(ui);
+                });
+                app.handle_surface_input(ctx);
+            },
+        );
+        assert!(!app.surface_focused);
+        assert!(!context.memory(|memory| memory.has_focus(page_id)));
+
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                focused: true,
+                events: vec![egui::Event::PointerMoved(pointer), pointer_click(true)],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.live_document_surface(ui);
+                });
+                app.handle_surface_input(ctx);
+            },
+        );
+        assert!(app.surface_focused);
+        assert!(context.memory(|memory| memory.has_focus(page_id)));
+
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                focused: true,
+                events: vec![egui::Event::PointerMoved(pointer), pointer_click(false)],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.live_document_surface(ui);
+                });
+                assert!(app.surface_focused);
+                assert!(context.memory(|memory| memory.has_focus(page_id)));
+                app.handle_surface_input(ctx);
+            },
+        );
+
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                focused: true,
+                events: vec![
+                    egui::Event::Text("later".into()),
+                    egui::Event::Key {
+                        key: Key::Backspace,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.live_document_surface(ui);
+                });
+                assert!(app.surface_focused);
+                app.handle_surface_input(ctx);
+            },
+        );
+
+        assert_eq!(app.session.project().elements[0].text, "lateseed");
+    }
+
+    #[test]
+    fn ime_preedit_is_transient_and_commit_is_inserted_once() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.dispatch_surface_events(
+            &[
+                egui::Event::Ime(egui::ImeEvent::Preedit("に".into())),
+                egui::Event::Text("に".into()),
+                egui::Event::Ime(egui::ImeEvent::Commit("日本".into())),
+            ],
+            egui::Modifiers::default(),
+        );
+        assert_eq!(app.session.project().elements[0].text, "日本");
+        assert!(app.ime_preedit.is_empty());
+        assert!(!app.ime_active);
+    }
+
+    #[test]
+    fn editing_key_dispatch_covers_enter_delete_backspace_undo_redo_and_shift_selection() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.dispatch_surface_events(
+            &[egui::Event::Text("abc".into())],
+            egui::Modifiers::default(),
+        );
+        let plain = egui::Modifiers::default();
+        app.dispatch_surface_events(
+            &[egui::Event::Key {
+                key: Key::ArrowLeft,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    shift: true,
+                    ..plain
+                },
+            }],
+            plain,
+        );
+        assert_ne!(
+            app.session.selection().anchor,
+            app.session.selection().focus
+        );
+        app.dispatch_surface_events(
+            &[
+                egui::Event::Key {
+                    key: Key::Backspace,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: plain,
+                },
+                egui::Event::Key {
+                    key: Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: plain,
+                },
+            ],
+            plain,
+        );
+        assert_eq!(app.session.project().elements.len(), 2);
+        app.dispatch_surface_events(
+            &[egui::Event::Key {
+                key: Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    command: true,
+                    ..plain
+                },
+            }],
+            plain,
+        );
+        assert_eq!(app.session.project().elements.len(), 1);
+        app.dispatch_surface_events(
+            &[egui::Event::Key {
+                key: Key::Y,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers {
+                    command: true,
+                    ..plain
+                },
+            }],
+            plain,
+        );
+        assert_eq!(app.session.project().elements.len(), 2);
+        app.dispatch_surface_events(
+            &[egui::Event::Key {
+                key: Key::Delete,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: plain,
+            }],
+            plain,
+        );
     }
 
     #[test]
