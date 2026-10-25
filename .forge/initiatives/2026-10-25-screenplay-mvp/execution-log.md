@@ -8,7 +8,7 @@
 
 - **Initiative:** `2026-10-25-screenplay-mvp`
 - **Initiative mode:** `standard`
-- **Current phase:** `execute`
+- **Current phase:** `plan`
 - **Current status:** `active`
 - **Orchestrator:** Forge orchestrator
 - **Orchestrator session/agent ID:** `planning-session-2026-10-25`
@@ -249,6 +249,102 @@
 - **Manual limitation:** `cargo run -p scriptcraft` built and reached `target/debug/scriptcraft`, but the terminal-only five-second bound expired without observable window/UI interaction; visual/manual success is not claimed.
 - **Result:** `PASS`. No hard-stop implementation, required-gate, scope, or rogue-behavior finding was found. No lettered fix WO is required. WO-008 is now `complete`.
 - **Next action/owner:** Orchestrator — retain the linked validation artifact and proceed to consolidated initiative closeout evidence.
+
+### 2026-10-25 17:39 UTC — User-requested scope correction returned initiative to planning
+
+- **Actor/role:** Orchestrator / architect
+- **Session/agent ID:** `planning-session-2026-10-25-post-mvp-correction`
+- **State transition:** Initiative `closeout preparation → plan`; no work order execution transition
+- **Work order/review:** [`scope-correction-2026-10-25.md`](scope-correction-2026-10-25.md), [`work-orders/WO-009-unified-live-editing-surface.md`](work-orders/WO-009-unified-live-editing-surface.md), [`work-orders/WO-010-basic-named-persistence-ui.md`](work-orders/WO-010-basic-named-persistence-ui.md)
+- **Action:** Recorded the user's post-MVP findings as an explicit scope correction. Created two dependency-ordered draft WOs: WO-009 for one primary live page-layout editing surface and WO-010 for basic user-selected/named Open, Save, and Save As UI. The persistence UI scope explicitly excludes recovery UI. No product source was changed.
+- **Exact observed UI defects:** The current app renders each element as a selectable summary row and, for the selected element, a separate multiline `TextEdit` (`continuous_view`); page mode paints layout lines with no editing controls (`page_view`); toolbar exposes a separate Continuous/Page preview mode split; direct edits replace the entire selected element through a transient text field rather than providing document-surface caret/selection/delete interaction; native Open/Save use hard-coded `scriptcraft.json` and there is no Save As or user-selected named path; the status bar still says `Persistence host boundary: not connected` despite wired persistence actions.
+- **Preserved evidence:** WO-001 through WO-008 passed validation artifacts remain unchanged and historical. This planning amendment does not claim approval, implementation, or validation for WO-009 or WO-010.
+- **Result:** Initiative is active in `plan`; new work orders are draft and await the normal design-readiness/review/approval gates.
+- **Next action/owner:** Orchestrator/user approver — review the amended plan and draft WOs before any design review or implementation dispatch.
+
+### 2026-10-25 17:42 UTC — Independent UI-correction review ledger reconciliation
+
+- **Actor/role:** Orchestrator / architect
+- **Session/agent ID:** `planning-session-2026-10-25-post-mvp-correction`
+- **State transition:** Amended initiative remains `plan`; no `plan → review`, `review → execute`, or work-order execution transition
+- **Work order/review:** [`reviews/design-review-ui-correction.md`](reviews/design-review-ui-correction.md), [`2026-10-25-screenplay-mvp-v1.md`](2026-10-25-screenplay-mvp-v1.md)
+- **Action:** Reconciled the initiative ledger after blocker `UI-CORRECTION-B-001`. The amended WO-009/WO-010 scope is recorded as planning-only with amended design approval pending; the contradictory amended readiness/approval claims were removed. The original WO-001-scoped approval and WO-001–WO-008 validation history remain preserved and bounded to that original work.
+- **Result:** The amended initiative is consistently `plan`; WO-009 and WO-010 remain draft, not approved, not implemented, and not validated. No human approval, implementation, or new validation is claimed by this correction.
+- **Changed files:** [`2026-10-25-screenplay-mvp-v1.md`](2026-10-25-screenplay-mvp-v1.md) and this log. No product code, work-order scope, or validation artifact was changed.
+- **Next action/owner:** Orchestrator/user approver — after the amended plan is ready, record the amended `plan → review` transition and complete the corrected design-review gate; obtain separate human approval for WO-009/WO-010 before any `review → execute` transition or implementation dispatch.
+
+### 2026-10-25 18:06 UTC — WO-009 unified live editing surface implementation completion
+
+- **Actor/role:** Desktop editing-surface implementer
+- **Session/agent ID:** `code-session-2026-10-25-wo-009`
+- **State transition:** WO-009 `draft → in-progress → in-review`
+- **Work order:** [`work-orders/WO-009-unified-live-editing-surface.md`](work-orders/WO-009-unified-live-editing-surface.md)
+- **Action:** Replaced the duplicate per-element summary plus selected multiline `TextEdit` and the Continuous/Page editing split with one page-layout `live_document_surface` in [`apps/scriptcraft/src/main.rs`](../../../apps/scriptcraft/src/main.rs). The page presentation is now the default and only editing surface. Pointer hit testing, caret placement, drag selection, direct text insertion/replacement, Delete, Backspace, Enter role transition, horizontal caret movement, undo/redo, role controls, and bounded errors route through the existing `EditingSession` and `ScreenplayLayout` source mappings. Recovery UI was removed; WO-010 named-file dialogs were not implemented.
+- **Changed files:** [`apps/scriptcraft/src/main.rs`](../../../apps/scriptcraft/src/main.rs), [`work-orders/WO-009-unified-live-editing-surface.md`](work-orders/WO-009-unified-live-editing-surface.md), and this log. No core semantic/layout algorithms, persistence/recovery, exports, WO-010, or requirements were changed. No commit was made.
+- **Focused test evidence:** Added app tests for no duplicate editor state, direct selection replacement/deletion/backspace, role-aware Enter transition, and source-mapped caret/hit testing. Existing core/layout and WO-008 tests remain preserved.
+- **Validation evidence:** `cargo fmt --all -- --check` passed; `cargo check --workspace` passed; `cargo build --workspace` passed; `cargo test --workspace -- --nocapture` passed with 4 app tests, 22 core unit tests, 3 WO-008 integration tests, and doc-test targets at zero failures; `cargo clippy --workspace --all-targets -- -D warnings` passed. Bounded `cargo run -p scriptcraft` reached `target/debug/scriptcraft` and was terminated after five seconds (`bounded_smoke_exit=143`); terminal-only execution provided no observable window or manual interaction evidence, so visual/manual success is not claimed. No independent validation is claimed.
+- **Result:** WO-009 implementation is in scope and is now `in-review`. This implementer does not claim independent validation or `complete` status.
+- **Next action/owner:** Fresh validation agent — inspect the single-surface interaction boundary and run the WO-009 acceptance checks; set `complete` only if independent validation passes.
+
+### 2026-10-25 18:08 UTC — WO-009 independent fresh-context validation
+
+- **Actor/role:** Independent fresh-context validator
+- **Session/agent ID:** `validation-session-2026-10-25-wo-009`
+- **State transition:** WO-009 remains `in-review`; validation result `fail`
+- **Work order/validation:** [`work-orders/WO-009-unified-live-editing-surface.md`](work-orders/WO-009-unified-live-editing-surface.md), [`validations/validation-WO-009.md`](validations/validation-WO-009.md)
+- **Action:** Read the validation process, WO-009, scope-correction note, UI-correction design review, execution log, current [`main.rs`](../../../apps/scriptcraft/src/main.rs), and core editing/layout APIs. Independently inspected the single-surface structure and input routing, ran focused/workspace behavior checks, full format/check/build/test/clippy gates, and a bounded native launch smoke. No product source was edited.
+- **Validation evidence:** The single page-layout surface, no duplicate per-element editor/buffer, no Continuous/Page split, source-mapped caret/hit testing, direct core-routed edits, Enter role transition, undo/redo, and bounded error path aligned. All Cargo gates passed: 4 app tests, 22 core unit tests, 3 WO-008 integration tests, and doc-test target at zero failures. Bounded launch reached `target/debug/scriptcraft` and ended after five seconds with exit 143; no visual/manual success was claimed.
+- **Hard stop:** Pointer drag handling in [`paint_page()`](../../../apps/scriptcraft/src/main.rs:169) collapses the selection on drag start when `response.dragged()` is false, losing the stable range anchor needed for reliable drag/range selection. The focused tests only cover programmatic selection, not this gesture sequence.
+- **Required fix:** Create and dispatch **WO-009a — preserve pointer drag selection anchor**, add a focused drag-range regression test, and perform fresh validation. The fix work order was not created and no implementation was performed in this validation session.
+- **Result:** `FAIL`. WO-009 is not complete; preserve [`validation-WO-009.md`](validations/validation-WO-009.md) as the failing evidence.
+- **Next action/owner:** Orchestrator — create/dispatch the lettered fix work order in a new implementer session, then dispatch a fresh validator.
+
+### 2026-10-25 18:09 UTC — WO-009a pointer drag-anchor fix implementation completion
+
+- **Actor/role:** Desktop editing-surface fix implementer
+- **Session/agent ID:** `code-session-2026-10-25-wo-009a`
+- **State transition:** WO-009a `in-progress → in-review`
+- **Work order/validation:** [`work-orders/WO-009a-preserve-pointer-drag-selection-anchor.md`](work-orders/WO-009a-preserve-pointer-drag-selection-anchor.md), failing [`validations/validation-WO-009.md`](validations/validation-WO-009.md)
+- **Action:** Created the official lettered fix artifact before implementation. Added only transient app-local drag-anchor state in [`apps/scriptcraft/src/main.rs`](../../../apps/scriptcraft/src/main.rs). `drag_started()` now stores the initial hit, and subsequent `dragged()` frames preserve that anchor while routing the current focus through `EditingSession::set_selection()`. Added the focused multi-character regression test `pointer_drag_preserves_initial_hit_as_selection_anchor`.
+- **Changed files:** [`apps/scriptcraft/src/main.rs`](../../../apps/scriptcraft/src/main.rs), [`work-orders/WO-009a-preserve-pointer-drag-selection-anchor.md`](work-orders/WO-009a-preserve-pointer-drag-selection-anchor.md), and this log. Persistence, recovery, exports, core crates, WO-010, and validation artifacts were not changed. No commit was made.
+- **Validation evidence:** `cargo fmt --all -- --check` passed; `cargo check --workspace` passed; `cargo build --workspace` passed; `cargo test --workspace -- --nocapture` passed with 5 app tests, 22 core tests, 3 WO-008 integration tests, and doc-test target at zero failures; `cargo clippy --workspace --all-targets -- -D warnings` passed.
+- **Result:** WO-009a implementation is complete within scope and is now `in-review`. No validation was created or claimed.
+- **Next action/owner:** Fresh validation agent — validate WO-009a against [`validation-WO-009.md`](validations/validation-WO-009.md) and the fix evidence; determine completion only through a fresh validation artifact.
+
+### 2026-10-25 18:11 UTC — WO-009a independent fresh-context validation and fix-chain resolution
+
+- **Actor/role:** Independent fresh-context validator
+- **Session/agent ID:** `validation-session-2026-10-25-wo-009a`
+- **State transition:** WO-009a `in-review → complete`; WO-009 `in-review → complete` through the lettered fix chain
+- **Work order/validation:** [`work-orders/WO-009a-preserve-pointer-drag-selection-anchor.md`](work-orders/WO-009a-preserve-pointer-drag-selection-anchor.md), [`validations/validation-WO-009a.md`](validations/validation-WO-009a.md), original failure [`validations/validation-WO-009.md`](validations/validation-WO-009.md)
+- **Action:** Fresh-context validator read the validation process, prior hard-stop evidence, WO-009a, WO-009, execution log, and current app source. No product source was edited. The focused regression was run independently to verify a drag-start hit at offset 1 remains the anchor through a later focus at offset 5 and is routed through `EditingSession::set_selection()`.
+- **Validation evidence:** Focused drag test passed (1/1). Full `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace -- --nocapture` (5 app, 22 core, 3 WO-008 integration, and doc-test targets; zero failures), and `cargo clippy --workspace --all-targets -- -D warnings` passed. Bounded `cargo run -p scriptcraft` reached the native binary; no visual/manual success was claimed.
+- **Result:** `PASS`. The WO-009 drag/range-selection hard stop is resolved by WO-009a. No new hard-stop, scope, required-gate, or rogue-behavior finding was identified. WO-009a and WO-009 are complete under the validation process.
+- **Next action/owner:** Orchestrator — preserve the linked validation artifact and continue the dependency-ordered initiative process.
+
+### 2026-10-25 18:13 UTC — WO-010 basic named persistence UI implementation completion
+
+- **Actor/role:** Desktop persistence-UI implementer
+- **Session/agent ID:** `code-session-2026-10-25-wo-010`
+- **State transition:** WO-010 `draft → in-progress → in-review`
+- **Work order:** [`work-orders/WO-010-basic-named-persistence-ui.md`](work-orders/WO-010-basic-named-persistence-ui.md)
+- **Action:** Replaced fixed native-project path behavior with app-owned optional named path state. Added native `rfd` Open and Save As dialogs; Save uses the current named path and falls back to Save As when unset. Added path/dirty/status presentation and safe save-first handling for Open while dirty. Recovery UI and stale persistence-boundary messaging remain absent; the unified editor surface was not changed.
+- **Changed files:** [`apps/scriptcraft/src/main.rs`](../../../apps/scriptcraft/src/main.rs), [`apps/scriptcraft/Cargo.toml`](../../../apps/scriptcraft/Cargo.toml), workspace [`Cargo.lock`](../../../Cargo.lock), [`blueprints/containers/scriptcraft-desktop.md`](../../blueprints/containers/scriptcraft-desktop.md), [`work-orders/WO-010-basic-named-persistence-ui.md`](work-orders/WO-010-basic-named-persistence-ui.md), and this log. No core persistence/schema/recovery code changed. No commit was made.
+- **Focused test evidence:** 8 app tests passed, including named selected-path Save/Open transitions, failed-save preservation of prior file/path/dirty state, and failed-open non-replacement.
+- **Validation evidence:** `cargo fmt --all -- --check` passed; `cargo check --workspace` passed; `cargo build --workspace` passed; `cargo test --workspace -- --nocapture` passed with 8 app tests, 22 core tests, 3 WO-008 integration tests, and zero doc-test failures; `cargo clippy --workspace --all-targets -- -D warnings` passed. Bounded `cargo run -p scriptcraft` reached `target/debug/scriptcraft` and was terminated after five seconds (`bounded_smoke_exit=143`); terminal-only execution provided no observable window or manual interaction evidence, so visual/manual success is not claimed. No independent validation claim is made.
+- **Result:** WO-010 implementation is within scope and is now `in-review`; fresh validation remains required. No broader recovery/collaboration feature was implemented.
+- **Next action/owner:** Implementer — run remaining required gates and bounded smoke, then fresh validation agent — inspect WO-010 acceptance and evidence.
+
+### 2026-10-25 18:15 UTC — WO-010 independent fresh-context validation
+
+- **Actor/role:** Independent fresh-context validator
+- **Session/agent ID:** `validation-session-2026-10-25-wo-010`
+- **State transition:** WO-010 `in-review → complete`; initiative remains `execute`
+- **Work order/validation:** [`work-orders/WO-010-basic-named-persistence-ui.md`](work-orders/WO-010-basic-named-persistence-ui.md), [`validations/validation-WO-010.md`](validations/validation-WO-010.md)
+- **Action:** Read the validation process, WO-010, the scope-correction note, UI-correction design review, execution log, WO-009/WO-009a evidence, current [`main.rs`](../../../apps/scriptcraft/src/main.rs), app manifest, and core [`persistence.rs`](../../../crates/scriptcraft-core/src/persistence.rs). Independently inspected named path/dialog routing, clean/dirty transitions, dirty-open refusal, non-destructive failure paths, absence of recovery UI and stale messaging, and unified-editor preservation. No product source was edited.
+- **Validation evidence:** Named save/open path and clean-state test passed; failed-save preservation test passed; failed-open non-replacement test passed; full `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo build --workspace`, `cargo test --workspace -- --nocapture` (8 app, 22 core, 3 WO-008 integration, and doc-test targets; zero failures), and `cargo clippy --workspace --all-targets -- -D warnings` passed. A bounded `cargo run -p scriptcraft` reached the native binary and was terminated after five seconds with exit 143; no visual/manual success was claimed.
+- **Result:** `PASS`. No hard-stop implementation, scope, required-gate, or rogue-behavior finding was identified. No lettered fix work order is required. WO-010 is now `complete`.
+- **Next action/owner:** Orchestrator — preserve the linked validation artifact and continue initiative closeout evidence.
 
 ## Session separation exceptions
 

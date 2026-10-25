@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 eframe = "0.29"
+rfd = "0.15"
 scriptcraft-core = { path = "../../crates/scriptcraft-core" }
 
 [lints]

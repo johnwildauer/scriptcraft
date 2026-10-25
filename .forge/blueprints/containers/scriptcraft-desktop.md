@@ -15,7 +15,7 @@ buffer.
 - **Owner:** Forge initialization agent
 - **Last updated:** 2026-10-25
 - **Technical context:** [`../technical-context.md`](../technical-context.md)
-- **Evidence basis:** desired architecture from `.analysis`; current `apps/scriptcraft/` inventory is empty
+- **Evidence basis:** desired architecture from `.analysis`, plus verified WO-009/WO-010 app-boundary behavior
 
 ## Infrastructure
 
@@ -67,6 +67,7 @@ buffer.
 |---|---|---|
 | 2026-10-25 | Created MVP desktop container boundary | User-approved desktop-first scope and `.analysis`; implementation/framework not claimed |
 | 2026-10-25 | Recorded foundation app seam | WO-001 verified a dependency-free native Rust binary and headless startup path; visible UI remains deferred |
+| 2026-10-25 | Recorded unified editor and named persistence host behavior | WO-009/WO-010 implementation evidence; app owns the optional current named path and native `rfd` selection, while core owns JSON and atomic-save semantics; recovery remains outside the UI |
 
 ## WO-001 verified foundation facts
 
@@ -77,4 +78,4 @@ buffer.
 ## WO-006 verified persistence facts
 
 - The app host owns [`StdFileSystem`](../../../crates/scriptcraft-core/src/persistence.rs) and path selection, while the core owns bounded bytes, atomic-save semantics, and recovery candidate contracts.
-- The focused host exposes Open, Save, and Recovery actions using the native `scriptcraft.json` path. Open replaces the session only after successful parse/validation; Save marks the session clean only after atomic replacement; Recovery reports explicit candidates without automatic replacement.
+- The focused host exposes native file-dialog Open, Save, and Save As actions. The app owns the optional current named path and displays it in status; Open replaces the session and path only after successful parse/validation, while Save marks the session clean and updates the path only after atomic replacement. Recovery APIs remain core-only and are not exposed in this UI.

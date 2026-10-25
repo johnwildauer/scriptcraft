@@ -2,7 +2,7 @@
 
 ## Initiative metadata
 
-- **Phase:** `execute`
+- **Phase:** `plan`
 - **Status:** `active`
 - **Owner/orchestrator:** Forge orchestrator
 - **Created:** 2026-10-25
@@ -21,16 +21,17 @@
 - **Branch creation failure:** `none` — the initial explicit `master` start-point failed because `master` has no commit; the no-start-point branch creation succeeded and is recorded above.
 - **Validation cadence:** `per work order`
 - **User checkpoint policy:** No manual user checkpoint after each WO, but each WO is validated immediately after its implementation by a separate fresh validation agent; design review still occurs before execution, and a consolidated human confirmation/closeout occurs after all WOs.
-- **Phase transition evidence:** `draft → plan` on 2026-10-25: user requested formal creation of the first initiative and all dependency-ordered WOs; plan and WO artifacts were created. `plan → review` was established by the formal design review. `review → execute` was approved by the user on 2026-10-25 after the independent review passed with warnings; the warnings remain tracked as execution follow-ups. WO-001 is the only dispatched work order.
+- **Phase transition evidence:** `draft → plan` on 2026-10-25: user requested formal creation of the first initiative and dependency-ordered WOs; plan and WO artifacts were created. The original MVP then passed `plan → review` and `review → execute` after the original formal design review and recorded human approval limited to WO-001; WO-001 through WO-008 were subsequently implemented and independently validated, with that approval and evidence preserved as historical records. On 2026-10-25, the user requested a post-MVP scope correction after inspecting the actual UI; the initiative returned from closeout preparation to `plan` to create WO-009 and WO-010. The amended initiative remains in `plan`: the correction's design review is `blocked` for ledger reconciliation, no amended `plan → review` transition has been recorded, and amended human design approval is pending. This correction does not invalidate or rewrite the original WO-001–WO-008 approval or validation evidence.
 - **Direct-translation confirmation:** `requested and confirmed` — this initiative and its WOs directly translate the user's approved MVP outcome and exclusions.
 
 ## Standard artifact locations
 
 - **Authoritative plan:** `2026-10-25-screenplay-mvp-v1.md`
-- **Design review:** [`reviews/design-review.md`](reviews/design-review.md) — not yet created; design review is still required before execution.
-- **Validations:** `validations/validation-[work-order-id].md` — none yet; no implementation has occurred.
+- **Design review:** [`reviews/design-review-ui-correction.md`](reviews/design-review-ui-correction.md) — amended initiative review is `blocked` pending ledger reconciliation; it does not authorize execution.
+- **Validations:** [`validations/`](validations/) — historical validation artifacts for WO-001 through WO-008 are preserved; no validation exists or is claimed for WO-009 or WO-010.
 - **Execution log:** [`execution-log.md`](execution-log.md)
 - **Work orders:** [`work-orders/`](work-orders/)
+- **Scope correction note:** [`scope-correction-2026-10-25.md`](scope-correction-2026-10-25.md)
 
 ## Outcome
 
@@ -118,15 +119,18 @@ Use a one-way dependency graph: workspace/app shell → reusable semantic core/s
 6. [`WO-006-persistence-recovery.md`](work-orders/WO-006-persistence-recovery.md) — implement versioned native JSON save/reopen, atomic failure safety, and recovery candidates.
 7. [`WO-007-exports-integration.md`](work-orders/WO-007-exports-integration.md) — add PDF/TXT export and integrate the representative end-to-end loop.
 8. [`WO-008-e2e-hardening.md`](work-orders/WO-008-e2e-hardening.md) — harden headless end-to-end behavior, hostile-input regressions, and desktop smoke evidence.
+9. [`WO-009-unified-live-editing-surface.md`](work-orders/WO-009-unified-live-editing-surface.md) — correct the desktop interaction model to one primary live page-layout editing surface with caret, direct typing, selection, deletion, and role-aware editing.
+10. [`WO-010-basic-named-persistence-ui.md`](work-orders/WO-010-basic-named-persistence-ui.md) — replace hard-coded native `scriptcraft.json` UI behavior with basic user-selected/named Open, Save, and Save As while keeping recovery outside the UI.
 
-Execution is sequential by default. Each WO has one owner and must be implemented in a fresh implementer session, marked `in-review` with changed-file and validation evidence, then immediately assessed by a separate fresh validation agent. No WO is currently approved, implemented, `in-review`, complete, or validated.
+Execution is sequential by default. Each WO has one owner and must be implemented in a fresh implementer session, marked `in-review` with changed-file and validation evidence, then immediately assessed by a separate fresh validation agent. WO-001 through WO-008 remain complete with their preserved passed validation artifacts and original approval history. WO-009 and WO-010 are newly created `draft` work orders only; neither is approved, implemented, `in-review`, complete, or validated. The amended initiative is in `plan` with amended design approval pending; no dispatch is authorized until the amended plan reaches `review`, the corrected design review passes, and separate human approval for WO-009/WO-010 is recorded.
 
 ## Risks and decisions
 
 - **Risk:** Dependency cascade risk remains: failures in the unverified workspace, schema, or shared layout contracts may require downstream WO replanning or fix WOs. **Mitigation:** strict dependency order, narrow ownership, per-WO fresh validation, and explicit fix-chain handling.
 - **Risk:** Font/profile and export contracts are unresolved in the baseline. **Mitigation:** resolve bounded decisions in WOs 001, 004, and 007 and record any authorized durable-document updates.
 - **Risk:** Native recovery can be confused with atomic save. **Mitigation:** keep them separate in WO-006 and require failure-injection evidence.
-- **Decision needed:** Formal design review and required human approval before execution. **Owner:** orchestrator/user approver.
+- **Decision needed:** For the amended WO-009/WO-010 scope, complete the corrected `plan → review` gate, obtain a separate required human design approval, and only then consider `review → execute`. **Owner:** orchestrator/user approver. The original approval remains limited to WO-001 and does not authorize WO-009 or WO-010.
+- **User-requested scope correction:** The original closeout preparation is superseded for now by the user-requested UI correction recorded in [`scope-correction-2026-10-25.md`](scope-correction-2026-10-25.md). The next gate is planning/design readiness for WO-009 and WO-010; no implementation or validation is authorized by this amendment alone.
 
 ## Design readiness checklist
 
@@ -140,15 +144,16 @@ Execution is sequential by default. Each WO has one owner and must be implemente
 - [x] Branch decision and phase transition evidence are recorded.
 - [x] Validation cadence and user checkpoint policy are recorded.
 - [x] Applicable validation evidence boundary and policy gates are identified.
-- [x] Formal design review has passed.
-- [x] Required human design approval has been obtained.
+- [x] Original MVP formal design review and WO-001-scoped human approval are preserved as historical evidence for WO-001 through WO-008.
+- [ ] Amended WO-009/WO-010 formal design review has passed; the current amended review is blocked pending ledger reconciliation.
+- [ ] Separate human design approval for amended WO-009/WO-010 has been obtained.
 
-## Human design approval
+## Original human design approval — WO-001 only
 
-- **Approval status:** `approved for execution`
+- **Approval status:** `approved for execution` — historical approval for WO-001 only; not approval of the amended scope.
 - **Approver:** User
 - **Approval date:** 2026-10-25
 - **Approval scope:** Execute WO-001 only, within the approved initiative scope and exclusions; do not implement later work orders or product features.
 - **Approval evidence:** User instruction received in the implementation session: “Implement only Forge WO-001...” including authorization to record the human design approval and proceed with the foundation implementation.
-- **Review basis:** Independent design review outcome `PASS WITH WARNINGS` in [`reviews/design-review.md`](reviews/design-review.md:93-100).
+- **Review basis:** Independent original design review outcome `PASS WITH WARNINGS` in [`reviews/design-review.md`](reviews/design-review.md:93-100). This record does not establish amended design approval or design readiness for WO-009/WO-010.
 - **Warnings preserved as follow-ups:** Resolve and evidence downstream foundational decisions before dependent WOs (DESIGN-REVIEW-W-001); keep the reusable/core package boundary justified and UI/window dependencies at the app boundary (DESIGN-REVIEW-W-002); record attempted/passed/failed/unavailable validation evidence with ownership at each boundary (DESIGN-REVIEW-W-003); and reconcile WO-006's durable-document classification before that WO is implemented (DESIGN-REVIEW-W-004).
