@@ -68,6 +68,17 @@ failures, and follow-ups. Planning discussion remains in the initiative plan.
 - **Result:** `PASS WITH WARNINGS`; no fix work order is required. Both work orders are complete.
 - **Next action/owner:** Forge orchestrator closeout; commit the branch, merge into the recorded base branch, and set status closed.
 
+### 2026-10-27 — Final closeout
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `code-orchestrator-toolbar-polish-2026-10-27`
+- **State transition:** initiative `closeout → closed`
+- **Work order/review:** Both work orders and their fresh validations
+- **Action:** Verified all work orders are complete, validations/gates/approval are recorded, session separation held, and no unrelated files were included. Recorded native visual smoke as a follow-up warning.
+- **Evidence:** [`validation-WO-001.md`](validations/validation-WO-001.md:1), [`validation-WO-002.md`](validations/validation-WO-002.md:1), `git diff --check` passed, commit `7b51d83` created on `dev/2026-10-27-toolbar-polish`.
+- **Result:** Initiative status set to `closed`; merge into `dev/2026-10-26-editor-geometry-corrections-v2` remains the final Git action.
+- **Next action/owner:** Forge orchestrator; merge the committed initiative branch and record the result.
+
 ### 2026-10-27 — Initiative investigation and branch decision
 
 - **Actor/role:** Forge orchestrator

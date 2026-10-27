@@ -3,7 +3,7 @@
 ## Initiative metadata
 
 - **Phase:** `closeout`
-- **Status:** `active`
+- **Status:** `closed`
 - **Owner/orchestrator:** Forge orchestrator
 - **Created:** 2026-10-27
 - **Updated:** 2026-10-27
@@ -139,6 +139,6 @@ WO-001 precedes WO-002 so geometry work measures the final vertical Item surface
 
 ## Closeout record
 
-- **Closeout status:** `in-progress`
+- **Closeout status:** `closed`
 - **Closeout date:** 2026-10-27
-- **Closeout evidence:** Both work orders passed separate fresh validation; required Cargo gates passed for both; no fix work orders or session exceptions were required. Git evidence will be recorded after branch commit and merge.
+- **Closeout evidence:** Both work orders passed separate fresh validation; required Cargo gates passed for both; no fix work orders or session exceptions were required. Commit `7b51d83` contains implementation and Forge evidence; merge evidence is recorded in the final execution-log entry.
