@@ -3,7 +3,7 @@
 ## Metadata and iteration boundary
 
 - **Phase:** `closeout`
-- **Status:** `active`
+- **Status:** `closed`
 - **Authoritative version:** `v2` — new research iteration; this is not a revision, reopening, or replacement of closed v1.
 - **Created/updated:** `2026-10-27`
 - **Mode:** `standard`; the user explicitly requested conversion of this research into a discrete v2 planning iteration.
@@ -256,3 +256,5 @@ On 2026-10-27, the user explicitly requested that the v2 research be converted i
 - **Closeout status:** `pending final commit and merge`
 - **Validation outcome:** All four v2 work orders passed fresh validation. Native display/window evidence remains unavailable and explicitly unclaimed; project policy defines no required native/manual gate.
 - **Follow-up:** Repeat usable-display macOS smoke for transition frames, native rectangles, Elements cursor/popup behavior, and toolbar-bottom pixel ownership.
+- **Closeout date:** `2026-10-27`
+- **Closeout evidence:** Implementation commit `44f452a` was created on `dev/2026-10-27-titlebar-transition-and-elements-alignment-v2`; merge commit `2ab1eac` merged it into `master`. The final checkout is clean on `master`.
