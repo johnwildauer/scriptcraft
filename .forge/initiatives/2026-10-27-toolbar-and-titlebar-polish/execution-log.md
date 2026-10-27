@@ -165,3 +165,12 @@ None.
 - **Role:** Forge orchestrator closeout
 - **Evidence:** All four work orders are complete with fresh validation artifacts and no hard-stop findings. Design review passed with warnings; human design approval was recorded before execution; session separation held for research, work-order authoring, implementation, and validation. Required Cargo/diff gates passed for the final implementation. Native-window smoke remains an explicitly recorded non-required follow-up.
 - **Next action:** Commit the initiative branch, merge it into `master`, record the resulting hashes, then flip the initiative status to `closed`.
+
+### 2026-10-27 — Initiative closeout completed
+
+- **Session/agent ID:** `orchestrator-closeout-2026-10-27`
+- **Role:** Forge orchestrator closeout
+- **Commit evidence:** Implementation and Forge artifacts committed on the initiative branch as `449f7e6` (`Polish toolbar title bar cursors and new document seed`).
+- **Merge evidence:** `dev/2026-10-27-toolbar-and-titlebar-polish` merged into `master` with merge commit `935c162` (`Merge toolbar and title-bar polish initiative`).
+- **Final state:** `master` is clean; all four work orders are `complete`, all four fresh validations passed, and the initiative status is now `closed`.
+- **Follow-up:** Native-window smoke remains deferred because no window-capable observation was available; this is not a project-policy completion blocker.

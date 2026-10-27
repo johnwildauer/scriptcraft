@@ -3,7 +3,7 @@
 ## Initiative metadata
 
 - **Phase:** `closeout`
-- **Status:** `active`
+- **Status:** `closed`
 - **Owner/orchestrator:** Forge architect/planner
 - **Created:** `2026-10-27`
 - **Updated:** `2026-10-27`
@@ -171,6 +171,8 @@ This initiative is in `closeout` after all four work orders passed fresh validat
 
 ## Closeout record
 
-- **Closeout status:** `pending final commit and merge`
+- **Closeout status:** `closed`
+- **Closeout date:** `2026-10-27`
+- **Closeout evidence:** Implementation commit `449f7e6` was created on `dev/2026-10-27-toolbar-and-titlebar-polish`; merge commit `935c162` merged that branch into `master`. The final checkout is clean on `master`.
 - **Validation outcome:** WO-001 and WO-002 passed with non-blocking native-smoke warnings; WO-003 and WO-004 passed with the same documented limitation. No fix work orders were required.
 - **Follow-up:** Repeat native-window smoke for toolbar hover geometry, title-strip maximize/restore, arrow/I-beam cursor visibility, and new-document presentation on a window-capable macOS environment. Owner: Forge orchestrator; trigger: next native desktop validation session.
