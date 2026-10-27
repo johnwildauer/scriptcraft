@@ -41,7 +41,7 @@ formatting.
 
 **Acceptance Criteria:**
 
-- **AC-WRITING-001.1:** Given a new project, the system shall provide a valid editable starting element and title-page metadata without requiring visual formatting tricks.
+- **AC-WRITING-001.1:** Given a new project, the system shall provide exactly one empty, valid editable Scene Heading starting element and title-page metadata without requiring visual formatting tricks. The initial caret shall be valid at element 0, byte offset 0.
 - **AC-WRITING-001.2:** Given an element, the system shall preserve its explicit role and canonical UTF-8 text independently of capitalization, spaces, tabs, indentation, or font appearance.
 - **AC-WRITING-001.3:** Given a valid selection, the system shall support insertion, deletion, split, join, role change, undo, and redo while preserving valid text boundaries and element order.
 - **AC-WRITING-001.4:** Given a role transition such as scene heading → action or character → dialogue, the system shall apply an explicit, testable transition policy and make the operation undoable.
@@ -124,7 +124,20 @@ the semantic editing model.
   without persisting toolbar layout state; a fully fitting composition shall
   keep its rightmost Item, including its label, inside the actual clipped
   toolbar content right edge after panel, frame, and viewport insets are
-  applied.
+  applied. Items with an approved typed width override, including the Elements
+  control, shall use that same resolved width for allocation and rendering
+  without changing the shared padding, gap, flexible-space, overflow, or
+  clipped-edge budget.
+- **AC-WRITING-005.6:** Given the desktop app is running, a dedicated compact
+  title strip shall display centered bold `ScriptCraft` placeholder text above
+  the toolbar. A double-click shall request maximize/unmaximize only when the
+  viewport's maximized state is known; unavailable or ignored state shall use
+  a bounded no-op/native fallback rather than an unsafe or exact-restoration
+  claim that the platform cannot support.
+- **AC-WRITING-005.7:** Toolbar action controls and the Elements control/label
+  surface shall request the standard arrow cursor, while the existing whole-
+  document editing response shall request the text/I-beam cursor. Decorative
+  labels and painted page rectangles shall not create competing cursor owners.
 
 ## Non-functional requirements
 

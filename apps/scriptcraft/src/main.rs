@@ -20,7 +20,11 @@ const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
 const MINIMUM_PAGE_WIDTH: f32 = 240.0;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 // Manual toolbar geometry controls: tune Item group width and row spacing here.
-const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 56.0;
+// The 46-point normal slot is the compact baseline recorded by the focused
+// geometry tests; labels may still expand a slot when active font metrics need it.
+const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 46.0;
+const TOOLBAR_ELEMENTS_WIDTH: f32 = 92.0;
+const TOOLBAR_SPACE_WIDTH: f32 = 72.0;
 const TOOLBAR_GROUP_HORIZONTAL_PADDING: f32 = 8.0;
 const TOOLBAR_OVERFLOW_WIDTH: f32 = 32.0;
 const TOOLBAR_ROW_PADDING: f32 = 4.0;
@@ -28,6 +32,8 @@ const TOOLBAR_ITEM_GAP: f32 = 4.0;
 const TOOLBAR_TOP_PADDING: f32 = 30.0;
 const TOOLBAR_BOTTOM_PADDING: f32 = 2.0;
 const TOOLBAR_ICON_HOVER_PADDING: f32 = 2.0;
+const TITLE_STRIP_TEXT: &str = "ScriptCraft";
+const TITLE_STRIP_HEIGHT: f32 = 30.0;
 
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
@@ -77,12 +83,19 @@ pub enum ToolbarItemKind {
     FlexibleSpace,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToolbarWidthOverride {
+    Measured,
+    Fixed(f32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ToolbarItem {
     id: &'static str,
     label: &'static str,
     icon: &'static str,
     kind: ToolbarItemKind,
+    width_override: ToolbarWidthOverride,
 }
 
 impl ToolbarItem {
@@ -97,6 +110,7 @@ impl ToolbarItem {
             label,
             icon,
             kind: ToolbarItemKind::Action(action),
+            width_override: ToolbarWidthOverride::Measured,
         }
     }
 
@@ -106,6 +120,7 @@ impl ToolbarItem {
             label: "Elements",
             icon: "▾",
             kind: ToolbarItemKind::Elements,
+            width_override: ToolbarWidthOverride::Fixed(TOOLBAR_ELEMENTS_WIDTH),
         }
     }
 
@@ -115,6 +130,7 @@ impl ToolbarItem {
             label: "Flexible Space",
             icon: "",
             kind: ToolbarItemKind::FlexibleSpace,
+            width_override: ToolbarWidthOverride::Measured,
         }
     }
 
@@ -124,6 +140,7 @@ impl ToolbarItem {
             label: "Space",
             icon: "",
             kind: ToolbarItemKind::Space,
+            width_override: ToolbarWidthOverride::Fixed(TOOLBAR_SPACE_WIDTH),
         }
     }
 }
@@ -177,12 +194,13 @@ where
     if is_flexible_toolbar_space(item) {
         return 0.0;
     }
-    if matches!(item.kind, ToolbarItemKind::Space) {
-        return TOOLBAR_NORMAL_ITEM_WIDTH;
+    match item.width_override {
+        ToolbarWidthOverride::Fixed(width) => width,
+        ToolbarWidthOverride::Measured => {
+            let label_width = measure_label(item.label) + TOOLBAR_GROUP_HORIZONTAL_PADDING;
+            TOOLBAR_NORMAL_ITEM_WIDTH.max(label_width)
+        }
     }
-
-    let label_width = measure_label(item.label) + TOOLBAR_GROUP_HORIZONTAL_PADDING;
-    TOOLBAR_NORMAL_ITEM_WIDTH.max(label_width)
 }
 
 fn toolbar_label_width(ui: &egui::Ui, label: &str) -> f32 {
@@ -324,11 +342,13 @@ fn toolbar_rect_ledger(
             left + width
         },
     );
+    let final_group_width = allocation
+        .visible
+        .last()
+        .map(|(_, width)| *width)
+        .unwrap_or(0.0);
     let final_label_rect = egui::Rect::from_min_max(
-        egui::pos2(
-            final_group_rect - TOOLBAR_NORMAL_ITEM_WIDTH,
-            content_rect.top(),
-        ),
+        egui::pos2(final_group_rect - final_group_width, content_rect.top()),
         egui::pos2(final_group_rect, content_rect.bottom()),
     );
     (
@@ -608,7 +628,7 @@ impl ScriptCraftApp {
         let icon_rect = toolbar_icon_hover_rect(icon_control_rect, TOOLBAR_ICON_HOVER_PADDING);
         let response = ui
             .interact(icon_rect, id.with("icon"), Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
+            .on_hover_cursor(egui::CursorIcon::Default);
         let fill = toolbar_group_fill(ui.style(), response.hovered());
         if fill != Color32::TRANSPARENT {
             ui.painter().rect_filled(icon_rect, 2.0, fill);
@@ -669,7 +689,7 @@ impl ScriptCraftApp {
     fn elements_toolbar_item(&mut self, ui: &mut egui::Ui, item: ToolbarItem, width: f32) {
         let selected_role = self.focused_role();
         let mut next_role = selected_role.unwrap_or(Role::Action);
-        ui.allocate_ui_with_layout(
+        let group_response = ui.allocate_ui_with_layout(
             Vec2::new(width, ui.spacing().interact_size.y * 2.0),
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
@@ -677,7 +697,7 @@ impl ScriptCraftApp {
                 // same explicit budget used by allocate_toolbar so it cannot
                 // advance the parent row past the allocated Elements slot.
                 ui.set_width(width);
-                egui::ComboBox::from_id_salt(item.id)
+                let combo_response = egui::ComboBox::from_id_salt(item.id)
                     .width(width)
                     .wrap_mode(TextWrapMode::Truncate)
                     .selected_text(screenplay_role_label(next_role))
@@ -685,10 +705,18 @@ impl ScriptCraftApp {
                         for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
                             ui.selectable_value(&mut next_role, role, label);
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_cursor(toolbar_cursor_icon());
                 let _ = ui.label(item.label);
+                debug_assert!(combo_response.rect.width() <= width + f32::EPSILON);
             },
         );
+        // Own the label-only portion at the group boundary without making the
+        // decorative label itself interactive or changing ComboBox routing.
+        group_response
+            .response
+            .on_hover_cursor(toolbar_cursor_icon());
         if selected_role != Some(next_role) {
             self.change_role_from_toolbar(next_role);
         }
@@ -1118,7 +1146,9 @@ impl ScriptCraftApp {
         // This is the only interactive response in the painted editor. Pages remain
         // source-mapped geometry, not independent focusable widgets.
         self.editor_surface_id = Some(editor_id);
-        let response = ui.interact(scroll_output.inner_rect, editor_id, Sense::click_and_drag());
+        let response = ui
+            .interact(scroll_output.inner_rect, editor_id, Sense::click_and_drag())
+            .on_hover_cursor(document_cursor_icon());
         self.editor_surface_rect = Some(response.rect);
         if let Some(pointer) = response.interact_pointer_pos() {
             let pointer_active = response.clicked()
@@ -1600,9 +1630,22 @@ fn toolbar_icon_hover_rect(icon_control_rect: egui::Rect, padding: f32) -> egui:
     )
 }
 
+fn toolbar_cursor_icon() -> egui::CursorIcon {
+    egui::CursorIcon::Default
+}
+
+fn document_cursor_icon() -> egui::CursorIcon {
+    egui::CursorIcon::Text
+}
+
 #[cfg(test)]
 fn toolbar_icon_hover_owner(icon_hover_rect: egui::Rect, pointer: egui::Pos2) -> bool {
     icon_hover_rect.contains(pointer)
+}
+
+#[cfg(test)]
+fn surface_cursor_owner(surface_rect: egui::Rect, pointer: egui::Pos2) -> bool {
+    surface_rect.contains(pointer)
 }
 
 fn toolbar_group_fill(style: &egui::Style, hovered: bool) -> Color32 {
@@ -1617,10 +1660,48 @@ fn toolbar_frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::side_top_panel(&ctx.style()).fill(toolbar_chrome_color(ctx))
 }
 
+fn title_strip_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::default().fill(toolbar_chrome_color(ctx))
+}
+
+fn title_strip_text_position(strip: egui::Rect, text_size: Vec2) -> egui::Pos2 {
+    strip.center() - text_size / 2.0
+}
+
+fn title_strip_viewport_command(maximized: Option<bool>) -> Option<egui::ViewportCommand> {
+    maximized.map(|is_maximized| egui::ViewportCommand::Maximized(!is_maximized))
+}
+
+fn title_strip(ui: &mut egui::Ui, ctx: &egui::Context) {
+    let response = ui.allocate_response(ui.available_size(), Sense::click());
+    let job = egui::WidgetText::from(RichText::new(TITLE_STRIP_TEXT).strong()).into_layout_job(
+        ui.style(),
+        egui::FontSelection::Default,
+        egui::Align::Center,
+    );
+    let galley = ui.fonts(|fonts| fonts.layout_job(job));
+    ui.painter().galley(
+        title_strip_text_position(response.rect, galley.size()),
+        galley,
+        ctx.style().visuals.text_color(),
+    );
+
+    if response.double_clicked() {
+        let command = ctx.input(|input| title_strip_viewport_command(input.viewport().maximized));
+        if let Some(command) = command {
+            ctx.send_viewport_cmd(command);
+        }
+    }
+}
+
 impl eframe::App for ScriptCraftApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
+        egui::TopBottomPanel::top("title-strip")
+            .frame(title_strip_frame(ctx))
+            .exact_height(TITLE_STRIP_HEIGHT)
+            .show(ctx, |ui| title_strip(ui, ctx));
         egui::TopBottomPanel::top("toolbar")
             .frame(toolbar_frame(ctx))
             .show(ctx, |ui| self.toolbar(ui));
@@ -1732,6 +1813,33 @@ mod tests {
     }
 
     #[test]
+    fn title_strip_uses_exact_height_and_centered_placeholder_text() {
+        let strip =
+            egui::Rect::from_min_size(egui::pos2(10.0, 20.0), Vec2::new(300.0, TITLE_STRIP_HEIGHT));
+        let text_size = Vec2::new(88.0, 18.0);
+        let position = title_strip_text_position(strip, text_size);
+
+        assert_eq!(TITLE_STRIP_TEXT, "ScriptCraft");
+        assert_eq!(TITLE_STRIP_HEIGHT, 30.0);
+        assert_eq!(position, egui::pos2(116.0, 26.0));
+        assert_eq!(position + text_size / 2.0, strip.center());
+        assert_eq!(TITLE_STRIP_HEIGHT + TOOLBAR_TOP_PADDING, 60.0);
+    }
+
+    #[test]
+    fn title_strip_viewport_toggle_is_safe_for_known_and_unknown_state() {
+        assert_eq!(
+            title_strip_viewport_command(Some(false)),
+            Some(egui::ViewportCommand::Maximized(true))
+        );
+        assert_eq!(
+            title_strip_viewport_command(Some(true)),
+            Some(egui::ViewportCommand::Maximized(false))
+        );
+        assert_eq!(title_strip_viewport_command(None), None);
+    }
+
+    #[test]
     fn toolbar_chrome_uses_open_widget_fill_without_mutating_style() {
         let ctx = egui::Context::default();
         let mut style = (*ctx.style()).clone();
@@ -1793,6 +1901,34 @@ mod tests {
         assert_eq!(hover.max.x, control.max.x + 2.0);
         assert_eq!(hover.min.y, control.min.y - 2.0);
         assert_eq!(hover.max.y, control.max.y + 2.0);
+    }
+
+    #[test]
+    fn cursor_intents_are_arrow_for_controls_and_text_for_document_surface() {
+        assert_eq!(toolbar_cursor_icon(), egui::CursorIcon::Default);
+        assert_eq!(document_cursor_icon(), egui::CursorIcon::Text);
+    }
+
+    #[test]
+    fn cursor_owner_geometry_covers_elements_label_and_document_surface_only() {
+        let elements_group =
+            egui::Rect::from_min_size(egui::pos2(20.0, 10.0), Vec2::new(92.0, 48.0));
+        let document_surface =
+            egui::Rect::from_min_size(egui::pos2(0.0, 70.0), Vec2::new(400.0, 300.0));
+
+        assert!(surface_cursor_owner(elements_group, egui::pos2(25.0, 45.0)));
+        assert!(!surface_cursor_owner(
+            elements_group,
+            egui::pos2(15.0, 45.0)
+        ));
+        assert!(surface_cursor_owner(
+            document_surface,
+            egui::pos2(200.0, 200.0)
+        ));
+        assert!(!surface_cursor_owner(
+            document_surface,
+            egui::pos2(200.0, 60.0)
+        ));
     }
 
     #[test]
@@ -1950,7 +2086,7 @@ mod tests {
         );
 
         assert_eq!(allocation.visible[0].1, TOOLBAR_NORMAL_ITEM_WIDTH);
-        assert_eq!(allocation.visible[1].1, 60.0);
+        assert_eq!(allocation.visible[1].1, TOOLBAR_ELEMENTS_WIDTH);
     }
 
     #[test]
@@ -2196,7 +2332,40 @@ mod tests {
         );
         assert_eq!(
             toolbar_item_width(ToolbarItem::space("space"), test_toolbar_label_width),
-            TOOLBAR_NORMAL_ITEM_WIDTH
+            TOOLBAR_SPACE_WIDTH
+        );
+    }
+
+    #[test]
+    fn toolbar_width_overrides_are_typed_and_resolved_once_for_elements_and_space() {
+        let elements = ToolbarItem::elements();
+        let space = ToolbarItem::space("space");
+
+        assert_eq!(
+            elements.width_override,
+            ToolbarWidthOverride::Fixed(TOOLBAR_ELEMENTS_WIDTH)
+        );
+        assert_eq!(
+            toolbar_item_width(elements, |_| 1_000.0),
+            TOOLBAR_ELEMENTS_WIDTH
+        );
+        assert_eq!(
+            space.width_override,
+            ToolbarWidthOverride::Fixed(TOOLBAR_SPACE_WIDTH)
+        );
+        assert_eq!(toolbar_item_width(space, |_| 1_000.0), TOOLBAR_SPACE_WIDTH);
+    }
+
+    #[test]
+    fn elements_width_target_covers_active_role_label_metrics() {
+        let widest_role = SUPPORTED_SCREENPLAY_ROLES
+            .iter()
+            .map(|(_, label)| test_toolbar_label_width(label))
+            .fold(0.0, f32::max);
+
+        assert!(
+            widest_role + TOOLBAR_GROUP_HORIZONTAL_PADDING <= TOOLBAR_ELEMENTS_WIDTH,
+            "active egui role label metrics require more than the Elements target: {widest_role}"
         );
     }
 
@@ -2210,8 +2379,28 @@ mod tests {
             .any(|item| matches!(item.kind, ToolbarItemKind::Elements)));
 
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        assert_eq!(app.session.project().elements.len(), 1);
+        assert_eq!(app.focused_role(), Some(Role::SceneHeading));
+        assert!(app.session.project().elements[0].text.is_empty());
+        assert_eq!(
+            app.session.selection().focus,
+            Position {
+                element: 0,
+                offset: 0
+            }
+        );
         app.dispatch_toolbar_action(ToolbarAction::New);
         assert_eq!(app.status, "New in-memory project");
+        assert_eq!(app.session.project().elements.len(), 1);
+        assert_eq!(app.focused_role(), Some(Role::SceneHeading));
+        assert!(app.session.project().elements[0].text.is_empty());
+        assert_eq!(
+            app.session.selection().focus,
+            Position {
+                element: 0,
+                offset: 0
+            }
+        );
         app.change_role_from_toolbar(Role::Dialogue);
         assert_eq!(app.focused_role(), Some(Role::Dialogue));
         assert!(app.error.is_none());
@@ -2228,7 +2417,16 @@ mod tests {
         app.dispatch_toolbar_action(ToolbarAction::New);
 
         assert_eq!(app.session.project().metadata.title, "Untitled Screenplay");
+        assert_eq!(app.session.project().elements.len(), 1);
+        assert_eq!(app.session.project().elements[0].role, Role::SceneHeading);
         assert_eq!(app.session.project().elements[0].text, "");
+        assert_eq!(
+            app.session.selection().focus,
+            Position {
+                element: 0,
+                offset: 0
+            }
+        );
         assert_eq!(app.native_path, None);
         assert_eq!(app.status, "New in-memory project");
         assert!(app.error.is_none());
@@ -2270,7 +2468,7 @@ mod tests {
             assert_eq!(app.focused_role(), Some(role), "{label}");
             assert_eq!(screenplay_role_label(role), label);
             assert_eq!(app.session.selection().focus.element, 1);
-            assert_eq!(app.session.project().elements[0].role, Role::Action);
+            assert_eq!(app.session.project().elements[0].role, Role::SceneHeading);
             assert!(app.error.is_none());
         }
     }
@@ -2724,7 +2922,7 @@ mod tests {
                 },
             );
 
-            assert_eq!(app.session.project().elements[0].text, "(words)");
+            assert_eq!(app.session.project().elements[0].text, "(WORDS)");
             assert_eq!(app.session.project().elements[1].role, Role::Dialogue);
             assert_eq!(
                 app.session.selection().focus,
@@ -2753,11 +2951,11 @@ mod tests {
             })
             .unwrap_or_else(|_| unreachable!());
         app.session.insert("🙂").unwrap_or_else(|_| unreachable!());
-        assert_eq!(app.session.project().elements[0].text, "a🙂c");
+        assert_eq!(app.session.project().elements[0].text, "A🙂C");
         app.session.delete().unwrap_or_else(|_| unreachable!());
-        assert_eq!(app.session.project().elements[0].text, "a🙂");
+        assert_eq!(app.session.project().elements[0].text, "A🙂");
         app.session.backspace().unwrap_or_else(|_| unreachable!());
-        assert_eq!(app.session.project().elements[0].text, "a");
+        assert_eq!(app.session.project().elements[0].text, "A");
     }
 
     #[test]
@@ -2769,8 +2967,8 @@ mod tests {
             &[egui::Event::Text("café🙂".into())],
             egui::Modifiers::default(),
         );
-        assert_eq!(app.session.project().elements[0].text, "café🙂");
-        assert_eq!(app.session.selection().focus.offset, "café🙂".len());
+        assert_eq!(app.session.project().elements[0].text, "CAFÉ🙂");
+        assert_eq!(app.session.selection().focus.offset, "CAFÉ🙂".len());
         assert_eq!(app.rendered_revision, None);
         assert_eq!(app.native_input_diagnostics.received_events, 1);
         assert_eq!(app.native_input_diagnostics.last_event_category, "text");
@@ -3258,7 +3456,7 @@ mod tests {
         source.open_native_at(&second);
         assert_eq!(source.native_path, Some(second));
         assert!(!source.session.dirty());
-        assert_eq!(source.session.project().elements[0].text, "second project");
+        assert_eq!(source.session.project().elements[0].text, "SECOND PROJECT");
 
         let _ = std::fs::remove_dir_all(root);
     }

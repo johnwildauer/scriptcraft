@@ -58,8 +58,10 @@ impl FileSystem for MemFs {
 }
 
 fn project() -> Project {
-    Project::new("wo003-project", "Long Document", "Writer")
-        .unwrap_or_else(|_| unreachable!("fixed fixture must be valid"))
+    let mut project = Project::new("wo003-project", "Long Document", "Writer")
+        .unwrap_or_else(|_| unreachable!("fixed fixture must be valid"));
+    project.elements[0].role = Role::Action;
+    project
 }
 
 fn layout_for(text: &str, lines_per_page: u32) -> ScreenplayLayout {

@@ -37,6 +37,7 @@ buffer.
 ### Key Contracts
 
 - The desktop shell never becomes the source of truth for screenplay text.
+- Startup and toolbar New delegate project creation to the core `Project::new()` seed; the desktop shell does not duplicate the Scene Heading seed or alter the existing Enter/Tab transition and opened-project delegation boundaries.
 - Every semantic mutation goes through the core editing/session boundary and is undoable when it changes the project.
 - Viewport size and zoom do not redefine print pagination.
 - The desktop consumes the core's role-pair geometry and profile font identity unchanged: new projects use `Courier`, existing supported stored families are retained, and PDF consumes the same fixed layout rather than applying an independent spacing or font policy.
@@ -68,8 +69,12 @@ buffer.
   label. The label is outside that response, its normal color is unchanged, and
   it remains available to accessibility surfaces without a redundant visible-label
   tooltip. The control
-  response receives the lightness-only hover affordance. The Elements Item uses the same centered fixed-width outer group,
-  placing a ComboBox above its centered `Elements` label.
+  response receives the lightness-only hover affordance. The Elements Item uses
+  the same centered fixed-width outer group, placing a ComboBox above its
+  centered `Elements` label. Toolbar metadata exposes a typed width policy;
+  the shared resolver applies measured label-aware widths to ordinary Items and
+  the evidence-backed 92-point Elements override to both allocation and
+  rendering, while the label remains outside the action response.
 - Toolbar allocation is transient and deterministic: `Space` consumes one
   72-point width, while rendered normal Items use their complete group width
   including label text measured through the active egui style/font galley path.
@@ -100,6 +105,17 @@ buffer.
   other platforms may ignore some or all of them and retain platform-managed
   decorations. The app must not make pixel-level cross-platform titlebar
   claims from these requests.
+- Above the toolbar, the desktop shell renders a separate 30-point custom
+  title strip with centered bold `ScriptCraft` placeholder text. Its full-strip
+  egui response owns double-click detection and sends
+  `ViewportCommand::Maximized(!maximized)` only when `ViewportInfo::maximized`
+  is `Some`; unknown state is a no-op. Unmaximize relies on native/backend
+  restoration where observable and makes no universal exact prior-frame claim.
+- Toolbar action controls and the Elements outer group request the standard
+  arrow cursor; the Elements label remains decorative and does not own a
+  competing response. The existing whole-surface painted editor response
+  requests the text/I-beam cursor, while page rectangles remain geometry rather
+  than independent cursor or focus owners.
 - The toolbar `TopBottomPanel` uses the egui style's open-widget
   `Widgets::open::weak_bg_fill` as its explicit app-chrome fill through a local
   frame helper. This is the
