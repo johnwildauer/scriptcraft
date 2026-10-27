@@ -63,13 +63,15 @@ buffer.
   supported role choices through `EditingSession::change_role()` and the shared
   transactional mutation/error presentation; it does not own role policy or
   semantic project state. The toolbar composition is not persisted in native
-  projects, and actionable Items use an icon-only borderless Button as the
-  hover/click surface above a separate centered text label whose normal color
-  is unchanged; text labels remain available to tooltips and accessibility
-  surfaces. The Elements Item uses the same centered fixed-width outer group,
+  projects, and actionable Items use a centered icon-first borderless outer
+  Item/group as the hover/click surface above a separate text label whose
+  normal color is unchanged; the group surface receives the lightness-only
+  hover affordance, and text labels remain available to tooltips and
+  accessibility surfaces. The Elements Item uses the same centered fixed-width outer group,
   placing a ComboBox above its centered `Elements` label.
-- Toolbar allocation is transient and deterministic: normal Items and `Space`
-  consume one 72-point normal-item width, while the allocator and renderer use
+- Toolbar allocation is transient and deterministic: `Space` consumes one
+  72-point width, while rendered normal Items use their complete deterministic
+  group width including label text. The allocator and renderer use
   one shared row-width budget that includes the 4-point horizontal row-padding
   budget, 4-point inter-item gaps (half egui's default horizontal gap), and the
   32-point overflow reservation when present. These values are the named
@@ -85,8 +87,9 @@ buffer.
   exposes its role choices through a nested submenu-like menu that still routes
   role changes through `EditingSession`. A fully fitting row remains inside the
   available width, including its rightmost Item.
-- The toolbar `TopBottomPanel` uses the egui style's `Visuals::panel_fill` as
-  its explicit app-chrome fill through a local frame helper. This is the
+- The toolbar `TopBottomPanel` uses the egui style's open-widget
+  `Widgets::open::weak_bg_fill` as its explicit app-chrome fill through a local
+  frame helper. This is the
   framework-exposed deterministic application-surface source and does not
   mutate global theme visuals or toolbar geometry. eframe's default native
   window decorations own the title bar and expose no sampleable title-bar

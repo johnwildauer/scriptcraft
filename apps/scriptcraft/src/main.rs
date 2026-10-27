@@ -17,8 +17,10 @@ const DEFAULT_PRESENTATION_SCALE_MULTIPLIER: f32 = 1.6;
 const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
 const MINIMUM_PAGE_WIDTH: f32 = 240.0;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
-// Manual toolbar geometry controls: tune the fixed Item group width and row spacing here.
+// Manual toolbar geometry controls: tune Item group width and row spacing here.
 const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 72.0;
+const TOOLBAR_LABEL_CHAR_WIDTH: f32 = 8.0;
+const TOOLBAR_GROUP_HORIZONTAL_PADDING: f32 = 8.0;
 const TOOLBAR_OVERFLOW_WIDTH: f32 = 32.0;
 const TOOLBAR_ROW_PADDING: f32 = 4.0;
 const TOOLBAR_ITEM_GAP: f32 = 4.0;
@@ -166,6 +168,19 @@ fn is_flexible_toolbar_space(item: ToolbarItem) -> bool {
     matches!(item.kind, ToolbarItemKind::FlexibleSpace)
 }
 
+fn toolbar_item_width(item: ToolbarItem) -> f32 {
+    if is_flexible_toolbar_space(item) {
+        return 0.0;
+    }
+    if matches!(item.kind, ToolbarItemKind::Space) {
+        return TOOLBAR_NORMAL_ITEM_WIDTH;
+    }
+
+    let label_width = item.label.chars().count() as f32 * TOOLBAR_LABEL_CHAR_WIDTH
+        + TOOLBAR_GROUP_HORIZONTAL_PADDING;
+    TOOLBAR_NORMAL_ITEM_WIDTH.max(label_width)
+}
+
 fn toolbar_content_width(widths: &[(ToolbarItem, f32)], overflow_width: f32) -> f32 {
     let child_count = widths.len() as f32 + f32::from(overflow_width > 0.0);
     widths.iter().map(|(_, width)| width).sum::<f32>()
@@ -179,14 +194,11 @@ fn toolbar_row_width(widths: &[(ToolbarItem, f32)], overflow_width: f32) -> f32 
 }
 
 /// Allocate the transient toolbar without measuring or mutating project state.
-/// Normal items, including `Space`, have one fixed slot. Flexible spaces share
-/// only the remaining width once every normal item fits.
+/// Spacing items have one fixed slot; rendered items use their complete,
+/// deterministic label-aware group width. Flexible spaces share only the
+/// remaining width once every normal item fits.
 fn allocate_toolbar(items: &[ToolbarItem], available_width: f32) -> ToolbarAllocation {
-    let normal_count = items
-        .iter()
-        .filter(|item| !is_flexible_toolbar_space(**item))
-        .count();
-    let fixed_width = normal_count as f32 * TOOLBAR_NORMAL_ITEM_WIDTH;
+    let fixed_width = items.iter().copied().map(toolbar_item_width).sum::<f32>();
     let full_fixed_width = fixed_width
         + TOOLBAR_ROW_PADDING * 2.0
         + (items.len().saturating_sub(1) as f32) * TOOLBAR_ITEM_GAP;
@@ -208,7 +220,7 @@ fn allocate_toolbar(items: &[ToolbarItem], available_width: f32) -> ToolbarAlloc
                     let width = if is_flexible_toolbar_space(*item) {
                         flexible_width
                     } else {
-                        TOOLBAR_NORMAL_ITEM_WIDTH
+                        toolbar_item_width(*item)
                     };
                     (*item, width)
                 })
@@ -228,18 +240,18 @@ fn allocate_toolbar(items: &[ToolbarItem], available_width: f32) -> ToolbarAlloc
         }
         if matches!(item.kind, ToolbarItemKind::Space) {
             let mut candidate = visible.clone();
-            candidate.push((item, TOOLBAR_NORMAL_ITEM_WIDTH));
+            candidate.push((item, toolbar_item_width(item)));
             if fitting
                 && toolbar_content_width(&candidate, TOOLBAR_OVERFLOW_WIDTH) <= available_width
             {
-                visible.push((item, TOOLBAR_NORMAL_ITEM_WIDTH));
+                visible.push((item, toolbar_item_width(item)));
             }
             continue;
         }
         let mut candidate = visible.clone();
-        candidate.push((item, TOOLBAR_NORMAL_ITEM_WIDTH));
+        candidate.push((item, toolbar_item_width(item)));
         if fitting && toolbar_content_width(&candidate, TOOLBAR_OVERFLOW_WIDTH) <= available_width {
-            visible.push((item, TOOLBAR_NORMAL_ITEM_WIDTH));
+            visible.push((item, toolbar_item_width(item)));
         } else {
             fitting = false;
             overflow.push(item);
@@ -432,25 +444,29 @@ impl ScriptCraftApp {
     }
 
     fn toolbar_action_button(&mut self, ui: &mut egui::Ui, item: ToolbarItem, width: f32) {
-        ui.allocate_ui_with_layout(
-            Vec2::new(width, ui.spacing().interact_size.y * 2.0),
-            egui::Layout::top_down(egui::Align::Center),
+        let (id, rect) = ui.allocate_space(Vec2::new(width, ui.spacing().interact_size.y * 2.0));
+        let response = ui
+            .interact(rect, id, Sense::click())
+            .on_hover_text(item.label)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let fill = toolbar_group_fill(ui.style(), response.hovered());
+        if fill != Color32::TRANSPARENT {
+            ui.painter().rect_filled(rect, 2.0, fill);
+        }
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Center)),
             |ui| {
-                let button = egui::Button::new(RichText::new(item.icon))
-                    .frame(false)
-                    .sense(Sense::click());
-                let response = ui
-                    .add(button)
-                    .on_hover_text(item.label)
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                ui.add(egui::Label::new(RichText::new(item.icon)));
                 ui.label(item.label);
-                if response.clicked() {
-                    if let ToolbarItemKind::Action(action) = item.kind {
-                        self.dispatch_toolbar_action(action);
-                    }
-                }
             },
         );
+        if response.clicked() {
+            if let ToolbarItemKind::Action(action) = item.kind {
+                self.dispatch_toolbar_action(action);
+            }
+        }
     }
 
     fn focused_role(&self) -> Option<Role> {
@@ -1365,7 +1381,15 @@ fn ordered_selection(selection: Selection) -> (Position, Position) {
 }
 
 fn toolbar_chrome_color(ctx: &egui::Context) -> Color32 {
-    ctx.style().visuals.panel_fill
+    ctx.style().visuals.widgets.open.weak_bg_fill
+}
+
+fn toolbar_group_fill(style: &egui::Style, hovered: bool) -> Color32 {
+    if hovered {
+        style.visuals.widgets.hovered.bg_fill
+    } else {
+        Color32::TRANSPARENT
+    }
 }
 
 fn toolbar_frame(ctx: &egui::Context) -> egui::Frame {
@@ -1454,15 +1478,34 @@ mod tests {
     use scriptcraft_core::Role;
 
     #[test]
-    fn toolbar_chrome_uses_the_style_panel_fill_without_mutating_style() {
+    fn toolbar_chrome_uses_open_widget_fill_without_mutating_style() {
         let ctx = egui::Context::default();
         let mut style = (*ctx.style()).clone();
         style.visuals.panel_fill = Color32::from_rgb(17, 34, 51);
+        style.visuals.widgets.open.weak_bg_fill = Color32::from_rgb(68, 85, 102);
         ctx.set_style(style.clone());
 
-        assert_eq!(toolbar_chrome_color(&ctx), style.visuals.panel_fill);
-        assert_eq!(toolbar_frame(&ctx).fill, style.visuals.panel_fill);
+        assert_eq!(
+            toolbar_chrome_color(&ctx),
+            style.visuals.widgets.open.weak_bg_fill
+        );
+        assert_eq!(
+            toolbar_frame(&ctx).fill,
+            style.visuals.widgets.open.weak_bg_fill
+        );
         assert_eq!(ctx.style().visuals.panel_fill, style.visuals.panel_fill);
+    }
+
+    #[test]
+    fn toolbar_group_hover_response_is_deterministic_and_preserves_label_color() {
+        let ctx = egui::Context::default();
+        let style = ctx.style();
+        assert_eq!(toolbar_group_fill(&style, false), Color32::TRANSPARENT);
+        assert_eq!(
+            toolbar_group_fill(&style, true),
+            style.visuals.widgets.hovered.bg_fill
+        );
+        assert_eq!(style.visuals.text_color(), ctx.style().visuals.text_color());
     }
 
     #[test]
@@ -1547,23 +1590,14 @@ mod tests {
         let wide = allocate_toolbar(&items, 800.0);
         assert!(wide.overflow.is_empty());
         assert_eq!(wide.visible.len(), items.len());
-        assert_eq!(wide.visible[4].1, 166.0);
-        assert_eq!(wide.visible[6].1, 166.0);
+        assert_eq!(wide.visible[4].1, 158.0);
+        assert_eq!(wide.visible[6].1, 158.0);
 
         let exact_width = toolbar_content_width(
             &items
                 .iter()
                 .copied()
-                .map(|item| {
-                    (
-                        item,
-                        if is_flexible_toolbar_space(item) {
-                            0.0
-                        } else {
-                            TOOLBAR_NORMAL_ITEM_WIDTH
-                        },
-                    )
-                })
+                .map(|item| (item, toolbar_item_width(item)))
                 .collect::<Vec<_>>(),
             0.0,
         );
@@ -1670,9 +1704,17 @@ mod tests {
         );
         assert_eq!(
             allocation.visible.last().map(|(_, width)| *width),
-            Some(72.0)
+            Some(88.0)
         );
         assert!(toolbar_content_width(&allocation.visible, 0.0) <= 600.0);
+    }
+
+    #[test]
+    fn toolbar_item_width_is_text_aware_and_includes_group_extent() {
+        let export = ToolbarItem::action("export-pdf", "Export PDF", "⇱", ToolbarAction::ExportPdf);
+        assert_eq!(toolbar_item_width(export), 88.0);
+        assert!(toolbar_item_width(export) > TOOLBAR_NORMAL_ITEM_WIDTH);
+        assert_eq!(toolbar_item_width(ToolbarItem::space("space")), 72.0);
     }
 
     #[test]

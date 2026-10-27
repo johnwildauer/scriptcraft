@@ -101,8 +101,8 @@ the semantic editing model.
 - **AC-WRITING-005.2:** Given an actionable toolbar Item is activated, the
   desktop shall route it through existing application/session adapters and
   preserve command safety, status, persistence, and fixed-layout PDF behavior.
-- **AC-WRITING-005.3:** Action Items shall use an icon-only, borderless button
-  as the hover/click surface, with a separate centered text label beneath it
+- **AC-WRITING-005.3:** Action Items shall use an icon-first, borderless outer
+  Item/group as the hover/click surface, with a centered text label beneath it
   that retains its normal text color; text labels remain available for tooltip
   and accessibility use.
 - **AC-WRITING-005.4:** Given the current caret/focus is within a screenplay
@@ -111,8 +111,9 @@ the semantic editing model.
   Parenthetical, Transition, and Note; choosing a label shall apply the role
   through the existing transactional session operation and preserve the
   document on rejection.
-- **AC-WRITING-005.5:** Given a toolbar width, normal Items and Space shall
-  consume one deterministic 72-point normal-item width, Flexible Space Items
+- **AC-WRITING-005.5:** Given a toolbar width, Space shall consume one
+  deterministic 72-point width, rendered normal Items shall consume their
+  complete deterministic group width including label text, and Flexible Space Items
   shall divide the remaining width equally after the shared 4-point horizontal
   row-padding and 4-point inter-item-gap budget, and a narrow toolbar shall
   retain the leftmost fitting Items while exposing non-spacing Items through a
