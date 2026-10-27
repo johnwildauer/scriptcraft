@@ -77,4 +77,4 @@ Make the native window chrome transparent/full-content as requested, constrain h
 
 - **Closeout status:** `closed`
 - **Closeout date:** 2026-10-27
-- **Closeout evidence:** All three work orders passed separate fresh validation; required gates passed; no fix work orders or session exceptions were required. Git evidence will be recorded in the final execution log.
+- **Closeout evidence:** All three work orders passed separate fresh validation; required gates passed; no fix work orders or session exceptions were required. Implementation/closeout commit `7834504`; merge evidence is recorded in the final execution log.
