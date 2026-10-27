@@ -1,0 +1,3 @@
+you are in "scriptcraft" a repo that will house a screenplay writing app authored in rust 
+
+we have a development workflow system called @/.forge, which guides all the agentic work we will do as we make this app. begin at @/.forge/_index.md. 

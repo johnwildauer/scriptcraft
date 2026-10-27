@@ -20,7 +20,7 @@ const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
 const MINIMUM_PAGE_WIDTH: f32 = 240.0;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 // Manual toolbar geometry controls: tune Item group width and row spacing here.
-const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 72.0;
+const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 56.0;
 const TOOLBAR_GROUP_HORIZONTAL_PADDING: f32 = 8.0;
 const TOOLBAR_OVERFLOW_WIDTH: f32 = 32.0;
 const TOOLBAR_ROW_PADDING: f32 = 4.0;
