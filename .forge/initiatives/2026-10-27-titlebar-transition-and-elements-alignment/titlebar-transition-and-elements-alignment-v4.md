@@ -3,7 +3,7 @@
 ## Metadata and iteration boundary
 
 - **Phase:** `closeout`
-- **Status:** `active`
+- **Status:** `closed`
 - **Authoritative version:** `v4` — converged native-titlebar baseline experiment; it does not replace or close v1, v2, or v3.
 - **Created:** `2026-10-27`
 - **Updated:** `2026-10-27`
@@ -154,5 +154,14 @@ This is the current v4 closeout state and supersedes earlier current-phase summa
 - [x] **V4-WO-002:** remains a `draft` proposal only. It is explicitly tabled/deferred to the successor initiative; it was not admitted to v4 execution, authorized, implemented, reviewed, validated, or completed. No source, requirements, or blueprint changes are authorized by this proposal disposition.
 - [x] **Successor ownership/gates:** the successor initiative owner/orchestrator must carry the proposal forward after this closeout, obtain a fresh design review and explicit human approval, then enforce a clean-build visual gate for title-text removal, continuous titlebar/app surface color, safe usable native controls/toolbar, and the preserved maximize/restore behavior. The successor initiative is not created here.
 - [x] **Durable documents:** requirements and blueprint remain unchanged for the completed V4-WO-001 experiment; V4-WO-002's proposed updates remain conditional on later approval and successful visual verification.
-- [ ] **Git evidence / terminal status:** a fresh complete inventory and the separately dispatched commit/merge into `master` remain pending. Do not claim Git clean or supply hashes until the execution-capable session records actual results. The initiative remains `active`; do not flip it to `closed` before commit and merge evidence.
+- [x] **Git evidence / terminal status:** completed after fresh inventory. Commit `053a581d4a180cdc2cbe34b03470c639d08c024b` was fast-forwarded into `master`; the initial post-merge tree was clean. Full terminal evidence is recorded below and in the shared execution log.
 - [x] **User authorization:** the user authorized committing the current entire cleanly inventoried cumulative tree and merging the continuation branch into `master`. This records permission, not completed Git actions.
+
+## Terminal closeout evidence — v4 (2026-10-27)
+
+- **Phase/status:** `closeout` / `closed`. V4-WO-001 remains `complete` with its independent `PASS WITH WARNINGS` validation and the recorded native-titlebar/animation observations. V4-WO-002 remains a proposal-only deferred successor candidate; it was not approved, implemented, reviewed, validated, or completed.
+- **Cumulative initiative commit:** `053a581d4a180cdc2cbe34b03470c639d08c024b` (`Close out terminated v3/v4 titlebar diagnostics`), created on `dev/2026-10-27-titlebar-transition-and-elements-alignment-v3` from base `6a6739c5263edee9896b32c00fc6f8470e35f3d6`.
+- **Merge evidence:** fast-forward merge into `master`; no separate merge commit was created. `master` advanced from `6a6739c5263edee9896b32c00fc6f8470e35f3d6` to `053a581d4a180cdc2cbe34b03470c639d08c024b`, which is both the initiative commit and merged tip.
+- **Inventory/verification:** exactly 18 initiative paths were committed: cumulative `apps/scriptcraft/src/main.rs`, the shared execution log, the v3/v4 plans, reviews, validations, and work-order artifacts (including the V4-WO-002 proposal). No unrelated or secret untracked files were present. Ignored `.DS_Store`, `.reference/.DS_Store`, and `target/` build output were not staged. `git diff --cached --check` passed.
+- **Terminal branch evidence:** after the fast-forward, `git status --short --branch` reported `## master` with no changed paths; `HEAD` and `master` both resolved to `053a581d4a180cdc2cbe34b03470c639d08c024b`. The separate final closeout-record commit is made on `master`; post-commit terminal verification is reported by the closeout execution session.
+- **Successor boundary:** no successor initiative was created. V4-WO-002 remains deferred pending a new initiative with its required review, explicit approval, and visual gate.

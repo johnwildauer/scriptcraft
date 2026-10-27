@@ -3,7 +3,7 @@
 ## Metadata and iteration boundary
 
 - **Phase:** `closeout`
-- **Status:** `active`
+- **Status:** `closed`
 - **Authoritative version:** `v3` — a new post-v2 follow-up iteration; it does not reopen, revise, or replace closed v1 or v2.
 - **Created/updated:** `2026-10-27`
 - **Mode:** `standard`; no rapid path was requested.
@@ -112,5 +112,14 @@ This is the current v3 disposition and supersedes the earlier “Current state�
 
 - **Deferred objective:** seamlessly integrate ordinary native macOS chrome by removing native title text beside the traffic lights and eliminating the distinct titlebar color band, while preserving usable native controls/toolbar and the observed no-swell/no-shrink/no-snap maximize/restore behavior.
 - **Owner / next action:** successor initiative owner (orchestrator) carries the unapproved [`V4-WO-002` proposal](work-orders/V4-WO-002-native-titlebar-seamless-chrome.md:1) into a new initiative only after v4 closeout. That initiative requires a fresh design review, explicit human approval before implementation, and a strict clean-build visual gate on macOS. No successor initiative is created by this closeout preparation.
-- [ ] **Git closeout remains pending:** an execution-capable session must freshly inventory the cumulative tree, then perform the separately authorized commit and merge into `master`, and record actual evidence. No hash, clean-worktree claim, or completed merge is asserted here. Keep status `active` until the shared Git evidence is recorded; only then may the v3 historical iteration receive the terminal `closed` status.
+- [x] **Git closeout:** completed after fresh inventory. Commit `053a581d4a180cdc2cbe34b03470c639d08c024b` was fast-forwarded into `master`; the initial post-merge tree was clean. Full terminal evidence is recorded below and in the shared execution log.
 - [x] User authorization is recorded: commit the current entire cleanly inventoried cumulative tree and merge the continuation branch into `master`. This is authorization, not evidence that inventory, staging, commit, or merge has occurred.
+
+## Terminal closeout evidence — v3 (2026-10-27)
+
+- **Phase/status:** `closeout` / `closed`. The incomplete v3 diagnostic lineage is terminated, not represented as fully implemented. V3-WO-001b remains the accepted validated black-bar correction; failed and incomplete v3 diagnostics remain tabled/terminated as itemized above.
+- **Cumulative initiative commit:** `053a581d4a180cdc2cbe34b03470c639d08c024b` (`Close out terminated v3/v4 titlebar diagnostics`), created on `dev/2026-10-27-titlebar-transition-and-elements-alignment-v3` from base `6a6739c5263edee9896b32c00fc6f8470e35f3d6`.
+- **Merge evidence:** fast-forward merge into `master`; no separate merge commit was created. `master` advanced from `6a6739c5263edee9896b32c00fc6f8470e35f3d6` to `053a581d4a180cdc2cbe34b03470c639d08c024b`, which is both the initiative commit and merged tip.
+- **Inventory/verification:** exactly 18 initiative paths were committed: cumulative `apps/scriptcraft/src/main.rs`, the shared execution log, the v3/v4 plans, reviews, validations, and work-order artifacts (including the V4-WO-002 proposal). No unrelated or secret untracked files were present. Ignored `.DS_Store`, `.reference/.DS_Store`, and `target/` build output were not staged. `git diff --cached --check` passed.
+- **Terminal branch evidence:** after the fast-forward, `git status --short --branch` reported `## master` with no changed paths; `HEAD` and `master` both resolved to `053a581d4a180cdc2cbe34b03470c639d08c024b`. The separate final closeout-record commit is made on `master`; post-commit terminal verification is reported by the closeout execution session.
+- **Successor boundary:** no successor initiative was created. The unapproved V4-WO-002 proposal remains deferred for a separately controlled initiative.
