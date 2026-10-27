@@ -19,6 +19,8 @@ const MINIMUM_PAGE_WIDTH: f32 = 240.0;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 88.0;
 const TOOLBAR_OVERFLOW_WIDTH: f32 = 32.0;
+const TOOLBAR_ROW_PADDING: f32 = 4.0;
+const TOOLBAR_ITEM_GAP: f32 = 4.0;
 
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
@@ -119,6 +121,10 @@ impl ToolbarItem {
     }
 }
 
+fn toolbar_action_text(item: ToolbarItem) -> String {
+    format!("{}\n{}", item.icon, item.label)
+}
+
 const SUPPORTED_SCREENPLAY_ROLES: [(Role, &str); 7] = [
     (Role::SceneHeading, "Scene Heading"),
     (Role::Action, "Action"),
@@ -160,6 +166,14 @@ fn is_flexible_toolbar_space(item: ToolbarItem) -> bool {
     matches!(item.kind, ToolbarItemKind::FlexibleSpace)
 }
 
+fn toolbar_content_width(widths: &[(ToolbarItem, f32)], overflow_width: f32) -> f32 {
+    let child_count = widths.len() as f32 + f32::from(overflow_width > 0.0);
+    widths.iter().map(|(_, width)| width).sum::<f32>()
+        + TOOLBAR_ROW_PADDING * 2.0
+        + (child_count - 1.0).max(0.0) * TOOLBAR_ITEM_GAP
+        + overflow_width
+}
+
 /// Allocate the transient toolbar without measuring or mutating project state.
 /// Normal items, including `Space`, have one fixed slot. Flexible spaces share
 /// only the remaining width once every normal item fits.
@@ -169,16 +183,19 @@ fn allocate_toolbar(items: &[ToolbarItem], available_width: f32) -> ToolbarAlloc
         .filter(|item| !is_flexible_toolbar_space(**item))
         .count();
     let fixed_width = normal_count as f32 * TOOLBAR_NORMAL_ITEM_WIDTH;
+    let full_fixed_width = fixed_width
+        + TOOLBAR_ROW_PADDING * 2.0
+        + (items.len().saturating_sub(1) as f32) * TOOLBAR_ITEM_GAP;
     let flexible_count = items
         .iter()
         .filter(|item| matches!(item.kind, ToolbarItemKind::FlexibleSpace))
         .count();
 
-    if fixed_width <= available_width {
+    if full_fixed_width <= available_width {
         let flexible_width = if flexible_count == 0 {
             0.0
         } else {
-            ((available_width - fixed_width) / flexible_count as f32).max(0.0)
+            ((available_width - full_fixed_width) / flexible_count as f32).max(0.0)
         };
         return ToolbarAllocation {
             visible: items
@@ -197,8 +214,6 @@ fn allocate_toolbar(items: &[ToolbarItem], available_width: f32) -> ToolbarAlloc
         };
     }
 
-    let fitting_width = (available_width - TOOLBAR_OVERFLOW_WIDTH).max(0.0);
-    let mut used_width = 0.0;
     let mut visible = Vec::new();
     let mut overflow = Vec::new();
     let mut fitting = true;
@@ -207,14 +222,18 @@ fn allocate_toolbar(items: &[ToolbarItem], available_width: f32) -> ToolbarAlloc
             continue;
         }
         if matches!(item.kind, ToolbarItemKind::Space) {
-            if fitting && used_width + TOOLBAR_NORMAL_ITEM_WIDTH <= fitting_width {
-                used_width += TOOLBAR_NORMAL_ITEM_WIDTH;
+            let mut candidate = visible.clone();
+            candidate.push((item, TOOLBAR_NORMAL_ITEM_WIDTH));
+            if fitting
+                && toolbar_content_width(&candidate, TOOLBAR_OVERFLOW_WIDTH) <= available_width
+            {
                 visible.push((item, TOOLBAR_NORMAL_ITEM_WIDTH));
             }
             continue;
         }
-        if fitting && used_width + TOOLBAR_NORMAL_ITEM_WIDTH <= fitting_width {
-            used_width += TOOLBAR_NORMAL_ITEM_WIDTH;
+        let mut candidate = visible.clone();
+        candidate.push((item, TOOLBAR_NORMAL_ITEM_WIDTH));
+        if fitting && toolbar_content_width(&candidate, TOOLBAR_OVERFLOW_WIDTH) <= available_width {
             visible.push((item, TOOLBAR_NORMAL_ITEM_WIDTH));
         } else {
             fitting = false;
@@ -406,11 +425,11 @@ impl ScriptCraftApp {
     }
 
     fn toolbar_action_button(&mut self, ui: &mut egui::Ui, item: ToolbarItem, width: f32) {
-        let button = egui::Button::new(RichText::new(format!("{} {}", item.icon, item.label)))
+        let button = egui::Button::new(RichText::new(toolbar_action_text(item)))
             .frame(false)
             .sense(Sense::click());
         let response = ui
-            .add_sized(Vec2::new(width, ui.spacing().interact_size.y), button)
+            .add_sized(Vec2::new(width, ui.spacing().interact_size.y * 2.0), button)
             .on_hover_text(item.label)
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         if response.clicked() {
@@ -433,16 +452,23 @@ impl ScriptCraftApp {
         self.mutate(result, "Changed focused element role", RevealIntent::None);
     }
 
-    fn elements_toolbar_item(&mut self, ui: &mut egui::Ui, item: ToolbarItem) {
+    fn elements_toolbar_item(&mut self, ui: &mut egui::Ui, item: ToolbarItem, width: f32) {
         let selected_role = self.focused_role();
         let mut next_role = selected_role.unwrap_or(Role::Action);
-        egui::ComboBox::from_id_salt(item.id)
-            .selected_text(screenplay_role_label(next_role))
-            .show_ui(ui, |ui| {
-                for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
-                    ui.selectable_value(&mut next_role, role, label);
-                }
-            });
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, ui.spacing().interact_size.y * 2.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                egui::ComboBox::from_id_salt(item.id)
+                    .selected_text(screenplay_role_label(next_role))
+                    .show_ui(ui, |ui| {
+                        for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
+                            ui.selectable_value(&mut next_role, role, label);
+                        }
+                    });
+                ui.label(item.label);
+            },
+        );
         if selected_role != Some(next_role) {
             self.change_role_from_toolbar(next_role);
         }
@@ -488,24 +514,35 @@ impl ScriptCraftApp {
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let allocation = allocate_toolbar(&default_toolbar_items(), ui.available_width());
-        ui.horizontal(|ui| {
-            for (item, width) in allocation.visible.iter().copied() {
-                ui.push_id(item.id, |ui| match item.kind {
-                    ToolbarItemKind::Action(_) => self.toolbar_action_button(ui, item, width),
-                    ToolbarItemKind::Elements => self.elements_toolbar_item(ui, item),
-                    ToolbarItemKind::Space | ToolbarItemKind::FlexibleSpace => {
-                        ui.add_space(width);
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.horizontal(|ui| {
+                ui.add_space(TOOLBAR_ROW_PADDING);
+                let mut first = true;
+                for (item, width) in allocation.visible.iter().copied() {
+                    if !first {
+                        ui.add_space(TOOLBAR_ITEM_GAP);
                     }
-                });
-            }
-            if !allocation.overflow.is_empty() {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    first = false;
+                    ui.push_id(item.id, |ui| match item.kind {
+                        ToolbarItemKind::Action(_) => self.toolbar_action_button(ui, item, width),
+                        ToolbarItemKind::Elements => self.elements_toolbar_item(ui, item, width),
+                        ToolbarItemKind::Space | ToolbarItemKind::FlexibleSpace => {
+                            ui.add_space(width);
+                        }
+                    });
+                }
+                if !allocation.overflow.is_empty() {
+                    if !first {
+                        ui.add_space(TOOLBAR_ITEM_GAP);
+                    }
                     ui.allocate_ui(
                         Vec2::new(allocation.overflow_width, ui.spacing().interact_size.y),
                         |ui| self.toolbar_overflow_menu(ui, &allocation.overflow),
                     );
-                });
-            }
+                }
+                ui.add_space(TOOLBAR_ROW_PADDING);
+            });
         });
     }
 
@@ -1427,21 +1464,58 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_action_presentation_stacks_icon_above_label() {
+        for item in default_toolbar_items()
+            .iter()
+            .copied()
+            .filter(|item| matches!(item.kind, ToolbarItemKind::Action(_)))
+        {
+            assert_eq!(
+                toolbar_action_text(item),
+                format!("{}\n{}", item.icon, item.label)
+            );
+            assert!(!toolbar_action_text(item).contains(&format!("{} {}", item.icon, item.label)));
+        }
+    }
+
+    #[test]
+    fn elements_item_keeps_selected_role_and_presentation_label() {
+        let item = ToolbarItem::elements();
+        assert_eq!(item.label, "Elements");
+        assert_eq!(screenplay_role_label(Role::Dialogue), "Dialogue");
+        assert!(matches!(item.kind, ToolbarItemKind::Elements));
+    }
+
+    #[test]
     fn toolbar_allocation_wide_and_exact_fit_are_deterministic() {
         let items = default_toolbar_items();
         let wide = allocate_toolbar(&items, 800.0);
         assert!(wide.overflow.is_empty());
         assert_eq!(wide.visible.len(), items.len());
-        assert_eq!(wide.visible[4].1, 136.0);
-        assert_eq!(wide.visible[6].1, 136.0);
+        assert_eq!(wide.visible[4].1, 118.0);
+        assert_eq!(wide.visible[6].1, 118.0);
 
-        let exact = allocate_toolbar(&items, TOOLBAR_NORMAL_ITEM_WIDTH * 6.0);
+        let exact_width = toolbar_content_width(
+            &items
+                .iter()
+                .copied()
+                .map(|item| {
+                    (
+                        item,
+                        if is_flexible_toolbar_space(item) {
+                            0.0
+                        } else {
+                            TOOLBAR_NORMAL_ITEM_WIDTH
+                        },
+                    )
+                })
+                .collect::<Vec<_>>(),
+            0.0,
+        );
+        let exact = allocate_toolbar(&items, exact_width);
         assert!(exact.overflow.is_empty());
         assert_eq!(exact.visible.len(), items.len());
-        assert!(exact
-            .visible
-            .iter()
-            .all(|(_, width)| { *width == TOOLBAR_NORMAL_ITEM_WIDTH || *width == 0.0 }));
+        assert_eq!(toolbar_content_width(&exact.visible, 0.0), exact_width);
     }
 
     #[test]
@@ -1453,8 +1527,8 @@ mod tests {
             .map(|(item, _)| item.label)
             .collect();
         let overflow: Vec<_> = allocation.overflow.iter().map(|item| item.label).collect();
-        assert_eq!(visible, vec!["New", "Open", "Save"]);
-        assert_eq!(overflow, vec!["Save As", "Elements", "Export PDF"]);
+        assert_eq!(visible, vec!["New", "Open"]);
+        assert_eq!(overflow, vec!["Save", "Save As", "Elements", "Export PDF"]);
         assert_eq!(allocation.overflow_width, TOOLBAR_OVERFLOW_WIDTH);
     }
 
@@ -1468,9 +1542,33 @@ mod tests {
             ToolbarItem::action("c", "C", "", ToolbarAction::ExportPdf),
         ];
         let allocation = allocate_toolbar(&items, 500.0);
-        assert_eq!(allocation.visible[1].1, 118.0);
-        assert_eq!(allocation.visible[3].1, 118.0);
+        assert_eq!(allocation.visible[1].1, 106.0);
+        assert_eq!(allocation.visible[3].1, 106.0);
         assert!(allocation.overflow.is_empty());
+    }
+
+    #[test]
+    fn toolbar_geometry_uses_half_default_gap_and_stays_within_bounds() {
+        assert_eq!(TOOLBAR_ITEM_GAP, 8.0 / 2.0);
+        let items = default_toolbar_items();
+        let allocation = allocate_toolbar(&items, 800.0);
+        assert!(toolbar_content_width(&allocation.visible, allocation.overflow_width) <= 800.0);
+        assert_eq!(
+            allocation.visible.last().map(|(item, _)| item.label),
+            Some("Export PDF")
+        );
+    }
+
+    #[test]
+    fn toolbar_allocation_wide_maximized_equivalent_keeps_export_pdf_fully_allocated() {
+        let items = default_toolbar_items();
+        let allocation = allocate_toolbar(&items, 600.0);
+        assert!(allocation.overflow.is_empty());
+        assert_eq!(
+            allocation.visible.last().map(|(item, _)| item.label),
+            Some("Export PDF")
+        );
+        assert!(toolbar_content_width(&allocation.visible, 0.0) <= 600.0);
     }
 
     #[test]

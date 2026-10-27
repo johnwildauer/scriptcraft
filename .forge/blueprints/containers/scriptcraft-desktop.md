@@ -64,14 +64,20 @@ buffer.
   transactional mutation/error presentation; it does not own role policy or
   semantic project state. The toolbar composition is not persisted in native
   projects, and actionable Items use icon-first borderless presentation with
-  text labels available to tooltips and accessibility surfaces.
+  the icon above a centered text label, while text labels remain available to
+  tooltips and accessibility surfaces. The Elements Item places a centered
+  `Elements` label beneath its selected-role ComboBox.
 - Toolbar allocation is transient and deterministic: normal Items and `Space`
-  consume one normal-item width, `Flexible Space` Items divide remaining width
-  equally, and narrow widths retain the leftmost fitting Items while placing a
-  far-right `>>` text menu after them. Spacing Items are excluded from overflow;
-  overflow action Items dispatch through the existing desktop adapters, and an
-  overflow Elements Item exposes its role choices through a nested submenu-like
-  menu that still routes role changes through `EditingSession`.
+  consume one normal-item width, while the allocator and renderer share a
+  4-point row-padding budget, a 4-point inter-item gap (half egui's default
+  horizontal gap), and the 32-point overflow reservation. `Flexible Space`
+  Items divide the remaining width equally after that budget, and narrow widths
+  retain the leftmost fitting Items while placing a far-right `>>` text menu
+  after them. Spacing Items are excluded from overflow; overflow action Items
+  dispatch through the existing desktop adapters, and an overflow Elements Item
+  exposes its role choices through a nested submenu-like menu that still routes
+  role changes through `EditingSession`. A fully fitting row remains inside the
+  available width, including its rightmost Item.
 - A focused collapsed caret uses egui animation/repaint state to alternate visible
   and hidden phases every 500 ms. Its animation identity includes the rendered
   revision, caret position, and focus generation, so revision/caret changes and
