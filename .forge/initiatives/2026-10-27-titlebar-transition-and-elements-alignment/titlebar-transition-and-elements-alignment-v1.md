@@ -3,7 +3,7 @@
 ## Initiative metadata
 
 - **Phase:** `closeout`
-- **Status:** `active`
+- **Status:** `closed`
 - **Owner/orchestrator:** Forge architect/planner
 - **Created:** `2026-10-27`
 - **Updated:** `2026-10-27`
@@ -169,6 +169,8 @@ This initiative is in `closeout` after all four work orders passed fresh validat
 
 ## Closeout record
 
-- **Closeout status:** `pending final commit and merge`
+- **Closeout status:** `closed`
+- **Closeout date:** `2026-10-27`
+- **Closeout evidence:** Implementation commit `28024cd` was created on `dev/2026-10-27-titlebar-transition-and-elements-alignment`; merge commit `11bf317` merged that branch into `master`. The final checkout is clean on `master`.
 - **Validation outcome:** All four work orders passed fresh validation; native-display limitations remain non-blocking warnings under project policy. No fix work orders were required.
 - **Follow-up:** Repeat native macOS smoke for maximize/restore direction, seam pixels, transition-frame metrics, closed/open Elements alignment, cursor, and keyboard behavior when a usable display is available.
