@@ -3,7 +3,7 @@
 ## Initiative metadata
 
 - **Phase:** `closeout`
-- **Status:** `active`
+- **Status:** `closed`
 - **Owner/orchestrator:** Forge orchestrator
 - **Created:** 2026-10-27
 - **Updated:** 2026-10-27
@@ -87,6 +87,6 @@ Use one measured toolbar geometry contract for allocation and actual rendering, 
 
 ## Closeout record
 
-- **Closeout status:** `in-progress`
+- **Closeout status:** `closed`
 - **Closeout date:** 2026-10-27
-- **Closeout evidence:** WO-001 passed fresh validation; WO-002 initially failed because its helper/application path was incomplete; WO-002a repaired the path and fresh validation passed all required gates. No unresolved implementation blocker remains. Git evidence will be recorded after commit/merge.
+- **Closeout evidence:** WO-001 passed fresh validation; WO-002 initially failed because its helper/application path was incomplete; WO-002a repaired the path and fresh validation passed all required gates. No unresolved implementation blocker remains. Implementation/closeout commit `686527e`; merge evidence is recorded in the execution log.

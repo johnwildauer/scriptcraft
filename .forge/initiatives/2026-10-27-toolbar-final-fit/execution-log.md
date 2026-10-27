@@ -114,6 +114,16 @@
 - **Result:** `PASS WITH WARNINGS`; no further fix work order is required. All work orders are complete through the fix chain.
 - **Next action/owner:** Forge orchestrator closeout; commit the branch, merge into the recorded base branch, and set status closed.
 
+### 2026-10-27 — Final closeout
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `code-orchestrator-toolbar-final-fit-2026-10-27`
+- **State transition:** initiative `closeout → closed`
+- **Action:** Verified both work orders are complete through the WO-002a fix chain, all validations/gates/approval are recorded, and no unrelated files were included. Recorded native visual limitations as follow-ups.
+- **Evidence:** [`validation-WO-001.md`](validations/validation-WO-001.md:1), [`validation-WO-002a.md`](validations/validation-WO-002a.md:1), `git diff --check` passed, commit `686527e` created on `dev/2026-10-27-toolbar-final-fit`.
+- **Result:** Initiative status set to `closed`; merge into the recorded base branch remains the final Git action.
+- **Next action/owner:** Forge orchestrator; merge the committed branch and record the result.
+
 ### 2026-10-27 — WO-002a implementation complete; awaiting validation
 
 - **Actor/role:** Desktop toolbar fix implementer
