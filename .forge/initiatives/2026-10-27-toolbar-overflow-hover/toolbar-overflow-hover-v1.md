@@ -84,4 +84,4 @@ The work orders are consecutive: group geometry is established before hover styl
 
 - **Closeout status:** `closed`
 - **Closeout date:** 2026-10-27
-- **Closeout evidence:** WO-001 passed fresh validation; WO-002 initially failed only formatting/Clippy gates; WO-002a repaired those gates and fresh validation passed. Git evidence will be recorded in the final execution log.
+- **Closeout evidence:** WO-001 passed fresh validation; WO-002 initially failed only formatting/Clippy gates; WO-002a repaired those gates and fresh validation passed. Implementation/closeout commit `0012c9c`; merge evidence is recorded in the final execution log.

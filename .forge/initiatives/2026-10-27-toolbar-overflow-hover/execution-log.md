@@ -88,6 +88,16 @@
 - **Result:** `PASS`; no further fix work order is required. All work orders are complete through the fix chain.
 - **Next action/owner:** Forge orchestrator closeout; commit the branch, merge into the recorded base branch, and set status closed.
 
+### 2026-10-27 — Final closeout
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `code-orchestrator-toolbar-overflow-hover-2026-10-27`
+- **State transition:** initiative `closeout → closed`
+- **Action:** Verified both work orders are complete through the WO-002a fix chain, all validation/gate evidence is recorded, and no unrelated files were included. Native visual limitations remain documented follow-ups.
+- **Evidence:** [`validation-WO-001.md`](validations/validation-WO-001.md:1), [`validation-WO-002a.md`](validations/validation-WO-002a.md:1), `git diff --check` passed, commit `0012c9c` created on `dev/2026-10-27-toolbar-overflow-hover`.
+- **Result:** Initiative status set to `closed`; merge into the recorded base branch remains the final Git action.
+- **Next action/owner:** Forge orchestrator; merge the committed branch and record the result.
+
 ### 2026-10-27 — WO-002a implemented with required gates passing
 
 - **Actor/role:** Desktop toolbar fix implementer
