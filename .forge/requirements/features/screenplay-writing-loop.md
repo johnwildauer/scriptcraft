@@ -87,6 +87,36 @@ formatting.
 - **AC-WRITING-004.2:** Given a PDF or plain-text export, the system shall not silently replace the native source of truth or falsely mark the native project clean.
 - **AC-WRITING-004.3:** Given a lossy plain-text export, the result shall communicate that roles, IDs, and page layout are not preserved as a lossless round trip.
 
+### REQ-WRITING-LOOP-005: Desktop command toolbar
+
+**User Story:** As an individual screenwriter, I want desktop commands in a
+consistent toolbar, so common project actions are discoverable without changing
+the semantic editing model.
+
+**Acceptance Criteria:**
+
+- **AC-WRITING-005.1:** Given the desktop app is running, the toolbar shall
+  present the typed default Item order New, Open, Save, Save As, Flexible Space,
+  Elements, Flexible Space, and Export PDF.
+- **AC-WRITING-005.2:** Given an actionable toolbar Item is activated, the
+  desktop shall route it through existing application/session adapters and
+  preserve command safety, status, persistence, and fixed-layout PDF behavior.
+- **AC-WRITING-005.3:** Action Items shall use icon-first, borderless button
+  presentation with a lightness-only hover affordance and retain text labels
+  for tooltip and accessibility use.
+- **AC-WRITING-005.4:** Given the current caret/focus is within a screenplay
+  element, the Elements Item shall display that element's explicit role using
+  the seven supported labels Scene Heading, Action, Character, Dialogue,
+  Parenthetical, Transition, and Note; choosing a label shall apply the role
+  through the existing transactional session operation and preserve the
+  document on rejection.
+- **AC-WRITING-005.5:** Given a toolbar width, normal Items and Space shall
+  consume one deterministic normal-item width, Flexible Space Items shall
+  divide the remaining width equally, and a narrow toolbar shall retain the
+  leftmost fitting Items while exposing non-spacing Items through a far-right
+  `>>` text menu. Action entries and Elements role choices in that menu shall
+  remain executable without persisting toolbar layout state.
+
 ## Non-functional requirements
 
 - **NFR-WRITING-001:** Production paths should prefer typed errors and bounded inputs over panic-prone handling; a discovered crash or data-loss defect requires a regression test.

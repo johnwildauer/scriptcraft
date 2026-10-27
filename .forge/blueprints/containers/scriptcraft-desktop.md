@@ -55,6 +55,23 @@ buffer.
 - Caret-affecting commands request conditional nearest reveal only when the caret
   is outside the actual scroll clip; passive scrolling and pointer selection clear
   stale reveal intent and do not recenter the user's viewport.
+- The desktop owns a transient typed toolbar Item composition. Its initial
+  default order is New, Open, Save, Save As, Flexible Space, Elements, Flexible
+  Space, Export PDF. Action Items carry stable identity, text, icon/presentation
+  metadata, and existing desktop command adapters. The Elements Item derives its
+  selected/displayed label from the current session focus and routes all seven
+  supported role choices through `EditingSession::change_role()` and the shared
+  transactional mutation/error presentation; it does not own role policy or
+  semantic project state. The toolbar composition is not persisted in native
+  projects, and actionable Items use icon-first borderless presentation with
+  text labels available to tooltips and accessibility surfaces.
+- Toolbar allocation is transient and deterministic: normal Items and `Space`
+  consume one normal-item width, `Flexible Space` Items divide remaining width
+  equally, and narrow widths retain the leftmost fitting Items while placing a
+  far-right `>>` text menu after them. Spacing Items are excluded from overflow;
+  overflow action Items dispatch through the existing desktop adapters, and an
+  overflow Elements Item exposes its role choices through a nested submenu-like
+  menu that still routes role changes through `EditingSession`.
 - A focused collapsed caret uses egui animation/repaint state to alternate visible
   and hidden phases every 500 ms. Its animation identity includes the rendered
   revision, caret position, and focus generation, so revision/caret changes and

@@ -17,6 +17,8 @@ const DEFAULT_PRESENTATION_SCALE_MULTIPLIER: f32 = 1.6;
 const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
 const MINIMUM_PAGE_WIDTH: f32 = 240.0;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 88.0;
+const TOOLBAR_OVERFLOW_WIDTH: f32 = 32.0;
 
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
@@ -47,6 +49,184 @@ struct PerformanceDiagnostics {
 enum RevealIntent {
     None,
     Conditional,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarAction {
+    New,
+    Open,
+    Save,
+    SaveAs,
+    ExportPdf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarItemKind {
+    Action(ToolbarAction),
+    Elements,
+    Space,
+    FlexibleSpace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolbarItem {
+    id: &'static str,
+    label: &'static str,
+    icon: &'static str,
+    kind: ToolbarItemKind,
+}
+
+impl ToolbarItem {
+    const fn action(
+        id: &'static str,
+        label: &'static str,
+        icon: &'static str,
+        action: ToolbarAction,
+    ) -> Self {
+        Self {
+            id,
+            label,
+            icon,
+            kind: ToolbarItemKind::Action(action),
+        }
+    }
+
+    const fn elements() -> Self {
+        Self {
+            id: "elements",
+            label: "Elements",
+            icon: "▾",
+            kind: ToolbarItemKind::Elements,
+        }
+    }
+
+    const fn flexible_space(id: &'static str) -> Self {
+        Self {
+            id,
+            label: "Flexible Space",
+            icon: "",
+            kind: ToolbarItemKind::FlexibleSpace,
+        }
+    }
+
+    pub const fn space(id: &'static str) -> Self {
+        Self {
+            id,
+            label: "Space",
+            icon: "",
+            kind: ToolbarItemKind::Space,
+        }
+    }
+}
+
+const SUPPORTED_SCREENPLAY_ROLES: [(Role, &str); 7] = [
+    (Role::SceneHeading, "Scene Heading"),
+    (Role::Action, "Action"),
+    (Role::Character, "Character"),
+    (Role::Dialogue, "Dialogue"),
+    (Role::Parenthetical, "Parenthetical"),
+    (Role::Transition, "Transition"),
+    (Role::Note, "Note"),
+];
+
+fn screenplay_role_label(role: Role) -> &'static str {
+    SUPPORTED_SCREENPLAY_ROLES
+        .iter()
+        .find_map(|(supported, label)| (*supported == role).then_some(*label))
+        .unwrap_or("Unknown")
+}
+
+fn default_toolbar_items() -> [ToolbarItem; 8] {
+    [
+        ToolbarItem::action("new", "New", "＋", ToolbarAction::New),
+        ToolbarItem::action("open", "Open", "↥", ToolbarAction::Open),
+        ToolbarItem::action("save", "Save", "▣", ToolbarAction::Save),
+        ToolbarItem::action("save-as", "Save As", "⇩", ToolbarAction::SaveAs),
+        ToolbarItem::flexible_space("flexible-space-before-elements"),
+        ToolbarItem::elements(),
+        ToolbarItem::flexible_space("flexible-space-after-elements"),
+        ToolbarItem::action("export-pdf", "Export PDF", "⇱", ToolbarAction::ExportPdf),
+    ]
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ToolbarAllocation {
+    visible: Vec<(ToolbarItem, f32)>,
+    overflow: Vec<ToolbarItem>,
+    overflow_width: f32,
+}
+
+fn is_flexible_toolbar_space(item: ToolbarItem) -> bool {
+    matches!(item.kind, ToolbarItemKind::FlexibleSpace)
+}
+
+/// Allocate the transient toolbar without measuring or mutating project state.
+/// Normal items, including `Space`, have one fixed slot. Flexible spaces share
+/// only the remaining width once every normal item fits.
+fn allocate_toolbar(items: &[ToolbarItem], available_width: f32) -> ToolbarAllocation {
+    let normal_count = items
+        .iter()
+        .filter(|item| !is_flexible_toolbar_space(**item))
+        .count();
+    let fixed_width = normal_count as f32 * TOOLBAR_NORMAL_ITEM_WIDTH;
+    let flexible_count = items
+        .iter()
+        .filter(|item| matches!(item.kind, ToolbarItemKind::FlexibleSpace))
+        .count();
+
+    if fixed_width <= available_width {
+        let flexible_width = if flexible_count == 0 {
+            0.0
+        } else {
+            ((available_width - fixed_width) / flexible_count as f32).max(0.0)
+        };
+        return ToolbarAllocation {
+            visible: items
+                .iter()
+                .map(|item| {
+                    let width = if is_flexible_toolbar_space(*item) {
+                        flexible_width
+                    } else {
+                        TOOLBAR_NORMAL_ITEM_WIDTH
+                    };
+                    (*item, width)
+                })
+                .collect(),
+            overflow: Vec::new(),
+            overflow_width: 0.0,
+        };
+    }
+
+    let fitting_width = (available_width - TOOLBAR_OVERFLOW_WIDTH).max(0.0);
+    let mut used_width = 0.0;
+    let mut visible = Vec::new();
+    let mut overflow = Vec::new();
+    let mut fitting = true;
+    for item in items.iter().copied() {
+        if is_flexible_toolbar_space(item) {
+            continue;
+        }
+        if matches!(item.kind, ToolbarItemKind::Space) {
+            if fitting && used_width + TOOLBAR_NORMAL_ITEM_WIDTH <= fitting_width {
+                used_width += TOOLBAR_NORMAL_ITEM_WIDTH;
+                visible.push((item, TOOLBAR_NORMAL_ITEM_WIDTH));
+            }
+            continue;
+        }
+        if fitting && used_width + TOOLBAR_NORMAL_ITEM_WIDTH <= fitting_width {
+            used_width += TOOLBAR_NORMAL_ITEM_WIDTH;
+            visible.push((item, TOOLBAR_NORMAL_ITEM_WIDTH));
+        } else {
+            fitting = false;
+            overflow.push(item);
+        }
+    }
+
+    ToolbarAllocation {
+        visible,
+        overflow,
+        overflow_width: TOOLBAR_OVERFLOW_WIDTH,
+    }
 }
 
 struct ScriptCraftApp {
@@ -199,22 +379,134 @@ impl ScriptCraftApp {
         }
     }
 
-    fn export_text(&mut self) {
-        match exports::export_text(self.session.project()) {
-            Ok(result) => match StdFileSystem
-                .write(&PathBuf::from("scriptcraft.txt"), result.text.as_bytes())
-            {
-                Ok(()) => {
-                    self.status = format!(
-                        "Exported lossy text to scriptcraft.txt — {}",
-                        result.loss.message
-                    );
-                    self.clear_error();
+    fn dispatch_toolbar_action(&mut self, action: ToolbarAction) {
+        match action {
+            ToolbarAction::New => {
+                match Project::new("demo-project", "Untitled Screenplay", "Writer")
+                    .map_err(|error| format!("new project failed: {error:?}"))
+                    .and_then(|project| {
+                        EditingSession::new(project)
+                            .map_err(|error| format!("session failed: {error:?}"))
+                    }) {
+                    Ok(session) => {
+                        self.session = session;
+                        self.surface_focused = false;
+                        self.native_path = None;
+                        self.status = "New in-memory project".into();
+                        self.clear_error();
+                    }
+                    Err(error) => self.show_error(error),
                 }
-                Err(error) => self.show_error(error),
-            },
-            Err(error) => self.show_error(error),
+            }
+            ToolbarAction::Open => self.open_native(),
+            ToolbarAction::Save => self.save_native(),
+            ToolbarAction::SaveAs => self.save_as_native(),
+            ToolbarAction::ExportPdf => self.export_pdf(),
         }
+    }
+
+    fn toolbar_action_button(&mut self, ui: &mut egui::Ui, item: ToolbarItem, width: f32) {
+        let button = egui::Button::new(RichText::new(format!("{} {}", item.icon, item.label)))
+            .frame(false)
+            .sense(Sense::click());
+        let response = ui
+            .add_sized(Vec2::new(width, ui.spacing().interact_size.y), button)
+            .on_hover_text(item.label)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            if let ToolbarItemKind::Action(action) = item.kind {
+                self.dispatch_toolbar_action(action);
+            }
+        }
+    }
+
+    fn focused_role(&self) -> Option<Role> {
+        self.session
+            .project()
+            .elements
+            .get(self.session.selection().focus.element)
+            .map(|element| element.role)
+    }
+
+    fn change_role_from_toolbar(&mut self, role: Role) {
+        let result = self.session.change_role(role);
+        self.mutate(result, "Changed focused element role", RevealIntent::None);
+    }
+
+    fn elements_toolbar_item(&mut self, ui: &mut egui::Ui, item: ToolbarItem) {
+        let selected_role = self.focused_role();
+        let mut next_role = selected_role.unwrap_or(Role::Action);
+        egui::ComboBox::from_id_salt(item.id)
+            .selected_text(screenplay_role_label(next_role))
+            .show_ui(ui, |ui| {
+                for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
+                    ui.selectable_value(&mut next_role, role, label);
+                }
+            });
+        if selected_role != Some(next_role) {
+            self.change_role_from_toolbar(next_role);
+        }
+    }
+
+    fn toolbar_overflow_menu(&mut self, ui: &mut egui::Ui, items: &[ToolbarItem]) {
+        let mut chosen_action = None;
+        let mut chosen_role = None;
+        ui.menu_button(">>", |ui| {
+            for item in items.iter().copied() {
+                match item.kind {
+                    ToolbarItemKind::Action(action) => {
+                        if ui.button(item.label).clicked() {
+                            chosen_action = Some(action);
+                            ui.close_menu();
+                        }
+                    }
+                    ToolbarItemKind::Elements => {
+                        let selected_role = self.focused_role();
+                        ui.menu_button(item.label, |ui| {
+                            for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
+                                if ui
+                                    .selectable_label(selected_role == Some(role), label)
+                                    .clicked()
+                                {
+                                    chosen_role = Some(role);
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    }
+                    ToolbarItemKind::Space | ToolbarItemKind::FlexibleSpace => {}
+                }
+            }
+        });
+        if let Some(action) = chosen_action {
+            self.dispatch_toolbar_action(action);
+        }
+        if let Some(role) = chosen_role {
+            self.change_role_from_toolbar(role);
+        }
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let allocation = allocate_toolbar(&default_toolbar_items(), ui.available_width());
+        ui.horizontal(|ui| {
+            for (item, width) in allocation.visible.iter().copied() {
+                ui.push_id(item.id, |ui| match item.kind {
+                    ToolbarItemKind::Action(_) => self.toolbar_action_button(ui, item, width),
+                    ToolbarItemKind::Elements => self.elements_toolbar_item(ui, item),
+                    ToolbarItemKind::Space | ToolbarItemKind::FlexibleSpace => {
+                        ui.add_space(width);
+                    }
+                });
+            }
+            if !allocation.overflow.is_empty() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.allocate_ui(
+                        Vec2::new(allocation.overflow_width, ui.spacing().interact_size.y),
+                        |ui| self.toolbar_overflow_menu(ui, &allocation.overflow),
+                    );
+                });
+            }
+        });
     }
 
     fn show_error<E: std::fmt::Debug>(&mut self, error: E) {
@@ -264,24 +556,6 @@ impl ScriptCraftApp {
             }
             Err(error) => self.show_error(error),
         }
-    }
-
-    fn role_controls(&mut self, ui: &mut egui::Ui) {
-        let element = self.session.selection().focus.element;
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Role:");
-            for role in roles() {
-                let selected = self.session.project().elements[element].role == role;
-                if ui.selectable_label(selected, role_label(role)).clicked() {
-                    let result = self.session.change_role(role);
-                    self.mutate(
-                        result,
-                        "Role changed through EditingSession",
-                        RevealIntent::None,
-                    );
-                }
-            }
-        });
     }
 
     fn caret_from_pointer(
@@ -1034,57 +1308,7 @@ impl eframe::App for ScriptCraftApp {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("New").clicked() {
-                    match Project::new("demo-project", "Untitled Screenplay", "Writer")
-                        .map_err(|error| format!("new project failed: {error:?}"))
-                        .and_then(|project| {
-                            EditingSession::new(project)
-                                .map_err(|error| format!("session failed: {error:?}"))
-                        }) {
-                        Ok(session) => {
-                            self.session = session;
-                            self.surface_focused = false;
-                            self.native_path = None;
-                            self.status = "New in-memory project".into();
-                            self.clear_error();
-                        }
-                        Err(error) => self.show_error(error),
-                    }
-                }
-                if ui.button("Open").clicked() {
-                    self.open_native();
-                }
-                if ui.button("Save").clicked() {
-                    self.save_native();
-                }
-                if ui.button("Save As").clicked() {
-                    self.save_as_native();
-                }
-                if ui.button("Export PDF").clicked() {
-                    self.export_pdf();
-                }
-                if ui.button("Export TXT (lossy)").clicked() {
-                    self.export_text();
-                }
-                if ui
-                    .add_enabled(self.session.can_undo(), egui::Button::new("Undo"))
-                    .clicked()
-                {
-                    let result = self.session.undo();
-                    self.mutate(result, "Undo", RevealIntent::Conditional);
-                }
-                if ui
-                    .add_enabled(self.session.can_redo(), egui::Button::new("Redo"))
-                    .clicked()
-                {
-                    let result = self.session.redo();
-                    self.mutate(result, "Redo", RevealIntent::Conditional);
-                }
-                ui.separator();
-                ui.label("Page layout live document");
-            });
-            self.role_controls(ui);
+            self.toolbar(ui);
         });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -1141,30 +1365,6 @@ impl eframe::App for ScriptCraftApp {
     }
 }
 
-fn roles() -> [Role; 7] {
-    [
-        Role::SceneHeading,
-        Role::Action,
-        Role::Character,
-        Role::Dialogue,
-        Role::Parenthetical,
-        Role::Transition,
-        Role::Note,
-    ]
-}
-
-fn role_label(role: Role) -> &'static str {
-    match role {
-        Role::SceneHeading => "Scene heading",
-        Role::Action => "Action",
-        Role::Character => "Character",
-        Role::Dialogue => "Dialogue",
-        Role::Parenthetical => "Parenthetical",
-        Role::Transition => "Transition",
-        Role::Note => "Note",
-    }
-}
-
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions::default();
     eframe::run_native(
@@ -1182,6 +1382,198 @@ fn main() -> eframe::Result {
 mod tests {
     use super::*;
     use scriptcraft_core::layout::{CHAR_WIDTH, LINE_HEIGHT};
+    use scriptcraft_core::Role;
+
+    #[test]
+    fn default_toolbar_has_approved_order_and_labels() {
+        let items = default_toolbar_items();
+        let labels: Vec<_> = items.iter().map(|item| item.label).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "New",
+                "Open",
+                "Save",
+                "Save As",
+                "Flexible Space",
+                "Elements",
+                "Flexible Space",
+                "Export PDF",
+            ]
+        );
+        assert!(matches!(
+            items[0].kind,
+            ToolbarItemKind::Action(ToolbarAction::New)
+        ));
+        assert!(matches!(items[4].kind, ToolbarItemKind::FlexibleSpace));
+        assert!(matches!(items[5].kind, ToolbarItemKind::Elements));
+        assert!(items.iter().all(|item| !item.label.is_empty()));
+        assert!(items
+            .iter()
+            .filter(|item| matches!(item.kind, ToolbarItemKind::Action(_)))
+            .all(|item| !item.icon.is_empty()));
+    }
+
+    #[test]
+    fn toolbar_model_keeps_normal_and_flexible_spacing_typed() {
+        assert!(matches!(
+            ToolbarItem::space("space").kind,
+            ToolbarItemKind::Space
+        ));
+        assert!(matches!(
+            ToolbarItem::flexible_space("flex").kind,
+            ToolbarItemKind::FlexibleSpace
+        ));
+    }
+
+    #[test]
+    fn toolbar_allocation_wide_and_exact_fit_are_deterministic() {
+        let items = default_toolbar_items();
+        let wide = allocate_toolbar(&items, 800.0);
+        assert!(wide.overflow.is_empty());
+        assert_eq!(wide.visible.len(), items.len());
+        assert_eq!(wide.visible[4].1, 136.0);
+        assert_eq!(wide.visible[6].1, 136.0);
+
+        let exact = allocate_toolbar(&items, TOOLBAR_NORMAL_ITEM_WIDTH * 6.0);
+        assert!(exact.overflow.is_empty());
+        assert_eq!(exact.visible.len(), items.len());
+        assert!(exact
+            .visible
+            .iter()
+            .all(|(_, width)| { *width == TOOLBAR_NORMAL_ITEM_WIDTH || *width == 0.0 }));
+    }
+
+    #[test]
+    fn toolbar_allocation_narrow_keeps_leftmost_items_and_far_right_menu() {
+        let allocation = allocate_toolbar(&default_toolbar_items(), 300.0);
+        let visible: Vec<_> = allocation
+            .visible
+            .iter()
+            .map(|(item, _)| item.label)
+            .collect();
+        let overflow: Vec<_> = allocation.overflow.iter().map(|item| item.label).collect();
+        assert_eq!(visible, vec!["New", "Open", "Save"]);
+        assert_eq!(overflow, vec!["Save As", "Elements", "Export PDF"]);
+        assert_eq!(allocation.overflow_width, TOOLBAR_OVERFLOW_WIDTH);
+    }
+
+    #[test]
+    fn toolbar_allocation_two_flexible_spaces_split_remaining_width_equally() {
+        let items = [
+            ToolbarItem::action("a", "A", "", ToolbarAction::New),
+            ToolbarItem::flexible_space("flex-a"),
+            ToolbarItem::action("b", "B", "", ToolbarAction::Save),
+            ToolbarItem::flexible_space("flex-b"),
+            ToolbarItem::action("c", "C", "", ToolbarAction::ExportPdf),
+        ];
+        let allocation = allocate_toolbar(&items, 500.0);
+        assert_eq!(allocation.visible[1].1, 118.0);
+        assert_eq!(allocation.visible[3].1, 118.0);
+        assert!(allocation.overflow.is_empty());
+    }
+
+    #[test]
+    fn overflow_entries_route_actions_and_elements_submenu_choices() {
+        let allocation = allocate_toolbar(&default_toolbar_items(), 300.0);
+        assert!(allocation
+            .overflow
+            .iter()
+            .any(|item| matches!(item.kind, ToolbarItemKind::Elements)));
+
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.dispatch_toolbar_action(ToolbarAction::New);
+        assert_eq!(app.status, "New in-memory project");
+        app.change_role_from_toolbar(Role::Dialogue);
+        assert_eq!(app.focused_role(), Some(Role::Dialogue));
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn toolbar_new_dispatch_replaces_session_without_persisting_path() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.native_path = Some(PathBuf::from("existing.json"));
+        app.session
+            .insert("draft")
+            .unwrap_or_else(|_| unreachable!());
+
+        app.dispatch_toolbar_action(ToolbarAction::New);
+
+        assert_eq!(app.session.project().metadata.title, "Untitled Screenplay");
+        assert_eq!(app.session.project().elements[0].text, "");
+        assert_eq!(app.native_path, None);
+        assert_eq!(app.status, "New in-memory project");
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn elements_role_labels_cover_all_supported_roles() {
+        let expected = [
+            (Role::SceneHeading, "Scene Heading"),
+            (Role::Action, "Action"),
+            (Role::Character, "Character"),
+            (Role::Dialogue, "Dialogue"),
+            (Role::Parenthetical, "Parenthetical"),
+            (Role::Transition, "Transition"),
+            (Role::Note, "Note"),
+        ];
+        assert_eq!(SUPPORTED_SCREENPLAY_ROLES, expected);
+        for (role, label) in expected {
+            assert_eq!(screenplay_role_label(role), label);
+        }
+    }
+
+    #[test]
+    fn elements_role_choices_change_the_current_caret_element() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert("first")
+            .unwrap_or_else(|_| unreachable!());
+        app.session.enter().unwrap_or_else(|_| unreachable!());
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 1,
+                offset: 0,
+            }))
+            .unwrap_or_else(|_| unreachable!());
+
+        for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
+            app.change_role_from_toolbar(role);
+            assert_eq!(app.focused_role(), Some(role), "{label}");
+            assert_eq!(screenplay_role_label(role), label);
+            assert_eq!(app.session.selection().focus.element, 1);
+            assert_eq!(app.session.project().elements[0].role, Role::Action);
+            assert!(app.error.is_none());
+        }
+    }
+
+    #[test]
+    fn rejected_elements_role_change_preserves_session_and_reports_error() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert("unchanged")
+            .unwrap_or_else(|_| unreachable!());
+        app.session.enter().unwrap_or_else(|_| unreachable!());
+        app.session
+            .set_selection(Selection {
+                anchor: Position {
+                    element: 0,
+                    offset: 0,
+                },
+                focus: Position {
+                    element: 1,
+                    offset: 0,
+                },
+            })
+            .unwrap_or_else(|_| unreachable!());
+        let before = app.session.clone();
+
+        app.change_role_from_toolbar(Role::Dialogue);
+
+        assert_eq!(app.session, before);
+        assert!(app.error.is_some());
+        assert!(app.status.contains("document unchanged"));
+    }
 
     #[test]
     fn app_has_one_live_surface_and_no_ui_text_buffer() {
