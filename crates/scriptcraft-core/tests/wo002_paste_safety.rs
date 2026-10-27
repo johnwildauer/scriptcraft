@@ -4,14 +4,13 @@
 use scriptcraft_core::editing::{EditError, EditingSession, Position, Selection};
 use scriptcraft_core::layout::ScreenplayLayout;
 use scriptcraft_core::persistence::serialize;
-use scriptcraft_core::{Project, MAX_TEXT_BYTES};
+use scriptcraft_core::{Project, Role, MAX_TEXT_BYTES};
 
 fn session() -> EditingSession {
-    EditingSession::new(
-        Project::new("paste-fixture", "Paste fixture", "Writer")
-            .unwrap_or_else(|_| unreachable!("fixture project must be valid")),
-    )
-    .unwrap_or_else(|_| unreachable!("fixture session must be valid"))
+    let mut project = Project::new("paste-fixture", "Paste fixture", "Writer")
+        .unwrap_or_else(|_| unreachable!("fixture project must be valid"));
+    project.elements[0].role = Role::Action;
+    EditingSession::new(project).unwrap_or_else(|_| unreachable!("fixture session must be valid"))
 }
 
 #[test]

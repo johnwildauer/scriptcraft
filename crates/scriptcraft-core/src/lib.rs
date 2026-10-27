@@ -224,7 +224,7 @@ impl Project {
         title: impl Into<String>,
         author: impl Into<String>,
     ) -> Result<Self, ModelError> {
-        let start = ScreenplayElement::new("element-1", Role::Action, "")?;
+        let start = ScreenplayElement::new("element-1", Role::SceneHeading, "")?;
         Ok(Self {
             id: StableId::new(id)?,
             schema_version: CURRENT_SCHEMA_VERSION,
@@ -674,10 +674,31 @@ mod tests {
     #[test]
     fn new_project_has_valid_start() {
         let p = Project::new("p-1", "题名", "作者").unwrap_or_else(|_| unreachable!());
-        assert_eq!(p.elements[0].role, Role::Action);
+        assert_eq!(p.elements.len(), 1);
+        assert_eq!(p.elements[0].id.as_str(), "element-1");
+        assert_eq!(p.elements[0].role, Role::SceneHeading);
+        assert!(p.elements[0].text.is_empty());
         assert_eq!(p.page_profile.font_family, "Courier");
         assert!(p.page_profile.uppercase_cues);
         assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn new_project_session_starts_with_valid_scene_heading_caret() {
+        let project = Project::new("p-1", "Title", "Author").unwrap_or_else(|_| unreachable!());
+        let session = editing::EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+
+        assert_eq!(
+            session.selection(),
+            editing::Selection::caret(editing::Position {
+                element: 0,
+                offset: 0,
+            })
+        );
+        assert_eq!(session.project().elements.len(), 1);
+        assert_eq!(session.project().elements[0].role, Role::SceneHeading);
+        assert!(session.project().elements[0].text.is_empty());
+        assert!(session.validate().is_ok());
     }
 
     #[test]

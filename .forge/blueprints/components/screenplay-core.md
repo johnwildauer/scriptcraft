@@ -61,6 +61,7 @@ adapts user input and consumes these results.
 ### Key Contracts
 
 - Role is semantic data, not inferred appearance.
+- `Project::new()` seeds exactly one empty `SceneHeading` element with stable identity; `EditingSession::new()` validates and places the initial caret at element 0, byte offset 0.
 - Element identity is stable and opaque; array position and page coordinates are not durable identity.
 - Valid edit offsets are checked UTF-8 boundaries.
 - A failed mutation restores project, selection, history, and dirty-state invariants.

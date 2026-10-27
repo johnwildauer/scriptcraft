@@ -78,6 +78,7 @@ constraints:
 ### Key Contracts
 
 - `REQ-WRITING-LOOP-001` behavior is satisfied by explicit `ScreenplayElement` roles, checked editing operations, and transactional session state.
+- New `Project` instances seed exactly one empty `SceneHeading`; the initial valid caret is session state, while subsequent Enter/Tab transitions remain owned by `RoleTransitionPolicy`/`EditingSession`.
 - `REQ-WRITING-LOOP-002` behavior is satisfied by one role-aware layout/display path with a fixed profile and source mappings.
 - `REQ-WRITING-LOOP-003` behavior is satisfied by a versioned native schema, atomic replacement, and bounded recovery candidates.
 - `REQ-WRITING-LOOP-004` behavior is satisfied by export adapters that consume print layout and report loss without becoming canonical save.
