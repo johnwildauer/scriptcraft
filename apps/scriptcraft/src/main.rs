@@ -2,7 +2,7 @@
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use eframe::egui::{
-    self, Color32, FontFamily, FontId, Key, RichText, Sense, Stroke, TextStyle, Vec2,
+    self, Color32, FontFamily, FontId, Key, RichText, Sense, Stroke, TextStyle, TextWrapMode, Vec2,
 };
 use scriptcraft_core::editing::{EditError, EditingSession, Position, Selection};
 use scriptcraft_core::exports;
@@ -25,9 +25,9 @@ const TOOLBAR_GROUP_HORIZONTAL_PADDING: f32 = 8.0;
 const TOOLBAR_OVERFLOW_WIDTH: f32 = 32.0;
 const TOOLBAR_ROW_PADDING: f32 = 4.0;
 const TOOLBAR_ITEM_GAP: f32 = 4.0;
-const TOOLBAR_TOP_PADDING: f32 = 32.0;
-const TOOLBAR_BOTTOM_PADDING: f32 = 1.0;
-const TOOLBAR_ICON_HOVER_PADDING: f32 = 0.0;
+const TOOLBAR_TOP_PADDING: f32 = 30.0;
+const TOOLBAR_BOTTOM_PADDING: f32 = 2.0;
+const TOOLBAR_ICON_HOVER_PADDING: f32 = 2.0;
 
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
@@ -224,6 +224,120 @@ fn toolbar_actual_available_width(
 #[cfg(test)]
 fn toolbar_row_right_edge(row_left: f32, allocation: &ToolbarAllocation) -> f32 {
     row_left + allocation.row_width
+}
+
+#[cfg(test)]
+fn toolbar_rect_contains(outer: egui::Rect, inner: egui::Rect) -> bool {
+    outer.left() <= inner.left()
+        && inner.right() <= outer.right()
+        && outer.top() <= inner.top()
+        && inner.bottom() <= outer.bottom()
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct ToolbarComboBoundaryLedger {
+    combo_response: egui::Rect,
+    child_min_rect: egui::Rect,
+    group_response: egui::Rect,
+}
+
+#[cfg(test)]
+fn toolbar_combo_boundary_ledger(width: f32) -> ToolbarComboBoundaryLedger {
+    let context = egui::Context::default();
+    let mut ledger = ToolbarComboBoundaryLedger {
+        combo_response: egui::Rect::NOTHING,
+        child_min_rect: egui::Rect::NOTHING,
+        group_response: egui::Rect::NOTHING,
+    };
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1200.0, 200.0));
+    let _ = context.run(
+        egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        },
+        |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let group = ui.allocate_ui_with_layout(
+                    Vec2::new(width, ui.spacing().interact_size.y * 2.0),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        ui.set_width(width);
+                        ledger.combo_response = egui::ComboBox::from_id_salt("ledger-elements")
+                            .width(width)
+                            .wrap_mode(TextWrapMode::Truncate)
+                            .selected_text("Scene Heading")
+                            .show_ui(ui, |_ui| {})
+                            .response
+                            .rect;
+                        let _ = ui.label("Elements");
+                        ledger.child_min_rect = ui.min_rect();
+                    },
+                );
+                ledger.group_response = group.response.rect;
+            });
+        },
+    );
+    ledger
+}
+
+#[cfg(test)]
+fn toolbar_rect_ledger(
+    content_rect: egui::Rect,
+    clip_rect: egui::Rect,
+    row_left: f32,
+    allocation: &ToolbarAllocation,
+) -> (egui::Rect, egui::Rect, egui::Rect, egui::Rect, egui::Rect) {
+    let row_rect = egui::Rect::from_min_size(
+        egui::pos2(row_left, content_rect.top()),
+        Vec2::new(allocation.row_width, content_rect.height()),
+    );
+    let elements_index = allocation
+        .visible
+        .iter()
+        .position(|(item, _)| matches!(item.kind, ToolbarItemKind::Elements));
+    let mut child_left = row_left + TOOLBAR_ROW_PADDING;
+    for (index, (_, width)) in allocation.visible.iter().copied().enumerate() {
+        if index > 0 {
+            child_left += TOOLBAR_ITEM_GAP;
+        }
+        if Some(index) == elements_index {
+            break;
+        }
+        child_left += width;
+    }
+    let child_width = elements_index
+        .and_then(|index| allocation.visible.get(index).map(|(_, width)| *width))
+        .unwrap_or(0.0);
+    let child_rect = egui::Rect::from_min_size(
+        egui::pos2(child_left, content_rect.top()),
+        Vec2::new(child_width, content_rect.height()),
+    );
+    let final_group_rect = allocation.visible.iter().enumerate().fold(
+        row_left + TOOLBAR_ROW_PADDING,
+        |left, (index, (_, width))| {
+            let left = if index == 0 {
+                left
+            } else {
+                left + TOOLBAR_ITEM_GAP
+            };
+            left + width
+        },
+    );
+    let final_label_rect = egui::Rect::from_min_max(
+        egui::pos2(
+            final_group_rect - TOOLBAR_NORMAL_ITEM_WIDTH,
+            content_rect.top(),
+        ),
+        egui::pos2(final_group_rect, content_rect.bottom()),
+    );
+    (
+        content_rect,
+        clip_rect,
+        row_rect,
+        child_rect,
+        final_label_rect,
+    )
 }
 
 /// Allocate the transient toolbar without mutating project state.
@@ -559,14 +673,20 @@ impl ScriptCraftApp {
             Vec2::new(width, ui.spacing().interact_size.y * 2.0),
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
+                // ComboBox has an intrinsic minimum. Constrain this child to the
+                // same explicit budget used by allocate_toolbar so it cannot
+                // advance the parent row past the allocated Elements slot.
+                ui.set_width(width);
                 egui::ComboBox::from_id_salt(item.id)
+                    .width(width)
+                    .wrap_mode(TextWrapMode::Truncate)
                     .selected_text(screenplay_role_label(next_role))
                     .show_ui(ui, |ui| {
                         for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
                             ui.selectable_value(&mut next_role, role, label);
                         }
                     });
-                ui.label(item.label);
+                let _ = ui.label(item.label);
             },
         );
         if selected_role != Some(next_role) {
@@ -1648,10 +1768,10 @@ mod tests {
         let control = toolbar_icon_control_rect(group, Vec2::splat(24.0));
         let icon = toolbar_icon_hover_rect(control, TOOLBAR_ICON_HOVER_PADDING);
 
-        assert_eq!(icon.min.x, 34.0);
-        assert_eq!(icon.max.x, 58.0);
-        assert_eq!(icon.min.y, 20.0);
-        assert_eq!(icon.max.y, 44.0);
+        assert_eq!(icon.min.x, 32.0);
+        assert_eq!(icon.max.x, 60.0);
+        assert_eq!(icon.min.y, 18.0);
+        assert_eq!(icon.max.y, 46.0);
         assert!(icon.center().x == group.center().x);
         assert!(icon.max.y < group.max.y);
         assert!(!icon.contains(egui::pos2(group.center().x, 60.0)));
@@ -1684,7 +1804,7 @@ mod tests {
             style.visuals.widgets.hovered.bg_fill
         );
         assert_eq!(toolbar_group_fill(&style, false), Color32::TRANSPARENT);
-        assert_eq!(TOOLBAR_ICON_HOVER_PADDING, 0.0);
+        assert_eq!(TOOLBAR_ICON_HOVER_PADDING, 2.0);
     }
 
     #[test]
@@ -1804,18 +1924,18 @@ mod tests {
             .map(|(item, _)| item.label)
             .collect();
         let overflow: Vec<_> = allocation.overflow.iter().map(|item| item.label).collect();
-        assert_eq!(visible, vec!["New", "Open", "Save"]);
-        assert_eq!(overflow, vec!["Save As", "Elements", "Export PDF"]);
+        assert_eq!(visible, vec!["New", "Open", "Save", "Save As"]);
+        assert_eq!(overflow, vec!["Elements", "Export PDF"]);
         assert_eq!(allocation.overflow_width, TOOLBAR_OVERFLOW_WIDTH);
     }
 
     #[test]
     fn toolbar_manual_geometry_controls_are_narrow_and_explicit() {
-        assert_eq!(TOOLBAR_NORMAL_ITEM_WIDTH, 72.0);
+        assert_eq!(TOOLBAR_NORMAL_ITEM_WIDTH, 46.0);
         assert_eq!(TOOLBAR_ROW_PADDING, 4.0);
         assert_eq!(TOOLBAR_ITEM_GAP, 4.0);
-        assert_eq!(TOOLBAR_TOP_PADDING, 32.0);
-        assert_eq!(TOOLBAR_BOTTOM_PADDING, 1.0);
+        assert_eq!(TOOLBAR_TOP_PADDING, 30.0);
+        assert_eq!(TOOLBAR_BOTTOM_PADDING, 2.0);
     }
 
     #[test]
@@ -1830,7 +1950,7 @@ mod tests {
         );
 
         assert_eq!(allocation.visible[0].1, TOOLBAR_NORMAL_ITEM_WIDTH);
-        assert_eq!(allocation.visible[1].1, TOOLBAR_NORMAL_ITEM_WIDTH);
+        assert_eq!(allocation.visible[1].1, 60.0);
     }
 
     #[test]
@@ -1917,16 +2037,90 @@ mod tests {
                 .iter()
                 .map(|item| item.label)
                 .collect::<Vec<_>>(),
-            vec!["Save As", "Elements", "Export PDF"]
+            vec!["Elements", "Export PDF"]
         );
         assert!(toolbar_row_right_edge(content.left(), &allocation) <= content.right());
     }
 
     #[test]
+    fn toolbar_rectangle_ledger_contains_content_clip_row_child_and_final_label() {
+        let item_widths = [
+            toolbar_content_width(
+                &default_toolbar_items()
+                    .iter()
+                    .copied()
+                    .map(|item| (item, toolbar_item_width(item, test_toolbar_label_width)))
+                    .collect::<Vec<_>>(),
+                0.0,
+            ),
+            300.0,
+            1_000.0,
+        ];
+
+        for width in item_widths {
+            let content = egui::Rect::from_min_size(egui::pos2(20.0, 0.0), Vec2::new(width, 48.0));
+            let clip = egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(content.right().min(980.0), content.bottom()),
+            );
+            let allocation = allocate_toolbar(
+                &default_toolbar_items(),
+                toolbar_actual_available_width(content, clip, content.left()),
+                test_toolbar_label_width,
+            );
+            let (content, clip, row, child, final_label) =
+                toolbar_rect_ledger(content, clip, content.left(), &allocation);
+
+            assert!(toolbar_rect_contains(content, row));
+            assert!(toolbar_rect_contains(clip, row));
+            assert!(toolbar_rect_contains(row, child));
+            assert!(toolbar_rect_contains(row, final_label));
+            assert!(toolbar_rect_contains(clip, final_label));
+            assert!(toolbar_row_right_edge(content.left(), &allocation) <= clip.right());
+        }
+    }
+
+    #[test]
+    fn toolbar_combo_boundary_ledger_contains_response_child_group_and_final_edge_cases() {
+        let items = default_toolbar_items();
+        let exact_width = toolbar_content_width(
+            &items
+                .iter()
+                .copied()
+                .map(|item| (item, toolbar_item_width(item, test_toolbar_label_width)))
+                .collect::<Vec<_>>(),
+            0.0,
+        );
+        let cases = [
+            ("wide", 1_000.0),
+            ("exact-fit", exact_width),
+            ("narrow", TOOLBAR_NORMAL_ITEM_WIDTH),
+        ];
+
+        for (name, width) in cases {
+            let ledger = toolbar_combo_boundary_ledger(width);
+            assert!(
+                ledger.combo_response.width() <= width + f32::EPSILON,
+                "{name}: ComboBox response expanded beyond child allocation: {:?} > {:?}",
+                ledger.combo_response,
+                width
+            );
+            assert!(
+                ledger.child_min_rect.width() <= width + f32::EPSILON,
+                "{name}: child min rect exceeded Elements budget"
+            );
+            assert!(
+                ledger.group_response.width() <= width + f32::EPSILON,
+                "{name}: Elements group exceeded allocated width"
+            );
+        }
+    }
+
+    #[test]
     fn toolbar_vertical_padding_is_explicit_and_reduced() {
-        assert_eq!(TOOLBAR_TOP_PADDING, 32.0);
-        assert_eq!(TOOLBAR_BOTTOM_PADDING, 1.0);
-        assert_eq!(TOOLBAR_TOP_PADDING + TOOLBAR_BOTTOM_PADDING, 33.0);
+        assert_eq!(TOOLBAR_TOP_PADDING, 30.0);
+        assert_eq!(TOOLBAR_BOTTOM_PADDING, 2.0);
+        assert_eq!(TOOLBAR_TOP_PADDING + TOOLBAR_BOTTOM_PADDING, 32.0);
     }
 
     #[test]
@@ -2002,7 +2196,7 @@ mod tests {
         );
         assert_eq!(
             toolbar_item_width(ToolbarItem::space("space"), test_toolbar_label_width),
-            72.0
+            TOOLBAR_NORMAL_ITEM_WIDTH
         );
     }
 
