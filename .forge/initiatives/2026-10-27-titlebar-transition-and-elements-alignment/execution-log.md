@@ -478,3 +478,9 @@ None.
 - **Post-merge evidence:** immediately after merge, current branch was `master`, `HEAD` and `master` both resolved to `053a581d4a180cdc2cbe34b03470c639d08c024b`, and `git status --short --branch` returned only `## master` (clean worktree).
 - **Terminal disposition:** both v3 and v4 plans now record phase `closeout` and status `closed`. Failed/tabled v3 diagnostics remain explicitly failed or incomplete; V3-WO-001b's accepted validation is preserved. V4-WO-001 remains complete with `PASS WITH WARNINGS`; V4-WO-002 remains deferred proposal-only. No successor initiative was created. Final closeout-record commit and post-commit clean-state verification follow on `master`.
 - **Final record owner/action:** this execution session commits the three terminal closeout records on `master`, then verifies and reports the resulting final `HEAD`, branch, and clean status. The old continuation branch is not merged back from `master`.
+
+### 2026-10-27 — Post-closeout-record terminal verification
+
+- **Closeout-record commit:** `1b01a1e15f39e3b106350a9ad8903c05b68bb195` (`Record terminal v3/v4 titlebar closeout`), parent `053a581d4a180cdc2cbe34b03470c639d08c024b`, on `master`.
+- **Verified state after that commit:** `git status --short --branch` returned `## master`; `git status --porcelain=v1` was empty; current branch was `master`; `HEAD` and `master` both resolved to `1b01a1e15f39e3b106350a9ad8903c05b68bb195`. Both initiative plans report phase `closeout`, status `closed`.
+- **This evidence update:** records the observed terminal state in the plans and log. It is committed on `master`; the final history tip and worktree state are verified and reported separately by the execution session.
