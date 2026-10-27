@@ -63,11 +63,11 @@ buffer.
   supported role choices through `EditingSession::change_role()` and the shared
   transactional mutation/error presentation; it does not own role policy or
   semantic project state. The toolbar composition is not persisted in native
-  projects, and actionable Items use a centered icon-first borderless outer
-  Item/group as the hover/click surface above a separate text label whose
-  normal color is unchanged; the group surface receives the lightness-only
-  hover affordance, and text labels remain available to tooltips and
-  accessibility surfaces. The Elements Item uses the same centered fixed-width outer group,
+  projects, and actionable Items use a centered icon-first borderless control
+  plus small explicit padding as the hover/click response above a separate text
+  label. The label is outside that response, its normal color is unchanged, and
+  it remains available to tooltips and accessibility surfaces. The control
+  response receives the lightness-only hover affordance. The Elements Item uses the same centered fixed-width outer group,
   placing a ComboBox above its centered `Elements` label.
 - Toolbar allocation is transient and deterministic: `Space` consumes one
   72-point width, while rendered normal Items use their complete deterministic
@@ -85,16 +85,27 @@ buffer.
   after them. Spacing Items are excluded from overflow; overflow action Items
   dispatch through the existing desktop adapters, and an overflow Elements Item
   exposes its role choices through a nested submenu-like menu that still routes
-  role changes through `EditingSession`. A fully fitting row remains inside the
-  available width, including its rightmost Item.
+  role changes through `EditingSession`. The allocator and renderer derive one
+  shared available width from the actual clipped `TopBottomPanel` content rect.
+  A fully fitting row remains inside that rect, including the rightmost Item and
+  its label, after outer panel/frame/viewport insets; the overflow reservation
+  is included in the same edge budget.
+- The native eframe viewport requests a hidden title, a transparent titlebar,
+  and a full-size content view through `ViewportBuilder`'s installed 0.29 API:
+  `with_title_shown(false)`, `with_titlebar_shown(false)`, and
+  `with_fullsize_content_view(true)`. These are native presentation hints: the
+  full-size content and titlebar behavior are macOS-specific in eframe, while
+  other platforms may ignore some or all of them and retain platform-managed
+  decorations. The app must not make pixel-level cross-platform titlebar
+  claims from these requests.
 - The toolbar `TopBottomPanel` uses the egui style's open-widget
   `Widgets::open::weak_bg_fill` as its explicit app-chrome fill through a local
   frame helper. This is the
   framework-exposed deterministic application-surface source and does not
-  mutate global theme visuals or toolbar geometry. eframe's default native
-  window decorations own the title bar and expose no sampleable title-bar
-  color in this setup; therefore the contract is app-surface color alignment,
-  not an unobservable pixel-equality claim against native OS chrome.
+  mutate global theme visuals or toolbar geometry. Native OS chrome remains
+  platform-owned and exposes no portable sampleable title-bar color; therefore
+  the contract is app-surface color alignment, not an unobservable pixel-
+  equality claim against native OS chrome.
 - A focused collapsed caret uses egui animation/repaint state to alternate visible
   and hidden phases every 500 ms. Its animation identity includes the rendered
   revision, caret position, and focus generation, so revision/caret changes and
@@ -138,6 +149,8 @@ buffer.
 | 2026-10-25 | Recorded unified editor and named persistence host behavior | WO-009/WO-010 implementation evidence; app owns the optional current named path and native `rfd` selection, while core owns JSON and atomic-save semantics; recovery remains outside the UI |
 | 2026-10-25 | Recorded hardened painted-editor input boundary | WO-011d implementation evidence: one stable whole-surface response/ID, response-driven focus, egui focus-lock filtering, focused event ownership, and bounded privacy-safe diagnostics; native typing remains a separate unproven manual gate |
 | 2026-10-26 | Recorded continuous focused-caret contract | WO-002 rendered evidence: egui-owned 500 ms phase scheduling is active only for a focused collapsed caret; range selection and unfocused idle frames suppress blink repaint, with revision/caret identity forming the transient reset boundary. |
+| 2026-10-27 | Recorded native viewport presentation request | WO-001 implementation evidence: the eframe 0.29 native runner requests hidden title text, a transparent titlebar, and full-size content through the installed `ViewportBuilder` API; unsupported-platform behavior remains platform-controlled. |
+| 2026-10-27 | Recorded icon-only toolbar hover ownership | WO-002 implementation evidence: action Items allocate an independent icon-plus-padding response for click/hover fill while the centered label remains outside the response with normal text color. |
 
 ## WO-001 verified foundation facts
 

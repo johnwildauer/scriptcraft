@@ -101,10 +101,10 @@ the semantic editing model.
 - **AC-WRITING-005.2:** Given an actionable toolbar Item is activated, the
   desktop shall route it through existing application/session adapters and
   preserve command safety, status, persistence, and fixed-layout PDF behavior.
-- **AC-WRITING-005.3:** Action Items shall use an icon-first, borderless outer
-  Item/group as the hover/click surface, with a centered text label beneath it
-  that retains its normal text color; text labels remain available for tooltip
-  and accessibility use.
+- **AC-WRITING-005.3:** Action Items shall use an icon-first, borderless icon
+  control with a small explicit padding region as the hover/click surface. The
+  centered text label beneath it remains outside that response, retains its
+  normal text color, and remains available for tooltip and accessibility use.
 - **AC-WRITING-005.4:** Given the current caret/focus is within a screenplay
   element, the Elements Item shall display that element's explicit role using
   the seven supported labels Scene Heading, Action, Character, Dialogue,
@@ -120,7 +120,9 @@ the semantic editing model.
   far-right `>>` text menu.
   Action entries and Elements role choices in that menu shall remain executable
   without persisting toolbar layout state; a fully fitting composition shall
-  keep its rightmost Item inside the available width.
+  keep its rightmost Item, including its label, inside the actual clipped
+  toolbar content right edge after panel, frame, and viewport insets are
+  applied.
 
 ## Non-functional requirements
 

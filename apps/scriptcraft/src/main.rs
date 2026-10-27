@@ -26,6 +26,7 @@ const TOOLBAR_ROW_PADDING: f32 = 4.0;
 const TOOLBAR_ITEM_GAP: f32 = 4.0;
 const TOOLBAR_TOP_PADDING: f32 = 2.0;
 const TOOLBAR_BOTTOM_PADDING: f32 = 2.0;
+const TOOLBAR_ICON_HOVER_PADDING: f32 = 2.0;
 
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
@@ -191,6 +192,20 @@ fn toolbar_content_width(widths: &[(ToolbarItem, f32)], overflow_width: f32) -> 
 
 fn toolbar_row_width(widths: &[(ToolbarItem, f32)], overflow_width: f32) -> f32 {
     toolbar_content_width(widths, overflow_width)
+}
+
+fn toolbar_actual_available_width(
+    content_rect: egui::Rect,
+    clip_rect: egui::Rect,
+    row_left: f32,
+) -> f32 {
+    let actual_rect = content_rect.intersect(clip_rect);
+    (actual_rect.right() - row_left).max(0.0)
+}
+
+#[cfg(test)]
+fn toolbar_row_right_edge(row_left: f32, allocation: &ToolbarAllocation) -> f32 {
+    row_left + allocation.row_width
 }
 
 /// Allocate the transient toolbar without measuring or mutating project state.
@@ -445,13 +460,16 @@ impl ScriptCraftApp {
 
     fn toolbar_action_button(&mut self, ui: &mut egui::Ui, item: ToolbarItem, width: f32) {
         let (id, rect) = ui.allocate_space(Vec2::new(width, ui.spacing().interact_size.y * 2.0));
+        let icon_control_size = Vec2::splat(ui.spacing().interact_size.y);
+        let icon_rect =
+            toolbar_icon_hover_rect(rect, icon_control_size, TOOLBAR_ICON_HOVER_PADDING);
         let response = ui
-            .interact(rect, id, Sense::click())
+            .interact(icon_rect, id.with("icon"), Sense::click())
             .on_hover_text(item.label)
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         let fill = toolbar_group_fill(ui.style(), response.hovered());
         if fill != Color32::TRANSPARENT {
-            ui.painter().rect_filled(rect, 2.0, fill);
+            ui.painter().rect_filled(icon_rect, 2.0, fill);
         }
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -543,7 +561,14 @@ impl ScriptCraftApp {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        let allocation = allocate_toolbar(&default_toolbar_items(), ui.available_width());
+        // Use the clipped panel content edge for both allocation and rendering.
+        // The logical panel width can extend past the visible viewport after
+        // frame/panel and native viewport insets have been applied.
+        let content_rect = ui.available_rect_before_wrap();
+        let row_left = ui.cursor().left();
+        let available_width =
+            toolbar_actual_available_width(content_rect, ui.clip_rect(), row_left);
+        let allocation = allocate_toolbar(&default_toolbar_items(), available_width);
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(TOOLBAR_TOP_PADDING);
@@ -1384,6 +1409,20 @@ fn toolbar_chrome_color(ctx: &egui::Context) -> Color32 {
     ctx.style().visuals.widgets.open.weak_bg_fill
 }
 
+fn toolbar_icon_hover_rect(
+    group_rect: egui::Rect,
+    icon_control_size: Vec2,
+    padding: f32,
+) -> egui::Rect {
+    egui::Rect::from_center_size(
+        egui::pos2(
+            group_rect.center().x,
+            group_rect.min.y + padding + icon_control_size.y / 2.0,
+        ),
+        icon_control_size + Vec2::splat(padding * 2.0),
+    )
+}
+
 fn toolbar_group_fill(style: &egui::Style, hovered: bool) -> Color32 {
     if hovered {
         style.visuals.widgets.hovered.bg_fill
@@ -1458,8 +1497,21 @@ impl eframe::App for ScriptCraftApp {
     }
 }
 
+fn native_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            // eframe 0.29 exposes the macOS titlebar controls through these
+            // names; together they are the installed-API equivalent of the
+            // requested hidden/transparent/full-size titlebar configuration.
+            .with_title_shown(false)
+            .with_titlebar_shown(false)
+            .with_fullsize_content_view(true),
+        ..Default::default()
+    }
+}
+
 fn main() -> eframe::Result {
-    let options = eframe::NativeOptions::default();
+    let options = native_options();
     eframe::run_native(
         "ScriptCraft",
         options,
@@ -1476,6 +1528,15 @@ mod tests {
     use super::*;
     use scriptcraft_core::layout::{CHAR_WIDTH, LINE_HEIGHT};
     use scriptcraft_core::Role;
+
+    #[test]
+    fn native_options_configure_the_requested_viewport_presentation() {
+        let options = native_options();
+
+        assert_eq!(options.viewport.title_shown, Some(false));
+        assert_eq!(options.viewport.titlebar_shown, Some(false));
+        assert_eq!(options.viewport.fullsize_content_view, Some(true));
+    }
 
     #[test]
     fn toolbar_chrome_uses_open_widget_fill_without_mutating_style() {
@@ -1506,6 +1567,32 @@ mod tests {
             style.visuals.widgets.hovered.bg_fill
         );
         assert_eq!(style.visuals.text_color(), ctx.style().visuals.text_color());
+    }
+
+    #[test]
+    fn toolbar_icon_hover_region_is_centered_and_excludes_the_label_area() {
+        let group = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), Vec2::new(72.0, 48.0));
+        let icon = toolbar_icon_hover_rect(group, Vec2::splat(24.0), TOOLBAR_ICON_HOVER_PADDING);
+
+        assert_eq!(icon.min.x, 32.0);
+        assert_eq!(icon.max.x, 60.0);
+        assert_eq!(icon.min.y, 20.0);
+        assert_eq!(icon.max.y, 48.0);
+        assert!(icon.center().x == group.center().x);
+        assert!(icon.max.y < group.max.y);
+        assert!(!icon.contains(egui::pos2(group.center().x, 60.0)));
+    }
+
+    #[test]
+    fn toolbar_icon_hover_fill_uses_the_existing_hover_color_source_only() {
+        let ctx = egui::Context::default();
+        let style = ctx.style();
+        assert_eq!(
+            toolbar_group_fill(&style, true),
+            style.visuals.widgets.hovered.bg_fill
+        );
+        assert_eq!(toolbar_group_fill(&style, false), Color32::TRANSPARENT);
+        assert_eq!(TOOLBAR_ICON_HOVER_PADDING, 2.0);
     }
 
     #[test]
@@ -1657,6 +1744,66 @@ mod tests {
                 toolbar_content_width(&allocation.visible, allocation.overflow_width)
             );
         }
+    }
+
+    #[test]
+    fn toolbar_shared_row_edge_contains_final_group_at_actual_content_edge() {
+        let content = egui::Rect::from_min_max(egui::pos2(12.0, 0.0), egui::pos2(812.0, 48.0));
+        let clip = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(804.0, 48.0));
+        let row_left = content.left();
+        let available = toolbar_actual_available_width(content, clip, row_left);
+        let allocation = allocate_toolbar(&default_toolbar_items(), available);
+
+        assert_eq!(available, 792.0);
+        assert!(toolbar_row_right_edge(row_left, &allocation) <= clip.right());
+        assert_eq!(
+            allocation.visible.last().map(|(item, _)| item.label),
+            Some("Export PDF")
+        );
+    }
+
+    #[test]
+    fn toolbar_shared_row_edge_contains_wide_and_exact_fit_allocations() {
+        let content = egui::Rect::from_min_size(egui::pos2(20.0, 0.0), Vec2::new(1000.0, 48.0));
+        let wide = allocate_toolbar(
+            &default_toolbar_items(),
+            toolbar_actual_available_width(content, content, content.left()),
+        );
+        assert!(toolbar_row_right_edge(content.left(), &wide) <= content.right());
+
+        let exact_width = toolbar_content_width(
+            &default_toolbar_items()
+                .iter()
+                .copied()
+                .map(|item| (item, toolbar_item_width(item)))
+                .collect::<Vec<_>>(),
+            0.0,
+        );
+        let exact_content =
+            egui::Rect::from_min_size(egui::pos2(20.0, 0.0), Vec2::new(exact_width, 48.0));
+        let exact = allocate_toolbar(&default_toolbar_items(), exact_width);
+        assert!(toolbar_row_right_edge(exact_content.left(), &exact) <= exact_content.right());
+        assert!(exact.overflow.is_empty());
+    }
+
+    #[test]
+    fn toolbar_shared_row_edge_preserves_narrow_overflow_reservation() {
+        let content = egui::Rect::from_min_size(egui::pos2(8.0, 0.0), Vec2::new(300.0, 48.0));
+        let allocation = allocate_toolbar(
+            &default_toolbar_items(),
+            toolbar_actual_available_width(content, content, content.left()),
+        );
+
+        assert_eq!(allocation.overflow_width, TOOLBAR_OVERFLOW_WIDTH);
+        assert_eq!(
+            allocation
+                .overflow
+                .iter()
+                .map(|item| item.label)
+                .collect::<Vec<_>>(),
+            vec!["Save As", "Elements", "Export PDF"]
+        );
+        assert!(toolbar_row_right_edge(content.left(), &allocation) <= content.right());
     }
 
     #[test]
