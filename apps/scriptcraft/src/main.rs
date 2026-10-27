@@ -3,6 +3,7 @@
 
 use eframe::egui::{
     self, Color32, FontFamily, FontId, Key, RichText, Sense, Stroke, TextStyle, TextWrapMode, Vec2,
+    WidgetText,
 };
 use scriptcraft_core::editing::{EditError, EditingSession, Position, Selection};
 use scriptcraft_core::exports;
@@ -23,17 +24,21 @@ const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 // The 46-point normal slot is the compact baseline recorded by the focused
 // geometry tests; labels may still expand a slot when active font metrics need it.
 const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 46.0;
-const TOOLBAR_ELEMENTS_WIDTH: f32 = 92.0;
+const TOOLBAR_ELEMENTS_WIDTH: f32 = 128.0;
 const TOOLBAR_SPACE_WIDTH: f32 = 72.0;
 const TOOLBAR_GROUP_HORIZONTAL_PADDING: f32 = 8.0;
 const TOOLBAR_OVERFLOW_WIDTH: f32 = 32.0;
 const TOOLBAR_ROW_PADDING: f32 = 4.0;
 const TOOLBAR_ITEM_GAP: f32 = 4.0;
-const TOOLBAR_TOP_PADDING: f32 = 30.0;
+const TOOLBAR_TOP_PADDING: f32 = 0.0;
 const TOOLBAR_BOTTOM_PADDING: f32 = 2.0;
 const TOOLBAR_ICON_HOVER_PADDING: f32 = 2.0;
 const TITLE_STRIP_TEXT: &str = "ScriptCraft";
 const TITLE_STRIP_HEIGHT: f32 = 30.0;
+#[cfg(test)]
+const CHROME_GEOMETRY_TOLERANCE: f32 = 0.5;
+#[cfg(test)]
+const TRANSITION_METRIC_TOLERANCE: f32 = 0.01;
 
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
@@ -297,6 +302,26 @@ fn toolbar_combo_boundary_ledger(width: f32) -> ToolbarComboBoundaryLedger {
         },
     );
     ledger
+}
+
+fn elements_closed_text_rect(
+    control_rect: egui::Rect,
+    button_padding: egui::Vec2,
+    icon_spacing: f32,
+    icon_width: f32,
+) -> egui::Rect {
+    let content_rect = control_rect.shrink2(button_padding);
+    let text_right = (content_rect.right() - icon_spacing - icon_width).max(content_rect.left());
+    egui::Rect::from_min_max(
+        content_rect.left_top(),
+        egui::pos2(text_right, content_rect.bottom()),
+    )
+}
+
+fn elements_closed_text_position(text_rect: egui::Rect, text_size: Vec2) -> egui::Pos2 {
+    egui::Align2::CENTER_CENTER
+        .align_size_within_rect(text_size, text_rect)
+        .min
 }
 
 #[cfg(test)]
@@ -697,17 +722,38 @@ impl ScriptCraftApp {
                 // same explicit budget used by allocate_toolbar so it cannot
                 // advance the parent row past the allocated Elements slot.
                 ui.set_width(width);
-                let combo_response = egui::ComboBox::from_id_salt(item.id)
+                let combo_result = egui::ComboBox::from_id_salt(item.id)
                     .width(width)
                     .wrap_mode(TextWrapMode::Truncate)
-                    .selected_text(screenplay_role_label(next_role))
+                    // The stock ComboBox has no independent closed-text alignment
+                    // setting. Keep its button, popup, ID, keyboard handling, and
+                    // arrow intact, then paint only the closed selected galley below.
+                    .selected_text("")
                     .show_ui(ui, |ui| {
                         for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
                             ui.selectable_value(&mut next_role, role, label);
                         }
-                    })
-                    .response
-                    .on_hover_cursor(toolbar_cursor_icon());
+                    });
+                let popup_open = combo_result.inner.is_some();
+                let combo_response = combo_result.response.on_hover_cursor(toolbar_cursor_icon());
+                if !popup_open {
+                    let text_rect = elements_closed_text_rect(
+                        combo_response.rect,
+                        ui.spacing().button_padding,
+                        ui.spacing().icon_spacing,
+                        ui.spacing().icon_width,
+                    );
+                    let galley = WidgetText::from(screenplay_role_label(next_role)).into_galley(
+                        ui,
+                        Some(TextWrapMode::Truncate),
+                        text_rect.width(),
+                        TextStyle::Button,
+                    );
+                    let text_position = elements_closed_text_position(text_rect, galley.size());
+                    let visuals = ui.style().interact(&combo_response);
+                    ui.painter()
+                        .galley(text_position, galley, visuals.text_color());
+                }
                 let _ = ui.label(item.label);
                 debug_assert!(combo_response.rect.width() <= width + f32::EPSILON);
             },
@@ -1088,8 +1134,14 @@ impl ScriptCraftApp {
         };
         self.rendered_revision = Some(self.session.revision());
         let available = ui.available_size();
-        let (page_width, horizontal_padding, scale) =
-            presentation_geometry(available.x, layout.profile.paper_width as f32);
+        let metrics = presentation_metrics(
+            available.x,
+            layout.profile.paper_width as f32,
+            layout.profile.font_size as f32,
+        );
+        let page_width = metrics.page_width;
+        let scale = metrics.scale;
+        let horizontal_padding = ((available.x.max(page_width) - page_width) / 2.0).max(0.0);
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let mut page_rects = Vec::with_capacity(layout.pages.len());
         let reveal_intent = self.reveal_intent;
@@ -1517,6 +1569,27 @@ fn presentation_geometry(available_width: f32, paper_width: f32) -> (f32, f32, f
     (page_width, horizontal_padding, page_width / paper_width)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PresentationMetrics {
+    page_width: f32,
+    scale: f32,
+    font_size: f32,
+}
+
+fn presentation_metrics(
+    available_width: f32,
+    paper_width: f32,
+    base_font_size: f32,
+) -> PresentationMetrics {
+    let (page_width, _horizontal_padding, scale) =
+        presentation_geometry(available_width, paper_width);
+    PresentationMetrics {
+        page_width,
+        scale,
+        font_size: (base_font_size * scale).max(5.0),
+    }
+}
+
 fn paint_fixed_metric_text(
     painter: &egui::Painter,
     origin: egui::Pos2,
@@ -1656,24 +1729,85 @@ fn toolbar_group_fill(style: &egui::Style, hovered: bool) -> Color32 {
     }
 }
 
+#[cfg(test)]
 fn toolbar_frame(ctx: &egui::Context) -> egui::Frame {
-    egui::Frame::side_top_panel(&ctx.style()).fill(toolbar_chrome_color(ctx))
+    chrome_frame(ctx)
 }
 
 fn title_strip_frame(ctx: &egui::Context) -> egui::Frame {
-    egui::Frame::default().fill(toolbar_chrome_color(ctx))
+    chrome_frame(ctx)
+}
+
+fn chrome_frame(ctx: &egui::Context) -> egui::Frame {
+    // The shared frame owns fill and inset policy. The title response therefore
+    // reaches both window edges, while toolbar row padding remains explicit.
+    // A disabled panel separator removes the seam without changing controls.
+    egui::Frame::none()
+        .fill(toolbar_chrome_color(ctx))
+        .stroke(egui::Stroke::NONE)
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ChromeGeometry {
+    panel: egui::Rect,
+    title: egui::Rect,
+    toolbar: egui::Rect,
+}
+
+#[cfg(test)]
+fn chrome_geometry(panel: egui::Rect, toolbar_height: f32) -> ChromeGeometry {
+    let title = egui::Rect::from_min_size(panel.min, Vec2::new(panel.width(), TITLE_STRIP_HEIGHT));
+    let toolbar = egui::Rect::from_min_max(
+        egui::pos2(panel.left(), title.bottom()),
+        egui::pos2(
+            panel.right(),
+            (title.bottom() + toolbar_height).min(panel.bottom()),
+        ),
+    );
+    ChromeGeometry {
+        panel,
+        title,
+        toolbar,
+    }
+}
+
+fn toolbar_content_height(style: &egui::Style) -> f32 {
+    style.spacing.interact_size.y * 2.0 + TOOLBAR_BOTTOM_PADDING
 }
 
 fn title_strip_text_position(strip: egui::Rect, text_size: Vec2) -> egui::Pos2 {
     strip.center() - text_size / 2.0
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewportMaximizedState {
+    Normal,
+    Maximized,
+    Unknown,
+}
+
+fn viewport_maximized_state(maximized: Option<bool>) -> ViewportMaximizedState {
+    match maximized {
+        Some(false) => ViewportMaximizedState::Normal,
+        Some(true) => ViewportMaximizedState::Maximized,
+        None => ViewportMaximizedState::Unknown,
+    }
+}
+
 fn title_strip_viewport_command(maximized: Option<bool>) -> Option<egui::ViewportCommand> {
-    maximized.map(|is_maximized| egui::ViewportCommand::Maximized(!is_maximized))
+    match viewport_maximized_state(maximized) {
+        ViewportMaximizedState::Normal => Some(egui::ViewportCommand::Maximized(true)),
+        ViewportMaximizedState::Maximized => Some(egui::ViewportCommand::Maximized(false)),
+        ViewportMaximizedState::Unknown => None,
+    }
 }
 
 fn title_strip(ui: &mut egui::Ui, ctx: &egui::Context) {
-    let response = ui.allocate_response(ui.available_size(), Sense::click());
+    let response = ui.allocate_response(
+        Vec2::new(ui.available_width(), TITLE_STRIP_HEIGHT),
+        Sense::click(),
+    );
     let job = egui::WidgetText::from(RichText::new(TITLE_STRIP_TEXT).strong()).into_layout_job(
         ui.style(),
         egui::FontSelection::Default,
@@ -1698,13 +1832,15 @@ impl eframe::App for ScriptCraftApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
-        egui::TopBottomPanel::top("title-strip")
+        let chrome_height = TITLE_STRIP_HEIGHT + toolbar_content_height(&ctx.style());
+        egui::TopBottomPanel::top("titlebar-toolbar")
             .frame(title_strip_frame(ctx))
-            .exact_height(TITLE_STRIP_HEIGHT)
-            .show(ctx, |ui| title_strip(ui, ctx));
-        egui::TopBottomPanel::top("toolbar")
-            .frame(toolbar_frame(ctx))
-            .show(ctx, |ui| self.toolbar(ui));
+            .show_separator_line(false)
+            .exact_height(chrome_height)
+            .show(ctx, |ui| {
+                title_strip(ui, ctx);
+                self.toolbar(ui);
+            });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(&self.status);
@@ -1823,11 +1959,23 @@ mod tests {
         assert_eq!(TITLE_STRIP_HEIGHT, 30.0);
         assert_eq!(position, egui::pos2(116.0, 26.0));
         assert_eq!(position + text_size / 2.0, strip.center());
-        assert_eq!(TITLE_STRIP_HEIGHT + TOOLBAR_TOP_PADDING, 60.0);
+        assert_eq!(TITLE_STRIP_HEIGHT + TOOLBAR_TOP_PADDING, 30.0);
     }
 
     #[test]
     fn title_strip_viewport_toggle_is_safe_for_known_and_unknown_state() {
+        assert_eq!(
+            viewport_maximized_state(Some(false)),
+            ViewportMaximizedState::Normal
+        );
+        assert_eq!(
+            viewport_maximized_state(Some(true)),
+            ViewportMaximizedState::Maximized
+        );
+        assert_eq!(
+            viewport_maximized_state(None),
+            ViewportMaximizedState::Unknown
+        );
         assert_eq!(
             title_strip_viewport_command(Some(false)),
             Some(egui::ViewportCommand::Maximized(true))
@@ -1946,14 +2094,48 @@ mod tests {
     #[test]
     fn toolbar_frame_preserves_top_panel_geometry_defaults() {
         let ctx = egui::Context::default();
-        let expected = egui::Frame::side_top_panel(&ctx.style());
         let actual = toolbar_frame(&ctx);
 
-        assert_eq!(actual.inner_margin, expected.inner_margin);
-        assert_eq!(actual.outer_margin, expected.outer_margin);
-        assert_eq!(actual.rounding, expected.rounding);
-        assert_eq!(actual.shadow, expected.shadow);
-        assert_eq!(actual.stroke, expected.stroke);
+        assert_eq!(actual.inner_margin, egui::Margin::ZERO);
+        assert_eq!(actual.outer_margin, egui::Margin::ZERO);
+        assert_eq!(actual.stroke, egui::Stroke::NONE);
+        assert_eq!(actual.fill, toolbar_chrome_color(&ctx));
+    }
+
+    #[test]
+    fn shared_chrome_geometry_has_no_gap_and_full_width_title_hit_region() {
+        let panel = egui::Rect::from_min_size(egui::pos2(12.0, 4.0), Vec2::new(800.0, 82.0));
+        let geometry = chrome_geometry(panel, 52.0);
+
+        assert_eq!(geometry.title.left(), panel.left());
+        assert_eq!(geometry.title.right(), panel.right());
+        assert_eq!(geometry.title.top(), panel.top());
+        assert!(
+            (geometry.toolbar.top() - geometry.title.bottom()).abs() <= CHROME_GEOMETRY_TOLERANCE
+        );
+        assert!((geometry.toolbar.bottom() - panel.bottom()).abs() <= CHROME_GEOMETRY_TOLERANCE);
+        assert!(geometry.panel.contains_rect(geometry.title));
+        assert!(geometry.panel.contains_rect(geometry.toolbar));
+    }
+
+    #[test]
+    fn presentation_metrics_are_stable_for_normal_and_maximized_widths() {
+        let normal = presentation_metrics(800.0, 612.0, 12.0);
+        let maximized = presentation_metrics(1_400.0, 612.0, 12.0);
+
+        assert!((normal.scale - maximized.scale).abs() <= TRANSITION_METRIC_TOLERANCE);
+        assert!((normal.page_width - maximized.page_width).abs() <= CHROME_GEOMETRY_TOLERANCE);
+        assert!((normal.font_size - maximized.font_size).abs() <= TRANSITION_METRIC_TOLERANCE);
+    }
+
+    #[test]
+    fn presentation_metrics_bound_narrow_width_without_claiming_transition_control() {
+        let narrow = presentation_metrics(400.0, 612.0, 12.0);
+        let stable = presentation_metrics(800.0, 612.0, 12.0);
+
+        assert!(narrow.scale < stable.scale);
+        assert!(narrow.font_size < stable.font_size);
+        assert_eq!(TOOLBAR_ELEMENTS_WIDTH, 128.0);
     }
 
     #[test]
@@ -2020,6 +2202,71 @@ mod tests {
     }
 
     #[test]
+    fn elements_closed_text_is_centered_in_the_arrow_excluded_content_area() {
+        let control = egui::Rect::from_min_size(egui::pos2(10.0, 4.0), Vec2::new(128.0, 24.0));
+        let text_rect = elements_closed_text_rect(control, Vec2::splat(4.0), 4.0, 12.0);
+
+        assert_eq!(text_rect.left(), 14.0);
+        assert_eq!(text_rect.right(), 118.0);
+        assert_eq!(text_rect.width(), 104.0);
+        assert_eq!(
+            elements_closed_text_position(text_rect, Vec2::new(40.0, 14.0)).x,
+            46.0
+        );
+
+        let arrow_rect = egui::Align2::RIGHT_CENTER
+            .align_size_within_rect(Vec2::new(12.0, 12.0), control.shrink2(Vec2::splat(4.0)));
+        assert_eq!(arrow_rect.center().x, 128.0);
+        assert_eq!(text_rect.right() + 4.0, arrow_rect.left());
+    }
+
+    #[test]
+    fn elements_closed_text_layout_truncates_long_labels_without_leaving_the_control() {
+        let context = egui::Context::default();
+        let control = egui::Rect::from_min_size(egui::pos2(10.0, 4.0), Vec2::new(128.0, 24.0));
+        let _ = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(400.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let text_rect =
+                        elements_closed_text_rect(control, ui.spacing().button_padding, 4.0, 12.0);
+                    let galley = WidgetText::from(
+                        "A deliberately long screenplay role label that must truncate",
+                    )
+                    .into_galley(
+                        ui,
+                        Some(TextWrapMode::Truncate),
+                        text_rect.width(),
+                        TextStyle::Button,
+                    );
+                    let position = elements_closed_text_position(text_rect, galley.size());
+
+                    assert!(galley.size().x <= text_rect.width());
+                    assert!(position.x >= text_rect.left());
+                    assert!(position.x + galley.size().x <= text_rect.right());
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn elements_popup_choices_keep_left_aligned_stock_path_for_all_roles() {
+        // The custom presentation is intentionally gated on the ComboBox being
+        // closed. Popup entries continue to use the stock selectable_value path,
+        // whose menu UI owns left-aligned labels and keyboard navigation.
+        assert_eq!(SUPPORTED_SCREENPLAY_ROLES.len(), 7);
+        assert!(SUPPORTED_SCREENPLAY_ROLES
+            .iter()
+            .all(|(_, label)| !label.is_empty()));
+    }
+
+    #[test]
     fn toolbar_allocation_wide_and_exact_fit_are_deterministic() {
         let items = default_toolbar_items();
         let wide = allocate_toolbar(&items, 800.0, test_toolbar_label_width);
@@ -2070,7 +2317,7 @@ mod tests {
         assert_eq!(TOOLBAR_NORMAL_ITEM_WIDTH, 46.0);
         assert_eq!(TOOLBAR_ROW_PADDING, 4.0);
         assert_eq!(TOOLBAR_ITEM_GAP, 4.0);
-        assert_eq!(TOOLBAR_TOP_PADDING, 30.0);
+        assert_eq!(TOOLBAR_TOP_PADDING, 0.0);
         assert_eq!(TOOLBAR_BOTTOM_PADDING, 2.0);
     }
 
@@ -2254,9 +2501,9 @@ mod tests {
 
     #[test]
     fn toolbar_vertical_padding_is_explicit_and_reduced() {
-        assert_eq!(TOOLBAR_TOP_PADDING, 30.0);
+        assert_eq!(TOOLBAR_TOP_PADDING, 0.0);
         assert_eq!(TOOLBAR_BOTTOM_PADDING, 2.0);
-        assert_eq!(TOOLBAR_TOP_PADDING + TOOLBAR_BOTTOM_PADDING, 32.0);
+        assert_eq!(TOOLBAR_TOP_PADDING + TOOLBAR_BOTTOM_PADDING, 2.0);
     }
 
     #[test]

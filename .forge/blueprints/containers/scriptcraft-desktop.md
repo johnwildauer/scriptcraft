@@ -73,8 +73,13 @@ buffer.
   the same centered fixed-width outer group, placing a ComboBox above its
   centered `Elements` label. Toolbar metadata exposes a typed width policy;
   the shared resolver applies measured label-aware widths to ordinary Items and
-  the evidence-backed 92-point Elements override to both allocation and
+  the evidence-backed 128-point Elements override to both allocation and
   rendering, while the label remains outside the action response.
+  The closed Elements ComboBox centers only its selected role galley within
+  the arrow-excluded control content region, using truncation when needed;
+  its standard arrow, response/ID, keyboard behavior, and popup ownership
+  remain stock. Open popup role choices remain left-aligned and continue to
+  route through the existing transactional session operation.
 - Toolbar allocation is transient and deterministic: `Space` consumes one
   72-point width, while rendered normal Items use their complete group width
   including label text measured through the active egui style/font galley path.
@@ -85,7 +90,7 @@ buffer.
   manual geometry controls `TOOLBAR_NORMAL_ITEM_WIDTH`,
   `TOOLBAR_ROW_PADDING`, `TOOLBAR_ITEM_GAP`, and
   `TOOLBAR_OVERFLOW_WIDTH`. The named vertical controls are
-  `TOOLBAR_TOP_PADDING` = 2 points and `TOOLBAR_BOTTOM_PADDING` = 2 points.
+  `TOOLBAR_TOP_PADDING` = 0 points and `TOOLBAR_BOTTOM_PADDING` = 2 points.
   `Flexible Space`
   Items divide the remaining width equally after that budget, and narrow widths
   retain the leftmost fitting Items while placing a far-right `>>` text menu
@@ -105,20 +110,23 @@ buffer.
   other platforms may ignore some or all of them and retain platform-managed
   decorations. The app must not make pixel-level cross-platform titlebar
   claims from these requests.
-- Above the toolbar, the desktop shell renders a separate 30-point custom
-  title strip with centered bold `ScriptCraft` placeholder text. Its full-strip
-  egui response owns double-click detection and sends
+- The desktop shell renders a unified title-bar/toolbar app surface. Its
+  30-point title region displays centered bold `ScriptCraft` placeholder text;
+  its full-width egui response owns double-click detection and sends
   `ViewportCommand::Maximized(!maximized)` only when `ViewportInfo::maximized`
-  is `Some`; unknown state is a no-op. Unmaximize relies on native/backend
+  is `Some`; unknown state is a no-op. The shared surface owns the app-chrome
+  fill, zero frame inset, and no separator stroke, while toolbar row padding
+  owns toolbar allocation geometry. Unmaximize relies on native/backend
   restoration where observable and makes no universal exact prior-frame claim.
 - Toolbar action controls and the Elements outer group request the standard
   arrow cursor; the Elements label remains decorative and does not own a
   competing response. The existing whole-surface painted editor response
   requests the text/I-beam cursor, while page rectangles remain geometry rather
   than independent cursor or focus owners.
-- The toolbar `TopBottomPanel` uses the egui style's open-widget
+- The unified title-bar/toolbar `TopBottomPanel` uses the egui style's open-widget
   `Widgets::open::weak_bg_fill` as its explicit app-chrome fill through a local
-  frame helper. This is the
+  shared frame helper. The shared frame has no inner/outer inset and disables
+  the panel separator; this is the
   framework-exposed deterministic application-surface source and does not
   mutate global theme visuals or toolbar geometry. Native OS chrome remains
   platform-owned and exposes no portable sampleable title-bar color; therefore
@@ -169,6 +177,7 @@ buffer.
 | 2026-10-26 | Recorded continuous focused-caret contract | WO-002 rendered evidence: egui-owned 500 ms phase scheduling is active only for a focused collapsed caret; range selection and unfocused idle frames suppress blink repaint, with revision/caret identity forming the transient reset boundary. |
 | 2026-10-27 | Recorded native viewport presentation request | WO-001 implementation evidence: the eframe 0.29 native runner requests hidden title text, a transparent titlebar, and full-size content through the installed `ViewportBuilder` API; unsupported-platform behavior remains platform-controlled. |
 | 2026-10-27 | Recorded icon-only toolbar hover ownership | WO-002 implementation evidence: action Items allocate an independent icon-plus-padding response for click/hover fill while the centered label remains outside the response with normal text color. |
+| 2026-10-27 | Recorded unified title-bar/toolbar surface ownership | WO-002 implementation evidence: one zero-inset, no-separator app-chrome frame owns the title and toolbar surface; the title retains a full-width response and the toolbar retains explicit row allocation padding. |
 
 ## WO-001 verified foundation facts
 
