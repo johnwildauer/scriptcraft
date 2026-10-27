@@ -98,6 +98,16 @@
 - **Result:** Initiative status set to `closed`; merge into the recorded base branch remains the final Git action.
 - **Next action/owner:** Forge orchestrator; merge the committed branch and record the result.
 
+### 2026-10-27 — Git merge completed
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `code-orchestrator-toolbar-overflow-hover-2026-10-27`
+- **State transition:** Git closure complete; initiative remains `closed`
+- **Action:** Fast-forward merged `dev/2026-10-27-toolbar-overflow-hover` into `dev/2026-10-26-editor-geometry-corrections-v2`.
+- **Evidence:** Base branch advanced from `bea6e1e` to `4f1b2d1` with no conflicts.
+- **Result:** Initiative branch merged; final documentation is on the base branch. Native visual follow-ups remain documented.
+- **Next action/owner:** None for this initiative.
+
 ### 2026-10-27 — WO-002a implemented with required gates passing
 
 - **Actor/role:** Desktop toolbar fix implementer
