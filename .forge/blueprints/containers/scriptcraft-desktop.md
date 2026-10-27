@@ -63,14 +63,18 @@ buffer.
   supported role choices through `EditingSession::change_role()` and the shared
   transactional mutation/error presentation; it does not own role policy or
   semantic project state. The toolbar composition is not persisted in native
-  projects, and actionable Items use icon-first borderless presentation with
-  the icon above a centered text label, while text labels remain available to
-  tooltips and accessibility surfaces. The Elements Item places a centered
-  `Elements` label beneath its selected-role ComboBox.
+  projects, and actionable Items use an icon-only borderless Button as the
+  hover/click surface above a separate centered text label whose normal color
+  is unchanged; text labels remain available to tooltips and accessibility
+  surfaces. The Elements Item uses the same centered fixed-width outer group,
+  placing a ComboBox above its centered `Elements` label.
 - Toolbar allocation is transient and deterministic: normal Items and `Space`
-  consume one normal-item width, while the allocator and renderer share a
-  4-point row-padding budget, a 4-point inter-item gap (half egui's default
-  horizontal gap), and the 32-point overflow reservation. `Flexible Space`
+  consume one 72-point normal-item width, while the allocator and renderer
+  share a 4-point row-padding budget, a 4-point inter-item gap (half egui's
+  default horizontal gap), and the 32-point overflow reservation. These three
+  values are the named manual geometry controls
+  `TOOLBAR_NORMAL_ITEM_WIDTH`, `TOOLBAR_ROW_PADDING`, and `TOOLBAR_ITEM_GAP`.
+  `Flexible Space`
   Items divide the remaining width equally after that budget, and narrow widths
   retain the leftmost fitting Items while placing a far-right `>>` text menu
   after them. Spacing Items are excluded from overflow; overflow action Items

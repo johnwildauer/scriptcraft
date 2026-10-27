@@ -101,9 +101,10 @@ the semantic editing model.
 - **AC-WRITING-005.2:** Given an actionable toolbar Item is activated, the
   desktop shall route it through existing application/session adapters and
   preserve command safety, status, persistence, and fixed-layout PDF behavior.
-- **AC-WRITING-005.3:** Action Items shall use icon-first, borderless button
-  presentation with the icon above a centered text label, a lightness-only
-  hover affordance, and retain text labels for tooltip and accessibility use.
+- **AC-WRITING-005.3:** Action Items shall use an icon-only, borderless button
+  as the hover/click surface, with a separate centered text label beneath it
+  that retains its normal text color; text labels remain available for tooltip
+  and accessibility use.
 - **AC-WRITING-005.4:** Given the current caret/focus is within a screenplay
   element, the Elements Item shall display that element's explicit role using
   the seven supported labels Scene Heading, Action, Character, Dialogue,
@@ -111,10 +112,11 @@ the semantic editing model.
   through the existing transactional session operation and preserve the
   document on rejection.
 - **AC-WRITING-005.5:** Given a toolbar width, normal Items and Space shall
-  consume one deterministic normal-item width, Flexible Space Items shall
-  divide the remaining width equally after the shared row padding and reduced
-  inter-item gap budget, and a narrow toolbar shall retain the leftmost fitting
-  Items while exposing non-spacing Items through a far-right `>>` text menu.
+  consume one deterministic 72-point normal-item width, Flexible Space Items
+  shall divide the remaining width equally after the shared 4-point row
+  padding and 4-point inter-item gap budget, and a narrow toolbar shall retain
+  the leftmost fitting Items while exposing non-spacing Items through a far-right
+  `>>` text menu.
   Action entries and Elements role choices in that menu shall remain executable
   without persisting toolbar layout state; a fully fitting composition shall
   keep its rightmost Item inside the available width.

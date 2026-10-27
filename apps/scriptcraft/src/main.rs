@@ -17,7 +17,8 @@ const DEFAULT_PRESENTATION_SCALE_MULTIPLIER: f32 = 1.6;
 const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
 const MINIMUM_PAGE_WIDTH: f32 = 240.0;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
-const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 88.0;
+// Manual toolbar geometry controls: tune the fixed Item group width and row spacing here.
+const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 72.0;
 const TOOLBAR_OVERFLOW_WIDTH: f32 = 32.0;
 const TOOLBAR_ROW_PADDING: f32 = 4.0;
 const TOOLBAR_ITEM_GAP: f32 = 4.0;
@@ -119,10 +120,6 @@ impl ToolbarItem {
             kind: ToolbarItemKind::Space,
         }
     }
-}
-
-fn toolbar_action_text(item: ToolbarItem) -> String {
-    format!("{}\n{}", item.icon, item.label)
 }
 
 const SUPPORTED_SCREENPLAY_ROLES: [(Role, &str); 7] = [
@@ -425,18 +422,25 @@ impl ScriptCraftApp {
     }
 
     fn toolbar_action_button(&mut self, ui: &mut egui::Ui, item: ToolbarItem, width: f32) {
-        let button = egui::Button::new(RichText::new(toolbar_action_text(item)))
-            .frame(false)
-            .sense(Sense::click());
-        let response = ui
-            .add_sized(Vec2::new(width, ui.spacing().interact_size.y * 2.0), button)
-            .on_hover_text(item.label)
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
-        if response.clicked() {
-            if let ToolbarItemKind::Action(action) = item.kind {
-                self.dispatch_toolbar_action(action);
-            }
-        }
+        ui.allocate_ui_with_layout(
+            Vec2::new(width, ui.spacing().interact_size.y * 2.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                let button = egui::Button::new(RichText::new(item.icon))
+                    .frame(false)
+                    .sense(Sense::click());
+                let response = ui
+                    .add(button)
+                    .on_hover_text(item.label)
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                ui.label(item.label);
+                if response.clicked() {
+                    if let ToolbarItemKind::Action(action) = item.kind {
+                        self.dispatch_toolbar_action(action);
+                    }
+                }
+            },
+        );
     }
 
     fn focused_role(&self) -> Option<Role> {
@@ -1464,17 +1468,15 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_action_presentation_stacks_icon_above_label() {
+    fn toolbar_action_metadata_keeps_icon_and_label_separate() {
         for item in default_toolbar_items()
             .iter()
             .copied()
             .filter(|item| matches!(item.kind, ToolbarItemKind::Action(_)))
         {
-            assert_eq!(
-                toolbar_action_text(item),
-                format!("{}\n{}", item.icon, item.label)
-            );
-            assert!(!toolbar_action_text(item).contains(&format!("{} {}", item.icon, item.label)));
+            assert!(!item.icon.is_empty());
+            assert!(!item.label.is_empty());
+            assert_ne!(item.icon, item.label);
         }
     }
 
@@ -1492,8 +1494,8 @@ mod tests {
         let wide = allocate_toolbar(&items, 800.0);
         assert!(wide.overflow.is_empty());
         assert_eq!(wide.visible.len(), items.len());
-        assert_eq!(wide.visible[4].1, 118.0);
-        assert_eq!(wide.visible[6].1, 118.0);
+        assert_eq!(wide.visible[4].1, 166.0);
+        assert_eq!(wide.visible[6].1, 166.0);
 
         let exact_width = toolbar_content_width(
             &items
@@ -1527,9 +1529,41 @@ mod tests {
             .map(|(item, _)| item.label)
             .collect();
         let overflow: Vec<_> = allocation.overflow.iter().map(|item| item.label).collect();
-        assert_eq!(visible, vec!["New", "Open"]);
-        assert_eq!(overflow, vec!["Save", "Save As", "Elements", "Export PDF"]);
+        assert_eq!(visible, vec!["New", "Open", "Save"]);
+        assert_eq!(overflow, vec!["Save As", "Elements", "Export PDF"]);
         assert_eq!(allocation.overflow_width, TOOLBAR_OVERFLOW_WIDTH);
+    }
+
+    #[test]
+    fn toolbar_manual_geometry_controls_are_narrow_and_explicit() {
+        assert_eq!(TOOLBAR_NORMAL_ITEM_WIDTH, 72.0);
+        assert_eq!(TOOLBAR_ROW_PADDING, 4.0);
+        assert_eq!(TOOLBAR_ITEM_GAP, 4.0);
+    }
+
+    #[test]
+    fn toolbar_allocation_normal_items_use_the_narrow_manual_width() {
+        let allocation = allocate_toolbar(
+            &[
+                ToolbarItem::action("a", "A", "", ToolbarAction::New),
+                ToolbarItem::elements(),
+            ],
+            200.0,
+        );
+
+        assert_eq!(allocation.visible[0].1, TOOLBAR_NORMAL_ITEM_WIDTH);
+        assert_eq!(allocation.visible[1].1, TOOLBAR_NORMAL_ITEM_WIDTH);
+    }
+
+    #[test]
+    fn toolbar_allocation_total_width_stays_within_available_bounds() {
+        for available_width in [300.0, 600.0, 800.0] {
+            let allocation = allocate_toolbar(&default_toolbar_items(), available_width);
+            assert!(
+                toolbar_content_width(&allocation.visible, allocation.overflow_width)
+                    <= available_width
+            );
+        }
     }
 
     #[test]
@@ -1542,8 +1576,8 @@ mod tests {
             ToolbarItem::action("c", "C", "", ToolbarAction::ExportPdf),
         ];
         let allocation = allocate_toolbar(&items, 500.0);
-        assert_eq!(allocation.visible[1].1, 106.0);
-        assert_eq!(allocation.visible[3].1, 106.0);
+        assert_eq!(allocation.visible[1].1, 130.0);
+        assert_eq!(allocation.visible[3].1, 130.0);
         assert!(allocation.overflow.is_empty());
     }
 
@@ -1567,6 +1601,10 @@ mod tests {
         assert_eq!(
             allocation.visible.last().map(|(item, _)| item.label),
             Some("Export PDF")
+        );
+        assert_eq!(
+            allocation.visible.last().map(|(_, width)| *width),
+            Some(72.0)
         );
         assert!(toolbar_content_width(&allocation.visible, 0.0) <= 600.0);
     }
