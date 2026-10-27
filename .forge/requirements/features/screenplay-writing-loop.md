@@ -45,9 +45,15 @@ formatting.
 - **AC-WRITING-001.2:** Given an element, the system shall preserve its explicit role and canonical UTF-8 text independently of capitalization, spaces, tabs, indentation, or font appearance.
 - **AC-WRITING-001.3:** Given a valid selection, the system shall support insertion, deletion, split, join, role change, undo, and redo while preserving valid text boundaries and element order.
 - **AC-WRITING-001.4:** Given a role transition such as scene heading → action or character → dialogue, the system shall apply an explicit, testable transition policy and make the operation undoable.
-- **AC-WRITING-001.4a:** Enter shall use the approved matrix: General/Note→same role, Scene Heading→Action, Action→Action, Character→Dialogue, Dialogue→Action, Parenthetical→Dialogue, and Transition→Scene Heading. Tab shall use Scene Heading→Action, Action→Character, blank Character→Transition, Transition→Scene Heading, Dialogue→Parenthetical, and Parenthetical→Dialogue; other Tab cases are consumed no-ops with no literal tab, mutation, or undo entry.
+- **AC-WRITING-001.4a:** Enter shall use the approved matrix: General/Note→same role, Scene Heading→Action, Action→Action, Character→Dialogue, Dialogue→Action at the collapsed UTF-8-safe end of the Dialogue, Dialogue→Dialogue when the collapsed caret is at an interior UTF-8 boundary, Parenthetical→Dialogue, and Transition→Scene Heading. Tab shall use Scene Heading→Action, Action→Character, blank Character→Transition, Transition→Scene Heading, Dialogue→Parenthetical, and Parenthetical→Dialogue; other Tab cases are consumed no-ops with no literal tab, mutation, or undo entry.
+
+**Approved WO-008 refinement:** The Dialogue interior branch is a transactional split: the original element retains the exact prefix and stable ID, the new Dialogue retains the exact suffix with a bounded distinct ID, and the collapsed selection moves to the new element at byte offset zero. Empty Dialogue is an end-boundary case; rejected non-collapsed, invalid-boundary, and capacity operations preserve session state.
 - **AC-WRITING-001.4b:** Up/Down shall navigate adjacent wrapped visual lines using layout source ranges, retain a preferred horizontal goal across successful repeated moves, clamp to shorter lines and document/page edges, and support Shift selection. The transient goal resets after horizontal movement, edits, pointer selection, Home/End, role changes, undo/redo, or a boundary no-op.
 - **AC-WRITING-001.5:** Given malformed or out-of-bound input, the system shall return a bounded error without corrupting the project or session state.
+
+**Approved WO-005 refinement:** Entering a Parenthetical through an explicit role transition or assignment creates transient generated `()` with the caret between delimiters. Enter/Tab removes that pair only while its stable element remains marked, Parenthetical, and exactly `()`; user-authored or pasted delimiters, partial edits, and non-empty text are preserved, and the provenance is not serialized.
+
+**Approved WO-004 refinement:** The canonical-text rule remains semantic and UTF-8-safe. For new projects, the persisted `uppercase_cues` policy defaults enabled and applies only at transactional edit boundaries to Scene Heading and Character text; opening legacy or existing projects does not rewrite stored text, and other roles preserve source casing. The setting is bounded and decodes as enabled when absent for legacy compatibility.
 
 ### REQ-WRITING-LOOP-002: Shared deterministic writing and page views
 
@@ -103,3 +109,7 @@ formatting.
 | Date | Change | Evidence/rationale |
 |---|---|---|
 | 2026-10-25 | Created stable MVP feature baseline and acceptance IDs | User-approved product goal and `.analysis` recommendations translated into implementation-agnostic requirements |
+
+### Approved WO-007 refinement
+
+`PageProfile` schema version 1 persists default-on `auto_parenthetical` and `strict_transition_boundaries` booleans; absent legacy keys default true and malformed types are typed load errors. Parenthetical Tab/Enter/Delete behavior, supported delimiter repair, before-opening insertion, and strict UTF-8-safe Scene Heading/Character/Transition boundaries are transactional, undoable, and rejected commands are successful no-ops without history.

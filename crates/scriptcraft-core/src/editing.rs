@@ -1,6 +1,7 @@
 //! Headless, transactional editing over the semantic screenplay model.
 
 use crate::{ModelError, Project, Role, ScreenplayElement, MAX_ELEMENTS, MAX_TEXT_BYTES};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
@@ -53,6 +54,7 @@ impl From<ModelError> for EditError {
 struct Snapshot {
     project: Project,
     selection: Selection,
+    generated_parentheticals: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +66,7 @@ pub struct EditingSession {
     clean_project: Project,
     history: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    generated_parentheticals: BTreeSet<String>,
     history_limit: usize,
 }
 
@@ -83,6 +86,7 @@ impl EditingSession {
             revision: 0,
             history: Vec::new(),
             redo: Vec::new(),
+            generated_parentheticals: BTreeSet::new(),
             history_limit: 100,
         })
     }
@@ -104,6 +108,12 @@ impl EditingSession {
     }
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Revalidates the live semantic project and selection without mutating it.
+    pub fn validate(&self) -> Result<(), EditError> {
+        self.project.validate()?;
+        validate_selection(&self.project, self.selection)
     }
 
     pub fn mark_saved(&mut self) {
@@ -130,18 +140,28 @@ impl EditingSession {
     }
 
     pub fn insert(&mut self, text: &str) -> Result<(), EditError> {
-        self.mutate(|project, selection| {
+        self.mutate(|project, selection, _generated| {
             let (start, end) = selection.ordered();
             replace_range(project, start, end, text)?;
+            let offset = normalize_element(project, start.element, start.offset + text.len())?;
             Ok(Selection::caret(Position {
                 element: start.element,
-                offset: start.offset + text.len(),
+                offset,
             }))
         })
     }
 
+    /// Inserts clipboard text as one transactional semantic edit.
+    ///
+    /// Newline characters remain in the active element. Layout is responsible
+    /// for visual line breaks; paste does not silently invent screenplay roles
+    /// or multiple undo entries.
+    pub fn insert_paste(&mut self, text: &str) -> Result<(), EditError> {
+        self.insert(text)
+    }
+
     pub fn delete(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection| {
+        self.mutate(|project, selection, generated| {
             let (start, end) = selection.ordered();
             if start != end {
                 replace_range(project, start, end, "")?;
@@ -151,6 +171,27 @@ impl EditingSession {
                 .elements
                 .get(start.element)
                 .ok_or(EditError::InvalidElement)?;
+            if item.role == Role::Parenthetical
+                && is_delimiter_only_parenthetical(item.text.as_str())
+            {
+                let id = item.id.as_str().to_owned();
+                generated.remove(&id);
+                if start.element == 0 || project.elements.len() == 1 {
+                    project.elements[0].role = Role::Dialogue;
+                    project.elements[0].text.clear();
+                    return Ok(Selection::caret(Position {
+                        element: 0,
+                        offset: 0,
+                    }));
+                }
+                let previous = start.element.saturating_sub(1);
+                let offset = project.elements[previous].text.len();
+                project.elements.remove(start.element);
+                return Ok(Selection::caret(Position {
+                    element: previous,
+                    offset,
+                }));
+            }
             if start.offset < item.text.len() {
                 let next = next_boundary(&item.text, start.offset);
                 replace_range(
@@ -168,7 +209,7 @@ impl EditingSession {
     }
 
     pub fn backspace(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection| {
+        self.mutate(|project, selection, _generated| {
             let (start, end) = selection.ordered();
             if start != end {
                 replace_range(project, start, end, "")?;
@@ -204,7 +245,7 @@ impl EditingSession {
     }
 
     pub fn split(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection| {
+        self.mutate(|project, selection, _generated| {
             let (start, end) = selection.ordered();
             if start != end {
                 return Err(EditError::InvalidSelection);
@@ -214,27 +255,129 @@ impl EditingSession {
     }
 
     pub fn enter(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection| {
+        self.mutate(|project, selection, generated| {
             let (start, end) = selection.ordered();
             if start != end {
                 return Err(EditError::InvalidSelection);
             }
-            let role = project.elements[start.element].role;
-            let next_role =
-                enter_transition(role).ok_or(EditError::UnsupportedTransition { from: role })?;
-            split_at(project, start, next_role)
+            let item = project
+                .elements
+                .get(start.element)
+                .ok_or(EditError::InvalidElement)?;
+            if strict_boundary_rejects(
+                project,
+                start.element,
+                item.role,
+                item.text.len(),
+                start.offset,
+            ) {
+                return Ok(*selection);
+            }
+            let item_role = item.role;
+            let item_text = item.text.clone();
+            let mut position = start;
+            if item_role == Role::Parenthetical {
+                if position.offset == 0 && item_text.starts_with('(') {
+                    let id = split_id(project);
+                    let new = ScreenplayElement::new(
+                        id.clone(),
+                        Role::Parenthetical,
+                        if project.page_profile.auto_parenthetical {
+                            "()"
+                        } else {
+                            ""
+                        },
+                    )?;
+                    project.elements.insert(position.element, new);
+                    if project.page_profile.auto_parenthetical {
+                        generated.insert(id);
+                        return Ok(Selection::caret(Position {
+                            element: position.element,
+                            offset: 1,
+                        }));
+                    }
+                    return Ok(Selection::caret(Position {
+                        element: position.element,
+                        offset: 0,
+                    }));
+                }
+                if empty_parenthetical_at(item_text.as_str(), position.offset)
+                    && generated.contains(project.elements[position.element].id.as_str())
+                {
+                    project.elements[position.element].text.clear();
+                    position.offset = 0;
+                    generated.remove(project.elements[position.element].id.as_str());
+                } else if let Some(boundary) =
+                    parenthetical_repair_boundary(item_text.as_str(), position.offset)
+                {
+                    project.elements[position.element].text =
+                        repair_parenthetical(item_text.as_str());
+                    position.offset = boundary;
+                    return insert_dialogue_below(project, position.element);
+                } else if !item_text.is_empty() {
+                    return Ok(*selection);
+                }
+            }
+            let role = project.elements[position.element].role;
+            let next_role = if role == Role::Dialogue && position.offset < item_text.len() {
+                Role::Dialogue
+            } else {
+                enter_transition(role).ok_or(EditError::UnsupportedTransition { from: role })?
+            };
+            split_at(project, position, next_role)
         })
     }
 
     /// Applies the explicit Tab policy. Unlisted roles are intentionally consumed
     /// without changing the project, selection, or history.
     pub fn tab(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection| {
+        self.mutate(|project, selection, generated| {
             let (start, end) = selection.ordered();
             if start != end {
                 return Ok(*selection);
             }
-            let element = &project.elements[start.element];
+            let item = project
+                .elements
+                .get(start.element)
+                .ok_or(EditError::InvalidElement)?;
+            if strict_boundary_rejects(
+                project,
+                start.element,
+                item.role,
+                item.text.len(),
+                start.offset,
+            ) {
+                return Ok(*selection);
+            }
+            let item_role = item.role;
+            let item_text = item.text.clone();
+            let mut position = start;
+            if project.page_profile.auto_parenthetical && item_role == Role::Parenthetical {
+                if is_delimiter_only_parenthetical(item_text.as_str()) {
+                    project.elements[position.element].role = Role::Dialogue;
+                    project.elements[position.element].text.clear();
+                    generated.remove(project.elements[position.element].id.as_str());
+                    position.offset = 0;
+                    return Ok(Selection::caret(position));
+                }
+                if empty_parenthetical_at(item_text.as_str(), position.offset)
+                    && generated.contains(project.elements[position.element].id.as_str())
+                {
+                    project.elements[position.element].text.clear();
+                    position.offset = 0;
+                    generated.remove(project.elements[position.element].id.as_str());
+                } else if let Some(boundary) =
+                    parenthetical_repair_boundary(item_text.as_str(), position.offset)
+                {
+                    project.elements[position.element].text =
+                        repair_parenthetical(item_text.as_str());
+                    position.offset = boundary;
+                    return insert_dialogue_below(project, position.element);
+                } else if !item_text.is_empty() {
+                    return Ok(*selection);
+                }
+            }
+            let element = &project.elements[position.element];
             let next_role = match element.role {
                 Role::SceneHeading => Some(Role::Action),
                 Role::Action => Some(Role::Character),
@@ -245,14 +388,30 @@ impl EditingSession {
                 _ => None,
             };
             if let Some(role) = next_role {
-                project.elements[start.element].role = role;
+                project.elements[position.element].role = role;
+                if project.page_profile.auto_parenthetical
+                    && role == Role::Parenthetical
+                    && project.elements[position.element].text.is_empty()
+                {
+                    project.elements[position.element].text = "()".into();
+                    generated.insert(project.elements[position.element].id.as_str().to_owned());
+                    return Ok(Selection::caret(Position {
+                        element: position.element,
+                        offset: 1,
+                    }));
+                }
+                return normalize_selection_in_element(
+                    project,
+                    position.element,
+                    Selection::caret(position),
+                );
             }
-            Ok(*selection)
+            Ok(Selection::caret(position))
         })
     }
 
     pub fn join_with_next(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection| {
+        self.mutate(|project, selection, _generated| {
             let (start, end) = selection.ordered();
             if start != end || start.offset != project.elements[start.element].text.len() {
                 return Err(EditError::InvalidSelection);
@@ -267,13 +426,23 @@ impl EditingSession {
     }
 
     pub fn change_role(&mut self, role: Role) -> Result<(), EditError> {
-        self.mutate(|project, selection| {
+        self.mutate(|project, selection, generated| {
             let (start, end) = selection.ordered();
             if start.element != end.element {
                 return Err(EditError::InvalidSelection);
             }
             project.elements[start.element].role = role;
-            Ok(*selection)
+            if role != Role::Parenthetical {
+                generated.remove(project.elements[start.element].id.as_str());
+            } else if project.elements[start.element].text.is_empty() {
+                project.elements[start.element].text = "()".into();
+                generated.insert(project.elements[start.element].id.as_str().to_owned());
+                return Ok(Selection::caret(Position {
+                    element: start.element,
+                    offset: 1,
+                }));
+            }
+            normalize_selection_in_element(project, start.element, *selection)
         })
     }
 
@@ -282,10 +451,12 @@ impl EditingSession {
         let current = Snapshot {
             project: self.project.clone(),
             selection: self.selection,
+            generated_parentheticals: self.generated_parentheticals.clone(),
         };
         self.redo.push(current);
         self.project = snapshot.project;
         self.selection = snapshot.selection;
+        self.generated_parentheticals = snapshot.generated_parentheticals;
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
         Ok(())
@@ -296,10 +467,12 @@ impl EditingSession {
         let current = Snapshot {
             project: self.project.clone(),
             selection: self.selection,
+            generated_parentheticals: self.generated_parentheticals.clone(),
         };
         self.push_history(current);
         self.project = snapshot.project;
         self.selection = snapshot.selection;
+        self.generated_parentheticals = snapshot.generated_parentheticals;
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
         Ok(())
@@ -307,10 +480,24 @@ impl EditingSession {
 
     fn mutate<F>(&mut self, operation: F) -> Result<(), EditError>
     where
-        F: FnOnce(&mut Project, &Selection) -> Result<Selection, EditError>,
+        F: FnOnce(&mut Project, &Selection, &mut BTreeSet<String>) -> Result<Selection, EditError>,
     {
         let mut project = self.project.clone();
-        let selection = operation(&mut project, &self.selection)?;
+        let mut generated = self.generated_parentheticals.clone();
+        let prior_generated = generated.clone();
+        let selection = operation(&mut project, &self.selection, &mut generated)?;
+        invalidate_changed_generated_parentheticals(
+            &self.project,
+            &project,
+            &prior_generated,
+            &mut generated,
+        );
+        generated.retain(|id| {
+            project
+                .elements
+                .iter()
+                .any(|element| element.id.as_str() == id && element.role == Role::Parenthetical)
+        });
         project.validate()?;
         validate_selection(&project, selection)?;
         if project == self.project && selection == self.selection {
@@ -319,9 +506,11 @@ impl EditingSession {
         self.push_history(Snapshot {
             project: self.project.clone(),
             selection: self.selection,
+            generated_parentheticals: self.generated_parentheticals.clone(),
         });
         self.project = project;
         self.selection = selection;
+        self.generated_parentheticals = generated;
         self.redo.clear();
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
@@ -335,6 +524,36 @@ impl EditingSession {
         self.history.push(snapshot);
         if self.history.len() > self.history_limit {
             self.history.remove(0);
+        }
+    }
+}
+
+fn invalidate_changed_generated_parentheticals(
+    before: &Project,
+    after: &Project,
+    prior_generated: &BTreeSet<String>,
+    generated: &mut BTreeSet<String>,
+) {
+    for id in prior_generated {
+        if !generated.contains(id) {
+            continue;
+        }
+        let Some(before_element) = before
+            .elements
+            .iter()
+            .find(|element| element.id.as_str() == id)
+        else {
+            continue;
+        };
+        let Some(after_element) = after
+            .elements
+            .iter()
+            .find(|element| element.id.as_str() == id)
+        else {
+            continue;
+        };
+        if before_element != after_element {
+            generated.remove(id);
         }
     }
 }
@@ -396,6 +615,142 @@ fn replace_range(
     Ok(())
 }
 
+fn strict_boundary_rejects(
+    project: &Project,
+    element: usize,
+    role: Role,
+    text_len: usize,
+    offset: usize,
+) -> bool {
+    project.page_profile.strict_transition_boundaries
+        && matches!(
+            role,
+            Role::SceneHeading | Role::Character | Role::Transition
+        )
+        && project.elements.get(element).is_some()
+        && offset != text_len
+}
+
+fn empty_parenthetical_at(text: &str, offset: usize) -> bool {
+    text == "()" && offset <= 2
+}
+
+fn is_delimiter_only_parenthetical(text: &str) -> bool {
+    matches!(text, "(" | "()" | ")")
+}
+
+fn parenthetical_repair_boundary(text: &str, offset: usize) -> Option<usize> {
+    let closed_pair_inner_end = text.starts_with('(')
+        && text.ends_with(')')
+        && text.len() > 2
+        && offset == text.len().saturating_sub(1);
+    let accepted = closed_pair_inner_end
+        || (text.starts_with('(') && !text.ends_with(')') && text.len() > 1)
+        || (!text.starts_with('(') && text.ends_with(')') && text.len() > 1)
+        || (!text.starts_with('(') && !text.ends_with(')') && !text.is_empty());
+    let at_supported_boundary = closed_pair_inner_end || offset == text.len();
+    if !accepted || !at_supported_boundary {
+        return None;
+    }
+    Some(match (text.starts_with('('), text.ends_with(')')) {
+        (true, false) => text.len() + 1,
+        (false, true) => text.len(),
+        (false, false) => text.len() + 1,
+        (true, true) => text.len(),
+    })
+}
+
+fn repair_parenthetical(text: &str) -> String {
+    match (text.starts_with('('), text.ends_with(')')) {
+        (true, false) => format!("{text})"),
+        (false, true) => format!("({text}"),
+        (false, false) => format!("({text})"),
+        (true, true) => text.to_owned(),
+    }
+}
+
+fn insert_dialogue_below(project: &mut Project, element: usize) -> Result<Selection, EditError> {
+    if project.elements.len() >= MAX_ELEMENTS {
+        return Err(EditError::TooManyElements);
+    }
+    let new = ScreenplayElement::new(split_id(project), Role::Dialogue, "")?;
+    project.elements.insert(element + 1, new);
+    Ok(Selection::caret(Position {
+        element: element + 1,
+        offset: 0,
+    }))
+}
+
+fn is_uppercase_cue(role: Role) -> bool {
+    matches!(role, Role::SceneHeading | Role::Character)
+}
+
+fn uppercase_with_mapping(text: &str, offset: usize) -> Result<(String, usize), EditError> {
+    if !text.is_char_boundary(offset) {
+        return Err(EditError::InvalidUtf8Boundary);
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut mapped = 0;
+    for (index, character) in text.char_indices() {
+        let uppercase = character.to_uppercase().collect::<String>();
+        if index < offset {
+            mapped += uppercase.len();
+        }
+        output.push_str(&uppercase);
+    }
+    Ok((output, mapped))
+}
+
+fn normalize_element(
+    project: &mut Project,
+    element: usize,
+    offset: usize,
+) -> Result<usize, EditError> {
+    let item = project
+        .elements
+        .get(element)
+        .ok_or(EditError::InvalidElement)?;
+    if !project.page_profile.uppercase_cues || !is_uppercase_cue(item.role) {
+        return Ok(offset);
+    }
+    let (text, mapped) = uppercase_with_mapping(&item.text, offset)?;
+    if text.len() > MAX_TEXT_BYTES {
+        return Err(EditError::TextTooLong);
+    }
+    project.elements[element].text = text;
+    Ok(mapped)
+}
+
+fn normalize_selection_in_element(
+    project: &mut Project,
+    element: usize,
+    selection: Selection,
+) -> Result<Selection, EditError> {
+    let item = project
+        .elements
+        .get(element)
+        .ok_or(EditError::InvalidElement)?;
+    if !project.page_profile.uppercase_cues || !is_uppercase_cue(item.role) {
+        return Ok(selection);
+    }
+    let (text, anchor) = uppercase_with_mapping(&item.text, selection.anchor.offset)?;
+    let (_, focus) = uppercase_with_mapping(&item.text, selection.focus.offset)?;
+    if text.len() > MAX_TEXT_BYTES {
+        return Err(EditError::TextTooLong);
+    }
+    project.elements[element].text = text;
+    Ok(Selection {
+        anchor: Position {
+            element,
+            offset: anchor,
+        },
+        focus: Position {
+            element,
+            offset: focus,
+        },
+    })
+}
+
 fn split_at(project: &mut Project, position: Position, role: Role) -> Result<Selection, EditError> {
     if project.elements.len() >= MAX_ELEMENTS {
         return Err(EditError::TooManyElements);
@@ -407,14 +762,30 @@ fn split_at(project: &mut Project, position: Position, role: Role) -> Result<Sel
         .clone();
     let left = item.text[..position.offset].to_owned();
     let right = item.text[position.offset..].to_owned();
-    let id = format!("{}-split-{}", item.id.as_str(), project.elements.len());
+    let id = split_id(project);
     let new_item = ScreenplayElement::new(id, role, right)?;
     project.elements[position.element].text = left;
     project.elements.insert(position.element + 1, new_item);
+    normalize_element(project, position.element + 1, 0)?;
     Ok(Selection::caret(Position {
         element: position.element + 1,
         offset: 0,
     }))
+}
+
+fn split_id(project: &Project) -> String {
+    let mut serial = project.elements.len().saturating_add(1);
+    loop {
+        let candidate = format!("element-{serial}");
+        if project
+            .elements
+            .iter()
+            .all(|element| element.id.as_str() != candidate)
+        {
+            return candidate;
+        }
+        serial = serial.saturating_add(1);
+    }
 }
 
 fn join_at(project: &mut Project, index: usize) -> Result<(), EditError> {
@@ -501,13 +872,13 @@ mod tests {
     #[test]
     fn enter_uses_explicit_role_transition_and_is_undoable() {
         let mut s = session("slug", Role::Character);
-        set(&mut s, 0, 2);
+        set(&mut s, 0, 4);
         assert_eq!(s.enter(), Ok(()));
         assert_eq!(s.project().elements[1].role, Role::Dialogue);
         assert_eq!(s.undo(), Ok(()));
         assert_eq!(s.project().elements.len(), 1);
         assert_eq!(s.redo(), Ok(()));
-        assert_eq!(s.project().elements[1].text, "ug");
+        assert_eq!(s.project().elements[1].text, "");
     }
 
     #[test]
@@ -523,10 +894,30 @@ mod tests {
         ];
         for (from, to) in expected {
             let mut s = session("text", from);
-            set(&mut s, 0, 2);
+            let offset = s.project().elements[0].text.len();
+            set(&mut s, 0, offset);
             s.enter().unwrap_or_else(|_| unreachable!());
             assert_eq!(s.project().elements[1].role, to);
         }
+    }
+
+    #[test]
+    fn repeated_paragraph_splits_keep_ids_bounded_and_model_valid() {
+        let mut s = session("paragraph", Role::Action);
+        for _ in 0..64 {
+            let element = s.project().elements.len().saturating_sub(1);
+            let offset = s.project().elements[element].text.len();
+            set(&mut s, element, offset);
+            s.enter().unwrap_or_else(|_| unreachable!());
+            assert!(s.validate().is_ok());
+            assert!(s.project().to_json().is_ok());
+        }
+        assert_eq!(s.project().elements.len(), 65);
+        assert!(s
+            .project()
+            .elements
+            .iter()
+            .all(|element| element.id.as_str().len() <= 128));
     }
 
     #[test]
@@ -541,6 +932,14 @@ mod tests {
         ];
         for (from, to, text) in expected {
             let mut s = session(text, from);
+            if from == Role::Parenthetical {
+                let mut project = s.project().clone();
+                project.page_profile.auto_parenthetical = false;
+                s.replace_with_saved(project)
+                    .unwrap_or_else(|_| unreachable!());
+            }
+            let offset = s.project().elements[0].text.len();
+            set(&mut s, 0, offset);
             s.tab().unwrap_or_else(|_| unreachable!());
             assert_eq!(s.project().elements[0].role, to);
             assert!(s.undo().is_ok());

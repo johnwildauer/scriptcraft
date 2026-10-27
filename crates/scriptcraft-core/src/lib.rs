@@ -165,6 +165,9 @@ pub struct PageProfile {
     pub lines_per_page: u32,
     pub line_advance: u32,
     pub boundary_gap: u32,
+    pub uppercase_cues: bool,
+    pub auto_parenthetical: bool,
+    pub strict_transition_boundaries: bool,
     pub font_family: String,
     pub font_size: u32,
     pub char_width: u32,
@@ -186,7 +189,10 @@ impl Default for PageProfile {
             lines_per_page: 55,
             line_advance: 12,
             boundary_gap: 12,
-            font_family: "Courier New".into(),
+            uppercase_cues: true,
+            auto_parenthetical: true,
+            strict_transition_boundaries: true,
+            font_family: "Courier".into(),
             font_size: 12,
             char_width: 7,
             role_boxes: [
@@ -382,7 +388,7 @@ fn encode_envelope(p: &Project) -> String {
         .map(|box_| format!("{{\"x\":{},\"width\":{}}}", box_.x, box_.width))
         .collect::<Vec<_>>()
         .join(",");
-    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(p.id.as_str()), p.schema_version, quote(&p.metadata.title), quote(&p.metadata.author), quote(&p.metadata.contact), quote(&p.metadata.created_at), quote(&p.metadata.updated_at), elements_json(&p.title_page), quote(&p.page_profile.name), p.page_profile.format_version, p.page_profile.paper_width, p.page_profile.paper_height, p.page_profile.margin_top, p.page_profile.margin_bottom, p.page_profile.margin_left, p.page_profile.margin_right, p.page_profile.chars_per_line, p.page_profile.lines_per_page, p.page_profile.line_advance, p.page_profile.boundary_gap, quote(&p.page_profile.font_family), p.page_profile.font_size, p.page_profile.char_width, role_boxes, elements_json(&p.elements))
+    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"uppercase_cues\":{},\"auto_parenthetical\":{},\"strict_transition_boundaries\":{},\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(p.id.as_str()), p.schema_version, quote(&p.metadata.title), quote(&p.metadata.author), quote(&p.metadata.contact), quote(&p.metadata.created_at), quote(&p.metadata.updated_at), elements_json(&p.title_page), quote(&p.page_profile.name), p.page_profile.format_version, p.page_profile.paper_width, p.page_profile.paper_height, p.page_profile.margin_top, p.page_profile.margin_bottom, p.page_profile.margin_left, p.page_profile.margin_right, p.page_profile.chars_per_line, p.page_profile.lines_per_page, p.page_profile.line_advance, p.page_profile.boundary_gap, p.page_profile.uppercase_cues, p.page_profile.auto_parenthetical, p.page_profile.strict_transition_boundaries, quote(&p.page_profile.font_family), p.page_profile.font_size, p.page_profile.char_width, role_boxes, elements_json(&p.elements))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -391,6 +397,7 @@ enum Json {
     Array(Vec<Json>),
     String(String),
     Number(u32),
+    Bool(bool),
 }
 struct Parser<'a> {
     bytes: &'a [u8],
@@ -427,6 +434,16 @@ impl<'a> Parser<'a> {
             Some(b'[') => self.array(),
             Some(b'"') => Ok(Json::String(self.string()?)),
             Some(b'0'..=b'9') => self.number(),
+            Some(b't') if self.bytes.get(self.pos..self.pos.saturating_add(4)) == Some(b"true") => {
+                self.pos += 4;
+                Ok(Json::Bool(true))
+            }
+            Some(b'f')
+                if self.bytes.get(self.pos..self.pos.saturating_add(5)) == Some(b"false") =>
+            {
+                self.pos += 5;
+                Ok(Json::Bool(false))
+            }
             _ => Err(ModelError::InvalidJson),
         }
     }
@@ -558,6 +575,16 @@ fn num_field(v: &Json, key: &'static str) -> Result<u32, ModelError> {
         _ => Err(ModelError::WrongType(key)),
     }
 }
+fn optional_bool_field(v: &Json, key: &'static str, default: bool) -> Result<bool, ModelError> {
+    let Json::Object(fields) = v else {
+        return Err(ModelError::WrongType(key));
+    };
+    match fields.iter().find(|(name, _)| name == key) {
+        Some((_, Json::Bool(value))) => Ok(*value),
+        Some(_) => Err(ModelError::WrongType(key)),
+        None => Ok(default),
+    }
+}
 fn decode_element(v: &Json) -> Result<ScreenplayElement, ModelError> {
     let role = Role::parse(&str_field(v, "role")?).ok_or(ModelError::InvalidJson)?;
     ScreenplayElement::new(str_field(v, "id")?, role, str_field(v, "text")?)
@@ -625,6 +652,13 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
             lines_per_page: num_field(profile, "lines_per_page")?,
             line_advance: num_field(profile, "line_advance")?,
             boundary_gap: num_field(profile, "boundary_gap")?,
+            uppercase_cues: optional_bool_field(profile, "uppercase_cues", true)?,
+            auto_parenthetical: optional_bool_field(profile, "auto_parenthetical", true)?,
+            strict_transition_boundaries: optional_bool_field(
+                profile,
+                "strict_transition_boundaries",
+                true,
+            )?,
             font_family: str_field(profile, "font_family")?,
             font_size: num_field(profile, "font_size")?,
             char_width: num_field(profile, "char_width")?,
@@ -641,7 +675,51 @@ mod tests {
     fn new_project_has_valid_start() {
         let p = Project::new("p-1", "题名", "作者").unwrap_or_else(|_| unreachable!());
         assert_eq!(p.elements[0].role, Role::Action);
+        assert_eq!(p.page_profile.font_family, "Courier");
+        assert!(p.page_profile.uppercase_cues);
         assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn legacy_profile_missing_uppercase_policy_defaults_true() {
+        let project = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
+        let json = project
+            .to_json()
+            .unwrap_or_else(|_| unreachable!())
+            .replace(",\"uppercase_cues\":true", "");
+        assert!(
+            Project::from_json(&json)
+                .unwrap_or_else(|_| unreachable!())
+                .page_profile
+                .uppercase_cues
+        );
+    }
+
+    #[test]
+    fn supported_profile_fonts_round_trip_without_rewriting() {
+        for family in ["Courier", "Courier New", "Courier Prime"] {
+            let mut project = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
+            project.page_profile.font_family = family.into();
+            let json = project.to_json().unwrap_or_else(|_| unreachable!());
+            let restored = Project::from_json(&json).unwrap_or_else(|_| unreachable!());
+            assert_eq!(restored.page_profile.font_family, family);
+        }
+    }
+
+    #[test]
+    fn missing_or_malformed_font_fields_remain_typed_errors() {
+        let project = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
+        let json = project.to_json().unwrap_or_else(|_| unreachable!());
+        let missing = json.replace(",\"font_family\":\"Courier\"", "");
+        assert_eq!(
+            Project::from_json(&missing),
+            Err(ModelError::MissingField("font_family"))
+        );
+        let malformed = json.replace("\"font_family\":\"Courier\"", "\"font_family\":1");
+        assert_eq!(
+            Project::from_json(&malformed),
+            Err(ModelError::WrongType("font_family"))
+        );
     }
     #[test]
     fn deterministic_unicode_round_trip() {

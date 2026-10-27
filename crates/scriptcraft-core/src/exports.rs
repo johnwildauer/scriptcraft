@@ -210,7 +210,7 @@ mod tests {
         assert!(first.ends_with(b"%%EOF\n"));
         assert!(String::from_utf8_lossy(&first).contains("/Count 1"));
         assert!(String::from_utf8_lossy(&first).contains("INT. ROOM - DAY"));
-        assert!(String::from_utf8_lossy(&first).contains("/BaseFont /CourierNew"));
+        assert!(String::from_utf8_lossy(&first).contains("/BaseFont /Courier"));
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
                 layout.profile.paper_height - line.rect.y - line.rect.height
             );
         }
-        assert_eq!(transforms[0].1 - transforms[1].1, LINE_HEIGHT * 2);
+        assert_eq!(transforms[0].1 - transforms[1].1, LINE_HEIGHT);
     }
 
     #[test]

@@ -4,11 +4,11 @@
 use eframe::egui::{self, Color32, FontFamily, FontId, Key, RichText, Sense, Stroke, Vec2};
 use scriptcraft_core::editing::{EditError, EditingSession, Position, Selection};
 use scriptcraft_core::exports;
-use scriptcraft_core::layout::{Caret, ScreenplayLayout};
+use scriptcraft_core::layout::{Caret, LayoutCache, ScreenplayLayout};
 use scriptcraft_core::persistence::{self, FileSystem, StdFileSystem};
 use scriptcraft_core::{Project, Role};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const EDITOR_SURFACE_ID: &str = "page-editor-surface";
 const CARET_WIDTH: f32 = 1.5;
@@ -16,6 +16,7 @@ const CURRENT_DEFAULT_PAGE_WIDTH: f32 = 360.0;
 const DEFAULT_PRESENTATION_SCALE_MULTIPLIER: f32 = 1.6;
 const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
 const MINIMUM_PAGE_WIDTH: f32 = 240.0;
+const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
@@ -26,6 +27,26 @@ struct NativeInputDiagnostics {
     focused: bool,
     focus_lock_installed: bool,
     dispatch_enabled: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PerformanceDiagnostics {
+    frames: u64,
+    events: u64,
+    layout_builds: u64,
+    layout_cache_hits: u64,
+    painted_pages: u64,
+    repaint_requests: u64,
+    frame_nanos: u128,
+    event_nanos: u128,
+    layout_nanos: u128,
+    paint_nanos: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevealIntent {
+    None,
+    Conditional,
 }
 
 struct ScriptCraftApp {
@@ -41,8 +62,12 @@ struct ScriptCraftApp {
     native_input_diagnostics: NativeInputDiagnostics,
     editor_surface_id: Option<egui::Id>,
     editor_surface_rect: Option<egui::Rect>,
-    reveal_caret: bool,
+    reveal_intent: RevealIntent,
     preferred_vertical_x: Option<u32>,
+    caret_blink_focus_generation: u64,
+    caret_blink_reset_time: f64,
+    layout_cache: LayoutCache,
+    performance: PerformanceDiagnostics,
 }
 
 impl ScriptCraftApp {
@@ -64,9 +89,39 @@ impl ScriptCraftApp {
             native_input_diagnostics: NativeInputDiagnostics::default(),
             editor_surface_id: None,
             editor_surface_rect: None,
-            reveal_caret: false,
+            reveal_intent: RevealIntent::None,
             preferred_vertical_x: None,
+            caret_blink_focus_generation: 0,
+            caret_blink_reset_time: 0.0,
+            layout_cache: LayoutCache::default(),
+            performance: PerformanceDiagnostics::default(),
         })
+    }
+
+    fn request_repaint(&mut self, ctx: &egui::Context) {
+        self.performance.repaint_requests = self.performance.repaint_requests.saturating_add(1);
+        ctx.request_repaint();
+    }
+
+    fn layout_for_render(
+        &mut self,
+    ) -> Result<std::sync::Arc<ScreenplayLayout>, scriptcraft_core::layout::LayoutError> {
+        let revision = self.session.revision();
+        let started = Instant::now();
+        let (layout, hit) = self
+            .layout_cache
+            .get_or_build(revision, self.session.project())?;
+        if hit {
+            self.performance.layout_cache_hits =
+                self.performance.layout_cache_hits.saturating_add(1);
+        } else {
+            self.performance.layout_builds = self.performance.layout_builds.saturating_add(1);
+            self.performance.layout_nanos = self
+                .performance
+                .layout_nanos
+                .saturating_add(started.elapsed().as_nanos());
+        }
+        Ok(layout)
     }
 
     fn save_native(&mut self) {
@@ -163,8 +218,22 @@ impl ScriptCraftApp {
     }
 
     fn show_error<E: std::fmt::Debug>(&mut self, error: E) {
-        self.error = Some(format!("{error:?}"));
-        self.status = "Operation failed; document unchanged".into();
+        let detail = format!("{error:?}");
+        let health = self.session_health();
+        self.error = Some(detail.clone());
+        self.status = format!("Operation failed; document unchanged ({detail}); {health}");
+    }
+
+    fn session_health(&self) -> String {
+        let validation = match self.session.validate() {
+            Ok(()) => "session valid".to_owned(),
+            Err(error) => format!("session invalid: {error:?}"),
+        };
+        let json = match self.session.project().to_json() {
+            Ok(serialized) => format!("live JSON valid ({} bytes)", serialized.len()),
+            Err(error) => format!("live JSON invalid: {error:?}"),
+        };
+        format!("{validation}; {json}")
     }
 
     fn clear_error(&mut self) {
@@ -179,14 +248,19 @@ impl ScriptCraftApp {
         self.native_input_diagnostics.last_event_category = category;
     }
 
-    fn mutate(&mut self, result: Result<(), EditError>, success: &str) {
+    fn mutate(
+        &mut self,
+        result: Result<(), EditError>,
+        success: &str,
+        reveal_intent: RevealIntent,
+    ) {
         match result {
             Ok(()) => {
                 self.preferred_vertical_x = None;
                 self.status = success.into();
                 self.clear_error();
                 self.rendered_revision = None;
-                self.reveal_caret = true;
+                self.reveal_intent = reveal_intent;
             }
             Err(error) => self.show_error(error),
         }
@@ -200,7 +274,11 @@ impl ScriptCraftApp {
                 let selected = self.session.project().elements[element].role == role;
                 if ui.selectable_label(selected, role_label(role)).clicked() {
                     let result = self.session.change_role(role);
-                    self.mutate(result, "Role changed through EditingSession");
+                    self.mutate(
+                        result,
+                        "Role changed through EditingSession",
+                        RevealIntent::None,
+                    );
                 }
             }
         });
@@ -214,14 +292,45 @@ impl ScriptCraftApp {
         scale: f32,
         pointer: egui::Pos2,
     ) -> Option<Position> {
-        let local_x = ((pointer.x - page_rect.left()) / scale).max(0.0) as u32;
-        let local_y = ((pointer.y - page_rect.top()) / scale).max(0.0) as u32;
+        let local_x = ((pointer.x - page_rect.left()) / scale).round() as i64;
+        let local_y = ((pointer.y - page_rect.top()) / scale).round() as i64;
         layout
-            .hit_test(page, local_x, local_y)
+            .nearest_line_hit_test(page, local_x, local_y)
             .map(|caret| Position {
                 element: caret.element,
                 offset: caret.offset,
             })
+    }
+
+    fn pointer_body_page(
+        layout: &ScreenplayLayout,
+        page_rects: &[egui::Rect],
+        pointer: egui::Pos2,
+    ) -> Option<usize> {
+        if page_rects
+            .iter()
+            .enumerate()
+            .any(|(index, rect)| rect.contains(pointer) && layout.pages[index].title_page)
+        {
+            // Title-page ownership is explicit: a title click never becomes a
+            // body selection, even when a body line is globally nearest.
+            return None;
+        }
+        page_rects
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !layout.pages[*index].title_page)
+            .min_by_key(|(index, rect)| {
+                let distance = if pointer.y < rect.top() {
+                    rect.top() - pointer.y
+                } else if pointer.y > rect.bottom() {
+                    pointer.y - rect.bottom()
+                } else {
+                    0.0
+                };
+                (distance.to_bits(), *index)
+            })
+            .map(|(index, _)| index)
     }
 
     fn apply_pointer_selection(
@@ -246,7 +355,9 @@ impl ScriptCraftApp {
         if result.is_ok() {
             self.preferred_vertical_x = None;
             self.rendered_revision = None;
-            self.reveal_caret = true;
+            // Pointer selection is authoritative: it must not inherit a reveal
+            // request queued by an earlier edit or navigation command.
+            self.reveal_intent = RevealIntent::None;
         }
         result
     }
@@ -284,6 +395,8 @@ impl ScriptCraftApp {
         scale: f32,
         editor_id: egui::Id,
     ) -> egui::Rect {
+        let paint_started = Instant::now();
+        self.performance.painted_pages = self.performance.painted_pages.saturating_add(1);
         let page_height = layout.profile.paper_height as f32 * scale;
         let page_rect = ui.allocate_space(Vec2::new(page_width, page_height)).1;
         let painter = ui.painter_at(page_rect);
@@ -344,19 +457,26 @@ impl ScriptCraftApp {
                 self.session.revision(),
                 caret.element,
                 caret.offset,
+                self.caret_blink_focus_generation,
             ));
             if let Ok(rect) = layout.caret_rect(caret) {
                 let blink_active = self.surface_focused;
-                let blink_phase = ui.ctx().animate_bool_with_time(blink_id, blink_active, 0.5);
-                if blink_active {
-                    ui.ctx().request_repaint_after(Duration::from_millis(500));
-                }
-                if caret_should_paint(blink_active, true, blink_phase) {
+                if caret_blink_visible(
+                    ui.ctx(),
+                    blink_id,
+                    blink_active,
+                    true,
+                    self.caret_blink_reset_time,
+                ) {
                     painter.rect_filled(
                         caret_bar_rect(page_rect, rect, scale),
                         0.0,
                         Color32::from_rgb(20, 80, 150),
                     );
+                }
+                if self.surface_focused {
+                    self.performance.repaint_requests =
+                        self.performance.repaint_requests.saturating_add(1);
                 }
                 if !self.ime_preedit.is_empty() {
                     let x = page_rect.left() + rect.x as f32 * scale + char_width;
@@ -372,11 +492,15 @@ impl ScriptCraftApp {
             }
         }
 
+        self.performance.paint_nanos = self
+            .performance
+            .paint_nanos
+            .saturating_add(paint_started.elapsed().as_nanos());
         page_rect
     }
 
     fn live_document_surface(&mut self, ui: &mut egui::Ui) {
-        let layout = match ScreenplayLayout::build(self.session.project()) {
+        let layout = match self.layout_for_render() {
             Ok(layout) => layout,
             Err(error) => {
                 self.show_error(error.clone());
@@ -390,7 +514,7 @@ impl ScriptCraftApp {
             presentation_geometry(available.x, layout.profile.paper_width as f32);
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let mut page_rects = Vec::with_capacity(layout.pages.len());
-        let reveal_caret = self.reveal_caret;
+        let reveal_intent = self.reveal_intent;
         let scroll_output = egui::ScrollArea::vertical()
             .id_salt("page-editor-scroll")
             .show(ui, |ui| {
@@ -408,7 +532,7 @@ impl ScriptCraftApp {
                     }));
                     ui.add_space(12.0);
                 }
-                if reveal_caret {
+                if reveal_intent == RevealIntent::Conditional {
                     let focus = self.session.selection().focus;
                     if let Some(page_index) = layout.pages.iter().position(|page| {
                         page.lines.iter().any(|line| {
@@ -429,12 +553,17 @@ impl ScriptCraftApp {
                                 ),
                                 Vec2::new(CARET_WIDTH, caret.height as f32 * scale),
                             );
-                            ui.scroll_to_rect(caret_rect, Some(egui::Align::Center));
+                            let visible_clip = ui.clip_rect();
+                            if caret_needs_reveal(caret_rect, visible_clip) {
+                                // `None` asks egui for nearest/minimal scrolling;
+                                // centering would override the writer's viewport.
+                                ui.scroll_to_rect(caret_rect, None);
+                            }
                         }
                     }
                 }
             });
-        self.reveal_caret = false;
+        self.reveal_intent = RevealIntent::None;
 
         // This is the only interactive response in the painted editor. Pages remain
         // source-mapped geometry, not independent focusable widgets.
@@ -452,31 +581,38 @@ impl ScriptCraftApp {
                     .native_input_diagnostics
                     .pointer_activations
                     .saturating_add(1);
-                if let Some(page_index) = page_rects.iter().position(|rect| rect.contains(pointer))
-                {
-                    if !layout.pages[page_index].title_page {
-                        if let Some(position) = self.caret_from_pointer(
-                            &layout,
-                            page_index,
-                            page_rects[page_index],
-                            scale,
-                            pointer,
+                if let Some(page_index) = Self::pointer_body_page(&layout, &page_rects, pointer) {
+                    if let Some(position) = self.caret_from_pointer(
+                        &layout,
+                        page_index,
+                        page_rects[page_index],
+                        scale,
+                        pointer,
+                    ) {
+                        if let Err(error) = self.apply_pointer_selection(
+                            position,
+                            response.drag_started(),
+                            response.dragged(),
                         ) {
-                            if let Err(error) = self.apply_pointer_selection(
-                                position,
-                                response.drag_started(),
-                                response.dragged(),
-                            ) {
-                                self.show_error(error);
-                            } else {
-                                self.clear_error();
-                            }
+                            self.show_error(error);
+                        } else {
+                            self.clear_error();
                         }
                     }
                 }
             }
         }
-        self.surface_focused = response.has_focus();
+        let surface_focused = response.has_focus();
+        if surface_focused != self.surface_focused {
+            self.caret_blink_focus_generation = self.caret_blink_focus_generation.wrapping_add(1);
+            if surface_focused {
+                self.caret_blink_reset_time = ui.ctx().input(|input| input.time.max(0.0));
+            }
+            // The next frame must use the new focus-generation identity. This is
+            // a transition-only repaint, not an unfocused blink loop.
+            self.request_repaint(ui.ctx());
+        }
+        self.surface_focused = surface_focused;
         self.native_input_diagnostics.focused = self.surface_focused;
         if self.surface_focused {
             ui.ctx().memory_mut(|memory| {
@@ -497,6 +633,8 @@ impl ScriptCraftApp {
     }
 
     fn dispatch_surface_events(&mut self, events: &[egui::Event], modifiers: egui::Modifiers) {
+        let started = Instant::now();
+        self.performance.events = self.performance.events.saturating_add(events.len() as u64);
         for (index, event) in events.iter().enumerate() {
             self.record_native_event(match event {
                 egui::Event::Text(_) => "text",
@@ -522,7 +660,9 @@ impl ScriptCraftApp {
                 {
                     Some(self.session.insert(text))
                 }
-                egui::Event::Paste(text) if !text.is_empty() => Some(self.session.insert(text)),
+                egui::Event::Paste(text) if !text.is_empty() => {
+                    Some(self.session.insert_paste(text))
+                }
                 egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
                     self.ime_active = true;
                     self.ime_preedit.clone_from(text);
@@ -552,9 +692,17 @@ impl ScriptCraftApp {
                 _ => continue,
             };
             if let Some(result) = result {
-                self.mutate(result, "Edited through EditingSession");
+                self.mutate(
+                    result,
+                    "Edited through EditingSession",
+                    RevealIntent::Conditional,
+                );
             }
         }
+        self.performance.event_nanos = self
+            .performance
+            .event_nanos
+            .saturating_add(started.elapsed().as_nanos());
     }
 
     fn key_event(&mut self, key: Key, modifiers: egui::Modifiers) -> Option<Result<(), EditError>> {
@@ -593,6 +741,9 @@ impl ScriptCraftApp {
         if !self.surface_focused {
             return;
         }
+        if ctx.input(|input| input.raw_scroll_delta != Vec2::ZERO) {
+            self.reveal_intent = RevealIntent::None;
+        }
         self.native_input_diagnostics.dispatched_frames = self
             .native_input_diagnostics
             .dispatched_frames
@@ -600,7 +751,9 @@ impl ScriptCraftApp {
         let events = ctx.input(|input| input.events.clone());
         let modifiers = ctx.input(|input| input.modifiers);
         self.dispatch_surface_events(&events, modifiers);
-        ctx.request_repaint();
+        if !events.is_empty() || ctx.input(|input| input.raw_scroll_delta != Vec2::ZERO) {
+            self.request_repaint(ctx);
+        }
     }
 
     fn document_end(&self) -> Position {
@@ -671,7 +824,8 @@ impl ScriptCraftApp {
     fn move_vertical(&mut self, down: bool, extend: bool) -> Result<(), EditError> {
         let selection = self.session.selection();
         let current = selection.focus;
-        let layout = ScreenplayLayout::build(self.session.project())
+        let layout = self
+            .layout_for_render()
             .map_err(|_| EditError::InvalidElement)?;
         let lines: Vec<_> = layout
             .pages
@@ -816,8 +970,35 @@ fn fixed_metric_x(origin: f32, column: usize, char_width: f32) -> f32 {
     origin + column as f32 * char_width
 }
 
-fn caret_should_paint(focused: bool, collapsed: bool, blink_phase: f32) -> bool {
-    focused && collapsed && blink_phase > 0.5
+fn caret_blink_visible(
+    ctx: &egui::Context,
+    blink_id: egui::Id,
+    focused: bool,
+    collapsed: bool,
+    reset_time: f64,
+) -> bool {
+    if !focused || !collapsed {
+        return false;
+    }
+
+    // egui owns both the clock and animation entry. A zero-duration animation
+    // makes each 500 ms phase switch discrete rather than introducing a fade.
+    // The caller's identity includes revision and caret position, so changes
+    // begin a distinct transient entry without model or thread state.
+    let time = ctx.input(|input| input.time.max(0.0));
+    let elapsed = (time - reset_time).max(0.0);
+    let interval = CARET_BLINK_INTERVAL.as_secs_f64();
+    let phase = (elapsed / interval).floor() as u64;
+    let target_visible = phase.is_multiple_of(2);
+    let phase_value = ctx.animate_bool_with_time(blink_id, target_visible, 0.0);
+    ctx.request_repaint_after(caret_blink_repaint_delay(elapsed));
+    phase_value > 0.5
+}
+
+fn caret_blink_repaint_delay(time: f64) -> Duration {
+    let interval = CARET_BLINK_INTERVAL.as_secs_f64();
+    let phase = (time.max(0.0) / interval).floor() as u64;
+    Duration::from_secs_f64(((phase + 1) as f64 * interval - time.max(0.0)).max(0.001))
 }
 
 fn caret_bar_rect(
@@ -834,6 +1015,10 @@ fn caret_bar_rect(
     )
 }
 
+fn caret_needs_reveal(caret_rect: egui::Rect, visible_clip: egui::Rect) -> bool {
+    !visible_clip.contains_rect(caret_rect)
+}
+
 fn ordered_selection(selection: Selection) -> (Position, Position) {
     if (selection.anchor.element, selection.anchor.offset)
         <= (selection.focus.element, selection.focus.offset)
@@ -846,6 +1031,8 @@ fn ordered_selection(selection: Selection) -> (Position, Position) {
 
 impl eframe::App for ScriptCraftApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let frame_started = Instant::now();
+        self.performance.frames = self.performance.frames.saturating_add(1);
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("New").clicked() {
@@ -885,14 +1072,14 @@ impl eframe::App for ScriptCraftApp {
                     .clicked()
                 {
                     let result = self.session.undo();
-                    self.mutate(result, "Undo");
+                    self.mutate(result, "Undo", RevealIntent::Conditional);
                 }
                 if ui
                     .add_enabled(self.session.can_redo(), egui::Button::new("Redo"))
                     .clicked()
                 {
                     let result = self.session.redo();
-                    self.mutate(result, "Redo");
+                    self.mutate(result, "Redo", RevealIntent::Conditional);
                 }
                 ui.separator();
                 ui.label("Page layout live document");
@@ -907,6 +1094,16 @@ impl eframe::App for ScriptCraftApp {
                     self.native_path
                         .as_deref()
                         .map_or("(unsaved)".to_owned(), |path| path.display().to_string())
+                ));
+                let performance = self.performance;
+                ui.label(format!(
+                    "Performance: frames={} events={} layouts={} hits={} pages={} repaint={}",
+                    performance.frames,
+                    performance.events,
+                    performance.layout_builds,
+                    performance.layout_cache_hits,
+                    performance.painted_pages,
+                    performance.repaint_requests
                 ));
                 if self.session.dirty() {
                     ui.label(RichText::new("● unsaved").color(Color32::YELLOW));
@@ -937,6 +1134,10 @@ impl eframe::App for ScriptCraftApp {
             self.live_document_surface(ui);
         });
         self.handle_surface_input(ctx);
+        self.performance.frame_nanos = self
+            .performance
+            .frame_nanos
+            .saturating_add(frame_started.elapsed().as_nanos());
     }
 }
 
@@ -990,6 +1191,38 @@ mod tests {
     }
 
     #[test]
+    fn session_health_reports_valid_live_model_and_json() {
+        let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let health = app.session_health();
+        assert!(health.contains("session valid"));
+        assert!(health.contains("live JSON valid"));
+    }
+
+    #[test]
+    fn layout_cache_hits_unchanged_reads_and_misses_revision_or_profile_changes() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let first = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        let second = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        assert_eq!(first.as_ref(), second.as_ref());
+        assert_eq!(app.performance.layout_builds, 1);
+        assert_eq!(app.performance.layout_cache_hits, 1);
+
+        let mut changed_profile = app.session.project().clone();
+        changed_profile.page_profile.line_advance += 1;
+        app.session
+            .replace_with_saved(changed_profile)
+            .unwrap_or_else(|_| unreachable!());
+        let _ = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        assert_eq!(app.performance.layout_builds, 2);
+
+        app.session
+            .insert("revision change")
+            .unwrap_or_else(|_| unreachable!());
+        let _ = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        assert_eq!(app.performance.layout_builds, 3);
+    }
+
+    #[test]
     fn presentation_geometry_scales_default_page_and_centers_it() {
         let (page_width, padding, scale) = presentation_geometry(800.0, 612.0);
         assert!((page_width - 576.0).abs() < f32::EPSILON);
@@ -1000,6 +1233,39 @@ mod tests {
         assert!((narrow_width - 368.0).abs() < f32::EPSILON);
         assert!((narrow_padding - 16.0).abs() < f32::EPSILON);
         assert!(narrow_scale < scale);
+    }
+
+    #[test]
+    fn conditional_reveal_only_requests_outside_or_partial_carets() {
+        let clip = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0));
+        assert!(!caret_needs_reveal(
+            egui::Rect::from_min_max(egui::pos2(20.0, 20.0), egui::pos2(21.0, 40.0)),
+            clip
+        ));
+        assert!(caret_needs_reveal(
+            egui::Rect::from_min_max(egui::pos2(20.0, -2.0), egui::pos2(21.0, 10.0)),
+            clip
+        ));
+        assert!(caret_needs_reveal(
+            egui::Rect::from_min_max(egui::pos2(20.0, 95.0), egui::pos2(21.0, 105.0)),
+            clip
+        ));
+    }
+
+    #[test]
+    fn pointer_selection_clears_pending_reveal_intent() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.reveal_intent = RevealIntent::Conditional;
+        app.apply_pointer_selection(
+            Position {
+                element: 0,
+                offset: 0,
+            },
+            true,
+            false,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(app.reveal_intent, RevealIntent::None);
     }
 
     #[test]
@@ -1044,12 +1310,43 @@ mod tests {
         app.session
             .set_selection(Selection::caret(Position {
                 element: 0,
-                offset: 4,
+                offset: "INT. OFFICE".len(),
             }))
             .unwrap_or_else(|_| unreachable!());
         app.session.enter().unwrap_or_else(|_| unreachable!());
         assert_eq!(app.session.project().elements[1].role, Role::Action);
         assert_eq!(app.session.selection().focus.element, 1);
+    }
+
+    #[test]
+    fn enter_key_dispatch_splits_interior_dialogue_without_role_drift() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .change_role(Role::Dialogue)
+            .unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert("hello🙂world")
+            .unwrap_or_else(|_| unreachable!());
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 0,
+                offset: "hello".len(),
+            }))
+            .unwrap_or_else(|_| unreachable!());
+        let result = app
+            .key_event(Key::Enter, egui::Modifiers::default())
+            .unwrap_or_else(|| unreachable!());
+        app.mutate(result, "Enter", RevealIntent::Conditional);
+        assert_eq!(app.session.project().elements[0].text, "hello");
+        assert_eq!(app.session.project().elements[1].text, "🙂world");
+        assert_eq!(app.session.project().elements[1].role, Role::Dialogue);
+        assert_eq!(
+            app.session.selection(),
+            Selection::caret(Position {
+                element: 1,
+                offset: 0
+            })
+        );
     }
 
     #[test]
@@ -1214,6 +1511,112 @@ mod tests {
     }
 
     #[test]
+    fn rendered_parenthetical_inner_end_routes_pointer_and_both_keys() {
+        for key in [Key::Tab, Key::Enter] {
+            let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+            app.session
+                .insert("(words)")
+                .unwrap_or_else(|_| unreachable!());
+            app.session
+                .change_role(Role::Parenthetical)
+                .unwrap_or_else(|_| unreachable!());
+
+            let context = egui::Context::default();
+            let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
+            let layout =
+                ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
+            let line = &layout.pages[0].lines[0];
+            let inner_end_pointer = |surface_rect: egui::Rect| {
+                let (_, horizontal_padding, scale) =
+                    presentation_geometry(surface_rect.width(), layout.profile.paper_width as f32);
+                egui::pos2(
+                    surface_rect.left()
+                        + horizontal_padding
+                        + (line.rect.x as f32
+                            + ("(words".chars().count() as f32 * layout.char_width as f32))
+                            * scale,
+                    surface_rect.top() + (line.rect.y as f32 + 1.0) * scale,
+                )
+            };
+            let pointer_click = |pos| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            };
+
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        app.live_document_surface(ui);
+                    });
+                },
+            );
+            let surface_rect = app.editor_surface_rect.unwrap_or_else(|| unreachable!());
+            let pointer = inner_end_pointer(surface_rect);
+
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    focused: true,
+                    events: vec![egui::Event::PointerMoved(pointer), pointer_click(pointer)],
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        app.live_document_surface(ui);
+                    });
+                    app.handle_surface_input(ctx);
+                },
+            );
+
+            assert_eq!(
+                app.session.selection(),
+                Selection::caret(Position {
+                    element: 0,
+                    offset: "(words".len(),
+                })
+            );
+            let key_event = egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            };
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    focused: true,
+                    events: vec![key_event],
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        app.live_document_surface(ui);
+                    });
+                    app.handle_surface_input(ctx);
+                },
+            );
+
+            assert_eq!(app.session.project().elements[0].text, "(words)");
+            assert_eq!(app.session.project().elements[1].role, Role::Dialogue);
+            assert_eq!(
+                app.session.selection().focus,
+                Position {
+                    element: 1,
+                    offset: 0
+                }
+            );
+        }
+    }
+
+    #[test]
     fn direct_surface_editing_supports_selection_replacement_deletion_and_backspace() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         app.session.insert("abc").unwrap_or_else(|_| unreachable!());
@@ -1251,6 +1654,7 @@ mod tests {
         assert_eq!(app.rendered_revision, None);
         assert_eq!(app.native_input_diagnostics.received_events, 1);
         assert_eq!(app.native_input_diagnostics.last_event_category, "text");
+        assert!(app.performance.event_nanos > 0);
     }
 
     #[test]
@@ -1333,6 +1737,7 @@ mod tests {
         assert!(app.surface_focused);
         assert!(context.memory(|memory| memory.has_focus(editor_id)));
         assert_eq!(app.native_input_diagnostics.pointer_activations, 1);
+        assert_eq!(app.session.selection().focus.offset, "seed".len());
 
         let _ = context.run(
             egui::RawInput {
@@ -1577,18 +1982,134 @@ mod tests {
         let layout =
             ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
         let font = renderer_font(&layout, 0.5);
-        assert_eq!(layout.profile.font_family, "Courier New");
+        assert_eq!(layout.profile.font_family, "Courier");
         assert_eq!(layout.profile.font_size, 12);
         assert_eq!(font.size, 6.0);
         assert_eq!(font.family, FontFamily::Monospace);
     }
 
     #[test]
-    fn caret_blink_is_focused_collapsed_and_transient() {
-        assert!(caret_should_paint(true, true, 0.75));
-        assert!(!caret_should_paint(false, true, 0.75));
-        assert!(!caret_should_paint(true, false, 0.75));
-        assert!(!caret_should_paint(true, true, 0.25));
+    fn rendered_caret_blink_alternates_on_controlled_egui_time() {
+        let context = egui::Context::default();
+        let id = egui::Id::new("wo002-caret");
+        let frame = |time: f64| {
+            let mut visible = false;
+            let output = context.run(
+                egui::RawInput {
+                    time: Some(time),
+                    predicted_dt: 0.5,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| visible = caret_blink_visible(ctx, id, true, true, 0.0),
+            );
+            (visible, output)
+        };
+
+        assert!(frame(0.0).0);
+        assert!(frame(0.499).0);
+        assert!(!frame(0.5).0);
+        assert!(!frame(0.999).0);
+        assert!(frame(1.0).0);
+    }
+
+    #[test]
+    fn rendered_caret_blink_schedules_only_focused_collapsed_phases() {
+        let context = egui::Context::default();
+        let id = egui::Id::new("wo002-repaint");
+        let run = |time: f64, focused: bool, collapsed: bool| {
+            let mut visible = false;
+            let output = context.run(
+                egui::RawInput {
+                    time: Some(time),
+                    predicted_dt: 0.5,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| visible = caret_blink_visible(ctx, id, focused, collapsed, 0.0),
+            );
+            (visible, output)
+        };
+
+        let _ = run(2.0, true, true);
+        let focused = run(2.1, true, true);
+        assert!(focused.0);
+        assert!(focused
+            .1
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|output| output.repaint_delay)
+            .is_some_and(|delay| delay <= CARET_BLINK_INTERVAL));
+        assert_eq!(caret_blink_repaint_delay(2.1), Duration::from_millis(400));
+        let unfocused = run(2.6, false, true);
+        assert!(!unfocused.0);
+        assert_eq!(caret_blink_repaint_delay(2.6), Duration::from_millis(400));
+        assert!(!run(2.6, true, false).0);
+    }
+
+    #[test]
+    fn rendered_caret_blink_identity_change_uses_a_distinct_entry() {
+        let context = egui::Context::default();
+        let first = egui::Id::new("wo002-first-caret");
+        let second = egui::Id::new("wo002-second-caret");
+        let run = |id: egui::Id, time: f64| {
+            let mut visible = false;
+            let output = context.run(
+                egui::RawInput {
+                    time: Some(time),
+                    predicted_dt: 0.5,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| visible = caret_blink_visible(ctx, id, true, true, 0.0),
+            );
+            (visible, output)
+        };
+
+        assert!(run(first, 0.0).0);
+        assert!(!run(first, 0.5).0);
+        assert!(!run(second, 0.5).0);
+        assert!(run(second, 1.0).0);
+    }
+
+    #[test]
+    fn rendered_caret_blink_focus_regain_starts_at_initial_visible_phase() {
+        let context = egui::Context::default();
+        let focused_id = egui::Id::new("wo002-focus-generation-0");
+        let regained_id = egui::Id::new("wo002-focus-generation-1");
+        let run = |id: egui::Id, time: f64, focused: bool, reset_time: f64| {
+            let mut visible = false;
+            let output = context.run(
+                egui::RawInput {
+                    time: Some(time),
+                    predicted_dt: 0.5,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| visible = caret_blink_visible(ctx, id, focused, true, reset_time),
+            );
+            (visible, output)
+        };
+
+        assert!(run(focused_id, 0.0, true, 0.0).0);
+        assert!(!run(focused_id, 0.75, true, 0.0).0);
+
+        let unfocused = run(focused_id, 0.75, false, 0.0);
+        assert!(!unfocused.0);
+        assert_eq!(
+            unfocused
+                .1
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .map(|output| output.repaint_delay),
+            Some(Duration::MAX)
+        );
+
+        // Focus loss changes the animation identity; regain establishes a new
+        // origin so a stale hidden phase cannot leak across the boundary.
+        assert!(run(regained_id, 0.75, true, 0.75).0);
+        assert!(run(regained_id, 1.249, true, 0.75).0);
+        assert!(!run(regained_id, 1.25, true, 0.75).0);
     }
 
     #[test]

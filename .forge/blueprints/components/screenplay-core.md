@@ -65,8 +65,12 @@ adapts user input and consumes these results.
 - Valid edit offsets are checked UTF-8 boundaries.
 - A failed mutation restores project, selection, history, and dirty-state invariants.
 - `EditingSession` owns explicit Enter and Tab role policies; unlisted Tab cases are consumed no-ops and never insert literal tab text. Role transitions are transactional and undoable.
-- Layout is deterministic for the same project/profile/font inputs and has a safe oversized-element escape hatch.
+- Dialogue Enter is boundary-sensitive: a collapsed UTF-8-safe caret at the element end uses Dialogue→Action, while an interior collapsed boundary splits prefix and suffix into two Dialogue elements. The original stable ID is retained, the inserted ID is bounded/collision-checked, and failed selections/capacity errors leave project, selection, history, revision, and dirty state unchanged.
+- Layout is deterministic for the same project/profile/font inputs and has a safe oversized-element escape hatch. Body spacing uses an explicit incoming-role policy: every incoming Dialogue or Parenthetical has zero extra boundary gap, while all other body transitions use `PageProfile.boundary_gap`; wrapped lines and title-page elements remain excluded from body boundary spacing.
+- Body pointer hit testing is a document-global nearest-line query over rendered body pages. It chooses by absolute vertical distance, prefers the earlier line and then lower page index on exact ties, clamps horizontal misses to the line source start/end, and delegates in-line positions to the UTF-8-safe source mapping. Title pages are not a body hit-test domain; empty pages fall through to non-empty body lines, and document-span clicks clamp to the first/last body line.
 - Native save failure preserves the last valid destination; recovery is a candidate, never a silent overwrite.
+- The persisted `PageProfile.uppercase_cues` policy defaults true for new projects and for legacy profiles missing the field. Opening a project never rewrites existing text; transactional insertion, paste, role assignment, and role transitions normalize only Scene Heading and Character text when enabled using Rust Unicode uppercase with UTF-8-safe transformed-prefix caret/selection mapping. Other roles preserve source casing, and the setting is not a UI concern in this scope.
+- Newly entered Parenthetical elements receive transiently marked generated `()` text with the caret at byte offset 1. The mark is keyed by stable element ID, participates in undo/redo snapshots, and is excluded from native persistence. A successful edit that changes a marked element invalidates its mark before later cleanup decisions; failed edits do not mutate it. Enter/Tab removes the text only when the marked element is still Parenthetical and exactly `()`; user-authored, pasted, partial, and non-empty parentheses remain canonical text.
 
 ### Integration Contracts
 
@@ -95,6 +99,12 @@ adapts user input and consumes these results.
 
 `TODO: link implementation symbols, headless tests, persistence fixtures, pagination fixtures, and independent blueprint review.`
 
+## WO-006 measured responsiveness boundary
+
+- The core benchmark fixture [`wo006_responsiveness.rs`](../../../crates/scriptcraft-core/tests/wo006_responsiveness.rs) measures complete deterministic layout builds at 1, 5, 15, 50, 120, and 180 pages with three warmups, ten samples, and beginning/middle/end edits. It retains only generated fixture dimensions and timing summaries; document text is not reported.
+- The reusable core exposes the session-owned `LayoutCache` adapter used by the desktop and the headless benchmark. It is keyed by editing-session revision and the complete persisted `PageProfile`; the profile equality comparison covers paper dimensions, margins, line/page metrics, boundary policy, font identity/size/character metric, role boxes, and casing policy. Viewport scale is presentation-only. A revision or profile change misses the cache, while unchanged reads share the immutable layout.
+- The same cached layout is consumed by page paint, hit testing, caret geometry, and vertical navigation. PDF export continues to request a fresh core layout, preserving deterministic output independent of transient desktop state.
+
 ## Revision history
 
 | Date | Change | Evidence/rationale |
@@ -111,7 +121,7 @@ adapts user input and consumes these results.
 ## WO-004 verified layout facts
 
 - [`ScreenplayLayout`](../../../crates/scriptcraft-core/src/layout.rs:51) is a dependency-free, backend-neutral derived view over a validated project.
-- The approved deterministic format is named/versioned `us_letter_screenplay` profile v1: US Letter `612 × 792` points (`72 points/inch`), margins left/right/top/bottom `108/72/72/72`, seven-unit fixed character cells, twelve-unit same-element line advance, and a twelve-unit boundary gap. Role boxes are scene/action/note `108..540`, character `259..434`, parenthetical `216..396`, dialogue `180..396`, and right-aligned transition `432..540`; notes inherit action geometry. Explicit bounded profile values are persisted without UI pixels or per-element formatting.
+- The approved deterministic format is named/versioned `us_letter_screenplay` profile v1: US Letter `612 × 792` points (`72 points/inch`), margins left/right/top/bottom `108/72/72/72`, seven-unit fixed character cells, twelve-unit same-element line advance, and a twelve-unit boundary gap. Role boxes are scene/action/note `108..540`, character `259..434`, parenthetical `216..396`, dialogue `180..396`, and right-aligned transition `432..540`; notes inherit action geometry. Explicit bounded profile values are persisted without UI pixels or per-element formatting. New profiles default to the `Courier` family; existing supported stored families remain unchanged.
 - Layout emits page/content bounds, role-aware line rectangles, source byte ranges, page assignment, title-page separation, keep-with-next flags, oversized flags, and safe hit/caret mappings. It never mutates canonical model text.
 
 ## WO-003 verified long-document facts
@@ -120,6 +130,18 @@ adapts user input and consumes these results.
 - The existing bounds remain in force (`MAX_ELEMENTS = 10,000`, `MAX_TEXT_BYTES = 262,144`, `MAX_JSON_BYTES = 1,048,576`); `Project::to_json()` now enforces the JSON bound at the model serialization boundary as well as persistence serialization.
 - Layout treats LF, CRLF, and standalone CR as equivalent paragraph delimiters without emitting a phantom carriage-return line. Source ranges remain byte-based, so a bounded multi-page paste reaches its final-page caret and round-trips through native persistence without semantic changes.
 - Invalid layout/model and persistence results are reported as recoverable errors; the desktop surface presents layout failures through the same unchanged-document error path rather than replacing the last valid session.
+
+## WO-002 verified paste facts
+
+- Clipboard insertion is an explicit transactional editing boundary. Embedded LF, CRLF, CR, whitespace, and Unicode remain canonical text in the active semantic element; layout interprets line delimiters for visual wrapping without inventing roles or elements.
+- A bounded paste is one edit-history entry. An oversized paste returns the typed text-size error before committing project, selection, history, revision, or dirty-state changes, and a subsequent valid edit remains possible.
+
+Evidence: [`wo002_paste_safety.rs`](../../../crates/scriptcraft-core/tests/wo002_paste_safety.rs) and [`editing.rs`](../../../crates/scriptcraft-core/src/editing.rs).
+
+## Follow-up: bounded split identity and health probes
+
+- Paragraph splitting generates bounded collision-checked IDs rather than recursively extending the source ID. This preserves the stable-ID limit during long sequences of Enter operations.
+- [`EditingSession::validate()`](../../../crates/scriptcraft-core/src/editing.rs:109) provides a non-mutating host health probe for live project, selection, and serialization diagnostics.
 
 Evidence: [`wo003_long_document.rs`](../../../crates/scriptcraft-core/tests/wo003_long_document.rs), layout/model changes in [`layout.rs`](../../../crates/scriptcraft-core/src/layout.rs) and [`lib.rs`](../../../crates/scriptcraft-core/src/lib.rs), and desktop error routing in [`main.rs`](../../../apps/scriptcraft/src/main.rs).
 
@@ -138,3 +160,7 @@ Evidence: [`lib.rs`](../../../crates/scriptcraft-core/src/lib.rs), [`layout.rs`]
 - PDF export consumes the same `ScreenplayLayout` line rectangles; regression coverage verifies x positions and the PDF coordinate transform `paper_height - y - height`, including twelve-unit adjacent-line spacing. The shared screen/PDF contract therefore remains unchanged.
 
 Evidence: WO-004 regression coverage in [`layout.rs`](../../../crates/scriptcraft-core/src/layout.rs), [`exports.rs`](../../../crates/scriptcraft-core/src/exports.rs), and [`main.rs`](../../../apps/scriptcraft/src/main.rs); implementer evidence in [`WO-004-screenplay-spacing-contract.md`](../../initiatives/2026-10-25-ui-quality-of-life/work-orders/WO-004-screenplay-spacing-contract.md).
+
+## WO-007 verified policy facts
+
+`PageProfile` schema version 1 owns `auto_parenthetical` and `strict_transition_boundaries`; both default true for new and legacy-missing profiles, reject malformed JSON types, round-trip through native persistence and `replace_with_saved()`, and participate in complete profile cache identity. Parenthetical shape repairs, empty-delete fallback, before-opening Enter, and strict UTF-8 end-boundary transitions preserve transactional rollback and no-op/history invariants.

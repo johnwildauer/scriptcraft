@@ -86,9 +86,9 @@ constraints:
 
 - Model/session → layout: valid semantic project plus profile; output is temporary pages/lines/source mappings.
 - Layout → desktop/PDF: backend-neutral display data; consumers do not independently paginate.
-- The layout display data uses the named/versioned `us_letter_screenplay` profile: inch-defined values become points at the format boundary, with explicit role boxes, source byte ranges, page assignment, valid-boundary hit/caret geometry, same-element single spacing, and a non-text twelve-point boundary gap. Viewport zoom is presentation-only and is not an input.
+- The layout display data uses the named/versioned `us_letter_screenplay` profile: inch-defined values become points at the format boundary, with explicit role boxes, source byte ranges, page assignment, valid-boundary hit/caret geometry, same-element single spacing, and an explicit body role-pair gap policy. Incoming Dialogue and Parenthetical elements have zero extra gap from every body predecessor; other incoming roles use the profile boundary gap. Title-page boundaries are excluded and viewport zoom is presentation-only.
 - Persistence → session: successful native save changes clean/path state only after replacement succeeds; failures preserve prior state.
-- The persisted profile is also the geometry/font seam: layout, caret/hit testing, desktop selection/IME rendering, pagination, and PDF consume its role boxes, character metric, line advance, boundary gap, and font size. The desktop uses viewport scale only as a presentation transform and falls back to egui's deterministic monospace family when a named Courier face is unavailable.
+- The persisted profile is also the geometry/font seam: layout, caret/hit testing, desktop selection/IME rendering, pagination, and PDF consume its role boxes, character metric, line advance, boundary gap, and font size. New projects default to `Courier`; explicit supported stored families remain compatible. The desktop uses viewport scale only as a presentation transform and falls back to egui's deterministic monospace family when a named Courier face is unavailable.
 
 ## Requirement alignment
 
@@ -117,9 +117,23 @@ constraints:
 
 `TODO: link implementation symbols, acceptance test evidence for AC-WRITING-001.1 through AC-WRITING-004.3, comparable diff evidence, and independent blueprint review.`
 
+## WO-006 verified responsiveness facts
+
+- Long-document responsiveness is measured rather than inferred: controlled 1/5/15/50/120/180-page generated fixtures use three warmups and ten samples, report p50/p95 layout milliseconds, and exercise edits near the beginning, middle, and end.
+- The desktop's revision/profile-keyed layout cache is a derived optimization only. Complete profile equality and session revision provide invalidation; the shared result remains authoritative for screen hit/caret/navigation geometry, while export builds its deterministic layout independently.
+- The unchanged 180-page read measured an approximately 100% layout-build p95 reduction in the bounded cache path (18.998 ms uncached versus below the 0.001 ms timer resolution cached in this run). No incremental pagination was added because the benchmark measured complete layout cost, not downstream pagination dominance.
+
 ## Revision history
 
 | Date | Change | Evidence/rationale |
 |---|---|---|
 | 2026-10-25 | Created feature counterpart for the stable MVP requirement | Requirements and `.analysis` translated into a bounded technical composition; no implementation/review claimed |
 | 2026-10-25 | Resolved WO-007 export adapter contract | `scriptcraft-core::exports` uses a dependency-free deterministic PDF 1.4 consumer over `ScreenplayLayout`; plain text carries an in-band `LossReport` for roles, stable IDs, and page layout. Outputs borrow the project and never become native save state. |
+
+### WO-007 verified editing facts
+
+The persisted profile owns default-on `auto_parenthetical` and `strict_transition_boundaries` without a schema bump. Editing consumes the approved parenthetical delimiter/empty-delete matrices and disables strict Scene Heading, Character, and Transition Tab/Enter commands away from collapsed UTF-8-safe text ends as successful no-ops.
+
+### WO-008 Dialogue Enter facts
+
+Dialogue Enter is boundary-sensitive: at a collapsed UTF-8-safe element end it retains Dialogue→Action, while at an interior collapsed boundary it splits and preserves the suffix as a new Dialogue element. The original ID remains on the prefix and the new ID is bounded and collision-checked. The transaction preserves source bytes, collapsed selection, undo/redo, dirty/revision/history behavior, and deterministic save/reopen semantics; rejected non-collapsed, invalid-boundary, and capacity operations are unchanged no-ops/errors.

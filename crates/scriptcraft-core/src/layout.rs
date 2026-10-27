@@ -5,6 +5,7 @@
 //! character cell is seven units wide and one line is twelve units high.
 
 use crate::{ModelError, PageProfile, Project, Role};
+use std::sync::Arc;
 
 pub const FONT_FAMILY: &str = "Courier-family fixed metrics (12 pt target)";
 pub const CHAR_WIDTH: u32 = 7;
@@ -57,6 +58,39 @@ pub struct ScreenplayLayout {
     pub char_width: u32,
     pub line_height: u32,
     pub pages: Vec<LayoutPage>,
+}
+
+/// Session-owned immutable layout cache shared by desktop adapters and
+/// headless measurements.  The revision and complete persisted profile are
+/// the cache key; viewport presentation state is intentionally not included.
+#[derive(Debug, Default)]
+pub struct LayoutCache {
+    revision: Option<u64>,
+    profile: Option<PageProfile>,
+    layout: Option<Arc<ScreenplayLayout>>,
+}
+
+impl LayoutCache {
+    pub fn get_or_build(
+        &mut self,
+        revision: u64,
+        project: &Project,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        if self.revision == Some(revision) && self.profile.as_ref() == Some(&project.page_profile) {
+            return self
+                .layout
+                .clone()
+                .ok_or(LayoutError {
+                    kind: LayoutErrorKind::NoGeometry,
+                })
+                .map(|layout| (layout, true));
+        }
+        let layout = Arc::new(ScreenplayLayout::build(project)?);
+        self.revision = Some(revision);
+        self.profile = Some(project.page_profile.clone());
+        self.layout = Some(layout.clone());
+        Ok((layout, false))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,17 +178,60 @@ impl ScreenplayLayout {
                 && y >= line.rect.y
                 && y < line.rect.y.saturating_add(line.rect.height)
         })?;
-        let units = x.saturating_sub(line.rect.x);
+        Some(self.caret_for_line(line, x as i64))
+    }
+
+    /// Hit-test the body as one document-flow domain. `page` and `y` describe
+    /// the pointer in page-local coordinates; the page height is used only to
+    /// compare lines across pages. Horizontal placement is deliberately
+    /// clamped to the selected line's source range.
+    pub fn nearest_line_hit_test(&self, page: usize, x: i64, y: i64) -> Option<Caret> {
+        if self.pages.get(page)?.title_page {
+            return None;
+        }
+        let page_height = i64::from(self.profile.paper_height);
+        let pointer_y = i64::try_from(page)
+            .ok()?
+            .saturating_mul(page_height)
+            .saturating_add(y);
+        self.pages
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| !candidate.title_page)
+            .flat_map(|(page_index, candidate)| {
+                candidate
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .map(move |(line_index, line)| {
+                        let line_y = i64::try_from(page_index)
+                            .unwrap_or(i64::MAX)
+                            .saturating_mul(page_height)
+                            .saturating_add(i64::from(line.rect.y));
+                        let distance = (pointer_y - line_y).abs();
+                        (distance, page_index, line_index, line)
+                    })
+            })
+            .min_by_key(|(distance, page_index, line_index, _)| {
+                // Stable document order is the tie-breaker: earlier lines,
+                // then lower page indexes, win exact vertical ties.
+                (*distance, *page_index, *line_index)
+            })
+            .map(|(_, _, _, line)| self.caret_for_line(line, x))
+    }
+
+    fn caret_for_line(&self, line: &LayoutLine, x: i64) -> Caret {
+        let units = x.saturating_sub(i64::from(line.rect.x)).max(0) as u32;
         let cells = (units.saturating_add(self.char_width / 2)) / self.char_width.max(1);
         let offset = line
             .text
             .char_indices()
             .nth(cells as usize)
             .map_or(line.source.end, |(at, _)| line.source.start + at);
-        Some(Caret {
+        Caret {
             element: line.element,
             offset,
-        })
+        }
     }
 
     pub fn caret_rect(&self, caret: Caret) -> Result<Rect, LayoutError> {
@@ -246,6 +323,14 @@ impl ScreenplayLayout {
         }
         let capacity = self.profile.lines_per_page as usize;
         let has_boundary = self.pages.last().is_some_and(|page| !page.lines.is_empty());
+        let previous_role = self
+            .pages
+            .last()
+            .and_then(|page| page.lines.last())
+            .map(|line| line.role);
+        let extra_gap = previous_role
+            .map(|previous| role_boundary_gap(&self.profile, previous, role))
+            .unwrap_or(0);
         if !lines.is_empty()
             && !self.pages.last().is_some_and(|page| page.title_page)
             && has_boundary
@@ -254,7 +339,7 @@ impl ScreenplayLayout {
                 .last()
                 .map_or(0, |page| page.occupied_lines as usize)
                 .saturating_add(minimum)
-                .saturating_add(usize::from(self.profile.boundary_gap > 0))
+                .saturating_add(usize::from(extra_gap > 0))
                 > capacity
         {
             self.pages.push(self.new_page(false));
@@ -264,10 +349,12 @@ impl ScreenplayLayout {
             // boxes. Keep it exact even when it is not a multiple of the
             // profile's line advance.
             if let Some(page) = self.pages.last_mut() {
-                page.next_line_y = page.next_line_y.saturating_add(self.profile.boundary_gap);
+                page.next_line_y = page.next_line_y.saturating_add(extra_gap);
                 // Keep pagination's existing logical line-capacity contract
                 // while the cursor above retains the exact point distance.
-                page.occupied_lines = page.occupied_lines.saturating_add(1);
+                page.occupied_lines = page
+                    .occupied_lines
+                    .saturating_add(usize::from(extra_gap > 0) as u32);
             }
         }
         let oversized_element = lines.len() > capacity;
@@ -353,6 +440,14 @@ fn keep_with_next(role: Role) -> bool {
         role,
         Role::SceneHeading | Role::Character | Role::Parenthetical
     )
+}
+
+fn role_boundary_gap(profile: &PageProfile, _previous: Role, next: Role) -> u32 {
+    if matches!(next, Role::Dialogue | Role::Parenthetical) {
+        0
+    } else {
+        profile.boundary_gap
+    }
 }
 
 fn is_boundary_in_line(line: &LayoutLine, offset: usize) -> bool {
@@ -571,7 +666,7 @@ mod tests {
         assert_eq!(layout.pages[0].lines[2].rect.height, 15);
         assert_eq!(
             layout.pages[0].lines[2].rect.y - layout.pages[0].lines[1].rect.y,
-            30
+            15
         );
         let caret = layout
             .caret_rect(Caret {
@@ -591,7 +686,7 @@ mod tests {
 
     #[test]
     fn non_multiple_boundary_gap_is_preserved_as_point_geometry() {
-        let mut p = project(&[(Role::Action, "first"), (Role::Dialogue, "second")]);
+        let mut p = project(&[(Role::Action, "first"), (Role::Action, "second")]);
         p.page_profile.line_advance = 14;
         p.page_profile.boundary_gap = 10;
         let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
@@ -606,7 +701,7 @@ mod tests {
 
     #[test]
     fn fixed_metric_line_boxes_and_carets_have_twelve_unit_spacing() {
-        let p = project(&[(Role::Action, "first"), (Role::Dialogue, "second")]);
+        let p = project(&[(Role::Action, "first"), (Role::Action, "second")]);
         let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
         let lines = &layout.pages[0].lines;
         assert_eq!(layout.line_height, 12);
@@ -625,6 +720,58 @@ mod tests {
             assert_eq!(caret.height, LINE_HEIGHT);
             assert_eq!(caret.y, line.rect.y);
         }
+    }
+
+    #[test]
+    fn every_incoming_dialogue_or_parenthetical_has_no_extra_gap() {
+        let predecessors = [
+            Role::SceneHeading,
+            Role::Action,
+            Role::Character,
+            Role::Dialogue,
+            Role::Parenthetical,
+            Role::Transition,
+            Role::Note,
+        ];
+        for next in [Role::Dialogue, Role::Parenthetical] {
+            for previous in predecessors {
+                let p = project(&[(previous, "before"), (next, "after")]);
+                let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+                let lines = &layout.pages[0].lines;
+                assert_eq!(
+                    lines[1].rect.y - lines[0].rect.y,
+                    p.page_profile.line_advance
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn other_incoming_roles_use_boundary_gap() {
+        let pairs = [
+            (Role::Action, Role::Action),
+            (Role::Dialogue, Role::Action),
+            (Role::Parenthetical, Role::Character),
+            (Role::Note, Role::SceneHeading),
+        ];
+        for (previous, next) in pairs {
+            let p = project(&[(previous, "before"), (next, "after")]);
+            let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+            let lines = &layout.pages[0].lines;
+            assert_eq!(
+                lines[1].rect.y - lines[0].rect.y,
+                p.page_profile.line_advance + p.page_profile.boundary_gap
+            );
+        }
+    }
+
+    #[test]
+    fn zero_gap_does_not_consume_page_capacity() {
+        let mut p = project(&[(Role::Action, "before"), (Role::Dialogue, "after")]);
+        p.page_profile.lines_per_page = 2;
+        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(layout.pages[0].occupied_lines, 2);
     }
 
     #[test]
@@ -745,5 +892,102 @@ mod tests {
                 offset: 1
             })
             .is_ok());
+    }
+
+    #[test]
+    fn nearest_pointer_clamps_margins_and_round_trips_all_body_roles() {
+        let p = project(&[
+            (Role::SceneHeading, "INT. ROOM"),
+            (Role::Character, "BOB"),
+            (Role::Parenthetical, "(quietly)"),
+            (Role::Dialogue, "café🙂"),
+            (Role::Transition, "CUT TO:"),
+            (Role::Note, "note"),
+        ]);
+        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        for page in &layout.pages {
+            for line in &page.lines {
+                let start = layout
+                    .nearest_line_hit_test(
+                        page.number,
+                        i64::from(line.rect.x).saturating_sub(100),
+                        i64::from(line.rect.y),
+                    )
+                    .unwrap_or_else(|| unreachable!());
+                assert_eq!(
+                    (start.element, start.offset),
+                    (line.element, line.source.start)
+                );
+                let end = layout
+                    .nearest_line_hit_test(
+                        page.number,
+                        i64::from(line.rect.x.saturating_add(line.rect.width)).saturating_add(100),
+                        i64::from(line.rect.y),
+                    )
+                    .unwrap_or_else(|| unreachable!());
+                assert_eq!((end.element, end.offset), (line.element, line.source.end));
+                let caret = Caret {
+                    element: line.element,
+                    offset: line.source.end,
+                };
+                let rect = layout
+                    .caret_rect(caret.clone())
+                    .unwrap_or_else(|_| unreachable!());
+                assert_eq!(
+                    layout.nearest_line_hit_test(page.number, i64::from(rect.x), i64::from(rect.y)),
+                    Some(caret)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nearest_pointer_clamps_document_and_ties_to_earlier_line() {
+        let mut p = project(&[(Role::Action, "first"), (Role::Action, "second")]);
+        p.page_profile.lines_per_page = 1;
+        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        assert!(layout.pages.len() >= 2);
+        let first = &layout.pages[0].lines[0];
+        let last_page = layout.pages.len() - 1;
+        let last = layout.pages[last_page]
+            .lines
+            .last()
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            layout
+                .nearest_line_hit_test(0, 0, -10_000)
+                .unwrap_or_else(|| unreachable!())
+                .offset,
+            first.source.start
+        );
+        let below = layout
+            .nearest_line_hit_test(last_page, i64::MAX, 10_000)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            (below.element, below.offset),
+            (last.element, last.source.end)
+        );
+
+        let page_height = i64::from(layout.profile.paper_height);
+        let previous_y = i64::from(first.rect.y);
+        let next_y = page_height + i64::from(layout.pages[1].lines[0].rect.y);
+        let midpoint = (previous_y + next_y) / 2;
+        let tie = layout
+            .nearest_line_hit_test(1, 0, midpoint - page_height)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(tie.element, first.element);
+    }
+
+    #[test]
+    fn title_page_is_not_a_body_hit_test_domain() {
+        let mut p = project(&[(Role::Action, "body")]);
+        p.title_page.push(
+            ScreenplayElement::new("title", Role::Action, "title")
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        assert!(layout.pages[0].title_page);
+        assert_eq!(layout.nearest_line_hit_test(0, 0, 0), None);
+        assert!(layout.nearest_line_hit_test(1, 0, -10_000).is_some());
     }
 }

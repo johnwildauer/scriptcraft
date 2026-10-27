@@ -39,6 +39,7 @@ buffer.
 - The desktop shell never becomes the source of truth for screenplay text.
 - Every semantic mutation goes through the core editing/session boundary and is undoable when it changes the project.
 - Viewport size and zoom do not redefine print pagination.
+- The desktop consumes the core's role-pair geometry and profile font identity unchanged: new projects use `Courier`, existing supported stored families are retained, and PDF consumes the same fixed layout rather than applying an independent spacing or font policy.
 - A failed open/save/export reports an error and does not silently replace valid in-memory or on-disk project state.
 - The painted page-layout editor has one stable whole-surface egui response/ID for
   focus and keyboard ownership. Page rectangles remain render/hit-test geometry;
@@ -47,6 +48,20 @@ buffer.
   text, paste, key, and IME events through the existing editing session. Retained
   native diagnostics expose only bounded focus/event categories and counters, never
   document text or a second buffer.
+- Pointer events are resolved against the shared layout's document-global body
+  nearest-line query. Page margins, blank areas, inter-page gaps, and vertical
+  document edges therefore select source-safe body positions; clicks inside a
+  title page retain title-page ownership and do not move the body selection.
+- Caret-affecting commands request conditional nearest reveal only when the caret
+  is outside the actual scroll clip; passive scrolling and pointer selection clear
+  stale reveal intent and do not recenter the user's viewport.
+- A focused collapsed caret uses egui animation/repaint state to alternate visible
+  and hidden phases every 500 ms. Its animation identity includes the rendered
+  revision, caret position, and focus generation, so revision/caret changes and
+  focus regain begin a distinct initial visible phase; focus transitions update
+  the transient generation only at the transition boundary. Range selections,
+  focus loss, and unfocused idle frames suppress the caret and do not schedule
+  blink repaint. No timer thread or model blink state is used.
 
 ### Integration Contracts
 
@@ -68,6 +83,12 @@ buffer.
 
 `TODO: link verified package manifest, build/run evidence, desktop smoke evidence, and independent blueprint review.`
 
+## WO-006 verified responsiveness facts
+
+- The desktop owns a bounded privacy-safe `PerformanceDiagnostics` record for cumulative frame, event, layout-build, paint, and repaint-request counts/timings. It stores no document text and exposes only aggregate counters in the status surface.
+- The desktop session adapter owns the reusable core `LayoutCache` instance, keyed by editing revision plus the complete persisted page profile. Unchanged reads hit an immutable shared layout; edits and any profile geometry/font/policy change miss it. Viewport scale remains a paint transform and does not invalidate layout. The headless benchmark invokes this same adapter rather than an `Arc`-clone proxy.
+- Repaint requests are limited to active surface input, focused caret phase scheduling, and explicit focus transitions; an otherwise focused idle frame does not request an unconditional repaint. Native long-document smoke was not available; headless benchmark/rendered instrumentation is the required evidence boundary.
+
 ## Revision history
 
 | Date | Change | Evidence/rationale |
@@ -76,6 +97,7 @@ buffer.
 | 2026-10-25 | Recorded foundation app seam | WO-001 verified a dependency-free native Rust binary and headless startup path; visible UI remains deferred |
 | 2026-10-25 | Recorded unified editor and named persistence host behavior | WO-009/WO-010 implementation evidence; app owns the optional current named path and native `rfd` selection, while core owns JSON and atomic-save semantics; recovery remains outside the UI |
 | 2026-10-25 | Recorded hardened painted-editor input boundary | WO-011d implementation evidence: one stable whole-surface response/ID, response-driven focus, egui focus-lock filtering, focused event ownership, and bounded privacy-safe diagnostics; native typing remains a separate unproven manual gate |
+| 2026-10-26 | Recorded continuous focused-caret contract | WO-002 rendered evidence: egui-owned 500 ms phase scheduling is active only for a focused collapsed caret; range selection and unfocused idle frames suppress blink repaint, with revision/caret identity forming the transient reset boundary. |
 
 ## WO-001 verified foundation facts
 

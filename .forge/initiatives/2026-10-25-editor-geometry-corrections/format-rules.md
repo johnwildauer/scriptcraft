@@ -29,6 +29,17 @@ Standard screenplay formatting rules require specific font, margin, and line spa
 • Blank Lines (Double Spacing): Use a blank single line break (double space equivalent) to separate different screenplay elements—such as dropping down a line between an action block and a new scene heading, or between a character name and their dialogue.
 • Lines per Page: Roughly 55 lines of text per standard page.
 
+## Body Role-Pair Boundary Spacing
+
+Boundary spacing is derived from the incoming body role, not inserted into
+canonical text. For every predecessor role (`Scene Heading`, `Action`,
+`Character`, `Dialogue`, `Parenthetical`, `Transition`, or `Note`), an
+incoming `Dialogue` or `Parenthetical` uses zero extra boundary gap. Every
+other body transition uses the profile's `boundary_gap`, including same-role
+transitions. Wrapped lines within one element use `line_advance`; title-page
+elements never use body boundary gaps. Page-capacity accounting consumes one
+logical boundary unit only when the selected extra gap is nonzero.
+
 ## Durable Reference and Future Project Overrides
 
 This document is the human-readable reference for ScriptCraft's default
