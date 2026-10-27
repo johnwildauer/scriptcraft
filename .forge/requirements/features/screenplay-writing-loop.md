@@ -113,10 +113,10 @@ the semantic editing model.
   document on rejection.
 - **AC-WRITING-005.5:** Given a toolbar width, normal Items and Space shall
   consume one deterministic 72-point normal-item width, Flexible Space Items
-  shall divide the remaining width equally after the shared 4-point row
-  padding and 4-point inter-item gap budget, and a narrow toolbar shall retain
-  the leftmost fitting Items while exposing non-spacing Items through a far-right
-  `>>` text menu.
+  shall divide the remaining width equally after the shared 4-point horizontal
+  row-padding and 4-point inter-item-gap budget, and a narrow toolbar shall
+  retain the leftmost fitting Items while exposing non-spacing Items through a
+  far-right `>>` text menu.
   Action entries and Elements role choices in that menu shall remain executable
   without persisting toolbar layout state; a fully fitting composition shall
   keep its rightmost Item inside the available width.

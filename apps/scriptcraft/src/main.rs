@@ -22,6 +22,8 @@ const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 72.0;
 const TOOLBAR_OVERFLOW_WIDTH: f32 = 32.0;
 const TOOLBAR_ROW_PADDING: f32 = 4.0;
 const TOOLBAR_ITEM_GAP: f32 = 4.0;
+const TOOLBAR_TOP_PADDING: f32 = 2.0;
+const TOOLBAR_BOTTOM_PADDING: f32 = 2.0;
 
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
@@ -157,6 +159,7 @@ struct ToolbarAllocation {
     visible: Vec<(ToolbarItem, f32)>,
     overflow: Vec<ToolbarItem>,
     overflow_width: f32,
+    row_width: f32,
 }
 
 fn is_flexible_toolbar_space(item: ToolbarItem) -> bool {
@@ -169,6 +172,10 @@ fn toolbar_content_width(widths: &[(ToolbarItem, f32)], overflow_width: f32) -> 
         + TOOLBAR_ROW_PADDING * 2.0
         + (child_count - 1.0).max(0.0) * TOOLBAR_ITEM_GAP
         + overflow_width
+}
+
+fn toolbar_row_width(widths: &[(ToolbarItem, f32)], overflow_width: f32) -> f32 {
+    toolbar_content_width(widths, overflow_width)
 }
 
 /// Allocate the transient toolbar without measuring or mutating project state.
@@ -208,6 +215,7 @@ fn allocate_toolbar(items: &[ToolbarItem], available_width: f32) -> ToolbarAlloc
                 .collect(),
             overflow: Vec::new(),
             overflow_width: 0.0,
+            row_width: available_width,
         };
     }
 
@@ -238,10 +246,12 @@ fn allocate_toolbar(items: &[ToolbarItem], available_width: f32) -> ToolbarAlloc
         }
     }
 
+    let row_width = toolbar_row_width(&visible, TOOLBAR_OVERFLOW_WIDTH);
     ToolbarAllocation {
         visible,
         overflow,
         overflow_width: TOOLBAR_OVERFLOW_WIDTH,
+        row_width,
     }
 }
 
@@ -520,33 +530,43 @@ impl ScriptCraftApp {
         let allocation = allocate_toolbar(&default_toolbar_items(), ui.available_width());
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            ui.horizontal(|ui| {
-                ui.add_space(TOOLBAR_ROW_PADDING);
-                let mut first = true;
-                for (item, width) in allocation.visible.iter().copied() {
-                    if !first {
-                        ui.add_space(TOOLBAR_ITEM_GAP);
-                    }
-                    first = false;
-                    ui.push_id(item.id, |ui| match item.kind {
-                        ToolbarItemKind::Action(_) => self.toolbar_action_button(ui, item, width),
-                        ToolbarItemKind::Elements => self.elements_toolbar_item(ui, item, width),
-                        ToolbarItemKind::Space | ToolbarItemKind::FlexibleSpace => {
-                            ui.add_space(width);
+            ui.add_space(TOOLBAR_TOP_PADDING);
+            ui.allocate_ui_with_layout(
+                Vec2::new(allocation.row_width, ui.spacing().interact_size.y * 2.0),
+                egui::Layout::left_to_right(egui::Align::Min),
+                |ui| {
+                    ui.add_space(TOOLBAR_ROW_PADDING);
+                    let mut first = true;
+                    for (item, width) in allocation.visible.iter().copied() {
+                        if !first {
+                            ui.add_space(TOOLBAR_ITEM_GAP);
                         }
-                    });
-                }
-                if !allocation.overflow.is_empty() {
-                    if !first {
-                        ui.add_space(TOOLBAR_ITEM_GAP);
+                        first = false;
+                        ui.push_id(item.id, |ui| match item.kind {
+                            ToolbarItemKind::Action(_) => {
+                                self.toolbar_action_button(ui, item, width)
+                            }
+                            ToolbarItemKind::Elements => {
+                                self.elements_toolbar_item(ui, item, width)
+                            }
+                            ToolbarItemKind::Space | ToolbarItemKind::FlexibleSpace => {
+                                ui.add_space(width);
+                            }
+                        });
                     }
-                    ui.allocate_ui(
-                        Vec2::new(allocation.overflow_width, ui.spacing().interact_size.y),
-                        |ui| self.toolbar_overflow_menu(ui, &allocation.overflow),
-                    );
-                }
-                ui.add_space(TOOLBAR_ROW_PADDING);
-            });
+                    if !allocation.overflow.is_empty() {
+                        if !first {
+                            ui.add_space(TOOLBAR_ITEM_GAP);
+                        }
+                        ui.allocate_ui(
+                            Vec2::new(allocation.overflow_width, ui.spacing().interact_size.y),
+                            |ui| self.toolbar_overflow_menu(ui, &allocation.overflow),
+                        );
+                    }
+                    ui.add_space(TOOLBAR_ROW_PADDING);
+                },
+            );
+            ui.add_space(TOOLBAR_BOTTOM_PADDING);
         });
     }
 
@@ -1344,13 +1364,21 @@ fn ordered_selection(selection: Selection) -> (Position, Position) {
     }
 }
 
+fn toolbar_chrome_color(ctx: &egui::Context) -> Color32 {
+    ctx.style().visuals.panel_fill
+}
+
+fn toolbar_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::side_top_panel(&ctx.style()).fill(toolbar_chrome_color(ctx))
+}
+
 impl eframe::App for ScriptCraftApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            self.toolbar(ui);
-        });
+        egui::TopBottomPanel::top("toolbar")
+            .frame(toolbar_frame(ctx))
+            .show(ctx, |ui| self.toolbar(ui));
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(&self.status);
@@ -1424,6 +1452,31 @@ mod tests {
     use super::*;
     use scriptcraft_core::layout::{CHAR_WIDTH, LINE_HEIGHT};
     use scriptcraft_core::Role;
+
+    #[test]
+    fn toolbar_chrome_uses_the_style_panel_fill_without_mutating_style() {
+        let ctx = egui::Context::default();
+        let mut style = (*ctx.style()).clone();
+        style.visuals.panel_fill = Color32::from_rgb(17, 34, 51);
+        ctx.set_style(style.clone());
+
+        assert_eq!(toolbar_chrome_color(&ctx), style.visuals.panel_fill);
+        assert_eq!(toolbar_frame(&ctx).fill, style.visuals.panel_fill);
+        assert_eq!(ctx.style().visuals.panel_fill, style.visuals.panel_fill);
+    }
+
+    #[test]
+    fn toolbar_frame_preserves_top_panel_geometry_defaults() {
+        let ctx = egui::Context::default();
+        let expected = egui::Frame::side_top_panel(&ctx.style());
+        let actual = toolbar_frame(&ctx);
+
+        assert_eq!(actual.inner_margin, expected.inner_margin);
+        assert_eq!(actual.outer_margin, expected.outer_margin);
+        assert_eq!(actual.rounding, expected.rounding);
+        assert_eq!(actual.shadow, expected.shadow);
+        assert_eq!(actual.stroke, expected.stroke);
+    }
 
     #[test]
     fn default_toolbar_has_approved_order_and_labels() {
@@ -1539,6 +1592,8 @@ mod tests {
         assert_eq!(TOOLBAR_NORMAL_ITEM_WIDTH, 72.0);
         assert_eq!(TOOLBAR_ROW_PADDING, 4.0);
         assert_eq!(TOOLBAR_ITEM_GAP, 4.0);
+        assert_eq!(TOOLBAR_TOP_PADDING, 2.0);
+        assert_eq!(TOOLBAR_BOTTOM_PADDING, 2.0);
     }
 
     #[test]
@@ -1563,7 +1618,18 @@ mod tests {
                 toolbar_content_width(&allocation.visible, allocation.overflow_width)
                     <= available_width
             );
+            assert_eq!(
+                allocation.row_width,
+                toolbar_content_width(&allocation.visible, allocation.overflow_width)
+            );
         }
+    }
+
+    #[test]
+    fn toolbar_vertical_padding_is_explicit_and_reduced() {
+        assert_eq!(TOOLBAR_TOP_PADDING, 2.0);
+        assert_eq!(TOOLBAR_BOTTOM_PADDING, 2.0);
+        assert_eq!(TOOLBAR_TOP_PADDING + TOOLBAR_BOTTOM_PADDING, 4.0);
     }
 
     #[test]

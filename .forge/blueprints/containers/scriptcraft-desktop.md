@@ -69,11 +69,14 @@ buffer.
   surfaces. The Elements Item uses the same centered fixed-width outer group,
   placing a ComboBox above its centered `Elements` label.
 - Toolbar allocation is transient and deterministic: normal Items and `Space`
-  consume one 72-point normal-item width, while the allocator and renderer
-  share a 4-point row-padding budget, a 4-point inter-item gap (half egui's
-  default horizontal gap), and the 32-point overflow reservation. These three
-  values are the named manual geometry controls
-  `TOOLBAR_NORMAL_ITEM_WIDTH`, `TOOLBAR_ROW_PADDING`, and `TOOLBAR_ITEM_GAP`.
+  consume one 72-point normal-item width, while the allocator and renderer use
+  one shared row-width budget that includes the 4-point horizontal row-padding
+  budget, 4-point inter-item gaps (half egui's default horizontal gap), and the
+  32-point overflow reservation when present. These values are the named
+  manual geometry controls `TOOLBAR_NORMAL_ITEM_WIDTH`,
+  `TOOLBAR_ROW_PADDING`, `TOOLBAR_ITEM_GAP`, and
+  `TOOLBAR_OVERFLOW_WIDTH`. The named vertical controls are
+  `TOOLBAR_TOP_PADDING` = 2 points and `TOOLBAR_BOTTOM_PADDING` = 2 points.
   `Flexible Space`
   Items divide the remaining width equally after that budget, and narrow widths
   retain the leftmost fitting Items while placing a far-right `>>` text menu
@@ -82,6 +85,13 @@ buffer.
   exposes its role choices through a nested submenu-like menu that still routes
   role changes through `EditingSession`. A fully fitting row remains inside the
   available width, including its rightmost Item.
+- The toolbar `TopBottomPanel` uses the egui style's `Visuals::panel_fill` as
+  its explicit app-chrome fill through a local frame helper. This is the
+  framework-exposed deterministic application-surface source and does not
+  mutate global theme visuals or toolbar geometry. eframe's default native
+  window decorations own the title bar and expose no sampleable title-bar
+  color in this setup; therefore the contract is app-surface color alignment,
+  not an unobservable pixel-equality claim against native OS chrome.
 - A focused collapsed caret uses egui animation/repaint state to alternate visible
   and hidden phases every 500 ms. Its animation identity includes the rendered
   revision, caret position, and focus generation, so revision/caret changes and
