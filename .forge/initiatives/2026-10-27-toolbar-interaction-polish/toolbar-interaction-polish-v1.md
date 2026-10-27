@@ -3,7 +3,7 @@
 ## Initiative metadata
 
 - **Phase:** `closeout`
-- **Status:** `active`
+- **Status:** `closed`
 - **Owner/orchestrator:** Forge orchestrator
 - **Created:** 2026-10-27
 - **Updated:** 2026-10-27
@@ -16,7 +16,7 @@
 - **Initiative branch:** `dev/2026-10-27-toolbar-interaction-polish`
 - **Branch policy:** `required`
 - **Branch naming convention:** `dev/YYYY-MM-DD-short-slug`
-- **Branch capability/evidence:** `git switch -c dev/2026-10-27-toolbar-interaction-polish` succeeded on 2026-10-27.
+- **Branch capability/evidence:** The implementation commit landed on the recorded base checkout before the initiative branch pointer was restored; `git branch dev/2026-10-27-toolbar-interaction-polish HEAD` and checkout succeeded during closeout. This is recorded as reduced branch-separation evidence rather than claimed as a clean isolated implementation branch.
 - **Reduced-capability fallback or opt-out evidence:** Not applicable.
 - **Branch creation failure:** `none`
 - **Validation cadence:** `per work order`
@@ -122,6 +122,6 @@ WO-001 precedes WO-002 because width tuning must measure the final nested Item s
 
 ## Closeout record
 
-- **Closeout status:** `in-progress`
+- **Closeout status:** `closed`
 - **Closeout date:** 2026-10-27
-- **Closeout evidence:** WO-001 passed fresh validation; WO-002's initial validation failed only required evidence gates, WO-002a repaired those failures, and fresh WO-002a validation passed all gates. No unresolved implementation blocker remains. Git evidence will be recorded after commit/merge.
+- **Closeout evidence:** WO-001 passed fresh validation; WO-002's initial validation failed only required evidence gates, WO-002a repaired those failures, and fresh WO-002a validation passed all gates. No unresolved implementation blocker remains. Implementation commit `0eb7b0a` and closeout commit are recorded in the execution log.

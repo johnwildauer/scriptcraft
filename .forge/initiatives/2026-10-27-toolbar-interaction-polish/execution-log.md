@@ -128,6 +128,17 @@ failures, and follow-ups. Planning discussion remains in the initiative plan.
 - **Result:** `PASS WITH WARNINGS`; no further fix work order is required. All work orders are complete through the fix chain.
 - **Next action/owner:** Forge orchestrator closeout; commit the branch, merge into the recorded base branch, and set status closed.
 
+### 2026-10-27 — Final closeout and branch evidence reconciliation
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `code-orchestrator-toolbar-interaction-polish-2026-10-27`
+- **State transition:** initiative `closeout → closed`
+- **Work order/review:** WO-001, WO-002, and WO-002a with their fresh validations
+- **Action:** Verified all work orders are complete through the WO-002a fix chain, all required gates pass, and no unrelated files were included. Reconciled Git evidence after discovering the implementation commit had landed on the base checkout: restored the named initiative branch pointer at the implementation tip and recorded the reduced branch-isolation evidence rather than claiming an isolated branch history.
+- **Evidence:** [`validations/validation-WO-001.md`](validations/validation-WO-001.md:1), [`validations/validation-WO-002.md`](validations/validation-WO-002.md:1), [`validations/validation-WO-002a.md`](validations/validation-WO-002a.md:1), implementation commit `0eb7b0a`, clean `git diff --check`, and successful branch pointer restoration.
+- **Result:** Initiative status set to `closed`; native visual smoke remains a documented follow-up warning.
+- **Next action/owner:** Forge orchestrator; commit this closeout record and fast-forward merge the branch into the recorded base branch.
+
 ### 2026-10-27 — WO-002a implementation completed
 
 - **Actor/role:** Desktop toolbar fix implementer
