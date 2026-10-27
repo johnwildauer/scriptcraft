@@ -79,6 +79,17 @@ failures, and follow-ups. Planning discussion remains in the initiative plan.
 - **Result:** Initiative status set to `closed`; merge into `dev/2026-10-26-editor-geometry-corrections-v2` remains the final Git action.
 - **Next action/owner:** Forge orchestrator; merge the committed initiative branch and record the result.
 
+### 2026-10-27 — Git merge completed
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `code-orchestrator-toolbar-polish-2026-10-27`
+- **State transition:** Git closure complete; initiative remains `closed`
+- **Work order/review:** Initiative closeout
+- **Action:** Fast-forward merged `dev/2026-10-27-toolbar-polish` into `dev/2026-10-26-editor-geometry-corrections-v2`.
+- **Evidence:** Merge succeeded; base branch advanced from `d77db0b` to `a834e9f`.
+- **Result:** Initiative branch merged with no merge conflicts. Final closeout documentation is recorded on the base branch.
+- **Next action/owner:** None for this initiative; native visual smoke remains the documented follow-up.
+
 ### 2026-10-27 — Initiative investigation and branch decision
 
 - **Actor/role:** Forge orchestrator

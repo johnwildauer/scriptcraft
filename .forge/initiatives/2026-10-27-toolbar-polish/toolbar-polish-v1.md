@@ -141,4 +141,4 @@ WO-001 precedes WO-002 so geometry work measures the final vertical Item surface
 
 - **Closeout status:** `closed`
 - **Closeout date:** 2026-10-27
-- **Closeout evidence:** Both work orders passed separate fresh validation; required Cargo gates passed for both; no fix work orders or session exceptions were required. Commit `7b51d83` contains implementation and Forge evidence; merge evidence is recorded in the final execution-log entry.
+- **Closeout evidence:** Both work orders passed separate fresh validation; required Cargo gates passed for both; no fix work orders or session exceptions were required. Commits `7b51d83` and `a834e9f` contain implementation and Forge evidence; merge evidence is recorded in the final execution-log entry.
