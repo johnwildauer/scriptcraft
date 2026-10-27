@@ -32,14 +32,70 @@ const TOOLBAR_OVERFLOW_WIDTH: f32 = 32.0;
 const TOOLBAR_ROW_PADDING: f32 = 4.0;
 const TOOLBAR_ITEM_GAP: f32 = 4.0;
 const TOOLBAR_TOP_PADDING: f32 = 0.0;
+// Preserve the toolbar's text/control clearance. The trailing span is part of
+// the exact top-panel allocation and must not be removed to fix a viewport row.
 const TOOLBAR_BOTTOM_PADDING: f32 = 2.0;
 const TOOLBAR_ICON_HOVER_PADDING: f32 = 2.0;
 const TITLE_STRIP_TEXT: &str = "ScriptCraft";
 const TITLE_STRIP_HEIGHT: f32 = 30.0;
+const PRESENTATION_SETTLE_FRAMES: u8 = 2;
+const PRESENTATION_FALLBACK_FRAMES: u8 = 12;
 #[cfg(test)]
 const CHROME_GEOMETRY_TOLERANCE: f32 = 0.5;
-#[cfg(test)]
 const TRANSITION_METRIC_TOLERANCE: f32 = 0.01;
+
+/// Source-level experiment selector. Restore `CustomHidden` to roll back to
+/// the existing app-owned title strip and transition behavior.
+const TITLEBAR_PRESENTATION_MODE: TitlebarPresentationMode = TitlebarPresentationMode::NativeMacOs;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitlebarPresentationMode {
+    CustomHidden,
+    NativeMacOs,
+}
+
+impl TitlebarPresentationMode {
+    fn uses_custom_titlebar(self) -> bool {
+        matches!(self, Self::CustomHidden)
+    }
+
+    fn uses_app_owned_transition_policy(self) -> bool {
+        self.uses_custom_titlebar()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitlebarSurface {
+    CustomTitleStrip,
+    NativeTitlebar,
+}
+
+fn selected_titlebar_presentation_mode() -> TitlebarPresentationMode {
+    TITLEBAR_PRESENTATION_MODE
+}
+
+fn titlebar_surface_for_mode(mode: TitlebarPresentationMode) -> TitlebarSurface {
+    if mode.uses_custom_titlebar() {
+        TitlebarSurface::CustomTitleStrip
+    } else {
+        TitlebarSurface::NativeTitlebar
+    }
+}
+
+fn titlebar_viewport_command_for_mode(
+    mode: TitlebarPresentationMode,
+    maximized: Option<bool>,
+) -> Option<egui::ViewportCommand> {
+    match titlebar_surface_for_mode(mode) {
+        TitlebarSurface::CustomTitleStrip => title_strip_viewport_command(maximized),
+        TitlebarSurface::NativeTitlebar => None,
+    }
+}
+
+fn should_request_policy_repaint(mode: TitlebarPresentationMode, observing: bool) -> bool {
+    mode.uses_app_owned_transition_policy() && observing
+}
 
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
@@ -751,6 +807,7 @@ struct ScriptCraftApp {
     layout_cache: LayoutCache,
     performance: PerformanceDiagnostics,
     viewport_diagnostics: ViewportDiagnostics,
+    presentation_policy: PresentationTransitionPolicy,
 }
 
 impl ScriptCraftApp {
@@ -779,6 +836,7 @@ impl ScriptCraftApp {
             layout_cache: LayoutCache::default(),
             performance: PerformanceDiagnostics::default(),
             viewport_diagnostics: ViewportDiagnostics::default(),
+            presentation_policy: PresentationTransitionPolicy::default(),
         })
     }
 
@@ -909,9 +967,15 @@ impl ScriptCraftApp {
         }
     }
 
-    fn toolbar_action_button(&mut self, ui: &mut egui::Ui, item: ToolbarItem, width: f32) {
+    fn toolbar_action_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        item: ToolbarItem,
+        width: f32,
+        presentation: ToolbarPresentationMetrics,
+    ) {
         let (id, rect) = ui.allocate_space(Vec2::new(width, ui.spacing().interact_size.y * 2.0));
-        let icon_control_size = Vec2::splat(ui.spacing().interact_size.y);
+        let icon_control_size = Vec2::splat(presentation.icon_control_size);
         let icon_control_rect = toolbar_icon_control_rect(rect, icon_control_size);
         let icon_rect = toolbar_icon_hover_rect(icon_control_rect, TOOLBAR_ICON_HOVER_PADDING);
         let response = ui
@@ -921,12 +985,7 @@ impl ScriptCraftApp {
         if fill != Color32::TRANSPARENT {
             ui.painter().rect_filled(icon_rect, 2.0, fill);
         }
-        let body_font = ui
-            .style()
-            .text_styles
-            .get(&TextStyle::Body)
-            .cloned()
-            .unwrap_or_else(|| FontId::proportional(14.0));
+        let body_font = presentation.font_id();
         let label_size = ui.fonts(|fonts| {
             fonts
                 .layout_no_wrap(
@@ -974,7 +1033,13 @@ impl ScriptCraftApp {
         self.mutate(result, "Changed focused element role", RevealIntent::None);
     }
 
-    fn elements_toolbar_item(&mut self, ui: &mut egui::Ui, item: ToolbarItem, width: f32) {
+    fn elements_toolbar_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        item: ToolbarItem,
+        width: f32,
+        presentation: ToolbarPresentationMetrics,
+    ) {
         let selected_role = self.focused_role();
         let mut next_role = selected_role.unwrap_or(Role::Action);
         let group_response = ui.allocate_ui_with_layout(
@@ -1006,7 +1071,11 @@ impl ScriptCraftApp {
                         ui.spacing().icon_spacing,
                         ui.spacing().icon_width,
                     );
-                    let galley = WidgetText::from(screenplay_role_label(next_role)).into_galley(
+                    let galley = WidgetText::from(
+                        RichText::new(screenplay_role_label(next_role))
+                            .font(presentation.font_id()),
+                    )
+                    .into_galley(
                         ui,
                         Some(TextWrapMode::Truncate),
                         text_rect.width(),
@@ -1020,12 +1089,7 @@ impl ScriptCraftApp {
                 // This caption is decorative. Allocate/paint it instead of adding a
                 // label response that can compete with the ComboBox cursor owner.
                 let (_, label_rect) = ui.allocate_space(ui.spacing().interact_size);
-                let label_font = ui
-                    .style()
-                    .text_styles
-                    .get(&TextStyle::Body)
-                    .cloned()
-                    .unwrap_or_else(|| FontId::proportional(14.0));
+                let label_font = presentation.font_id();
                 ui.painter().text(
                     label_rect.left_center(),
                     egui::Align2::LEFT_CENTER,
@@ -1100,6 +1164,10 @@ impl ScriptCraftApp {
         let allocation = allocate_toolbar(&default_toolbar_items(), available_width, |label| {
             toolbar_label_width(ui, label)
         });
+        let presentation = self.presentation_policy.effective_toolbar_metrics_for_mode(
+            live_toolbar_metrics(ui),
+            selected_titlebar_presentation_mode(),
+        );
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(TOOLBAR_TOP_PADDING);
@@ -1116,10 +1184,10 @@ impl ScriptCraftApp {
                         first = false;
                         ui.push_id(item.id, |ui| match item.kind {
                             ToolbarItemKind::Action(_) => {
-                                self.toolbar_action_button(ui, item, width)
+                                self.toolbar_action_button(ui, item, width, presentation)
                             }
                             ToolbarItemKind::Elements => {
-                                self.elements_toolbar_item(ui, item, width)
+                                self.elements_toolbar_item(ui, item, width, presentation)
                             }
                             ToolbarItemKind::Space | ToolbarItemKind::FlexibleSpace => {
                                 ui.add_space(width);
@@ -1419,12 +1487,15 @@ impl ScriptCraftApp {
         };
         self.rendered_revision = Some(self.session.revision());
         let available = ui.available_size();
-        let metrics = presentation_metrics_with_policy(
+        let live_metrics = presentation_metrics_with_policy(
             available.x,
             layout.profile.paper_width as f32,
             layout.profile.font_size as f32,
             presentation_metric_policy(),
         );
+        let metrics = self
+            .presentation_policy
+            .effective_page_metrics_for_mode(live_metrics, selected_titlebar_presentation_mode());
         let page_width = metrics.page_width;
         let scale = metrics.scale;
         self.viewport_diagnostics.record_geometry(
@@ -1487,6 +1558,16 @@ impl ScriptCraftApp {
         if let Some(page_rect) = page_rects.first().copied() {
             self.viewport_diagnostics
                 .record_presentation(metrics, page_rect);
+            let derived = PresentationMetricSet {
+                toolbar: live_toolbar_metrics(ui),
+                page: live_metrics,
+                page_bounds: page_rect.size(),
+            };
+            let observed_maximized = ui.ctx().input(|input| input.viewport().maximized);
+            if selected_titlebar_presentation_mode().uses_app_owned_transition_policy() {
+                self.presentation_policy
+                    .observe(observed_maximized, derived);
+            }
         }
         self.reveal_intent = RevealIntent::None;
 
@@ -1865,22 +1946,222 @@ fn presentation_geometry(available_width: f32, paper_width: f32) -> (f32, f32, f
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+struct ToolbarPresentationMetrics {
+    icon_control_size: f32,
+    font_size: f32,
+    icon_bounds: Vec2,
+    text_bounds: Vec2,
+}
+
+impl ToolbarPresentationMetrics {
+    fn font_id(self) -> FontId {
+        FontId::proportional(self.font_size)
+    }
+}
+
+fn live_toolbar_metrics(ui: &egui::Ui) -> ToolbarPresentationMetrics {
+    let font = ui
+        .style()
+        .text_styles
+        .get(&TextStyle::Body)
+        .cloned()
+        .unwrap_or_else(|| FontId::proportional(14.0));
+    let text_bounds = ui.fonts(|fonts| {
+        fonts
+            .layout_no_wrap("Export PDF".to_owned(), font.clone(), Color32::TRANSPARENT)
+            .size()
+    });
+    ToolbarPresentationMetrics {
+        icon_control_size: ui.spacing().interact_size.y,
+        font_size: font.size,
+        icon_bounds: Vec2::new(font.size, font.size),
+        text_bounds,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct PresentationMetrics {
     page_width: f32,
     scale: f32,
     font_size: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PresentationMetricSet {
+    toolbar: ToolbarPresentationMetrics,
+    page: PresentationMetrics,
+    page_bounds: Vec2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresentationTransitionState {
+    Stable,
+    Requested,
+    Settling,
+    Released,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PresentationTransitionPolicy {
+    state: PresentationTransitionState,
+    target_maximized: Option<bool>,
+    captured: Option<PresentationMetricSet>,
+    last_stable: Option<PresentationMetricSet>,
+    previous_derived: Option<PresentationMetricSet>,
+    stable_frames: u8,
+    held_frames: u8,
+}
+
+impl Default for PresentationTransitionPolicy {
+    fn default() -> Self {
+        Self {
+            state: PresentationTransitionState::Stable,
+            target_maximized: None,
+            captured: None,
+            last_stable: None,
+            previous_derived: None,
+            stable_frames: 0,
+            held_frames: 0,
+        }
+    }
+}
+
+impl PresentationTransitionPolicy {
+    fn is_observing(&self) -> bool {
+        !matches!(self.state, PresentationTransitionState::Stable)
+    }
+
+    fn effective_toolbar_metrics(
+        &self,
+        live: ToolbarPresentationMetrics,
+    ) -> ToolbarPresentationMetrics {
+        self.effective_set().map_or(live, |metrics| metrics.toolbar)
+    }
+
+    fn effective_toolbar_metrics_for_mode(
+        &self,
+        live: ToolbarPresentationMetrics,
+        mode: TitlebarPresentationMode,
+    ) -> ToolbarPresentationMetrics {
+        if mode.uses_app_owned_transition_policy() {
+            self.effective_toolbar_metrics(live)
+        } else {
+            live
+        }
+    }
+
+    fn effective_page_metrics(&self, live: PresentationMetrics) -> PresentationMetrics {
+        self.effective_set().map_or(live, |metrics| metrics.page)
+    }
+
+    fn effective_page_metrics_for_mode(
+        &self,
+        live: PresentationMetrics,
+        mode: TitlebarPresentationMode,
+    ) -> PresentationMetrics {
+        if mode.uses_app_owned_transition_policy() {
+            self.effective_page_metrics(live)
+        } else {
+            live
+        }
+    }
+
+    fn effective_set(&self) -> Option<PresentationMetricSet> {
+        match self.state {
+            PresentationTransitionState::Requested | PresentationTransitionState::Settling => {
+                self.captured.or(self.last_stable)
+            }
+            PresentationTransitionState::Released => self.last_stable,
+            PresentationTransitionState::Stable => None,
+        }
+    }
+
+    fn request(&mut self, target_maximized: Option<bool>) {
+        let Some(target_maximized) = target_maximized else {
+            return;
+        };
+        if self.target_maximized == Some(target_maximized)
+            && !matches!(self.state, PresentationTransitionState::Stable)
+        {
+            return;
+        }
+        self.target_maximized = Some(target_maximized);
+        self.captured = self.last_stable;
+        self.previous_derived = None;
+        self.stable_frames = 0;
+        self.held_frames = 0;
+        self.state = PresentationTransitionState::Requested;
+    }
+
+    fn observe(&mut self, observed_maximized: Option<bool>, derived: PresentationMetricSet) {
+        if matches!(self.state, PresentationTransitionState::Released) {
+            self.finish_release(derived);
+            return;
+        }
+        if matches!(self.state, PresentationTransitionState::Stable) {
+            self.last_stable = Some(derived);
+            self.previous_derived = Some(derived);
+            return;
+        }
+
+        self.held_frames = self.held_frames.saturating_add(1);
+        if matches!(self.state, PresentationTransitionState::Requested) {
+            self.state = PresentationTransitionState::Settling;
+        }
+        let metrics_stable = self
+            .previous_derived
+            .is_some_and(|previous| metric_set_close(previous, derived));
+        self.previous_derived = Some(derived);
+        if observed_maximized == self.target_maximized && metrics_stable {
+            self.stable_frames = self.stable_frames.saturating_add(1);
+        } else {
+            self.stable_frames = 0;
+        }
+        if self.stable_frames >= PRESENTATION_SETTLE_FRAMES
+            || self.held_frames >= PRESENTATION_FALLBACK_FRAMES
+        {
+            // The next frame is the first released frame. Capture the exact
+            // latest app-owned tuple so release cannot be followed by a snap.
+            self.last_stable = Some(derived);
+            self.captured = None;
+            self.state = PresentationTransitionState::Released;
+        }
+    }
+
+    fn finish_release(&mut self, derived: PresentationMetricSet) {
+        if matches!(self.state, PresentationTransitionState::Released) {
+            self.last_stable = Some(derived);
+            self.previous_derived = Some(derived);
+            self.target_maximized = None;
+            self.state = PresentationTransitionState::Stable;
+            self.stable_frames = 0;
+            self.held_frames = 0;
+        }
+    }
+}
+
+fn metric_set_close(left: PresentationMetricSet, right: PresentationMetricSet) -> bool {
+    let close = |a: f32, b: f32| (a - b).abs() <= TRANSITION_METRIC_TOLERANCE;
+    let close_vec = |a: Vec2, b: Vec2| close(a.x, b.x) && close(a.y, b.y);
+    close(
+        left.toolbar.icon_control_size,
+        right.toolbar.icon_control_size,
+    ) && close(left.toolbar.font_size, right.toolbar.font_size)
+        && close_vec(left.toolbar.icon_bounds, right.toolbar.icon_bounds)
+        && close_vec(left.toolbar.text_bounds, right.toolbar.text_bounds)
+        && close(left.page.page_width, right.page.page_width)
+        && close(left.page.scale, right.page.scale)
+        && close(left.page.font_size, right.page.font_size)
+        && close_vec(left.page_bounds, right.page_bounds)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PresentationMetricPolicy {
-    LiveWidthDerived,
+    AppOwnedTransition,
 }
 
 fn presentation_metric_policy() -> PresentationMetricPolicy {
-    // eframe/egui exposes snapshots and requests, not a reliable transition
-    // interval. Keep the responsive metric live until native evidence can
-    // delimit a page-only freeze without changing global egui scale or input.
-    PresentationMetricPolicy::LiveWidthDerived
+    PresentationMetricPolicy::AppOwnedTransition
 }
 
 fn presentation_metrics(
@@ -1904,7 +2185,7 @@ fn presentation_metrics_with_policy(
     policy: PresentationMetricPolicy,
 ) -> PresentationMetrics {
     match policy {
-        PresentationMetricPolicy::LiveWidthDerived => {
+        PresentationMetricPolicy::AppOwnedTransition => {
             presentation_metrics(available_width, paper_width, base_font_size)
         }
     }
@@ -2006,6 +2287,10 @@ fn toolbar_chrome_color(ctx: &egui::Context) -> Color32 {
     ctx.style().visuals.widgets.open.weak_bg_fill
 }
 
+fn chrome_clear_color(visuals: &egui::Visuals) -> [f32; 4] {
+    visuals.widgets.open.weak_bg_fill.to_normalized_gamma_f32()
+}
+
 fn toolbar_icon_control_rect(group_rect: egui::Rect, icon_control_size: Vec2) -> egui::Rect {
     egui::Rect::from_center_size(
         egui::pos2(
@@ -2067,6 +2352,14 @@ fn chrome_frame(ctx: &egui::Context) -> egui::Frame {
         .stroke(egui::Stroke::NONE)
 }
 
+fn central_panel_frame(ctx: &egui::Context) -> egui::Frame {
+    // The central panel is the immediate owner below the toolbar. Keep its
+    // normal 8-point document inset, but use the same explicit surface fill
+    // as the top chrome so the boundary cannot expose panel_fill as a dark
+    // (black-looking) strip between the two app-owned surfaces.
+    egui::Frame::central_panel(ctx.style().as_ref()).fill(toolbar_chrome_color(ctx))
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ChromeGeometry {
@@ -2126,7 +2419,9 @@ fn title_strip_viewport_command(maximized: Option<bool>) -> Option<egui::Viewpor
 fn title_strip(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
+    mode: TitlebarPresentationMode,
     viewport_diagnostics: &mut ViewportDiagnostics,
+    presentation_policy: &mut PresentationTransitionPolicy,
 ) {
     let response = ui.allocate_response(
         Vec2::new(ui.available_width(), TITLE_STRIP_HEIGHT),
@@ -2147,13 +2442,16 @@ fn title_strip(
     if response.double_clicked() {
         let (observed_maximized, command) = ctx.input(|input| {
             let observed = input.viewport().maximized;
-            (observed, title_strip_viewport_command(observed))
+            (observed, titlebar_viewport_command_for_mode(mode, observed))
         });
         let requested_maximized = command.as_ref().and_then(|command| match command {
             egui::ViewportCommand::Maximized(value) => Some(*value),
             _ => None,
         });
         viewport_diagnostics.record_command(observed_maximized, requested_maximized);
+        if mode.uses_app_owned_transition_policy() {
+            presentation_policy.request(requested_maximized);
+        }
         if let Some(command) = command {
             ctx.send_viewport_cmd(command);
         }
@@ -2161,11 +2459,21 @@ fn title_strip(
 }
 
 impl eframe::App for ScriptCraftApp {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        chrome_clear_color(visuals)
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
+        let mode = selected_titlebar_presentation_mode();
         self.performance.frames = self.performance.frames.saturating_add(1);
         self.viewport_diagnostics.begin_frame(ctx);
-        let chrome_height = TITLE_STRIP_HEIGHT + toolbar_content_height(&ctx.style());
+        let chrome_height = toolbar_content_height(&ctx.style())
+            + if mode.uses_custom_titlebar() {
+                TITLE_STRIP_HEIGHT
+            } else {
+                0.0
+            };
         let mut chrome_panel = egui::Rect::NOTHING;
         egui::TopBottomPanel::top("titlebar-toolbar")
             .frame(title_strip_frame(ctx))
@@ -2173,7 +2481,15 @@ impl eframe::App for ScriptCraftApp {
             .exact_height(chrome_height)
             .show(ctx, |ui| {
                 chrome_panel = ui.max_rect();
-                title_strip(ui, ctx, &mut self.viewport_diagnostics);
+                if mode.uses_custom_titlebar() {
+                    title_strip(
+                        ui,
+                        ctx,
+                        mode,
+                        &mut self.viewport_diagnostics,
+                        &mut self.presentation_policy,
+                    );
+                }
                 self.toolbar(ui);
             });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -2219,18 +2535,23 @@ impl eframe::App for ScriptCraftApp {
             });
         });
         let mut central_panel = egui::Rect::NOTHING;
-        egui::CentralPanel::default().show(ctx, |ui| {
-            central_panel = ui.max_rect();
-            ui.heading(&self.session.project().metadata.title);
-            ui.separator();
-            self.live_document_surface(ui);
-        });
+        egui::CentralPanel::default()
+            .frame(central_panel_frame(ctx))
+            .show(ctx, |ui| {
+                central_panel = ui.max_rect();
+                ui.heading(&self.session.project().metadata.title);
+                ui.separator();
+                self.live_document_surface(ui);
+            });
         self.viewport_diagnostics.record_chrome_ledger(
             chrome_panel,
             central_panel,
             ctx.pixels_per_point(),
         );
         self.handle_surface_input(ctx);
+        if should_request_policy_repaint(mode, self.presentation_policy.is_observing()) {
+            self.request_repaint(ctx);
+        }
         self.viewport_diagnostics.finish_frame();
         self.performance.frame_nanos = self
             .performance
@@ -2239,21 +2560,45 @@ impl eframe::App for ScriptCraftApp {
     }
 }
 
-fn native_options() -> eframe::NativeOptions {
-    eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            // eframe 0.29 exposes the macOS titlebar controls through these
-            // names; together they are the installed-API equivalent of the
-            // requested hidden/transparent/full-size titlebar configuration.
-            .with_title_shown(false)
-            .with_titlebar_shown(false)
-            .with_fullsize_content_view(true),
-        ..Default::default()
+fn native_options_for_mode(mode: TitlebarPresentationMode) -> eframe::NativeOptions {
+    match mode {
+        TitlebarPresentationMode::CustomHidden => eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_decorations(true)
+                .with_transparent(false)
+                .with_title(TITLE_STRIP_TEXT)
+                .with_title_shown(false)
+                .with_titlebar_buttons_shown(false)
+                .with_titlebar_shown(false)
+                .with_fullsize_content_view(true),
+            ..Default::default()
+        },
+        TitlebarPresentationMode::NativeMacOs => eframe::NativeOptions::default(),
     }
 }
 
+struct StartupPresentation {
+    mode: TitlebarPresentationMode,
+    options: eframe::NativeOptions,
+}
+
+fn startup_presentation_for_mode(mode: TitlebarPresentationMode) -> StartupPresentation {
+    StartupPresentation {
+        mode,
+        options: native_options_for_mode(mode),
+    }
+}
+
+fn startup_presentation() -> StartupPresentation {
+    startup_presentation_for_mode(selected_titlebar_presentation_mode())
+}
+
 fn main() -> eframe::Result {
-    let options = native_options();
+    // Keep the selected mode and the exact options object together at the
+    // only startup handoff. This prevents a stale helper or alternate mode
+    // from silently reaching the native runner.
+    let StartupPresentation { mode, options } = startup_presentation();
+    debug_assert_eq!(mode, selected_titlebar_presentation_mode());
     eframe::run_native(
         "ScriptCraft",
         options,
@@ -2283,12 +2628,107 @@ mod tests {
     use scriptcraft_core::Role;
 
     #[test]
-    fn native_options_configure_the_requested_viewport_presentation() {
-        let options = native_options();
+    fn native_startup_selects_vanilla_defaults_and_custom_path_is_reversible() {
+        let custom = native_options_for_mode(TitlebarPresentationMode::CustomHidden);
+        assert_eq!(custom.viewport.title, Some(TITLE_STRIP_TEXT.to_owned()));
+        assert_eq!(custom.viewport.title_shown, Some(false));
+        assert_eq!(custom.viewport.titlebar_shown, Some(false));
+        assert_eq!(custom.viewport.titlebar_buttons_shown, Some(false));
+        assert_eq!(custom.viewport.fullsize_content_view, Some(true));
+        assert_eq!(custom.viewport.decorations, Some(true));
+        assert_eq!(custom.viewport.transparent, Some(false));
 
-        assert_eq!(options.viewport.title_shown, Some(false));
-        assert_eq!(options.viewport.titlebar_shown, Some(false));
-        assert_eq!(options.viewport.fullsize_content_view, Some(true));
+        let native = native_options_for_mode(TitlebarPresentationMode::NativeMacOs);
+        assert_eq!(native.viewport.title, None);
+        assert_eq!(native.viewport.title_shown, None);
+        assert_eq!(native.viewport.titlebar_shown, None);
+        assert_eq!(native.viewport.titlebar_buttons_shown, None);
+        assert_eq!(native.viewport.fullsize_content_view, None);
+        assert_eq!(native.viewport.decorations, None);
+        assert_eq!(native.viewport.transparent, None);
+
+        for mode in [
+            TitlebarPresentationMode::CustomHidden,
+            TitlebarPresentationMode::NativeMacOs,
+        ] {
+            let handoff = startup_presentation_for_mode(mode);
+            let expected = native_options_for_mode(mode);
+            assert_eq!(handoff.mode, mode);
+            assert_eq!(handoff.options.viewport.title, expected.viewport.title);
+            assert_eq!(
+                handoff.options.viewport.title_shown,
+                expected.viewport.title_shown
+            );
+            assert_eq!(
+                handoff.options.viewport.titlebar_shown,
+                expected.viewport.titlebar_shown
+            );
+            assert_eq!(
+                handoff.options.viewport.fullsize_content_view,
+                expected.viewport.fullsize_content_view
+            );
+            assert_eq!(
+                handoff.options.viewport.decorations,
+                expected.viewport.decorations
+            );
+        }
+
+        let selected = startup_presentation();
+        assert_eq!(
+            selected_titlebar_presentation_mode(),
+            TitlebarPresentationMode::NativeMacOs
+        );
+        assert_eq!(selected.mode, TitlebarPresentationMode::NativeMacOs);
+        assert_eq!(selected.options.viewport.title, None);
+        assert_eq!(selected.options.viewport.title_shown, None);
+        assert_eq!(selected.options.viewport.titlebar_shown, None);
+        assert_eq!(selected.options.viewport.titlebar_buttons_shown, None);
+        assert_eq!(selected.options.viewport.fullsize_content_view, None);
+        assert_eq!(selected.options.viewport.decorations, None);
+        assert_eq!(selected.options.viewport.transparent, None);
+    }
+
+    #[test]
+    fn titlebar_mode_selects_custom_surface_and_policy_explicitly() {
+        assert!(TitlebarPresentationMode::CustomHidden.uses_custom_titlebar());
+        assert!(TitlebarPresentationMode::CustomHidden.uses_app_owned_transition_policy());
+        assert!(!TitlebarPresentationMode::NativeMacOs.uses_custom_titlebar());
+        assert!(!TitlebarPresentationMode::NativeMacOs.uses_app_owned_transition_policy());
+        assert_eq!(
+            titlebar_surface_for_mode(TitlebarPresentationMode::CustomHidden),
+            TitlebarSurface::CustomTitleStrip
+        );
+        assert_eq!(
+            titlebar_surface_for_mode(TitlebarPresentationMode::NativeMacOs),
+            TitlebarSurface::NativeTitlebar
+        );
+        assert!(should_request_policy_repaint(
+            TitlebarPresentationMode::CustomHidden,
+            true
+        ));
+        assert!(!should_request_policy_repaint(
+            TitlebarPresentationMode::NativeMacOs,
+            true
+        ));
+
+        let stable = synthetic_metric_set(800.0);
+        let mut policy = PresentationTransitionPolicy::default();
+        policy.request(Some(true));
+        assert!(policy.is_observing());
+        assert_eq!(
+            policy.effective_page_metrics_for_mode(
+                stable.page,
+                TitlebarPresentationMode::NativeMacOs
+            ),
+            stable.page
+        );
+        assert_eq!(
+            policy.effective_toolbar_metrics_for_mode(
+                stable.toolbar,
+                TitlebarPresentationMode::NativeMacOs
+            ),
+            stable.toolbar
+        );
     }
 
     #[test]
@@ -2328,6 +2768,14 @@ mod tests {
             Some(egui::ViewportCommand::Maximized(false))
         );
         assert_eq!(title_strip_viewport_command(None), None);
+        assert_eq!(
+            titlebar_viewport_command_for_mode(TitlebarPresentationMode::CustomHidden, Some(false)),
+            Some(egui::ViewportCommand::Maximized(true))
+        );
+        assert_eq!(
+            titlebar_viewport_command_for_mode(TitlebarPresentationMode::NativeMacOs, Some(false)),
+            None
+        );
     }
 
     #[test]
@@ -2344,6 +2792,10 @@ mod tests {
         );
         assert_eq!(
             toolbar_frame(&ctx).fill,
+            style.visuals.widgets.open.weak_bg_fill
+        );
+        assert_eq!(
+            central_panel_frame(&ctx).fill,
             style.visuals.widgets.open.weak_bg_fill
         );
         assert_eq!(ctx.style().visuals.panel_fill, style.visuals.panel_fill);
@@ -2495,6 +2947,55 @@ mod tests {
     }
 
     #[test]
+    fn restored_toolbar_padding_stays_inside_the_exact_panel_boundary() {
+        let ctx = egui::Context::default();
+        let row_height = ctx.style().spacing.interact_size.y * 2.0;
+
+        assert_eq!(TOOLBAR_BOTTOM_PADDING, 2.0);
+        assert_eq!(toolbar_content_height(&ctx.style()), row_height + 2.0);
+
+        let panel = egui::Rect::from_min_size(
+            egui::pos2(12.25, 4.5),
+            Vec2::new(
+                800.0,
+                TITLE_STRIP_HEIGHT + row_height + TOOLBAR_BOTTOM_PADDING,
+            ),
+        );
+        let row = egui::Rect::from_min_size(
+            egui::pos2(panel.left(), panel.top() + TITLE_STRIP_HEIGHT),
+            Vec2::new(panel.width(), row_height),
+        );
+        let central = egui::Rect::from_min_max(
+            egui::pos2(panel.left(), panel.bottom()),
+            egui::pos2(panel.right(), 600.0),
+        );
+
+        for pixels_per_point in [1.0, 1.5, 2.0] {
+            let ledger = chrome_surface_ledger(panel, row, central, panel, pixels_per_point);
+            assert_eq!(ledger.toolbar_row.bottom(), ledger.bottom_padding.top());
+            assert_eq!(ledger.toolbar_content.bottom(), ledger.central_panel.top());
+            assert_eq!(ledger.bottom_padding.height(), TOOLBAR_BOTTOM_PADDING);
+            assert_eq!(
+                ledger.bottom_padding_pixels,
+                logical_y_to_physical_rows(ledger.bottom_padding, pixels_per_point)
+            );
+            assert!(ledger.toolbar_content.contains_rect(ledger.bottom_padding));
+            assert!(ledger.clip.contains_rect(ledger.toolbar_content));
+        }
+    }
+
+    #[test]
+    fn viewport_clear_color_matches_the_chrome_surface_owner() {
+        let ctx = egui::Context::default();
+        let visuals = ctx.style().visuals.clone();
+
+        assert_eq!(
+            chrome_clear_color(&visuals),
+            toolbar_chrome_color(&ctx).to_normalized_gamma_f32()
+        );
+    }
+
+    #[test]
     fn shared_chrome_geometry_has_no_gap_and_full_width_title_hit_region() {
         let panel = egui::Rect::from_min_size(egui::pos2(12.0, 4.0), Vec2::new(800.0, 82.0));
         let geometry = chrome_geometry(panel, 52.0);
@@ -2512,7 +3013,7 @@ mod tests {
 
     #[test]
     fn toolbar_bottom_ownership_ledger_is_contiguous_and_pixel_bounded() {
-        let panel = egui::Rect::from_min_size(egui::pos2(12.25, 4.5), Vec2::new(800.0, 82.0));
+        let panel = egui::Rect::from_min_size(egui::pos2(12.25, 4.5), Vec2::new(800.0, 80.0));
         let title =
             egui::Rect::from_min_size(panel.min, Vec2::new(panel.width(), TITLE_STRIP_HEIGHT));
         let row = egui::Rect::from_min_size(
@@ -2540,7 +3041,37 @@ mod tests {
         let rows = logical_y_to_physical_rows(ledger.bottom_padding, ledger.pixels_per_point);
         assert_eq!(rows, ledger.bottom_padding_pixels);
         assert_eq!(rows.first, 165);
-        assert_eq!(rows.last_exclusive, 173);
+        assert_eq!(rows.last_exclusive, 169);
+    }
+
+    #[test]
+    fn chrome_fill_owns_former_strip_rows_at_each_representative_scale() {
+        let panel = egui::Rect::from_min_size(egui::pos2(12.25, 4.5), Vec2::new(800.0, 82.0));
+        let title =
+            egui::Rect::from_min_size(panel.min, Vec2::new(panel.width(), TITLE_STRIP_HEIGHT));
+        let row = egui::Rect::from_min_size(
+            egui::pos2(panel.left(), title.bottom()),
+            Vec2::new(panel.width(), 48.0),
+        );
+        let central = egui::Rect::from_min_max(
+            egui::pos2(panel.left(), panel.bottom()),
+            egui::pos2(panel.right(), 600.0),
+        );
+
+        for pixels_per_point in [1.0, 1.5, 2.0] {
+            let ledger = chrome_surface_ledger(panel, row, central, panel, pixels_per_point);
+            let chrome_rows = logical_y_to_physical_rows(ledger.toolbar_content, pixels_per_point);
+            let central_rows = logical_y_to_physical_rows(ledger.central_panel, pixels_per_point);
+
+            assert_eq!(ledger.toolbar_content.bottom(), ledger.central_panel.top());
+            // Floor/ceil conversion may make the adjacent owners overlap one
+            // physical row at a fractional boundary, but it must never leave
+            // an uncovered row between them.
+            assert!(central_rows.first <= chrome_rows.last_exclusive);
+            assert!(chrome_rows.last_exclusive >= central_rows.first);
+            assert!(ledger.clip.contains_rect(ledger.toolbar_content));
+            assert!(ledger.frame.contains_rect(ledger.toolbar_content));
+        }
     }
 
     #[test]
@@ -2576,19 +3107,89 @@ mod tests {
     }
 
     #[test]
-    fn presentation_policy_retains_live_metrics_until_native_interval_is_proven() {
+    fn presentation_policy_uses_the_app_owned_transition_boundary() {
         assert_eq!(
             presentation_metric_policy(),
-            PresentationMetricPolicy::LiveWidthDerived
+            PresentationMetricPolicy::AppOwnedTransition
         );
         let direct = presentation_metrics(400.0, 612.0, 12.0);
         let policy = presentation_metrics_with_policy(
             400.0,
             612.0,
             12.0,
-            PresentationMetricPolicy::LiveWidthDerived,
+            PresentationMetricPolicy::AppOwnedTransition,
         );
         assert_eq!(direct, policy);
+    }
+
+    fn synthetic_metric_set(page_width: f32) -> PresentationMetricSet {
+        PresentationMetricSet {
+            toolbar: ToolbarPresentationMetrics {
+                icon_control_size: 24.0,
+                font_size: 14.0,
+                icon_bounds: Vec2::splat(14.0),
+                text_bounds: Vec2::new(62.0, 16.0),
+            },
+            page: PresentationMetrics {
+                page_width,
+                scale: page_width / 612.0,
+                font_size: page_width / 51.0,
+            },
+            page_bounds: Vec2::new(page_width, 800.0),
+        }
+    }
+
+    #[test]
+    fn transition_policy_holds_combined_metrics_and_releases_without_a_snap() {
+        let stable = synthetic_metric_set(576.0);
+        let changed = synthetic_metric_set(980.0);
+        let mut policy = PresentationTransitionPolicy::default();
+        policy.observe(Some(false), stable);
+        policy.request(Some(true));
+        assert_eq!(policy.state, PresentationTransitionState::Requested);
+        assert_eq!(policy.effective_set(), Some(stable));
+
+        policy.observe(Some(false), changed);
+        assert_eq!(policy.state, PresentationTransitionState::Settling);
+        assert_eq!(policy.effective_set(), Some(stable));
+        policy.observe(Some(true), changed);
+        policy.observe(Some(true), changed);
+        assert_eq!(policy.state, PresentationTransitionState::Released);
+        assert_eq!(policy.effective_set(), Some(changed));
+        policy.observe(Some(true), changed);
+        assert_eq!(policy.state, PresentationTransitionState::Stable);
+        assert_eq!(policy.last_stable, Some(changed));
+    }
+
+    #[test]
+    fn transition_policy_unknown_state_recovers_boundedly_and_repeated_requests_coalesce() {
+        let stable = synthetic_metric_set(576.0);
+        let changed = synthetic_metric_set(720.0);
+        let mut policy = PresentationTransitionPolicy::default();
+        policy.observe(Some(false), stable);
+        policy.request(Some(true));
+        policy.request(Some(true));
+        assert_eq!(policy.held_frames, 0);
+        for _ in 0..PRESENTATION_FALLBACK_FRAMES {
+            policy.observe(None, changed);
+        }
+        assert_eq!(policy.state, PresentationTransitionState::Released);
+        assert_eq!(policy.effective_set(), Some(changed));
+    }
+
+    #[test]
+    fn transition_policy_opposite_request_rebases_once_without_stale_capture() {
+        let normal = synthetic_metric_set(576.0);
+        let wide = synthetic_metric_set(980.0);
+        let mut policy = PresentationTransitionPolicy::default();
+        policy.observe(Some(false), normal);
+        policy.request(Some(true));
+        policy.observe(Some(false), wide);
+        policy.request(Some(false));
+        assert_eq!(policy.target_maximized, Some(false));
+        assert_eq!(policy.captured, Some(normal));
+        assert_eq!(policy.held_frames, 0);
+        assert_eq!(policy.stable_frames, 0);
     }
 
     #[test]
