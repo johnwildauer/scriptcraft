@@ -100,8 +100,19 @@ failures, and follow-ups. Planning discussion remains in the initiative plan.
 - **Work order/review:** All three work orders and their fresh validations
 - **Action:** Verified all work orders are complete, all validation/gate evidence is present, session separation held, and no unrelated implementation files were included. Recorded deferred native visual smoke and branch-lineage reconciliation as follow-ups.
 - **Evidence:** [`validation-WO-001.md`](validations/validation-WO-001.md:1), [`validation-WO-002.md`](validations/validation-WO-002.md:1), [`validation-WO-003.md`](validations/validation-WO-003.md:1), `git diff --check` passed, commit `8244d70` created on `dev/2026-10-27-toolbar`.
-- **Result:** Initiative status set to `closed`; merge into `dev/2026-10-26-editor-geometry-corrections-v2` is the remaining Git closure action.
-- **Next action/owner:** Forge orchestrator; merge the committed initiative branch and record the merge result.
+- **Result:** Initiative status set to `closed`; commit `d3b4a37` contains the closeout record.
+- **Next action/owner:** Forge orchestrator; merge result recorded in the following entry.
+
+### 2026-10-27 — Git merge completed
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `code-orchestrator-toolbar-2026-10-27`
+- **State transition:** Git closure complete; initiative remains `closed`
+- **Work order/review:** Initiative closeout
+- **Action:** Switched to the recorded base branch and fast-forward merged `dev/2026-10-27-toolbar`.
+- **Evidence:** Merge command succeeded: `dev/2026-10-26-editor-geometry-corrections-v2` advanced from `11bd6c7` to `d3b4a37`.
+- **Result:** Initiative branch is merged; no uncommitted changes were introduced by the merge.
+- **Next action/owner:** None for this initiative; deferred native visual smoke and branch-lineage reconciliation remain documented follow-ups.
 
 ### 2026-10-27 — WO-001 dispatched
 
