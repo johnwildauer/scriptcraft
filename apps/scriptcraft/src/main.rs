@@ -10,6 +10,7 @@ use scriptcraft_core::exports;
 use scriptcraft_core::layout::{Caret, LayoutCache, ScreenplayLayout};
 use scriptcraft_core::persistence::{self, FileSystem, StdFileSystem};
 use scriptcraft_core::{Project, Role};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -63,6 +64,218 @@ struct PerformanceDiagnostics {
     event_nanos: u128,
     layout_nanos: u128,
     paint_nanos: u128,
+}
+
+const MAX_VIEWPORT_DIAGNOSTIC_SAMPLES: usize = 120;
+const MAX_VIEWPORT_COMMAND_OBSERVATIONS: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ViewportMetricSample {
+    frame: u64,
+    timestamp_ms: u128,
+    maximized: Option<bool>,
+    native_pixels_per_point: Option<f32>,
+    egui_pixels_per_point: f32,
+    inner_rect: Option<egui::Rect>,
+    outer_rect: Option<egui::Rect>,
+    content_rect: Option<egui::Rect>,
+    clip_rect: Option<egui::Rect>,
+    available_rect: Option<egui::Rect>,
+    page_width: Option<f32>,
+    page_scale: Option<f32>,
+    page_font_size: Option<f32>,
+    toolbar_bounds: Option<egui::Rect>,
+    page_bounds: Option<egui::Rect>,
+    chrome_ledger: Option<ChromeSurfaceLedger>,
+}
+
+/// Logical ownership ledger for the app-owned chrome boundary.  This is kept
+/// separate from paint code so a native pixel observation cannot be mistaken
+/// for an egui allocation merely because the two have similar coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ChromeSurfaceLedger {
+    panel: egui::Rect,
+    frame: egui::Rect,
+    title: egui::Rect,
+    toolbar_content: egui::Rect,
+    toolbar_row: egui::Rect,
+    bottom_padding: egui::Rect,
+    central_panel: egui::Rect,
+    clip: egui::Rect,
+    pixels_per_point: f32,
+    bottom_padding_pixels: PhysicalPixelSpan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PhysicalPixelSpan {
+    first: i32,
+    last_exclusive: i32,
+}
+
+fn logical_y_to_physical_rows(rect: egui::Rect, pixels_per_point: f32) -> PhysicalPixelSpan {
+    let scale = pixels_per_point.max(f32::EPSILON);
+    PhysicalPixelSpan {
+        first: (rect.top() * scale).floor() as i32,
+        last_exclusive: (rect.bottom() * scale).ceil() as i32,
+    }
+}
+
+fn chrome_surface_ledger(
+    panel: egui::Rect,
+    toolbar_row: egui::Rect,
+    central_panel: egui::Rect,
+    clip: egui::Rect,
+    pixels_per_point: f32,
+) -> ChromeSurfaceLedger {
+    let title = egui::Rect::from_min_size(panel.min, Vec2::new(panel.width(), TITLE_STRIP_HEIGHT));
+    let toolbar_content = egui::Rect::from_min_max(
+        egui::pos2(panel.left(), title.bottom()),
+        egui::pos2(panel.right(), panel.bottom()),
+    );
+    let bottom_padding = egui::Rect::from_min_max(
+        egui::pos2(panel.left(), toolbar_row.bottom()),
+        egui::pos2(panel.right(), toolbar_content.bottom()),
+    );
+    let bottom_padding_pixels = logical_y_to_physical_rows(bottom_padding, pixels_per_point);
+    ChromeSurfaceLedger {
+        panel,
+        frame: panel,
+        title,
+        toolbar_content,
+        toolbar_row,
+        bottom_padding,
+        central_panel,
+        clip,
+        pixels_per_point,
+        bottom_padding_pixels,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ViewportCommandObservation {
+    frame: u64,
+    timestamp_ms: u128,
+    observed_maximized: Option<bool>,
+    requested_maximized: Option<bool>,
+}
+
+#[derive(Debug, Default)]
+struct ViewportDiagnostics {
+    started_at: Option<Instant>,
+    frame: u64,
+    current: Option<ViewportMetricSample>,
+    samples: VecDeque<ViewportMetricSample>,
+    commands: VecDeque<ViewportCommandObservation>,
+}
+
+impl ViewportDiagnostics {
+    fn begin_frame(&mut self, ctx: &egui::Context) {
+        let started_at = *self.started_at.get_or_insert_with(Instant::now);
+        self.frame = self.frame.saturating_add(1);
+        let viewport = ctx.input(|input| input.viewport().clone());
+        self.current = Some(ViewportMetricSample {
+            frame: self.frame,
+            timestamp_ms: started_at.elapsed().as_millis(),
+            maximized: viewport.maximized,
+            native_pixels_per_point: viewport.native_pixels_per_point,
+            egui_pixels_per_point: ctx.pixels_per_point(),
+            inner_rect: viewport.inner_rect,
+            outer_rect: viewport.outer_rect,
+            content_rect: None,
+            clip_rect: None,
+            available_rect: None,
+            page_width: None,
+            page_scale: None,
+            page_font_size: None,
+            toolbar_bounds: None,
+            page_bounds: None,
+            chrome_ledger: None,
+        });
+    }
+
+    fn record_geometry(
+        &mut self,
+        content_rect: egui::Rect,
+        clip_rect: egui::Rect,
+        available_rect: egui::Rect,
+    ) {
+        if let Some(sample) = &mut self.current {
+            sample.content_rect = Some(content_rect);
+            sample.clip_rect = Some(clip_rect);
+            sample.available_rect = Some(available_rect);
+        }
+    }
+
+    fn record_toolbar_bounds(&mut self, bounds: egui::Rect) {
+        if let Some(sample) = &mut self.current {
+            sample.toolbar_bounds = Some(bounds);
+        }
+    }
+
+    fn record_chrome_ledger(
+        &mut self,
+        panel: egui::Rect,
+        central_panel: egui::Rect,
+        pixels_per_point: f32,
+    ) {
+        let Some(sample) = &mut self.current else {
+            return;
+        };
+        let Some(toolbar_row) = sample.toolbar_bounds else {
+            return;
+        };
+        let clip = sample.clip_rect.unwrap_or(panel);
+        sample.chrome_ledger = Some(chrome_surface_ledger(
+            panel,
+            toolbar_row,
+            central_panel,
+            clip,
+            pixels_per_point,
+        ));
+    }
+
+    fn record_presentation(&mut self, metrics: PresentationMetrics, page_bounds: egui::Rect) {
+        if let Some(sample) = &mut self.current {
+            sample.page_width = Some(metrics.page_width);
+            sample.page_scale = Some(metrics.scale);
+            sample.page_font_size = Some(metrics.font_size);
+            sample.page_bounds = Some(page_bounds);
+        }
+    }
+
+    fn record_command(
+        &mut self,
+        observed_maximized: Option<bool>,
+        requested_maximized: Option<bool>,
+    ) {
+        let Some(started_at) = self.started_at else {
+            return;
+        };
+        let observation = ViewportCommandObservation {
+            frame: self.frame,
+            timestamp_ms: started_at.elapsed().as_millis(),
+            observed_maximized,
+            requested_maximized,
+        };
+        bounded_push(
+            &mut self.commands,
+            observation,
+            MAX_VIEWPORT_COMMAND_OBSERVATIONS,
+        );
+    }
+
+    fn finish_frame(&mut self) {
+        if let Some(sample) = self.current.take() {
+            bounded_push(&mut self.samples, sample, MAX_VIEWPORT_DIAGNOSTIC_SAMPLES);
+        }
+    }
+}
+
+fn bounded_push<T>(items: &mut VecDeque<T>, item: T, limit: usize) {
+    if items.len() == limit {
+        items.pop_front();
+    }
+    items.push_back(item);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,7 +474,7 @@ fn toolbar_rect_contains(outer: egui::Rect, inner: egui::Rect) -> bool {
 #[derive(Debug, Clone, Copy)]
 struct ToolbarComboBoundaryLedger {
     combo_response: egui::Rect,
-    child_min_rect: egui::Rect,
+    decorative_label_response: egui::Rect,
     group_response: egui::Rect,
 }
 
@@ -270,7 +483,7 @@ fn toolbar_combo_boundary_ledger(width: f32) -> ToolbarComboBoundaryLedger {
     let context = egui::Context::default();
     let mut ledger = ToolbarComboBoundaryLedger {
         combo_response: egui::Rect::NOTHING,
-        child_min_rect: egui::Rect::NOTHING,
+        decorative_label_response: egui::Rect::NOTHING,
         group_response: egui::Rect::NOTHING,
     };
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1200.0, 200.0));
@@ -293,8 +506,8 @@ fn toolbar_combo_boundary_ledger(width: f32) -> ToolbarComboBoundaryLedger {
                             .show_ui(ui, |_ui| {})
                             .response
                             .rect;
-                        let _ = ui.label("Elements");
-                        ledger.child_min_rect = ui.min_rect();
+                        let (_, label_rect) = ui.allocate_space(ui.spacing().interact_size);
+                        ledger.decorative_label_response = label_rect;
                     },
                 );
                 ledger.group_response = group.response.rect;
@@ -302,6 +515,54 @@ fn toolbar_combo_boundary_ledger(width: f32) -> ToolbarComboBoundaryLedger {
         },
     );
     ledger
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ElementsCursorLedger {
+    outer_group: egui::Rect,
+    stock_combo: egui::Rect,
+    closed_selected_galley: egui::Rect,
+    decorative_label: egui::Rect,
+    popup_row: egui::Rect,
+    group_gap: egui::Rect,
+    document: egui::Rect,
+    closed_cursor: egui::CursorIcon,
+    popup_cursor: egui::CursorIcon,
+    document_cursor: egui::CursorIcon,
+}
+
+#[cfg(test)]
+fn elements_cursor_ledger() -> ElementsCursorLedger {
+    let outer_group = egui::Rect::from_min_size(egui::pos2(20.0, 10.0), Vec2::new(128.0, 48.0));
+    let stock_combo = egui::Rect::from_min_size(outer_group.min, Vec2::new(128.0, 24.0));
+    let closed_selected_galley =
+        elements_closed_text_rect(stock_combo, Vec2::splat(4.0), 4.0, 12.0);
+    let decorative_label = egui::Rect::from_min_size(
+        egui::pos2(outer_group.left(), stock_combo.bottom()),
+        Vec2::new(128.0, 24.0),
+    );
+    let popup_row = egui::Rect::from_min_size(
+        egui::pos2(stock_combo.left(), outer_group.bottom() + 4.0),
+        Vec2::new(128.0, 24.0),
+    );
+    let group_gap = egui::Rect::from_min_max(
+        egui::pos2(outer_group.right(), outer_group.top()),
+        egui::pos2(outer_group.right() + 4.0, outer_group.bottom()),
+    );
+    let document = egui::Rect::from_min_size(egui::pos2(0.0, 70.0), Vec2::new(400.0, 300.0));
+    ElementsCursorLedger {
+        outer_group,
+        stock_combo,
+        closed_selected_galley,
+        decorative_label,
+        popup_row,
+        group_gap,
+        document,
+        closed_cursor: toolbar_cursor_icon(),
+        popup_cursor: toolbar_cursor_icon(),
+        document_cursor: document_cursor_icon(),
+    }
 }
 
 fn elements_closed_text_rect(
@@ -489,6 +750,7 @@ struct ScriptCraftApp {
     caret_blink_reset_time: f64,
     layout_cache: LayoutCache,
     performance: PerformanceDiagnostics,
+    viewport_diagnostics: ViewportDiagnostics,
 }
 
 impl ScriptCraftApp {
@@ -516,6 +778,7 @@ impl ScriptCraftApp {
             caret_blink_reset_time: 0.0,
             layout_cache: LayoutCache::default(),
             performance: PerformanceDiagnostics::default(),
+            viewport_diagnostics: ViewportDiagnostics::default(),
         })
     }
 
@@ -754,7 +1017,22 @@ impl ScriptCraftApp {
                     ui.painter()
                         .galley(text_position, galley, visuals.text_color());
                 }
-                let _ = ui.label(item.label);
+                // This caption is decorative. Allocate/paint it instead of adding a
+                // label response that can compete with the ComboBox cursor owner.
+                let (_, label_rect) = ui.allocate_space(ui.spacing().interact_size);
+                let label_font = ui
+                    .style()
+                    .text_styles
+                    .get(&TextStyle::Body)
+                    .cloned()
+                    .unwrap_or_else(|| FontId::proportional(14.0));
+                ui.painter().text(
+                    label_rect.left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    item.label,
+                    label_font,
+                    ui.visuals().text_color(),
+                );
                 debug_assert!(combo_response.rect.width() <= width + f32::EPSILON);
             },
         );
@@ -814,13 +1092,18 @@ impl ScriptCraftApp {
         let row_left = ui.cursor().left();
         let available_width =
             toolbar_actual_available_width(content_rect, ui.clip_rect(), row_left);
+        self.viewport_diagnostics.record_geometry(
+            content_rect,
+            ui.clip_rect(),
+            ui.available_rect_before_wrap(),
+        );
         let allocation = allocate_toolbar(&default_toolbar_items(), available_width, |label| {
             toolbar_label_width(ui, label)
         });
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(TOOLBAR_TOP_PADDING);
-            ui.allocate_ui_with_layout(
+            let row_response = ui.allocate_ui_with_layout(
                 Vec2::new(allocation.row_width, ui.spacing().interact_size.y * 2.0),
                 egui::Layout::left_to_right(egui::Align::Min),
                 |ui| {
@@ -855,6 +1138,8 @@ impl ScriptCraftApp {
                     ui.add_space(TOOLBAR_ROW_PADDING);
                 },
             );
+            self.viewport_diagnostics
+                .record_toolbar_bounds(row_response.response.rect);
             ui.add_space(TOOLBAR_BOTTOM_PADDING);
         });
     }
@@ -1134,13 +1419,19 @@ impl ScriptCraftApp {
         };
         self.rendered_revision = Some(self.session.revision());
         let available = ui.available_size();
-        let metrics = presentation_metrics(
+        let metrics = presentation_metrics_with_policy(
             available.x,
             layout.profile.paper_width as f32,
             layout.profile.font_size as f32,
+            presentation_metric_policy(),
         );
         let page_width = metrics.page_width;
         let scale = metrics.scale;
+        self.viewport_diagnostics.record_geometry(
+            ui.available_rect_before_wrap(),
+            ui.clip_rect(),
+            ui.available_rect_before_wrap(),
+        );
         let horizontal_padding = ((available.x.max(page_width) - page_width) / 2.0).max(0.0);
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let mut page_rects = Vec::with_capacity(layout.pages.len());
@@ -1193,6 +1484,10 @@ impl ScriptCraftApp {
                     }
                 }
             });
+        if let Some(page_rect) = page_rects.first().copied() {
+            self.viewport_diagnostics
+                .record_presentation(metrics, page_rect);
+        }
         self.reveal_intent = RevealIntent::None;
 
         // This is the only interactive response in the painted editor. Pages remain
@@ -1576,6 +1871,18 @@ struct PresentationMetrics {
     font_size: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresentationMetricPolicy {
+    LiveWidthDerived,
+}
+
+fn presentation_metric_policy() -> PresentationMetricPolicy {
+    // eframe/egui exposes snapshots and requests, not a reliable transition
+    // interval. Keep the responsive metric live until native evidence can
+    // delimit a page-only freeze without changing global egui scale or input.
+    PresentationMetricPolicy::LiveWidthDerived
+}
+
 fn presentation_metrics(
     available_width: f32,
     paper_width: f32,
@@ -1587,6 +1894,19 @@ fn presentation_metrics(
         page_width,
         scale,
         font_size: (base_font_size * scale).max(5.0),
+    }
+}
+
+fn presentation_metrics_with_policy(
+    available_width: f32,
+    paper_width: f32,
+    base_font_size: f32,
+    policy: PresentationMetricPolicy,
+) -> PresentationMetrics {
+    match policy {
+        PresentationMetricPolicy::LiveWidthDerived => {
+            presentation_metrics(available_width, paper_width, base_font_size)
+        }
     }
 }
 
@@ -1803,7 +2123,11 @@ fn title_strip_viewport_command(maximized: Option<bool>) -> Option<egui::Viewpor
     }
 }
 
-fn title_strip(ui: &mut egui::Ui, ctx: &egui::Context) {
+fn title_strip(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    viewport_diagnostics: &mut ViewportDiagnostics,
+) {
     let response = ui.allocate_response(
         Vec2::new(ui.available_width(), TITLE_STRIP_HEIGHT),
         Sense::click(),
@@ -1821,7 +2145,15 @@ fn title_strip(ui: &mut egui::Ui, ctx: &egui::Context) {
     );
 
     if response.double_clicked() {
-        let command = ctx.input(|input| title_strip_viewport_command(input.viewport().maximized));
+        let (observed_maximized, command) = ctx.input(|input| {
+            let observed = input.viewport().maximized;
+            (observed, title_strip_viewport_command(observed))
+        });
+        let requested_maximized = command.as_ref().and_then(|command| match command {
+            egui::ViewportCommand::Maximized(value) => Some(*value),
+            _ => None,
+        });
+        viewport_diagnostics.record_command(observed_maximized, requested_maximized);
         if let Some(command) = command {
             ctx.send_viewport_cmd(command);
         }
@@ -1832,13 +2164,16 @@ impl eframe::App for ScriptCraftApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
+        self.viewport_diagnostics.begin_frame(ctx);
         let chrome_height = TITLE_STRIP_HEIGHT + toolbar_content_height(&ctx.style());
+        let mut chrome_panel = egui::Rect::NOTHING;
         egui::TopBottomPanel::top("titlebar-toolbar")
             .frame(title_strip_frame(ctx))
             .show_separator_line(false)
             .exact_height(chrome_height)
             .show(ctx, |ui| {
-                title_strip(ui, ctx);
+                chrome_panel = ui.max_rect();
+                title_strip(ui, ctx, &mut self.viewport_diagnostics);
                 self.toolbar(ui);
             });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -1883,12 +2218,20 @@ impl eframe::App for ScriptCraftApp {
                 ));
             });
         });
+        let mut central_panel = egui::Rect::NOTHING;
         egui::CentralPanel::default().show(ctx, |ui| {
+            central_panel = ui.max_rect();
             ui.heading(&self.session.project().metadata.title);
             ui.separator();
             self.live_document_surface(ui);
         });
+        self.viewport_diagnostics.record_chrome_ledger(
+            chrome_panel,
+            central_panel,
+            ctx.pixels_per_point(),
+        );
         self.handle_surface_input(ctx);
+        self.viewport_diagnostics.finish_frame();
         self.performance.frame_nanos = self
             .performance
             .frame_nanos
@@ -2058,6 +2401,55 @@ mod tests {
     }
 
     #[test]
+    fn elements_cursor_ledger_keeps_closed_regions_on_arrow_and_document_on_text() {
+        let ledger = elements_cursor_ledger();
+
+        assert_eq!(ledger.outer_group.width(), TOOLBAR_ELEMENTS_WIDTH);
+        assert!(toolbar_rect_contains(
+            ledger.outer_group,
+            ledger.stock_combo
+        ));
+        assert!(toolbar_rect_contains(
+            ledger.stock_combo,
+            ledger.closed_selected_galley
+        ));
+        assert!(toolbar_rect_contains(
+            ledger.outer_group,
+            ledger.decorative_label
+        ));
+        assert_eq!(ledger.closed_cursor, egui::CursorIcon::Default);
+        assert_eq!(ledger.popup_cursor, egui::CursorIcon::Default);
+        assert_eq!(ledger.document_cursor, egui::CursorIcon::Text);
+
+        for point in [
+            ledger.stock_combo.center(),
+            ledger.closed_selected_galley.center(),
+            ledger.decorative_label.center(),
+            ledger.group_gap.center(),
+            ledger.popup_row.center(),
+        ] {
+            assert_ne!(
+                point,
+                ledger.document.center(),
+                "Elements ledger region must not be document-owned"
+            );
+        }
+        assert!(ledger.document.contains(ledger.document.center()));
+    }
+
+    #[test]
+    fn decorative_elements_label_has_no_interaction_response() {
+        let ledger = toolbar_combo_boundary_ledger(TOOLBAR_ELEMENTS_WIDTH);
+
+        assert!(ledger.decorative_label_response.width() > 0.0);
+        assert!(ledger.decorative_label_response.height() > 0.0);
+        assert!(toolbar_rect_contains(
+            ledger.group_response,
+            ledger.decorative_label_response
+        ));
+    }
+
+    #[test]
     fn cursor_owner_geometry_covers_elements_label_and_document_surface_only() {
         let elements_group =
             egui::Rect::from_min_size(egui::pos2(20.0, 10.0), Vec2::new(92.0, 48.0));
@@ -2119,6 +2511,51 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_bottom_ownership_ledger_is_contiguous_and_pixel_bounded() {
+        let panel = egui::Rect::from_min_size(egui::pos2(12.25, 4.5), Vec2::new(800.0, 82.0));
+        let title =
+            egui::Rect::from_min_size(panel.min, Vec2::new(panel.width(), TITLE_STRIP_HEIGHT));
+        let row = egui::Rect::from_min_size(
+            egui::pos2(panel.left(), title.bottom()),
+            Vec2::new(panel.width(), 48.0),
+        );
+        let central = egui::Rect::from_min_max(
+            egui::pos2(panel.left(), panel.bottom()),
+            egui::pos2(panel.right(), 600.0),
+        );
+        let ledger = chrome_surface_ledger(panel, row, central, panel, 2.0);
+
+        assert_eq!(ledger.frame, ledger.panel);
+        assert_eq!(ledger.title.bottom(), ledger.toolbar_content.top());
+        assert_eq!(ledger.toolbar_row.top(), ledger.toolbar_content.top());
+        assert_eq!(ledger.toolbar_row.bottom(), ledger.bottom_padding.top());
+        assert_eq!(
+            ledger.bottom_padding.bottom(),
+            ledger.toolbar_content.bottom()
+        );
+        assert_eq!(ledger.toolbar_content.bottom(), ledger.panel.bottom());
+        assert_eq!(ledger.central_panel.top(), ledger.panel.bottom());
+        assert!(ledger.clip.contains_rect(ledger.toolbar_content));
+
+        let rows = logical_y_to_physical_rows(ledger.bottom_padding, ledger.pixels_per_point);
+        assert_eq!(rows, ledger.bottom_padding_pixels);
+        assert_eq!(rows.first, 165);
+        assert_eq!(rows.last_exclusive, 173);
+    }
+
+    #[test]
+    fn physical_pixel_row_conversion_expands_fractional_edges_deterministically() {
+        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 10.25), egui::pos2(20.0, 11.75));
+        assert_eq!(
+            logical_y_to_physical_rows(rect, 2.0),
+            PhysicalPixelSpan {
+                first: 20,
+                last_exclusive: 24,
+            }
+        );
+    }
+
+    #[test]
     fn presentation_metrics_are_stable_for_normal_and_maximized_widths() {
         let normal = presentation_metrics(800.0, 612.0, 12.0);
         let maximized = presentation_metrics(1_400.0, 612.0, 12.0);
@@ -2136,6 +2573,33 @@ mod tests {
         assert!(narrow.scale < stable.scale);
         assert!(narrow.font_size < stable.font_size);
         assert_eq!(TOOLBAR_ELEMENTS_WIDTH, 128.0);
+    }
+
+    #[test]
+    fn presentation_policy_retains_live_metrics_until_native_interval_is_proven() {
+        assert_eq!(
+            presentation_metric_policy(),
+            PresentationMetricPolicy::LiveWidthDerived
+        );
+        let direct = presentation_metrics(400.0, 612.0, 12.0);
+        let policy = presentation_metrics_with_policy(
+            400.0,
+            612.0,
+            12.0,
+            PresentationMetricPolicy::LiveWidthDerived,
+        );
+        assert_eq!(direct, policy);
+    }
+
+    #[test]
+    fn viewport_diagnostics_are_bounded_and_preserve_latest_samples() {
+        let mut samples = VecDeque::new();
+        for value in 0..=MAX_VIEWPORT_DIAGNOSTIC_SAMPLES {
+            bounded_push(&mut samples, value, MAX_VIEWPORT_DIAGNOSTIC_SAMPLES);
+        }
+        assert_eq!(samples.len(), MAX_VIEWPORT_DIAGNOSTIC_SAMPLES);
+        assert_eq!(samples.front(), Some(&1));
+        assert_eq!(samples.back(), Some(&MAX_VIEWPORT_DIAGNOSTIC_SAMPLES));
     }
 
     #[test]
@@ -2489,7 +2953,7 @@ mod tests {
                 width
             );
             assert!(
-                ledger.child_min_rect.width() <= width + f32::EPSILON,
+                ledger.decorative_label_response.width() <= width + f32::EPSILON,
                 "{name}: child min rect exceeded Elements budget"
             );
             assert!(
