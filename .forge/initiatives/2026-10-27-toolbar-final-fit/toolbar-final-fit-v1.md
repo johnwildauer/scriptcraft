@@ -89,4 +89,4 @@ Use one measured toolbar geometry contract for allocation and actual rendering, 
 
 - **Closeout status:** `closed`
 - **Closeout date:** 2026-10-27
-- **Closeout evidence:** WO-001 passed fresh validation; WO-002 initially failed because its helper/application path was incomplete; WO-002a repaired the path and fresh validation passed all required gates. No unresolved implementation blocker remains. Implementation/closeout commit `686527e`; merge evidence is recorded in the execution log.
+- **Closeout evidence:** WO-001 passed fresh validation; WO-002 initially failed because its helper/application path was incomplete; WO-002a repaired the path and fresh validation passed all required gates. No unresolved implementation blocker remains. Implementation/closeout commits `686527e` and `0b85bda`; merge evidence is recorded in the execution log.
