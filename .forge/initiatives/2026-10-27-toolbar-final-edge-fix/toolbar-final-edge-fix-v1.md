@@ -32,7 +32,7 @@
 
 - **Closeout status:** `closed`
 - **Closeout date:** 2026-10-27
-- **Closeout evidence:** WO-001 completed through the WO-001a crash fix and WO-001b ComboBox boundary fix. All automated gates passed after the final implementation, the app launched without the assertion panic, and the user verified Export PDF fully visible at wide/maximized and narrow widths.
+- **Closeout evidence:** WO-001 completed through the WO-001a crash fix and WO-001b ComboBox boundary fix. All automated gates passed after the final implementation, the app launched without the assertion panic, and the user verified Export PDF fully visible at wide/maximized and narrow widths. Commit `f01564a` contains the implementation and Forge closeout artifacts.
 - **Root cause fixed:** The Elements ComboBox had an intrinsic minimum width larger than its allocated slot; egui expanded the child UI and advanced later siblings beyond the computed row edge. The working fix applies [`ComboBox::width(width)`](../../apps/scriptcraft/src/main.rs:676) plus [`TextWrapMode::Truncate`](../../apps/scriptcraft/src/main.rs:677), while retaining [`ui.set_width(width)`](../../apps/scriptcraft/src/main.rs:672), so the actual ComboBox response honors the same budget used by allocation.
 
 ## Outcome

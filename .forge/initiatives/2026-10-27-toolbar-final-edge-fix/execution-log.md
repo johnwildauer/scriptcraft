@@ -76,6 +76,16 @@
 - **Result:** Personal native verification passed. The final edge defect is accepted as fixed; closeout is authorized.
 - **Next action/owner:** Forge orchestrator; commit the closeout record, merge the initiative branch, and record final Git evidence.
 
+### 2026-10-27 — Final Git closeout
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `code-orchestrator-toolbar-final-edge-fix-2026-10-27`
+- **State transition:** Git closeout complete; initiative remains `closed`
+- **Action:** Committed the final-edge implementation, crash fix, WO/fix evidence, user verification, and closeout record.
+- **Evidence:** Commit `f01564a` on `dev/2026-10-26-editor-geometry-corrections-v2`; working tree was clean after commit. This initiative used the existing base checkout rather than a separate initiative branch, as recorded in the plan's reduced-capability metadata.
+- **Result:** Forge closeout complete. The user verified the actual native result.
+- **Next action/owner:** None for this initiative.
+
 ### 2026-10-27 — Personal verification reports remaining clipping
 
 - **Actor/role:** User / Forge orchestrator
