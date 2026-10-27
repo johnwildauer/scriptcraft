@@ -66,12 +66,14 @@ buffer.
   projects, and actionable Items use a centered icon-first borderless control
   plus small explicit padding as the hover/click response above a separate text
   label. The label is outside that response, its normal color is unchanged, and
-  it remains available to tooltips and accessibility surfaces. The control
+  it remains available to accessibility surfaces without a redundant visible-label
+  tooltip. The control
   response receives the lightness-only hover affordance. The Elements Item uses the same centered fixed-width outer group,
   placing a ComboBox above its centered `Elements` label.
 - Toolbar allocation is transient and deterministic: `Space` consumes one
-  72-point width, while rendered normal Items use their complete deterministic
-  group width including label text. The allocator and renderer use
+  72-point width, while rendered normal Items use their complete group width
+  including label text measured through the active egui style/font galley path.
+  The allocator and renderer use
   one shared row-width budget that includes the 4-point horizontal row-padding
   budget, 4-point inter-item gaps (half egui's default horizontal gap), and the
   32-point overflow reservation when present. These values are the named

@@ -104,7 +104,8 @@ the semantic editing model.
 - **AC-WRITING-005.3:** Action Items shall use an icon-first, borderless icon
   control with a small explicit padding region as the hover/click surface. The
   centered text label beneath it remains outside that response, retains its
-  normal text color, and remains available for tooltip and accessibility use.
+  normal text color, remains available for accessibility use, and does not add a
+  redundant visible-label tooltip.
 - **AC-WRITING-005.4:** Given the current caret/focus is within a screenplay
   element, the Elements Item shall display that element's explicit role using
   the seven supported labels Scene Heading, Action, Character, Dialogue,
@@ -113,7 +114,8 @@ the semantic editing model.
   document on rejection.
 - **AC-WRITING-005.5:** Given a toolbar width, Space shall consume one
   deterministic 72-point width, rendered normal Items shall consume their
-  complete deterministic group width including label text, and Flexible Space Items
+  complete group width including label text measured at runtime with the active
+  egui style/font, and Flexible Space Items
   shall divide the remaining width equally after the shared 4-point horizontal
   row-padding and 4-point inter-item-gap budget, and a narrow toolbar shall
   retain the leftmost fitting Items while exposing non-spacing Items through a
