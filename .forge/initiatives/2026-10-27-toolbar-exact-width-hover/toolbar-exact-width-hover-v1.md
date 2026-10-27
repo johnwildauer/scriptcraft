@@ -78,4 +78,4 @@ Fix chain: [`WO-001a-reconcile-local-toolbar-geometry.md`](work-orders/WO-001a-r
 
 - **Closeout status:** `closed`
 - **Closeout date:** 2026-10-27
-- **Closeout evidence:** WO-001 passed through the WO-001a test reconciliation fix chain; WO-002 passed fresh validation; all required gates passed. Git evidence will be recorded in the final execution log.
+- **Closeout evidence:** WO-001 passed through the WO-001a test reconciliation fix chain; WO-002 passed fresh validation; all required gates passed. Implementation/closeout commit `05e6b51`; merge evidence is recorded in the final execution log.

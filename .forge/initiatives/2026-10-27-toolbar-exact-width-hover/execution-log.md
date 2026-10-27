@@ -53,6 +53,16 @@
 - **Result:** Initiative status set to `closed`; commit/merge are the remaining Git closure actions.
 - **Next action/owner:** Forge orchestrator; commit the branch, merge it into the recorded base branch, and record the result.
 
+### 2026-10-27 — Git merge completed
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `code-orchestrator-toolbar-exact-width-hover-2026-10-27`
+- **State transition:** Git closure complete; initiative remains `closed`
+- **Action:** Fast-forward merged `dev/2026-10-27-toolbar-exact-width-hover` into `dev/2026-10-26-editor-geometry-corrections-v2`.
+- **Evidence:** Base branch advanced from `758dc1a` to `05e6b51` with no conflicts.
+- **Result:** Initiative branch merged; final documentation is on the base branch. Native visual follow-up remains documented.
+- **Next action/owner:** None for this initiative.
+
 ### 2026-10-27 — WO-001a validation passed; WO-001 complete
 
 - **Actor/role:** Fresh-context validator / Forge orchestrator
