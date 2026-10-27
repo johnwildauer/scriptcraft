@@ -124,4 +124,4 @@ WO-001 precedes WO-002 because width tuning must measure the final nested Item s
 
 - **Closeout status:** `closed`
 - **Closeout date:** 2026-10-27
-- **Closeout evidence:** WO-001 passed fresh validation; WO-002's initial validation failed only required evidence gates, WO-002a repaired those failures, and fresh WO-002a validation passed all gates. No unresolved implementation blocker remains. Implementation commit `0eb7b0a` and closeout commit are recorded in the execution log.
+- **Closeout evidence:** WO-001 passed fresh validation; WO-002's initial validation failed only required evidence gates, WO-002a repaired those failures, and fresh WO-002a validation passed all gates. No unresolved implementation blocker remains. Implementation commit `0eb7b0a`, closeout commit `7dfa846`, and base-branch merge evidence are recorded in the execution log.

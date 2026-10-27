@@ -139,6 +139,17 @@ failures, and follow-ups. Planning discussion remains in the initiative plan.
 - **Result:** Initiative status set to `closed`; native visual smoke remains a documented follow-up warning.
 - **Next action/owner:** Forge orchestrator; commit this closeout record and fast-forward merge the branch into the recorded base branch.
 
+### 2026-10-27 — Git merge completed
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `code-orchestrator-toolbar-interaction-polish-2026-10-27`
+- **State transition:** Git closure complete; initiative remains `closed`
+- **Work order/review:** Initiative closeout
+- **Action:** Fast-forward merged `dev/2026-10-27-toolbar-interaction-polish` into `dev/2026-10-26-editor-geometry-corrections-v2`.
+- **Evidence:** Base branch advanced from `0eb7b0a` to `7dfa846` with no conflicts.
+- **Result:** Initiative branch merged; final documentation is now on the base branch. Reduced branch-isolation evidence remains explicitly recorded because implementation landed on the base checkout before branch-pointer restoration.
+- **Next action/owner:** None for this initiative; native visual smoke remains the documented follow-up.
+
 ### 2026-10-27 — WO-002a implementation completed
 
 - **Actor/role:** Desktop toolbar fix implementer
