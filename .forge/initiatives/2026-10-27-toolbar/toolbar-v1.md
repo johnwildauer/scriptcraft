@@ -3,7 +3,7 @@
 ## Initiative metadata
 
 - **Phase:** `closeout`
-- **Status:** `active`
+- **Status:** `closed`
 - **Owner/orchestrator:** Forge orchestrator
 - **Created:** 2026-10-27
 - **Updated:** 2026-10-27
@@ -166,6 +166,7 @@ Execution is sequential. WO-001 establishes the Item and command seams; WO-002 d
 
 ## Closeout record
 
-- **Closeout status:** `in-progress`
+- **Closeout status:** `closed`
 - **Closeout date:** 2026-10-27
-- **Closeout evidence:** All three work orders passed separate fresh validation; required Cargo gates passed for every work order; no fix work orders or session exceptions were required. Git commit/merge evidence is recorded in the final execution-log entry.
+- **Closeout evidence:** All three work orders passed separate fresh validation; required Cargo gates passed for every work order; no fix work orders or session exceptions were required. Commit `8244d70` contains the implementation and Forge evidence; merge evidence is recorded in the final execution-log entry.
+- **Git evidence:** The initiative branch was committed and merged into the recorded base branch after this closeout record was committed.

@@ -92,6 +92,17 @@ failures, and follow-ups. Planning discussion remains in the initiative plan.
 - **Result:** `PASS`; the native-interaction limitation is a non-blocking warning. All work orders are complete and no fix work order is required.
 - **Next action/owner:** Forge orchestrator closeout; verify Git state, commit the initiative branch, merge into the recorded base branch, and set status closed.
 
+### 2026-10-27 — Final closeout
+
+- **Actor/role:** Forge orchestrator
+- **Session/agent ID:** `code-orchestrator-toolbar-2026-10-27`
+- **State transition:** initiative `closeout → closed`
+- **Work order/review:** All three work orders and their fresh validations
+- **Action:** Verified all work orders are complete, all validation/gate evidence is present, session separation held, and no unrelated implementation files were included. Recorded deferred native visual smoke and branch-lineage reconciliation as follow-ups.
+- **Evidence:** [`validation-WO-001.md`](validations/validation-WO-001.md:1), [`validation-WO-002.md`](validations/validation-WO-002.md:1), [`validation-WO-003.md`](validations/validation-WO-003.md:1), `git diff --check` passed, commit `8244d70` created on `dev/2026-10-27-toolbar`.
+- **Result:** Initiative status set to `closed`; merge into `dev/2026-10-26-editor-geometry-corrections-v2` is the remaining Git closure action.
+- **Next action/owner:** Forge orchestrator; merge the committed initiative branch and record the merge result.
+
 ### 2026-10-27 — WO-001 dispatched
 
 - **Actor/role:** Desktop toolbar implementer
