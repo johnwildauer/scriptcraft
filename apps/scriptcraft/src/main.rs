@@ -180,6 +180,7 @@ impl ScriptCraftApp {
         match result {
             Ok(project) => match self.session.replace_with_saved(project) {
                 Ok(()) => {
+                    self.page_geometry.invalidate();
                     self.native_path = Some(path.to_owned());
                     self.status = format!("Opened {}", path.display());
                     self.clear_error();
@@ -1231,6 +1232,43 @@ mod tests {
         })
     }
 
+    fn seed_page_snapshot(app: &mut ScriptCraftApp, pages: Vec<egui::Rect>) -> egui::Rect {
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let clip = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 580.0));
+        app.performance.frames = 1;
+        app.page_scale = Some(1.0);
+        assert!(app
+            .page_geometry
+            .publish(1, app.session.revision(), viewport, 1.0, pages, clip,));
+        viewport
+    }
+
+    fn project_page_status(
+        app: &mut ScriptCraftApp,
+        frame: u64,
+        viewport: egui::Rect,
+    ) -> status_bar::VisiblePage {
+        app.page_geometry.visible_page(
+            frame,
+            app.session.revision(),
+            viewport,
+            app.page_scale.unwrap_or(f32::NAN),
+            false,
+        )
+    }
+
+    fn render_fresh_editor_geometry(app: &mut ScriptCraftApp) -> status_bar::VisiblePage {
+        let context = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
+        app.performance.frames = 2;
+        let input = egui::RawInput {
+            screen_rect: Some(viewport),
+            ..Default::default()
+        };
+        let _ = render_editor_frame(&context, app, input);
+        project_page_status(app, 3, context.screen_rect())
+    }
+
     #[test]
     fn visible_page_tracks_actual_scrolled_geometry_without_following_offscreen_caret() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
@@ -1323,6 +1361,143 @@ mod tests {
             "expected settled scrolled geometry to select a later sheet, got {after_scroll:?}"
         );
         assert_eq!(app.session.selection().focus, original_caret);
+    }
+
+    #[test]
+    fn visible_page_new_replacement_invalidates_revision_alias_before_projection() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let viewport = seed_page_snapshot(
+            &mut app,
+            vec![
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(700.0, 100.0)),
+                egui::Rect::from_min_max(egui::pos2(0.0, 110.0), egui::pos2(700.0, 210.0)),
+                egui::Rect::from_min_max(egui::pos2(0.0, 220.0), egui::pos2(700.0, 320.0)),
+            ],
+        );
+        assert_eq!(app.session.revision(), 0);
+        assert_eq!(
+            project_page_status(&mut app, 2, viewport),
+            status_bar::VisiblePage::Available {
+                one_based: 1,
+                total: 3
+            }
+        );
+
+        app.dispatch_toolbar_action(ToolbarAction::New);
+
+        assert_eq!(
+            app.session.revision(),
+            0,
+            "replacement aliases the old revision"
+        );
+        assert_eq!(
+            project_page_status(&mut app, 2, viewport),
+            status_bar::VisiblePage::Unavailable,
+            "successful New must invalidate before the footer's first page projection"
+        );
+        let selection_after_new = app.session.selection();
+        let repaint_requests_before_publish = app.performance.repaint_requests;
+        assert_eq!(
+            render_fresh_editor_geometry(&mut app),
+            status_bar::VisiblePage::Available {
+                one_based: 1,
+                total: 1
+            }
+        );
+        assert!(app.performance.repaint_requests > repaint_requests_before_publish);
+        assert_eq!(app.session.selection(), selection_after_new);
+        assert!(!app.surface_focused);
+    }
+
+    #[test]
+    fn visible_page_open_replacement_invalidates_revision_alias_and_failed_open_does_not() {
+        let root =
+            std::env::temp_dir().join(format!("scriptcraft-wo002a-open-{}", std::process::id()));
+        let saved_path = root.join("replacement.json");
+        let _ = std::fs::create_dir_all(&root);
+
+        let mut source = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        source
+            .session
+            .insert(&"action line\n".repeat(260))
+            .unwrap_or_else(|_| unreachable!());
+        source.save_native_at(&saved_path);
+        assert!(source.error.is_none());
+        let expected_total = ScreenplayLayout::build(source.session.project())
+            .unwrap_or_else(|_| unreachable!())
+            .pages
+            .len();
+        assert!(expected_total > 1);
+
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let viewport = seed_page_snapshot(
+            &mut app,
+            vec![egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(700.0, 500.0),
+            )],
+        );
+        assert_eq!(app.session.revision(), 0);
+        assert_eq!(
+            project_page_status(&mut app, 2, viewport),
+            status_bar::VisiblePage::Available {
+                one_based: 1,
+                total: 1
+            }
+        );
+
+        app.open_native_at(&saved_path);
+
+        assert_eq!(
+            app.session.revision(),
+            0,
+            "successful Open aliases revision zero"
+        );
+        assert_eq!(app.native_path.as_deref(), Some(saved_path.as_path()));
+        assert!(app.error.is_none());
+        assert_eq!(
+            project_page_status(&mut app, 2, viewport),
+            status_bar::VisiblePage::Unavailable,
+            "successful Open must invalidate before the footer's first page projection"
+        );
+        let selection_after_open = app.session.selection();
+        let repaint_requests_before_publish = app.performance.repaint_requests;
+        assert_eq!(
+            render_fresh_editor_geometry(&mut app),
+            status_bar::VisiblePage::Available {
+                one_based: 1,
+                total: expected_total
+            }
+        );
+        assert!(app.performance.repaint_requests > repaint_requests_before_publish);
+        assert_eq!(app.session.selection(), selection_after_open);
+        assert!(!app.surface_focused);
+
+        let mut failed_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let failed_viewport = seed_page_snapshot(
+            &mut failed_app,
+            vec![egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(700.0, 500.0),
+            )],
+        );
+        failed_app.native_path = Some(PathBuf::from("kept-project.json"));
+        failed_app.open_native_at(&root.join("missing.json"));
+        assert!(failed_app.error.is_some());
+        assert_eq!(
+            failed_app.native_path.as_deref(),
+            Some(std::path::Path::new("kept-project.json"))
+        );
+        assert_eq!(
+            project_page_status(&mut failed_app, 2, failed_viewport),
+            status_bar::VisiblePage::Available {
+                one_based: 1,
+                total: 1
+            },
+            "failed Open must preserve the prior published page snapshot"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

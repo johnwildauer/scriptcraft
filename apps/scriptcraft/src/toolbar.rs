@@ -477,6 +477,7 @@ impl ScriptCraftApp {
                     }) {
                     Ok(session) => {
                         self.session = session;
+                        self.page_geometry.invalidate();
                         self.surface_focused = false;
                         self.native_path = None;
                         self.status = "New in-memory project".into();

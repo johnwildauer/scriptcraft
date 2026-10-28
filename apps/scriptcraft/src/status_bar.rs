@@ -1,4 +1,6 @@
-use eframe::egui::{self, Color32, Rect, Sense, WidgetInfo, WidgetType};
+use eframe::egui::{
+    self, Align, Color32, Direction, FontSelection, Rect, Sense, WidgetInfo, WidgetText, WidgetType,
+};
 use std::path::Path;
 
 const COMPACT_STATUS_BREAKPOINT: f32 = 720.0;
@@ -98,7 +100,9 @@ fn interactive_response(
 pub(super) fn render_item(ui: &mut egui::Ui, item: &StatusItem) -> Option<StatusItemResponse> {
     match item.kind {
         StatusItemKind::Text => {
-            ui.push_id(item.id, |ui| ui.label(&item.label));
+            ui.push_id(item.id, |ui| {
+                paint_noninteractive_text(ui, item.id, &item.label, ui.visuals().text_color());
+            });
             None
         }
         StatusItemKind::ClickableText => {
@@ -118,6 +122,85 @@ pub(super) fn render_item(ui: &mut egui::Ui, item: &StatusItem) -> Option<Status
             Some(interactive_response(ui, response, &item.accessible_name))
         }
     }
+}
+
+/// Lay out and paint a label without creating an egui `Response` or pointer hit
+/// target. Keep the same wrapping and text style as `Ui::label`, and publish an
+/// equivalent AccessKit label node when the backend has accessibility enabled.
+fn paint_noninteractive_text(
+    ui: &mut egui::Ui,
+    id_source: &str,
+    text: &str,
+    color: Color32,
+) -> Rect {
+    let mut layout_job = WidgetText::from(text).into_layout_job(
+        ui.style(),
+        FontSelection::Default,
+        ui.text_valign(),
+    );
+    let available_width = ui.available_width();
+    let (galley_pos, galley, bounds) = if ui.wrap_mode() == egui::TextWrapMode::Wrap
+        && ui.layout().main_dir() == Direction::LeftToRight
+        && ui.layout().main_wrap()
+        && available_width.is_finite()
+    {
+        let cursor = ui.cursor();
+        let first_row_indentation = available_width - ui.available_size_before_wrap().x;
+        layout_job.wrap.max_width = available_width;
+        layout_job.first_row_min_height = cursor.height();
+        layout_job.halign = Align::Min;
+        layout_job.justify = false;
+        if let Some(first_section) = layout_job.sections.first_mut() {
+            first_section.leading_space = first_row_indentation;
+        }
+        let galley = ui.fonts(|fonts| fonts.layout_job(layout_job));
+        let pos = egui::pos2(ui.max_rect().left(), ui.cursor().top());
+        let mut bounds = Rect::NOTHING;
+        for row in &galley.rows {
+            let row_rect = row.rect.translate(pos.to_vec2());
+            ui.advance_cursor_after_rect(row_rect);
+            bounds = bounds.union(row_rect);
+        }
+        (pos, galley, bounds)
+    } else {
+        match ui.wrap_mode() {
+            egui::TextWrapMode::Extend => {
+                layout_job.wrap.max_width = f32::INFINITY;
+            }
+            egui::TextWrapMode::Wrap => layout_job.wrap.max_width = available_width,
+            egui::TextWrapMode::Truncate => {
+                layout_job.wrap.max_width = available_width;
+                layout_job.wrap.max_rows = 1;
+                layout_job.wrap.break_anywhere = true;
+            }
+        }
+        layout_job.halign = ui.layout().horizontal_placement();
+        layout_job.justify = ui.layout().horizontal_justify();
+        let galley = ui.fonts(|fonts| fonts.layout_job(layout_job));
+        let (_, rect) = ui.allocate_space(galley.size());
+        let pos = match galley.job.halign {
+            Align::LEFT => rect.left_top(),
+            Align::Center => rect.center_top(),
+            Align::RIGHT => rect.right_top(),
+        };
+        (pos, galley, rect)
+    };
+
+    if ui.is_rect_visible(bounds) {
+        ui.painter().galley(galley_pos, galley, color);
+    }
+    let accessibility_id = ui.make_persistent_id(("status-label", id_source));
+    ui.ctx().accesskit_node_builder(accessibility_id, |node| {
+        node.set_role(egui::accesskit::Role::Label);
+        node.set_name(text.to_owned());
+        node.set_bounds(egui::accesskit::Rect {
+            x0: bounds.min.x.into(),
+            y0: bounds.min.y.into(),
+            x1: bounds.max.x.into(),
+            y1: bounds.max.y.into(),
+        });
+    });
+    bounds
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,7 +470,7 @@ pub(super) fn show(
                 render_item(ui, &path_item);
                 render_item(ui, &operation_item);
                 if let Some(error) = center.error.as_deref() {
-                    ui.colored_label(Color32::RED, error);
+                    paint_noninteractive_text(ui, "status-error", error, Color32::RED);
                 }
             });
         });
@@ -402,7 +485,7 @@ pub(super) fn show(
                 render_item(ui, &path_item);
                 render_item(ui, &operation_item);
                 if let Some(error) = center.error.as_deref() {
-                    ui.colored_label(Color32::RED, error);
+                    paint_noninteractive_text(ui, "status-error", error, Color32::RED);
                 }
             });
             // Reserve a neutral right region for WO-003 without adding zoom controls.
@@ -415,7 +498,12 @@ pub(super) fn show(
         .id_salt("status-bar-diagnostics")
         .default_open(false)
         .show(ui, |ui| {
-            ui.label(diagnostics.safe_summary());
+            paint_noninteractive_text(
+                ui,
+                "status-diagnostics-summary",
+                &diagnostics.safe_summary(),
+                ui.visuals().text_color(),
+            );
         });
 }
 
@@ -643,13 +731,25 @@ mod tests {
     #[test]
     fn status_bar_item_rendering_keeps_text_noninteractive_and_buttons_named() {
         let context = egui::Context::default();
-        let mut text_interactive = None;
+        context.enable_accesskit();
         let mut button_interactive = None;
         let mut icon_interactive = None;
-        let _ = context.run(egui::RawInput::default(), |context| {
+        let item = StatusItem::text("plain", "status text remains visible");
+        let mut text_rect = Rect::NOTHING;
+        let mut text_widget_id = None;
+        let initial = context.run(egui::RawInput::default(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                let text = StatusItem::text("plain", "status");
-                text_interactive = render_item(ui, &text).map(|_| true);
+                ui.push_id(item.id, |ui| {
+                    // `Label` would allocate its response with this next automatic
+                    // ID; use it to verify the actual egui interaction snapshot.
+                    text_widget_id = Some(ui.next_auto_id());
+                    text_rect = paint_noninteractive_text(
+                        ui,
+                        item.id,
+                        &item.label,
+                        ui.visuals().text_color(),
+                    );
+                });
                 let button = StatusItem::clickable_text("details", "Details", "Show diagnostics");
                 button_interactive = render_item(ui, &button)
                     .map(|rendered| rendered.response.sense == Sense::click());
@@ -658,9 +758,72 @@ mod tests {
                     .map(|response| response.response.sense == Sense::click());
             });
         });
-        assert_eq!(text_interactive, None);
+        assert!(initial.shapes.iter().any(|shape| {
+            matches!(
+                &shape.shape,
+                egui::epaint::Shape::Text(text)
+                    if text.galley.text() == item.label
+            )
+        }));
+        let accessible_nodes = initial
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .map(|update| &update.nodes);
+        assert!(
+            accessible_nodes.is_some_and(|nodes| {
+                nodes.iter().any(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Label
+                        && node.name() == Some(item.label.as_str())
+                }) && nodes.iter().any(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Button
+                        && node.name() == Some("Show diagnostics")
+                }) && nodes.iter().any(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Button
+                        && node.name() == Some("More status options")
+                })
+            }),
+            "painter-only text and interactive controls retain their accessibility labels"
+        );
         assert_eq!(button_interactive, Some(true));
         assert_eq!(icon_interactive, Some(true));
+
+        let text_id = text_widget_id.unwrap_or_else(|| unreachable!());
+        let pointer_input = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(text_rect.center()),
+                egui::Event::PointerButton {
+                    pos: text_rect.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let mut adapter_returned_response = false;
+        let _ = context.run(pointer_input, |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                adapter_returned_response = render_item(ui, &item).is_some();
+            });
+        });
+        let pointer_targets_text = context.interaction_snapshot(|snapshot| {
+            snapshot.contains_pointer.contains(&text_id)
+                || snapshot.hovered.contains(&text_id)
+                || snapshot.clicked == Some(text_id)
+                || snapshot.dragged == Some(text_id)
+        });
+        assert!(!adapter_returned_response);
+        assert!(
+            !pointer_targets_text,
+            "painted noninteractive text must not register a pointer-sensing egui response"
+        );
+        assert_ne!(context.memory(|memory| memory.focused()), Some(text_id));
+        assert_eq!(
+            context.output(|output| output.cursor_icon),
+            egui::CursorIcon::Default,
+            "noninteractive text must not claim cursor ownership"
+        );
     }
 
     #[test]
