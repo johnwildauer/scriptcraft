@@ -1,10 +1,6 @@
 #![deny(unsafe_code)]
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-#[cfg(target_os = "macos")]
-#[path = "platform/macos_titlebar.rs"]
-mod macos_titlebar;
-
 use eframe::egui::{
     self, Color32, FontFamily, FontId, Key, RichText, Sense, Stroke, TextStyle, TextWrapMode, Vec2,
     WidgetText,
@@ -14,7 +10,6 @@ use scriptcraft_core::exports;
 use scriptcraft_core::layout::{Caret, LayoutCache, ScreenplayLayout};
 use scriptcraft_core::persistence::{self, FileSystem, StdFileSystem};
 use scriptcraft_core::{Project, Role};
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -24,6 +19,8 @@ const CURRENT_DEFAULT_PAGE_WIDTH: f32 = 360.0;
 const DEFAULT_PRESENTATION_SCALE_MULTIPLIER: f32 = 1.6;
 const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
 const MINIMUM_PAGE_WIDTH: f32 = 240.0;
+#[cfg(test)]
+const PRESENTATION_METRIC_TOLERANCE: f32 = 0.01;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 // Manual toolbar geometry controls: tune Item group width and row spacing here.
 // The 46-point normal slot is the compact baseline recorded by the focused
@@ -39,139 +36,7 @@ const TOOLBAR_TOP_PADDING: f32 = 0.0;
 // Preserve the toolbar's text/control clearance. The trailing span is part of
 // the exact top-panel allocation and must not be removed to fix a viewport row.
 const TOOLBAR_BOTTOM_PADDING: f32 = 2.0;
-// Reserve only the native top-left control band before the toolbar. This is a
-// bounded layout choice, not a measured macOS safe-area value.
-const NATIVE_TOOLBAR_TOP_INSET: f32 = 28.0;
 const TOOLBAR_ICON_HOVER_PADDING: f32 = 2.0;
-const TITLE_STRIP_TEXT: &str = "ScriptCraft";
-const TITLE_STRIP_HEIGHT: f32 = 30.0;
-const PRESENTATION_SETTLE_FRAMES: u8 = 2;
-const PRESENTATION_FALLBACK_FRAMES: u8 = 12;
-#[cfg(test)]
-const CHROME_GEOMETRY_TOLERANCE: f32 = 0.5;
-const TRANSITION_METRIC_TOLERANCE: f32 = 0.01;
-
-/// Source-level experiment selector. Restore `CustomHidden` to roll back to
-/// the existing app-owned title strip and transition behavior.
-const TITLEBAR_PRESENTATION_MODE: TitlebarPresentationMode = TitlebarPresentationMode::NativeMacOs;
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TitlebarPresentationMode {
-    CustomHidden,
-    NativeMacOs,
-}
-
-impl TitlebarPresentationMode {
-    fn uses_custom_titlebar(self) -> bool {
-        matches!(self, Self::CustomHidden)
-    }
-
-    fn uses_app_owned_transition_policy(self) -> bool {
-        self.uses_custom_titlebar()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TitlebarSurface {
-    CustomTitleStrip,
-    NativeTitlebar,
-}
-
-fn selected_titlebar_presentation_mode() -> TitlebarPresentationMode {
-    TITLEBAR_PRESENTATION_MODE
-}
-
-fn titlebar_surface_for_mode(mode: TitlebarPresentationMode) -> TitlebarSurface {
-    if mode.uses_custom_titlebar() {
-        TitlebarSurface::CustomTitleStrip
-    } else {
-        TitlebarSurface::NativeTitlebar
-    }
-}
-
-fn titlebar_viewport_command_for_mode(
-    mode: TitlebarPresentationMode,
-    maximized: Option<bool>,
-) -> Option<egui::ViewportCommand> {
-    match titlebar_surface_for_mode(mode) {
-        TitlebarSurface::CustomTitleStrip => title_strip_viewport_command(maximized),
-        TitlebarSurface::NativeTitlebar => None,
-    }
-}
-
-fn should_request_policy_repaint(mode: TitlebarPresentationMode, observing: bool) -> bool {
-    mode.uses_app_owned_transition_policy() && observing
-}
-
-// No response is registered over the leftmost 160 logical points. This
-// deliberately over-excludes the standard traffic-light cluster; the bridge
-// also checks current public native button geometry before invoking the action.
-const NATIVE_TITLEBAR_CONTROL_EXCLUSION: f32 = 160.0;
-
-fn native_titlebar_hit_rect(band: egui::Rect, clip: egui::Rect) -> egui::Rect {
-    egui::Rect::from_min_max(
-        egui::pos2(band.left() + NATIVE_TITLEBAR_CONTROL_EXCLUSION, band.top()),
-        band.max,
-    )
-    .intersect(clip)
-}
-
-fn native_titlebar_band(ui: &mut egui::Ui, mode: TitlebarPresentationMode) -> Option<egui::Pos2> {
-    let band = egui::Rect::from_min_size(
-        ui.cursor().min,
-        egui::vec2(ui.available_width(), toolbar_top_inset_for_mode(mode)),
-    );
-    // Keep precisely the existing layout allocation, including toolbar y.
-    ui.add_space(toolbar_top_inset_for_mode(mode));
-    if !cfg!(target_os = "macos")
-        || mode != TitlebarPresentationMode::NativeMacOs
-        || ui.memory(|memory| memory.any_popup_open())
-    {
-        return None;
-    }
-    let rect = native_titlebar_hit_rect(band, ui.clip_rect());
-    if !rect.is_positive() {
-        return None;
-    }
-    let response = ui.interact(
-        rect,
-        ui.id().with("native-titlebar-double-click"),
-        Sense::click(),
-    );
-    response
-        .double_clicked_by(egui::PointerButton::Primary)
-        .then(|| response.interact_pointer_pos())
-        .flatten()
-}
-
-fn dispatch_native_titlebar_action(
-    requested: bool,
-    perform_zoom: impl FnOnce() -> Result<(), &'static str>,
-) -> Result<(), &'static str> {
-    if requested {
-        perform_zoom()
-    } else {
-        Ok(())
-    }
-}
-
-fn perform_native_titlebar_zoom(
-    frame: &eframe::Frame,
-    position: egui::Pos2,
-    viewport: egui::Rect,
-) -> Result<(), &'static str> {
-    #[cfg(target_os = "macos")]
-    {
-        macos_titlebar::perform_zoom(frame, position, viewport)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (frame, position, viewport);
-        Err("AppKit unavailable on this platform")
-    }
-}
-
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
     pointer_activations: u32,
@@ -195,218 +60,6 @@ struct PerformanceDiagnostics {
     event_nanos: u128,
     layout_nanos: u128,
     paint_nanos: u128,
-}
-
-const MAX_VIEWPORT_DIAGNOSTIC_SAMPLES: usize = 120;
-const MAX_VIEWPORT_COMMAND_OBSERVATIONS: usize = 32;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ViewportMetricSample {
-    frame: u64,
-    timestamp_ms: u128,
-    maximized: Option<bool>,
-    native_pixels_per_point: Option<f32>,
-    egui_pixels_per_point: f32,
-    inner_rect: Option<egui::Rect>,
-    outer_rect: Option<egui::Rect>,
-    content_rect: Option<egui::Rect>,
-    clip_rect: Option<egui::Rect>,
-    available_rect: Option<egui::Rect>,
-    page_width: Option<f32>,
-    page_scale: Option<f32>,
-    page_font_size: Option<f32>,
-    toolbar_bounds: Option<egui::Rect>,
-    page_bounds: Option<egui::Rect>,
-    chrome_ledger: Option<ChromeSurfaceLedger>,
-}
-
-/// Logical ownership ledger for the app-owned chrome boundary.  This is kept
-/// separate from paint code so a native pixel observation cannot be mistaken
-/// for an egui allocation merely because the two have similar coordinates.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ChromeSurfaceLedger {
-    panel: egui::Rect,
-    frame: egui::Rect,
-    title: egui::Rect,
-    toolbar_content: egui::Rect,
-    toolbar_row: egui::Rect,
-    bottom_padding: egui::Rect,
-    central_panel: egui::Rect,
-    clip: egui::Rect,
-    pixels_per_point: f32,
-    bottom_padding_pixels: PhysicalPixelSpan,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PhysicalPixelSpan {
-    first: i32,
-    last_exclusive: i32,
-}
-
-fn logical_y_to_physical_rows(rect: egui::Rect, pixels_per_point: f32) -> PhysicalPixelSpan {
-    let scale = pixels_per_point.max(f32::EPSILON);
-    PhysicalPixelSpan {
-        first: (rect.top() * scale).floor() as i32,
-        last_exclusive: (rect.bottom() * scale).ceil() as i32,
-    }
-}
-
-fn chrome_surface_ledger(
-    panel: egui::Rect,
-    toolbar_row: egui::Rect,
-    central_panel: egui::Rect,
-    clip: egui::Rect,
-    pixels_per_point: f32,
-) -> ChromeSurfaceLedger {
-    let title = egui::Rect::from_min_size(panel.min, Vec2::new(panel.width(), TITLE_STRIP_HEIGHT));
-    let toolbar_content = egui::Rect::from_min_max(
-        egui::pos2(panel.left(), title.bottom()),
-        egui::pos2(panel.right(), panel.bottom()),
-    );
-    let bottom_padding = egui::Rect::from_min_max(
-        egui::pos2(panel.left(), toolbar_row.bottom()),
-        egui::pos2(panel.right(), toolbar_content.bottom()),
-    );
-    let bottom_padding_pixels = logical_y_to_physical_rows(bottom_padding, pixels_per_point);
-    ChromeSurfaceLedger {
-        panel,
-        frame: panel,
-        title,
-        toolbar_content,
-        toolbar_row,
-        bottom_padding,
-        central_panel,
-        clip,
-        pixels_per_point,
-        bottom_padding_pixels,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ViewportCommandObservation {
-    frame: u64,
-    timestamp_ms: u128,
-    observed_maximized: Option<bool>,
-    requested_maximized: Option<bool>,
-}
-
-#[derive(Debug, Default)]
-struct ViewportDiagnostics {
-    started_at: Option<Instant>,
-    frame: u64,
-    current: Option<ViewportMetricSample>,
-    samples: VecDeque<ViewportMetricSample>,
-    commands: VecDeque<ViewportCommandObservation>,
-}
-
-impl ViewportDiagnostics {
-    fn begin_frame(&mut self, ctx: &egui::Context) {
-        let started_at = *self.started_at.get_or_insert_with(Instant::now);
-        self.frame = self.frame.saturating_add(1);
-        let viewport = ctx.input(|input| input.viewport().clone());
-        self.current = Some(ViewportMetricSample {
-            frame: self.frame,
-            timestamp_ms: started_at.elapsed().as_millis(),
-            maximized: viewport.maximized,
-            native_pixels_per_point: viewport.native_pixels_per_point,
-            egui_pixels_per_point: ctx.pixels_per_point(),
-            inner_rect: viewport.inner_rect,
-            outer_rect: viewport.outer_rect,
-            content_rect: None,
-            clip_rect: None,
-            available_rect: None,
-            page_width: None,
-            page_scale: None,
-            page_font_size: None,
-            toolbar_bounds: None,
-            page_bounds: None,
-            chrome_ledger: None,
-        });
-    }
-
-    fn record_geometry(
-        &mut self,
-        content_rect: egui::Rect,
-        clip_rect: egui::Rect,
-        available_rect: egui::Rect,
-    ) {
-        if let Some(sample) = &mut self.current {
-            sample.content_rect = Some(content_rect);
-            sample.clip_rect = Some(clip_rect);
-            sample.available_rect = Some(available_rect);
-        }
-    }
-
-    fn record_toolbar_bounds(&mut self, bounds: egui::Rect) {
-        if let Some(sample) = &mut self.current {
-            sample.toolbar_bounds = Some(bounds);
-        }
-    }
-
-    fn record_chrome_ledger(
-        &mut self,
-        panel: egui::Rect,
-        central_panel: egui::Rect,
-        pixels_per_point: f32,
-    ) {
-        let Some(sample) = &mut self.current else {
-            return;
-        };
-        let Some(toolbar_row) = sample.toolbar_bounds else {
-            return;
-        };
-        let clip = sample.clip_rect.unwrap_or(panel);
-        sample.chrome_ledger = Some(chrome_surface_ledger(
-            panel,
-            toolbar_row,
-            central_panel,
-            clip,
-            pixels_per_point,
-        ));
-    }
-
-    fn record_presentation(&mut self, metrics: PresentationMetrics, page_bounds: egui::Rect) {
-        if let Some(sample) = &mut self.current {
-            sample.page_width = Some(metrics.page_width);
-            sample.page_scale = Some(metrics.scale);
-            sample.page_font_size = Some(metrics.font_size);
-            sample.page_bounds = Some(page_bounds);
-        }
-    }
-
-    fn record_command(
-        &mut self,
-        observed_maximized: Option<bool>,
-        requested_maximized: Option<bool>,
-    ) {
-        let Some(started_at) = self.started_at else {
-            return;
-        };
-        let observation = ViewportCommandObservation {
-            frame: self.frame,
-            timestamp_ms: started_at.elapsed().as_millis(),
-            observed_maximized,
-            requested_maximized,
-        };
-        bounded_push(
-            &mut self.commands,
-            observation,
-            MAX_VIEWPORT_COMMAND_OBSERVATIONS,
-        );
-    }
-
-    fn finish_frame(&mut self) {
-        if let Some(sample) = self.current.take() {
-            bounded_push(&mut self.samples, sample, MAX_VIEWPORT_DIAGNOSTIC_SAMPLES);
-        }
-    }
-}
-
-fn bounded_push<T>(items: &mut VecDeque<T>, item: T, limit: usize) {
-    if items.len() == limit {
-        items.pop_front();
-    }
-    items.push_back(item);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -881,8 +534,6 @@ struct ScriptCraftApp {
     caret_blink_reset_time: f64,
     layout_cache: LayoutCache,
     performance: PerformanceDiagnostics,
-    viewport_diagnostics: ViewportDiagnostics,
-    presentation_policy: PresentationTransitionPolicy,
 }
 
 impl ScriptCraftApp {
@@ -910,8 +561,6 @@ impl ScriptCraftApp {
             caret_blink_reset_time: 0.0,
             layout_cache: LayoutCache::default(),
             performance: PerformanceDiagnostics::default(),
-            viewport_diagnostics: ViewportDiagnostics::default(),
-            presentation_policy: PresentationTransitionPolicy::default(),
         })
     }
 
@@ -1231,22 +880,14 @@ impl ScriptCraftApp {
         let row_left = ui.cursor().left();
         let available_width =
             toolbar_actual_available_width(content_rect, ui.clip_rect(), row_left);
-        self.viewport_diagnostics.record_geometry(
-            content_rect,
-            ui.clip_rect(),
-            ui.available_rect_before_wrap(),
-        );
         let allocation = allocate_toolbar(&default_toolbar_items(), available_width, |label| {
             toolbar_label_width(ui, label)
         });
-        let presentation = self.presentation_policy.effective_toolbar_metrics_for_mode(
-            live_toolbar_metrics(ui),
-            selected_titlebar_presentation_mode(),
-        );
+        let presentation = live_toolbar_metrics(ui);
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.add_space(TOOLBAR_TOP_PADDING);
-            let row_response = ui.allocate_ui_with_layout(
+            ui.allocate_ui_with_layout(
                 Vec2::new(allocation.row_width, ui.spacing().interact_size.y * 2.0),
                 egui::Layout::left_to_right(egui::Align::Min),
                 |ui| {
@@ -1281,8 +922,6 @@ impl ScriptCraftApp {
                     ui.add_space(TOOLBAR_ROW_PADDING);
                 },
             );
-            self.viewport_diagnostics
-                .record_toolbar_bounds(row_response.response.rect);
             ui.add_space(TOOLBAR_BOTTOM_PADDING);
         });
     }
@@ -1562,22 +1201,13 @@ impl ScriptCraftApp {
         };
         self.rendered_revision = Some(self.session.revision());
         let available = ui.available_size();
-        let live_metrics = presentation_metrics_with_policy(
+        let metrics = presentation_metrics(
             available.x,
             layout.profile.paper_width as f32,
             layout.profile.font_size as f32,
-            presentation_metric_policy(),
         );
-        let metrics = self
-            .presentation_policy
-            .effective_page_metrics_for_mode(live_metrics, selected_titlebar_presentation_mode());
         let page_width = metrics.page_width;
         let scale = metrics.scale;
-        self.viewport_diagnostics.record_geometry(
-            ui.available_rect_before_wrap(),
-            ui.clip_rect(),
-            ui.available_rect_before_wrap(),
-        );
         let horizontal_padding = ((available.x.max(page_width) - page_width) / 2.0).max(0.0);
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let mut page_rects = Vec::with_capacity(layout.pages.len());
@@ -1630,20 +1260,6 @@ impl ScriptCraftApp {
                     }
                 }
             });
-        if let Some(page_rect) = page_rects.first().copied() {
-            self.viewport_diagnostics
-                .record_presentation(metrics, page_rect);
-            let derived = PresentationMetricSet {
-                toolbar: live_toolbar_metrics(ui),
-                page: live_metrics,
-                page_bounds: page_rect.size(),
-            };
-            let observed_maximized = ui.ctx().input(|input| input.viewport().maximized);
-            if selected_titlebar_presentation_mode().uses_app_owned_transition_policy() {
-                self.presentation_policy
-                    .observe(observed_maximized, derived);
-            }
-        }
         self.reveal_intent = RevealIntent::None;
 
         // This is the only interactive response in the painted editor. Pages remain
@@ -2024,8 +1640,6 @@ fn presentation_geometry(available_width: f32, paper_width: f32) -> (f32, f32, f
 struct ToolbarPresentationMetrics {
     icon_control_size: f32,
     font_size: f32,
-    icon_bounds: Vec2,
-    text_bounds: Vec2,
 }
 
 impl ToolbarPresentationMetrics {
@@ -2041,16 +1655,9 @@ fn live_toolbar_metrics(ui: &egui::Ui) -> ToolbarPresentationMetrics {
         .get(&TextStyle::Body)
         .cloned()
         .unwrap_or_else(|| FontId::proportional(14.0));
-    let text_bounds = ui.fonts(|fonts| {
-        fonts
-            .layout_no_wrap("Export PDF".to_owned(), font.clone(), Color32::TRANSPARENT)
-            .size()
-    });
     ToolbarPresentationMetrics {
         icon_control_size: ui.spacing().interact_size.y,
         font_size: font.size,
-        icon_bounds: Vec2::new(font.size, font.size),
-        text_bounds,
     }
 }
 
@@ -2059,184 +1666,6 @@ struct PresentationMetrics {
     page_width: f32,
     scale: f32,
     font_size: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct PresentationMetricSet {
-    toolbar: ToolbarPresentationMetrics,
-    page: PresentationMetrics,
-    page_bounds: Vec2,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PresentationTransitionState {
-    Stable,
-    Requested,
-    Settling,
-    Released,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PresentationTransitionPolicy {
-    state: PresentationTransitionState,
-    target_maximized: Option<bool>,
-    captured: Option<PresentationMetricSet>,
-    last_stable: Option<PresentationMetricSet>,
-    previous_derived: Option<PresentationMetricSet>,
-    stable_frames: u8,
-    held_frames: u8,
-}
-
-impl Default for PresentationTransitionPolicy {
-    fn default() -> Self {
-        Self {
-            state: PresentationTransitionState::Stable,
-            target_maximized: None,
-            captured: None,
-            last_stable: None,
-            previous_derived: None,
-            stable_frames: 0,
-            held_frames: 0,
-        }
-    }
-}
-
-impl PresentationTransitionPolicy {
-    fn is_observing(&self) -> bool {
-        !matches!(self.state, PresentationTransitionState::Stable)
-    }
-
-    fn effective_toolbar_metrics(
-        &self,
-        live: ToolbarPresentationMetrics,
-    ) -> ToolbarPresentationMetrics {
-        self.effective_set().map_or(live, |metrics| metrics.toolbar)
-    }
-
-    fn effective_toolbar_metrics_for_mode(
-        &self,
-        live: ToolbarPresentationMetrics,
-        mode: TitlebarPresentationMode,
-    ) -> ToolbarPresentationMetrics {
-        if mode.uses_app_owned_transition_policy() {
-            self.effective_toolbar_metrics(live)
-        } else {
-            live
-        }
-    }
-
-    fn effective_page_metrics(&self, live: PresentationMetrics) -> PresentationMetrics {
-        self.effective_set().map_or(live, |metrics| metrics.page)
-    }
-
-    fn effective_page_metrics_for_mode(
-        &self,
-        live: PresentationMetrics,
-        mode: TitlebarPresentationMode,
-    ) -> PresentationMetrics {
-        if mode.uses_app_owned_transition_policy() {
-            self.effective_page_metrics(live)
-        } else {
-            live
-        }
-    }
-
-    fn effective_set(&self) -> Option<PresentationMetricSet> {
-        match self.state {
-            PresentationTransitionState::Requested | PresentationTransitionState::Settling => {
-                self.captured.or(self.last_stable)
-            }
-            PresentationTransitionState::Released => self.last_stable,
-            PresentationTransitionState::Stable => None,
-        }
-    }
-
-    fn request(&mut self, target_maximized: Option<bool>) {
-        let Some(target_maximized) = target_maximized else {
-            return;
-        };
-        if self.target_maximized == Some(target_maximized)
-            && !matches!(self.state, PresentationTransitionState::Stable)
-        {
-            return;
-        }
-        self.target_maximized = Some(target_maximized);
-        self.captured = self.last_stable;
-        self.previous_derived = None;
-        self.stable_frames = 0;
-        self.held_frames = 0;
-        self.state = PresentationTransitionState::Requested;
-    }
-
-    fn observe(&mut self, observed_maximized: Option<bool>, derived: PresentationMetricSet) {
-        if matches!(self.state, PresentationTransitionState::Released) {
-            self.finish_release(derived);
-            return;
-        }
-        if matches!(self.state, PresentationTransitionState::Stable) {
-            self.last_stable = Some(derived);
-            self.previous_derived = Some(derived);
-            return;
-        }
-
-        self.held_frames = self.held_frames.saturating_add(1);
-        if matches!(self.state, PresentationTransitionState::Requested) {
-            self.state = PresentationTransitionState::Settling;
-        }
-        let metrics_stable = self
-            .previous_derived
-            .is_some_and(|previous| metric_set_close(previous, derived));
-        self.previous_derived = Some(derived);
-        if observed_maximized == self.target_maximized && metrics_stable {
-            self.stable_frames = self.stable_frames.saturating_add(1);
-        } else {
-            self.stable_frames = 0;
-        }
-        if self.stable_frames >= PRESENTATION_SETTLE_FRAMES
-            || self.held_frames >= PRESENTATION_FALLBACK_FRAMES
-        {
-            // The next frame is the first released frame. Capture the exact
-            // latest app-owned tuple so release cannot be followed by a snap.
-            self.last_stable = Some(derived);
-            self.captured = None;
-            self.state = PresentationTransitionState::Released;
-        }
-    }
-
-    fn finish_release(&mut self, derived: PresentationMetricSet) {
-        if matches!(self.state, PresentationTransitionState::Released) {
-            self.last_stable = Some(derived);
-            self.previous_derived = Some(derived);
-            self.target_maximized = None;
-            self.state = PresentationTransitionState::Stable;
-            self.stable_frames = 0;
-            self.held_frames = 0;
-        }
-    }
-}
-
-fn metric_set_close(left: PresentationMetricSet, right: PresentationMetricSet) -> bool {
-    let close = |a: f32, b: f32| (a - b).abs() <= TRANSITION_METRIC_TOLERANCE;
-    let close_vec = |a: Vec2, b: Vec2| close(a.x, b.x) && close(a.y, b.y);
-    close(
-        left.toolbar.icon_control_size,
-        right.toolbar.icon_control_size,
-    ) && close(left.toolbar.font_size, right.toolbar.font_size)
-        && close_vec(left.toolbar.icon_bounds, right.toolbar.icon_bounds)
-        && close_vec(left.toolbar.text_bounds, right.toolbar.text_bounds)
-        && close(left.page.page_width, right.page.page_width)
-        && close(left.page.scale, right.page.scale)
-        && close(left.page.font_size, right.page.font_size)
-        && close_vec(left.page_bounds, right.page_bounds)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PresentationMetricPolicy {
-    AppOwnedTransition,
-}
-
-fn presentation_metric_policy() -> PresentationMetricPolicy {
-    PresentationMetricPolicy::AppOwnedTransition
 }
 
 fn presentation_metrics(
@@ -2250,19 +1679,6 @@ fn presentation_metrics(
         page_width,
         scale,
         font_size: (base_font_size * scale).max(5.0),
-    }
-}
-
-fn presentation_metrics_with_policy(
-    available_width: f32,
-    paper_width: f32,
-    base_font_size: f32,
-    policy: PresentationMetricPolicy,
-) -> PresentationMetrics {
-    match policy {
-        PresentationMetricPolicy::AppOwnedTransition => {
-            presentation_metrics(available_width, paper_width, base_font_size)
-        }
     }
 }
 
@@ -2409,19 +1825,9 @@ fn toolbar_group_fill(style: &egui::Style, hovered: bool) -> Color32 {
     }
 }
 
-#[cfg(test)]
-fn toolbar_frame(ctx: &egui::Context) -> egui::Frame {
-    chrome_frame(ctx)
-}
-
-fn title_strip_frame(ctx: &egui::Context) -> egui::Frame {
-    chrome_frame(ctx)
-}
-
 fn chrome_frame(ctx: &egui::Context) -> egui::Frame {
-    // The shared frame owns fill and inset policy. The title response therefore
-    // reaches both window edges, while toolbar row padding remains explicit.
-    // A disabled panel separator removes the seam without changing controls.
+    // The top toolbar panel uses the shared app fill and a zero-inset frame;
+    // row padding remains explicit and its separator stays disabled.
     egui::Frame::none()
         .fill(toolbar_chrome_color(ctx))
         .stroke(egui::Stroke::NONE)
@@ -2435,123 +1841,19 @@ fn central_panel_frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::central_panel(ctx.style().as_ref()).fill(toolbar_chrome_color(ctx))
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ChromeGeometry {
-    panel: egui::Rect,
-    title: egui::Rect,
-    toolbar: egui::Rect,
-}
-
-#[cfg(test)]
-fn chrome_geometry(panel: egui::Rect, toolbar_height: f32) -> ChromeGeometry {
-    let title = egui::Rect::from_min_size(panel.min, Vec2::new(panel.width(), TITLE_STRIP_HEIGHT));
-    let toolbar = egui::Rect::from_min_max(
-        egui::pos2(panel.left(), title.bottom()),
-        egui::pos2(
-            panel.right(),
-            (title.bottom() + toolbar_height).min(panel.bottom()),
-        ),
-    );
-    ChromeGeometry {
-        panel,
-        title,
-        toolbar,
-    }
-}
-
 fn toolbar_content_height(style: &egui::Style) -> f32 {
     style.spacing.interact_size.y * 2.0 + TOOLBAR_BOTTOM_PADDING
 }
 
-fn toolbar_top_inset_for_mode(mode: TitlebarPresentationMode) -> f32 {
-    if mode == TitlebarPresentationMode::NativeMacOs {
-        NATIVE_TOOLBAR_TOP_INSET
-    } else {
-        0.0
-    }
-}
-
 #[cfg(test)]
-fn toolbar_layout_rect(
-    panel: egui::Rect,
-    mode: TitlebarPresentationMode,
-    toolbar_height: f32,
-) -> egui::Rect {
-    let top = panel.top() + toolbar_top_inset_for_mode(mode);
+fn toolbar_layout_rect(panel: egui::Rect, toolbar_height: f32) -> egui::Rect {
     egui::Rect::from_min_max(
-        egui::pos2(panel.left(), top),
-        egui::pos2(panel.right(), (top + toolbar_height).min(panel.bottom())),
+        panel.left_top(),
+        egui::pos2(
+            panel.right(),
+            (panel.top() + toolbar_height).min(panel.bottom()),
+        ),
     )
-}
-
-fn title_strip_text_position(strip: egui::Rect, text_size: Vec2) -> egui::Pos2 {
-    strip.center() - text_size / 2.0
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ViewportMaximizedState {
-    Normal,
-    Maximized,
-    Unknown,
-}
-
-fn viewport_maximized_state(maximized: Option<bool>) -> ViewportMaximizedState {
-    match maximized {
-        Some(false) => ViewportMaximizedState::Normal,
-        Some(true) => ViewportMaximizedState::Maximized,
-        None => ViewportMaximizedState::Unknown,
-    }
-}
-
-fn title_strip_viewport_command(maximized: Option<bool>) -> Option<egui::ViewportCommand> {
-    match viewport_maximized_state(maximized) {
-        ViewportMaximizedState::Normal => Some(egui::ViewportCommand::Maximized(true)),
-        ViewportMaximizedState::Maximized => Some(egui::ViewportCommand::Maximized(false)),
-        ViewportMaximizedState::Unknown => None,
-    }
-}
-
-fn title_strip(
-    ui: &mut egui::Ui,
-    ctx: &egui::Context,
-    mode: TitlebarPresentationMode,
-    viewport_diagnostics: &mut ViewportDiagnostics,
-    presentation_policy: &mut PresentationTransitionPolicy,
-) {
-    let response = ui.allocate_response(
-        Vec2::new(ui.available_width(), TITLE_STRIP_HEIGHT),
-        Sense::click(),
-    );
-    let job = egui::WidgetText::from(RichText::new(TITLE_STRIP_TEXT).strong()).into_layout_job(
-        ui.style(),
-        egui::FontSelection::Default,
-        egui::Align::Center,
-    );
-    let galley = ui.fonts(|fonts| fonts.layout_job(job));
-    ui.painter().galley(
-        title_strip_text_position(response.rect, galley.size()),
-        galley,
-        ctx.style().visuals.text_color(),
-    );
-
-    if response.double_clicked() {
-        let (observed_maximized, command) = ctx.input(|input| {
-            let observed = input.viewport().maximized;
-            (observed, titlebar_viewport_command_for_mode(mode, observed))
-        });
-        let requested_maximized = command.as_ref().and_then(|command| match command {
-            egui::ViewportCommand::Maximized(value) => Some(*value),
-            _ => None,
-        });
-        viewport_diagnostics.record_command(observed_maximized, requested_maximized);
-        if mode.uses_app_owned_transition_policy() {
-            presentation_policy.request(requested_maximized);
-        }
-        if let Some(command) = command {
-            ctx.send_viewport_cmd(command);
-        }
-    }
 }
 
 impl eframe::App for ScriptCraftApp {
@@ -2559,47 +1861,14 @@ impl eframe::App for ScriptCraftApp {
         chrome_clear_color(visuals)
     }
 
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
-        let mode = selected_titlebar_presentation_mode();
         self.performance.frames = self.performance.frames.saturating_add(1);
-        self.viewport_diagnostics.begin_frame(ctx);
-        let chrome_height = toolbar_top_inset_for_mode(mode)
-            + toolbar_content_height(&ctx.style())
-            + if mode.uses_custom_titlebar() {
-                TITLE_STRIP_HEIGHT
-            } else {
-                0.0
-            };
-        let mut chrome_panel = egui::Rect::NOTHING;
-        let mut native_double_click = None;
         egui::TopBottomPanel::top("titlebar-toolbar")
-            .frame(title_strip_frame(ctx))
+            .frame(chrome_frame(ctx))
             .show_separator_line(false)
-            .exact_height(chrome_height)
-            .show(ctx, |ui| {
-                chrome_panel = ui.max_rect();
-                if mode.uses_custom_titlebar() {
-                    title_strip(
-                        ui,
-                        ctx,
-                        mode,
-                        &mut self.viewport_diagnostics,
-                        &mut self.presentation_policy,
-                    );
-                }
-                native_double_click = native_titlebar_band(ui, mode);
-                self.toolbar(ui);
-            });
-        // Popup ownership wins even when a toolbar action opens one this frame.
-        if let Some(position) = native_double_click {
-            let requested = !ctx.memory(|memory| memory.any_popup_open());
-            if let Err(reason) = dispatch_native_titlebar_action(requested, || {
-                perform_native_titlebar_zoom(frame, position, ctx.screen_rect())
-            }) {
-                eprintln!("Native titlebar double-click ignored: {reason}");
-            }
-        }
+            .exact_height(toolbar_content_height(&ctx.style()))
+            .show(ctx, |ui| self.toolbar(ui));
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(&self.status);
@@ -2642,25 +1911,14 @@ impl eframe::App for ScriptCraftApp {
                 ));
             });
         });
-        let mut central_panel = egui::Rect::NOTHING;
         egui::CentralPanel::default()
             .frame(central_panel_frame(ctx))
             .show(ctx, |ui| {
-                central_panel = ui.max_rect();
                 ui.heading(&self.session.project().metadata.title);
                 ui.separator();
                 self.live_document_surface(ui);
             });
-        self.viewport_diagnostics.record_chrome_ledger(
-            chrome_panel,
-            central_panel,
-            ctx.pixels_per_point(),
-        );
         self.handle_surface_input(ctx);
-        if should_request_policy_repaint(mode, self.presentation_policy.is_observing()) {
-            self.request_repaint(ctx);
-        }
-        self.viewport_diagnostics.finish_frame();
         self.performance.frame_nanos = self
             .performance
             .frame_nanos
@@ -2668,54 +1926,31 @@ impl eframe::App for ScriptCraftApp {
     }
 }
 
-fn native_options_for_mode(mode: TitlebarPresentationMode) -> eframe::NativeOptions {
-    match mode {
-        TitlebarPresentationMode::CustomHidden => eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_decorations(true)
-                .with_transparent(false)
-                .with_title(TITLE_STRIP_TEXT)
-                .with_title_shown(false)
-                .with_titlebar_buttons_shown(false)
-                .with_titlebar_shown(false)
-                .with_fullsize_content_view(true),
-            ..Default::default()
-        },
-        TitlebarPresentationMode::NativeMacOs => eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_decorations(true)
-                .with_transparent(false)
-                .with_title_shown(false)
-                .with_titlebar_shown(false)
-                .with_fullsize_content_view(true)
-                .with_titlebar_buttons_shown(true),
-            ..Default::default()
-        },
+fn native_options() -> eframe::NativeOptions {
+    eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_decorations(true)
+            .with_transparent(false)
+            .with_title_shown(true)
+            .with_titlebar_shown(true)
+            .with_fullsize_content_view(false)
+            .with_titlebar_buttons_shown(true),
+        ..Default::default()
     }
 }
 
 struct StartupPresentation {
-    mode: TitlebarPresentationMode,
     options: eframe::NativeOptions,
 }
 
-fn startup_presentation_for_mode(mode: TitlebarPresentationMode) -> StartupPresentation {
+fn startup_presentation() -> StartupPresentation {
     StartupPresentation {
-        mode,
-        options: native_options_for_mode(mode),
+        options: native_options(),
     }
 }
 
-fn startup_presentation() -> StartupPresentation {
-    startup_presentation_for_mode(selected_titlebar_presentation_mode())
-}
-
 fn main() -> eframe::Result {
-    // Keep the selected mode and the exact options object together at the
-    // only startup handoff. This prevents a stale helper or alternate mode
-    // from silently reaching the native runner.
-    let StartupPresentation { mode, options } = startup_presentation();
-    debug_assert_eq!(mode, selected_titlebar_presentation_mode());
+    let StartupPresentation { options } = startup_presentation();
     eframe::run_native(
         "ScriptCraft",
         options,
@@ -2745,357 +1980,47 @@ mod tests {
     use scriptcraft_core::Role;
 
     #[test]
-    fn native_double_click_hit_region_excludes_controls_toolbar_and_clip_edges() {
-        let band = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 28.0));
-        let clip = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(700.0, 600.0));
-        let hit = native_titlebar_hit_rect(band, clip);
-        assert_eq!(hit.left(), 160.0);
-        assert_eq!(hit.right(), 700.0);
-        assert_eq!(hit.height(), 28.0);
-        assert!(!hit.contains(egui::pos2(60.0, 14.0)));
-        assert!(!hit.contains(egui::pos2(400.0, 29.0)));
-        assert!(!hit.contains(egui::pos2(701.0, 14.0)));
-        assert!(hit.contains(egui::pos2(400.0, 14.0)));
-        let narrow = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(120.0, 28.0));
-        assert!(!native_titlebar_hit_rect(narrow, narrow).is_positive());
-    }
-
-    #[test]
-    fn native_double_click_dispatch_is_one_public_action_or_bounded_noop() {
-        let mut calls = 0;
-        assert_eq!(
-            dispatch_native_titlebar_action(false, || {
-                calls += 1;
-                Ok(())
-            }),
-            Ok(())
-        );
-        assert_eq!(calls, 0);
-        assert_eq!(
-            dispatch_native_titlebar_action(true, || {
-                calls += 1;
-                Ok(())
-            }),
-            Ok(())
-        );
-        assert_eq!(calls, 1);
-        for unavailable in [
-            "window handle unavailable",
-            "native view has no current window",
-            "native Zoom action unavailable",
-            "native Zoom action disabled",
-            "not on the AppKit main thread",
-        ] {
-            assert_eq!(
-                dispatch_native_titlebar_action(true, || Err(unavailable)),
-                Err(unavailable)
-            );
-        }
-        // Errors do not request an alternate command or app-owned policy.
-        for state in [None, Some(false), Some(true)] {
-            assert_eq!(
-                titlebar_viewport_command_for_mode(TitlebarPresentationMode::NativeMacOs, state),
-                None
-            );
-        }
-        assert!(!should_request_policy_repaint(
-            TitlebarPresentationMode::NativeMacOs,
-            true
-        ));
-    }
-
-    fn native_double_click_headless_run(
-        mode: TitlebarPresentationMode,
-        position: egui::Pos2,
-        button: egui::PointerButton,
-        popup: bool,
-        overlay: bool,
-    ) -> usize {
-        let ctx = egui::Context::default();
-        let mut actions = 0;
-        for (index, pressed) in [None, Some(true), Some(false), Some(true), Some(false)]
-            .into_iter()
-            .enumerate()
-        {
-            if popup {
-                ctx.memory_mut(|memory| memory.open_popup(egui::Id::new("test-popup")));
-            }
-            let mut events = vec![egui::Event::PointerMoved(position)];
-            if let Some(pressed) = pressed {
-                events.push(egui::Event::PointerButton {
-                    pos: position,
-                    button,
-                    pressed,
-                    modifiers: egui::Modifiers::NONE,
-                });
-            }
-            let output = ctx.run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(800.0, 600.0),
-                    )),
-                    time: Some(index as f64 * 0.05),
-                    events,
-                    ..Default::default()
-                },
-                |ctx| {
-                    if overlay {
-                        egui::Area::new(egui::Id::new("test-overlay"))
-                            .order(egui::Order::Foreground)
-                            .fixed_pos(egui::Pos2::ZERO)
-                            .show(ctx, |ui| {
-                                ui.allocate_response(egui::vec2(800.0, 28.0), Sense::click());
-                            });
-                    }
-                    egui::TopBottomPanel::top("test-native-band")
-                        .frame(egui::Frame::none())
-                        .exact_height(80.0)
-                        .show(ctx, |ui| {
-                            let top = ui.cursor().top();
-                            let event = native_titlebar_band(ui, mode);
-                            assert_eq!(ui.cursor().top() - top, toolbar_top_inset_for_mode(mode));
-                            let _ = ui.button("toolbar control");
-                            assert_eq!(
-                                dispatch_native_titlebar_action(event.is_some(), || {
-                                    actions += 1;
-                                    Ok(())
-                                }),
-                                Ok(())
-                            );
-                        });
-                },
-            );
-            for viewport in output.viewport_output.values() {
-                assert!(
-                    viewport.commands.is_empty(),
-                    "native band must not emit viewport commands"
-                );
-            }
-        }
-        actions
-    }
-
-    #[test]
-    fn native_double_click_headless_ownership_and_native_only_routing() {
-        let native = TitlebarPresentationMode::NativeMacOs;
-        let primary = egui::PointerButton::Primary;
-        let blank = egui::pos2(400.0, 14.0);
-        assert_eq!(
-            native_double_click_headless_run(native, blank, primary, false, false),
-            usize::from(cfg!(target_os = "macos"))
-        );
-        for (mode, point, button, popup, overlay) in [
-            (native, egui::pos2(60.0, 14.0), primary, false, false),
-            (native, egui::pos2(400.0, 40.0), primary, false, false),
-            (native, blank, primary, true, false),
-            (native, blank, primary, false, true),
-            (native, blank, egui::PointerButton::Secondary, false, false),
-            (
-                TitlebarPresentationMode::CustomHidden,
-                blank,
-                primary,
-                false,
-                false,
-            ),
-        ] {
-            assert_eq!(
-                native_double_click_headless_run(mode, point, button, popup, overlay),
-                0
-            );
-        }
-    }
-
-    #[test]
     fn native_startup_selects_the_single_locked_viewport_tuple() {
-        let custom = native_options_for_mode(TitlebarPresentationMode::CustomHidden);
-        assert_eq!(custom.viewport.title, Some(TITLE_STRIP_TEXT.to_owned()));
-        assert_eq!(custom.viewport.title_shown, Some(false));
-        assert_eq!(custom.viewport.titlebar_shown, Some(false));
-        assert_eq!(custom.viewport.titlebar_buttons_shown, Some(false));
-        assert_eq!(custom.viewport.fullsize_content_view, Some(true));
-        assert_eq!(custom.viewport.decorations, Some(true));
-        assert_eq!(custom.viewport.transparent, Some(false));
+        let StartupPresentation { options } = startup_presentation();
+        let expected = native_options();
 
-        let native = native_options_for_mode(TitlebarPresentationMode::NativeMacOs);
-        assert_eq!(native.viewport.title, None);
-        assert_eq!(native.viewport.title_shown, Some(false));
-        assert_eq!(native.viewport.titlebar_shown, Some(false));
-        assert_eq!(native.viewport.titlebar_buttons_shown, Some(true));
-        assert_eq!(native.viewport.fullsize_content_view, Some(true));
-        assert_eq!(native.viewport.decorations, Some(true));
-        assert_eq!(native.viewport.transparent, Some(false));
-
-        for mode in [
-            TitlebarPresentationMode::CustomHidden,
-            TitlebarPresentationMode::NativeMacOs,
-        ] {
-            let handoff = startup_presentation_for_mode(mode);
-            let expected = native_options_for_mode(mode);
-            assert_eq!(handoff.mode, mode);
-            assert_eq!(handoff.options.viewport.title, expected.viewport.title);
-            assert_eq!(
-                handoff.options.viewport.title_shown,
-                expected.viewport.title_shown
-            );
-            assert_eq!(
-                handoff.options.viewport.titlebar_shown,
-                expected.viewport.titlebar_shown
-            );
-            assert_eq!(
-                handoff.options.viewport.titlebar_buttons_shown,
-                expected.viewport.titlebar_buttons_shown
-            );
-            assert_eq!(
-                handoff.options.viewport.fullsize_content_view,
-                expected.viewport.fullsize_content_view
-            );
-            assert_eq!(
-                handoff.options.viewport.decorations,
-                expected.viewport.decorations
-            );
-            assert_eq!(
-                handoff.options.viewport.transparent,
-                expected.viewport.transparent
-            );
-        }
-
-        let selected = startup_presentation();
+        assert_eq!(options.viewport.title, None);
+        assert_eq!(options.viewport.title_shown, Some(true));
+        assert_eq!(options.viewport.titlebar_shown, Some(true));
+        assert_eq!(options.viewport.titlebar_buttons_shown, Some(true));
+        assert_eq!(options.viewport.fullsize_content_view, Some(false));
+        assert_eq!(options.viewport.decorations, Some(true));
+        assert_eq!(options.viewport.transparent, Some(false));
+        assert_eq!(options.viewport.title, expected.viewport.title);
+        assert_eq!(options.viewport.title_shown, expected.viewport.title_shown);
         assert_eq!(
-            selected_titlebar_presentation_mode(),
-            TitlebarPresentationMode::NativeMacOs
+            options.viewport.titlebar_shown,
+            expected.viewport.titlebar_shown
         );
-        assert_eq!(selected.mode, TitlebarPresentationMode::NativeMacOs);
-        assert_eq!(selected.options.viewport.title, None);
-        assert_eq!(selected.options.viewport.title_shown, Some(false));
-        assert_eq!(selected.options.viewport.titlebar_shown, Some(false));
-        assert_eq!(selected.options.viewport.titlebar_buttons_shown, Some(true));
-        assert_eq!(selected.options.viewport.fullsize_content_view, Some(true));
-        assert_eq!(selected.options.viewport.decorations, Some(true));
-        assert_eq!(selected.options.viewport.transparent, Some(false));
+        assert_eq!(
+            options.viewport.titlebar_buttons_shown,
+            expected.viewport.titlebar_buttons_shown
+        );
+        assert_eq!(
+            options.viewport.fullsize_content_view,
+            expected.viewport.fullsize_content_view
+        );
+        assert_eq!(options.viewport.decorations, expected.viewport.decorations);
+        assert_eq!(options.viewport.transparent, expected.viewport.transparent);
     }
 
     #[test]
-    fn native_toolbar_reserved_band_is_bounded_and_preserves_full_width() {
+    fn toolbar_starts_at_content_boundary_and_preserves_full_width_and_height() {
         let panel = egui::Rect::from_min_size(egui::pos2(12.0, 8.0), Vec2::new(800.0, 120.0));
         let toolbar_height = 48.0;
-        let native =
-            toolbar_layout_rect(panel, TitlebarPresentationMode::NativeMacOs, toolbar_height);
-        let custom = toolbar_layout_rect(
-            panel,
-            TitlebarPresentationMode::CustomHidden,
-            toolbar_height,
-        );
+        let toolbar = toolbar_layout_rect(panel, toolbar_height);
 
-        assert_eq!(NATIVE_TOOLBAR_TOP_INSET, 28.0);
-        assert_eq!(
-            toolbar_top_inset_for_mode(TitlebarPresentationMode::NativeMacOs),
-            28.0
-        );
-        assert_eq!(
-            toolbar_top_inset_for_mode(TitlebarPresentationMode::CustomHidden),
-            0.0
-        );
-        assert_eq!(native.left(), panel.left());
-        assert_eq!(native.right(), panel.right());
-        assert_eq!(native.width(), panel.width());
-        assert_eq!(native.top() - panel.top(), NATIVE_TOOLBAR_TOP_INSET);
-        assert_eq!(native.height(), toolbar_height);
-        assert!(panel.contains_rect(native));
-        assert_eq!(custom.left(), panel.left());
-        assert_eq!(custom.right(), panel.right());
-        assert_eq!(custom.top(), panel.top());
-        assert_eq!(custom.height(), toolbar_height);
-    }
-
-    #[test]
-    fn titlebar_mode_selects_custom_surface_and_policy_explicitly() {
-        assert!(TitlebarPresentationMode::CustomHidden.uses_custom_titlebar());
-        assert!(TitlebarPresentationMode::CustomHidden.uses_app_owned_transition_policy());
-        assert!(!TitlebarPresentationMode::NativeMacOs.uses_custom_titlebar());
-        assert!(!TitlebarPresentationMode::NativeMacOs.uses_app_owned_transition_policy());
-        assert_eq!(
-            titlebar_surface_for_mode(TitlebarPresentationMode::CustomHidden),
-            TitlebarSurface::CustomTitleStrip
-        );
-        assert_eq!(
-            titlebar_surface_for_mode(TitlebarPresentationMode::NativeMacOs),
-            TitlebarSurface::NativeTitlebar
-        );
-        assert!(should_request_policy_repaint(
-            TitlebarPresentationMode::CustomHidden,
-            true
-        ));
-        assert!(!should_request_policy_repaint(
-            TitlebarPresentationMode::NativeMacOs,
-            true
-        ));
-
-        let stable = synthetic_metric_set(800.0);
-        let mut policy = PresentationTransitionPolicy::default();
-        policy.request(Some(true));
-        assert!(policy.is_observing());
-        assert_eq!(
-            policy.effective_page_metrics_for_mode(
-                stable.page,
-                TitlebarPresentationMode::NativeMacOs
-            ),
-            stable.page
-        );
-        assert_eq!(
-            policy.effective_toolbar_metrics_for_mode(
-                stable.toolbar,
-                TitlebarPresentationMode::NativeMacOs
-            ),
-            stable.toolbar
-        );
-    }
-
-    #[test]
-    fn title_strip_uses_exact_height_and_centered_placeholder_text() {
-        let strip =
-            egui::Rect::from_min_size(egui::pos2(10.0, 20.0), Vec2::new(300.0, TITLE_STRIP_HEIGHT));
-        let text_size = Vec2::new(88.0, 18.0);
-        let position = title_strip_text_position(strip, text_size);
-
-        assert_eq!(TITLE_STRIP_TEXT, "ScriptCraft");
-        assert_eq!(TITLE_STRIP_HEIGHT, 30.0);
-        assert_eq!(position, egui::pos2(116.0, 26.0));
-        assert_eq!(position + text_size / 2.0, strip.center());
-        assert_eq!(TITLE_STRIP_HEIGHT + TOOLBAR_TOP_PADDING, 30.0);
-    }
-
-    #[test]
-    fn title_strip_viewport_toggle_is_safe_for_known_and_unknown_state() {
-        assert_eq!(
-            viewport_maximized_state(Some(false)),
-            ViewportMaximizedState::Normal
-        );
-        assert_eq!(
-            viewport_maximized_state(Some(true)),
-            ViewportMaximizedState::Maximized
-        );
-        assert_eq!(
-            viewport_maximized_state(None),
-            ViewportMaximizedState::Unknown
-        );
-        assert_eq!(
-            title_strip_viewport_command(Some(false)),
-            Some(egui::ViewportCommand::Maximized(true))
-        );
-        assert_eq!(
-            title_strip_viewport_command(Some(true)),
-            Some(egui::ViewportCommand::Maximized(false))
-        );
-        assert_eq!(title_strip_viewport_command(None), None);
-        assert_eq!(
-            titlebar_viewport_command_for_mode(TitlebarPresentationMode::CustomHidden, Some(false)),
-            Some(egui::ViewportCommand::Maximized(true))
-        );
-        assert_eq!(
-            titlebar_viewport_command_for_mode(TitlebarPresentationMode::NativeMacOs, Some(false)),
-            None
-        );
+        assert_eq!(toolbar.left(), panel.left());
+        assert_eq!(toolbar.right(), panel.right());
+        assert_eq!(toolbar.width(), panel.width());
+        assert_eq!(toolbar.top(), panel.top());
+        assert_eq!(toolbar.height(), toolbar_height);
+        assert!(panel.contains_rect(toolbar));
     }
 
     #[test]
@@ -3111,7 +2036,7 @@ mod tests {
             style.visuals.widgets.open.weak_bg_fill
         );
         assert_eq!(
-            toolbar_frame(&ctx).fill,
+            chrome_frame(&ctx).fill,
             style.visuals.widgets.open.weak_bg_fill
         );
         assert_eq!(
@@ -3256,9 +2181,9 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_frame_preserves_top_panel_geometry_defaults() {
+    fn toolbar_chrome_frame_preserves_top_panel_geometry_defaults() {
         let ctx = egui::Context::default();
-        let actual = toolbar_frame(&ctx);
+        let actual = chrome_frame(&ctx);
 
         assert_eq!(actual.inner_margin, egui::Margin::ZERO);
         assert_eq!(actual.outer_margin, egui::Margin::ZERO);
@@ -3276,32 +2201,18 @@ mod tests {
 
         let panel = egui::Rect::from_min_size(
             egui::pos2(12.25, 4.5),
-            Vec2::new(
-                800.0,
-                TITLE_STRIP_HEIGHT + row_height + TOOLBAR_BOTTOM_PADDING,
-            ),
+            Vec2::new(800.0, toolbar_content_height(&ctx.style())),
         );
-        let row = egui::Rect::from_min_size(
-            egui::pos2(panel.left(), panel.top() + TITLE_STRIP_HEIGHT),
-            Vec2::new(panel.width(), row_height),
-        );
-        let central = egui::Rect::from_min_max(
-            egui::pos2(panel.left(), panel.bottom()),
-            egui::pos2(panel.right(), 600.0),
-        );
+        let row = egui::Rect::from_min_size(panel.left_top(), Vec2::new(panel.width(), row_height));
+        let bottom_padding =
+            egui::Rect::from_min_max(egui::pos2(panel.left(), row.bottom()), panel.right_bottom());
 
-        for pixels_per_point in [1.0, 1.5, 2.0] {
-            let ledger = chrome_surface_ledger(panel, row, central, panel, pixels_per_point);
-            assert_eq!(ledger.toolbar_row.bottom(), ledger.bottom_padding.top());
-            assert_eq!(ledger.toolbar_content.bottom(), ledger.central_panel.top());
-            assert_eq!(ledger.bottom_padding.height(), TOOLBAR_BOTTOM_PADDING);
-            assert_eq!(
-                ledger.bottom_padding_pixels,
-                logical_y_to_physical_rows(ledger.bottom_padding, pixels_per_point)
-            );
-            assert!(ledger.toolbar_content.contains_rect(ledger.bottom_padding));
-            assert!(ledger.clip.contains_rect(ledger.toolbar_content));
-        }
+        assert_eq!(row.top(), panel.top());
+        assert_eq!(row.bottom(), bottom_padding.top());
+        assert_eq!(bottom_padding.bottom(), panel.bottom());
+        assert_eq!(bottom_padding.height(), TOOLBAR_BOTTOM_PADDING);
+        assert!(panel.contains_rect(row));
+        assert!(panel.contains_rect(bottom_padding));
     }
 
     #[test]
@@ -3316,211 +2227,23 @@ mod tests {
     }
 
     #[test]
-    fn shared_chrome_geometry_has_no_gap_and_full_width_title_hit_region() {
-        let panel = egui::Rect::from_min_size(egui::pos2(12.0, 4.0), Vec2::new(800.0, 82.0));
-        let geometry = chrome_geometry(panel, 52.0);
-
-        assert_eq!(geometry.title.left(), panel.left());
-        assert_eq!(geometry.title.right(), panel.right());
-        assert_eq!(geometry.title.top(), panel.top());
-        assert!(
-            (geometry.toolbar.top() - geometry.title.bottom()).abs() <= CHROME_GEOMETRY_TOLERANCE
-        );
-        assert!((geometry.toolbar.bottom() - panel.bottom()).abs() <= CHROME_GEOMETRY_TOLERANCE);
-        assert!(geometry.panel.contains_rect(geometry.title));
-        assert!(geometry.panel.contains_rect(geometry.toolbar));
-    }
-
-    #[test]
-    fn toolbar_bottom_ownership_ledger_is_contiguous_and_pixel_bounded() {
-        let panel = egui::Rect::from_min_size(egui::pos2(12.25, 4.5), Vec2::new(800.0, 80.0));
-        let title =
-            egui::Rect::from_min_size(panel.min, Vec2::new(panel.width(), TITLE_STRIP_HEIGHT));
-        let row = egui::Rect::from_min_size(
-            egui::pos2(panel.left(), title.bottom()),
-            Vec2::new(panel.width(), 48.0),
-        );
-        let central = egui::Rect::from_min_max(
-            egui::pos2(panel.left(), panel.bottom()),
-            egui::pos2(panel.right(), 600.0),
-        );
-        let ledger = chrome_surface_ledger(panel, row, central, panel, 2.0);
-
-        assert_eq!(ledger.frame, ledger.panel);
-        assert_eq!(ledger.title.bottom(), ledger.toolbar_content.top());
-        assert_eq!(ledger.toolbar_row.top(), ledger.toolbar_content.top());
-        assert_eq!(ledger.toolbar_row.bottom(), ledger.bottom_padding.top());
-        assert_eq!(
-            ledger.bottom_padding.bottom(),
-            ledger.toolbar_content.bottom()
-        );
-        assert_eq!(ledger.toolbar_content.bottom(), ledger.panel.bottom());
-        assert_eq!(ledger.central_panel.top(), ledger.panel.bottom());
-        assert!(ledger.clip.contains_rect(ledger.toolbar_content));
-
-        let rows = logical_y_to_physical_rows(ledger.bottom_padding, ledger.pixels_per_point);
-        assert_eq!(rows, ledger.bottom_padding_pixels);
-        assert_eq!(rows.first, 165);
-        assert_eq!(rows.last_exclusive, 169);
-    }
-
-    #[test]
-    fn chrome_fill_owns_former_strip_rows_at_each_representative_scale() {
-        let panel = egui::Rect::from_min_size(egui::pos2(12.25, 4.5), Vec2::new(800.0, 82.0));
-        let title =
-            egui::Rect::from_min_size(panel.min, Vec2::new(panel.width(), TITLE_STRIP_HEIGHT));
-        let row = egui::Rect::from_min_size(
-            egui::pos2(panel.left(), title.bottom()),
-            Vec2::new(panel.width(), 48.0),
-        );
-        let central = egui::Rect::from_min_max(
-            egui::pos2(panel.left(), panel.bottom()),
-            egui::pos2(panel.right(), 600.0),
-        );
-
-        for pixels_per_point in [1.0, 1.5, 2.0] {
-            let ledger = chrome_surface_ledger(panel, row, central, panel, pixels_per_point);
-            let chrome_rows = logical_y_to_physical_rows(ledger.toolbar_content, pixels_per_point);
-            let central_rows = logical_y_to_physical_rows(ledger.central_panel, pixels_per_point);
-
-            assert_eq!(ledger.toolbar_content.bottom(), ledger.central_panel.top());
-            // Floor/ceil conversion may make the adjacent owners overlap one
-            // physical row at a fractional boundary, but it must never leave
-            // an uncovered row between them.
-            assert!(central_rows.first <= chrome_rows.last_exclusive);
-            assert!(chrome_rows.last_exclusive >= central_rows.first);
-            assert!(ledger.clip.contains_rect(ledger.toolbar_content));
-            assert!(ledger.frame.contains_rect(ledger.toolbar_content));
-        }
-    }
-
-    #[test]
-    fn physical_pixel_row_conversion_expands_fractional_edges_deterministically() {
-        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 10.25), egui::pos2(20.0, 11.75));
-        assert_eq!(
-            logical_y_to_physical_rows(rect, 2.0),
-            PhysicalPixelSpan {
-                first: 20,
-                last_exclusive: 24,
-            }
-        );
-    }
-
-    #[test]
     fn presentation_metrics_are_stable_for_normal_and_maximized_widths() {
         let normal = presentation_metrics(800.0, 612.0, 12.0);
         let maximized = presentation_metrics(1_400.0, 612.0, 12.0);
 
-        assert!((normal.scale - maximized.scale).abs() <= TRANSITION_METRIC_TOLERANCE);
-        assert!((normal.page_width - maximized.page_width).abs() <= CHROME_GEOMETRY_TOLERANCE);
-        assert!((normal.font_size - maximized.font_size).abs() <= TRANSITION_METRIC_TOLERANCE);
+        assert!((normal.scale - maximized.scale).abs() <= PRESENTATION_METRIC_TOLERANCE);
+        assert!((normal.page_width - maximized.page_width).abs() <= PRESENTATION_METRIC_TOLERANCE);
+        assert!((normal.font_size - maximized.font_size).abs() <= PRESENTATION_METRIC_TOLERANCE);
     }
 
     #[test]
-    fn presentation_metrics_bound_narrow_width_without_claiming_transition_control() {
+    fn presentation_metrics_bound_narrow_width() {
         let narrow = presentation_metrics(400.0, 612.0, 12.0);
         let stable = presentation_metrics(800.0, 612.0, 12.0);
 
         assert!(narrow.scale < stable.scale);
         assert!(narrow.font_size < stable.font_size);
         assert_eq!(TOOLBAR_ELEMENTS_WIDTH, 128.0);
-    }
-
-    #[test]
-    fn presentation_policy_uses_the_app_owned_transition_boundary() {
-        assert_eq!(
-            presentation_metric_policy(),
-            PresentationMetricPolicy::AppOwnedTransition
-        );
-        let direct = presentation_metrics(400.0, 612.0, 12.0);
-        let policy = presentation_metrics_with_policy(
-            400.0,
-            612.0,
-            12.0,
-            PresentationMetricPolicy::AppOwnedTransition,
-        );
-        assert_eq!(direct, policy);
-    }
-
-    fn synthetic_metric_set(page_width: f32) -> PresentationMetricSet {
-        PresentationMetricSet {
-            toolbar: ToolbarPresentationMetrics {
-                icon_control_size: 24.0,
-                font_size: 14.0,
-                icon_bounds: Vec2::splat(14.0),
-                text_bounds: Vec2::new(62.0, 16.0),
-            },
-            page: PresentationMetrics {
-                page_width,
-                scale: page_width / 612.0,
-                font_size: page_width / 51.0,
-            },
-            page_bounds: Vec2::new(page_width, 800.0),
-        }
-    }
-
-    #[test]
-    fn transition_policy_holds_combined_metrics_and_releases_without_a_snap() {
-        let stable = synthetic_metric_set(576.0);
-        let changed = synthetic_metric_set(980.0);
-        let mut policy = PresentationTransitionPolicy::default();
-        policy.observe(Some(false), stable);
-        policy.request(Some(true));
-        assert_eq!(policy.state, PresentationTransitionState::Requested);
-        assert_eq!(policy.effective_set(), Some(stable));
-
-        policy.observe(Some(false), changed);
-        assert_eq!(policy.state, PresentationTransitionState::Settling);
-        assert_eq!(policy.effective_set(), Some(stable));
-        policy.observe(Some(true), changed);
-        policy.observe(Some(true), changed);
-        assert_eq!(policy.state, PresentationTransitionState::Released);
-        assert_eq!(policy.effective_set(), Some(changed));
-        policy.observe(Some(true), changed);
-        assert_eq!(policy.state, PresentationTransitionState::Stable);
-        assert_eq!(policy.last_stable, Some(changed));
-    }
-
-    #[test]
-    fn transition_policy_unknown_state_recovers_boundedly_and_repeated_requests_coalesce() {
-        let stable = synthetic_metric_set(576.0);
-        let changed = synthetic_metric_set(720.0);
-        let mut policy = PresentationTransitionPolicy::default();
-        policy.observe(Some(false), stable);
-        policy.request(Some(true));
-        policy.request(Some(true));
-        assert_eq!(policy.held_frames, 0);
-        for _ in 0..PRESENTATION_FALLBACK_FRAMES {
-            policy.observe(None, changed);
-        }
-        assert_eq!(policy.state, PresentationTransitionState::Released);
-        assert_eq!(policy.effective_set(), Some(changed));
-    }
-
-    #[test]
-    fn transition_policy_opposite_request_rebases_once_without_stale_capture() {
-        let normal = synthetic_metric_set(576.0);
-        let wide = synthetic_metric_set(980.0);
-        let mut policy = PresentationTransitionPolicy::default();
-        policy.observe(Some(false), normal);
-        policy.request(Some(true));
-        policy.observe(Some(false), wide);
-        policy.request(Some(false));
-        assert_eq!(policy.target_maximized, Some(false));
-        assert_eq!(policy.captured, Some(normal));
-        assert_eq!(policy.held_frames, 0);
-        assert_eq!(policy.stable_frames, 0);
-    }
-
-    #[test]
-    fn viewport_diagnostics_are_bounded_and_preserve_latest_samples() {
-        let mut samples = VecDeque::new();
-        for value in 0..=MAX_VIEWPORT_DIAGNOSTIC_SAMPLES {
-            bounded_push(&mut samples, value, MAX_VIEWPORT_DIAGNOSTIC_SAMPLES);
-        }
-        assert_eq!(samples.len(), MAX_VIEWPORT_DIAGNOSTIC_SAMPLES);
-        assert_eq!(samples.front(), Some(&1));
-        assert_eq!(samples.back(), Some(&MAX_VIEWPORT_DIAGNOSTIC_SAMPLES));
     }
 
     #[test]
