@@ -139,6 +139,45 @@ the semantic editing model.
   document editing response shall request the text/I-beam cursor. Decorative
   labels and painted page rectangles shall not create competing cursor owners.
 
+### REQ-WRITING-LOOP-006: Desktop status bar and visible page
+
+**User Story:** As an individual screenwriter, I want the desktop status bar to
+show the page I can currently see and concise, trustworthy document/operation
+state, so that I can understand my viewport and project state without moving my
+caret or losing access to errors.
+
+**Acceptance Criteria:**
+
+- **AC-WRITING-006.1:** The desktop status presentation shall support distinct
+  noninteractive-text, clickable-text, and clickable-icon Item capabilities.
+  Interactive Items shall have explicit accessible names and support keyboard
+  focus and activation; noninteractive text shall not own focus, activation,
+  pointer response, or cursor behavior. The status bar shall not introduce
+  unrequested actions or icon assignments.
+- **AC-WRITING-006.2:** The status bar shall report the live editing session's
+  clean/unsaved state, cumulative frame count, current project path, and current
+  operation status. A clean in-memory project without a named path shall not be
+  described as previously saved.
+- **AC-WRITING-006.3:** Operation errors shall remain visibly identifiable, and
+  bounded diagnostics shall remain reachable without exposing screenplay text,
+  source text, or serialized project contents.
+- **AC-WRITING-006.4:** At narrow widths, a deterministic bounded fallback
+  shall retain access to visible-page state, clean/unsaved state, frames, path,
+  operation/error status, and diagnostics.
+- **AC-WRITING-006.5:** Given the actual rendered sheet rectangles and actual
+  editor scroll clip, the visible-page Item shall use one-based numbering and
+  select the sheet with the greatest vertical overlap; exact overlap ties shall
+  select the earlier rendered sheet. If no sheet overlaps, it shall select the
+  nearest vertical interval, with exact-distance ties selecting the earlier
+  sheet. The total shall include every rendered sheet, including an optional
+  title page.
+- **AC-WRITING-006.6:** Visible-page state shall be independent of caret/source
+  position and remain current after scrolling, resize, presentation-scale
+  changes, layout reflow, and conditional caret reveal. If layout or geometry is
+  invalid, missing, or stale, the status bar shall show an explicit unavailable
+  state until fresh geometry is published. Page-status updates shall not scroll
+  the editor, reveal the caret, steal focus, or change editor input ownership.
+
 ## Non-functional requirements
 
 - **NFR-WRITING-001:** Production paths should prefer typed errors and bounded inputs over panic-prone handling; a discovered crash or data-loss defect requires a regression test.
@@ -161,6 +200,8 @@ the semantic editing model.
 | Date | Change | Evidence/rationale |
 |---|---|---|
 | 2026-10-25 | Created stable MVP feature baseline and acceptance IDs | User-approved product goal and `.analysis` recommendations translated into implementation-agnostic requirements |
+
+| 2026-10-28 | Added desktop status-bar and viewport-visible-page acceptance criteria (`REQ-WRITING-LOOP-006`) | Approved status-bar initiative WO-002 adds desktop-only item, status, accessibility, narrow-width, and actual-viewport page contracts while preserving fixed core layout/source-mapping requirements |
 
 ### Approved WO-007 refinement
 

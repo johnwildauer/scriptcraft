@@ -123,6 +123,31 @@ buffer.
   competing response. The existing whole-surface painted editor response
   requests the text/I-beam cursor, while page rectangles remain geometry rather
   than independent cursor or focus owners.
+- The desktop status bar owns three presentation regions and a typed status Item
+  capability model: noninteractive text, clickable text, and clickable icons.
+  Capabilities carry explicit accessible names for interactive controls but do
+  not define or invent application actions or icon assignments. Noninteractive
+  labels remain response-free and do not compete with the editor for focus or
+  cursor ownership. The status adapter projects current `EditingSession::dirty()`
+  state (including clean-but-never-named projects), cumulative frame count,
+  optional native path, operation state, and visible errors. Bounded diagnostics
+  expose aggregate counters and event categories only, never screenplay/source
+  text or serialized project contents. A wrapped narrow-width layout retains
+  access to page, document, operation/error, and diagnostics state; the reserved
+  right region remains an available slot for later zoom controls.
+- The left status Item is a viewport-visible rendered-sheet indicator, not a
+  caret/page-source indicator. The editor publishes actual painted page
+  rectangles and its actual `ScrollArea` clip with layout revision, presentation
+  scale, viewport bounds, and publication frame. Because the bottom status panel
+  is composed before the editor, it accepts only the immediately preceding
+  geometry snapshot when revision, viewport, scale, and input/reveal invalidation
+  signals remain current; otherwise it reports unavailable until the editor
+  publishes fresh geometry and schedules a repaint. Selection is the maximum
+  vertical overlap, with exact ties favoring the earlier rendered sheet; a
+  no-overlap gap selects the nearest page interval, again favoring the earlier
+  sheet on a tie. Numbering is one-based over all rendered pages, including an
+  optional title page. Status projection never requests caret reveal, scrolls,
+  edits, focuses, or replaces the editor's single whole-surface response.
 - The unified title-bar/toolbar `TopBottomPanel` uses the egui style's open-widget
   `Widgets::open::weak_bg_fill` as its explicit app-chrome fill through a local
   shared frame helper. The shared frame has no inner/outer inset and disables
@@ -178,6 +203,7 @@ buffer.
 | 2026-10-27 | Recorded native viewport presentation request | WO-001 implementation evidence: the eframe 0.29 native runner requests hidden title text, a transparent titlebar, and full-size content through the installed `ViewportBuilder` API; unsupported-platform behavior remains platform-controlled. |
 | 2026-10-27 | Recorded icon-only toolbar hover ownership | WO-002 implementation evidence: action Items allocate an independent icon-plus-padding response for click/hover fill while the centered label remains outside the response with normal text color. |
 | 2026-10-27 | Recorded unified title-bar/toolbar surface ownership | WO-002 implementation evidence: one zero-inset, no-separator app-chrome frame owns the title and toolbar surface; the title retains a full-width response and the toolbar retains explicit row allocation padding. |
+| 2026-10-28 | Recorded item-based status and viewport-page ownership | Approved status-bar WO-002 implementation: desktop status items project live app/session state and consume fresh rendered-page/scroll-clip geometry without changing core layout or editor input ownership. |
 
 ## WO-001 verified foundation facts
 

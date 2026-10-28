@@ -2,13 +2,13 @@
 
 ## Metadata
 
-- **Status:** `in-review`
+- **Status:** `complete`
 - **Assignee:** Fresh dedicated desktop application implementer session
 - **Phase/order:** 1 of 3; foundational; no predecessor; WO-002 and WO-003 depend on the extracted toolbar boundary and preserved behavior
 - **Initiative:** [`status-bar-v1.md`](../status-bar-v1.md)
 - **Generated filename:** [`WO-001-toolbar-extraction.md`](WO-001-toolbar-extraction.md)
 - **Owner/orchestrator:** Forge orchestrator
-- **Validation:** [`validation-WO-001.md`](../validations/validation-WO-001.md) (future artifact; not created)
+- **Validation:** [`validation-WO-001.md`](../validations/validation-WO-001.md) — independent outcome `pass`; reconciled to `complete` by the orchestrator.
 - **Fixes:** none
 - **Implementer host subtask/dispatch ID:** `01a182ea-f5f2-76bf-8374-d98053293286` (actual host dispatch identifier for the fresh implementer subtask; this is not an internal session/agent ID, which is unavailable).
 - **Session exception:** none
@@ -57,6 +57,13 @@
 - **Git/evidence boundary at implementation completion:** Branch `dev/2026-10-28-status-bar`, HEAD `83621f34f5db17b3060b7c28fce795decd903581`, tracked modification only to `main.rs`, and untracked new `toolbar.rs` plus the pre-existing nine-file initiative artifact set. Within that set only this WO and `execution-log.md` were modified. The later orchestrator commit-preflight inventory and exact candidate paths are recorded in the execution log; no unrelated paths were present.
 - **Known check note:** The first successful `cargo check --workspace` emitted the three warnings above; the warning cleanup was limited to preserving the non-default Space model intentionally. The clean check, full tests, build, strict clippy, formatter check, and diff check all passed afterward. No required gate failed or remains unavailable.
 - **Next action/owner:** Orchestrator stages/commits only the explicitly authorized WO-001 candidate set as separately authorized, then dispatches a fresh independent WO-001 validator. Do not begin WO-002 before validation passes.
+
+### Implementation commit — 2026-10-28
+
+- **Commit:** `fde481db08ba058a1327e2d23abb9b056c2556c3` — `feat(scriptcraft): extract toolbar module`.
+- **Base/parent:** `83621f34f5db17b3060b7c28fce795decd903581` (the commit's direct parent).
+- **Scope:** One commit containing the exact nine approved initial initiative artifacts and the two authorized source paths; cached path/status evidence is recorded in the execution log.
+- **Recordkeeping boundary:** This commit reference was added after the commit as an unstaged documentation-only update. No amend was performed. WO-001 remains `in-review`; no independent validation or approval is claimed.
 
 ## Summary
 
@@ -134,3 +141,19 @@ No new user-visible criterion is introduced by this extraction-only WO. Preserve
 - [x] Durable-document impact classification is accurate against the diff; requirements and blueprints were verified unchanged.
 - [x] Execution log has dispatch/completion entries; the actual host subtask/dispatch ID is reconciled. The separate fresh validation artifact has not yet been created.
 - [x] Work order is `in-review` with evidence; completion comes only from passed validation.
+
+## Independent validation result — 2026-10-28
+
+- **Validation artifact:** [`validation-WO-001.md`](../validations/validation-WO-001.md).
+- **Outcome:** `pass`; applicable acceptance criteria and required automated checks passed. Optional native visual/input smoke was unavailable and is recorded as a warning, not as passed.
+- **State boundary:** WO-001 remains `in-review` until the orchestrator reconciles this result and performs any status transition. No implementation, commit, or index change was made by the validator.
+
+### Validation-result bookkeeping and completion — 2026-10-28
+
+- **Actor/role:** Forge orchestrator — validation-result bookkeeping only.
+- **Validator host dispatch ID:** `01a1834f-7f3f-709c-8286-06098a01a1a9` (actual fresh independent validator dispatch ID). Internal session/agent ID is unavailable and is not claimed.
+- **Implementer host dispatch ID:** `01a182ea-f5f2-76bf-8374-d98053293286` (actual implementer dispatch ID, retained for traceability).
+- **Validation basis:** Independent validator `pass` for commit `fde481db08ba058a1327e2d23abb9b056c2556c3` against base `83621f34f5db17b3060b7c28fce795decd903581`; the target commit's direct parent is the stated base. Required automated/project checks and applicable WO-001 acceptance criteria passed; no blocker was reported.
+- **State transition:** `in-review` → `complete`, after reconciling the validation result and dispatch ID.
+- **Limitation:** Native visual/input smoke remains unavailable and is recorded only as an optional warning, not a pass; it is not a configured hard-stop gate.
+- **Boundary:** Bookkeeping only. No code, implementation commit, staging/index, or other work order was changed; WO-002 and WO-003 remain undispatched.

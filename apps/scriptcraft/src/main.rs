@@ -13,7 +13,9 @@ use scriptcraft_core::{Project, Role};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod status_bar;
 mod toolbar;
+use status_bar::{DiagnosticProjection, ViewportPageTracker};
 use toolbar::{toolbar_chrome_color, toolbar_content_height};
 
 const EDITOR_SURFACE_ID: &str = "page-editor-surface";
@@ -72,6 +74,8 @@ struct ScriptCraftApp {
     editor_surface_rect: Option<egui::Rect>,
     reveal_intent: RevealIntent,
     preferred_vertical_x: Option<u32>,
+    page_geometry: ViewportPageTracker,
+    page_scale: Option<f32>,
     caret_blink_focus_generation: u64,
     caret_blink_reset_time: f64,
     layout_cache: LayoutCache,
@@ -99,6 +103,8 @@ impl ScriptCraftApp {
             editor_surface_rect: None,
             reveal_intent: RevealIntent::None,
             preferred_vertical_x: None,
+            page_geometry: ViewportPageTracker::default(),
+            page_scale: None,
             caret_blink_focus_generation: 0,
             caret_blink_reset_time: 0.0,
             layout_cache: LayoutCache::default(),
@@ -475,6 +481,8 @@ impl ScriptCraftApp {
         let layout = match self.layout_for_render() {
             Ok(layout) => layout,
             Err(error) => {
+                self.page_geometry.invalidate();
+                self.page_scale = None;
                 self.show_error(error.clone());
                 ui.colored_label(Color32::RED, format!("Layout error: {error:?}"));
                 return;
@@ -489,6 +497,7 @@ impl ScriptCraftApp {
         );
         let page_width = metrics.page_width;
         let scale = metrics.scale;
+        self.page_scale = Some(scale);
         let horizontal_padding = ((available.x.max(page_width) - page_width) / 2.0).max(0.0);
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let mut page_rects = Vec::with_capacity(layout.pages.len());
@@ -542,6 +551,25 @@ impl ScriptCraftApp {
                 }
             });
         self.reveal_intent = RevealIntent::None;
+
+        let actual_clip = scroll_output.inner_rect.intersect(ui.clip_rect());
+        let geometry_count_matches = page_rects.len() == layout.pages.len();
+        let needs_repaint = if geometry_count_matches {
+            self.page_geometry.publish(
+                self.performance.frames,
+                self.session.revision(),
+                ui.ctx().screen_rect(),
+                scale,
+                page_rects.clone(),
+                actual_clip,
+            )
+        } else {
+            self.page_geometry.invalidate();
+            true
+        };
+        if needs_repaint {
+            self.request_repaint(ui.ctx());
+        }
 
         // This is the only interactive response in the painted editor. Pages remain
         // source-mapped geometry, not independent focusable widgets.
@@ -1077,47 +1105,40 @@ impl eframe::App for ScriptCraftApp {
             .show_separator_line(false)
             .exact_height(toolbar_content_height(&ctx.style()))
             .show(ctx, |ui| self.toolbar(ui));
+        let viewport_rect = ctx.screen_rect();
+        let page_number = self.page_geometry.visible_page(
+            self.performance.frames,
+            self.session.revision(),
+            viewport_rect,
+            self.page_scale.unwrap_or(f32::NAN),
+            self.reveal_intent == RevealIntent::Conditional
+                || page_geometry_input_invalidated(ctx, self.page_geometry.clip()),
+        );
+        let center = status_bar::project_center(
+            self.session.dirty(),
+            self.performance.frames,
+            self.native_path.as_deref(),
+            &self.status,
+            self.error.as_deref(),
+        );
+        let performance = self.performance;
+        let input_diagnostics = &self.native_input_diagnostics;
+        let diagnostics = DiagnosticProjection {
+            focused: input_diagnostics.focused,
+            focus_lock: input_diagnostics.focus_lock_installed,
+            dispatch_enabled: input_diagnostics.dispatch_enabled,
+            received_events: input_diagnostics.received_events,
+            dispatched_frames: input_diagnostics.dispatched_frames,
+            pointer_activations: input_diagnostics.pointer_activations,
+            last_event_category: input_diagnostics.last_event_category,
+            performance_events: performance.events,
+            layout_builds: performance.layout_builds,
+            layout_cache_hits: performance.layout_cache_hits,
+            painted_pages: performance.painted_pages,
+            repaint_requests: performance.repaint_requests,
+        };
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(&self.status);
-                ui.label(format!(
-                    "Path: {}",
-                    self.native_path
-                        .as_deref()
-                        .map_or("(unsaved)".to_owned(), |path| path.display().to_string())
-                ));
-                let performance = self.performance;
-                ui.label(format!(
-                    "Performance: frames={} events={} layouts={} hits={} pages={} repaint={}",
-                    performance.frames,
-                    performance.events,
-                    performance.layout_builds,
-                    performance.layout_cache_hits,
-                    performance.painted_pages,
-                    performance.repaint_requests
-                ));
-                if self.session.dirty() {
-                    ui.label(RichText::new("● unsaved").color(Color32::YELLOW));
-                }
-                if let Some(error) = &self.error {
-                    ui.colored_label(Color32::RED, error);
-                }
-                let diagnostics = &self.native_input_diagnostics;
-                ui.label(format!(
-                    "Native input diagnostics: focus={} lock={} dispatch={} events={} frames={} activations={} last={}",
-                    diagnostics.focused,
-                    diagnostics.focus_lock_installed,
-                    diagnostics.dispatch_enabled,
-                    diagnostics.received_events,
-                    diagnostics.dispatched_frames,
-                    diagnostics.pointer_activations,
-                    if diagnostics.last_event_category.is_empty() {
-                        "none"
-                    } else {
-                        diagnostics.last_event_category
-                    }
-                ));
-            });
+            status_bar::show(ui, page_number, &center, diagnostics);
         });
         egui::CentralPanel::default()
             .frame(central_panel_frame(ctx))
@@ -1132,6 +1153,20 @@ impl eframe::App for ScriptCraftApp {
             .frame_nanos
             .saturating_add(frame_started.elapsed().as_nanos());
     }
+}
+
+fn page_geometry_input_invalidated(ctx: &egui::Context, previous_clip: Option<egui::Rect>) -> bool {
+    ctx.input(|input| {
+        let scroll_changed =
+            input.raw_scroll_delta != Vec2::ZERO || input.smooth_scroll_delta != Vec2::ZERO;
+        let pointer_scrolling = input.pointer.any_down()
+            && input
+                .pointer
+                .interact_pos()
+                .zip(previous_clip)
+                .is_some_and(|(position, clip)| clip.contains(position));
+        scroll_changed || pointer_scrolling
+    })
 }
 
 fn native_options() -> eframe::NativeOptions {
@@ -1184,6 +1219,141 @@ mod tests {
             });
         });
         width
+    }
+
+    fn render_editor_frame(
+        context: &egui::Context,
+        app: &mut ScriptCraftApp,
+        input: egui::RawInput,
+    ) -> egui::FullOutput {
+        context.run(input, |context| {
+            egui::CentralPanel::default().show(context, |ui| app.live_document_surface(ui));
+        })
+    }
+
+    #[test]
+    fn visible_page_tracks_actual_scrolled_geometry_without_following_offscreen_caret() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert(&"line\n".repeat(180))
+            .unwrap_or_else(|_| unreachable!());
+        let layout = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        assert!(layout.pages.len() >= 2);
+
+        let context = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        app.performance.frames = 1;
+        let _ = render_editor_frame(&context, &mut app, input);
+        let viewport = context.screen_rect();
+        let first = app.page_geometry.visible_page(
+            2,
+            app.session.revision(),
+            viewport,
+            app.page_scale.unwrap_or(1.0),
+            false,
+        );
+        assert_eq!(
+            first,
+            status_bar::VisiblePage::Available {
+                one_based: 1,
+                total: layout.pages.len()
+            }
+        );
+        let original_caret = app.session.selection().focus;
+
+        app.performance.frames = 2;
+        let wheel = egui::RawInput {
+            screen_rect: Some(screen),
+            events: vec![
+                egui::Event::PointerMoved(egui::pos2(400.0, 300.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -2_000.0),
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let mut during_scroll = status_bar::VisiblePage::Unavailable;
+        let _ = context.run(wheel, |context| {
+            during_scroll = app.page_geometry.visible_page(
+                app.performance.frames,
+                app.session.revision(),
+                context.screen_rect(),
+                app.page_scale.unwrap_or(1.0),
+                page_geometry_input_invalidated(context, app.page_geometry.clip()),
+            );
+            egui::CentralPanel::default().show(context, |ui| app.live_document_surface(ui));
+        });
+        assert_eq!(during_scroll, status_bar::VisiblePage::Unavailable);
+
+        let mut after_scroll = status_bar::VisiblePage::Unavailable;
+        for frame in 3..=60 {
+            app.performance.frames = frame;
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let _ = context.run(input, |context| {
+                after_scroll = app.page_geometry.visible_page(
+                    app.performance.frames,
+                    app.session.revision(),
+                    context.screen_rect(),
+                    app.page_scale.unwrap_or(1.0),
+                    page_geometry_input_invalidated(context, app.page_geometry.clip()),
+                );
+                egui::CentralPanel::default().show(context, |ui| app.live_document_surface(ui));
+            });
+            if matches!(
+                after_scroll,
+                status_bar::VisiblePage::Available { one_based, .. } if one_based > 1
+            ) {
+                break;
+            }
+        }
+        assert!(
+            matches!(
+                after_scroll,
+                status_bar::VisiblePage::Available { one_based, .. } if one_based > 1
+            ),
+            "expected settled scrolled geometry to select a later sheet, got {after_scroll:?}"
+        );
+        assert_eq!(app.session.selection().focus, original_caret);
+    }
+
+    #[test]
+    fn status_bar_marks_scroll_and_caret_reveal_as_stale_before_fresh_publish() {
+        let context = egui::Context::default();
+        let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(300.0, 400.0));
+        let input = egui::RawInput {
+            events: vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 80.0),
+                modifiers: egui::Modifiers::default(),
+            }],
+            ..Default::default()
+        };
+        let mut invalidated = false;
+        let _ = context.run(input, |context| {
+            invalidated = page_geometry_input_invalidated(context, Some(clip));
+        });
+        assert!(invalidated);
+
+        let mut tracker = ViewportPageTracker::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(500.0, 600.0));
+        let pages = vec![egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(300.0, 500.0),
+        )];
+        assert!(tracker.publish(1, 4, viewport, 1.0, pages, clip));
+        assert_eq!(
+            tracker.visible_page(2, 4, viewport, 1.0, true),
+            status_bar::VisiblePage::Unavailable
+        );
     }
     use scriptcraft_core::layout::{CHAR_WIDTH, LINE_HEIGHT};
     use scriptcraft_core::Role;
