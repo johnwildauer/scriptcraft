@@ -20,16 +20,16 @@
 - **Reduced-capability fallback or opt-out evidence:** Not applicable; the required local branch was created successfully.
 - **Branch creation failure:** `none`
 - **Validation cadence:** `per work order` (project default).
-- **Phase transition evidence:** Created in `draft` / `active` on 2026-10-28. `draft → plan` on 2026-10-28 after independent repository/process research, recorded convergence, and the user's explicit confirmation to record the direction and create exactly three draft work orders. At that planning handoff the initiative remained in `plan` and no review artifact was claimed. On 2026-10-28, the user's explicit request for the independent design-alignment review authorized `plan → review`; the three linked WOs and review evidence were available. The review at [`reviews/design-review.md`](reviews/design-review.md) independently returned `pass`. The required human approval is recorded separately and verbatim in that review. Therefore `review → execute` passed on 2026-10-28. No WO was executed or dispatched; all three remain `draft`.
+- **Phase transition evidence:** Created in `draft` / `active` on 2026-10-28. `draft → plan` on 2026-10-28 after independent repository/process research, recorded convergence, and the user's explicit confirmation to record the direction and create exactly three draft work orders. At that planning handoff the initiative remained in `plan` and no review artifact was claimed. On 2026-10-28, the user's explicit request for the independent design-alignment review authorized `plan → review`; the three linked WOs and review evidence were available. The review at [`reviews/design-review.md`](reviews/design-review.md) independently returned `pass`. The required human approval is recorded separately and verbatim in that review. Therefore `review → execute` passed on 2026-10-28. The subsequent WO-002 validation and fix-loop transitions are recorded in the execution log and in the validation reconciliation below; current phase is `execute`.
 - **Direct-translation confirmation:** `requested and explicitly confirmed` — at the convergence checkpoint the user said, “Yes. Record the proposed direction and create the three draft work orders; do not start design review or execution.” This authorizes direct translation into planning artifacts only; it is not design approval, review readiness, implementation authorization, execution, commit, or merge approval.
 
 ## Standard artifact locations
 
 - **Authoritative plan:** [`status-bar-v1.md`](status-bar-v1.md)
 - **Design review:** [`reviews/design-review.md`](reviews/design-review.md) — completed with outcome `pass`; separate human approval is recorded in its dedicated section.
-- **Validations:** [`validations/`](validations/) — none created.
+- **Validations:** [`validations/`](validations/) — [`validation-WO-001.md`](validations/validation-WO-001.md) (`pass`), [`validation-WO-002.md`](validations/validation-WO-002.md) (historical `fail`, preserved), and [`validation-WO-002a.md`](validations/validation-WO-002a.md) (`pass` for the fix and full original WO-002 boundary; actual validator dispatch and completion reconciliation recorded).
 - **Execution log:** [`execution-log.md`](execution-log.md)
-- **Work orders:** [`work-orders/`](work-orders/) — three sequential work orders, all `draft`.
+- **Work orders:** [`work-orders/`](work-orders/) — WO-001, WO-002, and its fix WO-002a are `complete`; fresh WO-002a validation host dispatch `01a183d2-d3db-75f9-b653-b8c72106d86b` passed both the fix and full original acceptance. WO-003 is `in-review` after implementation by actual host dispatch `01a183e4-a3cd-72bc-bc33-34c02e266a87`; fresh independent validation is pending.
 
 ## Outcome
 
@@ -146,7 +146,8 @@ Extract toolbar presentation into discrete desktop files and add discrete status
 The user explicitly confirmed direct translation into exactly three **draft** work orders. They are sequential. At the planning handoff they remained unapproved and not executable pending fresh-context design review and separate human design approval; the later gate result is recorded below.
 
 1. [`WO-001-toolbar-extraction.md`](work-orders/WO-001-toolbar-extraction.md) — extract existing toolbar behavior into a desktop-owned boundary and preserve its existing behavior/contracts only; no status-bar scope.
-2. [`WO-002-status-items-and-viewport-page.md`](work-orders/WO-002-status-items-and-viewport-page.md) — create the item-based status bar, all three interaction capabilities, truthful center clean/unsaved and cumulative frames, path/operation/error/diagnostic access and narrow fallback; derive the left-region page identity from actual visible page/clip geometry with deterministic ties/gaps/title/unavailable and geometry freshness, and test all WO-002 behavior.
+2. [`WO-002-status-items-and-viewport-page.md`](work-orders/WO-002-status-items-and-viewport-page.md) — create the item-based status bar, all three interaction capabilities, truthful center clean/unsaved and cumulative frames, path/operation/error/diagnostic access and narrow fallback; derive the left-region page identity from actual visible page/clip geometry with deterministic ties/gaps/title/unavailable and geometry freshness. Status: `complete` after the linked fix passed fresh validation over the full original acceptance range.
+   - Fix: [`WO-002a-freshness-and-noninteractive-text.md`](work-orders/WO-002a-freshness-and-noninteractive-text.md) — resolved both blockers in [`validation-WO-002.md`](validations/validation-WO-002.md); status `complete`. Implementer host dispatch `01a183b3-777f-7055-b601-e91404620223`; stable fix commit `a73c9de14195fb32ae36dce3ae2bba090c8970cf` directly parented by `4be598803fe19c8f212115ae0f2455afef412fac`. Fresh validation [`validation-WO-002a.md`](validations/validation-WO-002a.md) passed both the fix and full original WO-002 range; actual validator host dispatch ID `01a183d2-d3db-75f9-b653-b8c72106d86b` is reconciled, with no internal session ID available or inferred.
 3. [`WO-003-transient-zoom-and-integrated-regression.md`](work-orders/WO-003-transient-zoom-and-integrated-regression.md) — implement transient page zoom/right controls and horizontal navigation; integrate the full toolbar/editor/status/page/zoom/error regression matrix (no fourth WO).
 
 ## Risks and decisions
@@ -181,3 +182,31 @@ The user explicitly confirmed direct translation into exactly three **draft** wo
 - **Human approval and gate:** The exact approval statement is recorded in the review's separate **Explicit human approval** section, not as a finding. The review-pass condition and human-approval condition are both evidenced; `review → execute` is therefore satisfied and the current phase is `execute`.
 - **Execution boundary:** No WO was executed or dispatched; WO-001, WO-002, and WO-003 remain `draft`. The execution log was read only and intentionally not edited. No implementation, requirement/blueprint, manifest, branch, index, or commit change was made.
 - **Next action:** Dispatch WO-001 to its own fresh implementer session under the standard sequential execute/validate loop; WO-002 and WO-003 remain downstream of their stated dependencies.
+
+## WO-002 failed-validation reconciliation — 2026-10-28
+
+- The fresh validator dispatched as host ID `01a183a1-84ed-71a8-bc37-8608a4b1633a` returned `fail` on stable comparison `fde481db08ba058a1327e2d23abb9b056c2556c3..4be598803fe19c8f212115ae0f2455afef412fac`.
+- The two hard-stop findings are: successful New/Open replacement can show a stale page once when the old and new session revisions alias at zero before the editor publishes fresh geometry; and noninteractive status text uses a hover-response label despite the explicit response-free contract. Exact evidence and prior test history remain in [`validations/validation-WO-002.md`](validations/validation-WO-002.md).
+- The orchestrator reconciled initiative phase `execute` → `validate` for the validator dispatch and `validate` → `execute` after the failed result/fix creation; initiative status remains `active`. WO-002 transitions `in-review` → `blocked`. The linked fix [`WO-002a-freshness-and-noninteractive-text.md`](work-orders/WO-002a-freshness-and-noninteractive-text.md) was created as `draft`; that historical state is superseded by the later dispatch reconciliation below. WO-003 remains `draft` and undispatched.
+
+## WO-002a implementation-commit reconciliation — 2026-10-28
+
+- Fresh fix implementer host dispatch ID `01a183b3-777f-7055-b601-e91404620223` is reconciled; no internal session/agent ID is inferred. WO-002a remains `in-review`; original WO-002 remains `blocked`; initiative remains `execute` / `active`; WO-003 remains `draft` and undispatched.
+- Fix implementation commit `a73c9de14195fb32ae36dce3ae2bba090c8970cf` is directly parented by WO-002 commit `4be598803fe19c8f212115ae0f2455afef412fac`. It contains only the three authorized source paths `apps/scriptcraft/src/main.rs`, `apps/scriptcraft/src/status_bar.rs`, and `apps/scriptcraft/src/toolbar.rs` (all modified). Cached and committed-range whitespace checks passed. The fix remains unvalidated/incomplete pending a fresh independent validator; no WO completion or WO-003 transition is claimed.
+
+## WO-002a dispatch reconciliation — 2026-10-28
+
+- Fresh dedicated fix implementer host dispatch ID `01a183b3-777f-7055-b601-e91404620223` is reconciled from the supplied host identity. No internal session/agent ID is available or inferred.
+- WO-002a is `in-review` with implementation evidence; original WO-002 remains `blocked`, initiative remains `execute` / `active`, and WO-003 remains `draft` and undispatched. All required implementation checks are reported passing by the implementer; stable fix commit and independent fresh validation remain pending. No completion transition is claimed. Full details are in the linked fix work order and execution log.
+
+## WO-002a and full WO-002 fresh validation result — 2026-10-28
+
+- Fresh independent validation [`validation-WO-002a.md`](validations/validation-WO-002a.md) returns `pass` on both exact ranges: the WO-002a fix range `4be598803fe19c8f212115ae0f2455afef412fac..a73c9de14195fb32ae36dce3ae2bba090c8970cf` and full original WO-002 range `fde481db08ba058a1327e2d23abb9b056c2556c3..a73c9de14195fb32ae36dce3ae2bba090c8970cf`.
+- Both prior blockers pass criterion-level review and regressions; every original WO-002 acceptance criterion and all required commands pass. Native visual/input smoke remains unavailable and optional. The previous failed validation is preserved unchanged.
+- At validator return, the host dispatch ID and work-order state reconciliation were pending; no internal session/agent ID was inferred. That result-time snapshot is superseded by the orchestrator reconciliation below. No manual approval is recorded.
+
+## WO-002 validation-result and completion reconciliation — 2026-10-28
+
+- Actual fresh validator host dispatch ID: `01a183d2-d3db-75f9-b653-b8c72106d86b`; no internal session/agent ID is available or inferred.
+- [`validation-WO-002a.md`](validations/validation-WO-002a.md) passes both the exact fix range `4be598803fe19c8f212115ae0f2455afef412fac..a73c9de14195fb32ae36dce3ae2bba090c8970cf` and complete original WO-002 range `fde481db08ba058a1327e2d23abb9b056c2556c3..a73c9de14195fb32ae36dce3ae2bba090c8970cf`. It confirms all required gates passed and no blocker remains; the historical failed [`validation-WO-002.md`](validations/validation-WO-002.md) is preserved unchanged.
+- WO-002a transitions `in-review` → `complete` and WO-002 transitions `blocked` → `complete` under the validation/fix process. Initiative remains `execute` / `active`; WO-003 remains `draft` and undispatched. Native desktop visual/input smoke is unavailable and is not claimed as passed; it is optional, not a configured hard-stop gate.

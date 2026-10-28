@@ -2,15 +2,15 @@
 
 ## Metadata
 
-- **Status:** `draft`
-- **Assignee:** Desktop application implementer (one fresh session; not dispatched)
+- **Status:** `in-review`
+- **Assignee:** Dedicated fresh desktop implementer; actual host dispatch ID `01a183e4-a3cd-72bc-bc33-34c02e266a87` reconciled below
 - **Phase/order:** 3 of 3; depends on WO-001 and WO-002; final integrated validation boundary
 - **Initiative:** [`status-bar-v1.md`](../status-bar-v1.md)
 - **Generated filename:** [`WO-003-transient-zoom-and-integrated-regression.md`](WO-003-transient-zoom-and-integrated-regression.md)
 - **Owner/orchestrator:** Forge orchestrator
 - **Validation:** [`validation-WO-003.md`](../validations/validation-WO-003.md) (future artifact; not created)
 - **Fixes:** none
-- **Implementer session/agent ID:** Not assigned; no dispatch authorized
+- **Implementer host dispatch ID:** `01a183e4-a3cd-72bc-bc33-34c02e266a87` (actual host dispatch ID; no internal session/agent ID is exposed or inferred)
 - **Session exception:** none
 
 ## Summary
@@ -89,8 +89,56 @@ Initiative-confirmed zoom contract proposed for a new/additive future requiremen
 
 ## Completion checklist
 
-- [ ] Implementation is complete within scope.
-- [ ] Tests/checks and required gates have evidence.
-- [ ] Durable-document impact classification is accurate against the diff, and authorized documentation updates are applied.
-- [ ] Execution log is appended with dispatch/completion session identifiers; fresh independent validation artifact exists.
-- [ ] Work order is `in-review` with evidence; completion comes only from passed validation.
+- [x] Implementation is complete within scope.
+- [x] Tests/checks and required gates have evidence.
+- [x] Durable-document impact classification is accurate against the diff, and authorized documentation updates are applied.
+- [x] Execution log has the implementation start/completion evidence and reconciled actual host dispatch ID. The fresh independent validation artifact is pending and is validator-owned.
+- [x] Work order is `in-review` with evidence; completion comes only from passed validation.
+
+## Implementer execution and evidence — 2026-10-28
+
+- **State/dispatch:** Implementation started and completed on branch `dev/2026-10-28-status-bar`, at stable base `a73c9de14195fb32ae36dce3ae2bba090c8970cf`. Actual host dispatch ID `01a183e4-a3cd-72bc-bc33-34c02e266a87` is reconciled by the orchestrator; no internal implementer session/agent ID is claimed or inferred. The independent validator has not yet run. No staging or commit was performed by the implementer.
+- **Pre-existing work preserved:** The initial worktree already had the initiative execution log, initiative plan, and WO-002 record modified, plus untracked WO-002 validation/fix records. These are pre-existing approved WO-002 documentation and transitions; the existing content was preserved, and no WO-002/WO-002a source or validation record was rewritten by this WO.
+- **Implementation files:** `apps/scriptcraft/src/main.rs`, `apps/scriptcraft/src/status_bar.rs`.
+- **Durable-document files:** [`screenplay-writing-loop.md`](../../../requirements/features/screenplay-writing-loop.md) adds `AC-WRITING-006.7`; [`scriptcraft-desktop.md`](../../../blueprints/containers/scriptcraft-desktop.md) records the page-only transient zoom and two-axis navigation contract. Feature/technical/core blueprints, core sources, Cargo manifests/lockfile, persistence schema, fixed layout/source maps, and PDF export implementation were verified unchanged.
+- **Coverage:** One window-owned integer value from 75–300; fit baseline and every percentage across narrow/ordinary/wide widths; exact ordered nine presets; rounding/clamping; keyboard arrows/Home/End, focus retention, AccessKit slider name/current/min/max values; compact 320-point status retention of percent/page/document/error; same semantic pointer hit mapping at 75/100/137/200/300%; two-axis scroll state; visible page unavailable-until-fresh after zoom; and project JSON, revision, dirty/undo/redo, fixed source ranges, and PDF invariants across zoom.
+
+### Final command results
+
+| Command | Result |
+|---|---|
+| `cargo fmt --all -- --check` | Passed, exit 0. `cargo fmt --all` was also run successfully. |
+| `cargo test -p scriptcraft zoom_` | Passed: 9, 0 failed. |
+| `cargo test -p scriptcraft status_bar_` | Passed: 13, 0 failed. |
+| `cargo test -p scriptcraft visible_page_` | Passed: 4, 0 failed. |
+| `cargo test -p scriptcraft toolbar_` | Passed: 28, 0 failed. |
+| `cargo check --workspace` | Passed, exit 0. |
+| `cargo test --workspace` | Passed: 103 app + 45 core unit + 37 core integration = 185 passed, 0 failed; 0 doc tests. |
+| `cargo build --workspace` | Passed, exit 0. |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Passed, exit 0. |
+| `git diff --check` | Passed, exit 0 for tracked changes; staged diff remained empty. |
+| Bounded `cargo run -p scriptcraft` (15 seconds) | Application process remained running after 15 seconds and was terminated. Startup-only evidence; no native visual/input smoke is claimed. |
+
+### Failed attempts and repairs (preserved)
+
+- An early focused `zoom_` run failed because a test assumed font size would scale below the existing 5-point fit-baseline floor. Geometry/rendering was corrected to preserve the original 100% floor then apply the selected zoom factor; the final exhaustive percentage test passed.
+- An early horizontal-scroll test compared pre-tessellation output shape coordinates and failed even though egui's live horizontal offset changed by 286.8 points. The test now verifies the actual `ScrollArea` x/y offsets; it passes for both axes.
+- The slider's initial keyboard test failed for Home/End because stock egui slider keyboard handling only covered arrow increments. Focused Home/End endpoint handling was added and tests now prove both 75 and 300 values.
+- Strict Clippy first reported a manual clamp and excessive `paint_page` parameters; the width clamp was made explicit and grouped presentation metrics. A follow-up reported the now-unused layout parameter, which was removed. Final strict Clippy passed with warnings denied.
+- An early `cargo check -p scriptcraft` passed with a temporary dead-code warning for the 100% metrics helper; the test-only helper boundary removed that warning. Later required workspace check/build passed without warnings.
+- The optional source-search attempt using `rg` could not run because `rg` is not installed; the same dependency source inspection was completed using `grep`/`sed`. This did not block a required project gate.
+- The first preset pointer-interaction test frame confirmed the combo popup had opened in egui memory but the popup contents were not painted until the following frame. The test now renders that next frame before asserting and selecting the 200% menu entry; the focused interaction test and final 9-test zoom suite pass. The first post-change `cargo fmt --all -- --check` also identified formatting introduced during this repair; `cargo fmt --all` was applied and the final format check passes.
+
+### Validation handoff and limitations
+
+- No required automated gate remains failed or unavailable. Native desktop pointer/keyboard/visual smoke is not evidenced: the bounded process stayed alive, but this session did not inspect a rendered native window or exercise real hardware input. Project policy has no configured manual hard-stop; the work-order-recommended visual smoke remains an explicit limitation.
+- No validation artifact was created by the implementer. A separate fresh validator must assess this implementation, rerun configured gates, and decide pass/fail; WO-003 remains `in-review` until then.
+
+## Orchestrator dispatch reconciliation and implementation commit preflight — 2026-10-28
+
+- **Actual implementer host dispatch ID:** `01a183e4-a3cd-72bc-bc33-34c02e266a87`. This is the host dispatch identifier; the host did not expose an internal session/agent ID, and none is inferred.
+- **State/dependencies:** WO-001, WO-002, and WO-002a are `complete`; the independent WO-002a pass covers both the fix and full original WO-002 acceptance. WO-003 remains `in-review`; no WO-003 validation, approval, or initiative closeout is claimed. Initiative remains `execute` / `active`.
+- **Implementation evidence:** The implementer report and preceding section record the authorized code, scoped requirement/desktop-blueprint updates, focused and workspace checks, historical failed attempts and repairs, and unavailable native visual/input smoke. These are implementer-reported results, not checks independently rerun by this bookkeeping step.
+- **Live Git preflight:** Branch `dev/2026-10-28-status-bar`; `HEAD` is the requested base `a73c9de14195fb32ae36dce3ae2bba090c8970cf`, a direct child of the prior WO-002 fix commit. The index was empty. The exact worktree set is the two authorized app files; scoped requirement and desktop blueprint; initiative plan; execution log; WO-002 and WO-003; and the approved WO-002a fix plus original-fail and follow-up-pass validation records. No unrelated or unexpected staged/worktree path was found.
+- **Historical failure preservation:** The original `validation-WO-002.md` remains an unchanged `fail` artifact with its findings and historical command outcomes intact; its content was inspected and its SHA-256 before staging was `84630b5cd54db882986e04bec06e688dbfad7dddc029b90af6cffb042221a543`.
+- **Commit boundary:** Actual dispatch and implementation evidence are reconciled before staging. Only the exact authorized WO-003 paths and approved prior WO-002/fix/validation/plan state records will be explicitly staged. No blanket add, reset, stash, merge, implementation edit, validation/approval, or initiative closure is performed. The full staged name-status/diff and whitespace check precede the single implementation commit; commit hash/parent will be recorded afterward as unstaged documentation.

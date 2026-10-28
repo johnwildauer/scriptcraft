@@ -76,6 +76,9 @@ struct ScriptCraftApp {
     preferred_vertical_x: Option<u32>,
     page_geometry: ViewportPageTracker,
     page_scale: Option<f32>,
+    zoom_percent: u16,
+    #[cfg(test)]
+    last_scroll_offset: Vec2,
     caret_blink_focus_generation: u64,
     caret_blink_reset_time: f64,
     layout_cache: LayoutCache,
@@ -105,6 +108,9 @@ impl ScriptCraftApp {
             preferred_vertical_x: None,
             page_geometry: ViewportPageTracker::default(),
             page_scale: None,
+            zoom_percent: 100,
+            #[cfg(test)]
+            last_scroll_offset: Vec2::ZERO,
             caret_blink_focus_generation: 0,
             caret_blink_reset_time: 0.0,
             layout_cache: LayoutCache::default(),
@@ -370,10 +376,11 @@ impl ScriptCraftApp {
         ui: &mut egui::Ui,
         layout: &ScreenplayLayout,
         page_index: usize,
-        page_width: f32,
-        scale: f32,
+        metrics: PresentationMetrics,
         editor_id: egui::Id,
     ) -> egui::Rect {
+        let page_width = metrics.page_width;
+        let scale = metrics.scale;
         let paint_started = Instant::now();
         self.performance.painted_pages = self.performance.painted_pages.saturating_add(1);
         let page_height = layout.profile.paper_height as f32 * scale;
@@ -419,7 +426,7 @@ impl ScriptCraftApp {
                 &painter,
                 egui::pos2(x, y),
                 &line.text,
-                renderer_font(layout, scale),
+                renderer_font(metrics.font_size),
                 Color32::DARK_GRAY,
                 char_width,
             );
@@ -464,7 +471,7 @@ impl ScriptCraftApp {
                         egui::pos2(x, y),
                         egui::Align2::LEFT_TOP,
                         &self.ime_preedit,
-                        renderer_font(layout, scale),
+                        renderer_font(metrics.font_size),
                         Color32::from_rgb(80, 80, 160),
                     );
                 }
@@ -491,10 +498,11 @@ impl ScriptCraftApp {
         };
         self.rendered_revision = Some(self.session.revision());
         let available = ui.available_size();
-        let metrics = presentation_metrics(
+        let metrics = presentation_metrics_at_zoom(
             available.x,
             layout.profile.paper_width as f32,
             layout.profile.font_size as f32,
+            self.zoom_percent,
         );
         let page_width = metrics.page_width;
         let scale = metrics.scale;
@@ -503,16 +511,17 @@ impl ScriptCraftApp {
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let mut page_rects = Vec::with_capacity(layout.pages.len());
         let reveal_intent = self.reveal_intent;
-        let scroll_output = egui::ScrollArea::vertical()
+        let content_width = available.x.max(page_width);
+        let scroll_output = egui::ScrollArea::both()
             .id_salt("page-editor-scroll")
             .show(ui, |ui| {
+                ui.set_min_width(content_width);
                 for page_index in 0..layout.pages.len() {
                     let mut page_rect = None;
                     ui.horizontal(|ui| {
                         ui.add_space(horizontal_padding);
-                        page_rect = Some(
-                            self.paint_page(ui, &layout, page_index, page_width, scale, editor_id),
-                        );
+                        page_rect =
+                            Some(self.paint_page(ui, &layout, page_index, metrics, editor_id));
                         ui.add_space(horizontal_padding);
                     });
                     page_rects.push(page_rect.unwrap_or_else(|| {
@@ -551,6 +560,10 @@ impl ScriptCraftApp {
                     }
                 }
             });
+        #[cfg(test)]
+        {
+            self.last_scroll_offset = scroll_output.state.offset;
+        }
         self.reveal_intent = RevealIntent::None;
 
         let actual_clip = scroll_output.inner_rect.intersect(ui.clip_rect());
@@ -953,6 +966,7 @@ struct PresentationMetrics {
     font_size: f32,
 }
 
+#[cfg(test)]
 fn presentation_metrics(
     available_width: f32,
     paper_width: f32,
@@ -964,6 +978,23 @@ fn presentation_metrics(
         page_width,
         scale,
         font_size: (base_font_size * scale).max(5.0),
+    }
+}
+
+fn presentation_metrics_at_zoom(
+    available_width: f32,
+    paper_width: f32,
+    base_font_size: f32,
+    zoom_percent: u16,
+) -> PresentationMetrics {
+    let normalized = status_bar::normalized_zoom_percent(zoom_percent as f64);
+    let (fit_page_width, _, fit_scale) = presentation_geometry(available_width, paper_width);
+    let zoom_factor = normalized as f32 / 100.0;
+    let scale = fit_scale * zoom_factor;
+    PresentationMetrics {
+        page_width: fit_page_width * zoom_factor,
+        scale,
+        font_size: (base_font_size * fit_scale).max(5.0) * zoom_factor,
     }
 }
 
@@ -986,9 +1017,9 @@ fn paint_fixed_metric_text(
     }
 }
 
-fn renderer_font(layout: &ScreenplayLayout, scale: f32) -> FontId {
+fn renderer_font(font_size: f32) -> FontId {
     FontId::new(
-        (layout.profile.font_size as f32 * scale).max(5.0),
+        font_size,
         // The persisted profile names the Courier-family target. egui's
         // built-in monospace family is the deterministic headless fallback;
         // viewport scale changes the display transform, not the base point size.
@@ -1139,7 +1170,16 @@ impl eframe::App for ScriptCraftApp {
             repaint_requests: performance.repaint_requests,
         };
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            status_bar::show(ui, page_number, &center, diagnostics);
+            if status_bar::show(
+                ui,
+                page_number,
+                &center,
+                diagnostics,
+                &mut self.zoom_percent,
+            ) {
+                self.page_geometry.invalidate();
+                self.page_scale = None;
+            }
         });
         egui::CentralPanel::default()
             .frame(central_panel_frame(ctx))
@@ -1798,6 +1838,260 @@ mod tests {
         assert!(narrow.scale < stable.scale);
         assert!(narrow.font_size < stable.font_size);
         assert_eq!(TOOLBAR_ELEMENTS_WIDTH, 128.0);
+    }
+
+    #[test]
+    fn zoom_geometry_uses_responsive_fit_baseline_and_scales_every_integer_percent() {
+        for available_width in [320.0, 400.0, 800.0, 1_400.0] {
+            let baseline = presentation_metrics(available_width, 612.0, 12.0);
+            let at_100 = presentation_metrics_at_zoom(available_width, 612.0, 12.0, 100);
+            assert_eq!(at_100, baseline);
+            for percent in status_bar::MIN_ZOOM_PERCENT..=status_bar::MAX_ZOOM_PERCENT {
+                let zoomed = presentation_metrics_at_zoom(available_width, 612.0, 12.0, percent);
+                let factor = percent as f32 / 100.0;
+                assert!((zoomed.scale - baseline.scale * factor).abs() < 0.001);
+                assert!((zoomed.page_width - baseline.page_width * factor).abs() < 0.001);
+                assert!((zoomed.font_size - baseline.font_size * factor).abs() < 0.001);
+            }
+        }
+        let narrow_maximum = presentation_metrics_at_zoom(320.0, 612.0, 12.0, 300);
+        assert!(narrow_maximum.page_width > 320.0);
+    }
+
+    #[test]
+    fn zoom_state_is_transient_and_preserves_layout_export_dirty_and_undo_contracts() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let initial_json = app
+            .session
+            .project()
+            .to_json()
+            .unwrap_or_else(|_| unreachable!());
+        let initial_pdf =
+            exports::export_pdf(app.session.project()).unwrap_or_else(|_| unreachable!());
+        let initial_revision = app.session.revision();
+        let initial_dirty = app.session.dirty();
+        let initial_layout =
+            ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
+
+        for percent in status_bar::ZOOM_PRESETS {
+            app.zoom_percent = percent;
+            assert_eq!(app.session.revision(), initial_revision);
+            assert_eq!(app.session.dirty(), initial_dirty);
+            assert_eq!(
+                app.session
+                    .project()
+                    .to_json()
+                    .unwrap_or_else(|_| unreachable!()),
+                initial_json
+            );
+            assert_eq!(
+                exports::export_pdf(app.session.project()).unwrap_or_else(|_| unreachable!()),
+                initial_pdf
+            );
+            let layout =
+                ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
+            assert_eq!(layout.pages.len(), initial_layout.pages.len());
+            let source_ranges = |layout: &ScreenplayLayout| {
+                layout
+                    .pages
+                    .iter()
+                    .flat_map(|page| page.lines.iter())
+                    .map(|line| (line.element, line.source.start, line.source.end))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(source_ranges(&layout), source_ranges(&initial_layout));
+        }
+
+        assert!(app.session.insert("draft").is_ok());
+        let dirty_json = app
+            .session
+            .project()
+            .to_json()
+            .unwrap_or_else(|_| unreachable!());
+        let dirty_revision = app.session.revision();
+        for percent in status_bar::MIN_ZOOM_PERCENT..=status_bar::MAX_ZOOM_PERCENT {
+            app.zoom_percent = percent;
+            assert!(app.session.dirty());
+            assert_eq!(app.session.revision(), dirty_revision);
+            assert_eq!(
+                app.session
+                    .project()
+                    .to_json()
+                    .unwrap_or_else(|_| unreachable!()),
+                dirty_json
+            );
+        }
+        assert!(app.session.undo().is_ok());
+        assert!(!app.session.dirty());
+        assert!(app.session.redo().is_ok());
+        assert!(app.session.dirty());
+    }
+
+    #[test]
+    fn zoomed_editor_presents_wide_pages_with_horizontal_and_vertical_scroll() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.zoom_percent = status_bar::MAX_ZOOM_PERCENT;
+        app.session
+            .insert(&"wide line\n".repeat(240))
+            .unwrap_or_else(|_| unreachable!());
+        let context = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
+
+        let page_rects = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Rect(rect) if rect.fill == Color32::from_gray(246) => {
+                        Some(rect.rect)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let initial = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+        );
+        let initial_pages = page_rects(&initial);
+        let initial_page = initial_pages
+            .first()
+            .copied()
+            .unwrap_or(egui::Rect::NOTHING);
+        assert!(initial_page.width() > screen.width());
+        assert!(initial_page.height() > screen.height());
+        assert!(app.page_scale.is_some_and(|scale| scale > 1.0));
+
+        let horizontally_scrolled = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![
+                    egui::Event::PointerMoved(egui::pos2(400.0, 300.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(-900.0, 0.0),
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let horizontal_pages = page_rects(&horizontally_scrolled);
+        let horizontal_page = horizontal_pages
+            .first()
+            .copied()
+            .unwrap_or(egui::Rect::NOTHING);
+        assert!(app.last_scroll_offset.x > 0.0);
+        assert_eq!(horizontal_page.width(), initial_page.width());
+
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![
+                    egui::Event::PointerMoved(egui::pos2(400.0, 300.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -900.0),
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        assert!(app.last_scroll_offset.y > 0.0);
+        assert!(app.page_scale.is_some_and(|scale| scale > 1.0));
+    }
+
+    #[test]
+    fn zoom_transforms_keep_pointer_hit_testing_on_the_same_source_position() {
+        let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let layout =
+            ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
+        let line = &layout.pages[0].lines[0];
+        let page_origin = egui::pos2(25.0, 40.0);
+
+        for zoom_percent in [75, 100, 137, 200, 300] {
+            let metrics = presentation_metrics_at_zoom(
+                800.0,
+                layout.profile.paper_width as f32,
+                layout.profile.font_size as f32,
+                zoom_percent,
+            );
+            let page_rect = egui::Rect::from_min_size(
+                page_origin,
+                Vec2::new(
+                    metrics.page_width,
+                    layout.profile.paper_height as f32 * metrics.scale,
+                ),
+            );
+            let pointer = egui::pos2(
+                page_rect.left() + line.rect.x as f32 * metrics.scale,
+                page_rect.top() + line.rect.y as f32 * metrics.scale,
+            );
+            assert_eq!(
+                app.caret_from_pointer(&layout, 0, page_rect, metrics.scale, pointer),
+                Some(Position {
+                    element: line.element,
+                    offset: line.source.start,
+                }),
+                "zoom {zoom_percent}% must preserve semantic pointer mapping"
+            );
+        }
+    }
+
+    #[test]
+    fn visible_page_returns_after_fresh_zoom_geometry_is_published() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert(&"page\n".repeat(180))
+            .unwrap_or_else(|_| unreachable!());
+        let context = egui::Context::default();
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
+        app.performance.frames = 1;
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            project_page_status(&mut app, 2, context.screen_rect()),
+            status_bar::VisiblePage::Available { .. }
+        ));
+        let fit_scale = app.page_scale.unwrap_or(0.0);
+
+        app.zoom_percent = 200;
+        app.page_geometry.invalidate();
+        app.page_scale = None;
+        assert_eq!(
+            project_page_status(&mut app, 2, context.screen_rect()),
+            status_bar::VisiblePage::Unavailable
+        );
+        app.performance.frames = 2;
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+        );
+        assert_eq!(app.zoom_percent, 200);
+        assert!((app.page_scale.unwrap_or(0.0) - fit_scale * 2.0).abs() < 0.001);
+        assert!(matches!(
+            project_page_status(&mut app, 3, context.screen_rect()),
+            status_bar::VisiblePage::Available { .. }
+        ));
     }
 
     #[test]
@@ -3208,7 +3502,7 @@ mod tests {
         let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         let layout =
             ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
-        let font = renderer_font(&layout, 0.5);
+        let font = renderer_font(6.0);
         assert_eq!(layout.profile.font_family, "Courier");
         assert_eq!(layout.profile.font_size, 12);
         assert_eq!(font.size, 6.0);

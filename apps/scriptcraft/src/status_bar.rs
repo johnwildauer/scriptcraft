@@ -4,6 +4,64 @@ use eframe::egui::{
 use std::path::Path;
 
 const COMPACT_STATUS_BREAKPOINT: f32 = 720.0;
+pub(super) const MIN_ZOOM_PERCENT: u16 = 75;
+pub(super) const MAX_ZOOM_PERCENT: u16 = 300;
+pub(super) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250, 300];
+
+pub(super) fn normalized_zoom_percent(value: f64) -> u16 {
+    if !value.is_finite() {
+        return 100;
+    }
+    value
+        .round()
+        .clamp(MIN_ZOOM_PERCENT as f64, MAX_ZOOM_PERCENT as f64) as u16
+}
+
+fn zoom_controls(ui: &mut egui::Ui, zoom_percent: &mut u16) -> (bool, Rect, Rect, egui::Id) {
+    let old_value = *zoom_percent;
+    let mut slider_rect = Rect::NOTHING;
+    let mut presets_rect = Rect::NOTHING;
+    let mut presets_id = egui::Id::NULL;
+    ui.horizontal_wrapped(|ui| {
+        let slider_width = ui.available_width().clamp(40.0, 165.0);
+        slider_rect = zoom_slider(ui, slider_width, zoom_percent).rect;
+        let presets_response = egui::ComboBox::from_id_salt("status-page-zoom-presets")
+            .selected_text(format!("{zoom_percent}%"))
+            .width(64.0)
+            .show_ui(ui, |ui| {
+                for preset in ZOOM_PRESETS {
+                    ui.selectable_value(zoom_percent, preset, format!("{preset}%"));
+                }
+            })
+            .response;
+        presets_rect = presets_response.rect;
+        presets_id = presets_response.id;
+    });
+    (
+        *zoom_percent != old_value,
+        slider_rect,
+        presets_rect,
+        presets_id,
+    )
+}
+
+fn zoom_slider(ui: &mut egui::Ui, width: f32, zoom_percent: &mut u16) -> egui::Response {
+    let response = ui.add_sized(
+        [width, ui.spacing().interact_size.y],
+        egui::Slider::new(zoom_percent, MIN_ZOOM_PERCENT..=MAX_ZOOM_PERCENT)
+            .integer()
+            .show_value(false)
+            .text("Page zoom"),
+    );
+    if response.has_focus() {
+        if ui.input(|input| input.key_pressed(egui::Key::Home)) {
+            *zoom_percent = MIN_ZOOM_PERCENT;
+        } else if ui.input(|input| input.key_pressed(egui::Key::End)) {
+            *zoom_percent = MAX_ZOOM_PERCENT;
+        }
+    }
+    response
+}
 
 fn uses_compact_status_layout(available_width: f32) -> bool {
     !available_width.is_finite() || available_width < COMPACT_STATUS_BREAKPOINT
@@ -449,9 +507,10 @@ pub(super) fn show(
     page: VisiblePage,
     center: &CenterProjection,
     diagnostics: DiagnosticProjection<'_>,
-) {
+    zoom_percent: &mut u16,
+) -> bool {
     let compact = uses_compact_status_layout(ui.available_width());
-    let page_item = StatusItem::text("visible-page", page.label());
+    let mut zoom_changed = false;
     let clean_item = StatusItem::text("clean-state", center.clean_label);
     let frames_item = StatusItem::text("frame-count", &center.frames_label);
     let path_item = StatusItem::text("document-path", &center.path_label);
@@ -461,7 +520,16 @@ pub(super) fn show(
         // Keep viewport and document state on the first compact row; keep the
         // potentially longer path/operation/error details on a second wrapped row.
         ui.vertical(|ui| {
+            zoom_changed = zoom_controls(ui, zoom_percent).0;
             ui.horizontal_wrapped(|ui| {
+                let page_item = StatusItem::text(
+                    "visible-page",
+                    if zoom_changed {
+                        VisiblePage::Unavailable.label()
+                    } else {
+                        page.label()
+                    },
+                );
                 render_item(ui, &page_item);
                 render_item(ui, &clean_item);
                 render_item(ui, &frames_item);
@@ -476,7 +544,18 @@ pub(super) fn show(
         });
     } else {
         ui.columns(3, |regions| {
+            // Render controls before the page label so a zoom change reports
+            // unavailable until the newly scaled page geometry is published.
+            zoom_changed = zoom_controls(&mut regions[2], zoom_percent).0;
             regions[0].with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let page_item = StatusItem::text(
+                    "visible-page",
+                    if zoom_changed {
+                        VisiblePage::Unavailable.label()
+                    } else {
+                        page.label()
+                    },
+                );
                 render_item(ui, &page_item);
             });
             regions[1].horizontal_wrapped(|ui| {
@@ -487,10 +566,6 @@ pub(super) fn show(
                 if let Some(error) = center.error.as_deref() {
                     paint_noninteractive_text(ui, "status-error", error, Color32::RED);
                 }
-            });
-            // Reserve a neutral right region for WO-003 without adding zoom controls.
-            regions[2].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(48.0);
             });
         });
     }
@@ -505,11 +580,56 @@ pub(super) fn show(
                 ui.visuals().text_color(),
             );
         });
+    zoom_changed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_zoom_controls(
+        context: &egui::Context,
+        input: egui::RawInput,
+        zoom_percent: &mut u16,
+    ) -> (egui::FullOutput, bool, Rect, Rect, egui::Id) {
+        let mut changed = false;
+        let mut slider_rect = Rect::NOTHING;
+        let mut presets_rect = Rect::NOTHING;
+        let mut presets_id = egui::Id::NULL;
+        let output = context.run(input, |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                (changed, slider_rect, presets_rect, presets_id) = zoom_controls(ui, zoom_percent);
+            });
+        });
+        (output, changed, slider_rect, presets_rect, presets_id)
+    }
+
+    fn pointer_button_frame(position: egui::Pos2, pressed: bool) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn text_center(output: &egui::FullOutput, expected: &str) -> Option<egui::Pos2> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == expected => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+    }
 
     fn rect(left: f32, top: f32, right: f32, bottom: f32) -> Rect {
         Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))
@@ -858,5 +978,314 @@ mod tests {
             });
         });
         assert!(activated);
+    }
+
+    #[test]
+    fn zoom_value_normalization_rounds_and_clamps_all_integer_values() {
+        assert_eq!(normalized_zoom_percent(f64::NAN), 100);
+        assert_eq!(normalized_zoom_percent(f64::INFINITY), 100);
+        assert_eq!(normalized_zoom_percent(74.4), MIN_ZOOM_PERCENT);
+        assert_eq!(normalized_zoom_percent(74.5), MIN_ZOOM_PERCENT);
+        assert_eq!(normalized_zoom_percent(301.0), MAX_ZOOM_PERCENT);
+        assert_eq!(normalized_zoom_percent(124.49), 124);
+        assert_eq!(normalized_zoom_percent(124.5), 125);
+        for percent in MIN_ZOOM_PERCENT..=MAX_ZOOM_PERCENT {
+            assert_eq!(normalized_zoom_percent(percent as f64), percent);
+        }
+    }
+
+    #[test]
+    fn zoom_preset_matrix_is_exact_and_ordered() {
+        assert_eq!(ZOOM_PRESETS, [75, 90, 100, 125, 150, 175, 200, 250, 300]);
+        assert_eq!(ZOOM_PRESETS.len(), 9);
+        assert!(ZOOM_PRESETS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn zoom_controls_select_presets_and_drag_slider_into_intermediate_value() {
+        let viewport = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 320.0));
+        let context = egui::Context::default();
+        let mut zoom_percent = 137;
+        let (initial, changed, slider_rect, presets_rect, _) = render_zoom_controls(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+            &mut zoom_percent,
+        );
+        assert!(!changed);
+        assert!(slider_rect.is_positive());
+        assert!(presets_rect.is_positive());
+        assert!(text_center(&initial, "137%").is_some());
+
+        let press = egui::pos2(
+            slider_rect.left() + slider_rect.width() * 0.2,
+            slider_rect.center().y,
+        );
+        let drag = egui::pos2(
+            slider_rect.left() + slider_rect.width() * 0.4,
+            slider_rect.center().y,
+        );
+        let (_, press_changed, _, _, _) = render_zoom_controls(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..pointer_button_frame(press, true)
+            },
+            &mut zoom_percent,
+        );
+        assert!(press_changed);
+        assert!((MIN_ZOOM_PERCENT..=MAX_ZOOM_PERCENT).contains(&zoom_percent));
+        assert!(!ZOOM_PRESETS.contains(&zoom_percent));
+        let _ = render_zoom_controls(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                events: vec![egui::Event::PointerMoved(drag)],
+                ..Default::default()
+            },
+            &mut zoom_percent,
+        );
+        let (_, slider_changed, _, _, _) = render_zoom_controls(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..pointer_button_frame(drag, false)
+            },
+            &mut zoom_percent,
+        );
+        assert!(slider_changed || press_changed);
+        assert!((MIN_ZOOM_PERCENT..=MAX_ZOOM_PERCENT).contains(&zoom_percent));
+        assert!(!ZOOM_PRESETS.contains(&zoom_percent));
+
+        let context = egui::Context::default();
+        zoom_percent = 137;
+        let (_, _, _, presets_rect, presets_id) = render_zoom_controls(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+            &mut zoom_percent,
+        );
+        let _ = render_zoom_controls(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..pointer_button_frame(presets_rect.center(), true)
+            },
+            &mut zoom_percent,
+        );
+        let (_, _, _, _, _) = render_zoom_controls(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..pointer_button_frame(presets_rect.center(), false)
+            },
+            &mut zoom_percent,
+        );
+        assert!(context.memory(|memory| memory.is_popup_open(presets_id.with("popup"))));
+        let (opened_menu, _, _, _, _) = render_zoom_controls(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+            &mut zoom_percent,
+        );
+        let preset_center =
+            text_center(&opened_menu, "200%").unwrap_or(egui::Pos2::new(-1.0, -1.0));
+        assert!(
+            preset_center.x >= 0.0 && preset_center.y >= 0.0,
+            "preset popup did not render at {:?}; rendered text: {:?}",
+            presets_rect,
+            opened_menu
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        );
+        let _ = render_zoom_controls(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..pointer_button_frame(preset_center, true)
+            },
+            &mut zoom_percent,
+        );
+        let (selected, preset_changed, _, _, _) = render_zoom_controls(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..pointer_button_frame(preset_center, false)
+            },
+            &mut zoom_percent,
+        );
+        assert!(preset_changed);
+        assert_eq!(zoom_percent, 200);
+        assert!(text_center(&selected, "200%").is_some());
+    }
+
+    #[test]
+    fn zoom_slider_is_accessible_and_keyboard_adjusts_the_shared_integer_value() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut zoom_percent = 100;
+        let mut slider_id = None;
+        let initial = context.run(egui::RawInput::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let response = zoom_slider(ui, 220.0, &mut zoom_percent);
+                response.request_focus();
+                slider_id = Some(response.id);
+            });
+        });
+        assert!(slider_id.is_some());
+        let initial_slider = initial
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .and_then(|update| {
+                update.nodes.iter().find_map(|(_, node)| {
+                    (node.name() == Some("Page zoom")
+                        && node.role() == egui::accesskit::Role::Slider)
+                        .then_some(node)
+                })
+            });
+        assert!(initial_slider.is_some());
+        assert_eq!(
+            initial_slider.and_then(|node| node.numeric_value()),
+            Some(100.0)
+        );
+        assert_eq!(
+            initial_slider.and_then(|node| node.min_numeric_value()),
+            Some(MIN_ZOOM_PERCENT as f64)
+        );
+        assert_eq!(
+            initial_slider.and_then(|node| node.max_numeric_value()),
+            Some(MAX_ZOOM_PERCENT as f64)
+        );
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::ArrowRight,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            ..Default::default()
+        };
+        let incremented = context.run(input, |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                zoom_slider(ui, 220.0, &mut zoom_percent);
+            });
+        });
+        assert_eq!(zoom_percent, 101);
+        assert_eq!(context.memory(|memory| memory.focused()), slider_id);
+        assert!(incremented
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .is_some_and(|update| update.nodes.iter().any(|(_, node)| {
+                node.role() == egui::accesskit::Role::Slider
+                    && node.name() == Some("Page zoom")
+                    && node.numeric_value() == Some(101.0)
+            })));
+
+        for (key, expected) in [
+            (egui::Key::Home, MIN_ZOOM_PERCENT),
+            (egui::Key::End, MAX_ZOOM_PERCENT),
+        ] {
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+                ..Default::default()
+            };
+            let _ = context.run(input, |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    zoom_slider(ui, 220.0, &mut zoom_percent);
+                });
+            });
+            assert_eq!(zoom_percent, expected);
+        }
+    }
+
+    #[test]
+    fn narrow_status_layout_keeps_zoom_page_error_and_project_state_rendered() {
+        let context = egui::Context::default();
+        let viewport = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 320.0));
+        let center = project_center(
+            true,
+            23,
+            Some(Path::new("draft.scriptcraft")),
+            "Save failed",
+            Some("destination unchanged"),
+        );
+        let diagnostics = DiagnosticProjection {
+            focused: false,
+            focus_lock: false,
+            dispatch_enabled: false,
+            received_events: 0,
+            dispatched_frames: 0,
+            pointer_activations: 0,
+            last_event_category: "",
+            performance_events: 0,
+            layout_builds: 0,
+            layout_cache_hits: 0,
+            painted_pages: 0,
+            repaint_requests: 0,
+        };
+        let mut zoom_percent = 137;
+        let output = context.run(
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    assert!(!show(
+                        ui,
+                        VisiblePage::Available {
+                            one_based: 2,
+                            total: 8,
+                        },
+                        &center,
+                        diagnostics,
+                        &mut zoom_percent,
+                    ));
+                });
+            },
+        );
+        let text_is_visible = |expected: &str| {
+            output.shapes.iter().any(|clipped| {
+                matches!(
+                    &clipped.shape,
+                    egui::epaint::Shape::Text(text) if text.galley.text() == expected
+                )
+            })
+        };
+        for expected in [
+            "137%",
+            "Page 2 of 8",
+            "Unsaved changes",
+            "Frames: 23",
+            "Path: draft.scriptcraft",
+            "Save failed",
+            "destination unchanged",
+        ] {
+            assert!(
+                text_is_visible(expected),
+                "missing compact status text: {expected}"
+            );
+        }
     }
 }

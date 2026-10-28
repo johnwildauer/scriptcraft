@@ -4,7 +4,7 @@
 
 - **Status:** `draft` — stable MVP requirement baseline; independent requirements review not performed
 - **Owner:** Forge initialization agent
-- **Last updated:** 2026-10-25
+- **Last updated:** 2026-10-28
 - **Product overview:** [`../product-overview.md`](../product-overview.md)
 - **Blueprint counterpart:** [`../../blueprints/features/screenplay-writing-loop.md`](../../blueprints/features/screenplay-writing-loop.md)
 - **Evidence basis:** Desired product behavior derived from user-approved scope and `.analysis`; current implementation is unknown.
@@ -177,6 +177,18 @@ caret or losing access to errors.
   invalid, missing, or stale, the status bar shall show an explicit unavailable
   state until fresh geometry is published. Page-status updates shall not scroll
   the editor, reveal the caret, steal focus, or change editor input ownership.
+- **AC-WRITING-006.7:** The desktop status bar shall provide one accessible,
+  apparently continuous whole-percent page zoom slider from 75% through 300%
+  and an adjacent menu containing exactly 75%, 90%, 100%, 125%, 150%, 175%,
+  200%, 250%, and 300%. Both controls shall share one transient per-window value
+  and show every intermediate integer accurately. 100% shall retain the existing
+  responsive window-fit page baseline, with the selected percentage retained
+  across resizes; zoom shall scale only page presentation and allow horizontal
+  as well as vertical navigation without changing editor source mapping or
+  focus/IME ownership. Zoom shall not persist or alter native project data,
+  session revision, saved/dirty or undo state, fixed pagination/source ranges,
+  or fixed-layout PDF output, and shall not globally scale the toolbar/status
+  controls.
 
 ## Non-functional requirements
 
@@ -202,6 +214,7 @@ caret or losing access to errors.
 | 2026-10-25 | Created stable MVP feature baseline and acceptance IDs | User-approved product goal and `.analysis` recommendations translated into implementation-agnostic requirements |
 
 | 2026-10-28 | Added desktop status-bar and viewport-visible-page acceptance criteria (`REQ-WRITING-LOOP-006`) | Approved status-bar initiative WO-002 adds desktop-only item, status, accessibility, narrow-width, and actual-viewport page contracts while preserving fixed core layout/source-mapping requirements |
+| 2026-10-28 | Added transient desktop page-zoom acceptance criterion (`AC-WRITING-006.7`) | Approved status-bar initiative WO-003 implementation; page-only 75–300% responsive zoom, exact presets, two-axis access, and fixed document/export invariants |
 
 ### Approved WO-007 refinement
 

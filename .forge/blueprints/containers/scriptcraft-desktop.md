@@ -13,7 +13,7 @@ buffer.
 
 - **Status:** `draft` — desired boundary; not implemented or independently reviewed
 - **Owner:** Forge initialization agent
-- **Last updated:** 2026-10-25
+- **Last updated:** 2026-10-28
 - **Technical context:** [`../technical-context.md`](../technical-context.md)
 - **Evidence basis:** desired architecture from `.analysis`, plus verified WO-009/WO-010 app-boundary behavior
 
@@ -133,8 +133,7 @@ buffer.
   optional native path, operation state, and visible errors. Bounded diagnostics
   expose aggregate counters and event categories only, never screenplay/source
   text or serialized project contents. A wrapped narrow-width layout retains
-  access to page, document, operation/error, and diagnostics state; the reserved
-  right region remains an available slot for later zoom controls.
+  access to page, document, operation/error, diagnostics, and zoom controls.
 - The left status Item is a viewport-visible rendered-sheet indicator, not a
   caret/page-source indicator. The editor publishes actual painted page
   rectangles and its actual `ScrollArea` clip with layout revision, presentation
@@ -148,6 +147,20 @@ buffer.
   sheet on a tie. Numbering is one-based over all rendered pages, including an
   optional title page. Status projection never requests caret reveal, scrolls,
   edits, focuses, or replaces the editor's single whole-surface response.
+- The desktop owns one transient integer zoom percentage per window, initialized
+  to 100 and bounded to 75–300. Its accessible status-bar slider and adjacent
+  nine-entry preset menu read and update that same value; the displayed percent
+  stays accurate for intermediate values. 100% delegates to the existing
+  responsive width-fit geometry, and resizing recomputes that fit baseline while
+  retaining the selected percentage. The percentage multiplies only page
+  presentation scale and never changes global egui zoom, toolbar/status sizing,
+  the core layout cache key, semantic coordinates, or persistent project data.
+  The page editor uses two-axis scrolling for overflow while maintaining its
+  vertical multi-page route; painted page rectangles, pointer hit tests, caret
+  reveal, and selection/source mapping use the same forward/inverse scale. Zoom
+  invalidates visible-page geometry until a fresh page/clip snapshot is
+  published. Zoom alone does not mutate the editing session, saved/dirty or
+  undo state, fixed pagination/source ranges, or fixed-layout PDF output.
 - The unified title-bar/toolbar `TopBottomPanel` uses the egui style's open-widget
   `Widgets::open::weak_bg_fill` as its explicit app-chrome fill through a local
   shared frame helper. The shared frame has no inner/outer inset and disables
@@ -204,6 +217,7 @@ buffer.
 | 2026-10-27 | Recorded icon-only toolbar hover ownership | WO-002 implementation evidence: action Items allocate an independent icon-plus-padding response for click/hover fill while the centered label remains outside the response with normal text color. |
 | 2026-10-27 | Recorded unified title-bar/toolbar surface ownership | WO-002 implementation evidence: one zero-inset, no-separator app-chrome frame owns the title and toolbar surface; the title retains a full-width response and the toolbar retains explicit row allocation padding. |
 | 2026-10-28 | Recorded item-based status and viewport-page ownership | Approved status-bar WO-002 implementation: desktop status items project live app/session state and consume fresh rendered-page/scroll-clip geometry without changing core layout or editor input ownership. |
+| 2026-10-28 | Recorded transient page zoom and two-axis navigation | Approved status-bar WO-003 implementation: one window-owned page-only percentage state preserves the responsive baseline, source/input mapping, and fixed core/export contracts. |
 
 ## WO-001 verified foundation facts
 

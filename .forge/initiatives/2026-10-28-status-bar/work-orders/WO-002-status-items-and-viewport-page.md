@@ -2,14 +2,15 @@
 
 ## Metadata
 
-- **Status:** `in-review` — WO-002 implementation and required automated checks are complete; independent validation remains pending in a separate fresh session.
+- **Status:** `complete` — the linked fix order passed fresh independent validation for both findings and the full original WO-002 acceptance boundary; completion reconciliation is recorded below.
 - **Assignee:** Fresh dedicated desktop application implementer subtask (dispatched 2026-10-28 16:40 UTC)
 - **Phase/order:** 2 of 3; depends on WO-001; precedes integrated zoom regression in WO-003
 - **Initiative:** [`status-bar-v1.md`](../status-bar-v1.md)
 - **Generated filename:** [`WO-002-status-items-and-viewport-page.md`](WO-002-status-items-and-viewport-page.md)
 - **Owner/orchestrator:** Forge orchestrator
-- **Validation:** [`validation-WO-002.md`](../validations/validation-WO-002.md) (future artifact; not created)
-- **Fixes:** none
+- **Validation:** [`validation-WO-002.md`](../validations/validation-WO-002.md) — independent result `fail`, actual validator host dispatch `01a183a1-84ed-71a8-bc37-8608a4b1633a`; stable comparison `fde481db08ba058a1327e2d23abb9b056c2556c3..4be598803fe19c8f212115ae0f2455afef412fac`.
+- **Fixes:** [`WO-002a-freshness-and-noninteractive-text.md`](WO-002a-freshness-and-noninteractive-text.md) — `complete` after fresh independent validation; implementer host dispatch `01a183b3-777f-7055-b601-e91404620223`, validation host dispatch `01a183d2-d3db-75f9-b653-b8c72106d86b`, and stable fix commit `a73c9de14195fb32ae36dce3ae2bba090c8970cf` directly atop `4be598803fe19c8f212115ae0f2455afef412fac` are reconciled. No internal validator session/agent ID is available or inferred.
+- **Subsequent fresh validation evidence:** [`validation-WO-002a.md`](../validations/validation-WO-002a.md) independently passes WO-002a on `4be598803fe19c8f212115ae0f2455afef412fac..a73c9de14195fb32ae36dce3ae2bba090c8970cf` and the full original WO-002 acceptance on `fde481db08ba058a1327e2d23abb9b056c2556c3..a73c9de14195fb32ae36dce3ae2bba090c8970cf`. The two prior blockers are resolved. The historical failed [`validation-WO-002.md`](../validations/validation-WO-002.md) remains preserved unchanged.
 - **Initial implementer host subtask/dispatch ID:** `01a1835e-24db-7021-9c56-2becaf971f08` (actual host dispatch ID; internal session/agent ID is unavailable and is not inferred).
 - **Fresh continuation implementer host subtask/dispatch ID:** `01a1836c-02ef-730c-988d-5f3c52b27655` (actual host dispatch ID; internal session/agent ID is unavailable and is not inferred).
 - **Session exception:** none
@@ -151,4 +152,45 @@ Initiative-confirmed behavior proposed at planning time for the additive require
 - [x] Tests/checks and required gates have evidence; the optional native smoke limitation is recorded.
 - [x] Durable-document impact classification is accurate against the diff, and authorized documentation updates are applied.
 - [x] Execution log is appended with implementation evidence and both actual implementer host dispatch IDs. Independent validation is a separate next-phase artifact and is not claimed here.
-- [x] Work order is `in-review` with evidence; completion comes only from passed validation.
+- [x] Implementation handoff reached `in-review` with evidence before independent validation; current failed-validation state is reconciled below. Completion comes only from passed validation.
+
+## Implementation commit — 2026-10-28
+
+- **Commit:** `4be598803fe19c8f212115ae0f2455afef412fac` — `feat(scriptcraft): add status bar and visible page`.
+- **Base/parent:** `fde481db08ba058a1327e2d23abb9b056c2556c3` (direct parent; expected WO-002 base).
+- **Scope:** One commit containing the authorized WO-002 implementation, additive requirement and desktop blueprint, WO-002/log evidence, plus the approved uncommitted WO-001 completion/validation records. Exact committed path inventory is in the execution log.
+- **Recordkeeping boundary:** This hash/base reference is post-commit documentation and remains unstaged. No amend was performed. WO-002 remains `in-review`; no independent validation or approval is claimed.
+
+## Independent validation — 2026-10-28
+
+- [`validation-WO-002.md`](../validations/validation-WO-002.md) independently compared the stable implementation range and reran all required commands. Outcome: `fail` for two explicit alignment blockers: stale visible-page data can survive successful New/Open replacement when revision aliases at zero; noninteractive text uses egui's hover-sense label despite the response-free contract. Required fix scope and command evidence are in the validation artifact.
+- At validator completion, no completion transition or fix-order creation had yet been performed; the actual host dispatch ID was then pending reconciliation. Those facts are historical and are reconciled below. WO-003 remains unstarted.
+
+## Orchestrator validation reconciliation — 2026-10-28
+
+- **Validator dispatch:** Actual fresh validator host dispatch ID `01a183a1-84ed-71a8-bc37-8608a4b1633a`; no internal session/agent ID is inferred.
+- **Comparison/outcome:** `fail` on exact stable range `fde481db08ba058a1327e2d23abb9b056c2556c3..4be598803fe19c8f212115ae0f2455afef412fac`, for the two blockers detailed in [`validation-WO-002.md`](../validations/validation-WO-002.md): successful New/Open replacement can reuse revision zero and expose one stale page projection before fresh geometry; noninteractive text creates egui's hover-response label despite the response-free contract.
+- **State transition:** Initiative phase is reconciled as `execute` → `validate` for the fresh validation dispatch, then `validate` → `execute` after failure/fix-order creation; status remains `active`. WO-002 transitions `in-review` → `blocked` and is not complete. Linked fix [`WO-002a-freshness-and-noninteractive-text.md`](WO-002a-freshness-and-noninteractive-text.md) was `draft` at creation; its later dispatch/state reconciliation is recorded below. WO-003 remains `draft` and undispatched.
+
+## WO-002a dispatch reconciliation — 2026-10-28
+
+- Fresh dedicated fix implementer host dispatch ID `01a183b3-777f-7055-b601-e91404620223` is reconciled. The host does not provide an internal session/agent ID; none is claimed.
+- WO-002a is now `in-review` with implementation evidence and fix commit `a73c9de14195fb32ae36dce3ae2bba090c8970cf` directly atop WO-002 commit `4be598803fe19c8f212115ae0f2455afef412fac`, while this original WO-002 remains `blocked` and incomplete pending independent fix validation. Initiative remains `execute` / `active`; WO-003 remains `draft` and undispatched. Implementer-reported required checks pass; fresh validation is pending. No completion transition is claimed.
+
+## WO-002a implementation commit reconciliation — 2026-10-28
+
+- Fix implementation commit `a73c9de14195fb32ae36dce3ae2bba090c8970cf` has direct parent `4be598803fe19c8f212115ae0f2455afef412fac`; it contains only `apps/scriptcraft/src/main.rs`, `apps/scriptcraft/src/status_bar.rs`, and `apps/scriptcraft/src/toolbar.rs` (all modified). Full staged paths/diff were inspected; cached and committed-range whitespace checks passed. Exact evidence is recorded in WO-002a and the execution log.
+- This commit does not change the state boundary: WO-002 remains `blocked` pending a fresh independent validator passing WO-002a and full original WO-002 acceptance. No completion or WO-003 transition is claimed.
+
+## Fresh WO-002a and full WO-002 validation — 2026-10-28
+
+- Fresh independent validation artifact [`validation-WO-002a.md`](../validations/validation-WO-002a.md) records `pass` for the fix and all original WO-002 acceptance criteria on the full range `fde481db08ba058a1327e2d23abb9b056c2556c3..a73c9de14195fb32ae36dce3ae2bba090c8970cf`; the exact fix-only range is also assessed there. The successful New/Open revision-alias and response-free rendered-text findings are both resolved with targeted regressions.
+- All required focused/workspace commands, bounded `cargo run`, and both committed-range whitespace checks passed. The bounded process exited within 15 seconds with exit code 0; native visual/input smoke remains unavailable and is not claimed. Full command outcomes and criterion-level evidence are in the fresh validation artifact.
+- At validator return, host dispatch ID reconciliation and work-order state transitions were pending; no internal session/agent ID was inferred. The actual ID and subsequent transitions are recorded in the orchestrator reconciliation below. At that return point, original WO-002 was `blocked` and WO-002a was `in-review`; no status transition, manual approval, or WO-003 dispatch had occurred. The previous failed validation is preserved unchanged.
+
+## WO-002a validation and completion reconciliation — 2026-10-28
+
+- **Fresh validator host dispatch ID:** `01a183d2-d3db-75f9-b653-b8c72106d86b` (actual host dispatch ID supplied for this validation); no internal session/agent ID is available or inferred.
+- **Validation result and exact coverage:** [`validation-WO-002a.md`](../validations/validation-WO-002a.md) records `pass` for the WO-002a fix range `4be598803fe19c8f212115ae0f2455afef412fac..a73c9de14195fb32ae36dce3ae2bba090c8970cf` and the complete original WO-002 range `fde481db08ba058a1327e2d23abb9b056c2556c3..a73c9de14195fb32ae36dce3ae2bba090c8970cf`.
+- **State transition:** WO-002a `in-review` → `complete`; original WO-002 `blocked` → `complete`. This follows the passing fix-validation chain under the Forge validation process. The initiative remains `execute` / `active`; WO-003 remains `draft` and undispatched.
+- **Gate/blocker disposition:** The validator reports all required focused/workspace checks and both committed-range whitespace checks passed, no remaining blocker, and every original WO-002 criterion passed. The previous failure is not reclassified or removed. Native desktop visual/input smoke remains unavailable and is not claimed as passed; it is optional and not a configured hard-stop gate.
