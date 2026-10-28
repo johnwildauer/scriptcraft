@@ -50,6 +50,7 @@ fn zoom_slider(ui: &mut egui::Ui, width: f32, zoom_percent: &mut u16) -> egui::R
         [width, ui.spacing().interact_size.y],
         egui::Slider::new(zoom_percent, MIN_ZOOM_PERCENT..=MAX_ZOOM_PERCENT)
             .integer()
+            .trailing_fill(true)
             .show_value(false)
             .text("Page zoom"),
     );
@@ -999,6 +1000,122 @@ mod tests {
         assert_eq!(ZOOM_PRESETS, [75, 90, 100, 125, 150, 175, 200, 250, 300]);
         assert_eq!(ZOOM_PRESETS.len(), 9);
         assert!(ZOOM_PRESETS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn zoom_slider_emits_blue_proportional_fill_and_circular_thumb() {
+        for percent in [75, 137, 200, 300] {
+            let context = egui::Context::default();
+            let mut zoom_percent = percent;
+            let mut slider_rect = Rect::NOTHING;
+            let mut selection_fill = Color32::TRANSPARENT;
+            let mut track_fill = Color32::TRANSPARENT;
+            let output = context.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, 320.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        selection_fill = ui.visuals().selection.bg_fill;
+                        track_fill = ui.visuals().widgets.inactive.bg_fill;
+                        slider_rect = zoom_slider(ui, 220.0, &mut zoom_percent).rect;
+                    });
+                },
+            );
+
+            let emitted_rects = output
+                .shapes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, clipped)| match &clipped.shape {
+                    egui::epaint::Shape::Rect(shape) => Some((index, shape)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let track_shapes = emitted_rects
+                .iter()
+                .copied()
+                .filter(|(_, shape)| shape.fill == track_fill && shape.rect.is_positive())
+                .collect::<Vec<_>>();
+            let selected_shapes = emitted_rects
+                .iter()
+                .copied()
+                .filter(|(_, shape)| shape.fill == selection_fill && shape.rect.is_positive())
+                .collect::<Vec<_>>();
+            let thumbs = output
+                .shapes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, clipped)| match &clipped.shape {
+                    egui::epaint::Shape::Circle(circle) => Some((index, circle)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                track_shapes.len(),
+                1,
+                "zoom={percent}: expected emitted track"
+            );
+            assert_eq!(
+                selected_shapes.len(),
+                1,
+                "zoom={percent}: expected emitted fill"
+            );
+            assert_eq!(
+                thumbs.len(),
+                1,
+                "zoom={percent}: expected one circular thumb"
+            );
+            assert_ne!(
+                selection_fill, track_fill,
+                "selected and unselected track colors must differ"
+            );
+            assert!(
+                selection_fill.b() > selection_fill.g() && selection_fill.g() > selection_fill.r(),
+                "zoom={percent}: selected fill should be visibly blue, got {selection_fill:?}"
+            );
+
+            let (track_index, track) = track_shapes[0];
+            let (fill_index, fill) = selected_shapes[0];
+            let (thumb_index, thumb) = thumbs[0];
+            let fill_fraction =
+                (percent - MIN_ZOOM_PERCENT) as f32 / (MAX_ZOOM_PERCENT - MIN_ZOOM_PERCENT) as f32;
+            let first_thumb_center = track.rect.left() + thumb.radius;
+            let last_thumb_center = track.rect.right() - thumb.radius;
+            let expected_thumb_x =
+                first_thumb_center + fill_fraction * (last_thumb_center - first_thumb_center);
+            let actual_fill_position = fill.rect.right() - track.rounding.nw;
+            let actual_fill_fraction = (actual_fill_position - first_thumb_center)
+                / (last_thumb_center - first_thumb_center);
+
+            assert!(track.rect.is_positive());
+            assert_eq!(fill.rect.left(), track.rect.left());
+            assert_eq!(fill.rect.top(), track.rect.top());
+            assert_eq!(fill.rect.bottom(), track.rect.bottom());
+            assert_eq!(fill.rounding, track.rounding);
+            assert!(
+                (thumb.center.x - expected_thumb_x).abs() <= 0.01,
+                "zoom={percent}: thumb x={} should map to {fill_fraction:.4} of usable rail at {expected_thumb_x}",
+                thumb.center.x
+            );
+            assert!(
+                (actual_fill_fraction - fill_fraction).abs() <= 0.01,
+                "zoom={percent}: emitted selected fill maps to {actual_fill_fraction:.4}, expected {fill_fraction:.4}"
+            );
+            assert!((fill.rect.right() - (thumb.center.x + track.rounding.nw)).abs() <= 0.01);
+            assert_eq!(thumb.center.y, track.rect.center().y);
+            assert!(thumb.radius > 0.0);
+            assert!(
+                track_index < fill_index && fill_index < thumb_index,
+                "track, selected fill, and circular thumb should be painted in that order"
+            );
+            assert!(slider_rect.contains(thumb.center));
+        }
     }
 
     #[test]

@@ -2,14 +2,14 @@
 
 ## Metadata
 
-- **Status:** `in-review`
+- **Status:** `blocked` — fresh validation failed on the required blue proportional slider trailing fill; linked WO-003a has implementation evidence and remains `in-review` pending its separate fix commit and fresh validation.
 - **Assignee:** Dedicated fresh desktop implementer; actual host dispatch ID `01a183e4-a3cd-72bc-bc33-34c02e266a87` reconciled below
 - **Phase/order:** 3 of 3; depends on WO-001 and WO-002; final integrated validation boundary
 - **Initiative:** [`status-bar-v1.md`](../status-bar-v1.md)
 - **Generated filename:** [`WO-003-transient-zoom-and-integrated-regression.md`](WO-003-transient-zoom-and-integrated-regression.md)
 - **Owner/orchestrator:** Forge orchestrator
-- **Validation:** [`validation-WO-003.md`](../validations/validation-WO-003.md) (future artifact; not created)
-- **Fixes:** none
+- **Validation:** [`validation-WO-003.md`](../validations/validation-WO-003.md) (`fail` on stable committed range `a73c9de14195fb32ae36dce3ae2bba090c8970cf..671c7267328b960be10c82be1fa032df895b0874`; actual validator host dispatch `01a184cb-6163-710f-b7f3-52d14c89466d`)
+- **Fixes:** [`WO-003a-blue-proportional-slider-fill.md`](WO-003a-blue-proportional-slider-fill.md) (`in-review`; implementation reported under actual fresh implementer host dispatch `01a184da-1260-706c-96ec-3c55e3fe5d2c`; separate fix commit and committed-range whitespace check pending)
 - **Implementer host dispatch ID:** `01a183e4-a3cd-72bc-bc33-34c02e266a87` (actual host dispatch ID; no internal session/agent ID is exposed or inferred)
 - **Session exception:** none
 
@@ -142,3 +142,26 @@ Initiative-confirmed zoom contract proposed for a new/additive future requiremen
 - **Live Git preflight:** Branch `dev/2026-10-28-status-bar`; `HEAD` is the requested base `a73c9de14195fb32ae36dce3ae2bba090c8970cf`, a direct child of the prior WO-002 fix commit. The index was empty. The exact worktree set is the two authorized app files; scoped requirement and desktop blueprint; initiative plan; execution log; WO-002 and WO-003; and the approved WO-002a fix plus original-fail and follow-up-pass validation records. No unrelated or unexpected staged/worktree path was found.
 - **Historical failure preservation:** The original `validation-WO-002.md` remains an unchanged `fail` artifact with its findings and historical command outcomes intact; its content was inspected and its SHA-256 before staging was `84630b5cd54db882986e04bec06e688dbfad7dddc029b90af6cffb042221a543`.
 - **Commit boundary:** Actual dispatch and implementation evidence are reconciled before staging. Only the exact authorized WO-003 paths and approved prior WO-002/fix/validation/plan state records will be explicitly staged. No blanket add, reset, stash, merge, implementation edit, validation/approval, or initiative closure is performed. The full staged name-status/diff and whitespace check precede the single implementation commit; commit hash/parent will be recorded afterward as unstaged documentation.
+
+## Implementation commit and post-commit recordkeeping — 2026-10-28
+
+- **Commit:** `671c7267328b960be10c82be1fa032df895b0874` (`feat(scriptcraft): add transient page zoom`).
+- **Direct parent/base:** `a73c9de14195fb32ae36dce3ae2bba090c8970cf`, the requested WO-003 base. This is one new implementation commit; no amend or history rewrite was performed.
+- **Exact committed paths/status:** `M` `.forge/blueprints/containers/scriptcraft-desktop.md`; `M` `.forge/initiatives/2026-10-28-status-bar/execution-log.md`; `M` `.forge/initiatives/2026-10-28-status-bar/status-bar-v1.md`; `A` `.forge/initiatives/2026-10-28-status-bar/validations/validation-WO-002.md`; `A` `.forge/initiatives/2026-10-28-status-bar/validations/validation-WO-002a.md`; `M` `.forge/initiatives/2026-10-28-status-bar/work-orders/WO-002-status-items-and-viewport-page.md`; `A` `.forge/initiatives/2026-10-28-status-bar/work-orders/WO-002a-freshness-and-noninteractive-text.md`; `M` this WO; `M` `.forge/requirements/features/screenplay-writing-loop.md`; `M` `apps/scriptcraft/src/main.rs`; `M` `apps/scriptcraft/src/status_bar.rs`.
+- **Commit guards:** Explicit staging was limited to these 11 approved paths. Staged name-status and full diff were inspected; there were no unstaged changes before commit. `git diff --cached --check` and committed-range `git diff --check a73c9de14195fb32ae36dce3ae2bba090c8970cf..671c7267328b960be10c82be1fa032df895b0874` passed. Post-commit verification confirmed the hash, sole direct parent, exact 11-path inventory, clean index/worktree before this post-commit note, and unchanged SHA-256 for the historical failed WO-002 validation.
+- **State boundary:** WO-003 remains `in-review`, not validated or complete; the fresh independent validator is pending. Initiative remains `execute` / `active`. This hash/parent/path record is post-commit documentation and is intentionally unstaged; no source change, validation, review/approval, or initiative closure occurred here.
+
+## Failed-validation reconciliation — 2026-10-28
+
+- **Validation result:** The fresh independent validator returned `fail` on the stable committed range `a73c9de14195fb32ae36dce3ae2bba090c8970cf..671c7267328b960be10c82be1fa032df895b0874`; see [`validation-WO-003.md`](../validations/validation-WO-003.md). Actual validator host dispatch ID `01a184cb-6163-710f-b7f3-52d14c89466d` is recorded; no internal session/agent ID is available or inferred.
+- **Finding and scope:** Required blue value-proportional trailing fill is absent from the slider's rendered track. All other inspected acceptance criteria and required automated checks passed. Native visual/input smoke is unavailable and optional, not the failure. Preserve the committed implementation and failed validation artifact.
+- **State:** WO-003 transitions `in-review` → `blocked`. Fix [`WO-003a-blue-proportional-slider-fill.md`](WO-003a-blue-proportional-slider-fill.md) is created as `draft`, linked to this original and its failed validation. Initiative phase transitions `execute` → `validate` for the actual validator dispatch and `validate` → `execute` after the fail/fix-order event; initiative status remains `active`.
+- **Next flow:** A new dedicated implementer must receive WO-003a; its actual host dispatch ID is not yet available and must be recorded at dispatch. The implementer must create a separate fix commit and record changed files, attempts/results, and diff evidence. Then a different fresh validator must validate both the fix and the complete original WO-003 acceptance boundary. WO-003 cannot become `complete` until that fresh validation passes both.
+
+## WO-003a dispatch reconciliation / implementation-commit preflight — 2026-10-28
+
+- **Actual fix implementer host dispatch ID:** `01a184da-1260-706c-96ec-3c55e3fe5d2c`. This is the host dispatch identifier only; no internal session/agent ID is exposed or inferred. It is distinct from the original WO-003 implementer (`01a183e4-a3cd-72bc-bc33-34c02e266a87`) and failed validator (`01a184cb-6163-710f-b7f3-52d14c89466d`).
+- **Fix/state:** WO-003a is `in-review` with implementation evidence; original WO-003 remains `blocked` on the historical failed validation. Initiative remains `execute` / `active`. No fix validation, completion, approval, or initiative closure is claimed.
+- **Implementer-reported evidence:** The narrow source change is only `apps/scriptcraft/src/status_bar.rs`, with `.trailing_fill(true)` and the actual-emitted-shape regression. The fix WO records the exact test evidence, all attempts, and final results; required focused/workspace checks and pre-commit `git diff --check` are reported passing. They were not independently rerun by this orchestration bookkeeping. Native visual/input smoke remains unavailable/unclaimed.
+- **Live preflight:** Branch `dev/2026-10-28-status-bar`; `HEAD` and required direct base are `671c7267328b960be10c82be1fa032df895b0874`, whose parent is `a73c9de14195fb32ae36dce3ae2bba090c8970cf`; index empty. Only authorized WO-003a source/evidence and previously recorded plan/log/original-WO state were present; no unexpected staged or unrelated path was found.
+- **Commit boundary:** Create one separate implementation commit directly atop `671c7267328b960be10c82be1fa032df895b0874` after explicit path staging, complete staged-diff/path review, and cached whitespace check. Then run the committed-range whitespace check before fresh validation; record the actual hash/parent as post-commit documentation without amend. The fix commit and range check are still pending at this preflight point.
