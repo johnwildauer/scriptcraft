@@ -1,5 +1,9 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+#[cfg(target_os = "macos")]
+#[path = "platform/macos_titlebar.rs"]
+mod macos_titlebar;
 
 use eframe::egui::{
     self, Color32, FontFamily, FontId, Key, RichText, Sense, Stroke, TextStyle, TextWrapMode, Vec2,
@@ -35,6 +39,9 @@ const TOOLBAR_TOP_PADDING: f32 = 0.0;
 // Preserve the toolbar's text/control clearance. The trailing span is part of
 // the exact top-panel allocation and must not be removed to fix a viewport row.
 const TOOLBAR_BOTTOM_PADDING: f32 = 2.0;
+// Reserve only the native top-left control band before the toolbar. This is a
+// bounded layout choice, not a measured macOS safe-area value.
+const NATIVE_TOOLBAR_TOP_INSET: f32 = 28.0;
 const TOOLBAR_ICON_HOVER_PADDING: f32 = 2.0;
 const TITLE_STRIP_TEXT: &str = "ScriptCraft";
 const TITLE_STRIP_HEIGHT: f32 = 30.0;
@@ -95,6 +102,74 @@ fn titlebar_viewport_command_for_mode(
 
 fn should_request_policy_repaint(mode: TitlebarPresentationMode, observing: bool) -> bool {
     mode.uses_app_owned_transition_policy() && observing
+}
+
+// No response is registered over the leftmost 160 logical points. This
+// deliberately over-excludes the standard traffic-light cluster; the bridge
+// also checks current public native button geometry before invoking the action.
+const NATIVE_TITLEBAR_CONTROL_EXCLUSION: f32 = 160.0;
+
+fn native_titlebar_hit_rect(band: egui::Rect, clip: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(band.left() + NATIVE_TITLEBAR_CONTROL_EXCLUSION, band.top()),
+        band.max,
+    )
+    .intersect(clip)
+}
+
+fn native_titlebar_band(ui: &mut egui::Ui, mode: TitlebarPresentationMode) -> Option<egui::Pos2> {
+    let band = egui::Rect::from_min_size(
+        ui.cursor().min,
+        egui::vec2(ui.available_width(), toolbar_top_inset_for_mode(mode)),
+    );
+    // Keep precisely the existing layout allocation, including toolbar y.
+    ui.add_space(toolbar_top_inset_for_mode(mode));
+    if !cfg!(target_os = "macos")
+        || mode != TitlebarPresentationMode::NativeMacOs
+        || ui.memory(|memory| memory.any_popup_open())
+    {
+        return None;
+    }
+    let rect = native_titlebar_hit_rect(band, ui.clip_rect());
+    if !rect.is_positive() {
+        return None;
+    }
+    let response = ui.interact(
+        rect,
+        ui.id().with("native-titlebar-double-click"),
+        Sense::click(),
+    );
+    response
+        .double_clicked_by(egui::PointerButton::Primary)
+        .then(|| response.interact_pointer_pos())
+        .flatten()
+}
+
+fn dispatch_native_titlebar_action(
+    requested: bool,
+    perform_zoom: impl FnOnce() -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    if requested {
+        perform_zoom()
+    } else {
+        Ok(())
+    }
+}
+
+fn perform_native_titlebar_zoom(
+    frame: &eframe::Frame,
+    position: egui::Pos2,
+    viewport: egui::Rect,
+) -> Result<(), &'static str> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_titlebar::perform_zoom(frame, position, viewport)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (frame, position, viewport);
+        Err("AppKit unavailable on this platform")
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2389,6 +2464,27 @@ fn toolbar_content_height(style: &egui::Style) -> f32 {
     style.spacing.interact_size.y * 2.0 + TOOLBAR_BOTTOM_PADDING
 }
 
+fn toolbar_top_inset_for_mode(mode: TitlebarPresentationMode) -> f32 {
+    if mode == TitlebarPresentationMode::NativeMacOs {
+        NATIVE_TOOLBAR_TOP_INSET
+    } else {
+        0.0
+    }
+}
+
+#[cfg(test)]
+fn toolbar_layout_rect(
+    panel: egui::Rect,
+    mode: TitlebarPresentationMode,
+    toolbar_height: f32,
+) -> egui::Rect {
+    let top = panel.top() + toolbar_top_inset_for_mode(mode);
+    egui::Rect::from_min_max(
+        egui::pos2(panel.left(), top),
+        egui::pos2(panel.right(), (top + toolbar_height).min(panel.bottom())),
+    )
+}
+
 fn title_strip_text_position(strip: egui::Rect, text_size: Vec2) -> egui::Pos2 {
     strip.center() - text_size / 2.0
 }
@@ -2463,18 +2559,20 @@ impl eframe::App for ScriptCraftApp {
         chrome_clear_color(visuals)
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
         let mode = selected_titlebar_presentation_mode();
         self.performance.frames = self.performance.frames.saturating_add(1);
         self.viewport_diagnostics.begin_frame(ctx);
-        let chrome_height = toolbar_content_height(&ctx.style())
+        let chrome_height = toolbar_top_inset_for_mode(mode)
+            + toolbar_content_height(&ctx.style())
             + if mode.uses_custom_titlebar() {
                 TITLE_STRIP_HEIGHT
             } else {
                 0.0
             };
         let mut chrome_panel = egui::Rect::NOTHING;
+        let mut native_double_click = None;
         egui::TopBottomPanel::top("titlebar-toolbar")
             .frame(title_strip_frame(ctx))
             .show_separator_line(false)
@@ -2490,8 +2588,18 @@ impl eframe::App for ScriptCraftApp {
                         &mut self.presentation_policy,
                     );
                 }
+                native_double_click = native_titlebar_band(ui, mode);
                 self.toolbar(ui);
             });
+        // Popup ownership wins even when a toolbar action opens one this frame.
+        if let Some(position) = native_double_click {
+            let requested = !ctx.memory(|memory| memory.any_popup_open());
+            if let Err(reason) = dispatch_native_titlebar_action(requested, || {
+                perform_native_titlebar_zoom(frame, position, ctx.screen_rect())
+            }) {
+                eprintln!("Native titlebar double-click ignored: {reason}");
+            }
+        }
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(&self.status);
@@ -2573,7 +2681,16 @@ fn native_options_for_mode(mode: TitlebarPresentationMode) -> eframe::NativeOpti
                 .with_fullsize_content_view(true),
             ..Default::default()
         },
-        TitlebarPresentationMode::NativeMacOs => eframe::NativeOptions::default(),
+        TitlebarPresentationMode::NativeMacOs => eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_decorations(true)
+                .with_transparent(false)
+                .with_title_shown(false)
+                .with_titlebar_shown(false)
+                .with_fullsize_content_view(true)
+                .with_titlebar_buttons_shown(true),
+            ..Default::default()
+        },
     }
 }
 
@@ -2628,7 +2745,169 @@ mod tests {
     use scriptcraft_core::Role;
 
     #[test]
-    fn native_startup_selects_vanilla_defaults_and_custom_path_is_reversible() {
+    fn native_double_click_hit_region_excludes_controls_toolbar_and_clip_edges() {
+        let band = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 28.0));
+        let clip = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(700.0, 600.0));
+        let hit = native_titlebar_hit_rect(band, clip);
+        assert_eq!(hit.left(), 160.0);
+        assert_eq!(hit.right(), 700.0);
+        assert_eq!(hit.height(), 28.0);
+        assert!(!hit.contains(egui::pos2(60.0, 14.0)));
+        assert!(!hit.contains(egui::pos2(400.0, 29.0)));
+        assert!(!hit.contains(egui::pos2(701.0, 14.0)));
+        assert!(hit.contains(egui::pos2(400.0, 14.0)));
+        let narrow = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(120.0, 28.0));
+        assert!(!native_titlebar_hit_rect(narrow, narrow).is_positive());
+    }
+
+    #[test]
+    fn native_double_click_dispatch_is_one_public_action_or_bounded_noop() {
+        let mut calls = 0;
+        assert_eq!(
+            dispatch_native_titlebar_action(false, || {
+                calls += 1;
+                Ok(())
+            }),
+            Ok(())
+        );
+        assert_eq!(calls, 0);
+        assert_eq!(
+            dispatch_native_titlebar_action(true, || {
+                calls += 1;
+                Ok(())
+            }),
+            Ok(())
+        );
+        assert_eq!(calls, 1);
+        for unavailable in [
+            "window handle unavailable",
+            "native view has no current window",
+            "native Zoom action unavailable",
+            "native Zoom action disabled",
+            "not on the AppKit main thread",
+        ] {
+            assert_eq!(
+                dispatch_native_titlebar_action(true, || Err(unavailable)),
+                Err(unavailable)
+            );
+        }
+        // Errors do not request an alternate command or app-owned policy.
+        for state in [None, Some(false), Some(true)] {
+            assert_eq!(
+                titlebar_viewport_command_for_mode(TitlebarPresentationMode::NativeMacOs, state),
+                None
+            );
+        }
+        assert!(!should_request_policy_repaint(
+            TitlebarPresentationMode::NativeMacOs,
+            true
+        ));
+    }
+
+    fn native_double_click_headless_run(
+        mode: TitlebarPresentationMode,
+        position: egui::Pos2,
+        button: egui::PointerButton,
+        popup: bool,
+        overlay: bool,
+    ) -> usize {
+        let ctx = egui::Context::default();
+        let mut actions = 0;
+        for (index, pressed) in [None, Some(true), Some(false), Some(true), Some(false)]
+            .into_iter()
+            .enumerate()
+        {
+            if popup {
+                ctx.memory_mut(|memory| memory.open_popup(egui::Id::new("test-popup")));
+            }
+            let mut events = vec![egui::Event::PointerMoved(position)];
+            if let Some(pressed) = pressed {
+                events.push(egui::Event::PointerButton {
+                    pos: position,
+                    button,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    time: Some(index as f64 * 0.05),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    if overlay {
+                        egui::Area::new(egui::Id::new("test-overlay"))
+                            .order(egui::Order::Foreground)
+                            .fixed_pos(egui::Pos2::ZERO)
+                            .show(ctx, |ui| {
+                                ui.allocate_response(egui::vec2(800.0, 28.0), Sense::click());
+                            });
+                    }
+                    egui::TopBottomPanel::top("test-native-band")
+                        .frame(egui::Frame::none())
+                        .exact_height(80.0)
+                        .show(ctx, |ui| {
+                            let top = ui.cursor().top();
+                            let event = native_titlebar_band(ui, mode);
+                            assert_eq!(ui.cursor().top() - top, toolbar_top_inset_for_mode(mode));
+                            let _ = ui.button("toolbar control");
+                            assert_eq!(
+                                dispatch_native_titlebar_action(event.is_some(), || {
+                                    actions += 1;
+                                    Ok(())
+                                }),
+                                Ok(())
+                            );
+                        });
+                },
+            );
+            for viewport in output.viewport_output.values() {
+                assert!(
+                    viewport.commands.is_empty(),
+                    "native band must not emit viewport commands"
+                );
+            }
+        }
+        actions
+    }
+
+    #[test]
+    fn native_double_click_headless_ownership_and_native_only_routing() {
+        let native = TitlebarPresentationMode::NativeMacOs;
+        let primary = egui::PointerButton::Primary;
+        let blank = egui::pos2(400.0, 14.0);
+        assert_eq!(
+            native_double_click_headless_run(native, blank, primary, false, false),
+            usize::from(cfg!(target_os = "macos"))
+        );
+        for (mode, point, button, popup, overlay) in [
+            (native, egui::pos2(60.0, 14.0), primary, false, false),
+            (native, egui::pos2(400.0, 40.0), primary, false, false),
+            (native, blank, primary, true, false),
+            (native, blank, primary, false, true),
+            (native, blank, egui::PointerButton::Secondary, false, false),
+            (
+                TitlebarPresentationMode::CustomHidden,
+                blank,
+                primary,
+                false,
+                false,
+            ),
+        ] {
+            assert_eq!(
+                native_double_click_headless_run(mode, point, button, popup, overlay),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn native_startup_selects_the_single_locked_viewport_tuple() {
         let custom = native_options_for_mode(TitlebarPresentationMode::CustomHidden);
         assert_eq!(custom.viewport.title, Some(TITLE_STRIP_TEXT.to_owned()));
         assert_eq!(custom.viewport.title_shown, Some(false));
@@ -2640,12 +2919,12 @@ mod tests {
 
         let native = native_options_for_mode(TitlebarPresentationMode::NativeMacOs);
         assert_eq!(native.viewport.title, None);
-        assert_eq!(native.viewport.title_shown, None);
-        assert_eq!(native.viewport.titlebar_shown, None);
-        assert_eq!(native.viewport.titlebar_buttons_shown, None);
-        assert_eq!(native.viewport.fullsize_content_view, None);
-        assert_eq!(native.viewport.decorations, None);
-        assert_eq!(native.viewport.transparent, None);
+        assert_eq!(native.viewport.title_shown, Some(false));
+        assert_eq!(native.viewport.titlebar_shown, Some(false));
+        assert_eq!(native.viewport.titlebar_buttons_shown, Some(true));
+        assert_eq!(native.viewport.fullsize_content_view, Some(true));
+        assert_eq!(native.viewport.decorations, Some(true));
+        assert_eq!(native.viewport.transparent, Some(false));
 
         for mode in [
             TitlebarPresentationMode::CustomHidden,
@@ -2664,12 +2943,20 @@ mod tests {
                 expected.viewport.titlebar_shown
             );
             assert_eq!(
+                handoff.options.viewport.titlebar_buttons_shown,
+                expected.viewport.titlebar_buttons_shown
+            );
+            assert_eq!(
                 handoff.options.viewport.fullsize_content_view,
                 expected.viewport.fullsize_content_view
             );
             assert_eq!(
                 handoff.options.viewport.decorations,
                 expected.viewport.decorations
+            );
+            assert_eq!(
+                handoff.options.viewport.transparent,
+                expected.viewport.transparent
             );
         }
 
@@ -2680,12 +2967,45 @@ mod tests {
         );
         assert_eq!(selected.mode, TitlebarPresentationMode::NativeMacOs);
         assert_eq!(selected.options.viewport.title, None);
-        assert_eq!(selected.options.viewport.title_shown, None);
-        assert_eq!(selected.options.viewport.titlebar_shown, None);
-        assert_eq!(selected.options.viewport.titlebar_buttons_shown, None);
-        assert_eq!(selected.options.viewport.fullsize_content_view, None);
-        assert_eq!(selected.options.viewport.decorations, None);
-        assert_eq!(selected.options.viewport.transparent, None);
+        assert_eq!(selected.options.viewport.title_shown, Some(false));
+        assert_eq!(selected.options.viewport.titlebar_shown, Some(false));
+        assert_eq!(selected.options.viewport.titlebar_buttons_shown, Some(true));
+        assert_eq!(selected.options.viewport.fullsize_content_view, Some(true));
+        assert_eq!(selected.options.viewport.decorations, Some(true));
+        assert_eq!(selected.options.viewport.transparent, Some(false));
+    }
+
+    #[test]
+    fn native_toolbar_reserved_band_is_bounded_and_preserves_full_width() {
+        let panel = egui::Rect::from_min_size(egui::pos2(12.0, 8.0), Vec2::new(800.0, 120.0));
+        let toolbar_height = 48.0;
+        let native =
+            toolbar_layout_rect(panel, TitlebarPresentationMode::NativeMacOs, toolbar_height);
+        let custom = toolbar_layout_rect(
+            panel,
+            TitlebarPresentationMode::CustomHidden,
+            toolbar_height,
+        );
+
+        assert_eq!(NATIVE_TOOLBAR_TOP_INSET, 28.0);
+        assert_eq!(
+            toolbar_top_inset_for_mode(TitlebarPresentationMode::NativeMacOs),
+            28.0
+        );
+        assert_eq!(
+            toolbar_top_inset_for_mode(TitlebarPresentationMode::CustomHidden),
+            0.0
+        );
+        assert_eq!(native.left(), panel.left());
+        assert_eq!(native.right(), panel.right());
+        assert_eq!(native.width(), panel.width());
+        assert_eq!(native.top() - panel.top(), NATIVE_TOOLBAR_TOP_INSET);
+        assert_eq!(native.height(), toolbar_height);
+        assert!(panel.contains_rect(native));
+        assert_eq!(custom.left(), panel.left());
+        assert_eq!(custom.right(), panel.right());
+        assert_eq!(custom.top(), panel.top());
+        assert_eq!(custom.height(), toolbar_height);
     }
 
     #[test]

@@ -10,5 +10,17 @@ eframe = "0.29"
 rfd = "0.15"
 scriptcraft-core = { path = "../../crates/scriptcraft-core" }
 
-[lints]
-workspace = true
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "=0.6.2"
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow", "NSControl", "NSButton"] }
+
+# The root remains forbid. Only the audited AppKit borrowed-view retain may
+# override this package's deny, in one macOS-only bridge function.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+panic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
