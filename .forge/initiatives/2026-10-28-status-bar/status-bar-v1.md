@@ -6,7 +6,7 @@
 - **Status:** `active`
 - **Owner/orchestrator:** Forge orchestrator
 - **Created:** 2026-10-28
-- **Updated:** 2026-10-28
+- **Updated:** 2026-10-29
 - **Authoritative version:** `v1`
 - **Initiative mode:** `standard`
 - **Mode requested by:** `user`
@@ -27,9 +27,9 @@
 
 - **Authoritative plan:** [`status-bar-v1.md`](status-bar-v1.md)
 - **Design review:** [`reviews/design-review.md`](reviews/design-review.md) — completed with outcome `pass`; separate human approval is recorded in its dedicated section.
-- **Validations:** [`validations/`](validations/) — [`validation-WO-001.md`](validations/validation-WO-001.md) (`pass`), [`validation-WO-002.md`](validations/validation-WO-002.md) (historical `fail`, preserved), [`validation-WO-002a.md`](validations/validation-WO-002a.md) (`pass` for the fix and full original WO-002 boundary), and [`validation-WO-003.md`](validations/validation-WO-003.md) (`fail` on the stable WO-003 range; actual validator dispatch `01a184cb-6163-710f-b7f3-52d14c89466d` reconciled).
+- **Validations:** [`validations/`](validations/) — [`validation-WO-001.md`](validations/validation-WO-001.md) (`pass`), [`validation-WO-002.md`](validations/validation-WO-002.md) (historical `fail`, preserved), [`validation-WO-002a.md`](validations/validation-WO-002a.md) (`pass` for the fix and full original WO-002 boundary), [`validation-WO-003.md`](validations/validation-WO-003.md) (historical `fail`, preserved), and [`validation-WO-003a.md`](validations/validation-WO-003a.md) (`PASS` for the WO-003a fix and full original WO-003 ranges; actual fresh validator host dispatch ID `01a184f3-6a4f-76bb-81b2-9ad6d5c5b738`).
 - **Execution log:** [`execution-log.md`](execution-log.md)
-- **Work orders:** [`work-orders/`](work-orders/) — WO-001, WO-002, and its fix WO-002a are `complete`; fresh WO-002a validation passed both the fix and full original acceptance. WO-003 is `blocked` after failed fresh validation by actual host dispatch `01a184cb-6163-710f-b7f3-52d14c89466d`; linked fix WO-003a is `in-review` after implementation evidence by actual implementer host dispatch `01a184da-1260-706c-96ec-3c55e3fe5d2c`. Its separate fix commit and committed-range whitespace check remain pending before fresh validation.
+- **Work orders:** [`work-orders/`](work-orders/) — WO-001, WO-002 and fix WO-002a are `complete`; WO-003 and fix WO-003a are `complete` after fresh [`validation-WO-003a.md`](validations/validation-WO-003a.md) passed both exact fix and full original WO-003 ranges under actual validator host dispatch `01a184f3-6a4f-76bb-81b2-9ad6d5c5b738`. Initiative remains `execute` / `active`; closeout and merge are not authorized or performed.
 
 ## Outcome
 
@@ -223,4 +223,23 @@ The user explicitly confirmed direct translation into exactly three **draft** wo
 - The actual fresh WO-003a implementer host dispatch ID is `01a184da-1260-706c-96ec-3c55e3fe5d2c`; the host provides no internal session/agent ID, and none is inferred. WO-003a remains `in-review`; original WO-003 remains `blocked`; initiative remains `execute` / `active`.
 - The implementer reports required focused/workspace checks passing and only `apps/scriptcraft/src/status_bar.rs` changed for product code. These reports and the preserved initial formatting failure/repair are detailed in the fix WO and execution log; this bookkeeping step did not rerun validation.
 - Preflight confirmed branch `dev/2026-10-28-status-bar`, `HEAD` `671c7267328b960be10c82be1fa032df895b0874` with direct parent `a73c9de14195fb32ae36dce3ae2bba090c8970cf`, empty index, and only the authorized source plus this initiative's plan/log/WO/failed-validation/fix-WO records in the worktree. No unrelated or unexpected staged change was present.
-- The fix commit must be a separate direct child of `671c7267328b960be10c82be1fa032df895b0874`. Its committed-range whitespace check and hash/parent record are pending; neither work order completion nor initiative closure is authorized here.
+- The fix commit must be a separate direct child of `671c7267328b960be10c82be1fa032df895b0874`. This was completed as `0e453485067a18ba49bf87acef16c77a2ed739c8`; its committed-range whitespace check passed. Fresh validation remains pending; neither work order completion nor initiative closure is authorized here.
+
+## WO-003a implementation-commit reconciliation — 2026-10-28
+
+- Fix commit `0e453485067a18ba49bf87acef16c77a2ed739c8` (`fix(scriptcraft): enable proportional zoom slider fill`) is directly parented by the original WO-003 target `671c7267328b960be10c82be1fa032df895b0874`. It contains exactly six authorized paths: `apps/scriptcraft/src/status_bar.rs`; this initiative's `status-bar-v1.md`, `execution-log.md`, original WO-003, WO-003a, and `validation-WO-003.md`.
+- Only those six paths were explicitly staged; the complete staged diff/path inventory was inspected and `git diff --cached --check` passed. Post-commit ancestry/path checks passed, index and worktree are clean, and `git diff --check 671c7267328b960be10c82be1fa032df895b0874..0e453485067a18ba49bf87acef16c77a2ed739c8` passed.
+- WO-003a remains `in-review`, original WO-003 remains `blocked`, and initiative remains `execute` / `active`. Required project checks are implementer-reported rather than independently rerun in this bookkeeping; a distinct fresh validator must assess the fix and full original WO-003 boundary. No completion or closure is claimed.
+
+## WO-003a and full WO-003 fresh validation result — 2026-10-29
+
+- Distinct fresh validation [`validation-WO-003a.md`](validations/validation-WO-003a.md) returns `PASS` on exact fix range `671c7267328b960be10c82be1fa032df895b0874..0e453485067a18ba49bf87acef16c77a2ed739c8` and full original WO-003 range `a73c9de14195fb32ae36dce3ae2bba090c8970cf..0e453485067a18ba49bf87acef16c77a2ed739c8`.
+- All mandatory focused/workspace checks pass; the rendered-fill finding is resolved. Optional native visual/input smoke remains unavailable and unclaimed. The prior failed [`validation-WO-003.md`](validations/validation-WO-003.md) remains preserved as a historical failure.
+- Actual validator host dispatch ID is pending orchestrator reconciliation; no internal session/agent ID is inferred. This record does not transition either WO or the initiative: WO-003 remains `blocked`, WO-003a remains `in-review`, and the initiative remains `execute` / `active`. No closeout or manual approval is claimed.
+
+## WO-003a validation and completion reconciliation — 2026-10-29
+
+- **Actual fresh validator host dispatch ID:** `01a184f3-6a4f-76bb-81b2-9ad6d5c5b738`; this is the supplied host dispatch ID. No internal session/agent ID is available or inferred.
+- **Validation result and boundaries:** [`validation-WO-003a.md`](validations/validation-WO-003a.md) is `PASS` for the exact fix range `671c7267328b960be10c82be1fa032df895b0874..0e453485067a18ba49bf87acef16c77a2ed739c8` and the full original WO-003 range `a73c9de14195fb32ae36dce3ae2bba090c8970cf..0e453485067a18ba49bf87acef16c77a2ed739c8`. The validator independently confirmed all required focused/workspace/format/build/strict-Clippy and whitespace gates; the missing blue proportional fill defect is resolved. The immutable historical WO-003 failure remains preserved.
+- **Work-order transitions:** After confirming that pass, WO-003a transitions `in-review` → `complete` and WO-003 transitions `blocked` → `complete`, linked by the fix and validation evidence. WO-001, WO-002 and WO-002a remain `complete` with their prior required evidence, dispatch IDs and commit hashes unchanged.
+- **Limitation and initiative boundary:** Native rendered-window and real pointer/keyboard smoke remains unavailable and is not claimed; it is optional, not a configured hard-stop. The initiative remains `execute` / `active`. No closeout, merge, closure, or additional manual approval is performed or implied.

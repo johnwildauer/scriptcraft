@@ -2,14 +2,14 @@
 
 ## Metadata
 
-- **Status:** `blocked` — fresh validation failed on the required blue proportional slider trailing fill; linked WO-003a has implementation evidence and remains `in-review` pending its separate fix commit and fresh validation.
+- **Status:** `complete` — the historical failure for missing blue proportional slider fill remains preserved; linked fresh validation passed WO-003a and the full original acceptance, and completion is reconciled below.
 - **Assignee:** Dedicated fresh desktop implementer; actual host dispatch ID `01a183e4-a3cd-72bc-bc33-34c02e266a87` reconciled below
 - **Phase/order:** 3 of 3; depends on WO-001 and WO-002; final integrated validation boundary
 - **Initiative:** [`status-bar-v1.md`](../status-bar-v1.md)
 - **Generated filename:** [`WO-003-transient-zoom-and-integrated-regression.md`](WO-003-transient-zoom-and-integrated-regression.md)
 - **Owner/orchestrator:** Forge orchestrator
 - **Validation:** [`validation-WO-003.md`](../validations/validation-WO-003.md) (`fail` on stable committed range `a73c9de14195fb32ae36dce3ae2bba090c8970cf..671c7267328b960be10c82be1fa032df895b0874`; actual validator host dispatch `01a184cb-6163-710f-b7f3-52d14c89466d`)
-- **Fixes:** [`WO-003a-blue-proportional-slider-fill.md`](WO-003a-blue-proportional-slider-fill.md) (`in-review`; implementation reported under actual fresh implementer host dispatch `01a184da-1260-706c-96ec-3c55e3fe5d2c`; separate fix commit and committed-range whitespace check pending)
+- **Fixes:** [`WO-003a-blue-proportional-slider-fill.md`](WO-003a-blue-proportional-slider-fill.md) (`complete`; implemented under actual fresh host dispatch `01a184da-1260-706c-96ec-3c55e3fe5d2c`; fix commit `0e453485067a18ba49bf87acef16c77a2ed739c8` is directly based on this WO's target; fresh [`validation-WO-003a.md`](../validations/validation-WO-003a.md) passes both the fix and full original acceptance under actual validator host dispatch `01a184f3-6a4f-76bb-81b2-9ad6d5c5b738`)
 - **Implementer host dispatch ID:** `01a183e4-a3cd-72bc-bc33-34c02e266a87` (actual host dispatch ID; no internal session/agent ID is exposed or inferred)
 - **Session exception:** none
 
@@ -165,3 +165,23 @@ Initiative-confirmed zoom contract proposed for a new/additive future requiremen
 - **Implementer-reported evidence:** The narrow source change is only `apps/scriptcraft/src/status_bar.rs`, with `.trailing_fill(true)` and the actual-emitted-shape regression. The fix WO records the exact test evidence, all attempts, and final results; required focused/workspace checks and pre-commit `git diff --check` are reported passing. They were not independently rerun by this orchestration bookkeeping. Native visual/input smoke remains unavailable/unclaimed.
 - **Live preflight:** Branch `dev/2026-10-28-status-bar`; `HEAD` and required direct base are `671c7267328b960be10c82be1fa032df895b0874`, whose parent is `a73c9de14195fb32ae36dce3ae2bba090c8970cf`; index empty. Only authorized WO-003a source/evidence and previously recorded plan/log/original-WO state were present; no unexpected staged or unrelated path was found.
 - **Commit boundary:** Create one separate implementation commit directly atop `671c7267328b960be10c82be1fa032df895b0874` after explicit path staging, complete staged-diff/path review, and cached whitespace check. Then run the committed-range whitespace check before fresh validation; record the actual hash/parent as post-commit documentation without amend. The fix commit and range check are still pending at this preflight point.
+
+## WO-003a implementation-commit reconciliation — 2026-10-28
+
+- **Fix commit:** `0e453485067a18ba49bf87acef16c77a2ed739c8` (`fix(scriptcraft): enable proportional zoom slider fill`), direct child of `671c7267328b960be10c82be1fa032df895b0874`, the original WO-003 target. No amend or history rewrite was performed.
+- **Exact committed paths/status:** `M` `.forge/initiatives/2026-10-28-status-bar/execution-log.md`; `M` `.forge/initiatives/2026-10-28-status-bar/status-bar-v1.md`; `A` `.forge/initiatives/2026-10-28-status-bar/validations/validation-WO-003.md`; `M` this WO; `A` [`WO-003a-blue-proportional-slider-fill.md`](WO-003a-blue-proportional-slider-fill.md); `M` `apps/scriptcraft/src/status_bar.rs`.
+- **Checks/guards:** Only these six authorized paths were explicitly staged; the complete staged diff/path inventory was reviewed and `git diff --cached --check` passed. Post-commit direct-parent and exact-path checks passed; index and worktree were clean immediately after the commit. `git diff --check 671c7267328b960be10c82be1fa032df895b0874..0e453485067a18ba49bf87acef16c77a2ed739c8` passed.
+- **State boundary:** WO-003 remains `blocked`; WO-003a remains `in-review`; initiative remains `execute` / `active`. The implementer's required Cargo/project checks remain reported evidence, not independently rerun by this bookkeeping. A different fresh validator must assess both the fix and full original acceptance; no completion or initiative closure is claimed.
+
+## WO-003a and full WO-003 fresh validation result — 2026-10-29
+
+- Fresh independent [`validation-WO-003a.md`](../validations/validation-WO-003a.md) returns `PASS` for the fix range `671c7267328b960be10c82be1fa032df895b0874..0e453485067a18ba49bf87acef16c77a2ed739c8` and the full original WO-003 range `a73c9de14195fb32ae36dce3ae2bba090c8970cf..0e453485067a18ba49bf87acef16c77a2ed739c8`.
+- The prior missing blue painted proportional fill is resolved by the per-slider change and actual emitted-shape coverage at 75%, 137%, 200%, and 300%. All original WO-003 criteria and all required focused/workspace checks pass. Native visual/input smoke remains unavailable and optional; startup-only evidence is not counted as smoke.
+- At validation handoff, actual validator host dispatch ID and state reconciliation were pending. The subsequent dispatch and completion reconciliation is recorded below; no internal ID is invented.
+
+## WO-003a validation and completion reconciliation — 2026-10-29
+
+- **Actual fresh validator host dispatch ID:** `01a184f3-6a4f-76bb-81b2-9ad6d5c5b738`; no internal session/agent ID is exposed or inferred.
+- **Pass and scope:** The linked fresh [`validation-WO-003a.md`](../validations/validation-WO-003a.md) passes the fix range `671c7267328b960be10c82be1fa032df895b0874..0e453485067a18ba49bf87acef16c77a2ed739c8` and the full original WO-003 range `a73c9de14195fb32ae36dce3ae2bba090c8970cf..0e453485067a18ba49bf87acef16c77a2ed739c8`. All mandatory gates pass and the missing actual blue proportional-fill defect is resolved. Historical failed [`validation-WO-003.md`](../validations/validation-WO-003.md) remains preserved.
+- **Transition:** After confirming the pass, this WO transitions `blocked` → `complete`; linked WO-003a transitions `in-review` → `complete`. WO-001, WO-002 and WO-002a remain `complete` with their already recorded evidence. Initiative remains `execute` / `active`.
+- **Native limitation / scope:** Native rendered-window and real pointer/keyboard smoke remains unavailable and is not claimed; startup/liveness is not smoke. No closeout, merge, or closure is performed.

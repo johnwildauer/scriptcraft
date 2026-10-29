@@ -102,3 +102,10 @@ No command failure required follow-up or waiver. The result is nevertheless `fai
 - The validation outcome above remains the historical `fail` on `a73c9de14195fb32ae36dce3ae2bba090c8970cf..671c7267328b960be10c82be1fa032df895b0874`; its finding, evidence, and validator-reported command results are preserved.
 - The linked fix WO-003a has implementation evidence and is `in-review` under actual fresh implementer host dispatch ID `01a184da-1260-706c-96ec-3c55e3fe5d2c`. This is the host dispatch ID only; no internal session/agent ID is exposed or inferred. The fix implementer reports the required checks passed; this dispatch reconciliation does not rerun or validate them.
 - Original WO-003 remains `blocked`; initiative remains `execute` / `active`. The fix commit is pending and must directly parent `671c7267328b960be10c82be1fa032df895b0874`; its committed-range `git diff --check` is pending as well. A different fresh validator must assess both WO-003a and the full original WO-003 acceptance after those gates. No pass, completion, or initiative closure is implied.
+
+## Orchestrator fix-commit reconciliation — 2026-10-28
+
+- The historical validation outcome remains `fail`; this record does not revise or supersede the finding or its command evidence.
+- Fix commit `0e453485067a18ba49bf87acef16c77a2ed739c8` was created directly on target/base `671c7267328b960be10c82be1fa032df895b0874`. Exact commit paths are the authorized `apps/scriptcraft/src/status_bar.rs` change and five same-initiative Forge records: plan, execution log, original WO-003, WO-003a, and this validation artifact.
+- Explicit staged path inventory/full diff were inspected and `git diff --cached --check` passed. Post-commit ancestry/path checks passed, and committed-range `git diff --check 671c7267328b960be10c82be1fa032df895b0874..0e453485067a18ba49bf87acef16c77a2ed739c8` passed.
+- WO-003a remains `in-review`; WO-003 remains `blocked`; initiative remains `execute` / `active`. A separate fresh validator must assess both fix and full original acceptance. No validation pass, completion, or initiative closure is claimed here.

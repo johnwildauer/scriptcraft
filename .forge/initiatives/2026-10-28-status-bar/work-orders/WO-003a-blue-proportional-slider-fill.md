@@ -2,14 +2,14 @@
 
 ## Metadata
 
-- **Status:** `in-review` — implementation evidence is recorded; the separate fix commit and its committed-range whitespace check are pending orchestrator action before fresh validation.
+- **Status:** `complete` — fresh validation passed the fix and full original WO-003 ranges; completion reconciliation is recorded below.
 - **Assignee:** Fresh dedicated implementer, separate from the WO-003 implementer and validator; actual host dispatch ID `01a184da-1260-706c-96ec-3c55e3fe5d2c` reconciled below.
 - **Phase/order:** Fix for WO-003; sequentially follows its failed validation.
 - **Initiative:** [`status-bar-v1.md`](../status-bar-v1.md)
-- **Original work order:** [`WO-003-transient-zoom-and-integrated-regression.md`](WO-003-transient-zoom-and-integrated-regression.md) (`blocked` until a linked fix passes).
+- **Original work order:** [`WO-003-transient-zoom-and-integrated-regression.md`](WO-003-transient-zoom-and-integrated-regression.md) (`complete` after the linked fix passed fresh validation over both required boundaries).
 - **Failure:** [`validation-WO-003.md`](../validations/validation-WO-003.md), `fail` on `a73c9de14195fb32ae36dce3ae2bba090c8970cf..671c7267328b960be10c82be1fa032df895b0874`; actual validator host dispatch `01a184cb-6163-710f-b7f3-52d14c89466d`.
-- **Fix validation:** `validation-WO-003a.md` (created by the separate fresh validator after implementation; not yet created).
-- **Fix commit:** Required as a separate commit directly based on the original WO-003 target `671c7267328b960be10c82be1fa032df895b0874`; hash pending orchestrator action. Implementer did not stage or commit.
+- **Fix validation:** [`validation-WO-003a.md`](../validations/validation-WO-003a.md) (`PASS` for the fix and full original WO-003 ranges; actual validator host dispatch ID `01a184f3-6a4f-76bb-81b2-9ad6d5c5b738`).
+- **Fix commit:** `0e453485067a18ba49bf87acef16c77a2ed739c8`, a separate commit directly based on the original WO-003 target `671c7267328b960be10c82be1fa032df895b0874`; committed-range whitespace check passed. Implementer did not stage or commit.
 - **Owner/orchestrator:** Forge orchestrator.
 - **Session exception:** none.
 
@@ -57,9 +57,9 @@ Record any failures and repairs; do not erase earlier attempts. Inspect exact ch
 ## Validation and completion boundary
 
 - Implementer must be a new fresh session. Record the actual host dispatch ID only after it is provided; do not invent an internal session/agent ID.
-- After implementation evidence and the separate fix commit exist, dispatch a different fresh validator under [`05-validation.md`](../../process/05-validation.md).
+- After implementation evidence and the separate fix commit exist, dispatch a different fresh validator under [`05-validation.md`](../../../process/05-validation.md).
 - The validator must independently rerun all required checks listed above against the committed fix (including the fix-range and full-original committed-range `git diff --check`), assess WO-003a against its fix commit, **and** re-evaluate the complete original WO-003 acceptance boundary on `a73c9de14195fb32ae36dce3ae2bba090c8970cf..<fix-commit>`, including the slider range, thumb, pointer/keyboard/accessibility behavior and all prior integrated contracts. Do not validate only the newly added color test.
-- The original WO-003 remains `blocked` and incomplete until the independent validator passes both the fix and full original acceptance. On pass, the orchestrator records the actual validator host dispatch ID, links `validation-WO-003a.md`, and reconciles the fix and original states according to Forge policy.
+- The original WO-003 remained `blocked` and incomplete until the independent validator passed both the fix and full original acceptance. The orchestrator has recorded the actual validator host dispatch ID, linked `validation-WO-003a.md`, and transitioned this fix and the original work order to `complete` under Forge policy.
 
 ## Durable-document impact
 
@@ -69,9 +69,9 @@ Record any failures and repairs; do not erase earlier attempts. Inspect exact ch
 
 ## Dispatch and state
 
-- **Current state:** `in-review`; dispatched to a fresh dedicated implementer on 2026-10-28 23:33 UTC and implemented with evidence on 2026-10-28 under actual host dispatch ID `01a184da-1260-706c-96ec-3c55e3fe5d2c`. No internal session/agent ID is inferred.
-- **Transition evidence:** `draft` → `in-progress` at dispatch, then `in-progress` → `in-review` after implementation and evidence recording. Initiative remains `execute` / `active`; original WO-003 remains `blocked` pending the fix and independent validation.
-- **Next action:** Orchestrator creates the separate fix commit directly based on `671c7267328b960be10c82be1fa032df895b0874`, then runs `git diff --check 671c7267328b960be10c82be1fa032df895b0874..<fix-commit>` before dispatching a distinct fresh validator. Validation must assess both WO-003a and the entire original WO-003 boundary; do not complete either work order here.
+- **Current state:** `complete`; dispatched to a fresh dedicated implementer on 2026-10-28 23:33 UTC and implemented with evidence on 2026-10-28 under actual host dispatch ID `01a184da-1260-706c-96ec-3c55e3fe5d2c`. Fresh validation and completion are reconciled below. No internal session/agent ID is inferred.
+- **Transition evidence:** `draft` → `in-progress` at dispatch, `in-progress` → `in-review` after implementation/evidence, then `in-review` → `complete` after the distinct fresh validator passed both the fix and full original WO-003 boundary. Initiative remains `execute` / `active`; original WO-003 is complete through this validated fix chain.
+- **Next action:** No further WO-003a action. Initiative closeout/merge remains outside this reconciliation.
 
 ## Implementer execution and evidence — 2026-10-28
 
@@ -104,7 +104,7 @@ Record any failures and repairs; do not erase earlier attempts. Inspect exact ch
 
 - **Failures/repairs:** Initial format-check failure and formatting repair are preserved above. No other required command failed; the diagnostic shape probe was replaced with the passing permanent rendered-output test.
 - **Commit boundary:** No staging or commit by implementer. Fix commit and committed-range whitespace check are pending the orchestrator; required direct parent is `671c7267328b960be10c82be1fa032df895b0874`.
-- **Validation handoff:** WO-003a is `in-review` with paths, attempts/results and diff evidence recorded. Fresh validation must wait for dispatch-ID reconciliation, separate fix commit, and its committed-range whitespace check. A different fresh validator must then assess WO-003a and the complete original WO-003 acceptance. WO-003 remains `blocked`; neither work order is claimed complete.
+- **Validation handoff:** WO-003a is `in-review` with paths, attempts/results and diff evidence recorded. Dispatch-ID reconciliation, separate fix commit, and committed-range whitespace check are recorded below. A different fresh validator must assess WO-003a and the complete original WO-003 acceptance. WO-003 remains `blocked`; neither work order is claimed complete.
 
 ## Orchestrator dispatch reconciliation / implementation-commit preflight — 2026-10-28
 
@@ -112,3 +112,25 @@ Record any failures and repairs; do not erase earlier attempts. Inspect exact ch
 - **State:** WO-003a remains `in-review`; original WO-003 remains `blocked`; initiative remains `execute` / `active`. The required implementation checks in the execution evidence are implementer-reported passing, not independently rerun here. Native visual/input smoke is unavailable and not claimed.
 - **Git preflight:** Branch `dev/2026-10-28-status-bar`; `HEAD` is the required base `671c7267328b960be10c82be1fa032df895b0874` and a direct child of `a73c9de14195fb32ae36dce3ae2bba090c8970cf`. The index was empty. Complete status/diff review found only the authorized change to `apps/scriptcraft/src/status_bar.rs` and approved Forge plan/log/WO/failed-validation state; no unexpected staged or unrelated path was present.
 - **Boundary:** This preflight records dispatch and reported evidence before staging. The separate commit must directly parent `671c7267328b960be10c82be1fa032df895b0874`; the staged inventory/diff and whitespace check precede commit, and the committed-range whitespace check follows it. No validation, approval, work-order completion, or initiative closure is performed.
+
+## Orchestrator implementation-commit reconciliation — 2026-10-28
+
+- **Commit and direct parent/base:** `0e453485067a18ba49bf87acef16c77a2ed739c8` (`fix(scriptcraft): enable proportional zoom slider fill`) is directly based on `671c7267328b960be10c82be1fa032df895b0874`, the original WO-003 target. No amend or history rewrite was performed.
+- **Exact committed paths/status:** `M` `apps/scriptcraft/src/status_bar.rs`; `M` `status-bar-v1.md`; `M` `execution-log.md`; `M` original WO-003; `A` this WO; `A` `validation-WO-003.md`.
+- **Commit guards:** Explicit staging was limited to those six authorized paths. Full staged name-status/diff and path inventory were inspected; `git diff --cached --check` passed. Post-commit ancestry/path checks passed, index/worktree were clean immediately after commit, and `git diff --check 671c7267328b960be10c82be1fa032df895b0874..0e453485067a18ba49bf87acef16c77a2ed739c8` passed.
+- **State/next boundary:** WO-003a remains `in-review`; WO-003 remains `blocked`; initiative remains `execute` / `active`. Required project checks remain implementer-reported and were not rerun by this bookkeeping. A different fresh validator must independently assess the fix and full original WO-003 acceptance. Native visual/input smoke is unavailable and not claimed; no completion or initiative closure is claimed.
+
+## Fresh validation result — 2026-10-29
+
+- **Validation artifact:** [`validation-WO-003a.md`](../validations/validation-WO-003a.md) records `PASS` for both exact committed ranges: the WO-003a fix range and the complete original WO-003 range.
+- **Dispatch identity:** Actual validator host dispatch ID `01a184f3-6a4f-76bb-81b2-9ad6d5c5b738`; no internal session/agent ID is available or inferred.
+- **Evidence:** The validator independently inspected both diffs and implementation, reran every focused/workspace/format/strict-Clippy and committed/worktree whitespace check, and found no remaining acceptance blocker. Native desktop visual/input smoke is unavailable and remains an optional limitation, not a claimed pass.
+- **State boundary at validator handoff:** At result time, state reconciliation was pending; the orchestrator's subsequent completion decision is recorded below. Native desktop visual/input smoke remains an explicit unclaimed limitation.
+
+## Orchestrator validation and completion reconciliation — 2026-10-29
+
+- **Actual validator host dispatch ID:** `01a184f3-6a4f-76bb-81b2-9ad6d5c5b738`; supplied host dispatch identity only, with no internal session/agent ID inferred.
+- **Pass confirmed before transition:** [`validation-WO-003a.md`](../validations/validation-WO-003a.md) passes exact fix range `671c7267328b960be10c82be1fa032df895b0874..0e453485067a18ba49bf87acef16c77a2ed739c8` and complete original WO-003 range `a73c9de14195fb32ae36dce3ae2bba090c8970cf..0e453485067a18ba49bf87acef16c77a2ed739c8`. All mandatory gates pass; the required rendered blue proportional-fill regression resolves the historical blocker. Earlier failed WO-003 validation remains intact.
+- **State transition:** WO-003a transitions `in-review` → `complete`; linked original WO-003 transitions `blocked` → `complete` under the Forge fix-validation policy. Initiative remains `execute` / `active`; no closeout, merge, or closure is performed.
+- **Process link repair:** Corrected the validation-process link above from the work-orders directory to [`05-validation.md`](../../../process/05-validation.md). Its resolved target is `.forge/process/05-validation.md` and was verified to exist.
+- **Limitation:** Native rendered-window and real pointer/keyboard smoke remains unavailable and unclaimed. It is recommended but not a configured hard-stop; startup/liveness alone is not represented as smoke.
