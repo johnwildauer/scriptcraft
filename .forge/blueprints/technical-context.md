@@ -58,7 +58,7 @@ fixed PageProfile → layout/pages/source mappings → display list
 | Desktop host | Native desktop application | Framework unknown | desired / provisional |
 | Core boundary | Window-independent library or modules | Keep semantic behavior headless-capable | desired / inferred from analysis |
 | Native data | Versioned UTF-8 JSON-like owned project | Extension/schema not selected | desired / provisional |
-| Layout | One bounded named/versioned screenplay page profile initially | `us_letter_screenplay` v1: 72-point/inch US Letter (`612 × 792` points), margins top/bottom/left/right `72/72/108/72`, seven persisted role boxes, 12-point Courier-family target with deterministic monospace fallback, 7-unit default character metric, 12-unit same-element advance and 12-unit boundary gap; screen/PDF/caret consume shared layout and viewport scale is presentation-only | verified by WO-002a implementation; fresh validation pending |
+| Layout | One bounded named/versioned screenplay page profile initially | `us_letter_screenplay` v1: 72-point/inch US Letter (`612 × 792` points), margins top/bottom/left/right `72/72/108/72`, seven persisted role boxes, 12-point Courier Prime default (regular face bundled in desktop builds), 7-unit fixed character cell, 12-unit same-element advance and 12-unit boundary gap; screen/PDF/caret consume shared layout and viewport scale is presentation-only. PDF retains Type1 family mapping and does not embed the bundled TTF. | fixed profile verified; font renderer updated by WO-007 |
 | Export | PDF plus deliberately lossy plain text | Exact library/contract unknown | desired / provisional |
 
 ## Cross-cutting concerns
@@ -80,7 +80,7 @@ fixed PageProfile → layout/pages/source mappings → display list
 
 - The current source baseline is empty in the inspected application/library paths; do not infer that the analysis-referenced WordCraft modules are present.
 - Framework and package structure are unresolved; choose only after a verified workspace discovery step.
-- Font metrics can make pagination nondeterministic across machines; pin or bundle an acceptable open font/profile before promising exact output.
+- Desktop glyph advances do not determine pagination: the fixed seven-unit character cell owns layout and the supplied regular Courier Prime face is bundled in the app. PDF still uses a non-embedded Type1 family mapping, so downstream viewer substitution may vary; do not claim identical PDF glyph appearance without a separately approved embedding change.
 - A general document model could reintroduce Word-specific breadth; keep the semantic screenplay model explicit and small.
 - Recovery snapshots are not the same as atomic saves; both need separate tests and evidence.
 - Incremental pagination, collaboration, interchange, MCP, and web support remain deferred until a demonstrated requirement exists.

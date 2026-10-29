@@ -13,6 +13,7 @@ use scriptcraft_core::{Project, Role};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod document_font;
 mod status_bar;
 mod toolbar;
 use status_bar::{DiagnosticProjection, ViewportPageTracker};
@@ -77,6 +78,7 @@ struct ScriptCraftApp {
     page_geometry: ViewportPageTracker,
     page_scale: Option<f32>,
     zoom_percent: u16,
+    pinch_zoom_percent: f64,
     #[cfg(test)]
     last_scroll_offset: Vec2,
     caret_blink_focus_generation: u64,
@@ -98,7 +100,7 @@ impl ScriptCraftApp {
             ime_preedit: String::new(),
             ime_active: false,
             rendered_revision: None,
-            status: "In-memory demo project".into(),
+            status: String::new(),
             error: None,
             native_path: None,
             native_input_diagnostics: NativeInputDiagnostics::default(),
@@ -109,6 +111,7 @@ impl ScriptCraftApp {
             page_geometry: ViewportPageTracker::default(),
             page_scale: None,
             zoom_percent: 100,
+            pinch_zoom_percent: 100.0,
             #[cfg(test)]
             last_scroll_offset: Vec2::ZERO,
             caret_blink_focus_generation: 0,
@@ -121,6 +124,10 @@ impl ScriptCraftApp {
     fn request_repaint(&mut self, ctx: &egui::Context) {
         self.performance.repaint_requests = self.performance.repaint_requests.saturating_add(1);
         ctx.request_repaint();
+    }
+
+    fn sync_pinch_zoom_from_controls(&mut self) {
+        self.pinch_zoom_percent = f64::from(self.zoom_percent);
     }
 
     fn layout_for_render(
@@ -426,7 +433,7 @@ impl ScriptCraftApp {
                 &painter,
                 egui::pos2(x, y),
                 &line.text,
-                renderer_font(metrics.font_size),
+                renderer_font(&layout.profile.font_family, metrics.font_size),
                 Color32::DARK_GRAY,
                 char_width,
             );
@@ -471,7 +478,7 @@ impl ScriptCraftApp {
                         egui::pos2(x, y),
                         egui::Align2::LEFT_TOP,
                         &self.ime_preedit,
-                        renderer_font(metrics.font_size),
+                        renderer_font(&layout.profile.font_family, metrics.font_size),
                         Color32::from_rgb(80, 80, 160),
                     );
                 }
@@ -665,6 +672,7 @@ impl ScriptCraftApp {
                 egui::Event::Ime(egui::ImeEvent::Commit(_)) => "ime-commit",
                 egui::Event::Ime(egui::ImeEvent::Enabled) => "ime-enabled",
                 egui::Event::Ime(egui::ImeEvent::Disabled) => "ime-disabled",
+                egui::Event::Zoom(_) => "zoom",
                 egui::Event::Key { pressed: true, .. } => "key-pressed",
                 egui::Event::Key { pressed: false, .. } => "key-released",
                 _ => "other",
@@ -1017,13 +1025,17 @@ fn paint_fixed_metric_text(
     }
 }
 
-fn renderer_font(font_size: f32) -> FontId {
+fn renderer_font(font_family: &str, font_size: f32) -> FontId {
     FontId::new(
         font_size,
-        // The persisted profile names the Courier-family target. egui's
-        // built-in monospace family is the deterministic headless fallback;
-        // viewport scale changes the display transform, not the base point size.
-        FontFamily::Monospace,
+        if font_family == document_font::COURIER_PRIME_FAMILY {
+            FontFamily::Name(document_font::COURIER_PRIME_FAMILY.into())
+        } else {
+            // Preserve the renderer's established appearance for explicit legacy
+            // Courier/Courier New profiles; only the new Prime default selects
+            // the embedded face. Viewport scale remains presentation-only.
+            FontFamily::Monospace
+        },
     )
 }
 
@@ -1124,70 +1136,103 @@ fn central_panel_frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::central_panel(ctx.style().as_ref()).fill(toolbar_chrome_color(ctx))
 }
 
+fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egui::Rect {
+    egui::TopBottomPanel::top("titlebar-toolbar")
+        .frame(chrome_frame(ctx))
+        .show_separator_line(false)
+        .exact_height(toolbar_content_height(&ctx.style()))
+        .show(ctx, |ui| app.toolbar(ui));
+    let viewport_rect = ctx.screen_rect();
+    let page_number = app.page_geometry.visible_page(
+        app.performance.frames,
+        app.session.revision(),
+        viewport_rect,
+        app.page_scale.unwrap_or(f32::NAN),
+        app.reveal_intent == RevealIntent::Conditional
+            || page_geometry_input_invalidated(ctx, app.page_geometry.clip()),
+    );
+    let center = status_bar::project_center(app.session.dirty(), &app.status, app.error.as_deref());
+    let performance = app.performance;
+    let input_diagnostics = &app.native_input_diagnostics;
+    let diagnostics = DiagnosticProjection {
+        focused: input_diagnostics.focused,
+        focus_lock: input_diagnostics.focus_lock_installed,
+        dispatch_enabled: input_diagnostics.dispatch_enabled,
+        received_events: input_diagnostics.received_events,
+        dispatched_frames: input_diagnostics.dispatched_frames,
+        pointer_activations: input_diagnostics.pointer_activations,
+        last_event_category: input_diagnostics.last_event_category,
+        performance_events: performance.events,
+        layout_builds: performance.layout_builds,
+        layout_cache_hits: performance.layout_cache_hits,
+        painted_pages: performance.painted_pages,
+        repaint_requests: performance.repaint_requests,
+    };
+    egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+        if status_bar::show(ui, page_number, &center, diagnostics, &mut app.zoom_percent) {
+            // Pointer/keyboard slider and exact preset edits become the new
+            // continuous pinch baseline, keeping both control paths in sync
+            // without changing document/session state.
+            app.sync_pinch_zoom_from_controls();
+            app.page_geometry.invalidate();
+            app.page_scale = None;
+        }
+    });
+    let central = egui::CentralPanel::default()
+        .frame(central_panel_frame(ctx))
+        .show(ctx, |ui| app.live_document_surface(ui));
+    central.response.rect
+}
+
 impl eframe::App for ScriptCraftApp {
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         chrome_clear_color(visuals)
     }
 
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // egui computes total pixels-per-point as zoom_factor × native scale.
+        // Resolve the factor against this frame's native scale before begin_pass
+        // so moving between monitors never briefly multiplies fallback 2.0 by
+        // the newly reported OS scale.
+        let viewport = raw_input.viewports.get_mut(&raw_input.viewport_id);
+        let native_scale = viewport.and_then(|viewport| {
+            if viewport
+                .native_pixels_per_point
+                .is_some_and(|value| !value.is_finite() || value <= 0.0)
+            {
+                viewport.native_pixels_per_point = None;
+            }
+            viewport.native_pixels_per_point
+        });
+        ctx.set_zoom_factor(status_bar::ui_zoom_factor(native_scale));
+
+        let original_zoom = self.zoom_percent;
+        for event in &raw_input.events {
+            if let egui::Event::Zoom(factor) = event {
+                self.record_native_event("zoom");
+                if let Some(next) =
+                    status_bar::zoom_after_native_factor(self.pinch_zoom_percent, *factor)
+                {
+                    self.pinch_zoom_percent = next;
+                    self.zoom_percent = status_bar::normalized_zoom_percent(next);
+                }
+            }
+        }
+        // The app has consumed the event for page zoom. Keep it out of egui's
+        // later input-state zoom delta so no other surface can apply it again.
+        raw_input
+            .events
+            .retain(|event| !matches!(event, egui::Event::Zoom(_)));
+        if self.zoom_percent != original_zoom {
+            self.page_geometry.invalidate();
+            self.page_scale = None;
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
-        egui::TopBottomPanel::top("titlebar-toolbar")
-            .frame(chrome_frame(ctx))
-            .show_separator_line(false)
-            .exact_height(toolbar_content_height(&ctx.style()))
-            .show(ctx, |ui| self.toolbar(ui));
-        let viewport_rect = ctx.screen_rect();
-        let page_number = self.page_geometry.visible_page(
-            self.performance.frames,
-            self.session.revision(),
-            viewport_rect,
-            self.page_scale.unwrap_or(f32::NAN),
-            self.reveal_intent == RevealIntent::Conditional
-                || page_geometry_input_invalidated(ctx, self.page_geometry.clip()),
-        );
-        let center = status_bar::project_center(
-            self.session.dirty(),
-            self.performance.frames,
-            self.native_path.as_deref(),
-            &self.status,
-            self.error.as_deref(),
-        );
-        let performance = self.performance;
-        let input_diagnostics = &self.native_input_diagnostics;
-        let diagnostics = DiagnosticProjection {
-            focused: input_diagnostics.focused,
-            focus_lock: input_diagnostics.focus_lock_installed,
-            dispatch_enabled: input_diagnostics.dispatch_enabled,
-            received_events: input_diagnostics.received_events,
-            dispatched_frames: input_diagnostics.dispatched_frames,
-            pointer_activations: input_diagnostics.pointer_activations,
-            last_event_category: input_diagnostics.last_event_category,
-            performance_events: performance.events,
-            layout_builds: performance.layout_builds,
-            layout_cache_hits: performance.layout_cache_hits,
-            painted_pages: performance.painted_pages,
-            repaint_requests: performance.repaint_requests,
-        };
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            if status_bar::show(
-                ui,
-                page_number,
-                &center,
-                diagnostics,
-                &mut self.zoom_percent,
-            ) {
-                self.page_geometry.invalidate();
-                self.page_scale = None;
-            }
-        });
-        egui::CentralPanel::default()
-            .frame(central_panel_frame(ctx))
-            .show(ctx, |ui| {
-                ui.heading(&self.session.project().metadata.title);
-                ui.separator();
-                self.live_document_surface(ui);
-            });
+        show_application_panels(self, ctx);
         self.handle_surface_input(ctx);
         self.performance.frame_nanos = self
             .performance
@@ -1238,7 +1283,8 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "ScriptCraft",
         options,
-        Box::new(|_cc| {
+        Box::new(|cc| {
+            document_font::install(&cc.egui_ctx);
             ScriptCraftApp::new()
                 .map(|app| Box::new(app) as Box<dyn eframe::App>)
                 .map_err(|error| error.into())
@@ -1251,8 +1297,14 @@ mod tests {
     use super::*;
     use crate::toolbar::*;
 
+    fn test_context() -> egui::Context {
+        let context = egui::Context::default();
+        document_font::install(&context);
+        context
+    }
+
     fn test_toolbar_label_width(label: &str) -> f32 {
-        let ctx = egui::Context::default();
+        let ctx = test_context();
         let mut width = 0.0;
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -1270,6 +1322,74 @@ mod tests {
         context.run(input, |context| {
             egui::CentralPanel::default().show(context, |ui| app.live_document_surface(ui));
         })
+    }
+
+    #[test]
+    fn rendered_application_omits_project_title_strip_and_keeps_title_page() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new("wo008-project", "Untitled Screenplay", "Writer")
+            .unwrap_or_else(|_| unreachable!());
+        project.title_page.push(
+            scriptcraft_core::ScreenplayElement::new(
+                "wo008-title-page-content",
+                Role::Action,
+                "VISIBLE TITLE PAGE CONTENT",
+            )
+            .unwrap_or_else(|_| unreachable!()),
+        );
+        let saved_project = project.to_json().unwrap_or_else(|_| unreachable!());
+        let reopened_project =
+            persistence::deserialize(saved_project.as_bytes()).unwrap_or_else(|_| unreachable!());
+        app.session
+            .replace_with_saved(reopened_project)
+            .unwrap_or_else(|_| unreachable!());
+        app.page_geometry.invalidate();
+
+        assert_eq!(app.session.project().metadata.title, "Untitled Screenplay");
+        assert_eq!(
+            app.session.project().title_page[0].text,
+            "VISIBLE TITLE PAGE CONTENT"
+        );
+        app.performance.frames = 1;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_024.0, 768.0));
+        let mut central_rect = egui::Rect::NOTHING;
+        let output = context.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| central_rect = show_application_panels(&mut app, ctx),
+        );
+
+        let rendered_text = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let rendered_document = rendered_text.concat();
+        assert!(rendered_text.iter().any(|text| text == "New"));
+        assert!(rendered_text.iter().any(|text| text == "100%"));
+        assert!(!rendered_text
+            .iter()
+            .any(|text| text == "Untitled Screenplay"));
+        assert!(rendered_document.contains("VISIBLE TITLE PAGE CONTENT"));
+        let editor_rect = app
+            .editor_surface_rect
+            .unwrap_or_else(|| unreachable!("the central panel must render the editor"));
+        assert!(editor_rect.height() > 0.0);
+        assert!(
+            editor_rect.top() - central_rect.top() < 20.0,
+            "editor should start at the central panel's normal inset without a reserved title row: editor={editor_rect:?}, central={central_rect:?}"
+        );
+        assert_eq!(app.session.project().metadata.title, "Untitled Screenplay");
+        assert_eq!(
+            app.session.project().title_page[0].text,
+            "VISIBLE TITLE PAGE CONTENT"
+        );
     }
 
     fn seed_page_snapshot(app: &mut ScriptCraftApp, pages: Vec<egui::Rect>) -> egui::Rect {
@@ -1298,7 +1418,7 @@ mod tests {
     }
 
     fn render_fresh_editor_geometry(app: &mut ScriptCraftApp) -> status_bar::VisiblePage {
-        let context = egui::Context::default();
+        let context = test_context();
         let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
         app.performance.frames = 2;
         let input = egui::RawInput {
@@ -1318,7 +1438,7 @@ mod tests {
         let layout = app.layout_for_render().unwrap_or_else(|_| unreachable!());
         assert!(layout.pages.len() >= 2);
 
-        let context = egui::Context::default();
+        let context = test_context();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
         let input = egui::RawInput {
             screen_rect: Some(screen),
@@ -1542,7 +1662,7 @@ mod tests {
 
     #[test]
     fn status_bar_marks_scroll_and_caret_reveal_as_stale_before_fresh_publish() {
-        let context = egui::Context::default();
+        let context = test_context();
         let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(300.0, 400.0));
         let input = egui::RawInput {
             events: vec![egui::Event::MouseWheel {
@@ -1619,7 +1739,7 @@ mod tests {
 
     #[test]
     fn toolbar_chrome_uses_open_widget_fill_without_mutating_style() {
-        let ctx = egui::Context::default();
+        let ctx = test_context();
         let mut style = (*ctx.style()).clone();
         style.visuals.panel_fill = Color32::from_rgb(17, 34, 51);
         style.visuals.widgets.open.weak_bg_fill = Color32::from_rgb(68, 85, 102);
@@ -1642,7 +1762,7 @@ mod tests {
 
     #[test]
     fn toolbar_group_hover_response_is_deterministic_and_preserves_label_color() {
-        let ctx = egui::Context::default();
+        let ctx = test_context();
         let style = ctx.style();
         assert_eq!(toolbar_group_fill(&style, false), Color32::TRANSPARENT);
         assert_eq!(
@@ -1764,7 +1884,7 @@ mod tests {
 
     #[test]
     fn toolbar_icon_hover_fill_uses_the_existing_hover_color_source_only() {
-        let ctx = egui::Context::default();
+        let ctx = test_context();
         let style = ctx.style();
         assert_eq!(
             toolbar_group_fill(&style, true),
@@ -1776,7 +1896,7 @@ mod tests {
 
     #[test]
     fn toolbar_chrome_frame_preserves_top_panel_geometry_defaults() {
-        let ctx = egui::Context::default();
+        let ctx = test_context();
         let actual = chrome_frame(&ctx);
 
         assert_eq!(actual.inner_margin, egui::Margin::ZERO);
@@ -1787,7 +1907,7 @@ mod tests {
 
     #[test]
     fn restored_toolbar_padding_stays_inside_the_exact_panel_boundary() {
-        let ctx = egui::Context::default();
+        let ctx = test_context();
         let row_height = ctx.style().spacing.interact_size.y * 2.0;
 
         assert_eq!(TOOLBAR_BOTTOM_PADDING, 2.0);
@@ -1811,7 +1931,7 @@ mod tests {
 
     #[test]
     fn viewport_clear_color_matches_the_chrome_surface_owner() {
-        let ctx = egui::Context::default();
+        let ctx = test_context();
         let visuals = ctx.style().visuals.clone();
 
         assert_eq!(
@@ -1928,13 +2048,189 @@ mod tests {
     }
 
     #[test]
+    fn native_zoom_events_change_transient_page_zoom_and_leave_editor_input_untouched() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let context = test_context();
+        let initial_revision = app.session.revision();
+        let initial_selection = app.session.selection();
+        let initial_json = app
+            .session
+            .project()
+            .to_json()
+            .unwrap_or_else(|_| unreachable!());
+        let mut raw_input = egui::RawInput {
+            events: vec![
+                egui::Event::Zoom(1.02),
+                egui::Event::Zoom(1.02),
+                egui::Event::Zoom(1.02),
+            ],
+            ..Default::default()
+        };
+
+        eframe::App::raw_input_hook(&mut app, &context, &mut raw_input);
+        assert_eq!(app.zoom_percent, 106);
+        assert!((app.pinch_zoom_percent - 106.1208).abs() < 0.001);
+        assert_eq!(app.page_scale, None);
+        assert_eq!(app.session.revision(), initial_revision);
+        assert_eq!(app.session.selection(), initial_selection);
+
+        assert!(raw_input.events.is_empty(), "native zoom was consumed once");
+        let mut egui_zoom_delta = 0.0;
+        let _ = context.run(raw_input, |context| {
+            egui_zoom_delta = context.input(|input| input.zoom_delta());
+        });
+        assert_eq!(egui_zoom_delta, 1.0);
+        app.dispatch_surface_events(&[], egui::Modifiers::default());
+        assert_eq!(app.session.revision(), initial_revision);
+        assert_eq!(app.session.selection(), initial_selection);
+        assert_eq!(
+            app.session
+                .project()
+                .to_json()
+                .unwrap_or_else(|_| unreachable!()),
+            initial_json
+        );
+        assert_eq!(app.native_input_diagnostics.received_events, 3);
+        assert_eq!(app.native_input_diagnostics.last_event_category, "zoom");
+
+        let context = test_context();
+        context.enable_accesskit();
+        let mut zoom = app.zoom_percent;
+        let output = context.run(egui::RawInput::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                assert!(!status_bar::show(
+                    ui,
+                    status_bar::VisiblePage::Available {
+                        one_based: 1,
+                        total: 1,
+                    },
+                    &status_bar::project_center(false, "", None),
+                    status_bar::DiagnosticProjection {
+                        focused: false,
+                        focus_lock: false,
+                        dispatch_enabled: false,
+                        received_events: 0,
+                        dispatched_frames: 0,
+                        pointer_activations: 0,
+                        last_event_category: "",
+                        performance_events: 0,
+                        layout_builds: 0,
+                        layout_cache_hits: 0,
+                        painted_pages: 0,
+                        repaint_requests: 0,
+                    },
+                    &mut zoom,
+                ));
+            });
+        });
+        assert_eq!(zoom, 106);
+        assert!(output.shapes.iter().any(|clipped| matches!(
+            &clipped.shape,
+            egui::epaint::Shape::Text(text) if text.galley.text() == "106%"
+        )));
+        assert!(output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .is_some_and(|update| update.nodes.iter().any(|(_, node)| {
+                node.role() == egui::accesskit::Role::Slider
+                    && node.name() == Some("Page zoom")
+                    && node.numeric_value() == Some(106.0)
+            })));
+    }
+
+    #[test]
+    fn native_zoom_rejects_invalid_events_and_clamps_both_bounds() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let context = test_context();
+
+        for factor in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut input = egui::RawInput {
+                events: vec![egui::Event::Zoom(factor)],
+                ..Default::default()
+            };
+            eframe::App::raw_input_hook(&mut app, &context, &mut input);
+            assert_eq!(app.zoom_percent, 100, "invalid factor {factor:?}");
+            assert_eq!(app.pinch_zoom_percent, 100.0);
+        }
+
+        let mut outward = egui::RawInput {
+            events: vec![egui::Event::Zoom(100.0)],
+            ..Default::default()
+        };
+        eframe::App::raw_input_hook(&mut app, &context, &mut outward);
+        assert_eq!(app.zoom_percent, status_bar::MAX_ZOOM_PERCENT);
+        assert_eq!(
+            app.pinch_zoom_percent,
+            f64::from(status_bar::MAX_ZOOM_PERCENT)
+        );
+
+        let mut inward = egui::RawInput {
+            events: vec![egui::Event::Zoom(0.001)],
+            ..Default::default()
+        };
+        eframe::App::raw_input_hook(&mut app, &context, &mut inward);
+        assert_eq!(app.zoom_percent, status_bar::MIN_ZOOM_PERCENT);
+        assert_eq!(
+            app.pinch_zoom_percent,
+            f64::from(status_bar::MIN_ZOOM_PERCENT)
+        );
+    }
+
+    #[test]
+    fn ui_scale_hook_uses_native_pixels_once_and_fallback_without_carryover() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let context = test_context();
+        for (native, expected_factor, expected_pixels_per_point) in [
+            (Some(1.0), 1.0, 1.0),
+            (Some(1.5), 1.0, 1.5),
+            (Some(2.0), 1.0, 2.0),
+            (None, 2.0, 2.0),
+            (Some(1.5), 1.0, 1.5),
+            (Some(f32::NAN), 2.0, 2.0),
+            (Some(0.0), 2.0, 2.0),
+        ] {
+            let mut input = egui::RawInput::default();
+            if let Some(viewport) = input.viewports.get_mut(&input.viewport_id) {
+                viewport.native_pixels_per_point = native;
+            }
+            eframe::App::raw_input_hook(&mut app, &context, &mut input);
+            let _ = context.run(input, |_| {});
+            assert_eq!(context.zoom_factor(), expected_factor);
+            assert_eq!(context.pixels_per_point(), expected_pixels_per_point);
+        }
+        assert_eq!(status_bar::resolved_ui_pixels_per_point(Some(1.5)), 1.5);
+        assert_eq!(status_bar::resolved_ui_pixels_per_point(None), 2.0);
+    }
+
+    #[test]
+    fn status_controls_override_pinch_fraction_and_continue_from_selected_value() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.pinch_zoom_percent = 143.4;
+        app.zoom_percent = status_bar::normalized_zoom_percent(app.pinch_zoom_percent);
+        assert_eq!(app.zoom_percent, 143);
+        // A control edit is handled by update after status_bar::show; this is
+        // the same synchronization performed in that production path.
+        app.zoom_percent = 200;
+        app.sync_pinch_zoom_from_controls();
+        assert_eq!(app.pinch_zoom_percent, 200.0);
+        assert_eq!(
+            status_bar::normalized_zoom_percent(
+                status_bar::zoom_after_native_factor(app.pinch_zoom_percent, 1.01)
+                    .unwrap_or(app.pinch_zoom_percent)
+            ),
+            202
+        );
+    }
+
+    #[test]
     fn zoomed_editor_presents_wide_pages_with_horizontal_and_vertical_scroll() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         app.zoom_percent = status_bar::MAX_ZOOM_PERCENT;
         app.session
             .insert(&"wide line\n".repeat(240))
             .unwrap_or_else(|_| unreachable!());
-        let context = egui::Context::default();
+        let context = test_context();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
 
         let page_rects = |output: &egui::FullOutput| {
@@ -2053,7 +2349,7 @@ mod tests {
         app.session
             .insert(&"page\n".repeat(180))
             .unwrap_or_else(|_| unreachable!());
-        let context = egui::Context::default();
+        let context = test_context();
         let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
         app.performance.frames = 1;
         let _ = render_editor_frame(
@@ -2178,7 +2474,7 @@ mod tests {
 
     #[test]
     fn elements_closed_text_layout_truncates_long_labels_without_leaving_the_control() {
-        let context = egui::Context::default();
+        let context = test_context();
         let control = egui::Rect::from_min_size(egui::pos2(10.0, 4.0), Vec2::new(128.0, 24.0));
         let _ = context.run(
             egui::RawInput {
@@ -3042,7 +3338,7 @@ mod tests {
                 .change_role(Role::Parenthetical)
                 .unwrap_or_else(|_| unreachable!());
 
-            let context = egui::Context::default();
+            let context = test_context();
             let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
             let layout =
                 ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
@@ -3181,7 +3477,7 @@ mod tests {
     #[test]
     fn unfocused_surface_does_not_consume_keyboard_events() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
-        let context = egui::Context::default();
+        let context = test_context();
         let _ = context.run(
             egui::RawInput {
                 focused: true,
@@ -3201,7 +3497,7 @@ mod tests {
         app.session
             .insert("seed")
             .unwrap_or_else(|_| unreachable!());
-        let context = egui::Context::default();
+        let context = test_context();
         let layout =
             ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
         let (_, horizontal_padding, scale) =
@@ -3498,20 +3794,73 @@ mod tests {
     }
 
     #[test]
-    fn renderer_uses_profile_point_size_and_deterministic_monospace_fallback() {
+    fn renderer_uses_embedded_profile_face_and_preserves_legacy_fallback() {
         let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         let layout =
             ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
-        let font = renderer_font(6.0);
-        assert_eq!(layout.profile.font_family, "Courier");
+        let font = renderer_font(&layout.profile.font_family, 6.0);
+        assert_eq!(layout.profile.font_family, "Courier Prime");
         assert_eq!(layout.profile.font_size, 12);
         assert_eq!(font.size, 6.0);
-        assert_eq!(font.family, FontFamily::Monospace);
+        assert_eq!(
+            font.family,
+            FontFamily::Name(document_font::COURIER_PRIME_FAMILY.into())
+        );
+        assert_eq!(renderer_font("Courier", 6.0).family, FontFamily::Monospace);
+        assert_eq!(
+            renderer_font("Courier New", 6.0).family,
+            FontFamily::Monospace
+        );
+    }
+
+    #[test]
+    fn rendered_document_text_uses_bundled_face_without_changing_fixed_cells() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert("INT. ROOM - DAY")
+            .unwrap_or_else(|_| unreachable!());
+        let layout = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        let line = layout.pages[0].lines[0].clone();
+        let output = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+        );
+        let scale = app.page_scale.unwrap_or(1.0);
+        let mut glyphs = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text)
+                    if text.galley.job.sections[0].format.font_id.family
+                        == FontFamily::Name(document_font::COURIER_PRIME_FAMILY.into()) =>
+                {
+                    Some((text.pos.x, text.galley.text().to_owned()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        glyphs.sort_by(|left, right| left.0.total_cmp(&right.0));
+        assert_eq!(glyphs.len(), line.text.chars().count());
+        assert!(glyphs
+            .iter()
+            .all(|(_, character)| character.chars().count() == 1));
+        for pair in glyphs.windows(2) {
+            assert!(((pair[1].0 - pair[0].0) - layout.char_width as f32 * scale).abs() < 0.01);
+        }
+        assert_eq!(line.source.end - line.source.start, line.text.len());
     }
 
     #[test]
     fn rendered_caret_blink_alternates_on_controlled_egui_time() {
-        let context = egui::Context::default();
+        let context = test_context();
         let id = egui::Id::new("wo002-caret");
         let frame = |time: f64| {
             let mut visible = false;
@@ -3536,7 +3885,7 @@ mod tests {
 
     #[test]
     fn rendered_caret_blink_schedules_only_focused_collapsed_phases() {
-        let context = egui::Context::default();
+        let context = test_context();
         let id = egui::Id::new("wo002-repaint");
         let run = |time: f64, focused: bool, collapsed: bool| {
             let mut visible = false;
@@ -3570,7 +3919,7 @@ mod tests {
 
     #[test]
     fn rendered_caret_blink_identity_change_uses_a_distinct_entry() {
-        let context = egui::Context::default();
+        let context = test_context();
         let first = egui::Id::new("wo002-first-caret");
         let second = egui::Id::new("wo002-second-caret");
         let run = |id: egui::Id, time: f64| {
@@ -3595,7 +3944,7 @@ mod tests {
 
     #[test]
     fn rendered_caret_blink_focus_regain_starts_at_initial_visible_phase() {
-        let context = egui::Context::default();
+        let context = test_context();
         let focused_id = egui::Id::new("wo002-focus-generation-0");
         let regained_id = egui::Id::new("wo002-focus-generation-1");
         let run = |id: egui::Id, time: f64, focused: bool, reset_time: f64| {

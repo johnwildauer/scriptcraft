@@ -192,7 +192,7 @@ impl Default for PageProfile {
             uppercase_cues: true,
             auto_parenthetical: true,
             strict_transition_boundaries: true,
-            font_family: "Courier".into(),
+            font_family: "Courier Prime".into(),
             font_size: 12,
             char_width: 7,
             role_boxes: [
@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(p.elements[0].id.as_str(), "element-1");
         assert_eq!(p.elements[0].role, Role::SceneHeading);
         assert!(p.elements[0].text.is_empty());
-        assert_eq!(p.page_profile.font_family, "Courier");
+        assert_eq!(p.page_profile.font_family, "Courier Prime");
         assert!(p.page_profile.uppercase_cues);
         assert!(p.validate().is_ok());
     }
@@ -731,12 +731,12 @@ mod tests {
     fn missing_or_malformed_font_fields_remain_typed_errors() {
         let project = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
         let json = project.to_json().unwrap_or_else(|_| unreachable!());
-        let missing = json.replace(",\"font_family\":\"Courier\"", "");
+        let missing = json.replace(",\"font_family\":\"Courier Prime\"", "");
         assert_eq!(
             Project::from_json(&missing),
             Err(ModelError::MissingField("font_family"))
         );
-        let malformed = json.replace("\"font_family\":\"Courier\"", "\"font_family\":1");
+        let malformed = json.replace("\"font_family\":\"Courier Prime\"", "\"font_family\":1");
         assert_eq!(
             Project::from_json(&malformed),
             Err(ModelError::WrongType("font_family"))

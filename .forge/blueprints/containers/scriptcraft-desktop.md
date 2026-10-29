@@ -40,7 +40,7 @@ buffer.
 - Startup and toolbar New delegate project creation to the core `Project::new()` seed; the desktop shell does not duplicate the Scene Heading seed or alter the existing Enter/Tab transition and opened-project delegation boundaries.
 - Every semantic mutation goes through the core editing/session boundary and is undoable when it changes the project.
 - Viewport size and zoom do not redefine print pagination.
-- The desktop consumes the core's role-pair geometry and profile font identity unchanged: new projects use `Courier`, existing supported stored families are retained, and PDF consumes the same fixed layout rather than applying an independent spacing or font policy.
+- The desktop consumes the core's role-pair geometry and profile font identity unchanged: new projects use `Courier Prime`, existing supported stored families are retained without migration, and the supplied regular face is embedded into the application build and selected for default document text. Fixed character-cell placement continues to own screen geometry. PDF consumes the same fixed layout and the existing deterministic Type1 family mapping; it does not embed the supplied TTF or apply an independent spacing policy.
 - A failed open/save/export reports an error and does not silently replace valid in-memory or on-disk project state.
 - The painted page-layout editor has one stable whole-surface egui response/ID for
   focus and keyboard ownership. Page rectangles remain render/hit-test geometry;
@@ -129,11 +129,14 @@ buffer.
   not define or invent application actions or icon assignments. Noninteractive
   labels remain response-free and do not compete with the editor for focus or
   cursor ownership. The status adapter projects current `EditingSession::dirty()`
-  state (including clean-but-never-named projects), cumulative frame count,
-  optional native path, operation state, and visible errors. Bounded diagnostics
-  expose aggregate counters and event categories only, never screenplay/source
-  text or serialized project contents. A wrapped narrow-width layout retains
-  access to page, document, operation/error, diagnostics, and zoom controls.
+  state (including clean-but-never-named projects), operation state, and visible
+  errors; it does not display the cumulative frame count, native path, or initial
+  in-memory-demo placeholder. The three-region wide layout and compact one-row
+  layout clip status text horizontally rather than wrapping or growing the
+  footer. Bounded Diagnostics expose aggregate counters and event categories
+  only, never screenplay/source text or serialized project contents. Diagnostics
+  remains available for the current release scope, with removal deferred until
+  pre-release.
 - The left status Item is a viewport-visible rendered-sheet indicator, not a
   caret/page-source indicator. The editor publishes actual painted page
   rectangles and its actual `ScrollArea` clip with layout revision, presentation
@@ -161,6 +164,21 @@ buffer.
   invalidates visible-page geometry until a fresh page/clip snapshot is
   published. Zoom alone does not mutate the editing session, saved/dirty or
   undo state, fixed pagination/source ranges, or fixed-layout PDF output.
+- Supported native `egui::Event::Zoom` input is routed once at the app boundary
+  to that same bounded transient page-zoom value; positive factors magnify and
+  factors below one shrink. egui-winit 0.29.1 maps winit 0.30.13
+  `WindowEvent::PinchGesture` to this event (positive native delta magnifies,
+  negative delta shrinks). The pinned winit API documents native pinch delivery
+  only on macOS and iOS; other platforms/backends may not deliver it, and no
+  separate squeeze event is promised. The zoom event is not dispatched as text,
+  selection, or editing input.
+- Effective UI pixels-per-point uses egui's optional per-viewport OS-native
+  pixels-per-point at a UI zoom factor of 1.0, or a UI zoom factor of 2.0 when
+  native scale is unavailable/invalid. This is resolved in eframe's pre-input
+  hook against the incoming viewport scale so a fallback is not retained when
+  native scale later appears. The resulting global egui UI scale affects
+  controls and framework-managed pointer/AccessKit/IME geometry; the independent
+  document percentage remains a page presentation transform only.
 - The unified title-bar/toolbar `TopBottomPanel` uses the egui style's open-widget
   `Widgets::open::weak_bg_fill` as its explicit app-chrome fill through a local
   shared frame helper. The shared frame has no inner/outer inset and disables
@@ -218,6 +236,8 @@ buffer.
 | 2026-10-27 | Recorded unified title-bar/toolbar surface ownership | WO-002 implementation evidence: one zero-inset, no-separator app-chrome frame owns the title and toolbar surface; the title retains a full-width response and the toolbar retains explicit row allocation padding. |
 | 2026-10-28 | Recorded item-based status and viewport-page ownership | Approved status-bar WO-002 implementation: desktop status items project live app/session state and consume fresh rendered-page/scroll-clip geometry without changing core layout or editor input ownership. |
 | 2026-10-28 | Recorded transient page zoom and two-axis navigation | Approved status-bar WO-003 implementation: one window-owned page-only percentage state preserves the responsive baseline, source/input mapping, and fixed core/export contracts. |
+| 2026-10-29 | Recorded status-content removal and horizontal clipping | WO-005 implementation: no displayed frame/path/demo placeholder; status and Diagnostics content are clipped to single-line regions, while clean/unsaved, operation/error, visible page, zoom, and Diagnostics-now behavior remain. Diagnostics removal is deferred until pre-release. |
+| 2026-10-29 | Recorded supported native pinch and UI scale | WO-006 implementation: supported egui zoom events update transient page-only zoom; native pixels-per-point is applied once with exact 2.0 fallback when unavailable, distinct from page zoom. Native delivery remains platform/backend dependent. |
 
 ## WO-001 verified foundation facts
 

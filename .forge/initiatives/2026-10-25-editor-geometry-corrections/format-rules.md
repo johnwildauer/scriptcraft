@@ -4,7 +4,7 @@ Standard screenplay formatting rules require specific font, margin, and line spa
 
 ## Font and Text Size
 
-• Font Family: Courier (12-point), Courier New, or Courier Prime. Courier is a monospaced font where every character takes up the exact same horizontal space, making page-to-time calculations reliable.
+• Font Family: Courier Prime (12-point) is the default for new projects. Courier and Courier New remain accepted for explicitly saved legacy profiles. Courier Prime is a screenplay-oriented monospaced face; ScriptCraft's fixed character-cell geometry, not platform font advances, remains authoritative for layout.
 • Font Size: 12-point.
 
 ## Page Margins (US Letter)
@@ -45,9 +45,13 @@ logical boundary unit only when the selected extra gap is nonzero.
 This document is the human-readable reference for ScriptCraft's default
 screenplay format. Layout code converts inch-defined values to typographic
 points using `72 × inches`; screen pixels and viewport zoom are never format
-inputs. The persisted profile records the Courier-family target and 12-point
-base metric; the desktop uses its deterministic monospace fallback when a
-named Courier face is unavailable.
+inputs. New profiles persist the exact family name `Courier Prime` and the
+12-point base metric. The desktop bundles and renders the supplied regular
+Courier Prime face; it uses the established monospace renderer for projects
+whose explicitly saved family is `Courier` or `Courier New`. The bundled font
+files and their SIL Open Font License notices remain unmodified at
+`fonts/CourierPrime/`. PDF keeps its existing deterministic Type1 family-name
+mapping; this does not claim that the PDF embeds the TrueType font.
 
 The native project/profile model should preserve a named format identity and a
 bounded, versioned override seam for future project-specific changes. Future

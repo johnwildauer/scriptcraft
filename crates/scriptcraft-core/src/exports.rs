@@ -210,7 +210,7 @@ mod tests {
         assert!(first.ends_with(b"%%EOF\n"));
         assert!(String::from_utf8_lossy(&first).contains("/Count 1"));
         assert!(String::from_utf8_lossy(&first).contains("INT. ROOM - DAY"));
-        assert!(String::from_utf8_lossy(&first).contains("/BaseFont /Courier"));
+        assert!(String::from_utf8_lossy(&first).contains("/BaseFont /CourierPrime"));
     }
 
     #[test]

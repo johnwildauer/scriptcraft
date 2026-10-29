@@ -155,15 +155,18 @@ caret or losing access to errors.
   pointer response, or cursor behavior. The status bar shall not introduce
   unrequested actions or icon assignments.
 - **AC-WRITING-006.2:** The status bar shall report the live editing session's
-  clean/unsaved state, cumulative frame count, current project path, and current
-  operation status. A clean in-memory project without a named path shall not be
-  described as previously saved.
+  clean/unsaved state and current operation status, without displaying a
+  cumulative frame count or project path. A clean in-memory project without a
+  named path shall not be described as previously saved; it may be labeled
+  `Clean` without asserting that it has been saved.
 - **AC-WRITING-006.3:** Operation errors shall remain visibly identifiable, and
   bounded diagnostics shall remain reachable without exposing screenplay text,
-  source text, or serialized project contents.
+  source text, or serialized project contents. Diagnostics is retained for the
+  current release scope, with its removal deferred until pre-release.
 - **AC-WRITING-006.4:** At narrow widths, a deterministic bounded fallback
-  shall retain access to visible-page state, clean/unsaved state, frames, path,
-  operation/error status, and diagnostics.
+  shall retain access to visible-page state, clean/unsaved state,
+  operation/error status, diagnostics, and zoom controls. Status text shall clip
+  horizontally as single-line content rather than wrap or grow the footer.
 - **AC-WRITING-006.5:** Given the actual rendered sheet rectangles and actual
   editor scroll clip, the visible-page Item shall use one-based numbering and
   select the sheet with the greatest vertical overlap; exact overlap ties shall
@@ -189,6 +192,27 @@ caret or losing access to errors.
   session revision, saved/dirty or undo state, fixed pagination/source ranges,
   or fixed-layout PDF output, and shall not globally scale the toolbar/status
   controls.
+- **AC-WRITING-006.8:** With status content and viewport size unchanged, the
+  bottom status panel shall remain height-stable across 60 consecutive egui
+  frames at normal (1200 × 820 logical points) and compact (480 × 820 logical
+  points) widths. After frame 1, the panel-height range across frames 2–60 shall
+  be no greater than 1 logical point, with no monotonic growth; status controls
+  and content shall remain available and the panel shall leave both toolbar and
+  editor visible.
+- **AC-WRITING-006.9:** The rendered status content and expanded Diagnostics
+  summary shall remain single-line and clipped to their allocated regions at
+  wide, breakpoint-adjacent, compact, and narrow widths. Changes in long status
+  text or diagnostic counters shall not add rows or increase stable footer
+  height; opening Diagnostics may add only its fixed disclosure row.
+- **AC-WRITING-006.10:** A supported native inward/outward pinch event shall
+  adjust the same transient per-window whole-percent page zoom as the status
+  slider and presets, preserving the inclusive 75–300% limits and all document,
+  session, pagination, export, and editor-input invariants in AC-WRITING-006.7.
+  Inward pinch is the negative direction of the backend's supported zoom event;
+  delivery is platform/backend dependent and no distinct squeeze event is
+  promised. Effective egui UI pixels-per-point shall use a valid OS-native value
+  once when reported, or exactly 2.0 when unavailable/invalid; this UI scale is
+  independent of page zoom and shall not multiply native scale twice.
 
 ## Non-functional requirements
 
@@ -215,6 +239,7 @@ caret or losing access to errors.
 
 | 2026-10-28 | Added desktop status-bar and viewport-visible-page acceptance criteria (`REQ-WRITING-LOOP-006`) | Approved status-bar initiative WO-002 adds desktop-only item, status, accessibility, narrow-width, and actual-viewport page contracts while preserving fixed core layout/source-mapping requirements |
 | 2026-10-28 | Added transient desktop page-zoom acceptance criterion (`AC-WRITING-006.7`) | Approved status-bar initiative WO-003 implementation; page-only 75–300% responsive zoom, exact presets, two-axis access, and fixed document/export invariants |
+| 2026-10-29 | Revised desktop status content and clipping criteria (`AC-WRITING-006.2`–`AC-WRITING-006.4`, `AC-WRITING-006.9`) | WO-005 removes the visible frame/path/initial-placeholder claims, retains Diagnostics until pre-release, and defines clipped single-line content while preserving page, zoom, state, and error behavior |
 
 ### Approved WO-007 refinement
 

@@ -148,15 +148,15 @@ Evidence: [`wo003_long_document.rs`](../../../crates/scriptcraft-core/tests/wo00
 
 ## WO-002a verified profile and renderer facts
 
-- `PageProfile` is the single bounded, versioned owner of the Courier-family target (`font_family`, `font_size`), deterministic character metric, line advance, boundary gap, and all seven role boxes. Native JSON round trips preserve default and alternate profiles; invalid role geometry and metric values are rejected before layout.
-- `ScreenplayLayout` derives wrapping, line rectangles, role edges, hit testing, caret rectangles, pagination, and page capacity from the persisted profile. The desktop renderer uses the profile's 12-point base size and the built-in monospace family as the deterministic fallback when a named Courier face is not installed; viewport scale is presentation-only.
+- `PageProfile` is the single bounded, versioned owner of the Courier-family target (`font_family`, `font_size`), deterministic character metric, line advance, boundary gap, and all seven role boxes. New projects select `Courier Prime`; native JSON round trips preserve default and explicitly chosen alternate profiles without migration or rewrite.
+- `ScreenplayLayout` derives wrapping, line rectangles, role edges, hit testing, caret rectangles, pagination, and page capacity from the persisted profile. The desktop renderer uses the embedded Courier Prime regular face for new-profile text at the profile's base size; explicit legacy `Courier` and `Courier New` profiles retain the established monospace rendering path. Fixed character cells remain authoritative and viewport scale is presentation-only.
 - PDF export consumes the same line rectangles and persisted font size. No override editor or per-element pixel formatting exists.
 
 Evidence: [`lib.rs`](../../../crates/scriptcraft-core/src/lib.rs), [`layout.rs`](../../../crates/scriptcraft-core/src/layout.rs), [`exports.rs`](../../../crates/scriptcraft-core/src/exports.rs), [`main.rs`](../../../apps/scriptcraft/src/main.rs), and focused profile/parity tests.
 
 ## WO-004 verified spacing and export facts
 
-- The fixed profile is `612 × 792` points with top/bottom/left/right margins `72/72/108/72`, `55` nominal line capacity, seven-unit fixed character cells, twelve-unit same-element line boxes, and twelve-unit inter-element boundary gaps. The renderer uses a 12-point Courier-family target and keeps viewport scaling out of print geometry.
+- The fixed profile is `612 × 792` points with top/bottom/left/right margins `72/72/108/72`, `55` nominal line capacity, seven-unit fixed character cells, twelve-unit same-element line boxes, and twelve-unit inter-element boundary gaps. New projects target the bundled regular Courier Prime face at 12 points and keep viewport scaling out of print geometry.
 - Structural regressions cover content bounds, explicit role edges, adjacent same-element and boundary advances, line boxes, caret heights, source mappings, empty/wrapped/keep-with-next lines, and page-capacity resets. The desktop regression confirms viewport scale transforms fixed layout coordinates without changing page structure.
 - PDF export consumes the same `ScreenplayLayout` line rectangles; regression coverage verifies x positions and the PDF coordinate transform `paper_height - y - height`, including twelve-unit adjacent-line spacing. The shared screen/PDF contract therefore remains unchanged.
 
