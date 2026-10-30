@@ -4,16 +4,18 @@
 
 The feature flows from a semantic `Project` through a transactional editing
 session and a fixed-profile layout pipeline to desktop/page/PDF consumers, with
-native persistence and bounded recovery at the side boundary. The blueprint is
-an intended technical composition, not a claim that these components exist.
+native persistence and bounded recovery at the side boundary. The core and
+desktop boundaries are implemented; this blueprint combines that current
+evidence with still-desired composition contracts and does not imply every
+requirement has been independently reviewed or validated.
 
 ## Document status
 
 - **Status:** `draft` — desired MVP composition; independent blueprint review not performed
 - **Owner:** Forge initialization agent
-- **Last updated:** 2026-10-25
+- **Last updated:** 2026-10-30
 - **Requirements:** [`../../requirements/features/screenplay-writing-loop.md`](../../requirements/features/screenplay-writing-loop.md)
-- **Evidence basis:** `.analysis` research and user-approved scope; current implementation unknown
+- **Evidence basis:** `.analysis` research, current core/app source, and work-order evidence; see revision history for the desktop UI Polish boundary and its native-evidence limits
 
 ## Component Blueprint Composition
 
@@ -90,6 +92,7 @@ constraints:
 - The layout display data uses the named/versioned `us_letter_screenplay` profile: inch-defined values become points at the format boundary, with explicit role boxes, source byte ranges, page assignment, valid-boundary hit/caret geometry, same-element single spacing, and an explicit body role-pair gap policy. Incoming Dialogue and Parenthetical elements have zero extra gap from every body predecessor; other incoming roles use the profile boundary gap. Title-page boundaries are excluded and viewport zoom is presentation-only.
 - Persistence → session: successful native save changes clean/path state only after replacement succeeds; failures preserve prior state.
 - The persisted profile is also the geometry/font seam: layout, caret/hit testing, desktop selection/IME rendering, pagination, and PDF consume its role boxes, character metric, line advance, boundary gap, and font size. New projects default to `Courier Prime`; explicit supported stored families remain unchanged on open/save, with `Courier` and `Courier New` retaining their established renderer path. The desktop embeds the supplied regular Courier Prime face at build time; fixed character cells remain authoritative and viewport scale is presentation-only. PDF retains the existing deterministic Type1 family mapping and does not embed the supplied TTF.
+- Desktop page zoom, appearance, Sprint Timer, Focus Mode, and right-status overflow are presentation/window state, not part of `Project`, `EditingSession`, or `ScreenplayLayout`. UI Polish WO-001–004 report and independently validate preservation of semantic/project state, fixed pagination/source mappings, and fixed-layout export behavior. The native notification request and fullscreen command remain desktop adapter boundaries; their actual OS delivery/completion is not established by rendered tests.
 
 ## Requirement alignment
 
@@ -130,6 +133,7 @@ constraints:
 |---|---|---|
 | 2026-10-25 | Created feature counterpart for the stable MVP requirement | Requirements and `.analysis` translated into a bounded technical composition; no implementation/review claimed |
 | 2026-10-25 | Resolved WO-007 export adapter contract | `scriptcraft-core::exports` uses a dependency-free deterministic PDF 1.4 consumer over `ScreenplayLayout`; plain text carries an in-band `LossReport` for roles, stable IDs, and page layout. Outputs borrow the project and never become native save state. |
+| 2026-10-30 | Clarified current implementation versus desired feature composition | Core/app source and UI Polish WO-001–004 validations establish selected desktop presentation behavior without making native notification/fullscreen or comprehensive feature-validation claims |
 
 ### WO-007 verified editing facts
 

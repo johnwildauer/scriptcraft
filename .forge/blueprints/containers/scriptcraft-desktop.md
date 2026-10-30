@@ -2,25 +2,27 @@
 
 ## Container Summary
 
-ScriptCraft Desktop is the desired native runnable boundary for an individual
+ScriptCraft Desktop is the native runnable boundary for an individual
 screenwriter. It owns the window, input/IME path, focused editor, page preview,
 dialogs, clipboard, file selection, status/error presentation, and platform
 services. It delegates semantic edits, layout decisions, and persistence
 contracts to the core rather than maintaining a second authoritative text
-buffer.
+buffer. The UI Polish WO-001–004 behavior below is implementation-backed by
+separate work-order validations, with native OS observations explicitly limited
+where noted.
 
 ## Document status
 
-- **Status:** `draft` — desired boundary; not implemented or independently reviewed
+- **Status:** `draft` — implementation evidence exists for the desktop shell and selected UI contracts; independent blueprint review remains separate
 - **Owner:** Forge initialization agent
-- **Last updated:** 2026-10-28
+- **Last updated:** 2026-10-30
 - **Technical context:** [`../technical-context.md`](../technical-context.md)
-- **Evidence basis:** desired architecture from `.analysis`, plus verified WO-009/WO-010 app-boundary behavior
+- **Evidence basis:** desired architecture from `.analysis`, verified app/core behavior, and later work-order evidence linked in revision history; not every desired contract is independently reviewed
 
 ## Infrastructure
 
-- **Technology/runtime:** Rust native desktop process — language confirmed; framework and OS target unknown.
-- **Build/package:** Cargo is an agent-default pending manifest verification; exact command unknown.
+- **Technology/runtime:** Rust native desktop process; app package uses eframe/egui 0.29 and delegates native windowing through its locked backend stack. Platform-specific behavior remains evidence-dependent.
+- **Build/package:** Cargo workspace; app package `scriptcraft` depends on eframe, rfd, and the reusable `scriptcraft-core` crate.
 - **Deployment/distribution:** Local desktop executable/package; packaging method unknown and out of current initialization scope.
 - **Configuration:** Keep UI preferences/session state separate from native screenplay projects; exact preference location unknown.
 - **Dependencies:** Core capability and selected desktop UI framework; do not add MCP, web, or broad format dependencies for MVP.
@@ -102,22 +104,24 @@ buffer.
   A fully fitting row remains inside that rect, including the rightmost Item and
   its label, after outer panel/frame/viewport insets; the overflow reservation
   is included in the same edge budget.
-- The native eframe viewport requests a hidden title, a transparent titlebar,
-  and a full-size content view through `ViewportBuilder`'s installed 0.29 API:
-  `with_title_shown(false)`, `with_titlebar_shown(false)`, and
-  `with_fullsize_content_view(true)`. These are native presentation hints: the
-  full-size content and titlebar behavior are macOS-specific in eframe, while
-  other platforms may ignore some or all of them and retain platform-managed
-  decorations. The app must not make pixel-level cross-platform titlebar
-  claims from these requests.
-- The desktop shell renders a unified title-bar/toolbar app surface. Its
-  30-point title region displays centered bold `ScriptCraft` placeholder text;
-  its full-width egui response owns double-click detection and sends
-  `ViewportCommand::Maximized(!maximized)` only when `ViewportInfo::maximized`
-  is `Some`; unknown state is a no-op. The shared surface owns the app-chrome
-  fill, zero frame inset, and no separator stroke, while toolbar row padding
-  owns toolbar allocation geometry. Unmaximize relies on native/backend
-  restoration where observable and makes no universal exact prior-frame claim.
+- The current app configures visible native decorations, title text/titlebar,
+  and titlebar buttons (`with_decorations(true)`, opaque presentation,
+  `with_title_shown(true)`, `with_titlebar_shown(true)`,
+  `with_fullsize_content_view(false)`, and
+  `with_titlebar_buttons_shown(true)`). The top egui panel renders the toolbar
+  directly; the central panel then renders the live document. The app does not
+  currently render a separate app-owned title strip or a title-strip
+  double-click maximize action. Native titlebar appearance and behavior remain
+  platform-owned.
+- **Unresolved requirement discrepancy:** AC-WRITING-005.6 still requires a
+  separate centered `ScriptCraft` app-owned title strip and its maximize action.
+  That requirement is not satisfied by the current composition above and is not
+  changed by this blueprint correction. Status-bar WO-008 removed only the
+  different project-metadata heading and separator below the toolbar; it did
+  not authorize removing or restoring the separate title strip. The product
+  owner/orchestrator must disposition AC-WRITING-005.6 through the appropriate
+  process. No title-strip product change or native titlebar equivalence is
+  claimed here.
 - Toolbar action controls and the Elements outer group request the standard
   arrow cursor; the Elements label remains decorative and does not own a
   competing response. The existing whole-surface painted editor response
@@ -125,18 +129,47 @@ buffer.
   than independent cursor or focus owners.
 - The desktop status bar owns three presentation regions and a typed status Item
   capability model: noninteractive text, clickable text, and clickable icons.
-  Capabilities carry explicit accessible names for interactive controls but do
-  not define or invent application actions or icon assignments. Noninteractive
-  labels remain response-free and do not compete with the editor for focus or
-  cursor ownership. The status adapter projects current `EditingSession::dirty()`
+  Noninteractive labels are response-free and do not compete with the editor for
+  focus or cursor ownership. The right-hand controls are ordered Sprint Timer,
+  Focus Mode, Appearance, and page zoom; a deterministic width-aware layout
+  moves the non-fitting suffix into one accessible overflow disclosure without
+  duplicating actions. Interactive controls have accessible names and keyboard
+  activation. The status adapter projects current `EditingSession::dirty()`
   state (including clean-but-never-named projects), operation state, and visible
   errors; it does not display the cumulative frame count, native path, or initial
-  in-memory-demo placeholder. The three-region wide layout and compact one-row
-  layout clip status text horizontally rather than wrapping or growing the
-  footer. Bounded Diagnostics expose aggregate counters and event categories
-  only, never screenplay/source text or serialized project contents. Diagnostics
+  in-memory-demo placeholder. Status and Diagnostics text clip as single lines;
+  overflow exposes page/clean/operation state and preserves error visibility.
+  Bounded Diagnostics expose aggregate counters and event categories only,
+  never screenplay/source text or serialized project contents. Diagnostics
   remains available for the current release scope, with removal deferred until
   pre-release.
+- Appearance is transient per window and starts in System mode. System follows
+  egui's resolved theme/fallback; Day uses light visuals, Night dark visuals, and
+  Midnight a darker derived palette. The page palette follows the resolved light
+  or dark theme and supplies paper, text, border, selection, caret, and IME
+  colors. Rendered tests measured contrast for the authored opaque page palettes;
+  native OS-theme propagation and native visual appearance have not been
+  observed. Appearance does not persist or change core/project/export state.
+- Sprint Timer is a transient per-window Countdown/Stopwatch model independent
+  of its popup visibility. It uses monotonic elapsed-time/deadline calculations,
+  bounded repaint scheduling while running, and no timer-owned idle/paused loop;
+  active/paused state survives popup dismissal, while relaunch persistence is
+  not provided. Completion commits a one-shot attempt per timer generation and
+  submits a fixed-text notification request asynchronously through the local
+  macOS `osascript` adapter. Process acceptance is not delivery evidence; OS
+  authorization, identity, presentation, delivery, and sleep-inclusive timing
+  are unverified. In-app completion remains available when the request is
+  unavailable.
+- Focus Mode observes this viewport's optional reported fullscreen state and
+  issues one framework borderless-fullscreen viewport command per accepted
+  activation when the state is known and no request is unresolved. Pending,
+  unknown, timeout, and external-transition states are presented without an
+  optimistic success claim; there is no implicit retry or inverse queue. The
+  backend/window manager owns native transition and restoration. The app's
+  600 ms stable-report interval is a duplicate-suppression heuristic, not a
+  native completion acknowledgement. No macOS app/window smoke was performed;
+  green-button/Space/menu-bar equivalence, Escape behavior, transition
+  completion, and exact geometry/monitor restoration remain unverified.
 - The left status Item is a viewport-visible rendered-sheet indicator, not a
   caret/page-source indicator. The editor publishes actual painted page
   rectangles and its actual `ScrollArea` clip with layout revision, presentation
@@ -153,11 +186,15 @@ buffer.
 - The desktop owns one transient integer zoom percentage per window, initialized
   to 100 and bounded to 75–300. Its accessible status-bar slider and adjacent
   nine-entry preset menu read and update that same value; the displayed percent
-  stays accurate for intermediate values. 100% delegates to the existing
-  responsive width-fit geometry, and resizing recomputes that fit baseline while
-  retaining the selected percentage. The percentage multiplies only page
-  presentation scale and never changes global egui zoom, toolbar/status sizing,
-  the core layout cache key, semantic coordinates, or persistent project data.
+  stays accurate for intermediate values. The 100% page baseline is 360 egui
+  logical points independent of viewport width. For the actual scroll area's
+  inner clip width `V`, page width `P`, and 16-point side buffer `B`, content width
+  is `max(V, P + 2B)`; the page is centered when it fits and scrollable
+  horizontally when the buffered page exceeds the inner clip. Resize preserves
+  a valid horizontal offset and otherwise clamps it to the current range. The
+  percentage multiplies only page presentation scale and never changes global
+  egui zoom, toolbar/status sizing, the core layout cache key, semantic
+  coordinates, or persistent project data.
   The page editor uses two-axis scrolling for overflow while maintaining its
   vertical multi-page route; painted page rectangles, pointer hit tests, caret
   reveal, and selection/source mapping use the same forward/inverse scale. Zoom
@@ -172,13 +209,14 @@ buffer.
   only on macOS and iOS; other platforms/backends may not deliver it, and no
   separate squeeze event is promised. The zoom event is not dispatched as text,
   selection, or editing input.
-- Effective UI pixels-per-point uses egui's optional per-viewport OS-native
-  pixels-per-point at a UI zoom factor of 1.0, or a UI zoom factor of 2.0 when
-  native scale is unavailable/invalid. This is resolved in eframe's pre-input
-  hook against the incoming viewport scale so a fallback is not retained when
-  native scale later appears. The resulting global egui UI scale affects
-  controls and framework-managed pointer/AccessKit/IME geometry; the independent
-  document percentage remains a page presentation transform only.
+- Effective UI pixels-per-point uses a valid finite positive per-viewport native
+  scale once at UI zoom factor 1.0; 1.0 is valid. When native scale is missing or
+  invalid, the desktop uses UI zoom factor 2.3, replacing that fallback when a
+  valid native value arrives. Resolution occurs in the pre-input hook against
+  the incoming viewport scale. The resulting egui UI scale affects controls and
+  framework-managed pointer/AccessKit/IME geometry; the independent document
+  percentage remains a page presentation transform only. These are
+  implementation/rendered-test results, not native multi-monitor observation.
 - The unified title-bar/toolbar `TopBottomPanel` uses the egui style's open-widget
   `Widgets::open::weak_bg_fill` as its explicit app-chrome fill through a local
   shared frame helper. The shared frame has no inner/outer inset and disables
@@ -220,7 +258,7 @@ buffer.
 
 - The desktop owns a bounded privacy-safe `PerformanceDiagnostics` record for cumulative frame, event, layout-build, paint, and repaint-request counts/timings. It stores no document text and exposes only aggregate counters in the status surface.
 - The desktop session adapter owns the reusable core `LayoutCache` instance, keyed by editing revision plus the complete persisted page profile. Unchanged reads hit an immutable shared layout; edits and any profile geometry/font/policy change miss it. Viewport scale remains a paint transform and does not invalidate layout. The headless benchmark invokes this same adapter rather than an `Arc`-clone proxy.
-- Repaint requests are limited to active surface input, focused caret phase scheduling, and explicit focus transitions; an otherwise focused idle frame does not request an unconditional repaint. Native long-document smoke was not available; headless benchmark/rendered instrumentation is the required evidence boundary.
+- Repaint requests include active surface input, focused caret phase scheduling, explicit focus transitions, and bounded timer progression while a timer is running (including while its popup is closed). Focus Mode polls only during pending/recovery/settling transitions; idle/paused/completed timers and otherwise focused idle frames do not request a timer-owned unconditional repaint. Native notification, fullscreen, and general visual smoke was not performed; rendered-frame/source evidence must not be described as native OS behavior.
 
 ## Revision history
 
@@ -238,6 +276,7 @@ buffer.
 | 2026-10-28 | Recorded transient page zoom and two-axis navigation | Approved status-bar WO-003 implementation: one window-owned page-only percentage state preserves the responsive baseline, source/input mapping, and fixed core/export contracts. |
 | 2026-10-29 | Recorded status-content removal and horizontal clipping | WO-005 implementation: no displayed frame/path/demo placeholder; status and Diagnostics content are clipped to single-line regions, while clean/unsaved, operation/error, visible page, zoom, and Diagnostics-now behavior remain. Diagnostics removal is deferred until pre-release. |
 | 2026-10-29 | Recorded supported native pinch and UI scale | WO-006 implementation: supported egui zoom events update transient page-only zoom; native pixels-per-point is applied once with exact 2.0 fallback when unavailable, distinct from page zoom. Native delivery remains platform/backend dependent. |
+| 2026-10-30 | Reconciled fixed page geometry, UI scale, status actions, appearance, timer, and Focus Mode | UI Polish WO-001–004 implementations and separate passing validations; source/rendered evidence records but does not prove native notification delivery, native fullscreen completion, OS theme delivery, or native visual smoke. Corrected the app-owned title-strip/native-titlebar description to current source while preserving the unresolved AC-WRITING-005.6 discrepancy; status-bar WO-008 removed only the separate project-metadata heading. |
 
 ## WO-001 verified foundation facts
 

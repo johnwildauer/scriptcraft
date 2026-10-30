@@ -11,20 +11,22 @@ use scriptcraft_core::layout::{Caret, LayoutCache, ScreenplayLayout};
 use scriptcraft_core::persistence::{self, FileSystem, StdFileSystem};
 use scriptcraft_core::{Project, Role};
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 mod document_font;
+mod focus_mode;
+mod sprint_timer;
 mod status_bar;
 mod toolbar;
+use sprint_timer::{NotificationResult, NotificationSink};
 use status_bar::{DiagnosticProjection, ViewportPageTracker};
 use toolbar::{toolbar_chrome_color, toolbar_content_height};
 
 const EDITOR_SURFACE_ID: &str = "page-editor-surface";
 const CARET_WIDTH: f32 = 1.5;
 const CURRENT_DEFAULT_PAGE_WIDTH: f32 = 360.0;
-const DEFAULT_PRESENTATION_SCALE_MULTIPLIER: f32 = 1.6;
 const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
-const MINIMUM_PAGE_WIDTH: f32 = 240.0;
 #[cfg(test)]
 const PRESENTATION_METRIC_TOLERANCE: f32 = 0.01;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -62,6 +64,11 @@ enum RevealIntent {
 
 struct ScriptCraftApp {
     session: EditingSession,
+    focus_mode: focus_mode::FocusModeController,
+    sprint_timer: sprint_timer::SprintTimer,
+    timer_clock_origin: Instant,
+    notification_sink: sprint_timer::NativeNotificationSink,
+    notification_results: Receiver<(u64, NotificationResult)>,
     surface_focused: bool,
     drag_anchor: Option<Position>,
     ime_preedit: String,
@@ -77,10 +84,28 @@ struct ScriptCraftApp {
     preferred_vertical_x: Option<u32>,
     page_geometry: ViewportPageTracker,
     page_scale: Option<f32>,
+    effective_pixels_per_point: Option<f32>,
     zoom_percent: u16,
     pinch_zoom_percent: f64,
+    appearance_mode: status_bar::AppearanceMode,
+    applied_appearance: Option<(status_bar::AppearanceMode, egui::Theme)>,
+    page_palette: status_bar::PagePalette,
     #[cfg(test)]
     last_scroll_offset: Vec2,
+    #[cfg(test)]
+    last_scroll_outer_rect: egui::Rect,
+    #[cfg(test)]
+    last_scroll_inner_rect: egui::Rect,
+    #[cfg(test)]
+    last_scroll_content_size: Vec2,
+    #[cfg(test)]
+    last_scroll_horizontal_item_spacing: f32,
+    #[cfg(test)]
+    last_scroll_page_rects: Vec<egui::Rect>,
+    #[cfg(test)]
+    focus_mode_status_item_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    status_panel_rect: Option<egui::Rect>,
     caret_blink_focus_generation: u64,
     caret_blink_reset_time: f64,
     layout_cache: LayoutCache,
@@ -93,8 +118,14 @@ impl ScriptCraftApp {
             .map_err(|error| format!("new project failed: {error:?}"))?;
         let session =
             EditingSession::new(project).map_err(|error| format!("session failed: {error:?}"))?;
+        let (notification_sink, notification_results) = sprint_timer::NativeNotificationSink::new();
         Ok(Self {
             session,
+            focus_mode: focus_mode::FocusModeController::default(),
+            sprint_timer: sprint_timer::SprintTimer::default(),
+            timer_clock_origin: Instant::now(),
+            notification_sink,
+            notification_results,
             surface_focused: false,
             drag_anchor: None,
             ime_preedit: String::new(),
@@ -110,10 +141,31 @@ impl ScriptCraftApp {
             preferred_vertical_x: None,
             page_geometry: ViewportPageTracker::default(),
             page_scale: None,
+            effective_pixels_per_point: None,
             zoom_percent: 100,
             pinch_zoom_percent: 100.0,
+            appearance_mode: status_bar::AppearanceMode::System,
+            applied_appearance: None,
+            page_palette: status_bar::PagePalette::for_theme(
+                status_bar::AppearanceMode::System,
+                egui::Theme::Light,
+            ),
             #[cfg(test)]
             last_scroll_offset: Vec2::ZERO,
+            #[cfg(test)]
+            last_scroll_outer_rect: egui::Rect::NOTHING,
+            #[cfg(test)]
+            last_scroll_inner_rect: egui::Rect::NOTHING,
+            #[cfg(test)]
+            last_scroll_content_size: Vec2::ZERO,
+            #[cfg(test)]
+            last_scroll_horizontal_item_spacing: 0.0,
+            #[cfg(test)]
+            last_scroll_page_rects: Vec::new(),
+            #[cfg(test)]
+            focus_mode_status_item_rect: None,
+            #[cfg(test)]
+            status_panel_rect: None,
             caret_blink_focus_generation: 0,
             caret_blink_reset_time: 0.0,
             layout_cache: LayoutCache::default(),
@@ -124,6 +176,36 @@ impl ScriptCraftApp {
     fn request_repaint(&mut self, ctx: &egui::Context) {
         self.performance.repaint_requests = self.performance.repaint_requests.saturating_add(1);
         ctx.request_repaint();
+    }
+
+    fn timer_now(&self) -> Duration {
+        self.timer_clock_origin.elapsed()
+    }
+
+    fn reconcile_sprint_timer(&mut self, now: Duration) {
+        if let Some(notice) = self.sprint_timer.reconcile(now) {
+            let result = self.notification_sink.request(notice);
+            self.sprint_timer
+                .apply_notification_result(notice.generation, result);
+        }
+        while let Ok((generation, result)) = self.notification_results.try_recv() {
+            self.sprint_timer
+                .apply_notification_result(generation, result);
+        }
+    }
+
+    fn schedule_sprint_timer_repaint(&mut self, ctx: &egui::Context, now: Duration) {
+        if let Some(delay) = self.sprint_timer.next_repaint_delay(now) {
+            self.performance.repaint_requests = self.performance.repaint_requests.saturating_add(1);
+            ctx.request_repaint_after(delay);
+        }
+    }
+
+    fn schedule_focus_mode_repaint(&mut self, ctx: &egui::Context, now: Duration) {
+        if let Some(delay) = self.focus_mode.next_repaint_delay(now) {
+            self.performance.repaint_requests = self.performance.repaint_requests.saturating_add(1);
+            ctx.request_repaint_after(delay);
+        }
     }
 
     fn sync_pinch_zoom_from_controls(&mut self) {
@@ -354,12 +436,12 @@ impl ScriptCraftApp {
         result
     }
 
-    fn selection_color(
+    fn selection_range(
         &self,
         line_start: usize,
         line_end: usize,
         element: usize,
-    ) -> Option<Color32> {
+    ) -> Option<(usize, usize)> {
         let selection = self.session.selection();
         let (start, end) = ordered_selection(selection);
         if start.element > element || end.element < element {
@@ -375,7 +457,7 @@ impl ScriptCraftApp {
         } else {
             line_end
         };
-        (from < line_end && to > line_start).then_some(Color32::from_rgb(170, 205, 245))
+        (from < line_end && to > line_start).then_some((from, to))
     }
 
     fn paint_page(
@@ -394,26 +476,15 @@ impl ScriptCraftApp {
         let page_rect = ui.allocate_space(Vec2::new(page_width, page_height)).1;
         let painter = ui.painter_at(page_rect);
         let char_width = layout.char_width as f32 * scale;
-        painter.rect_filled(page_rect, 2.0, Color32::from_gray(246));
-        painter.rect_stroke(page_rect, 2.0, Stroke::new(1.0_f32, Color32::GRAY));
+        let palette = self.page_palette;
+        painter.rect_filled(page_rect, 2.0, palette.paper);
+        painter.rect_stroke(page_rect, 2.0, Stroke::new(1.0_f32, palette.border));
 
         for line in &layout.pages[page_index].lines {
             let x = page_rect.left() + line.rect.x as f32 * scale;
             let y = page_rect.top() + line.rect.y as f32 * scale;
-            if let Some(color) =
-                self.selection_color(line.source.start, line.source.end, line.element)
-            {
-                let (start, end) = ordered_selection(self.session.selection());
-                let from = if start.element == line.element {
-                    start.offset.max(line.source.start)
-                } else {
-                    line.source.start
-                };
-                let to = if end.element == line.element {
-                    end.offset.min(line.source.end)
-                } else {
-                    line.source.end
-                };
+            let selection = self.selection_range(line.source.start, line.source.end, line.element);
+            if let Some((from, to)) = selection {
                 let left =
                     x + line.text[..from - line.source.start].chars().count() as f32 * char_width;
                 let width = line.text[from - line.source.start..to - line.source.start]
@@ -426,16 +497,21 @@ impl ScriptCraftApp {
                         Vec2::new(width.max(1.0), layout.line_height as f32 * scale),
                     ),
                     0.0,
-                    color,
+                    palette.selection,
                 );
             }
-            paint_fixed_metric_text(
+            paint_fixed_metric_text_with_selection(
                 &painter,
                 egui::pos2(x, y),
                 &line.text,
                 renderer_font(&layout.profile.font_family, metrics.font_size),
-                Color32::DARK_GRAY,
                 char_width,
+                FixedMetricTextStyle {
+                    color: palette.text,
+                    selected_color: palette.selection_text,
+                    selection: selection
+                        .map(|(start, end)| (start - line.source.start, end - line.source.start)),
+                },
             );
         }
 
@@ -461,11 +537,7 @@ impl ScriptCraftApp {
                     true,
                     self.caret_blink_reset_time,
                 ) {
-                    painter.rect_filled(
-                        caret_bar_rect(page_rect, rect, scale),
-                        0.0,
-                        Color32::from_rgb(20, 80, 150),
-                    );
+                    painter.rect_filled(caret_bar_rect(page_rect, rect, scale), 0.0, palette.caret);
                 }
                 if self.surface_focused {
                     self.performance.repaint_requests =
@@ -479,7 +551,7 @@ impl ScriptCraftApp {
                         egui::Align2::LEFT_TOP,
                         &self.ime_preedit,
                         renderer_font(&layout.profile.font_family, metrics.font_size),
-                        Color32::from_rgb(80, 80, 160),
+                        palette.ime_text,
                     );
                 }
             }
@@ -504,32 +576,53 @@ impl ScriptCraftApp {
             }
         };
         self.rendered_revision = Some(self.session.revision());
-        let available = ui.available_size();
-        let metrics = presentation_metrics_at_zoom(
-            available.x,
-            layout.profile.paper_width as f32,
-            layout.profile.font_size as f32,
-            self.zoom_percent,
-        );
-        let page_width = metrics.page_width;
-        let scale = metrics.scale;
-        self.page_scale = Some(scale);
-        let horizontal_padding = ((available.x.max(page_width) - page_width) / 2.0).max(0.0);
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let mut page_rects = Vec::with_capacity(layout.pages.len());
+        #[cfg(test)]
+        let mut horizontal_item_spacing = 0.0;
+        #[cfg(test)]
+        let scroll_outer_rect = ui.available_rect_before_wrap();
+        let mut rendered_scale = 1.0;
         let reveal_intent = self.reveal_intent;
-        let content_width = available.x.max(page_width);
         let scroll_output = egui::ScrollArea::both()
             .id_salt("page-editor-scroll")
             .show(ui, |ui| {
-                ui.set_min_width(content_width);
+                // ScrollArea's child max rect is the actual inner viewport after
+                // reserved scrollbar width and parent clipping have been applied.
+                let viewport_width = ui.available_width().max(0.0);
+                let metrics = presentation_metrics_at_zoom(
+                    viewport_width,
+                    layout.profile.paper_width as f32,
+                    layout.profile.font_size as f32,
+                    self.zoom_percent,
+                );
+                let geometry = page_scroll_geometry(viewport_width, metrics.page_width);
+                debug_assert_eq!(
+                    geometry.horizontal_overflow,
+                    geometry.content_width > geometry.viewport_width
+                );
+                let scale = metrics.scale;
+                rendered_scale = scale;
+                self.page_scale = Some(scale);
+                ui.set_min_width(geometry.content_width);
                 for page_index in 0..layout.pages.len() {
                     let mut page_rect = None;
                     ui.horizontal(|ui| {
-                        ui.add_space(horizontal_padding);
+                        // Explicit geometry owns all horizontal spacing; default
+                        // row gaps would inflate measured scroll content.
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        #[cfg(test)]
+                        {
+                            horizontal_item_spacing = ui.spacing().item_spacing.x;
+                        }
+                        ui.add_space(geometry.leading_padding);
                         page_rect =
                             Some(self.paint_page(ui, &layout, page_index, metrics, editor_id));
-                        ui.add_space(horizontal_padding);
+                        let trailing_padding = (geometry.content_width
+                            - geometry.leading_padding
+                            - metrics.page_width)
+                            .max(0.0);
+                        ui.add_space(trailing_padding);
                     });
                     page_rects.push(page_rect.unwrap_or_else(|| {
                         egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::ZERO)
@@ -567,9 +660,15 @@ impl ScriptCraftApp {
                     }
                 }
             });
+        let scale = rendered_scale;
         #[cfg(test)]
         {
             self.last_scroll_offset = scroll_output.state.offset;
+            self.last_scroll_outer_rect = scroll_outer_rect;
+            self.last_scroll_inner_rect = scroll_output.inner_rect;
+            self.last_scroll_content_size = scroll_output.content_size;
+            self.last_scroll_horizontal_item_spacing = horizontal_item_spacing;
+            self.last_scroll_page_rects.clone_from(&page_rects);
         }
         self.reveal_intent = RevealIntent::None;
 
@@ -956,22 +1055,65 @@ impl ScriptCraftApp {
     }
 }
 
-fn presentation_geometry(available_width: f32, paper_width: f32) -> (f32, f32, f32) {
-    let default_scale =
-        CURRENT_DEFAULT_PAGE_WIDTH * DEFAULT_PRESENTATION_SCALE_MULTIPLIER / paper_width;
-    let default_page_width = paper_width * default_scale;
-    let usable_width = (available_width - PAGE_HORIZONTAL_PADDING * 2.0).max(0.0);
-    let page_width = default_page_width.min(usable_width.max(MINIMUM_PAGE_WIDTH));
-    let content_width = available_width.max(page_width);
-    let horizontal_padding = ((content_width - page_width) / 2.0).max(0.0);
-    (page_width, horizontal_padding, page_width / paper_width)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PresentationMetrics {
     page_width: f32,
     scale: f32,
     font_size: f32,
+}
+
+fn presentation_metrics_at_zoom(
+    _available_width: f32,
+    paper_width: f32,
+    base_font_size: f32,
+    zoom_percent: u16,
+) -> PresentationMetrics {
+    let normalized = status_bar::normalized_zoom_percent(zoom_percent as f64);
+    let zoom_factor = normalized as f32 / 100.0;
+    let page_width = CURRENT_DEFAULT_PAGE_WIDTH * zoom_factor;
+    let scale = page_width / paper_width;
+    PresentationMetrics {
+        page_width,
+        scale,
+        font_size: (base_font_size * scale).max(5.0),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PageScrollGeometry {
+    viewport_width: f32,
+    content_width: f32,
+    leading_padding: f32,
+    horizontal_overflow: bool,
+}
+
+fn page_scroll_geometry(viewport_width: f32, page_width: f32) -> PageScrollGeometry {
+    let viewport_width = if viewport_width.is_finite() {
+        viewport_width.max(0.0)
+    } else {
+        0.0
+    };
+    let page_width = if page_width.is_finite() {
+        page_width.max(0.0)
+    } else {
+        0.0
+    };
+    let buffered_page_width = page_width + PAGE_HORIZONTAL_PADDING * 2.0;
+    let content_width = viewport_width.max(buffered_page_width);
+    PageScrollGeometry {
+        viewport_width,
+        content_width,
+        leading_padding: ((content_width - page_width) / 2.0).max(0.0),
+        horizontal_overflow: buffered_page_width > viewport_width,
+    }
+}
+
+#[cfg(test)]
+fn presentation_geometry(available_width: f32, paper_width: f32) -> (f32, f32, f32) {
+    let metrics = presentation_metrics_at_zoom(available_width, paper_width, 12.0, 100);
+    let content_width = available_width.max(metrics.page_width + PAGE_HORIZONTAL_PADDING * 2.0);
+    let leading_padding = ((content_width - metrics.page_width) / 2.0).max(0.0);
+    (metrics.page_width, leading_padding, metrics.scale)
 }
 
 #[cfg(test)]
@@ -980,47 +1122,38 @@ fn presentation_metrics(
     paper_width: f32,
     base_font_size: f32,
 ) -> PresentationMetrics {
-    let (page_width, _horizontal_padding, scale) =
-        presentation_geometry(available_width, paper_width);
-    PresentationMetrics {
-        page_width,
-        scale,
-        font_size: (base_font_size * scale).max(5.0),
-    }
+    presentation_metrics_at_zoom(available_width, paper_width, base_font_size, 100)
 }
 
-fn presentation_metrics_at_zoom(
-    available_width: f32,
-    paper_width: f32,
-    base_font_size: f32,
-    zoom_percent: u16,
-) -> PresentationMetrics {
-    let normalized = status_bar::normalized_zoom_percent(zoom_percent as f64);
-    let (fit_page_width, _, fit_scale) = presentation_geometry(available_width, paper_width);
-    let zoom_factor = normalized as f32 / 100.0;
-    let scale = fit_scale * zoom_factor;
-    PresentationMetrics {
-        page_width: fit_page_width * zoom_factor,
-        scale,
-        font_size: (base_font_size * fit_scale).max(5.0) * zoom_factor,
-    }
+struct FixedMetricTextStyle {
+    color: Color32,
+    selected_color: Color32,
+    selection: Option<(usize, usize)>,
 }
 
-fn paint_fixed_metric_text(
+fn paint_fixed_metric_text_with_selection(
     painter: &egui::Painter,
     origin: egui::Pos2,
     text: &str,
     font: FontId,
-    color: Color32,
     char_width: f32,
+    style: FixedMetricTextStyle,
 ) {
-    for (column, character) in text.chars().enumerate() {
+    for (column, (byte, character)) in text.char_indices().enumerate() {
+        let glyph_color = if style
+            .selection
+            .is_some_and(|(start, end)| byte >= start && byte < end)
+        {
+            style.selected_color
+        } else {
+            style.color
+        };
         painter.text(
             egui::pos2(fixed_metric_x(origin.x, column, char_width), origin.y),
             egui::Align2::LEFT_TOP,
             character.to_string(),
             font.clone(),
-            color,
+            glyph_color,
         );
     }
 }
@@ -1137,6 +1270,15 @@ fn central_panel_frame(ctx: &egui::Context) -> egui::Frame {
 }
 
 fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egui::Rect {
+    let now = app.timer_now();
+    app.reconcile_sprint_timer(now);
+    let fullscreen = ctx.input(|input| input.viewport().fullscreen);
+    app.focus_mode.observe(fullscreen, now);
+    let (resolved_theme, applied_appearance) =
+        status_bar::configure_appearance(ctx, app.appearance_mode, app.applied_appearance);
+    app.applied_appearance = applied_appearance;
+    app.page_palette = status_bar::PagePalette::for_theme(app.appearance_mode, resolved_theme);
+
     egui::TopBottomPanel::top("titlebar-toolbar")
         .frame(chrome_frame(ctx))
         .show_separator_line(false)
@@ -1168,8 +1310,40 @@ fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egu
         painted_pages: performance.painted_pages,
         repaint_requests: performance.repaint_requests,
     };
-    egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-        if status_bar::show(ui, page_number, &center, diagnostics, &mut app.zoom_percent) {
+    let status_panel = egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+        let was_timer_open = app.sprint_timer.popup_open;
+        let focus_view = app.focus_mode.view();
+        let mut focus_activated = false;
+        let (zoom_changed, appearance_changed, timer_button_rect, focus_button_rect) =
+            status_bar::show_with_focus_mode(
+                ui,
+                page_number,
+                &center,
+                diagnostics,
+                &mut app.zoom_percent,
+                &mut app.appearance_mode,
+                &mut app.sprint_timer.popup_open,
+                &mut app.sprint_timer.just_opened,
+                &focus_view,
+                &mut focus_activated,
+            );
+        if !was_timer_open && app.sprint_timer.popup_open {
+            app.sprint_timer.popup_anchor = timer_button_rect.unwrap_or(egui::Rect::NOTHING);
+        }
+        #[cfg(test)]
+        {
+            app.sprint_timer.status_item_rect = timer_button_rect;
+            app.focus_mode_status_item_rect = focus_button_rect;
+        }
+        #[cfg(not(test))]
+        let _ = focus_button_rect;
+        if was_timer_open && !app.sprint_timer.popup_open {
+            app.sprint_timer.close_popup();
+        }
+        if appearance_changed {
+            ctx.request_repaint();
+        }
+        if zoom_changed {
             // Pointer/keyboard slider and exact preset edits become the new
             // continuous pinch baseline, keeping both control paths in sync
             // without changing document/session state.
@@ -1177,10 +1351,25 @@ fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egu
             app.page_geometry.invalidate();
             app.page_scale = None;
         }
+        if focus_activated {
+            if let Some(request) = app.focus_mode.request(now) {
+                // The request/pending generation is committed before the
+                // viewport effect so same-frame or reentrant activation cannot
+                // issue an implicit inverse.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(request.target));
+            }
+        }
     });
+    #[cfg(test)]
+    {
+        app.status_panel_rect = Some(status_panel.response.rect);
+    }
+    #[cfg(not(test))]
+    let _ = status_panel;
     let central = egui::CentralPanel::default()
         .frame(central_panel_frame(ctx))
         .show(ctx, |ui| app.live_document_surface(ui));
+    sprint_timer::show_popup(ctx, &mut app.sprint_timer, now, &mut app.notification_sink);
     central.response.rect
 }
 
@@ -1192,7 +1381,7 @@ impl eframe::App for ScriptCraftApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         // egui computes total pixels-per-point as zoom_factor × native scale.
         // Resolve the factor against this frame's native scale before begin_pass
-        // so moving between monitors never briefly multiplies fallback 2.0 by
+        // so moving between monitors never briefly multiplies fallback 2.3 by
         // the newly reported OS scale.
         let viewport = raw_input.viewports.get_mut(&raw_input.viewport_id);
         let native_scale = viewport.and_then(|viewport| {
@@ -1204,7 +1393,10 @@ impl eframe::App for ScriptCraftApp {
             }
             viewport.native_pixels_per_point
         });
+        let effective_pixels_per_point = status_bar::resolved_ui_pixels_per_point(native_scale);
         ctx.set_zoom_factor(status_bar::ui_zoom_factor(native_scale));
+        let scale_changed = self.effective_pixels_per_point != Some(effective_pixels_per_point);
+        self.effective_pixels_per_point = Some(effective_pixels_per_point);
 
         let original_zoom = self.zoom_percent;
         for event in &raw_input.events {
@@ -1223,7 +1415,7 @@ impl eframe::App for ScriptCraftApp {
         raw_input
             .events
             .retain(|event| !matches!(event, egui::Event::Zoom(_)));
-        if self.zoom_percent != original_zoom {
+        if self.zoom_percent != original_zoom || scale_changed {
             self.page_geometry.invalidate();
             self.page_scale = None;
         }
@@ -1232,7 +1424,12 @@ impl eframe::App for ScriptCraftApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
+        self.notification_sink.set_repaint_context(ctx);
+        let timer_now = self.timer_now();
+        self.reconcile_sprint_timer(timer_now);
         show_application_panels(self, ctx);
+        self.schedule_sprint_timer_repaint(ctx, self.timer_now());
+        self.schedule_focus_mode_repaint(ctx, self.timer_now());
         self.handle_surface_input(ctx);
         self.performance.frame_nanos = self
             .performance
@@ -1301,6 +1498,673 @@ mod tests {
         let context = egui::Context::default();
         document_font::install(&context);
         context
+    }
+
+    fn render_app_frame(
+        context: &egui::Context,
+        app: &mut ScriptCraftApp,
+        screen: egui::Rect,
+        events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+    ) -> egui::FullOutput {
+        render_app_frame_with_fullscreen(context, app, screen, events, modifiers, None)
+    }
+
+    fn render_app_frame_with_fullscreen(
+        context: &egui::Context,
+        app: &mut ScriptCraftApp,
+        screen: egui::Rect,
+        events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+        fullscreen: Option<bool>,
+    ) -> egui::FullOutput {
+        app.performance.frames = app.performance.frames.saturating_add(1);
+        let mut input = egui::RawInput {
+            screen_rect: Some(screen),
+            focused: true,
+            events,
+            modifiers,
+            ..Default::default()
+        };
+        if let Some(viewport) = input.viewports.get_mut(&input.viewport_id) {
+            viewport.fullscreen = fullscreen;
+        }
+        context.run(input, |ctx| {
+            show_application_panels(app, ctx);
+            app.handle_surface_input(ctx);
+        })
+    }
+
+    fn click_events(rect: egui::Rect) -> [Vec<egui::Event>; 2] {
+        let point = rect.center();
+        let pointer = |pressed| egui::Event::PointerButton {
+            pos: point,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        [
+            vec![egui::Event::PointerMoved(point), pointer(true)],
+            vec![egui::Event::PointerMoved(point), pointer(false)],
+        ]
+    }
+
+    fn rendered_text(output: &egui::FullOutput) -> String {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn rendered_text_center(output: &egui::FullOutput, needle: &str) -> Option<egui::Pos2> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text().contains(needle) => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+    }
+
+    fn fullscreen_commands(output: &egui::FullOutput) -> Vec<bool> {
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .into_iter()
+            .flat_map(|viewport| viewport.commands.iter())
+            .filter_map(|command| match command {
+                egui::ViewportCommand::Fullscreen(fullscreen) => Some(*fullscreen),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn contains_only_fullscreen_commands(output: &egui::FullOutput) -> bool {
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_none_or(|viewport| {
+                viewport
+                    .commands
+                    .iter()
+                    .all(|command| matches!(command, egui::ViewportCommand::Fullscreen(_)))
+            })
+    }
+
+    #[test]
+    fn wo004_rendered_focus_action_uses_reported_state_and_preserves_window_content_state() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_200.0, 820.0));
+        app.zoom_percent = 150;
+        app.sprint_timer
+            .select_mode(sprint_timer::TimerMode::Stopwatch);
+        app.sprint_timer.start_stopwatch(Duration::ZERO);
+        app.appearance_mode = status_bar::AppearanceMode::Night;
+        let revision = app.session.revision();
+
+        let first = render_app_frame_with_fullscreen(
+            &context,
+            &mut app,
+            screen,
+            Vec::new(),
+            egui::Modifiers::default(),
+            Some(false),
+        );
+        assert!(rendered_text(&first).contains("⛶ Focus Mode"));
+        let focus_rect = app
+            .focus_mode_status_item_rect
+            .unwrap_or_else(|| unreachable!("Focus Mode should be inline at wide width"));
+        assert!(focus_rect.width() >= 112.0, "focus target={focus_rect:?}");
+        let timer_rect = app
+            .sprint_timer
+            .status_item_rect
+            .unwrap_or_else(|| unreachable!("Sprint Timer should remain inline at wide width"));
+        let appearance_center = rendered_text_center(&first, "Appearance")
+            .unwrap_or_else(|| unreachable!("Appearance should remain visible at wide width"));
+        assert!(timer_rect.right() < focus_rect.left());
+        assert!(focus_rect.right() < appearance_center.x);
+        assert_eq!(
+            app.focus_mode.view().accessible_name(),
+            "Enter Focus Mode; the window reports windowed"
+        );
+
+        let mut command_output = egui::FullOutput::default();
+        for events in click_events(focus_rect) {
+            command_output = render_app_frame_with_fullscreen(
+                &context,
+                &mut app,
+                screen,
+                events,
+                egui::Modifiers::default(),
+                Some(false),
+            );
+        }
+        assert_eq!(fullscreen_commands(&command_output), [true]);
+        assert!(contains_only_fullscreen_commands(&command_output));
+        assert!(app
+            .focus_mode
+            .view()
+            .accessible_name()
+            .contains("transition pending: entering fullscreen"));
+        assert!(!app.focus_mode.view().enabled());
+        assert_eq!(app.zoom_percent, 150);
+        assert_eq!(app.appearance_mode, status_bar::AppearanceMode::Night);
+        assert!(app.sprint_timer.is_running_or_paused());
+        assert_eq!(app.session.revision(), revision);
+
+        let unknown = render_app_frame_with_fullscreen(
+            &context,
+            &mut app,
+            screen,
+            Vec::new(),
+            egui::Modifiers::default(),
+            None,
+        );
+        assert!(fullscreen_commands(&unknown).is_empty());
+        assert!(app
+            .focus_mode
+            .view()
+            .accessible_name()
+            .contains("fullscreen state is not reported"));
+
+        let exit_context = test_context();
+        let mut exit_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let exit_first = render_app_frame_with_fullscreen(
+            &exit_context,
+            &mut exit_app,
+            screen,
+            Vec::new(),
+            egui::Modifiers::default(),
+            Some(true),
+        );
+        assert!(rendered_text(&exit_first).contains("⛶ Focus Mode"));
+        let exit_rect = exit_app
+            .focus_mode_status_item_rect
+            .unwrap_or_else(|| unreachable!("fullscreen action should be inline at wide width"));
+        let mut exit_output = egui::FullOutput::default();
+        for events in click_events(exit_rect) {
+            exit_output = render_app_frame_with_fullscreen(
+                &exit_context,
+                &mut exit_app,
+                screen,
+                events,
+                egui::Modifiers::default(),
+                Some(true),
+            );
+        }
+        assert_eq!(fullscreen_commands(&exit_output), [false]);
+        assert!(contains_only_fullscreen_commands(&exit_output));
+    }
+
+    #[test]
+    fn wo004_rendered_overflow_focus_and_external_os_changes_reconcile_without_commands() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let narrow = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(480.0, 820.0));
+        let first = render_app_frame_with_fullscreen(
+            &context,
+            &mut app,
+            narrow,
+            Vec::new(),
+            egui::Modifiers::default(),
+            Some(false),
+        );
+        assert!(app.focus_mode_status_item_rect.is_none());
+        let more_center = rendered_text_center(&first, "More").unwrap_or_else(|| {
+            unreachable!("narrow layout must expose the status overflow trigger")
+        });
+        let more_rect = egui::Rect::from_center_size(more_center, Vec2::splat(2.0));
+        for events in click_events(more_rect) {
+            render_app_frame_with_fullscreen(
+                &context,
+                &mut app,
+                narrow,
+                events,
+                egui::Modifiers::default(),
+                Some(false),
+            );
+        }
+        let menu = render_app_frame_with_fullscreen(
+            &context,
+            &mut app,
+            narrow,
+            Vec::new(),
+            egui::Modifiers::default(),
+            Some(false),
+        );
+        assert!(rendered_text(&menu).contains("⛶ Focus Mode"));
+        let focus_rect = app
+            .focus_mode_status_item_rect
+            .unwrap_or_else(|| unreachable!("Focus Mode should be available in overflow"));
+        let mut command_output = egui::FullOutput::default();
+        for events in click_events(focus_rect) {
+            command_output = render_app_frame_with_fullscreen(
+                &context,
+                &mut app,
+                narrow,
+                events,
+                egui::Modifiers::default(),
+                Some(false),
+            );
+        }
+        assert_eq!(fullscreen_commands(&command_output), [true]);
+
+        // OS-originated fullscreen changes are observed; they do not cause an
+        // application command or replay the preceding request.
+        let entered = render_app_frame_with_fullscreen(
+            &context,
+            &mut app,
+            narrow,
+            Vec::new(),
+            egui::Modifiers::default(),
+            Some(true),
+        );
+        assert!(fullscreen_commands(&entered).is_empty());
+        assert!(app
+            .focus_mode
+            .view()
+            .accessible_name()
+            .contains("transition pending: entering fullscreen"));
+
+        let mut external_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let external_initial = render_app_frame_with_fullscreen(
+            &context,
+            &mut external_app,
+            narrow,
+            Vec::new(),
+            egui::Modifiers::default(),
+            Some(false),
+        );
+        assert!(fullscreen_commands(&external_initial).is_empty());
+        let entered = render_app_frame_with_fullscreen(
+            &context,
+            &mut external_app,
+            narrow,
+            Vec::new(),
+            egui::Modifiers::default(),
+            Some(true),
+        );
+        assert!(fullscreen_commands(&entered).is_empty());
+        assert!(external_app
+            .focus_mode
+            .view()
+            .accessible_name()
+            .contains("window reports fullscreen"));
+        let exited = render_app_frame_with_fullscreen(
+            &context,
+            &mut external_app,
+            narrow,
+            Vec::new(),
+            egui::Modifiers::default(),
+            Some(false),
+        );
+        assert!(fullscreen_commands(&exited).is_empty());
+        assert!(external_app
+            .focus_mode
+            .view()
+            .accessible_name()
+            .contains("window reports windowed"));
+    }
+
+    #[test]
+    fn wo004_pending_and_unavailable_focus_states_keep_the_footer_height_bounded() {
+        for width in [1_200.0, 480.0] {
+            for pending in [true, false] {
+                let context = test_context();
+                let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+                let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(width, 820.0));
+                if pending {
+                    render_app_frame_with_fullscreen(
+                        &context,
+                        &mut app,
+                        screen,
+                        Vec::new(),
+                        egui::Modifiers::default(),
+                        Some(false),
+                    );
+                    assert!(app.focus_mode.request(app.timer_now()).is_some());
+                }
+
+                let mut heights = Vec::with_capacity(60);
+                let fullscreen = if pending { Some(false) } else { None };
+                for _ in 0..60 {
+                    render_app_frame_with_fullscreen(
+                        &context,
+                        &mut app,
+                        screen,
+                        Vec::new(),
+                        egui::Modifiers::default(),
+                        fullscreen,
+                    );
+                    let rect = app
+                        .status_panel_rect
+                        .unwrap_or_else(|| unreachable!("status panel should be measured"));
+                    heights.push(rect.height());
+                }
+                assert!(
+                    heights.iter().all(|height| *height < 120.0),
+                    "width={width}, pending={pending}: status panel consumed the viewport: {heights:?}"
+                );
+                let stable = &heights[1..];
+                let minimum = stable.iter().copied().fold(f32::INFINITY, f32::min);
+                let maximum = stable.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    maximum - minimum <= 1.0,
+                    "width={width}, pending={pending}: status height range={minimum}..{maximum}"
+                );
+                assert!(
+                    !stable.windows(2).all(|pair| pair[1] > pair[0]),
+                    "width={width}, pending={pending}: status panel grew monotonically: {stable:?}"
+                );
+                let accessible = app.focus_mode.view().accessible_name();
+                if pending {
+                    assert!(accessible.contains("transition pending"));
+                } else {
+                    assert!(accessible.contains("state is not reported"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wo003_rendered_status_icon_opens_timer_and_enter_uses_filtered_minutes() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_200.0, 820.0));
+        let first = render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            Vec::new(),
+            egui::Modifiers::default(),
+        );
+        assert_eq!(app.sprint_timer.minutes_input, "25");
+        assert!(rendered_text(&first).contains('⏱'));
+        let status_rect = app
+            .sprint_timer
+            .status_item_rect
+            .unwrap_or_else(|| unreachable!("the timer action should be inline at 1200 points"));
+        assert!(
+            status_rect.width() >= 36.0,
+            "timer target is too small: {status_rect:?}"
+        );
+        for events in click_events(status_rect) {
+            render_app_frame(
+                &context,
+                &mut app,
+                screen,
+                events,
+                egui::Modifiers::default(),
+            );
+        }
+        assert!(app.sprint_timer.popup_open);
+        let popup_output = render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            Vec::new(),
+            egui::Modifiers::default(),
+        );
+        let popup_text = rendered_text(&popup_output);
+        assert!(
+            popup_text.contains("Countdown"),
+            "popup text={popup_text:?}; window={:?}; status={status_rect:?}",
+            app.sprint_timer.popup_rect
+        );
+        assert!(popup_text.contains("Stopwatch"));
+        assert!(popup_text.contains("25:00"));
+        assert!(popup_text.contains("Start Sprint"));
+        assert!(popup_text.contains("End Sprint"));
+        assert!(!app.sprint_timer.end_enabled());
+        let minutes_rect = app
+            .sprint_timer
+            .minutes_input_rect
+            .unwrap_or_else(|| unreachable!("the popup should render its minutes editor"));
+        for events in click_events(minutes_rect) {
+            render_app_frame(
+                &context,
+                &mut app,
+                screen,
+                events,
+                egui::Modifiers::default(),
+            );
+        }
+        let select_all = egui::Event::Key {
+            key: Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        };
+        render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            vec![select_all, egui::Event::Paste("1.5".to_owned())],
+            egui::Modifiers {
+                command: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(app.sprint_timer.minutes_input, "15");
+        render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            vec![egui::Event::Key {
+                key: Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            egui::Modifiers::default(),
+        );
+        assert_eq!(
+            app.sprint_timer.primary_label(),
+            "Pause",
+            "popup={:?}; primary={:?}; status={status_rect:?}",
+            app.sprint_timer.popup_rect,
+            app.sprint_timer.primary_button_rect
+        );
+        assert_eq!(app.sprint_timer.minutes_input, "15");
+        assert_eq!(
+            app.session.revision(),
+            0,
+            "timer Enter must not edit screenplay content"
+        );
+    }
+
+    #[test]
+    fn wo003_rendered_start_and_outside_close_preserve_running_timer() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.sprint_timer.minutes_input = "1".to_owned();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_200.0, 820.0));
+        render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            Vec::new(),
+            egui::Modifiers::default(),
+        );
+        let status_rect = app
+            .sprint_timer
+            .status_item_rect
+            .unwrap_or_else(|| unreachable!("timer status icon"));
+        for events in click_events(status_rect) {
+            render_app_frame(
+                &context,
+                &mut app,
+                screen,
+                events,
+                egui::Modifiers::default(),
+            );
+        }
+        render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            Vec::new(),
+            egui::Modifiers::default(),
+        );
+        let start_rect = app
+            .sprint_timer
+            .primary_button_rect
+            .unwrap_or_else(|| unreachable!("Start Sprint action"));
+        for events in click_events(start_rect) {
+            render_app_frame(
+                &context,
+                &mut app,
+                screen,
+                events,
+                egui::Modifiers::default(),
+            );
+        }
+        assert_eq!(app.sprint_timer.primary_label(), "Pause");
+        let outside = egui::pos2(16.0, 800.0);
+        render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            vec![
+                egui::Event::PointerMoved(outside),
+                egui::Event::PointerButton {
+                    pos: outside,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            egui::Modifiers::default(),
+        );
+        render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: outside,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            egui::Modifiers::default(),
+        );
+        assert!(!app.sprint_timer.popup_open);
+        assert_eq!(app.sprint_timer.primary_label(), "Pause");
+        assert_eq!(app.session.revision(), 0);
+
+        for events in click_events(status_rect) {
+            render_app_frame(
+                &context,
+                &mut app,
+                screen,
+                events,
+                egui::Modifiers::default(),
+            );
+        }
+        render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            Vec::new(),
+            egui::Modifiers::default(),
+        );
+        render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            vec![egui::Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            egui::Modifiers::default(),
+        );
+        assert!(!app.sprint_timer.popup_open);
+        assert_eq!(app.sprint_timer.primary_label(), "Pause");
+        assert_eq!(app.session.revision(), 0);
+    }
+
+    #[test]
+    fn wo003_closed_popup_schedules_bounded_running_timer_repaints_only() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.sprint_timer
+            .select_mode(sprint_timer::TimerMode::Stopwatch);
+        app.sprint_timer.start_stopwatch(Duration::ZERO);
+        assert!(!app.sprint_timer.popup_open);
+        let before = app.performance.repaint_requests;
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            app.schedule_sprint_timer_repaint(ctx, Duration::from_millis(250));
+        });
+        assert_eq!(app.performance.repaint_requests, before + 1);
+        app.sprint_timer.pause(Duration::from_secs(1));
+        let paused_requests = app.performance.repaint_requests;
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            app.schedule_sprint_timer_repaint(ctx, Duration::from_secs(2));
+        });
+        assert_eq!(app.performance.repaint_requests, paused_requests);
+        assert!(!app.sprint_timer.popup_open);
+    }
+
+    #[test]
+    fn wo003_rendered_completion_keeps_reset_enabled_and_end_disabled() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.sprint_timer.set_minutes_input("1".to_owned());
+        app.sprint_timer.start_countdown(Duration::ZERO);
+        app.sprint_timer.reconcile(Duration::from_secs(60));
+        app.sprint_timer.popup_open = true;
+        app.sprint_timer.just_opened = true;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_200.0, 820.0));
+        render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            Vec::new(),
+            egui::Modifiers::default(),
+        );
+        let output = render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            Vec::new(),
+            egui::Modifiers::default(),
+        );
+        let text = rendered_text(&output);
+        assert!(text.contains("Great Work! You completed a 1 Minute Sprint"));
+        assert!(text.contains("Reset"));
+        assert_eq!(app.sprint_timer.primary_label(), "Reset");
+        assert!(!app.sprint_timer.end_enabled());
+        let reset_rect = app
+            .sprint_timer
+            .primary_button_rect
+            .unwrap_or_else(|| unreachable!("completed timer Reset button"));
+        for events in click_events(reset_rect) {
+            render_app_frame(
+                &context,
+                &mut app,
+                screen,
+                events,
+                egui::Modifiers::default(),
+            );
+        }
+        assert!(app.sprint_timer.is_idle());
+        assert_eq!(app.sprint_timer.minutes_input, "25");
     }
 
     fn test_toolbar_label_width(label: &str) -> f32 {
@@ -1372,7 +2236,13 @@ mod tests {
             .collect::<Vec<_>>();
         let rendered_document = rendered_text.concat();
         assert!(rendered_text.iter().any(|text| text == "New"));
-        assert!(rendered_text.iter().any(|text| text == "100%"));
+        assert!(
+            rendered_text.iter().any(|text| text == "100%")
+                || rendered_text
+                    .iter()
+                    .any(|text| text == "More" || text == "! More"),
+            "zoom remains inline or reachable from status overflow"
+        );
         assert!(!rendered_text
             .iter()
             .any(|text| text == "Untitled Screenplay"));
@@ -1390,6 +2260,229 @@ mod tests {
             app.session.project().title_page[0].text,
             "VISIBLE TITLE PAGE CONTENT"
         );
+    }
+
+    #[test]
+    fn wo002_rendered_pages_follow_theme_palette_without_mutating_document_state() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new("wo002-theme-project", "Theme Test", "Writer")
+            .unwrap_or_else(|_| unreachable!());
+        project.title_page.push(
+            scriptcraft_core::ScreenplayElement::new(
+                "wo002-theme-title",
+                Role::Action,
+                "TITLE PAGE THEME",
+            )
+            .unwrap_or_else(|_| unreachable!()),
+        );
+        app.session
+            .replace_with_saved(project)
+            .unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert("BODY THEME")
+            .unwrap_or_else(|_| unreachable!());
+        app.session
+            .set_selection(Selection {
+                anchor: Position {
+                    element: 0,
+                    offset: 0,
+                },
+                focus: Position {
+                    element: 0,
+                    offset: 4,
+                },
+            })
+            .unwrap_or_else(|_| unreachable!());
+        app.surface_focused = false;
+        let serialized_before = app
+            .session
+            .project()
+            .to_json()
+            .unwrap_or_else(|_| unreachable!());
+        let revision_before = app.session.revision();
+        let selection_before = app.session.selection();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_200.0, 900.0));
+
+        for (mode, system_theme, expected_theme) in [
+            (
+                status_bar::AppearanceMode::System,
+                Some(egui::Theme::Light),
+                egui::Theme::Light,
+            ),
+            (
+                status_bar::AppearanceMode::System,
+                Some(egui::Theme::Dark),
+                egui::Theme::Dark,
+            ),
+            (
+                status_bar::AppearanceMode::Day,
+                Some(egui::Theme::Dark),
+                egui::Theme::Light,
+            ),
+            (
+                status_bar::AppearanceMode::Night,
+                Some(egui::Theme::Light),
+                egui::Theme::Dark,
+            ),
+            (
+                status_bar::AppearanceMode::Midnight,
+                Some(egui::Theme::Light),
+                egui::Theme::Dark,
+            ),
+        ] {
+            app.appearance_mode = mode;
+            let output = context.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    system_theme,
+                    ..Default::default()
+                },
+                |ctx| {
+                    show_application_panels(&mut app, ctx);
+                },
+            );
+            let palette = status_bar::PagePalette::for_theme(mode, expected_theme);
+            assert_eq!(app.page_palette, palette);
+            let paper_pages = output
+                .shapes
+                .iter()
+                .filter(|clipped| {
+                    matches!(
+                        &clipped.shape,
+                        egui::epaint::Shape::Rect(rect) if rect.fill == palette.paper
+                    )
+                })
+                .count();
+            assert!(
+                paper_pages >= 2,
+                "title and body pages use {mode:?} palette"
+            );
+            assert!(output.shapes.iter().any(|clipped| matches!(
+                &clipped.shape,
+                egui::epaint::Shape::Rect(rect) if rect.fill == palette.selection
+            )));
+            assert!(output.shapes.iter().any(|clipped| matches!(
+                &clipped.shape,
+                egui::epaint::Shape::Text(text)
+                    if text.fallback_color == palette.selection_text
+            )));
+            assert!(output.shapes.iter().any(|clipped| matches!(
+                &clipped.shape,
+                egui::epaint::Shape::Text(text)
+                    if text.fallback_color == palette.text
+            )));
+            let rendered_text = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert!(rendered_text.contains("TITLE PAGE THEME"));
+            assert_eq!(app.session.revision(), revision_before);
+            assert_eq!(app.session.selection(), selection_before);
+            assert_eq!(
+                app.session
+                    .project()
+                    .to_json()
+                    .unwrap_or_else(|_| unreachable!()),
+                serialized_before
+            );
+        }
+
+        app.ime_preedit = "IME PREEDIT".to_owned();
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 0,
+                offset: 0,
+            }))
+            .unwrap_or_else(|_| unreachable!());
+        let surface = app.editor_surface_rect.unwrap_or_else(|| unreachable!());
+        let focus_point = surface.center();
+        let pointer_button = |pressed| egui::Event::PointerButton {
+            pos: focus_point,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        for pressed in [true, false] {
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    events: vec![
+                        egui::Event::PointerMoved(focus_point),
+                        pointer_button(pressed),
+                    ],
+                    ..Default::default()
+                },
+                |ctx| {
+                    show_application_panels(&mut app, ctx);
+                },
+            );
+        }
+        assert!(app.surface_focused);
+        let editor_id = app.editor_surface_id.unwrap_or_else(|| unreachable!());
+        assert!(context.memory(|memory| memory.has_focus(editor_id)));
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 0,
+                offset: 0,
+            }))
+            .unwrap_or_else(|_| unreachable!());
+        let mut render_time = context.input(|input| input.time) + 0.01;
+        for mode in [
+            status_bar::AppearanceMode::Day,
+            status_bar::AppearanceMode::Night,
+            status_bar::AppearanceMode::Midnight,
+        ] {
+            app.appearance_mode = mode;
+            app.caret_blink_reset_time = render_time;
+            let output = context.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    system_theme: Some(egui::Theme::Light),
+                    time: Some(render_time),
+                    ..Default::default()
+                },
+                |ctx| {
+                    show_application_panels(&mut app, ctx);
+                },
+            );
+            render_time += 0.01;
+            let expected_theme = if mode == status_bar::AppearanceMode::Day {
+                egui::Theme::Light
+            } else {
+                egui::Theme::Dark
+            };
+            let palette = status_bar::PagePalette::for_theme(mode, expected_theme);
+            let caret_rendered = output.shapes.iter().any(|clipped| {
+                matches!(
+                    &clipped.shape,
+                    egui::epaint::Shape::Rect(rect) if rect.fill == palette.caret
+                )
+            });
+            assert!(
+                caret_rendered,
+                "mode={mode:?}; focused={}; selection={:?}; blink_reset={}; input_time={}; rectangle_fills={:?}",
+                app.surface_focused,
+                app.session.selection(),
+                app.caret_blink_reset_time,
+                context.input(|input| input.time),
+                output.shapes.iter().filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Rect(rect) => Some(rect.fill),
+                    _ => None,
+                }).collect::<Vec<_>>(),
+            );
+            assert!(output.shapes.iter().any(|clipped| matches!(
+                &clipped.shape,
+                egui::epaint::Shape::Text(text)
+                    if text.fallback_color == palette.ime_text
+                        && text.galley.text().contains("IME PREEDIT")
+            )));
+        }
     }
 
     fn seed_page_snapshot(app: &mut ScriptCraftApp, pages: Vec<egui::Rect>) -> egui::Rect {
@@ -1951,17 +3044,17 @@ mod tests {
     }
 
     #[test]
-    fn presentation_metrics_bound_narrow_width() {
+    fn presentation_metrics_do_not_shrink_to_narrow_viewports() {
         let narrow = presentation_metrics(400.0, 612.0, 12.0);
         let stable = presentation_metrics(800.0, 612.0, 12.0);
 
-        assert!(narrow.scale < stable.scale);
-        assert!(narrow.font_size < stable.font_size);
+        assert_eq!(narrow.page_width, CURRENT_DEFAULT_PAGE_WIDTH);
+        assert_eq!(narrow, stable);
         assert_eq!(TOOLBAR_ELEMENTS_WIDTH, 128.0);
     }
 
     #[test]
-    fn zoom_geometry_uses_responsive_fit_baseline_and_scales_every_integer_percent() {
+    fn wo001_zoom_geometry_uses_fixed_baseline_and_scales_every_integer_percent() {
         for available_width in [320.0, 400.0, 800.0, 1_400.0] {
             let baseline = presentation_metrics(available_width, 612.0, 12.0);
             let at_100 = presentation_metrics_at_zoom(available_width, 612.0, 12.0, 100);
@@ -2178,17 +3271,21 @@ mod tests {
     }
 
     #[test]
-    fn ui_scale_hook_uses_native_pixels_once_and_fallback_without_carryover() {
+    fn wo001_ui_scale_hook_uses_native_pixels_once_and_replaces_fallback_immediately() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         let context = test_context();
         for (native, expected_factor, expected_pixels_per_point) in [
             (Some(1.0), 1.0, 1.0),
             (Some(1.5), 1.0, 1.5),
             (Some(2.0), 1.0, 2.0),
-            (None, 2.0, 2.0),
+            (None, 2.3, 2.3),
             (Some(1.5), 1.0, 1.5),
-            (Some(f32::NAN), 2.0, 2.0),
-            (Some(0.0), 2.0, 2.0),
+            (Some(f32::NAN), 2.3, 2.3),
+            (Some(0.0), 2.3, 2.3),
+            (Some(-1.0), 2.3, 2.3),
+            (Some(f32::INFINITY), 2.3, 2.3),
+            (Some(f32::NEG_INFINITY), 2.3, 2.3),
+            (None, 2.3, 2.3),
         ] {
             let mut input = egui::RawInput::default();
             if let Some(viewport) = input.viewports.get_mut(&input.viewport_id) {
@@ -2200,7 +3297,7 @@ mod tests {
             assert_eq!(context.pixels_per_point(), expected_pixels_per_point);
         }
         assert_eq!(status_bar::resolved_ui_pixels_per_point(Some(1.5)), 1.5);
-        assert_eq!(status_bar::resolved_ui_pixels_per_point(None), 2.0);
+        assert_eq!(status_bar::resolved_ui_pixels_per_point(None), 2.3);
     }
 
     #[test]
@@ -2304,6 +3401,162 @@ mod tests {
         );
         assert!(app.last_scroll_offset.y > 0.0);
         assert!(app.page_scale.is_some_and(|scale| scale > 1.0));
+
+        let retained_x = app.last_scroll_offset.x;
+        let narrower_screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(700.0, 600.0));
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(narrower_screen),
+                ..Default::default()
+            },
+        );
+        assert!(app.last_scroll_offset.x + 0.01 >= retained_x);
+        assert_eq!(
+            app.last_scroll_page_rects.first().map(egui::Rect::width),
+            Some(initial_page.width()),
+            "resizing must not refit the selected page zoom"
+        );
+
+        let fitting_screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_600.0, 900.0));
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(fitting_screen),
+                ..Default::default()
+            },
+        );
+        assert!(app.last_scroll_offset.x.abs() < 0.01);
+    }
+
+    #[test]
+    fn wo001_scroll_offsets_reach_edges_and_clamp_or_persist_across_resize_and_zoom() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.zoom_percent = 300;
+        app.session
+            .insert(&"wide paragraph\n".repeat(240))
+            .unwrap_or_else(|_| unreachable!());
+        let narrow = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(narrow),
+                ..Default::default()
+            },
+        );
+        let width_before = app
+            .last_scroll_page_rects
+            .first()
+            .map(egui::Rect::width)
+            .unwrap_or(0.0);
+
+        let wheel = |width: f32, x: f32, y: f32| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(width, 600.0),
+            )),
+            events: vec![
+                egui::Event::PointerMoved(egui::pos2(400.0, 300.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(x, y),
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let settle = |app: &mut ScriptCraftApp, width: f32, height: f32| {
+            for _ in 0..6 {
+                let time = context.input(|input| input.time) + 0.2;
+                let _ = render_editor_frame(
+                    &context,
+                    app,
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(width, height),
+                        )),
+                        time: Some(time),
+                        predicted_dt: 0.1,
+                        ..Default::default()
+                    },
+                );
+            }
+        };
+        let _ = render_editor_frame(&context, &mut app, wheel(800.0, -900.0, 0.0));
+        settle(&mut app, 800.0, 600.0);
+        let max_x = (app.last_scroll_content_size.x - app.last_scroll_inner_rect.width()).max(0.0);
+        assert!(max_x > 0.0);
+        assert!(app.last_scroll_offset.x > 0.0);
+        assert!(app.last_scroll_offset.x <= max_x + 0.01);
+
+        let _ = render_editor_frame(&context, &mut app, wheel(800.0, 900.0, 0.0));
+        settle(&mut app, 800.0, 600.0);
+        assert!(
+            app.last_scroll_offset.x.abs() < 0.01,
+            "reverse horizontal scroll should reach the leading edge, got {}",
+            app.last_scroll_offset.x
+        );
+        let _ = render_editor_frame(&context, &mut app, wheel(800.0, -120.0, 0.0));
+        settle(&mut app, 800.0, 600.0);
+        let offset_before_resize = app.last_scroll_offset.x;
+        assert!(offset_before_resize > 0.0 && offset_before_resize < max_x - 1.0);
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(700.0, 600.0),
+                )),
+                ..Default::default()
+            },
+        );
+        settle(&mut app, 700.0, 600.0);
+        assert!(
+            (app.last_scroll_offset.x - offset_before_resize).abs() < 0.01,
+            "valid horizontal offset should survive width resize: before={offset_before_resize}, after={}, max={}",
+            app.last_scroll_offset.x,
+            (app.last_scroll_content_size.x - app.last_scroll_inner_rect.width()).max(0.0)
+        );
+        assert_eq!(
+            app.last_scroll_page_rects.first().map(egui::Rect::width),
+            Some(width_before)
+        );
+
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(1_600.0, 900.0),
+                )),
+                ..Default::default()
+            },
+        );
+        assert!(app.last_scroll_offset.x.abs() < 0.01);
+
+        let _ = render_editor_frame(&context, &mut app, wheel(800.0, -120.0, 0.0));
+        settle(&mut app, 800.0, 600.0);
+        app.zoom_percent = 100;
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(narrow),
+                ..Default::default()
+            },
+        );
+        assert!(app.last_scroll_offset.x.abs() < 0.01);
+        assert_eq!(
+            app.last_scroll_page_rects.first().map(egui::Rect::width),
+            Some(CURRENT_DEFAULT_PAGE_WIDTH)
+        );
     }
 
     #[test]
@@ -3040,16 +4293,202 @@ mod tests {
     }
 
     #[test]
-    fn presentation_geometry_scales_default_page_and_centers_it() {
+    fn wo001_presentation_geometry_keeps_fixed_page_and_centers_it() {
         let (page_width, padding, scale) = presentation_geometry(800.0, 612.0);
-        assert!((page_width - 576.0).abs() < f32::EPSILON);
-        assert!((padding - 112.0).abs() < f32::EPSILON);
-        assert!((scale - (576.0 / 612.0)).abs() < f32::EPSILON);
+        assert!((page_width - 360.0).abs() < f32::EPSILON);
+        assert!((padding - 220.0).abs() < f32::EPSILON);
+        assert!((scale - (360.0 / 612.0)).abs() < f32::EPSILON);
 
         let (narrow_width, narrow_padding, narrow_scale) = presentation_geometry(400.0, 612.0);
-        assert!((narrow_width - 368.0).abs() < f32::EPSILON);
-        assert!((narrow_padding - 16.0).abs() < f32::EPSILON);
-        assert!(narrow_scale < scale);
+        assert!((narrow_width - 360.0).abs() < f32::EPSILON);
+        assert!((narrow_padding - 20.0).abs() < f32::EPSILON);
+        assert_eq!(narrow_scale, scale);
+    }
+
+    #[test]
+    fn wo001_scroll_geometry_has_exact_buffered_overflow_threshold() {
+        let wide = page_scroll_geometry(800.0, 360.0);
+        assert_eq!(wide.content_width, 800.0);
+        assert_eq!(wide.leading_padding, 220.0);
+        assert!(!wide.horizontal_overflow);
+
+        let exact = page_scroll_geometry(392.0, 360.0);
+        assert_eq!(exact.content_width, 392.0);
+        assert_eq!(exact.leading_padding, 16.0);
+        assert!(!exact.horizontal_overflow);
+
+        let overflow = page_scroll_geometry(391.0, 360.0);
+        assert_eq!(overflow.content_width, 392.0);
+        assert_eq!(overflow.leading_padding, 16.0);
+        assert!(overflow.horizontal_overflow);
+
+        let tiny = page_scroll_geometry(0.0, 360.0);
+        assert_eq!(tiny.content_width, 392.0);
+        assert_eq!(tiny.leading_padding, 16.0);
+        assert!(tiny.horizontal_overflow);
+
+        let invalid = page_scroll_geometry(f32::NAN, 360.0);
+        assert_eq!(invalid.viewport_width, 0.0);
+        assert_eq!(invalid.content_width, 392.0);
+        assert!(invalid.horizontal_overflow);
+    }
+
+    #[test]
+    fn wo001_rendered_sheet_uses_fixed_logical_width_and_single_system_scaling() {
+        for (native_scale, effective_scale) in [
+            (Some(1.0), 1.0),
+            (Some(1.5), 1.5),
+            (Some(2.0), 2.0),
+            (None, 2.3),
+        ] {
+            for zoom_percent in [100, 150] {
+                let context = test_context();
+                let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+                app.zoom_percent = zoom_percent;
+                let screen =
+                    egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_600.0, 1_000.0));
+                let mut input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                if let Some(viewport) = input.viewports.get_mut(&input.viewport_id) {
+                    viewport.native_pixels_per_point = native_scale;
+                }
+                eframe::App::raw_input_hook(&mut app, &context, &mut input);
+                let output = context.run(input, |context| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::none())
+                        .show(context, |ui| app.live_document_surface(ui));
+                });
+                let page = output
+                    .shapes
+                    .iter()
+                    .find_map(|clipped| match &clipped.shape {
+                        egui::epaint::Shape::Rect(rect) if rect.fill == Color32::from_gray(246) => {
+                            Some(rect.rect)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(egui::Rect::NOTHING);
+                let expected_logical = 360.0 * f32::from(zoom_percent) / 100.0;
+                assert!((page.width() - expected_logical).abs() < 0.01);
+                assert!(
+                    (page.width() * context.pixels_per_point()
+                        - expected_logical * effective_scale)
+                        .abs()
+                        < 0.1
+                );
+                assert!((page.height() / page.width() - 792.0 / 612.0).abs() < 0.001);
+                assert!((context.pixels_per_point() - effective_scale).abs() < 0.001);
+                assert_eq!(
+                    context.zoom_factor(),
+                    if native_scale.is_some() { 1.0 } else { 2.3 },
+                    "page zoom must not alter global UI zoom"
+                );
+                assert!((app.page_scale.unwrap_or(0.0) - expected_logical / 612.0).abs() < 0.001);
+                assert_eq!(app.session.revision(), 0);
+                assert!(!app.session.dirty());
+            }
+        }
+    }
+
+    #[test]
+    fn wo001_rendered_inner_clip_controls_centering_and_horizontal_overflow() {
+        for (viewport_width, expected_padding, should_overflow) in [
+            (800.0, 220.0, false),
+            (392.0, 16.0, false),
+            (390.0, 16.0, true),
+        ] {
+            let context = test_context();
+            let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+            let screen =
+                egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(viewport_width, 900.0));
+            let output = context.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::none())
+                        .show(context, |ui| app.live_document_surface(ui));
+                },
+            );
+            let page = app
+                .last_scroll_page_rects
+                .first()
+                .copied()
+                .unwrap_or(egui::Rect::NOTHING);
+            let inner = app.last_scroll_inner_rect;
+            assert!((inner.width() - viewport_width).abs() < 0.01);
+            assert!((page.left() - inner.left() - expected_padding).abs() < 0.01);
+            assert!((page.width() - CURRENT_DEFAULT_PAGE_WIDTH).abs() < 0.01);
+            assert!(
+                (inner.left() + app.last_scroll_content_size.x - page.right() - expected_padding)
+                    .abs()
+                    < 0.01
+            );
+            assert!((app.last_scroll_content_size.x - viewport_width.max(392.0)).abs() < 0.01);
+            assert_eq!(app.last_scroll_horizontal_item_spacing, 0.0);
+            assert_eq!(
+                app.last_scroll_content_size.x > inner.width() + 0.01,
+                should_overflow
+            );
+            assert!(
+                app.last_scroll_offset.x
+                    <= (app.last_scroll_content_size.x - inner.width()).max(0.0) + 0.01
+            );
+            assert!(app.last_scroll_outer_rect.contains_rect(inner));
+            assert!(output.shapes.iter().any(|clipped| matches!(
+                &clipped.shape,
+                egui::epaint::Shape::Rect(rect) if rect.fill == Color32::from_gray(246)
+            )));
+        }
+    }
+
+    #[test]
+    fn wo001_native_scale_changes_invalidate_status_geometry_until_republished() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
+        app.performance.frames = 1;
+        let mut initial_input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        if let Some(viewport) = initial_input.viewports.get_mut(&initial_input.viewport_id) {
+            viewport.native_pixels_per_point = Some(1.5);
+        }
+        eframe::App::raw_input_hook(&mut app, &context, &mut initial_input);
+        let _ = render_editor_frame(&context, &mut app, initial_input);
+        assert!(matches!(
+            project_page_status(&mut app, 2, context.screen_rect()),
+            status_bar::VisiblePage::Available { .. }
+        ));
+
+        let mut migrated_input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        if let Some(viewport) = migrated_input
+            .viewports
+            .get_mut(&migrated_input.viewport_id)
+        {
+            viewport.native_pixels_per_point = Some(2.0);
+        }
+        eframe::App::raw_input_hook(&mut app, &context, &mut migrated_input);
+        assert_eq!(app.page_scale, None);
+        assert_eq!(
+            project_page_status(&mut app, 2, context.screen_rect()),
+            status_bar::VisiblePage::Unavailable
+        );
+
+        app.performance.frames = 2;
+        let _ = render_editor_frame(&context, &mut app, migrated_input);
+        assert!(matches!(
+            project_page_status(&mut app, 3, context.screen_rect()),
+            status_bar::VisiblePage::Available { .. }
+        ));
     }
 
     #[test]
@@ -3775,7 +5214,7 @@ mod tests {
     }
 
     #[test]
-    fn viewport_scale_only_transforms_fixed_print_geometry() {
+    fn viewport_page_scale_only_transforms_fixed_print_geometry() {
         let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         let layout =
             ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
@@ -3788,7 +5227,7 @@ mod tests {
         assert_eq!(line.rect.height, LINE_HEIGHT);
         assert_eq!(line.rect.y as f32 * small_scale, 72.0 * small_scale);
         assert_eq!(line.rect.y as f32 * large_scale, 72.0 * large_scale);
-        assert_ne!(small_scale, large_scale);
+        assert_eq!(small_scale, large_scale);
         assert_eq!(layout.pages[0].content_bounds.x, 108);
         assert_eq!(layout.pages[0].content_bounds.y, 72);
     }

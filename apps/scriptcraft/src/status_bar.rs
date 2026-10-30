@@ -1,3 +1,4 @@
+use crate::focus_mode::FocusModeView;
 use eframe::egui::{
     self, Align, Color32, Direction, FontSelection, Rect, Sense, WidgetInfo, WidgetText, WidgetType,
 };
@@ -5,7 +6,207 @@ const COMPACT_STATUS_BREAKPOINT: f32 = 720.0;
 pub(super) const MIN_ZOOM_PERCENT: u16 = 75;
 pub(super) const MAX_ZOOM_PERCENT: u16 = 300;
 pub(super) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250, 300];
-const FALLBACK_UI_PIXELS_PER_POINT: f32 = 2.0;
+const FALLBACK_UI_PIXELS_PER_POINT: f32 = 2.3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum AppearanceMode {
+    #[default]
+    System,
+    Day,
+    Night,
+    Midnight,
+}
+
+impl AppearanceMode {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Day => "Day Mode",
+            Self::Night => "Night Mode",
+            Self::Midnight => "Midnight Mode",
+        }
+    }
+
+    fn theme_preference(self) -> egui::ThemePreference {
+        match self {
+            Self::System => egui::ThemePreference::System,
+            Self::Day => egui::ThemePreference::Light,
+            Self::Night | Self::Midnight => egui::ThemePreference::Dark,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PagePalette {
+    pub(super) paper: Color32,
+    pub(super) text: Color32,
+    pub(super) border: Color32,
+    pub(super) selection: Color32,
+    pub(super) selection_text: Color32,
+    pub(super) caret: Color32,
+    pub(super) ime_text: Color32,
+}
+
+impl PagePalette {
+    pub(super) fn for_theme(mode: AppearanceMode, theme: egui::Theme) -> Self {
+        match (theme, mode == AppearanceMode::Midnight) {
+            (egui::Theme::Light, _) => Self {
+                paper: Color32::from_rgb(246, 246, 246),
+                text: Color32::from_rgb(32, 32, 32),
+                border: Color32::from_rgb(105, 105, 105),
+                selection: Color32::from_rgb(56, 109, 177),
+                selection_text: Color32::WHITE,
+                caret: Color32::from_rgb(20, 80, 150),
+                ime_text: Color32::from_rgb(76, 42, 122),
+            },
+            (egui::Theme::Dark, true) => Self {
+                paper: Color32::from_rgb(12, 14, 18),
+                text: Color32::from_rgb(238, 240, 244),
+                border: Color32::from_rgb(112, 118, 130),
+                selection: Color32::from_rgb(75, 117, 163),
+                selection_text: Color32::WHITE,
+                caret: Color32::from_rgb(85, 213, 255),
+                ime_text: Color32::from_rgb(211, 194, 255),
+            },
+            (egui::Theme::Dark, false) => Self {
+                paper: Color32::from_rgb(28, 30, 35),
+                text: Color32::from_rgb(238, 238, 238),
+                border: Color32::from_rgb(128, 130, 138),
+                selection: Color32::from_rgb(75, 117, 163),
+                selection_text: Color32::WHITE,
+                caret: Color32::from_rgb(85, 213, 255),
+                ime_text: Color32::from_rgb(211, 194, 255),
+            },
+        }
+    }
+}
+
+pub(super) fn configure_appearance(
+    ctx: &egui::Context,
+    mode: AppearanceMode,
+    currently_applied: Option<(AppearanceMode, egui::Theme)>,
+) -> (egui::Theme, Option<(AppearanceMode, egui::Theme)>) {
+    let system_theme = ctx
+        .system_theme()
+        .unwrap_or_else(|| ctx.options(|options| options.fallback_theme));
+    let resolved_theme = match mode {
+        AppearanceMode::System => system_theme,
+        AppearanceMode::Day => egui::Theme::Light,
+        AppearanceMode::Night | AppearanceMode::Midnight => egui::Theme::Dark,
+    };
+    let applied = Some((mode, resolved_theme));
+
+    if currently_applied != applied {
+        let light = egui::Visuals::light();
+        let mut dark = egui::Visuals::dark();
+        if mode == AppearanceMode::Midnight {
+            dark.panel_fill = Color32::from_rgb(12, 14, 18);
+            dark.window_fill = Color32::from_rgb(15, 17, 22);
+            dark.faint_bg_color = Color32::from_rgb(20, 22, 27);
+            dark.extreme_bg_color = Color32::from_rgb(8, 10, 13);
+            dark.code_bg_color = Color32::from_rgb(16, 18, 23);
+            dark.widgets.noninteractive.bg_fill = Color32::from_rgb(14, 16, 20);
+            dark.widgets.inactive.bg_fill = Color32::from_rgb(25, 28, 34);
+            dark.widgets.hovered.bg_fill = Color32::from_rgb(38, 43, 52);
+            dark.widgets.active.bg_fill = Color32::from_rgb(48, 56, 68);
+            dark.widgets.open.bg_fill = Color32::from_rgb(22, 25, 31);
+        }
+        ctx.set_visuals_of(egui::Theme::Light, light);
+        ctx.set_visuals_of(egui::Theme::Dark, dark);
+        ctx.set_theme(mode.theme_preference());
+    }
+
+    (resolved_theme, applied)
+}
+
+#[allow(dead_code)] // Stable slots for the later timer and focus work orders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum RightStatusItemId {
+    SprintTimer,
+    FocusMode,
+    Appearance,
+    Zoom,
+}
+
+impl RightStatusItemId {
+    fn order(self) -> u8 {
+        match self {
+            Self::SprintTimer => 0,
+            Self::FocusMode => 1,
+            Self::Appearance => 2,
+            Self::Zoom => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct RightStatusItemWidth {
+    pub(super) id: RightStatusItemId,
+    pub(super) width: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RightStatusLayout {
+    pub(super) inline: Vec<RightStatusItemId>,
+    pub(super) overflow: Vec<RightStatusItemId>,
+}
+
+pub(super) fn plan_right_status_items(
+    available_width: f32,
+    item_spacing: f32,
+    overflow_trigger_width: f32,
+    items: &[RightStatusItemWidth],
+) -> RightStatusLayout {
+    let mut ordered = items
+        .iter()
+        .copied()
+        .filter(|item| item.width.is_finite() && item.width > 0.0)
+        .collect::<Vec<_>>();
+    ordered.sort_by_key(|item| item.id.order());
+    ordered.dedup_by_key(|item| item.id);
+
+    let available_width = if available_width.is_finite() {
+        available_width.max(0.0)
+    } else {
+        0.0
+    };
+    let spacing = if item_spacing.is_finite() {
+        item_spacing.max(0.0)
+    } else {
+        0.0
+    };
+    let total = ordered.iter().map(|item| item.width).sum::<f32>()
+        + spacing * ordered.len().saturating_sub(1) as f32;
+    if total <= available_width {
+        return RightStatusLayout {
+            inline: ordered.iter().map(|item| item.id).collect(),
+            overflow: Vec::new(),
+        };
+    }
+
+    let trigger = if overflow_trigger_width.is_finite() {
+        overflow_trigger_width.max(0.0)
+    } else {
+        0.0
+    };
+    let inline_budget = (available_width - trigger - spacing).max(0.0);
+    let mut inline = Vec::new();
+    let mut used = 0.0;
+    for item in &ordered {
+        let candidate = used + if inline.is_empty() { 0.0 } else { spacing } + item.width;
+        if candidate > inline_budget {
+            break;
+        }
+        inline.push(item.id);
+        used = candidate;
+    }
+    let overflow = ordered
+        .iter()
+        .skip(inline.len())
+        .map(|item| item.id)
+        .collect();
+    RightStatusLayout { inline, overflow }
+}
 
 pub(super) fn resolved_ui_pixels_per_point(native: Option<f32>) -> f32 {
     native
@@ -48,12 +249,8 @@ fn zoom_controls(
     let mut presets_id = egui::Id::NULL;
     ui.horizontal(|ui| {
         let available_width = region_width.unwrap_or_else(|| ui.available_width());
-        let slider_label = if region_width.is_some() {
-            "Zoom"
-        } else {
-            "Page zoom"
-        };
-        let label_reserve = if region_width.is_some() { 48.0 } else { 0.0 };
+        let slider_label = "Page zoom";
+        let label_reserve = if region_width.is_some() { 64.0 } else { 0.0 };
         let slider_width = (available_width - 64.0 - ui.spacing().item_spacing.x - label_reserve)
             .clamp(40.0, 165.0);
         slider_rect = zoom_slider(ui, slider_width, zoom_percent, slider_label).rect;
@@ -208,7 +405,8 @@ pub(super) fn render_item(ui: &mut egui::Ui, item: &StatusItem) -> Option<Status
         StatusItemKind::ClickableIcon => {
             let response = ui
                 .push_id(item.id, |ui| {
-                    ui.add(
+                    ui.add_sized(
+                        ui.spacing().interact_size,
                         egui::Button::new(&item.label)
                             .frame(false)
                             .sense(Sense::click()),
@@ -309,13 +507,6 @@ impl VisiblePage {
     pub(super) fn label(self) -> String {
         match self {
             Self::Available { one_based, total } => format!("Page {one_based} of {total}"),
-            Self::Unavailable => "Page unavailable".to_owned(),
-        }
-    }
-
-    fn compact_label(self) -> String {
-        match self {
-            Self::Available { one_based, total } => format!("{one_based}/{total}"),
             Self::Unavailable => "Page unavailable".to_owned(),
         }
     }
@@ -589,6 +780,7 @@ impl DiagnosticProjection<'_> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn show(
     ui: &mut egui::Ui,
     page: VisiblePage,
@@ -599,6 +791,313 @@ pub(super) fn show(
     show_impl(ui, page, center, diagnostics, zoom_percent, None)
 }
 
+#[allow(clippy::too_many_arguments)] // Keep transient timer ownership at the app caller.
+pub(super) fn show_with_focus_mode(
+    ui: &mut egui::Ui,
+    page: VisiblePage,
+    center: &CenterProjection,
+    diagnostics: DiagnosticProjection<'_>,
+    zoom_percent: &mut u16,
+    appearance: &mut AppearanceMode,
+    timer_open: &mut bool,
+    timer_just_opened: &mut bool,
+    focus_view: &FocusModeView,
+    focus_activated: &mut bool,
+) -> (bool, bool, Option<Rect>, Option<Rect>) {
+    show_impl_with_appearance(
+        ui,
+        page,
+        center,
+        diagnostics,
+        zoom_percent,
+        appearance,
+        None,
+        Some(timer_open),
+        Some(timer_just_opened),
+        Some(focus_view),
+        Some(focus_activated),
+    )
+}
+
+fn measured_button_width(ui: &egui::Ui, text: &str) -> f32 {
+    let text_width = ui.fonts(|fonts| {
+        fonts
+            .layout_no_wrap(
+                text.to_owned(),
+                egui::TextStyle::Button.resolve(ui.style()),
+                Color32::WHITE,
+            )
+            .size()
+            .x
+    });
+    text_width + ui.spacing().button_padding.x * 2.0
+}
+
+fn appearance_menu(ui: &mut egui::Ui, appearance: &mut AppearanceMode) -> bool {
+    let previous = *appearance;
+    let menu = ui.menu_button("Appearance", |ui| {
+        ui.set_min_width(156.0);
+        for choice in [
+            AppearanceMode::System,
+            AppearanceMode::Day,
+            AppearanceMode::Night,
+            AppearanceMode::Midnight,
+        ] {
+            ui.selectable_value(appearance, choice, choice.label());
+        }
+    });
+    menu.response.widget_info(|| {
+        WidgetInfo::labeled(
+            WidgetType::Button,
+            menu.response.enabled,
+            "Appearance mode".to_owned(),
+        )
+    });
+    *appearance != previous
+}
+
+fn appearance_choices(ui: &mut egui::Ui, appearance: &mut AppearanceMode) -> bool {
+    let previous = *appearance;
+    for choice in [
+        AppearanceMode::System,
+        AppearanceMode::Day,
+        AppearanceMode::Night,
+        AppearanceMode::Midnight,
+    ] {
+        ui.selectable_value(appearance, choice, choice.label());
+    }
+    *appearance != previous
+}
+
+#[allow(clippy::too_many_arguments)] // Keep each transient status action owned by its desktop caller.
+fn render_right_item(
+    ui: &mut egui::Ui,
+    item: RightStatusItemId,
+    width: f32,
+    zoom_percent: &mut u16,
+    appearance: &mut AppearanceMode,
+    timer_open: Option<&mut bool>,
+    timer_just_opened: Option<&mut bool>,
+    focus_view: Option<&FocusModeView>,
+    focus_activated: Option<&mut bool>,
+    focus_width: f32,
+) -> (bool, bool, Option<Rect>, Option<Rect>) {
+    ui.push_id(item, |ui| match item {
+        RightStatusItemId::SprintTimer => {
+            let mut activated = false;
+            let mut timer_rect = None;
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    let timer_item =
+                        StatusItem::clickable_icon("sprint-timer-status-item", "⏱", "Sprint Timer");
+                    if let Some(rendered) = render_item(ui, &timer_item) {
+                        rendered.response.clone().on_hover_text("Sprint Timer");
+                        timer_rect = Some(rendered.response.rect);
+                        activated = rendered.activated;
+                    }
+                },
+            );
+            if activated {
+                if let Some(open) = timer_open {
+                    *open = !*open;
+                    if *open {
+                        if let Some(just_opened) = timer_just_opened {
+                            *just_opened = true;
+                        }
+                    }
+                }
+            }
+            (false, false, timer_rect, None)
+        }
+        RightStatusItemId::Appearance => {
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| (false, appearance_menu(ui, appearance), None, None),
+            )
+            .inner
+        }
+        RightStatusItemId::Zoom => {
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    (
+                        zoom_controls(ui, zoom_percent, Some(width)).0,
+                        false,
+                        None,
+                        None,
+                    )
+                },
+            )
+            .inner
+        }
+        RightStatusItemId::FocusMode => {
+            let mut focus_rect = None;
+            ui.allocate_ui_with_layout(
+                egui::vec2(focus_width, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    if let Some(view) = focus_view {
+                        let item = StatusItem::clickable_text(
+                            "focus-mode-status-item",
+                            view.button_text(),
+                            view.accessible_name(),
+                        );
+                        let rendered = ui
+                            .add_enabled_ui(view.enabled(), |ui| {
+                                let response = ui
+                                    .push_id(item.id, |ui| {
+                                        ui.add_sized(
+                                            egui::vec2(focus_width, ui.spacing().interact_size.y),
+                                            egui::Button::new(&item.label),
+                                        )
+                                    })
+                                    .inner;
+                                Some(interactive_response(ui, response, &item.accessible_name))
+                            })
+                            .inner;
+                        if let Some(rendered) = rendered {
+                            rendered
+                                .response
+                                .clone()
+                                .on_hover_text(view.accessible_name());
+                            focus_rect = Some(rendered.response.rect);
+                            if rendered.activated {
+                                if let Some(activated) = focus_activated {
+                                    *activated = true;
+                                }
+                            }
+                        }
+                    }
+                    (false, false, None, focus_rect)
+                },
+            )
+            .inner
+        }
+    })
+    .inner
+}
+
+#[allow(clippy::too_many_arguments)] // Each live control state remains explicitly caller-owned.
+fn overflow_menu(
+    ui: &mut egui::Ui,
+    overflow: &[RightStatusItemId],
+    page: VisiblePage,
+    center: &CenterProjection,
+    zoom_percent: &mut u16,
+    appearance: &mut AppearanceMode,
+    timer_open: &mut Option<&mut bool>,
+    timer_just_opened: &mut Option<&mut bool>,
+    focus_view: Option<&FocusModeView>,
+    focus_activated: Option<&mut bool>,
+) -> (bool, bool, Option<Rect>, Option<Rect>) {
+    let mut zoom_changed = false;
+    let mut appearance_changed = false;
+    let mut timer_rect = None;
+    let mut focus_rect = None;
+    let mut focus_activated = focus_activated;
+    let trigger = if center.error.is_some() {
+        "! More"
+    } else {
+        "More"
+    };
+    let accessible_name = if center.error.is_some() {
+        "Error. More status controls and details"
+    } else {
+        "More status controls and details"
+    };
+    let menu = ui.menu_button(trigger, |ui| {
+        ui.set_min_width(288.0);
+        egui::ScrollArea::vertical()
+            .max_height(320.0)
+            .show(ui, |ui| {
+                ui.label(page.label());
+                ui.label(center.clean_label);
+                if let Some(message) = status_message(center) {
+                    ui.label(message);
+                }
+                ui.separator();
+                for item in overflow {
+                    match item {
+                        RightStatusItemId::Appearance => {
+                            appearance_changed |= appearance_choices(ui, appearance);
+                        }
+                        RightStatusItemId::Zoom => {
+                            zoom_changed |= zoom_controls(ui, zoom_percent, Some(270.0)).0;
+                        }
+                        RightStatusItemId::SprintTimer => {
+                            let response = ui
+                                .push_id(RightStatusItemId::SprintTimer, |ui| {
+                                    ui.button("⏱  Sprint Timer")
+                                })
+                                .inner;
+                            response.clone().on_hover_text("Sprint Timer");
+                            timer_rect = Some(response.rect);
+                            response.widget_info(|| {
+                                WidgetInfo::labeled(
+                                    WidgetType::Button,
+                                    response.enabled,
+                                    "Sprint Timer".to_owned(),
+                                )
+                            });
+                            if response.clicked() {
+                                if let Some(open) = timer_open.as_deref_mut() {
+                                    *open = !*open;
+                                    if *open {
+                                        if let Some(just_opened) = timer_just_opened.as_deref_mut()
+                                        {
+                                            *just_opened = true;
+                                        }
+                                    }
+                                }
+                                ui.close_menu();
+                            }
+                        }
+                        RightStatusItemId::FocusMode => {
+                            if let Some(view) = focus_view {
+                                let response = ui
+                                    .add_enabled_ui(view.enabled(), |ui| {
+                                        ui.push_id(RightStatusItemId::FocusMode, |ui| {
+                                            ui.button(view.button_text())
+                                        })
+                                        .inner
+                                    })
+                                    .inner;
+                                response.clone().on_hover_text(view.accessible_name());
+                                response.widget_info(|| {
+                                    WidgetInfo::labeled(
+                                        WidgetType::Button,
+                                        response.enabled,
+                                        view.accessible_name(),
+                                    )
+                                });
+                                focus_rect = Some(response.rect);
+                                if response.clicked() {
+                                    if let Some(activated) = focus_activated.as_deref_mut() {
+                                        *activated = true;
+                                    }
+                                    ui.close_menu();
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+    });
+    menu.response.widget_info(|| {
+        WidgetInfo::labeled(
+            WidgetType::Button,
+            menu.response.enabled,
+            accessible_name.to_owned(),
+        )
+    });
+    (zoom_changed, appearance_changed, timer_rect, focus_rect)
+}
+
+#[cfg(test)]
 fn show_impl(
     ui: &mut egui::Ui,
     page: VisiblePage,
@@ -607,145 +1106,210 @@ fn show_impl(
     zoom_percent: &mut u16,
     diagnostics_open: Option<bool>,
 ) -> bool {
-    let compact = uses_compact_status_layout(ui.available_width());
-    let mut zoom_changed = false;
-    let message = status_message(center);
+    let mut appearance = AppearanceMode::System;
+    show_impl_with_appearance(
+        ui,
+        page,
+        center,
+        diagnostics,
+        zoom_percent,
+        &mut appearance,
+        diagnostics_open,
+        None,
+        None,
+        None,
+        None,
+    )
+    .0
+}
 
-    if compact {
-        let available_width = ui.available_width();
-        let row_height = ui.spacing().interact_size.y;
-        let gaps = ui.spacing().item_spacing.x * 2.0;
-        let zoom_width = (available_width * 0.4)
-            .clamp(160.0, 200.0)
-            .min(available_width);
-        let content_width = (available_width - zoom_width - gaps).max(0.0);
-        let page_width = content_width * 0.4;
-        let state_width = (content_width - page_width).max(0.0);
-        let clean_label = if center.clean_label == "Unsaved changes" {
+#[allow(clippy::too_many_arguments)] // Explicit projections and caller-owned state avoid hidden status globals.
+fn show_impl_with_appearance(
+    ui: &mut egui::Ui,
+    page: VisiblePage,
+    center: &CenterProjection,
+    diagnostics: DiagnosticProjection<'_>,
+    zoom_percent: &mut u16,
+    appearance: &mut AppearanceMode,
+    diagnostics_open: Option<bool>,
+    timer_open: Option<&mut bool>,
+    timer_just_opened: Option<&mut bool>,
+    focus_view: Option<&FocusModeView>,
+    focus_activated: Option<&mut bool>,
+) -> (bool, bool, Option<Rect>, Option<Rect>) {
+    let available_width = ui.available_width().max(0.0);
+    let mut zoom_changed = false;
+    let mut appearance_changed = false;
+    let mut timer_rect = None;
+    let mut focus_rect = None;
+    let mut timer_open = timer_open;
+    let mut timer_just_opened = timer_just_opened;
+    let mut focus_activated = focus_activated;
+    let message = status_message(center);
+    let clean_label =
+        if uses_compact_status_layout(available_width) && center.clean_label == "Unsaved changes" {
             "Dirty"
         } else {
             center.clean_label
         };
-        one_line_region(ui, egui::vec2(available_width, row_height), |row| {
-            row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                one_line_region(ui, egui::vec2(zoom_width, row_height), |zoom_ui| {
-                    zoom_changed = zoom_controls(zoom_ui, zoom_percent, Some(zoom_width)).0;
-                });
+    let row_height = ui.spacing().interact_size.y;
+    let timer_width = ui.spacing().interact_size.x.max(36.0);
+    ui.columns(3, |regions| {
+        let right_width = regions[2].available_width().max(0.0);
+        let appearance_width = measured_button_width(&regions[2], "Appearance");
+        let zoom_width = 270.0;
+        let trigger_label = if center.error.is_some() {
+            "! More"
+        } else {
+            "More"
+        };
+        let trigger_width = measured_button_width(&regions[2], trigger_label);
+        let mut right_items = Vec::with_capacity(4);
+        if timer_open.is_some() {
+            right_items.push(RightStatusItemWidth {
+                id: RightStatusItemId::SprintTimer,
+                width: timer_width,
+            });
+        }
+        let focus_width = measured_button_width(&regions[2], "⛶ Focus Mode").max(112.0);
+        if focus_view.is_some() {
+            right_items.push(RightStatusItemWidth {
+                id: RightStatusItemId::FocusMode,
+                width: focus_width,
+            });
+        }
+        right_items.extend([
+            RightStatusItemWidth {
+                id: RightStatusItemId::Appearance,
+                width: appearance_width,
+            },
+            RightStatusItemWidth {
+                id: RightStatusItemId::Zoom,
+                width: zoom_width,
+            },
+        ]);
+        let plan = plan_right_status_items(
+            right_width,
+            regions[2].spacing().item_spacing.x,
+            trigger_width,
+            &right_items,
+        );
+
+        // Controls are processed first so a zoom edit makes this frame's page
+        // projection unavailable before the page label is painted.
+        one_line_region(
+            &mut regions[2],
+            egui::vec2(right_width, row_height),
+            |right_ui| {
+                right_ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |right_ui| {
+                        if !plan.overflow.is_empty() {
+                            let (zoom, mode, timer_button_rect, focus_button_rect) = overflow_menu(
+                                right_ui,
+                                &plan.overflow,
+                                page,
+                                center,
+                                zoom_percent,
+                                appearance,
+                                &mut timer_open,
+                                &mut timer_just_opened,
+                                focus_view,
+                                focus_activated.as_deref_mut(),
+                            );
+                            zoom_changed |= zoom;
+                            appearance_changed |= mode;
+                            timer_rect = timer_button_rect;
+                            focus_rect = focus_button_rect;
+                        }
+                        for item in plan.inline.iter().rev() {
+                            let width = match item {
+                                RightStatusItemId::Appearance => appearance_width,
+                                RightStatusItemId::Zoom => zoom_width,
+                                RightStatusItemId::SprintTimer => timer_width,
+                                RightStatusItemId::FocusMode => focus_width,
+                            };
+                            let (zoom, mode, timer_button_rect, focus_button_rect) =
+                                render_right_item(
+                                    right_ui,
+                                    *item,
+                                    width.min(right_ui.available_width()),
+                                    zoom_percent,
+                                    appearance,
+                                    timer_open.as_deref_mut(),
+                                    timer_just_opened.as_deref_mut(),
+                                    focus_view,
+                                    focus_activated.as_deref_mut(),
+                                    focus_width,
+                                );
+                            zoom_changed |= zoom;
+                            appearance_changed |= mode;
+                            timer_rect = timer_button_rect.or(timer_rect);
+                            focus_rect = focus_button_rect.or(focus_rect);
+                        }
+                    },
+                );
+            },
+        );
+
+        let page_width = regions[0].available_width().max(0.0);
+        one_line_region(
+            &mut regions[0],
+            egui::vec2(page_width, row_height),
+            |page_ui| {
                 let visible_page = if zoom_changed {
                     VisiblePage::Unavailable
                 } else {
                     page
                 };
-                let page_item = StatusItem {
+                let item = StatusItem {
                     accessible_name: visible_page.label(),
-                    ..StatusItem::text("visible-page", visible_page.compact_label())
+                    ..StatusItem::text("visible-page", visible_page.label())
                 };
-                one_line_region(ui, egui::vec2(page_width, row_height), |region| {
-                    render_item(region, &page_item);
-                });
-                one_line_region(ui, egui::vec2(state_width, row_height), |region| {
-                    let state_rect = region.max_rect().intersect(region.clip_rect());
-                    let clean_width = (state_rect.width() * 0.55).max(0.0);
-                    let clean_rect = Rect::from_min_max(
-                        state_rect.min,
-                        egui::pos2(state_rect.left() + clean_width, state_rect.bottom()),
-                    );
-                    let message_rect = Rect::from_min_max(
-                        egui::pos2(clean_rect.right(), state_rect.top()),
-                        state_rect.max,
-                    );
+                render_item(page_ui, &item);
+            },
+        );
+
+        let status_width = regions[1].available_width().max(0.0);
+        one_line_region(
+            &mut regions[1],
+            egui::vec2(status_width, row_height),
+            |region| {
+                let status_rect = region.max_rect().intersect(region.clip_rect());
+                let clean_width = (status_rect.width() * 0.4).max(0.0);
+                let clean_rect = Rect::from_min_max(
+                    status_rect.min,
+                    egui::pos2(status_rect.left() + clean_width, status_rect.bottom()),
+                );
+                let message_rect = Rect::from_min_max(
+                    egui::pos2(clean_rect.right(), status_rect.top()),
+                    status_rect.max,
+                );
+                paint_clipped_single_line(
+                    region,
+                    "clean-state",
+                    clean_label,
+                    center.clean_label,
+                    region.visuals().text_color(),
+                    clean_rect,
+                );
+                if let Some(message) = message.as_deref() {
                     paint_clipped_single_line(
                         region,
-                        "clean-state",
-                        clean_label,
-                        center.clean_label,
-                        region.visuals().text_color(),
-                        clean_rect,
-                    );
-                    if let Some(message) = message.as_deref() {
-                        paint_clipped_single_line(
-                            region,
-                            "operation-status",
-                            message,
-                            message,
-                            if center.error.is_some() {
-                                Color32::RED
-                            } else {
-                                region.visuals().text_color()
-                            },
-                            message_rect,
-                        );
-                    }
-                });
-            });
-        });
-    } else {
-        ui.columns(3, |regions| {
-            // Render controls before the page label so a zoom change reports
-            // unavailable until the newly scaled page geometry is published.
-            zoom_changed = zoom_controls(&mut regions[2], zoom_percent, None).0;
-            let status_width = regions[1].available_width();
-            let page_row_height = regions[1].min_size().y.max(regions[2].min_size().y);
-            one_line_region(
-                &mut regions[1],
-                egui::vec2(status_width, page_row_height),
-                |ui| {
-                    let status_rect = ui.max_rect().intersect(ui.clip_rect());
-                    let clean_width = (status_rect.width() * 0.48).max(0.0);
-                    let clean_rect = Rect::from_min_max(
-                        status_rect.min,
-                        egui::pos2(status_rect.left() + clean_width, status_rect.bottom()),
-                    );
-                    let message_rect = Rect::from_min_max(
-                        egui::pos2(clean_rect.right(), status_rect.top()),
-                        status_rect.max,
-                    );
-                    paint_clipped_single_line(
-                        ui,
-                        "clean-state",
-                        center.clean_label,
-                        center.clean_label,
-                        ui.visuals().text_color(),
-                        clean_rect,
-                    );
-                    if let Some(message) = message.as_deref() {
-                        paint_clipped_single_line(
-                            ui,
-                            "operation-status",
-                            message,
-                            message,
-                            if center.error.is_some() {
-                                Color32::RED
-                            } else {
-                                ui.visuals().text_color()
-                            },
-                            message_rect,
-                        );
-                    }
-                },
-            );
-
-            // Center the page label within the content row, not the column's
-            // full available panel height. The latter grows with TopBottomPanel
-            // feedback and becomes a growing minimum when collected by columns.
-            let page_column_width = regions[0].available_width();
-            one_line_region(
-                &mut regions[0],
-                egui::vec2(page_column_width, page_row_height),
-                |ui| {
-                    let page_item = StatusItem::text(
-                        "visible-page",
-                        if zoom_changed {
-                            VisiblePage::Unavailable.label()
+                        "operation-status",
+                        message,
+                        message,
+                        if center.error.is_some() {
+                            Color32::RED
                         } else {
-                            page.label()
+                            region.visuals().text_color()
                         },
+                        message_rect,
                     );
-                    render_item(ui, &page_item);
-                },
-            );
-        });
-    }
+                }
+            },
+        );
+    });
     egui::CollapsingHeader::new("Diagnostics")
         .id_salt("status-bar-diagnostics")
         .default_open(false)
@@ -767,12 +1331,82 @@ fn show_impl(
                 },
             );
         });
-    zoom_changed
+    (zoom_changed, appearance_changed, timer_rect, focus_rect)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wo004_focus_action_supports_enter_space_and_reports_accessible_state() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let mut controller = crate::focus_mode::FocusModeController::default();
+        controller.observe(Some(false), std::time::Duration::ZERO);
+        let view = controller.view();
+        let item = StatusItem::clickable_text(
+            "focus-mode-status-item",
+            view.button_text(),
+            view.accessible_name(),
+        );
+        let mut widget_id = None;
+        let mut activated = false;
+        let render =
+            |input: egui::RawInput, widget_id: &mut Option<egui::Id>, activated: &mut bool| {
+                context.run(input, |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        let rendered = ui
+                            .add_enabled_ui(view.enabled(), |ui| {
+                                let response = ui
+                                    .push_id(item.id, |ui| {
+                                        ui.add_sized(
+                                            egui::vec2(144.0, ui.spacing().interact_size.y),
+                                            egui::Button::new(&item.label),
+                                        )
+                                    })
+                                    .inner;
+                                Some(interactive_response(ui, response, &item.accessible_name))
+                            })
+                            .inner;
+                        if let Some(rendered) = rendered {
+                            *widget_id = Some(rendered.response.id);
+                            *activated = rendered.activated;
+                        }
+                    });
+                })
+            };
+        let initial = render(egui::RawInput::default(), &mut widget_id, &mut activated);
+        let focus_id = widget_id.unwrap_or_else(|| unreachable!("Focus Mode widget was rendered"));
+        let accesskit = initial.platform_output.accesskit_update;
+        assert!(accesskit.is_some_and(|update| {
+            update.nodes.iter().any(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button
+                    && node.name() == Some(view.accessible_name().as_str())
+            })
+        }));
+
+        for key in [egui::Key::Enter, egui::Key::Space] {
+            context.memory_mut(|memory| memory.request_focus(focus_id));
+            activated = false;
+            let output = render(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key,
+                        physical_key: Some(key),
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::default(),
+                    }],
+                    ..Default::default()
+                },
+                &mut widget_id,
+                &mut activated,
+            );
+            assert!(activated, "keyboard activation failed for {key:?}");
+            assert!(output.platform_output.accesskit_update.is_some());
+        }
+    }
 
     fn render_zoom_controls(
         context: &egui::Context,
@@ -871,6 +1505,65 @@ mod tests {
             },
         );
         (output, toolbar_rect, status_rect, editor_rect)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_status_overflow(
+        context: &egui::Context,
+        width: f32,
+        page: VisiblePage,
+        center: &CenterProjection,
+        diagnostics: DiagnosticProjection<'_>,
+        zoom_percent: &mut u16,
+        diagnostics_open: Option<bool>,
+    ) -> egui::FullOutput {
+        let (initial, _, _, _) = render_status_frame(
+            context,
+            egui::RawInput::default(),
+            width,
+            page,
+            center,
+            diagnostics,
+            zoom_percent,
+            diagnostics_open,
+        );
+        let Some(trigger) = initial
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text)
+                    if text.galley.text() == "More" || text.galley.text() == "! More" =>
+                {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+        else {
+            return initial;
+        };
+        for pressed in [true, false] {
+            let _ = render_status_frame(
+                context,
+                pointer_button_frame(trigger, pressed),
+                width,
+                page,
+                center,
+                diagnostics,
+                zoom_percent,
+                diagnostics_open,
+            );
+        }
+        render_status_frame(
+            context,
+            egui::RawInput::default(),
+            width,
+            page,
+            center,
+            diagnostics,
+            zoom_percent,
+            diagnostics_open,
+        )
+        .0
     }
 
     #[test]
@@ -1037,6 +1730,431 @@ mod tests {
         assert!(!uses_compact_status_layout(COMPACT_STATUS_BREAKPOINT));
         assert!(!uses_compact_status_layout(1_200.0));
         assert!(uses_compact_status_layout(f32::NAN));
+    }
+
+    #[test]
+    fn wo002_right_item_plan_preserves_order_and_moves_only_a_suffix_to_overflow() {
+        let items = [
+            RightStatusItemWidth {
+                id: RightStatusItemId::Zoom,
+                width: 250.0,
+            },
+            RightStatusItemWidth {
+                id: RightStatusItemId::Appearance,
+                width: 110.0,
+            },
+            RightStatusItemWidth {
+                id: RightStatusItemId::FocusMode,
+                width: 70.0,
+            },
+            RightStatusItemWidth {
+                id: RightStatusItemId::SprintTimer,
+                width: 70.0,
+            },
+        ];
+        let all = plan_right_status_items(600.0, 6.0, 60.0, &items);
+        assert_eq!(
+            all.inline,
+            [
+                RightStatusItemId::SprintTimer,
+                RightStatusItemId::FocusMode,
+                RightStatusItemId::Appearance,
+                RightStatusItemId::Zoom,
+            ]
+        );
+        assert!(all.overflow.is_empty());
+
+        let suffix = plan_right_status_items(400.0, 6.0, 60.0, &items);
+        assert_eq!(
+            suffix.inline,
+            [
+                RightStatusItemId::SprintTimer,
+                RightStatusItemId::FocusMode,
+                RightStatusItemId::Appearance,
+            ]
+        );
+        assert_eq!(suffix.overflow, [RightStatusItemId::Zoom]);
+
+        let narrow = plan_right_status_items(280.0, 6.0, 60.0, &items);
+        assert_eq!(
+            narrow.inline,
+            [RightStatusItemId::SprintTimer, RightStatusItemId::FocusMode]
+        );
+        assert_eq!(
+            narrow.overflow,
+            [RightStatusItemId::Appearance, RightStatusItemId::Zoom]
+        );
+        let below_minimum = plan_right_status_items(40.0, 6.0, 60.0, &items);
+        assert!(below_minimum.inline.is_empty());
+        assert_eq!(below_minimum.overflow.len(), 4);
+    }
+
+    #[test]
+    fn wo002_right_status_fixture_items_render_inline_and_in_overflow() {
+        let items = [
+            RightStatusItemWidth {
+                id: RightStatusItemId::Zoom,
+                width: 250.0,
+            },
+            RightStatusItemWidth {
+                id: RightStatusItemId::Appearance,
+                width: 110.0,
+            },
+            RightStatusItemWidth {
+                id: RightStatusItemId::FocusMode,
+                width: 70.0,
+            },
+            RightStatusItemWidth {
+                id: RightStatusItemId::SprintTimer,
+                width: 70.0,
+            },
+        ];
+        let label = |id| match id {
+            RightStatusItemId::SprintTimer => "Sprint Timer",
+            RightStatusItemId::FocusMode => "Focus Mode",
+            RightStatusItemId::Appearance => "Appearance",
+            RightStatusItemId::Zoom => "Zoom",
+        };
+
+        for width in [600.0, 400.0, 280.0] {
+            let context = egui::Context::default();
+            let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 180.0));
+            let mut plan = None;
+            let render = |input: egui::RawInput, plan: &mut Option<RightStatusLayout>| {
+                context.run(input, |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        let layout = plan_right_status_items(
+                            ui.available_width(),
+                            ui.spacing().item_spacing.x,
+                            measured_button_width(ui, "More"),
+                            &items,
+                        );
+                        *plan = Some(layout.clone());
+                        let row_height = ui.spacing().interact_size.y;
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if !layout.overflow.is_empty() {
+                                ui.menu_button("More", |ui| {
+                                    for id in &layout.overflow {
+                                        ui.label(label(*id));
+                                    }
+                                });
+                            }
+                            for id in layout.inline.iter().rev() {
+                                let width = items
+                                    .iter()
+                                    .find(|item| item.id == *id)
+                                    .map_or(0.0, |item| item.width);
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(width, row_height),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(label(*id));
+                                    },
+                                );
+                            }
+                        });
+                    });
+                })
+            };
+
+            let mut output = render(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                &mut plan,
+            );
+            let layout = plan.take().unwrap_or_else(|| unreachable!());
+            let inline_positions = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(text) => {
+                        let name = text.galley.text();
+                        layout
+                            .inline
+                            .iter()
+                            .any(|id| label(*id) == name)
+                            .then_some((name.to_owned(), text.pos.x))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let mut sorted_inline = inline_positions.clone();
+            sorted_inline.sort_by(|first, second| first.1.total_cmp(&second.1));
+            assert_eq!(
+                sorted_inline
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+                layout
+                    .inline
+                    .iter()
+                    .map(|id| label(*id))
+                    .collect::<Vec<_>>(),
+                "inline fixture render order at {width} points"
+            );
+
+            if !layout.overflow.is_empty() {
+                let trigger = output
+                    .shapes
+                    .iter()
+                    .find_map(|clipped| match &clipped.shape {
+                        egui::epaint::Shape::Text(text) if text.galley.text() == "More" => {
+                            Some(text.pos + text.galley.size() * 0.5)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| unreachable!("overflow trigger must be rendered"));
+                for pressed in [true, false] {
+                    let _ = render(
+                        egui::RawInput {
+                            screen_rect: Some(screen),
+                            events: vec![
+                                egui::Event::PointerMoved(trigger),
+                                egui::Event::PointerButton {
+                                    pos: trigger,
+                                    button: egui::PointerButton::Primary,
+                                    pressed,
+                                    modifiers: egui::Modifiers::default(),
+                                },
+                            ],
+                            ..Default::default()
+                        },
+                        &mut plan,
+                    );
+                }
+                output = render(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                    &mut plan,
+                );
+                let mut overflow_positions = output
+                    .shapes
+                    .iter()
+                    .filter_map(|clipped| match &clipped.shape {
+                        egui::epaint::Shape::Text(text) => {
+                            let name = text.galley.text();
+                            layout
+                                .overflow
+                                .iter()
+                                .any(|id| label(*id) == name)
+                                .then_some((name.to_owned(), text.pos.y))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                overflow_positions.sort_by(|first, second| first.1.total_cmp(&second.1));
+                assert_eq!(
+                    overflow_positions
+                        .iter()
+                        .map(|(name, _)| name.as_str())
+                        .collect::<Vec<_>>(),
+                    layout
+                        .overflow
+                        .iter()
+                        .map(|id| label(*id))
+                        .collect::<Vec<_>>(),
+                    "overflow fixture render order at {width} points"
+                );
+            }
+        }
+    }
+
+    fn relative_luminance(color: Color32, background: Color32) -> f64 {
+        let alpha = f64::from(color.a()) / 255.0;
+        let channel = |foreground: u8, behind: u8| {
+            let composited =
+                (f64::from(foreground) * alpha + f64::from(behind) * (1.0 - alpha)) / 255.0;
+            if composited <= 0.04045 {
+                composited / 12.92
+            } else {
+                ((composited + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(color.r(), background.r())
+            + 0.7152 * channel(color.g(), background.g())
+            + 0.0722 * channel(color.b(), background.b())
+    }
+
+    fn contrast_ratio(first: Color32, second: Color32) -> f64 {
+        let first_luminance = relative_luminance(first, second);
+        let second_luminance = relative_luminance(second, second);
+        let lighter = first_luminance.max(second_luminance);
+        let darker = first_luminance.min(second_luminance);
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn wo002_page_palettes_meet_text_selection_caret_ime_and_border_contrast() {
+        for (mode, theme) in [
+            (AppearanceMode::System, egui::Theme::Light),
+            (AppearanceMode::Day, egui::Theme::Light),
+            (AppearanceMode::System, egui::Theme::Dark),
+            (AppearanceMode::Night, egui::Theme::Dark),
+            (AppearanceMode::Midnight, egui::Theme::Dark),
+        ] {
+            let palette = PagePalette::for_theme(mode, theme);
+            assert!(contrast_ratio(palette.text, palette.paper) >= 4.5);
+            assert!(contrast_ratio(palette.ime_text, palette.paper) >= 4.5);
+            assert!(contrast_ratio(palette.selection_text, palette.selection) >= 4.5);
+            assert!(contrast_ratio(palette.selection, palette.paper) >= 3.0);
+            assert!(contrast_ratio(palette.caret, palette.paper) >= 3.0);
+            assert!(contrast_ratio(palette.border, palette.paper) >= 3.0);
+        }
+    }
+
+    #[test]
+    fn wo002_system_tracks_resolved_theme_and_explicit_modes_ignore_system_changes() {
+        let context = egui::Context::default();
+        context.options_mut(|options| options.fallback_theme = egui::Theme::Light);
+        let mut applied = None;
+        for (system_theme, expected) in [
+            (Some(egui::Theme::Light), egui::Theme::Light),
+            (Some(egui::Theme::Dark), egui::Theme::Dark),
+            (None, egui::Theme::Light),
+            (Some(egui::Theme::Light), egui::Theme::Light),
+        ] {
+            let _ = context.run(
+                egui::RawInput {
+                    system_theme,
+                    ..Default::default()
+                },
+                |context| {
+                    let (resolved, next) =
+                        configure_appearance(context, AppearanceMode::System, applied);
+                    applied = next;
+                    assert_eq!(resolved, expected);
+                    assert_eq!(context.theme(), expected);
+                    let palette = PagePalette::for_theme(AppearanceMode::System, resolved);
+                    assert_eq!(
+                        palette.paper,
+                        PagePalette::for_theme(
+                            if expected == egui::Theme::Dark {
+                                AppearanceMode::Night
+                            } else {
+                                AppearanceMode::Day
+                            },
+                            expected,
+                        )
+                        .paper
+                    );
+                },
+            );
+        }
+
+        for (mode, expected) in [
+            (AppearanceMode::Day, egui::Theme::Light),
+            (AppearanceMode::Night, egui::Theme::Dark),
+            (AppearanceMode::Midnight, egui::Theme::Dark),
+        ] {
+            let mut current = None;
+            for system_theme in [Some(egui::Theme::Dark), Some(egui::Theme::Light)] {
+                let _ = context.run(
+                    egui::RawInput {
+                        system_theme,
+                        ..Default::default()
+                    },
+                    |context| {
+                        let (resolved, next) = configure_appearance(context, mode, current);
+                        current = next;
+                        assert_eq!(resolved, expected);
+                        assert_eq!(context.theme(), expected);
+                    },
+                );
+            }
+        }
+
+        let mut night_visuals = egui::Visuals::dark();
+        let mut applied = None;
+        let _ = context.run(
+            egui::RawInput {
+                system_theme: Some(egui::Theme::Dark),
+                ..Default::default()
+            },
+            |context| {
+                let (_, next) = configure_appearance(context, AppearanceMode::Night, applied);
+                applied = next;
+                night_visuals = context.style_of(egui::Theme::Dark).visuals.clone();
+                let (_, _) = configure_appearance(context, AppearanceMode::Midnight, applied);
+                let midnight = context.style_of(egui::Theme::Dark).visuals.clone();
+                assert!(
+                    relative_luminance(midnight.panel_fill, Color32::BLACK)
+                        < relative_luminance(night_visuals.panel_fill, Color32::BLACK)
+                );
+                assert!(
+                    relative_luminance(midnight.window_fill, Color32::BLACK)
+                        < relative_luminance(night_visuals.window_fill, Color32::BLACK)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn wo002_appearance_menu_has_exact_choices_and_keyboard_accessible_widget() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 320.0));
+        let mut mode = AppearanceMode::System;
+        let render = |context: &egui::Context, input: egui::RawInput, mode: &mut AppearanceMode| {
+            context.run(input, |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    appearance_menu(ui, mode);
+                });
+            })
+        };
+        let initial = render(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            &mut mode,
+        );
+        assert!(initial
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .is_some_and(|update| update.nodes.iter().any(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button
+                    && node.name() == Some("Appearance mode")
+            })));
+        let button = text_center(&initial, "Appearance").unwrap_or(egui::Pos2::ZERO);
+        for pressed in [true, false] {
+            let _ = render(
+                &context,
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..pointer_button_frame(button, pressed)
+                },
+                &mut mode,
+            );
+        }
+        let menu = render(
+            &context,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            &mut mode,
+        );
+        for label in ["System", "Day Mode", "Night Mode", "Midnight Mode"] {
+            assert!(text_center(&menu, label).is_some(), "missing {label}");
+        }
+        let night = text_center(&menu, "Night Mode").unwrap_or(egui::Pos2::ZERO);
+        for pressed in [true, false] {
+            let _ = render(
+                &context,
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..pointer_button_frame(night, pressed)
+                },
+                &mut mode,
+            );
+        }
+        assert_eq!(mode, AppearanceMode::Night);
     }
 
     #[test]
@@ -1248,7 +2366,7 @@ mod tests {
     }
 
     #[test]
-    fn native_ui_scale_prefers_valid_os_value_once_and_falls_back_to_two() {
+    fn native_ui_scale_prefers_valid_os_value_once_and_uses_2_3_fallback() {
         for native in [Some(1.0), Some(1.5), Some(2.0)] {
             assert_eq!(resolved_ui_pixels_per_point(native), native.unwrap_or(0.0));
             assert_eq!(ui_zoom_factor(native), 1.0);
@@ -1263,11 +2381,12 @@ mod tests {
             Some(-1.0),
             Some(f32::NAN),
             Some(f32::INFINITY),
+            Some(f32::NEG_INFINITY),
         ] {
-            assert_eq!(resolved_ui_pixels_per_point(invalid), 2.0);
-            assert_eq!(ui_zoom_factor(invalid), 2.0);
+            assert_eq!(resolved_ui_pixels_per_point(invalid), 2.3);
+            assert_eq!(ui_zoom_factor(invalid), 2.3);
         }
-        assert_eq!(ui_zoom_factor(None) * 1.5, 3.0);
+        assert!((ui_zoom_factor(None) * 1.5 - 3.45).abs() < 0.000_001);
         assert_eq!(ui_zoom_factor(Some(1.5)) * 1.5, 1.5);
     }
 
@@ -1708,27 +2827,43 @@ mod tests {
                     )
                 })
             };
-            for expected in ["137%", "Diagnostics"] {
-                assert!(
-                    text_is_visible(expected),
-                    "{layout_name} status renderer omitted {expected:?}; labels={:?}",
-                    output
-                        .shapes
-                        .iter()
-                        .filter_map(|clipped| match &clipped.shape {
-                            egui::epaint::Shape::Text(text) =>
-                                Some((text.galley.text().to_owned(), text.pos, clipped.clip_rect,)),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
+            let expected = "Diagnostics";
+            assert!(
+                text_is_visible(expected),
+                "{layout_name} status renderer omitted {expected:?}; labels={:?}",
+                output
+                    .shapes
+                    .iter()
+                    .filter_map(|clipped| match &clipped.shape {
+                        egui::epaint::Shape::Text(text) =>
+                            Some((text.galley.text().to_owned(), text.pos, clipped.clip_rect,)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            );
+            if layout_name == "normal" {
+                assert!(text_is_visible("137%"));
+            } else {
+                assert!(text_is_visible("More") || text_is_visible("! More"));
+                let overflow = open_status_overflow(
+                    &context,
+                    width,
+                    VisiblePage::Available {
+                        one_based: 2,
+                        total: 8,
+                    },
+                    &center,
+                    diagnostics,
+                    &mut zoom_percent,
+                    None,
                 );
+                assert!(overflow.shapes.iter().any(|clipped| matches!(
+                    &clipped.shape,
+                    egui::epaint::Shape::Text(text) if text.galley.text() == "137%"
+                )));
             }
             assert!(
-                text_is_visible(if layout_name == "normal" {
-                    "Page 2 of 8"
-                } else {
-                    "2/8"
-                }),
+                text_is_visible("Page 2 of 8"),
                 "{layout_name} status renderer omitted the visible page"
             );
             assert!(
@@ -1953,6 +3088,59 @@ mod tests {
             assert!(last_editor.height() > 100.0);
 
             let output = last_output.unwrap_or_else(|| unreachable!());
+            if !output.shapes.iter().any(|clipped| {
+                matches!(
+                    &clipped.shape,
+                    egui::epaint::Shape::Text(text) if text.galley.text() == "137%"
+                )
+            }) {
+                let center = project_center(
+                    true,
+                    "Operation status with a deliberately variable-width payload",
+                    Some("destination unchanged after a detailed recoverable failure"),
+                );
+                let diagnostics = DiagnosticProjection {
+                    focused: true,
+                    focus_lock: false,
+                    dispatch_enabled: false,
+                    received_events: 60,
+                    dispatched_frames: 120,
+                    pointer_activations: 30,
+                    last_event_category: "pointer",
+                    performance_events: 600_180,
+                    layout_builds: 59_820,
+                    layout_cache_hits: 3_932_220,
+                    painted_pages: 6_060,
+                    repaint_requests: 1_020,
+                };
+                let overflow = open_status_overflow(
+                    &context,
+                    width,
+                    VisiblePage::Available {
+                        one_based: 180,
+                        total: 999,
+                    },
+                    &center,
+                    diagnostics,
+                    &mut zoom_percent,
+                    Some(true),
+                );
+                assert!(
+                    overflow.shapes.iter().any(|clipped| matches!(
+                        &clipped.shape,
+                        egui::epaint::Shape::Text(text) if text.galley.text() == "137%"
+                    )),
+                    "width={width}: Zoom is not reachable in status overflow; popup labels={:?}",
+                    overflow
+                        .shapes
+                        .iter()
+                        .filter_map(|clipped| match &clipped.shape {
+                            egui::epaint::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                );
+            }
             let text_shapes = output
                 .shapes
                 .iter()
@@ -1998,28 +3186,13 @@ mod tests {
                 )),
                 "width={width}: expanded diagnostics summary was not rendered"
             );
-            assert!(
-                output.shapes.iter().any(|clipped| matches!(
-                    &clipped.shape,
-                    egui::epaint::Shape::Text(text) if text.galley.text() == "137%"
-                )),
-                "width={width}: zoom value disappeared; labels={:?}",
-                output
-                    .shapes
-                    .iter()
-                    .filter_map(|clipped| match &clipped.shape {
-                        egui::epaint::Shape::Text(text) => Some(text.galley.text().to_owned()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            );
         }
     }
 
     #[test]
     fn narrow_status_layout_keeps_zoom_page_error_and_project_state_rendered() {
         let context = egui::Context::default();
-        let viewport = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 320.0));
+        let width = 320.0;
         let center = project_center(true, "Save failed", Some("destination unchanged"));
         let diagnostics = DiagnosticProjection {
             focused: false,
@@ -2036,25 +3209,19 @@ mod tests {
             repaint_requests: 0,
         };
         let mut zoom_percent = 137;
-        let output = context.run(
-            egui::RawInput {
-                screen_rect: Some(viewport),
-                ..Default::default()
-            },
-            |context| {
-                egui::CentralPanel::default().show(context, |ui| {
-                    assert!(!show(
-                        ui,
-                        VisiblePage::Available {
-                            one_based: 2,
-                            total: 8,
-                        },
-                        &center,
-                        diagnostics,
-                        &mut zoom_percent,
-                    ));
-                });
-            },
+        let page = VisiblePage::Available {
+            one_based: 2,
+            total: 8,
+        };
+        let (output, _, _, _) = render_status_frame(
+            &context,
+            egui::RawInput::default(),
+            width,
+            page,
+            &center,
+            diagnostics,
+            &mut zoom_percent,
+            None,
         );
         let text_is_visible = |expected: &str| {
             output.shapes.iter().any(|clipped| {
@@ -2064,7 +3231,7 @@ mod tests {
                 )
             })
         };
-        for expected in ["137%", "2/8", "Dirty"] {
+        for expected in ["Page 2 of 8", "Dirty", "! More"] {
             assert!(
                 text_is_visible(expected),
                 "missing compact status text: {expected}"
@@ -2075,5 +3242,23 @@ mod tests {
             egui::epaint::Shape::Text(text)
                 if text.galley.text().starts_with("Save failed")
         )));
+        let overflow = open_status_overflow(
+            &context,
+            width,
+            page,
+            &center,
+            diagnostics,
+            &mut zoom_percent,
+            None,
+        );
+        for expected in ["137%", "Page 2 of 8", "Unsaved changes", "Save failed"] {
+            assert!(
+                overflow.shapes.iter().any(|clipped| matches!(
+                    &clipped.shape,
+                    egui::epaint::Shape::Text(text) if text.galley.text().contains(expected)
+                )),
+                "overflow omitted {expected}"
+            );
+        }
     }
 }

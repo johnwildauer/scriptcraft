@@ -23,7 +23,3 @@ Act as the implementer for one assigned work order in your own separate implemen
 6. Report completion: record changed files (including created/deleted files), validation attempts and results, comparable diff or equivalent evidence, and follow-up in the work order and execution log; log entries record the session/agent identifier for dispatch and completion. Set the work order to `in-review` only after implementation and this evidence record are complete. `in-review` means "implemented with evidence recorded, awaiting validation."
 
 The orchestrator then dispatches a fresh validation session per [`05-validation.md`](05-validation.md); validation, not the implementer, determines completion. A passed validation sets the work order to `complete`; a failed validation creates a fix work order and a new implementer session. Do not mark the work order `complete` yourself.
-
-## Blocking conditions
-
-Stop and mark the work order `blocked` when requirements are contradictory, a dependency is missing, a required command cannot run, a manual gate is unavailable, or safe implementation would exceed scope. Record the exact issue and proposed next action.

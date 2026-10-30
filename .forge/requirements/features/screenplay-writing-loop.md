@@ -4,7 +4,7 @@
 
 - **Status:** `draft` — stable MVP requirement baseline; independent requirements review not performed
 - **Owner:** Forge initialization agent
-- **Last updated:** 2026-10-28
+- **Last updated:** 2026-10-30
 - **Product overview:** [`../product-overview.md`](../product-overview.md)
 - **Blueprint counterpart:** [`../../blueprints/features/screenplay-writing-loop.md`](../../blueprints/features/screenplay-writing-loop.md)
 - **Evidence basis:** Desired product behavior derived from user-approved scope and `.analysis`; current implementation is unknown.
@@ -19,9 +19,10 @@ formatting.
 
 ## Observed, inferred, and desired distinctions
 
-- **Observed:** The checkout has planning analysis describing this loop; no ScriptCraft implementation files were found in the inspected app/crate directories.
+- **Observed at initialization (2026-10-25):** The checkout had planning analysis describing this loop; no ScriptCraft implementation files were found in the inspected app/crate directories.
+- **Current implementation evidence:** A native Rust desktop app and reusable core now exist. The 2026-10-30 UI Polish work orders independently validated the four desktop behaviors documented in REQ-WRITING-LOOP-006; this does not establish native OS notification/fullscreen delivery or validate unrelated requirements.
 - **Inferred:** The analysis represents the intended product direction and a useful architecture hypothesis, not a current contract.
-- **Desired:** The behaviors and acceptance criteria below become the stable MVP contract after independent review.
+- **Desired:** The behaviors and acceptance criteria below are the product contract. This document remains `draft`; no independent requirements review is claimed by the UI Polish validations.
 
 ## Terminology
 
@@ -139,6 +140,8 @@ the semantic editing model.
   document editing response shall request the text/I-beam cursor. Decorative
   labels and painted page rectangles shall not create competing cursor owners.
 
+> **Unresolved implementation discrepancy:** AC-WRITING-005.6 remains the product requirement for a separate app-owned title strip. The current desktop source renders the toolbar directly below the native titlebar and does not render that app-owned strip. The status-bar initiative's WO-008 removed only the distinct project-metadata heading below the toolbar; it did not remove or disposition AC-WRITING-005.6. This discrepancy is not resolved by the UI Polish work orders.
+
 ### REQ-WRITING-LOOP-006: Desktop status bar and visible page
 
 **User Story:** As an individual screenwriter, I want the desktop status bar to
@@ -151,9 +154,12 @@ caret or losing access to errors.
 - **AC-WRITING-006.1:** The desktop status presentation shall support distinct
   noninteractive-text, clickable-text, and clickable-icon Item capabilities.
   Interactive Items shall have explicit accessible names and support keyboard
-  focus and activation; noninteractive text shall not own focus, activation,
-  pointer response, or cursor behavior. The status bar shall not introduce
-  unrequested actions or icon assignments.
+  focus and pointer or keyboard activation; noninteractive text shall not own
+  focus, activation, pointer response, or cursor behavior. The right-hand
+  controls shall be Sprint Timer, Focus Mode, Appearance, and page zoom in that
+  order, whether presented inline or through the status overflow disclosure.
+  Each control shall appear as one actionable representation at a time; no other
+  status action or icon assignment shall be introduced without authorization.
 - **AC-WRITING-006.2:** The status bar shall report the live editing session's
   clean/unsaved state and current operation status, without displaying a
   cumulative frame count or project path. A clean in-memory project without a
@@ -163,10 +169,16 @@ caret or losing access to errors.
   bounded diagnostics shall remain reachable without exposing screenplay text,
   source text, or serialized project contents. Diagnostics is retained for the
   current release scope, with its removal deferred until pre-release.
-- **AC-WRITING-006.4:** At narrow widths, a deterministic bounded fallback
-  shall retain access to visible-page state, clean/unsaved state,
-  operation/error status, diagnostics, and zoom controls. Status text shall clip
-  horizontally as single-line content rather than wrap or grow the footer.
+- **AC-WRITING-006.4:** At narrow widths where the status controls remain usable,
+  a deterministic bounded fallback shall retain access to visible-page state,
+  clean/unsaved state, operation/error status, privacy-safe Diagnostics, Sprint
+  Timer, Focus Mode, Appearance, and both page-zoom controls through inline
+  content or the accessible overflow disclosure. Error state shall remain
+  identifiable and its details reachable. Status text shall clip horizontally as
+  single-line content rather than wrap or grow the footer. Below the minimum
+  usable viewport, the interface shall remain bounded and avoid overlapping or
+  unsafe interactions; no clickable-control guarantee is made for a physically
+  unusable or zero-width viewport.
 - **AC-WRITING-006.5:** Given the actual rendered sheet rectangles and actual
   editor scroll clip, the visible-page Item shall use one-based numbering and
   select the sheet with the greatest vertical overlap; exact overlap ties shall
@@ -184,14 +196,16 @@ caret or losing access to errors.
   apparently continuous whole-percent page zoom slider from 75% through 300%
   and an adjacent menu containing exactly 75%, 90%, 100%, 125%, 150%, 175%,
   200%, 250%, and 300%. Both controls shall share one transient per-window value
-  and show every intermediate integer accurately. 100% shall retain the existing
-  responsive window-fit page baseline, with the selected percentage retained
-  across resizes; zoom shall scale only page presentation and allow horizontal
-  as well as vertical navigation without changing editor source mapping or
-  focus/IME ownership. Zoom shall not persist or alter native project data,
-  session revision, saved/dirty or undo state, fixed pagination/source ranges,
-  or fixed-layout PDF output, and shall not globally scale the toolbar/status
-  controls.
+  and show every intermediate integer accurately. At 100%, the page shall have a
+  fixed 360-logical-point presentation width independent of viewport width; the
+  selected percentage shall be retained across resizes. The page shall be
+  centered within the actual editor viewport when it and its 16-point exterior
+  side buffers fit, and remain reachable by horizontal as well as vertical
+  navigation when they do not. Zoom shall scale only page presentation without
+  changing editor source mapping or focus/IME ownership. Zoom shall not persist
+  or alter native project data, session revision, saved/dirty or undo state,
+  fixed pagination/source ranges, or fixed-layout PDF output, and shall not
+  globally scale toolbar/status controls.
 - **AC-WRITING-006.8:** With status content and viewport size unchanged, the
   bottom status panel shall remain height-stable across 60 consecutive egui
   frames at normal (1200 × 820 logical points) and compact (480 × 820 logical
@@ -210,9 +224,49 @@ caret or losing access to errors.
   session, pagination, export, and editor-input invariants in AC-WRITING-006.7.
   Inward pinch is the negative direction of the backend's supported zoom event;
   delivery is platform/backend dependent and no distinct squeeze event is
-  promised. Effective egui UI pixels-per-point shall use a valid OS-native value
-  once when reported, or exactly 2.0 when unavailable/invalid; this UI scale is
-  independent of page zoom and shall not multiply native scale twice.
+  promised. A valid finite positive OS-native pixels-per-point value, including
+  1.0, shall be applied once with UI zoom 1.0; when the native value is absent or
+  invalid, the effective UI scale shall use the 2.3 fallback. A later valid
+  native value shall replace the fallback. UI scale is independent of page zoom
+  and shall not multiply native scale twice.
+- **AC-WRITING-006.11:** Appearance shall offer exactly System, Day Mode, Night
+  Mode, and Midnight Mode through an accessible control and begin each app
+  window in transient System mode. System shall follow the theme resolved by the
+  desktop framework, including changes reported while selected; when no system
+  preference is reported, the framework's resolved fallback shall be used
+  without claiming an observed OS theme. Day shall use a light page and
+  Night/Midnight dark pages; Midnight's page and major app surfaces shall be
+  measurably darker than Night. Page text and IME text shall retain at least
+  4.5:1 contrast against their composited backgrounds, selected text at least
+  4.5:1 against the selection, and the caret and visible selection boundary at
+  least 3:1 against adjacent page colors. Appearance changes shall not persist
+  and shall not change screenplay data, layout/source mappings, session
+  revision, dirty/undo state, page zoom, or PDF/plain-text output.
+- **AC-WRITING-006.12:** Sprint Timer shall be an accessible per-window status
+  action with mutually exclusive Countdown and Stopwatch modes. Countdown shall
+  default to 25 minutes, accept whole minutes from 1 through 1440, preserve
+  invalid input without starting, and support Start, Pause, Resume, End,
+  completion, and Reset. Ending an active/paused countdown shall restore the
+  captured input; running/paused timers shall continue across popup dismissal,
+  while idle/completed dismissal and Reset shall restore the 25-minute default.
+  Stopwatch shall support Start, Pause, Resume, and End and display elapsed
+  hours without wrapping. Timer state shall not persist across app relaunch or
+  change screenplay/project, editor, zoom, save, undo, pagination, or export
+  state. Completion shall show the captured duration and request at most one
+  best-effort OS notification per completed sprint; an accepted request shall
+  not be described as delivered, and notification unavailability shall not
+  remove the in-app completion result.
+- **AC-WRITING-006.13:** Focus Mode shall be an accessible per-window status
+  action that requests entry or exit only when the window reports a known
+  fullscreen state. An accepted request shall be represented as pending until
+  subsequent reports permit reconciliation; unknown, pending, or unresolved
+  state shall not be treated as a successful transition, automatically retried,
+  or toggled by repeated activation. Subsequent window reports, including
+  OS-originated changes, shall determine the available action. Focus Mode shall
+  not change screenplay/project data, editor state, page zoom, pagination, or
+  exports. Native transition completion, green-button equivalence, and exact
+  window/monitor restoration are not guaranteed by a reported state or command
+  request.
 
 ## Non-functional requirements
 
@@ -240,6 +294,7 @@ caret or losing access to errors.
 | 2026-10-28 | Added desktop status-bar and viewport-visible-page acceptance criteria (`REQ-WRITING-LOOP-006`) | Approved status-bar initiative WO-002 adds desktop-only item, status, accessibility, narrow-width, and actual-viewport page contracts while preserving fixed core layout/source-mapping requirements |
 | 2026-10-28 | Added transient desktop page-zoom acceptance criterion (`AC-WRITING-006.7`) | Approved status-bar initiative WO-003 implementation; page-only 75–300% responsive zoom, exact presets, two-axis access, and fixed document/export invariants |
 | 2026-10-29 | Revised desktop status content and clipping criteria (`AC-WRITING-006.2`–`AC-WRITING-006.4`, `AC-WRITING-006.9`) | WO-005 removes the visible frame/path/initial-placeholder claims, retains Diagnostics until pre-release, and defines clipped single-line content while preserving page, zoom, state, and error behavior |
+| 2026-10-30 | Reconciled desktop status, appearance, timer, focus, scale, and page-presentation criteria (`AC-WRITING-006.1`, `.4`, `.7`, `.10`–`.13`) | UI Polish WO-001–004 implementations and separate passing validations; rendered/source evidence does not establish native notification delivery, fullscreen completion, or native visual smoke |
 
 ### Approved WO-007 refinement
 
