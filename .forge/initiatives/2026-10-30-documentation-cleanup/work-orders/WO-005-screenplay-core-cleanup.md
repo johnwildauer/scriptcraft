@@ -2,17 +2,17 @@
 
 ## Metadata
 
-- **Status:** `draft`
+- **Status:** `executed; narrow scope-alignment outcome recorded`
 - **Work-order kind:** `document-only`
-- **Assignee:** To be assigned by the orchestrator after applicable gates.
-- **Order/dependencies:** No hard predecessor WO. Coordinate the parenthetical decision with WO-003, shared snapshot/export decisions with WO-002–004 and the other blueprint owners, and the PDF and cache gaps with their owners. Independent design review and required human design approval precede execution. No dependent implementation WO is identified.
+- **Assignee:** User-directed execution; individual implementer/session not recorded.
+- **Order/dependencies:** No hard predecessor or dependent implementation WO. Coordinate the parenthetical decision with WO-003, shared snapshot/export decisions with WO-002–004 and other blueprint owners, and PDF/cache gaps with their owners. At drafting, independent design review and required human approval were the default pre-execution gates. The later user direction explicitly authorized execution without a separate design-review agent; no formal design review or approval is recorded.
 - **Initiative:** [`../documentation-cleanup-v1.md`](../documentation-cleanup-v1.md)
 - **Generated filename:** `WO-005-screenplay-core-cleanup.md`
 - **Owner/orchestrator:** Forge orchestrator
-- **Validation:** [`../validations/validation-WO-005.md`](../validations/validation-WO-005.md) — future artifact.
+- **Validation:** [`../validations/validation-WO-005.md`](../validations/validation-WO-005.md) — narrow scope/alignment; no scope blocker identified; not full acceptance validation.
 - **Fixes:** none
-- **Implementer session/agent ID:** pending dispatch
-- **Dedicated work-order commit:** pending; exact full single-parent hash required when Git is usable.
+- **Implementer session/agent ID:** Not recorded.
+- **Dedicated work-order commit:** `7b6aacf7f37ec40ba5f049ccbf00a290d6dddcb2`.
 - **Documentation-first relationship:** none; no dependent implementation WO is identified. The orchestrator owns the recorded code and cross-document gaps and any future disposition.
 - **Commit description convention:** `docs-first (pre-implementation): no dependent implementation WOs — screenplay core blueprint cleanup`; the label does not assert a code dependency.
 - **Session exception:** none
@@ -79,10 +79,14 @@ Reconcile the Screenplay Core capability blueprint into a durable description of
 
 - [ ] Core-only edit compared against the complete original and all six preservation inventories and decisions.
 - [ ] Markdown/link, scoped diff and applicable policy checks recorded; unavailable or failed checks reported.
-- [ ] Orchestrator records dispatch/completion identifiers, changed files, evidence and exact dedicated commit hash, or applicable no-change/Git disposition; unrelated source TODO excluded.
-- [ ] Fresh independent validator receives this WO and exact hash; drafting or implementation alone does not complete validation.
+- [x] Orchestrator records changed target, execution evidence and exact dedicated commit hash; unrelated source TODO excluded; individual session ID was not recorded.
+- [x] Fresh independent narrow scope validator received this WO and exact hash; see linked validation. Broader acceptance remains unverified.
 - [ ] Orchestrator coordinates WO-003 and other owners and carries recorded gaps forward without expanding this assignment.
 
 ## Handoff
 
 Provide the approved WO, original core blueprint, updated component template, initiative core findings and user decisions, and applicable checks. Preserve unrelated work and stop if the scoped edit cannot be isolated safely. Drafting does not authorize execution, review, approval or a code fix.
+
+## Execution record — 2026-10-30
+
+The later user instruction explicitly directed execution of all seven WOs and superseded the initial planning-only boundary. This target-only implementation is recorded in the dedicated commit above; the separately authorized source TODO was not included. Validation was a fast, narrow scope/alignment comparison and did not verify factual/code accuracy, acceptance completeness, design, links/Markdown, or tests. PDF and cache observations remain unresolved initiative-level gaps/risks, not fixes. No separate design-review agent, formal design review, or design approval is recorded.

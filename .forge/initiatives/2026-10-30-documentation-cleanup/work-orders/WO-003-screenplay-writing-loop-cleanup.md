@@ -2,24 +2,24 @@
 
 ## Metadata
 
-- **Status:** `draft`
+- **Status:** `executed; narrow scope-alignment outcome recorded`
 - **Work-order kind:** `document-only`
-- **Assignee:** To be assigned by the orchestrator after applicable gates.
-- **Order/dependencies:** No hard predecessor WO; coordinate with [`WO-002`](WO-002-product-overview-cleanup.md) and the other document owners on shared decisions before closeout. The ID mapping below is proposed and reviewable, not approved. Independent design review and required human design approval precede execution; requirements review and independent per-WO validation are distinct. Orchestrator prepares dependencies and applicable checks.
+- **Assignee:** User-directed execution; individual implementer/session not recorded.
+- **Order/dependencies:** No hard predecessor WO; coordinate with [`WO-002`](WO-002-product-overview-cleanup.md) and other owners on shared decisions. The mapping below was proposed at drafting and implemented in the dedicated requirements commit; no formal design approval is recorded. The later user direction authorized execution without a separate design-review agent. Requirements review, design review, and independent per-WO validation remain distinct; no formal requirements/design review is recorded.
 - **Initiative:** [`../documentation-cleanup-v1.md`](../documentation-cleanup-v1.md)
 - **Generated filename:** `WO-003-screenplay-writing-loop-cleanup.md`
 - **Owner/orchestrator:** Forge orchestrator
-- **Validation:** [`../validations/validation-WO-003.md`](../validations/validation-WO-003.md) — future artifact.
+- **Validation:** [`../validations/validation-WO-003.md`](../validations/validation-WO-003.md) — narrow scope/alignment; no general alignment blocker identified; not full acceptance validation.
 - **Fixes:** none
-- **Implementer session/agent ID:** pending dispatch
-- **Dedicated work-order commit:** pending; exact full single-parent hash required when Git is usable.
+- **Implementer session/agent ID:** Not recorded.
+- **Dedicated work-order commit:** `f0e009c3109a1ffc4ece364d2f245fc558da0bf7`.
 - **Documentation-first relationship:** none; no dependent implementation WO is identified. The apparent desktop text-export gap is an initiative follow-up, not assigned code work.
 - **Commit description convention:** `docs-first (pre-implementation): no dependent implementation WOs — screenplay writing loop requirements cleanup`; the label does not assert an implementation dependency.
 - **Session exception:** none
 
 ## Summary
 
-Make the feature requirements a cohesive, intent-first, independently traceable statement of desired writer-facing behavior. Preserve the existing contract and IDs except for the recorded snapshot/titlebar decisions and the proposed, reviewable duplicate-ID resolution below; drafting this proposal does not approve a requirements change. Do not portray implementation evidence or WO history as requirements.
+Make the feature requirements a cohesive, intent-first, independently traceable statement of desired writer-facing behavior. At drafting time, the duplicate-ID resolution below was proposed and reviewable. The subsequent user-directed implementation applied the mapping in the dedicated commit recorded above; this execution record does not claim formal design approval. Do not portray implementation evidence or WO history as requirements.
 
 ## In scope
 
@@ -41,7 +41,7 @@ The [original feature requirements](../../../requirements/features/screenplay-wr
 - `002`: retain fixed-profile deterministic pagination, source mapping, role-aware measures/keeps, oversized-element safety, and valid-boundary caret/hit-test round trips.
 - `003`: retain native schema-v1 serialization/reopen, saved content and transient-state exclusion, failure safety and dirty state in `.1`–`.3`; default legacy fields as recorded and safely reject malformed or unsupported schema versions. Do not promise cross-version migrations. Retire snapshot criterion `.4` without replacement or ID reuse and remove snapshot-related story, overview, terminology and prose; do not invent another recovery promise.
 - `004`: retain fixed-layout PDF that preserves non-ASCII characters, native-source/dirty-state safety, and lossy plain-text export with its roles/IDs/page-layout loss communication. Do not reinterpret text as lossless or remove its requirement because the desktop route appears absent.
-- `005`: preserve default toolbar order, action routing, accessibility/hover semantics, role selection and rejection, width/allocation/overflow and cursor ownership. **Proposed, reviewable mapping (not approved):** retain toolbar width/overflow as `AC-WRITING-005.5`; restore the duplicated cursor-owner clause to its historically supported `AC-WRITING-005.7`, preserving its behavior. The user permitted reuse of `.6` only for a new narrow macOS criterion: the desktop uses the OS-owned native window header and places the toolbar at the top of the content area below it; header interactions remain OS-owned. The historical app-owned title strip/maximize criterion is retired and is not equivalent. This proposed mapping still requires applicable review and approval before any requirements edit. Do not promise a particular OS double-click outcome or native visual result.
+- `005`: preserve default toolbar order, action routing, accessibility/hover semantics, role selection and rejection, width/allocation/overflow and cursor ownership. **Mapping specified for this WO and implemented in the requirements commit:** width/overflow is `AC-WRITING-005.5`; the historically supported cursor-owner clause is `AC-WRITING-005.7`; `.6` is used only for the narrow, non-equivalent macOS criterion that the OS owns the native window header and the toolbar begins in the content area below it. The historical app-owned title strip/maximize criterion is retired. No particular OS double-click outcome or native visual result is promised. This was proposed when drafted and was implemented under later user direction; no formal design approval is recorded.
 - Also preserve the recorded New safeguard in its appropriate existing criterion: a dirty session must not be replaced by New without the writer's explicit informed consent. Do not prescribe a dialog, action sequence, or alternate recovery policy.
 - `006`: preserve all `.1`–`.13` status, error/privacy, overflow and visible-page rules; zoom values, fixed page size, invariants and geometry; footer stability and clipping; pinch and scale fallback/platform bounds; appearance modes and contrast; timer lifecycle and best-effort notification; and reported-state Focus Mode limitations. Recast implementation-specific language only when its observable, independently testable meaning and numeric bounds remain intact.
 - Preserve the three NFRs, the existing non-goals, and useful product-overview/feature-blueprint links. Keep technical mechanisms only where necessary to make the existing durable contract precise; do not turn architecture or state evidence into product requirements.
@@ -54,7 +54,7 @@ The [original feature requirements](../../../requirements/features/screenplay-wr
 
 1. Compare the whole original feature file with the area template and the preservation inventory above. Reorganize into established-state purpose, capability groups, constraints, and related documents. Keep each requirement and AC uniquely associated and independently testable; retain all semantic conditions, data-safety obligations, numeric thresholds, exclusions and platform qualifications.
 2. Remove document status/owner/date, observed/inferred/current evidence, WO-specific headings and approvals, evidence placeholders, obsolete risk inventory and revision history. Translate the three in-body refinements and the trailing parenthetical/boundary refinement into the relevant existing editing criteria or clearly associated constraints; do not drop details when moving them. Remove obsolete implementation-specific phrasing where it is not part of a necessary testable contract.
-3. Apply the recorded user decisions and carry the ID proposal exactly as described in Requirements. The proposed resolution is reviewable, not approved: `AC-WRITING-003.4` retires without reuse; width/overflow retains `AC-WRITING-005.5`; cursor ownership returns to historical `AC-WRITING-005.7`; and user-permitted `.6` reuse is limited to the non-equivalent native-header criterion, with the old app-owned strip/maximize criterion retired. Historical references remain untouched, so their meaning is determined by their original context. Do not edit the requirements until applicable review and approval; if additional renumbering or a material behavioral change seems necessary, stop and report it for user decision.
+3. Apply the recorded user decisions and the mapping above: `AC-WRITING-003.4` retires without reuse; width/overflow uses `.5`; cursor ownership uses `.7`; and user-permitted `.6` is limited to the non-equivalent native-header criterion, with the old app-owned strip/maximize criterion retired. This instruction was executed in the requirements commit listed in metadata; it does not assert formal design approval. Historical references remain untouched, so their meaning is determined by their original context. If additional renumbering or a material behavioral change is necessary, stop and report it for user decision.
 4. Check the original and revised file section by section against the preservation inventory, decision record and acceptance tests. Maintain no history or ID mapping table in the durable requirements; the initiative and this WO carry the mapping. If another material intent or current-state conflict is discovered, report it to the orchestrator; do not silently align requirements to code or extend this work order.
 
 ## Files and systems
@@ -80,10 +80,14 @@ The [original feature requirements](../../../requirements/features/screenplay-wr
 
 - [ ] Feature-only edit compared against every original requirement, refinement, constraint and exclusion; exact ID/retirement/reuse mapping checked.
 - [ ] Template, Markdown/link, diff and applicable policy checks recorded, including failures and unavailable checks.
-- [ ] Orchestrator records dispatch/completion identifiers, changed files, evidence and exact dedicated commit hash, or the applicable no-change/Git disposition.
-- [ ] Fresh independent validator receives this WO and exact hash; drafting or implementation alone does not complete validation.
+- [x] Orchestrator records changed target, execution evidence and exact dedicated commit hash; individual session ID was not recorded.
+- [x] Fresh independent narrow scope validator received this WO and exact hash; see linked validation. Broader acceptance remains unverified.
 - [ ] Orchestrator coordinates WO-002 and the other document owners and carries the text-export gap forward without expanding this assignment.
 
 ## Handoff
 
 Provide the approved WO, original feature file, area template, initiative's feature-specific finding and both user decisions, plus applicable checks. Orchestrator owns cross-document ordering and separate review/approval gates. Preserve unrelated changes and stop if they cannot be isolated safely; drafting does not authorize execution.
+
+## Execution record — 2026-10-30
+
+The later user instruction explicitly directed execution of all seven WOs and superseded the initial planning-only boundary. Commit `f0e009c3109a1ffc4ece364d2f245fc558da0bf7` applied the documented ID disposition to this requirements target. The linked validation is only a fast, narrow scope/alignment comparison; it did not assess factual accuracy, detailed acceptance completeness, design, links/Markdown, or tests. No separate design-review agent, formal design review, or design approval is recorded.

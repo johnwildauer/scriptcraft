@@ -2,17 +2,18 @@
 
 ## Metadata
 
-- **Status:** `draft`
+- **Status:** `executed; original sentence-level blocker corrected; separate traceability-status inconsistency unresolved`
 - **Work-order kind:** `document-only`
-- **Assignee:** To be assigned by the orchestrator after applicable gates.
-- **Order/dependencies:** No hard predecessor WO. Orchestrator supplies the recorded decisions and coordinated requirement-ID mapping; coordinate WO-002–006 and the manifest owner without assuming their drafts have executed. Applicable requirements review, independent design review and required human design approval precede execution. No dependent implementation WO is identified.
+- **Assignee:** User-directed execution; user personally made the corrective blueprint edit and committed it; initial implementer/session ID not otherwise recorded.
+- **Order/dependencies:** No hard predecessor or dependent implementation WO. The original conditional ID-mapping instructions below remain applicable to the blueprint comparison; WO-003's requirements commit contains the mapping, but no formal design approval is recorded. Coordinate with WO-002–006 and the manifest owner. The later user direction authorized execution without a separate design-review agent; no formal requirements/design review or approval is recorded. The proposal-status discrepancy is detailed in the follow-up validation.
 - **Initiative:** [`../documentation-cleanup-v1.md`](../documentation-cleanup-v1.md)
 - **Generated filename:** `WO-007-screenplay-writing-loop-blueprint-cleanup.md`
 - **Owner/orchestrator:** Forge orchestrator
-- **Validation:** [`../validations/validation-WO-007.md`](../validations/validation-WO-007.md) — future artifact.
+- **Validation:** [`../validations/validation-WO-007.md`](../validations/validation-WO-007.md) — historical blocked result; [`../validations/validation-WO-007-follow-up.md`](../validations/validation-WO-007-follow-up.md) — original sentence-level blocker removed, but a separate proposal-status inconsistency remains; no overall success finding.
 - **Fixes:** none
-- **Implementer session/agent ID:** pending dispatch
-- **Dedicated work-order commit:** pending; exact full single-parent hash required when Git is usable.
+- **Implementer session/agent ID:** Not recorded for the initial implementation.
+- **Dedicated work-order commit:** `1aba276afee6a58366d65392cf4ad1d1ca72c6ad`.
+- **User corrective/verification commit:** `ac1363b1d02799d5dbbd1368230b4d734a42faaf` (user's blueprint correction and verification).
 - **Documentation-first relationship:** none identified; the target blueprint can lead subsequent work, but no dependent implementation WO is authorized or identified. The orchestrator owns the recorded target/code gaps.
 - **Commit description convention:** `docs-first (pre-implementation): no dependent implementation WOs — screenplay writing loop feature blueprint cleanup`; the label does not assert a code dependency.
 - **Session exception:** none
@@ -85,10 +86,14 @@ Reconcile the writing-loop feature blueprint into a durable technical compositio
 - [ ] Feature-only edit compared with the complete original, template, all six contract groups, decisions and exclusions.
 - [ ] Requirement traceability and proposed ID mapping checked without silent semantic reuse; all links and fragments resolve against actual supplied documents.
 - [ ] Scoped diff, Markdown and applicable checks recorded, including unavailable or failed checks.
-- [ ] Orchestrator records dispatch/completion identifiers, changed files, evidence and exact dedicated commit hash, or applicable no-change/Git disposition; unrelated source changes excluded.
-- [ ] Fresh independent validator receives this WO and exact hash; drafting or implementation alone does not complete validation.
+- [x] Orchestrator records the initial target commit, user's corrective/verification commit, and validation evidence; initial implementer session ID was not recorded.
+- [x] Independent narrow follow-up compared the WO, final blueprint, and both WO-007 commits; it resolves the original sentence-level blocker but records a separate unresolved status inconsistency, not overall acceptance.
 - [ ] Orchestrator coordinates the other document owners, ID correction and recorded gaps without expanding this assignment.
 
 ## Handoff
 
 Provide the approved WO, original feature blueprint, updated feature-area template, initiative feature findings, recorded decisions, coordinated ID status and applicable checks. Preserve unrelated work and stop if the scoped edit cannot be isolated safely. Drafting does not authorize execution, review, approval, code changes or a successor WO.
+
+## Execution record — 2026-10-30
+
+The later user instruction explicitly directed execution of all seven WOs and superseded the initial planning-only boundary. The initial feature-blueprint implementation is recorded above. The original narrow validation found an unconditional `.7` cursor / `.6` header attribution contrary to this WO's conditional mapping. The user personally corrected, verified, and committed removal of that sentence; the original blocked validation remains historical. Follow-up comparison confirms the sentence-level correction but flags that the final blueprint still calls the `.5`/`.7`/`.6` mapping proposed although WO-003 implemented it in the requirements. This residual status inconsistency is unresolved and the durable blueprint is not changed by this bookkeeping task. No factual/code verification, broad acceptance testing, formal design review, or design approval is claimed.

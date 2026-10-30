@@ -2,17 +2,17 @@
 
 ## Metadata
 
-- **Status:** `draft`
+- **Status:** `executed; narrow scope-alignment outcome recorded`
 - **Work-order kind:** `document-only`
-- **Assignee:** To be assigned by orchestrator after applicable gates.
-- **Order/dependencies:** No predecessor WO. Independent design review and required human design approval precede execution; orchestrator provides the approved assignment and baseline evidence. No dependent implementation WO is identified.
+- **Assignee:** User-directed execution; individual implementer/session not recorded.
+- **Order/dependencies:** No predecessor or dependent implementation WO. At drafting, independent design review and required human approval were the default pre-execution gates. The later user direction explicitly authorized execution without a separate design-review agent; no formal design review or approval is recorded.
 - **Initiative:** [`../documentation-cleanup-v1.md`](../documentation-cleanup-v1.md)
 - **Generated filename:** `WO-001-project-manifest-cleanup.md`
 - **Owner/orchestrator:** Forge orchestrator
-- **Validation:** [`../validations/validation-WO-001.md`](../validations/validation-WO-001.md) — future artifact.
+- **Validation:** [`../validations/validation-WO-001.md`](../validations/validation-WO-001.md) — narrow changed-file scope alignment; no implementation-scope blocker identified; not full acceptance validation.
 - **Fixes:** none
-- **Implementer session/agent ID:** pending dispatch
-- **Dedicated work-order commit:** pending; exact full hash required when Git is usable.
+- **Implementer session/agent ID:** Not recorded.
+- **Dedicated work-order commit:** `fd89a0c6c03a082d9f1163147e86e2d35ca7e0aa`.
 - **Documentation-first relationship:** none; manifest cleanup is not a target for a dependent code change.
 - **Commit description convention:** `docs-first (pre-implementation): no dependent implementation WOs — project manifest cleanup`; the conventional label does not assert a code dependency.
 - **Session exception:** none
@@ -67,9 +67,13 @@ Make the project manifest a clear, trustworthy project-policy and baseline refer
 
 - [ ] Scoped manifest edit and preservation checks completed; no unsupported fact or silent policy change.
 - [ ] Document checks and applicable gates recorded, including unavailable or failed checks.
-- [ ] Orchestrator records dispatch/completion identifiers, changed files, execution evidence and the exact dedicated WO commit hash, or the applicable no-change/Git disposition.
-- [ ] Fresh independent validator receives this WO and exact hash; the work order is not complete merely because it was drafted or implemented.
+- [x] Orchestrator records changed target, execution evidence and exact dedicated WO commit hash; individual session ID was not recorded.
+- [x] Fresh independent narrow scope validator received this WO and exact hash; see linked validation. Broader acceptance remains unverified.
 
 ## Handoff
 
 The orchestrator supplies the approved WO, current manifest, plan's manifest-specific finding, relevant existing evidence, and required checks. Keep unrelated work isolated; if pre-existing changes cannot be separated safely, stop. User approval to draft is not approval to execute.
+
+## Execution record — 2026-10-30
+
+The later user instruction explicitly directed execution of all seven WOs and superseded the initial planning-only boundary. This target-only implementation is recorded in the dedicated commit above. Validation was a fast, narrow scope comparison; it did not verify facts, links, Markdown, preservation completeness, policy correctness, or tests. No separate design-review agent, formal design review, or design approval is recorded.

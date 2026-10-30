@@ -12,3 +12,7 @@ The original implementation changed the authorized [desktop container blueprint]
 ## Limits
 
 This follow-up assesses net file scope only. It does not assess factual or code accuracy, implementation correctness, acceptance completeness, design, or review/approval gates, and runs no tests or broad audit.
+
+## Reconciliation context — 2026-10-30
+
+The initial WO-006 blocker remains recorded in [`validation-WO-006.md`](validation-WO-006.md); this follow-up resolves only its net-scope issue. Initiative reconciliation records WO-006 as executed with that correction and follow-up, without claiming full acceptance or design approval; see [`execution-log.md`](../execution-log.md).

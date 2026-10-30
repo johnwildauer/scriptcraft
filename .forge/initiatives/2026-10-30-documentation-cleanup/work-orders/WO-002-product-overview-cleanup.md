@@ -2,17 +2,17 @@
 
 ## Metadata
 
-- **Status:** `draft`
+- **Status:** `executed; narrow scope-alignment outcome recorded`
 - **Work-order kind:** `document-only`
-- **Assignee:** To be assigned by orchestrator after applicable gates.
-- **Order/dependencies:** No predecessor WO. Independent design review and required human design approval precede execution; the orchestrator coordinates the snapshot-intent decision with other document owners. No dependent implementation WO is identified.
+- **Assignee:** User-directed execution; individual implementer/session not recorded.
+- **Order/dependencies:** No predecessor or dependent implementation WO. At drafting, independent design review and required human approval were the default pre-execution gates; the orchestrator coordinates the snapshot-intent decision with other owners. The later user direction explicitly authorized execution without a separate design-review agent; no formal design review or approval is recorded.
 - **Initiative:** [`../documentation-cleanup-v1.md`](../documentation-cleanup-v1.md)
 - **Generated filename:** `WO-002-product-overview-cleanup.md`
 - **Owner/orchestrator:** Forge orchestrator
-- **Validation:** [`../validations/validation-WO-002.md`](../validations/validation-WO-002.md) — future artifact.
+- **Validation:** [`../validations/validation-WO-002.md`](../validations/validation-WO-002.md) — narrow scope/alignment; no general alignment blocker identified; not full acceptance validation.
 - **Fixes:** none
-- **Implementer session/agent ID:** pending dispatch
-- **Dedicated work-order commit:** pending; exact full hash required when Git is usable.
+- **Implementer session/agent ID:** Not recorded.
+- **Dedicated work-order commit:** `487d59711f8e5149f4d5f585e894a8ff054d3fe7`.
 - **Documentation-first relationship:** none; this cleanup has no identified dependent implementation WO. A possible desktop text-export gap is recorded in the initiative, not assigned for implementation here.
 - **Commit description convention:** `docs-first (pre-implementation): no dependent implementation WOs — product overview cleanup`; the conventional label does not assert a code dependency.
 - **Session exception:** none
@@ -74,10 +74,14 @@ Recast the product overview as a concise, durable statement of ScriptCraft's int
 
 - [ ] Overview-only edit and section-by-section intent, exclusion, and snapshot-decision checks complete.
 - [ ] Markdown/link checks, scoped diff check, and applicable gates recorded; failures or unavailable checks reported.
-- [ ] Orchestrator records dispatch/completion identifiers, changed files, evidence, and exact dedicated WO commit hash, or applicable no-change/Git disposition.
-- [ ] Fresh independent validator receives this WO and exact hash; drafting or implementation alone does not complete validation.
+- [x] Orchestrator records changed target, execution evidence, and exact dedicated WO commit hash; individual session ID was not recorded.
+- [x] Fresh independent narrow scope validator received this WO and exact hash; see linked validation. Broader acceptance remains unverified.
 - [ ] Orchestrator routes the snapshot decision and recorded export gap to the appropriate owners without expanding this WO.
 
 ## Handoff
 
 The orchestrator supplies the approved WO, original overview, the initiative's product-overview finding and user decision, and applicable checks. Keep unrelated work isolated; if existing edits cannot be separated safely, stop. User direction to draft is not approval to execute. Requirements review, design review/approval, and independent per-WO validation remain distinct activities.
+
+## Execution record — 2026-10-30
+
+The later user instruction explicitly directed execution of all seven WOs and superseded the initial planning-only boundary. This target-only implementation is recorded in the dedicated commit above. Validation was a fast, narrow scope/alignment comparison; it did not establish factual accuracy, detailed acceptance completeness, links, Markdown, design merits, or test results. No separate design-review agent, formal design review, or design approval is recorded. The desktop text-export route remains an initiative follow-up, not code work in this WO.

@@ -2,17 +2,19 @@
 
 ## Metadata
 
-- **Status:** `draft`
+- **Status:** `executed; initial scope blocker corrected; narrow net-scope follow-up recorded`
 - **Work-order kind:** `document-only`
-- **Assignee:** To be assigned by the orchestrator after applicable gates.
-- **Order/dependencies:** No hard predecessor WO; coordinate the decisions and contracts below with WO-002–005, the manifest and feature-blueprint owners. Applicable requirements review, independent design review and required human design approval precede execution. No dependent implementation WO is identified.
+- **Assignee:** User-directed execution; individual implementer/session not recorded.
+- **Order/dependencies:** No hard predecessor or dependent implementation WO; coordinate the decisions below with WO-002–005, the manifest and feature-blueprint owners. At drafting, applicable requirements review, independent design review, and required human approval were the default pre-execution gates. The later user direction explicitly authorized execution without a separate design-review agent; no formal review or design approval is recorded.
 - **Initiative:** [`../documentation-cleanup-v1.md`](../documentation-cleanup-v1.md)
 - **Generated filename:** `WO-006-scriptcraft-desktop-cleanup.md`
 - **Owner/orchestrator:** Forge orchestrator
-- **Validation:** [`../validations/validation-WO-006.md`](../validations/validation-WO-006.md) — future artifact.
+- **Validation:** [`../validations/validation-WO-006.md`](../validations/validation-WO-006.md) — initial scope blocker; [`../validations/validation-WO-006-follow-up.md`](../validations/validation-WO-006-follow-up.md) — separate narrow net-scope follow-up resolves that blocker only.
 - **Fixes:** none
-- **Implementer session/agent ID:** pending dispatch
-- **Dedicated work-order commit:** pending; exact full single-parent hash required when Git is usable.
+- **Implementer session/agent ID:** Not recorded.
+- **Initial implementation commit:** `059258690781c42c952b00435529793e3a79c8a3` (included out-of-scope execution-log edit).
+- **Scope correction commit:** `3b82e11b15ce4c5a15a870ba87822718a58bd41e`.
+- **Net-scope follow-up validation commit:** `44665782fa2549b4dc390fc9898abab0388eb48f`.
 - **Documentation-first relationship:** none; no dependent implementation WO is identified. The orchestrator owns recorded code/target gaps and their future disposition.
 - **Commit description convention:** `docs-first (pre-implementation): no dependent implementation WOs — desktop container blueprint cleanup`; the label does not assert a code dependency.
 - **Session exception:** none
@@ -79,10 +81,14 @@ Reconcile the desktop container blueprint into a durable target description of t
 
 - [ ] Desktop-only edit compared against the complete original and all six contract groups, decisions and exclusions.
 - [ ] Markdown/link, scoped diff and applicable policy checks recorded; unavailable or failed checks reported.
-- [ ] Orchestrator records dispatch/completion identifiers, changed files, evidence and exact dedicated commit hash, or applicable no-change/Git disposition; unrelated source changes are excluded.
-- [ ] Fresh independent validator receives this WO and exact hash; drafting or implementation alone does not complete validation.
+- [x] Orchestrator records the initial target and scope overreach, the separate correction, and exact commit hashes; individual session ID was not recorded.
+- [x] Fresh independent narrow validation and net-scope follow-up are recorded in the linked artifacts. The follow-up resolves only the scope blocker; broader acceptance remains unverified.
 - [ ] Orchestrator coordinates the New decision, other document owners and recorded gaps without expanding this assignment.
 
 ## Handoff
 
 Provide the approved WO, original desktop blueprint, container template, initiative desktop findings and recorded user decisions, plus applicable checks. Preserve unrelated work and stop if the scoped edit cannot be isolated safely. Drafting does not authorize execution, review, approval, code changes or a successor WO.
+
+## Execution record — 2026-10-30
+
+The later user instruction explicitly directed execution of all seven WOs and superseded the initial planning-only boundary. The initial implementation also edited this initiative's execution log, outside the desktop-blueprint-only scope; the separate correction removed the log change, and the independent net-scope follow-up records that specific blocker resolved. The follow-up did not assess factual/code accuracy, acceptance completeness, design, approval, tests, or broad audit. No separate design-review agent, formal design review, or design approval is recorded.

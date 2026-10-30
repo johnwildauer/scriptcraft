@@ -15,3 +15,7 @@ WO-001 authorizes a document-only change to `.forge/project-manifest.md`. The im
 ## Scope limits
 
 Compared only WO-001 with the named commit for general work-order alignment and scope. Did not verify factual claims, relative links, Markdown correctness, implementation/code accuracy, preservation completeness, or policy correctness; did not run tests, commands, a broad audit, or a design review. No claim is made that acceptance checks or WO completion have been independently verified.
+
+## Subsequent execution-record context — 2026-10-30
+
+The `draft`/pending-status wording above describes the metadata observed during this narrow comparison and remains part of its historical scope record. Later initiative reconciliation records the user-directed execution and current WO status. This note does not broaden the validation outcome or imply formal design review, approval, or full acceptance; see [`execution-log.md`](../execution-log.md).

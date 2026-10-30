@@ -2,17 +2,17 @@
 
 ## Metadata
 
-- **Status:** `draft`
+- **Status:** `executed; narrow scope-alignment outcome recorded`
 - **Work-order kind:** `document-only`
-- **Assignee:** To be assigned by the orchestrator after applicable gates.
-- **Order/dependencies:** No hard predecessor WO; coordinate terminology and recorded decisions with WO-001–003 and the separately assigned blueprint owners. Independent design review and required human design approval precede execution. No dependent implementation WO is identified; the orchestrator owns the recorded text-export gap and any future disposition.
+- **Assignee:** User-directed execution; individual implementer/session not recorded.
+- **Order/dependencies:** No hard predecessor or dependent implementation WO; coordinate terminology and decisions with WO-001–003 and the other blueprint owners. At drafting, independent design review and required human approval were the default pre-execution gates. The later user direction explicitly authorized execution without a separate design-review agent; no formal design review or approval is recorded. The orchestrator retains the text-export gap follow-up.
 - **Initiative:** [`../documentation-cleanup-v1.md`](../documentation-cleanup-v1.md)
 - **Generated filename:** `WO-004-technical-context-target-map.md`
 - **Owner/orchestrator:** Forge orchestrator
-- **Validation:** [`../validations/validation-WO-004.md`](../validations/validation-WO-004.md) — future artifact.
+- **Validation:** [`../validations/validation-WO-004.md`](../validations/validation-WO-004.md) — narrow scope/alignment; no general blocker identified; not full acceptance validation.
 - **Fixes:** none
-- **Implementer session/agent ID:** pending dispatch
-- **Dedicated work-order commit:** pending; exact full single-parent hash required when Git is usable.
+- **Implementer session/agent ID:** Not recorded.
+- **Dedicated work-order commit:** `6b26b4bd501c984b652f8c0d15299f8dbcc9b17e`.
 - **Documentation-first relationship:** none; no dependent implementation WO is identified. A known apparent desktop text-export integration gap is an initiative-level follow-up, not assigned code work.
 - **Commit description convention:** `docs-first (pre-implementation): no dependent implementation WOs — technical context target map`; the conventional label does not assert a code dependency.
 - **Session exception:** none
@@ -77,10 +77,14 @@ Populate the unfilled technical-context scaffold with a concise, navigable targe
 
 - [ ] Target-only map populated and checked against all paths, flows, decisions, exclusions and acceptance criteria.
 - [ ] Markdown, links, scoped diff and applicable policy checks recorded; failed or unavailable checks reported.
-- [ ] Orchestrator records dispatch/completion identifiers, changed files, evidence and exact dedicated commit hash, or the applicable no-change/Git disposition.
-- [ ] Fresh independent validator receives this WO and exact hash; drafting or implementation alone does not complete validation.
+- [x] Orchestrator records changed target, execution evidence and exact dedicated commit hash; individual session ID was not recorded.
+- [x] Fresh independent narrow scope validator received this WO and exact hash; see linked validation. Broader acceptance remains unverified.
 - [ ] Orchestrator coordinates other document owners and the recorded text-export gap without expanding this assignment.
 
 ## Handoff
 
 Provide the approved WO, original technical-context scaffold, initiative technical-context finding and recorded user decisions, and applicable checks. Preserve unrelated work and stop if the target change cannot be isolated safely. Drafting does not authorize execution, review or approval.
+
+## Execution record — 2026-10-30
+
+The later user instruction explicitly directed execution of all seven WOs and superseded the initial planning-only boundary. This target-only implementation is recorded in the dedicated commit above. Validation was a fast, narrow scope/alignment comparison and did not verify factual/code accuracy, detailed acceptance, design, links/Markdown, tests, or broad audit. No separate design-review agent, formal design review, or design approval is recorded.

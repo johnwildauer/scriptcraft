@@ -15,3 +15,7 @@ WO-006 authorizes a document-only cleanup of [the desktop container blueprint](.
 ## Scope limits
 
 Compared only WO-006 with the named commit for general work-order/execution alignment and scope. Did not assess factual or code accuracy, implementation correctness, detailed acceptance-criteria completeness, design merits, links, or Markdown correctness; did not run application tests or perform a broad audit or design review. The repository was clean before this review artifact was created. This narrow review does not assess whether procedural review or approval gates were met, approve the work order, or authorize the implementation.
+
+## Subsequent execution-record context — 2026-10-30
+
+This initial finding remains the historical record of the extra execution-log file in WO-006's implementation commit. Separate commit `3b82e11b15ce4c5a15a870ba87822718a58bd41e` corrected that scope overreach; [`validation-WO-006-follow-up.md`](validation-WO-006-follow-up.md) records the narrow net-scope blocker as resolved. Neither review assesses broader acceptance, accuracy, design, approval, or tests; see [`execution-log.md`](../execution-log.md).

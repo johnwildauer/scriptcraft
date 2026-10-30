@@ -15,3 +15,7 @@ WO-002 authorizes a document-only update to `.forge/requirements/product-overvie
 ## Scope limits
 
 Compared only WO-002 with the named commit for general work-order/execution alignment and scope. Did not assess factual or code accuracy, detailed acceptance completeness, policy/design merits, relative links, or Markdown correctness; did not run application tests or perform a broad audit or design review. No claim is made that WO-002 is otherwise complete or that its procedural gates were met.
+
+## Subsequent execution-record context — 2026-10-30
+
+The `draft`/pending-gate wording above describes the metadata observed during this narrow comparison and remains historical. Later initiative reconciliation records the user's direction to execute WO-002 and the current WO status. This note does not broaden the validation outcome or imply formal design review, approval, or full acceptance; see [`execution-log.md`](../execution-log.md).
