@@ -133,7 +133,7 @@ artifact blocked when safe comparison or a required gate is unavailable.
 - Technical context: [`blueprints/technical-context.md`](blueprints/technical-context.md)
 - Project policy: this manifest's Project policy section
 - Historical first-initiative handoff: [`Screenplay MVP plan`](initiatives/2026-10-25-screenplay-mvp/2026-10-25-screenplay-mvp-v1.md)
-- Historical foundation validation: [`WO-001 validation`](initiatives/2026-10-25-screenplay-mvp/validations/validation-WO-001.md) — records the 2025-10-25 checks and host observation; not a current result.
+- Historical foundation validation: [`WO-001 validation`](initiatives/2026-10-25-screenplay-mvp/validations/validation-WO-001.md) — records the 2026-10-25 checks and host observation; not a current result.
 - Requirements review findings: [`requirements-review.md`](requirements/requirements-review.md) — independent fresh-context review completed with warnings; warning dispositions remain follow-ups.
 - Blueprint review findings: [`blueprint-review.md`](blueprints/blueprint-review.md) — independent fresh-context review completed with warnings; warning dispositions remain follow-ups.
 - Completion evidence: Initialization review artifacts and historical foundation command evidence are linked above; remaining warnings are preserved as follow-up decisions rather than represented as missing reviews.

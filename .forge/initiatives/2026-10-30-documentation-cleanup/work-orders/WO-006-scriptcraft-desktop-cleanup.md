@@ -1,0 +1,88 @@
+# Work Order: WO-006 — ScriptCraft Desktop Container Blueprint Cleanup
+
+## Metadata
+
+- **Status:** `draft`
+- **Work-order kind:** `document-only`
+- **Assignee:** To be assigned by the orchestrator after applicable gates.
+- **Order/dependencies:** No hard predecessor WO; coordinate the decisions and contracts below with WO-002–005, the manifest and feature-blueprint owners. Applicable requirements review, independent design review and required human design approval precede execution. No dependent implementation WO is identified.
+- **Initiative:** [`../documentation-cleanup-v1.md`](../documentation-cleanup-v1.md)
+- **Generated filename:** `WO-006-scriptcraft-desktop-cleanup.md`
+- **Owner/orchestrator:** Forge orchestrator
+- **Validation:** [`../validations/validation-WO-006.md`](../validations/validation-WO-006.md) — future artifact.
+- **Fixes:** none
+- **Implementer session/agent ID:** pending dispatch
+- **Dedicated work-order commit:** pending; exact full single-parent hash required when Git is usable.
+- **Documentation-first relationship:** none; no dependent implementation WO is identified. The orchestrator owns recorded code/target gaps and their future disposition.
+- **Commit description convention:** `docs-first (pre-implementation): no dependent implementation WOs — desktop container blueprint cleanup`; the label does not assert a code dependency.
+- **Session exception:** none
+
+## Summary
+
+Reconcile the desktop container blueprint into a durable target description of the runnable desktop boundary, its composition and its contracts. Use established-state voice, preserve substantive intended behavior and the explicitly recorded user decisions, and leave implementation evidence, gaps and history in initiative artifacts.
+
+## In scope
+
+- Edit only [`scriptcraft-desktop.md`](../../../blueprints/containers/scriptcraft-desktop.md), comparing the entire original including its trailing WO-labeled sections against the [container template](../../../blueprints/containers/container-slug.md), the [desktop findings](../documentation-cleanup-v1.md#desktop-container-analysis-and-wo-006-handoff), and the preservation inventory below.
+- Describe the native desktop container's responsibilities, runtime and delivery boundary, interfaces, composition, invariants, failure behavior and material architectural decisions with rationale. Link related documents without importing their obsolete claims.
+- Apply the user's decisions about dirty-session New, the native macOS header, snapshot recovery, text export and non-ASCII PDF. Do not confuse target language with evidence of current behavior.
+
+## Out of scope
+
+- Editing requirements, other blueprints, manifest, source, tests, configuration, process/templates or historical artifacts; implementing fixes, removing existing snapshot code, creating successor WOs, performing design review or granting approval.
+- Inventing the New consent UI, a text-export route, a recovery substitute, persistent preferences, a delivery mechanism, unsupported platform guarantees, native titlebar gestures, or native notification/fullscreen/theme outcomes. Do not infer implementation success from the target or documentary checks.
+- Carrying status/owner/date, WO notes, test/benchmark observations, evidence placeholders, implementation gaps, revision history, unverified OS behavior, or obsolete framework/version-specific backend evidence into the durable blueprint. Do not weaken existing behavior merely to shorten it.
+
+## Requirements and blueprint context
+
+- [`REQ-WRITING-LOOP-001`–`006`](../../../requirements/features/screenplay-writing-loop.md:37) supply semantic editing, layout, safe native save, export, toolbar and status behavior; preserve especially `AC-WRITING-003.1`–`.3`, `004.1`–`.3`, `005.1`–`.5`, the cursor-owner criterion and `006.1`–`.13`. The [initiative decisions](../documentation-cleanup-v1.md) supersede unreconciled snapshot, old app-owned title-strip and parenthetical wording. [WO-003](WO-003-screenplay-writing-loop-cleanup.md) carries a proposed, reviewable ID resolution—not an approved change—that retains `.5` for width, restores `.7` for cursor ownership and uses the user-permitted `.6` only for a non-equivalent native-header criterion; the old strip/maximize criterion is retired. Do not change requirement IDs here.
+- [`product-overview.md`](../../../requirements/product-overview.md), [`technical-context.md`](../../../blueprints/technical-context.md), [`screenplay-core.md`](../../../blueprints/components/screenplay-core.md), and the [feature blueprint](../../../blueprints/features/screenplay-writing-loop.md) are read-only coordination context. WO-002–005 and the feature owner separately reconcile their documents; do not assume their drafts have been executed. The user's New consent decision must be routed to requirements and feature owners, not silently added to those files here.
+- The [initiative desktop handoff](../documentation-cleanup-v1.md#desktop-container-analysis-and-wo-006-handoff) records source-level New, status-path and potential PDF destination conflicts and the pre-existing text, PDF and cache gaps. These are follow-ups, not instructions to make code changes or claims of runtime validation.
+
+## Required contracts and decisions
+
+1. **Container and boundaries.** Describe a local Rust/Cargo desktop application using the desktop UI framework and native dialogs, depending on a reusable headless screenplay core. The desktop owns window, input/IME, focused editor, page presentation, file selection, clipboard and error/status/platform adapters; core owns the canonical semantic project, transactional session, fixed layout, native serialization and export contracts. Transient per-window state is not canonical project content. Do not prescribe an unknown preference store, packaging method, network service, OS matrix or permanently pinned framework/backend version. Retain the material decision to keep desktop APIs out of core and its headless-testability consequence; remove the obsolete claim that framework selection is still deferred.
+2. **Session, files and exports.** Startup and New delegate to the core's new-project seed, which supplies one empty Scene Heading and a valid initial caret; semantic edits and role changes go through the transactional session, not a second desktop text buffer. **User decision:** New never replaces a dirty session without the writer's explicit informed consent; specify no dialog, action sequence or alternate recovery policy. Opening replaces session/path only after successful read, parse and validation; save prepares and atomically replaces the named destination, changing path/clean state only on success. Failed open/save/export reports an error and preserves valid in-memory and native on-disk state. Native persistence supports schema v1, defaulted legacy fields and safe rejection of malformed or unsupported versions; do not promise cross-version migrations. Snapshot candidates are not an intended desktop contract. PDF and deliberately lossy text are noncanonical, do not silently replace the native project or mark it clean, and text communicates loss of roles, stable IDs and page layout. PDF uses shared fixed print layout and preserves non-ASCII characters; do not prescribe an export destination, UI route, Type1-only mapping or non-embedding policy that would preclude the user's decision.
+3. **Editor and layout.** One stable whole-surface editor response owns focus, keyboard and text/IME/paste input; page rectangles are render/hit-test geometry, not separate editors. Delegate semantic mutation and undo to core. Pointer placement uses shared document-global nearest body-line geometry with source-safe clamping; title-page clicks do not move body selection. Caret-affecting commands reveal only when outside the actual scroll clip; passive scrolling and pointer selection clear stale reveal intent. Retain focused collapsed-caret blinking at 500 ms with reset on revision/caret/focus change and no blink repaint for range selections or unfocused idle frames. The shared cached layout must represent the current project and complete profile, including after New or Open; zoom is presentation-only. Preserve profile font identity, Courier Prime new-project default, supported stored families, bundled regular face and fixed character-cell geometry without asserting a conflicting PDF encoding implementation.
+4. **Toolbar and native chrome.** Keep the default New, Open, Save, Save As, Flexible Space, Elements, Flexible Space, Export PDF order and typed transient composition. Actions route through the desktop adapters; Elements derives the selected role from the session and routes all seven choices transactionally. Preserve icon-first borderless action responses, separate centered accessible labels, lightness-only hover, arrow vs editor I-beam cursor ownership, centered closed Elements value with truncation and stock arrow/keyboard/popup behavior, and left-aligned popup choices. Preserve measured label-aware allocation, 128-point Elements override shared by allocation/rendering, 72-point fixed Space, 4-point row padding per side, 4-point item gap, 32-point overflow reservation, 0/2-point top/bottom padding, equally divided flexible space and leftmost-fit overflow with actionable entries and nested Elements choices; keep all fitting items within the clipped content edge. On macOS the OS owns the native header; the toolbar is at the top of the app content below it. Do not restore an app-owned title strip or maximize gesture. App chrome uses the shared no-inset/no-separator framework surface; do not promise pixel equality with OS chrome.
+5. **Status and page presentation.** Preserve three status regions; noninteractive text is response-free, interactive items have accessible names and keyboard activation, and Sprint Timer, Focus Mode, Appearance and zoom retain their order and a single accessible representation through deterministic overflow. Show clean/unsaved and operation/error state, distinguish clean unnamed projects from previously saved ones, keep errors and bounded privacy-safe diagnostics reachable, and do not display the native path, frame count or demo placeholder. Retain single-line clipping and bounded footer behavior, including unusable-viewport limitations. Visible page derives from actual rendered sheets and scroll clip, counts title pages, selects maximum overlap or nearest interval with earlier-sheet ties, reports unavailable on stale geometry, and never changes input, focus or scroll. Preserve one transient 75–300 whole-percent page zoom, 100% default, the nine existing presets, 360-logical-point baseline, 16-point side buffers, centering/two-axis access, offset clamping and consistent paint/hit-test/reveal transforms; zoom does not change document, history, fixed pagination, PDF or global UI sizing. Supported pinch feeds the same zoom once, with delivery platform/backend-dependent. Native UI scale is applied once when finite and positive, including 1.0; fallback is 2.3 and a later valid value replaces it.
+6. **Window features and scheduling.** Preserve transient System/Day/Night/Midnight appearance, framework-resolved System fallback, page palette and existing contrast thresholds, without modifying document/export state or claiming observed OS theme behavior. Preserve the accessible per-window countdown/stopwatch and its existing limits, lifecycle, popup-dismissal and reset semantics, monotonic timing, bounded running repaint, nonpersistent state, and at-most-one asynchronous best-effort notification request per completed sprint; acceptance is not OS delivery and in-app completion remains available. Preserve Focus Mode's known-reported-state request, pending/unknown/timeout and external-transition handling, no optimistic success, implicit retry or inverse queue, and platform-owned fullscreen/restoration; the 600 ms stable-report interval is a duplicate-suppression heuristic, not a native completion acknowledgement. Retain privacy-safe bounded event/performance diagnostics and bounded repaint scheduling without embedding benchmark results or claiming native smoke evidence.
+
+## Implementation plan
+
+1. Compare each original section and trailing refinement with the six contract groups and user decisions. Reorganize into Purpose and boundary, Runtime and delivery, Interfaces and composition, Contracts and Decisions; integrate lasting conditions and numeric guarantees rather than copying WO narratives.
+2. Resolve the stale path-in-status, old foundation/framework and placeholder claims as specified above. Keep target/code discrepancies in the initiative, not the blueprint; do not present current implementation as evidence that the target is fulfilled. Avoid prescribing an implementation choice that conflicts with non-ASCII PDF preservation.
+3. Apply the New consent decision and the prior header, recovery, export and cache decisions exactly. If an additional material intent choice or unexplained current-state conflict is necessary, stop and report it to the orchestrator for the user rather than guessing or editing another document.
+4. Compare the completed document against every original contract, this inventory and exclusions; check links and the scoped diff. Orchestrator coordinates other owners and records any expected document/code lag in the execution handoff.
+
+## Files and systems
+
+- **Create:** none as part of the document edit.
+- **Update:** [`scriptcraft-desktop.md`](../../../blueprints/containers/scriptcraft-desktop.md) only.
+- **Avoid changing:** all other durable documents, initiative histories, application/core source, tests, assets, configuration and Forge process/templates. The separately authorized PDF source TODO is not part of this WO or its commit.
+
+## Validation and acceptance
+
+- **Document checks:** Compare the original and revised blueprint section by section, including all trailing facts, against every numbered contract group and user decision. Verify headings, Markdown and retained relative links; inspect the exact scoped diff and run `git diff --check`. Record failed or unavailable checks and run applicable project-policy checks supplied by the orchestrator. Application tests and native smoke are not inherently required for this document-only WO; documentary inspection is not runtime validation.
+- **Acceptance:** Given the original blueprint, container template and initiative decisions, an independent reader can verify all six contract groups and their conditions, numerical bounds and failure guarantees. New requires explicit informed consent before replacing a dirty session without prescribing UI; native macOS header ownership replaces the old strip; snapshot promises are absent without weakening save safety; lossy text and its loss communication remain; non-ASCII PDF is preserved in the target without a contradictory encoding constraint; cache correctness covers project replacement; and status excludes the native path. The result contains no lifecycle, WO evidence, history, gap narratives, invented features or native verification claims, and no other file is changed by the WO.
+- **Independent validation:** After applicable review, approval and execution, a fresh validator receives this WO, the original and updated assigned blueprint, and the exact dedicated single-parent commit hash. The validator checks that exact commit and scoped document against these criteria and records the result in the linked validation artifact; document-only validation does not inspect application source or block on known dependent code gaps. Drafting is not validation, approval or execution.
+
+## Durable-document impact
+
+- **Requirements impact:** `verify unchanged` — requirements are read-only; orchestrator coordinates the user-directed New safeguard and other shared decisions with the requirements owners under separately authorized work.
+- **Blueprint impact:** `update` — only the desktop container blueprint; all other blueprints are read-only.
+- **Affected documents/IDs:** Desktop container; coordinate WO-002–005, the manifest and feature blueprint, including `AC-WRITING-003.1`–`.4`, `004.1`–`.3`, `005.5`–`.7` and `006.1`–`.13`; no ID changes here.
+- **Rationale and evidence:** The initiative records the relevant user decisions, source-level gaps, affected owners and evidence limitations. None authorizes implementation.
+- **Authorized documentation changes:** Only the target described above. No dependent implementation WO is identified; orchestrator records cross-document and code/target gaps in the execution handoff when applicable.
+
+## Completion checklist
+
+- [ ] Desktop-only edit compared against the complete original and all six contract groups, decisions and exclusions.
+- [ ] Markdown/link, scoped diff and applicable policy checks recorded; unavailable or failed checks reported.
+- [ ] Orchestrator records dispatch/completion identifiers, changed files, evidence and exact dedicated commit hash, or applicable no-change/Git disposition; unrelated source changes are excluded.
+- [ ] Fresh independent validator receives this WO and exact hash; drafting or implementation alone does not complete validation.
+- [ ] Orchestrator coordinates the New decision, other document owners and recorded gaps without expanding this assignment.
+
+## Handoff
+
+Provide the approved WO, original desktop blueprint, container template, initiative desktop findings and recorded user decisions, plus applicable checks. Preserve unrelated work and stop if the scoped edit cannot be isolated safely. Drafting does not authorize execution, review, approval, code changes or a successor WO.

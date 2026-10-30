@@ -148,6 +148,7 @@ fn page_content(page: &crate::layout::LayoutPage, paper_height: u32, font_size: 
                     output.push(character);
                 }
                 c if c.is_ascii_graphic() || c == ' ' => output.push(c),
+                // TODO: Preserve non-ASCII text in PDF output instead of substituting it.
                 _ => output.push('?'),
             }
         }
