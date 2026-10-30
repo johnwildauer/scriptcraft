@@ -6,18 +6,25 @@
 
 - **Initiative:** `2026-10-30-documentation-cleanup`
 - **Initiative mode:** `standard`
-- **Current phase:** `plan`
+- **Current phase:** `execute` — WO-006 only; other work orders remain unchanged.
 - **Current status:** `active`
 - **Orchestrator:** Forge orchestrator
 - **Orchestrator session/agent ID:** Not recorded for the scaffold session.
 
 ## Desired-state documentation handoff
 
-No durable-document work order has been authorized or started. Do not record a document/code lag until a document-first work order and dependent implementation work orders are actually defined.
+WO-006 is a document-only target update with no dependent implementation work order. The user directed immediate execution without a separate design review; do not infer that the other work orders or their review/approval gates are authorized. No code fix is assigned by WO-006, and the recorded target/code gaps remain future-work handoffs.
 
 ## Execution log entries
 
-No execution entries yet. This initiative remains in planning; branch creation evidence and initial findings are recorded in [`documentation-cleanup-v1.md`](documentation-cleanup-v1.md).
+### WO-006 — ScriptCraft Desktop container blueprint cleanup
+
+- **Authority and gate:** The user directly directed execution of WO-006 without a separate design review. This records that instruction, not a claim that independent design review or validation occurred.
+- **Scope:** Updated only [`scriptcraft-desktop.md`](../../blueprints/containers/scriptcraft-desktop.md) as WO-006's durable target; no source, tests, other durable documents, or other work orders were changed.
+- **Disposition:** Reorganized the container blueprint against the container template, retaining its target contracts and user decisions. Implementation/history claims and obsolete work-order detail were removed; known implementation gaps remain documented in the initiative handoff and are not described as fixed.
+- **Checks:** `git diff --check` passed; all 4 Markdown links in the target resolve; the five required container-template sections are present; no work-order, lifecycle, revision-history, or verification-evidence markers remain in the target. No application tests or native runtime checks were run for this document-only change.
+- **Independent validation:** Not performed by the implementer; a fresh reviewer is to validate the exact implementation commit.
+- **Dedicated commit:** The single-parent WO-006 implementation commit contains this entry and the scoped blueprint change; its full hash is supplied in the execution handoff.
 
 ## Session separation exceptions
 
