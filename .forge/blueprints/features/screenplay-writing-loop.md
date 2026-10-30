@@ -1,144 +1,68 @@
-# Feature Blueprint: Dependable Screenplay Writing Loop
+# Feature-Area Blueprint: Dependable Screenplay Writing Loop
 
-## Feature Summary
+## Scope and requirements
 
-The feature flows from a semantic `Project` through a transactional editing
-session and a fixed-profile layout pipeline to desktop/page/PDF consumers, with
-native persistence and bounded recovery at the side boundary. The core and
-desktop boundaries are implemented; this blueprint combines that current
-evidence with still-desired composition contracts and does not imply every
-requirement has been independently reviewed or validated.
-
-## Document status
-
-- **Status:** `draft` — desired MVP composition; independent blueprint review not performed
-- **Owner:** Forge initialization agent
-- **Last updated:** 2026-10-30
 - **Requirements:** [`../../requirements/features/screenplay-writing-loop.md`](../../requirements/features/screenplay-writing-loop.md)
-- **Evidence basis:** `.analysis` research, current core/app source, and work-order evidence; see revision history for the desktop UI Polish boundary and its native-evidence limits
+- **Technical context:** [`../technical-context.md`](../technical-context.md)
+- **Area summary:** A local desktop writing surface delegates semantic screenplay operations to a reusable headless core. The core project remains the single canonical source; transactional editing, shared fixed-profile layout, native persistence, and derived exports preserve screenplay meaning from input through review output.
 
-## Component Blueprint Composition
+## Shared composition
 
-Compose [`#ProjectModel`](../components/screenplay-core.md#projectmodel),
-[`#EditingSession`](../components/screenplay-core.md#editingsession),
-[`#ScreenplayLayout`](../components/screenplay-core.md#screenplaylayout), and
-[`#NativePersistence`](../components/screenplay-core.md#nativepersistence)
-inside [`@ScriptCraft Desktop Application`](../containers/scriptcraft-desktop.md).
-The UI sends semantic input to `#EditingSession`; the session mutates and
-validates `#ProjectModel`; `#ScreenplayLayout` derives writing/page geometry;
-and `#NativePersistence` handles the native source and recovery boundary.
+The [ScriptCraft Desktop container](../containers/scriptcraft-desktop.md) owns the window, keyboard/IME and pointer input, editor and page presentation, file selection, clipboard, toolbar, status, and platform interactions. It adapts user actions to the [Screenplay Core component](../components/screenplay-core.md), which owns the semantic project and editing session, role-transition policy, fixed-profile layout and source mappings, native serialization, and export adapters. The desktop consumes core results and handles presentation and filesystem/platform operations; the core is a reusable library, not a separately runnable service. There is one authoritative semantic document, not a second desktop text buffer.
 
-## Feature-Specific Components
+The flow is: writer input → desktop adapter → transactional core session/project → shared fixed-profile layout → desktop presentation or PDF. Save/open crosses the desktop file boundary through core native-project serialization; plain text is a separate lossy export. Window and presentation state stays outside canonical project data. Component and container blueprints define their detailed contracts; this feature composes them without duplicating their inventories.
 
-```component
-name: RoleTransitionPolicy
-container: ScriptCraft Desktop Application
-responsibilities:
-  - Map explicit current roles and editing actions to predictable next roles.
-  - Keep transitions testable and undoable; never infer roles from appearance.
-```
+## Capability realization
 
-```component
-name: ExportLossBoundary
-container: ScriptCraft Desktop Application
-responsibilities:
-  - Request fixed print layout for PDF and emit a deliberate loss report/status for plain text.
-  - Keep exports separate from native save cleanliness and canonical project identity.
-```
+### Semantic screenplay editing
 
-## Models and contracts
+- **Requirements:** `REQ-WRITING-LOOP-001`; `AC-WRITING-001.1`–`.5`, including `.4a` and `.4b`.
+- **Composition and flow:** The core project stores ordered screenplay elements with stable opaque IDs, one of seven explicit roles (Scene Heading, Action, Character, Dialogue, Parenthetical, Transition, Note), canonical UTF-8 text, metadata, title-page content, and fixed page-profile inputs. A new project has one empty Scene Heading and a valid caret at element 0, byte 0. The desktop sends editing and navigation commands to the core session; it does not infer roles from appearance or own separate transition policy.
+- **Contracts:** Checked UTF-8-safe, bounded mutations are transactional, undoable where applicable, and preserve project/session state on rejection or failure. Enter and Tab use explicit role policies, including the collapsed Dialogue-end transition to Action and the interior Dialogue split: the original ID and prefix remain, a distinct bounded ID owns the Dialogue suffix, and the caret moves to its start. Cue casing applies only at edit boundaries to Scene Heading and Character; opening does not rewrite stored text, and absent legacy casing settings use the specified default.
+- **Parentheticals:** Automatic generation creates transient `()` with an interior caret and stable-element provenance that participates in undo/redo but is not serialized. The special Enter cleanup applies only to a still-marked generated empty pair. Pasted parentheses remain intact during paste and thereafter follow ordinary document Tab/Delete handling, including delimiter-only transitions/deletion and the applicable previous-element or first/only-element fallback. This is distinct from generated-pair Enter behavior; authored nonempty content is preserved and rejected operations do not mutate state.
 
-```model
-name: Project
-store: versioned native project file
-description: Canonical semantic screenplay project and fixed page-profile inputs.
-fields:
-  - id: opaque stable project identifier
-  - schema_version: supported native schema integer
-  - metadata: title, author, contact, timestamps
-  - title_page: explicit title-page elements
-  - page_profile: named fixed paper/role layout inputs
-  - elements: ordered ScreenplayElement list
-constraints:
-  - roles are explicit and text is canonical UTF-8
-  - transient selection, layout coordinates, undo history, and UI state are not required content
-```
+### Shared deterministic writing and page views
 
-```model
-name: ScreenplayElement
-store: Project.elements
-description: One ordered semantic writing item.
-fields:
-  - id: opaque stable element identifier
-  - role: scene_heading | action | character | dialogue | parenthetical | transition | note
-  - text: canonical UTF-8 string
-constraints:
-  - element order is writing order
-  - role meaning is independent of typography/indentation
-```
+- **Requirements:** `REQ-WRITING-LOOP-002`; `AC-WRITING-002.1`–`.4`.
+- **Composition and flow:** The core layout derives immutable page, line, and source-range geometry from the semantic project and complete, versioned fixed screenplay profile. The desktop uses the shared geometry for continuous writing, fixed-page presentation, hit testing, caret placement, selection, and visual-line navigation; PDF uses the same fixed print-layout contract.
+- **Contracts:** Identical project/profile inputs yield deterministic pagination and UTF-8-byte source mappings independent of viewport zoom. Role-aware wrapping and keep relationships do not insert formatting into canonical text; title-page boundaries remain separate from body spacing, incoming Dialogue and Parenthetical have no additional body boundary gap, and other incoming body roles use the profile gap. Oversized content has a bounded safe layout path. Caret/hit-test mapping stays at valid text boundaries. Cached geometry belongs to the current project and complete profile; revision/profile equality alone must not allow geometry from a replaced project or session to be reused.
 
-### Key Contracts
+### Durable native project persistence
 
-- `REQ-WRITING-LOOP-001` behavior is satisfied by explicit `ScreenplayElement` roles, checked editing operations, and transactional session state.
-- New `Project` instances seed exactly one empty `SceneHeading`; the initial valid caret is session state, while subsequent Enter/Tab transitions remain owned by `RoleTransitionPolicy`/`EditingSession`.
-- `REQ-WRITING-LOOP-002` behavior is satisfied by one role-aware layout/display path with a fixed profile and source mappings.
-- `REQ-WRITING-LOOP-003` behavior is satisfied by a versioned native schema, atomic replacement, and bounded recovery candidates.
-- `REQ-WRITING-LOOP-004` behavior is satisfied by export adapters that consume print layout and report loss without becoming canonical save.
+- **Requirements:** `REQ-WRITING-LOOP-003`; `AC-WRITING-003.1`–`.3`.
+- **Composition and flow:** The core serializes and parses the versioned canonical project; the desktop owns file selection and routes open/save operations. Only semantic project content and reproducible layout inputs are required in the native representation, not caret, selection, derived layout, undo history, or transient generated-parenthetical provenance.
+- **Contracts:** Schema version 1 is supported. Specified missing legacy fields receive their defaults; malformed or unsupported versions are rejected safely, without a cross-version migration commitment. Save prepares bounded data and atomically replaces the named destination. Open/save failures preserve the valid session and prior native destination; associated path and clean state change only after the corresponding operation succeeds. New must not replace a dirty session without the writer's explicit informed consent. There is no snapshot-recovery promise or implied substitute.
 
-### Integration Contracts
+### Explicit noncanonical exports
 
-- Model/session → layout: valid semantic project plus profile; output is temporary pages/lines/source mappings.
-- Layout → desktop/PDF: backend-neutral display data; consumers do not independently paginate.
-- The layout display data uses the named/versioned `us_letter_screenplay` profile: inch-defined values become points at the format boundary, with explicit role boxes, source byte ranges, page assignment, valid-boundary hit/caret geometry, same-element single spacing, and an explicit body role-pair gap policy. Incoming Dialogue and Parenthetical elements have zero extra gap from every body predecessor; other incoming roles use the profile boundary gap. Title-page boundaries are excluded and viewport zoom is presentation-only.
-- Persistence → session: successful native save changes clean/path state only after replacement succeeds; failures preserve prior state.
-- The persisted profile is also the geometry/font seam: layout, caret/hit testing, desktop selection/IME rendering, pagination, and PDF consume its role boxes, character metric, line advance, boundary gap, and font size. New projects default to `Courier Prime`; explicit supported stored families remain unchanged on open/save, with `Courier` and `Courier New` retaining their established renderer path. The desktop embeds the supplied regular Courier Prime face at build time; fixed character cells remain authoritative and viewport scale is presentation-only. PDF retains the existing deterministic Type1 family mapping and does not embed the supplied TTF.
-- Desktop page zoom, appearance, Sprint Timer, Focus Mode, and right-status overflow are presentation/window state, not part of `Project`, `EditingSession`, or `ScreenplayLayout`. UI Polish WO-001–004 report and independently validate preservation of semantic/project state, fixed pagination/source mappings, and fixed-layout export behavior. The native notification request and fullscreen command remain desktop adapter boundaries; their actual OS delivery/completion is not established by rendered tests.
+- **Requirements:** `REQ-WRITING-LOOP-004`; `AC-WRITING-004.1`–`.3`.
+- **Composition and flow:** Core export adapters consume the semantic project and fixed print layout. PDF and plain text are derived review outputs; desktop adapters handle any applicable file interaction without changing the native-save contract.
+- **Contracts:** PDF uses fixed print geometry and preserves non-ASCII characters without prescribing a conflicting font-encoding or embedding mechanism. Plain text is deliberately lossy and communicates that roles, stable IDs, and page layout are not preserved. Neither export replaces the native source or marks it clean, and export failure leaves the native project and in-memory session intact. No particular desktop text-export route is part of this composition.
 
-## Requirement alignment
+### Desktop toolbar and native header
 
-- `REQ-WRITING-LOOP-001` → `#ProjectModel`, `#EditingSession`, and `RoleTransitionPolicy`.
-- `REQ-WRITING-LOOP-002` → `#ScreenplayLayout` and the shared display boundary.
-- `REQ-WRITING-LOOP-003` → `#NativePersistence` and session save/recovery integration.
-- `REQ-WRITING-LOOP-004` → `ExportLossBoundary` and print-layout integration.
+- **Requirements:** `REQ-WRITING-LOOP-005`; `AC-WRITING-005.1`–`.7`.
+- **Composition and flow:** The desktop toolbar routes project commands and role selection through desktop adapters to the core session, persistence, or fixed-layout export boundary. Elements reflects the selected explicit role and applies a chosen role through the transactional session. On macOS, the operating system owns the native window header; toolbar content begins below it in the application content area.
+- **Contracts:** The default action order, icon-first controls, accessible labels, role choices, narrow-width overflow, measured label-aware widths, flexible-space allocation, and clipped-edge behavior follow the linked criteria. Action and Elements controls request the standard arrow cursor; the whole-document editor requests the text/I-beam cursor, with no competing decorative cursor owner. The supplied requirements assign toolbar width/overflow to `AC-WRITING-005.5`, native header to `.6`, and cursor ownership to `.7`; the ambiguous historical `.5` is not used for cursor ownership. Header interaction remains OS-owned and no additional native gesture or visual outcome is promised.
 
-## Architecture Decision Records
+### Status, visible page, and transient presentation
 
-### ADR-001: Native semantic project is the source of truth
+- **Requirements:** `REQ-WRITING-LOOP-006`; `AC-WRITING-006.1`–`.13`.
+- **Composition and flow:** The desktop projects session cleanliness, operation/errors, privacy-safe diagnostics, and fresh rendered-page geometry into an accessible status surface. Status observes the editor and does not take ownership of semantic input. Per-window zoom, appearance, timer, focus-mode requests, and overflow are transient presentation state, not project, session-history, fixed-layout, or export data.
+- **Contracts:** Status distinguishes clean/unsaved state without exposing the project path and selects the visible page from actual sheet rectangles and the editor scroll clip, independently of caret position. Invalid or stale geometry produces an unavailable state until refreshed. Bounded overflow preserves access to page/session/error information and the ordered Timer, Focus Mode, Appearance, and zoom controls; text remains clipped and the footer bounded, with no control guarantee for an unusable viewport. Zoom and appearance do not alter semantic content, fixed pagination/source ranges, native state, or exports. Timer completion remains available in-app while OS notification is best-effort; fullscreen entry/exit is a request reconciled against reported window state, not a guaranteed native transition. Accessibility, transient control details, limits, and conditional behavior remain specified by the linked acceptance criteria and desktop blueprint.
 
-**Context:** DOCX/FDX and visual exports are broad or lossy and are explicitly out of the MVP boundary.
+## Constraints
 
-**Decision:** Use a ScriptCraft-owned versioned native project for semantic roles, IDs, metadata, and page-profile inputs; treat PDF/plain text as explicit outputs.
+- The native semantic project is the single source of truth; layout, selection, undo, and presentation are derived or transient.
+- Editing, file operations, and exports preserve bounded failure behavior and the last valid native project. Fixed pagination is independent of viewport presentation.
+- Core editing, layout, and persistence remain exercisable without a desktop window; deterministic output follows identical semantic project/profile inputs.
+- **Non-functional requirements:** `NFR-WRITING-001` (typed errors and bounded inputs), `NFR-WRITING-002` (headless core verification), and `NFR-WRITING-003` (deterministic native serialization and structural pagination).
+- Native macOS behavior and platform-dependent event delivery are bounded to the explicit contracts above; no unlisted OS behavior is implied.
 
-**Consequences:** The MVP can validate the writing loop without compatibility scope, but schema migration and export-loss contracts must be designed before implementation.
+## Decisions
 
-### WO-003 verified integration facts
-
-- Multi-page editing, layout, and native persistence share the same validated semantic project. Controlled fixtures cover independent element count, text size, wrapped-line/page count, LF/CRLF/CR paste patterns, failed edits, invalid layout input, final-page caret geometry, and save/reopen semantics.
-- The bounded safety contract is preserved: no model limits were raised and schema version `1` was unchanged. `Project::to_json()` rejects encoded output over `MAX_JSON_BYTES`, while failed session/layout/persistence operations leave the prior valid state or destination usable.
-- The desktop layout error path now uses the existing recoverable error presentation (`Operation failed; document unchanged`) instead of only painting an untracked raw layout label.
-
-## Completion evidence placeholder
-
-`TODO: link implementation symbols, acceptance test evidence for AC-WRITING-001.1 through AC-WRITING-004.3, comparable diff evidence, and independent blueprint review.`
-
-## WO-006 verified responsiveness facts
-
-- Long-document responsiveness is measured rather than inferred: controlled 1/5/15/50/120/180-page generated fixtures use three warmups and ten samples, report p50/p95 layout milliseconds, and exercise edits near the beginning, middle, and end.
-- The desktop's revision/profile-keyed layout cache is a derived optimization only. Complete profile equality and session revision provide invalidation; the shared result remains authoritative for screen hit/caret/navigation geometry, while export builds its deterministic layout independently.
-- The unchanged 180-page read measured an approximately 100% layout-build p95 reduction in the bounded cache path (18.998 ms uncached versus below the 0.001 ms timer resolution cached in this run). No incremental pagination was added because the benchmark measured complete layout cost, not downstream pagination dominance.
-
-## Revision history
-
-| Date | Change | Evidence/rationale |
-|---|---|---|
-| 2026-10-25 | Created feature counterpart for the stable MVP requirement | Requirements and `.analysis` translated into a bounded technical composition; no implementation/review claimed |
-| 2026-10-25 | Resolved WO-007 export adapter contract | `scriptcraft-core::exports` uses a dependency-free deterministic PDF 1.4 consumer over `ScreenplayLayout`; plain text carries an in-band `LossReport` for roles, stable IDs, and page layout. Outputs borrow the project and never become native save state. |
-| 2026-10-30 | Clarified current implementation versus desired feature composition | Core/app source and UI Polish WO-001–004 validations establish selected desktop presentation behavior without making native notification/fullscreen or comprehensive feature-validation claims |
-
-### WO-007 verified editing facts
-
-The persisted profile owns default-on `auto_parenthetical` and `strict_transition_boundaries` without a schema bump. Editing consumes the approved parenthetical delimiter/empty-delete matrices and disables strict Scene Heading, Character, and Transition Tab/Enter commands away from collapsed UTF-8-safe text ends as successful no-ops.
-
-### WO-008 Dialogue Enter facts
-
-Dialogue Enter is boundary-sensitive: at a collapsed UTF-8-safe element end it retains Dialogue→Action, while at an interior collapsed boundary it splits and preserves the suffix as a new Dialogue element. The original ID remains on the prefix and the new ID is bounded and collision-checked. The transaction preserves source bytes, collapsed selection, undo/redo, dirty/revision/history behavior, and deterministic save/reopen semantics; rejected non-collapsed, invalid-boundary, and capacity operations are unchanged no-ops/errors.
+- **Keep the native semantic project canonical and outputs derived.** This preserves stable identity and saved-state meaning while allowing layout, PDF, and lossy text to be regenerated without replacing the source.
+- **Keep core policy independent of desktop presentation.** The headless core owns semantic editing, shared layout, persistence, and export contracts; the desktop owns input, presentation, files, and platform interaction.
+- **Support schema version 1 without promising cross-version migration.** Specified legacy defaults and safe rejection of malformed or unsupported versions bound the native compatibility contract.
+- **Preserve the recorded editing and platform intent.** Pasted parentheses follow normal subsequent Tab/Delete rules, distinct from generated-pair Enter cleanup; PDF preserves non-ASCII; dirty New requires informed consent; and the macOS header is OS-owned rather than an app-owned title strip.
+- **Trace the supplied requirements IDs without changing them here.** The initiative records the `.5`/`.7` correction and non-equivalent `.6` reuse as a proposed, reviewable mapping, not as an approval or a history rewrite. This blueprint follows the IDs currently present in the read-only requirements; snapshot criterion `AC-WRITING-003.4` is retired without replacement or reuse.
