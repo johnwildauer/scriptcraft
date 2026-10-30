@@ -1,167 +1,106 @@
 # Component Blueprint: Screenplay Core
 
-## Capability Summary
+## Capability
 
-Screenplay Core is the desired reusable capability behind the desktop shell.
-It owns semantic project data, explicit screenplay roles, checked positions and
-selections, transactional editing/session behavior, fixed-profile layout, and
-native persistence/recovery contracts. It must be usable by headless tests and
-must not depend on window widgets.
+Screenplay Core provides the reusable, headless semantic screenplay model and document operations consumed by ScriptCraft Desktop. It owns canonical project data, transactional editing sessions, deterministic fixed-profile layout, versioned native project serialization, and noncanonical export adapters. Its contracts are independent of window widgets; the desktop owns presentation, input, file selection, and platform interaction.
 
-## Document status
+The capability supports the [screenplay-writing-loop requirements](../../requirements/features/screenplay-writing-loop.md) and composes into the [ScriptCraft Desktop container](../containers/scriptcraft-desktop.md) and [Screenplay Writing Loop feature](../features/screenplay-writing-loop.md).
 
-- **Status:** `draft` — desired MVP component; implementation evidence exists for model, editing, and layout; independent blueprint review/WO-004 validation remains separate
-- **Owner:** Forge initialization agent
-- **Last updated:** 2026-10-25
-- **Containers:** [`../containers/scriptcraft-desktop.md`](../containers/scriptcraft-desktop.md)
-- **Evidence basis:** `.analysis` recommendations; no current source implementation observed
+## Composition
 
-## Core Components
+### ProjectModel
 
 ```component
 name: ProjectModel
-container: ScriptCraft Desktop Application
+container: Reusable Screenplay Core library
 responsibilities:
-  - Own versioned Project metadata, title-page elements, ordered screenplay elements, stable IDs, roles, and PageProfile inputs.
-  - Validate bounded structure and preserve canonical UTF-8 text.
+  - Own versioned project metadata, title-page elements, ordered screenplay elements, stable identifiers, roles, and fixed PageProfile inputs.
+  - Preserve canonical UTF-8 text and validate bounded project structure and serialization.
 ```
+
+### EditingSession
 
 ```component
 name: EditingSession
-container: ScriptCraft Desktop Application
+container: Reusable Screenplay Core library
 responsibilities:
-  - Own positions, anchor/focus selection, semantic edit operations, role transitions, dirty state, revision, and bounded undo/redo.
-  - Apply mutations transactionally and return typed errors without corrupting state.
+  - Own the semantic project, checked positions and selections, role-transition policies, dirty state, revision, and bounded undo/redo.
+  - Apply edits transactionally and preserve session invariants on rejected, failed, or no-op operations.
 ```
+
+### ScreenplayLayout
 
 ```component
 name: ScreenplayLayout
-container: ScriptCraft Desktop Application
+container: Reusable Screenplay Core library
 responsibilities:
-  - Resolve role rules through one fixed profile, wrap text, paginate, and return source mappings/caret geometry.
-  - Produce the same semantic/page inputs for continuous writing, page preview, and print export.
+  - Derive immutable, deterministic page geometry and source mappings from a validated project and complete fixed PageProfile.
+  - Provide role-aware wrapping, pagination, caret geometry, and hit testing independent of viewport presentation scale.
 ```
+
+### NativePersistence
 
 ```component
 name: NativePersistence
-container: ScriptCraft Desktop Application
+container: Reusable Screenplay Core library
 responsibilities:
-  - Serialize/parse the versioned native project with bounds and migrations.
-  - Perform atomic save and maintain bounded recovery candidates without silently overwriting the named project.
+  - Serialize and parse the bounded, versioned canonical native project representation.
+  - Prepare native saves for atomic destination replacement while preserving failure and dirty-state guarantees.
 ```
 
-`ProjectModel` is the durable semantic source. `EditingSession` changes it and
-invalidates derived layout. `ScreenplayLayout` reads a valid project and emits
-temporary geometry; it does not mutate the model. `NativePersistence` reads and
-writes semantic project data, not caret/layout/undo state. The desktop container
-adapts user input and consumes these results.
+### ExportAdapters
 
-## System Contracts
+```component
+name: ExportAdapters
+container: Reusable Screenplay Core library
+responsibilities:
+  - Produce noncanonical PDF output from fixed screenplay layout while preserving non-ASCII characters.
+  - Produce deliberately lossy plain text with an explicit account of semantic and layout information not retained.
+```
 
-### Key Contracts
+`ProjectModel` is the canonical semantic source. `EditingSession` applies edits to it and owns selection and editing history. `ScreenplayLayout` reads the project and complete profile to produce immutable derived geometry; it does not mutate canonical text. `NativePersistence` reads and writes semantic project content, not transient caret, layout, undo, or generated-parenthetical provenance. Export adapters derive review outputs without replacing or changing the native source. Desktop input delegates semantic operations to the session, and desktop presentation, hit testing, caret geometry, visual-line navigation, and PDF generation consume the appropriate shared core layout contracts. The core has no widget dependency; window chrome, including the OS-owned macOS header, remains at the desktop boundary.
 
-- Role is semantic data, not inferred appearance.
-- `Project::new()` seeds exactly one empty `SceneHeading` element with stable identity; `EditingSession::new()` validates and places the initial caret at element 0, byte offset 0.
-- Element identity is stable and opaque; array position and page coordinates are not durable identity.
-- Valid edit offsets are checked UTF-8 boundaries.
-- A failed mutation restores project, selection, history, and dirty-state invariants.
-- `EditingSession` owns explicit Enter and Tab role policies; unlisted Tab cases are consumed no-ops and never insert literal tab text. Role transitions are transactional and undoable.
-- Dialogue Enter is boundary-sensitive: a collapsed UTF-8-safe caret at the element end uses Dialogue→Action, while an interior collapsed boundary splits prefix and suffix into two Dialogue elements. The original stable ID is retained, the inserted ID is bounded/collision-checked, and failed selections/capacity errors leave project, selection, history, revision, and dirty state unchanged.
-- Layout is deterministic for the same project/profile/font inputs and has a safe oversized-element escape hatch. Body spacing uses an explicit incoming-role policy: every incoming Dialogue or Parenthetical has zero extra boundary gap, while all other body transitions use `PageProfile.boundary_gap`; wrapped lines and title-page elements remain excluded from body boundary spacing.
-- Body pointer hit testing is a document-global nearest-line query over rendered body pages. It chooses by absolute vertical distance, prefers the earlier line and then lower page index on exact ties, clamps horizontal misses to the line source start/end, and delegates in-line positions to the UTF-8-safe source mapping. Title pages are not a body hit-test domain; empty pages fall through to non-empty body lines, and document-span clicks clamp to the first/last body line.
-- Native save failure preserves the last valid destination; recovery is a candidate, never a silent overwrite.
-- The persisted `PageProfile.uppercase_cues` policy defaults true for new projects and for legacy profiles missing the field. Opening a project never rewrites existing text; transactional insertion, paste, role assignment, and role transitions normalize only Scene Heading and Character text when enabled using Rust Unicode uppercase with UTF-8-safe transformed-prefix caret/selection mapping. Other roles preserve source casing, and the setting is not a UI concern in this scope.
-- Newly entered Parenthetical elements receive transiently marked generated `()` text with the caret at byte offset 1. The mark is keyed by stable element ID, participates in undo/redo snapshots, and is excluded from native persistence. A successful edit that changes a marked element invalidates its mark before later cleanup decisions; failed edits do not mutate it. Enter/Tab removes the text only when the marked element is still Parenthetical and exactly `()`; user-authored, pasted, partial, and non-empty parentheses remain canonical text.
+## Contracts
 
-### Integration Contracts
+### Semantic model and transactional editing
 
-- Desktop UI calls semantic operations and consumes pages/display records; it does not directly edit a parallel string.
-- PDF consumes print layout/display output; export does not become the native source.
-- Headless tests call the same core operations as the UI.
-- The desktop adapter derives visual-line vertical movement from `ScreenplayLayout` source ranges and geometry. Its preferred horizontal goal is transient UI/session state and is never serialized.
+- A project contains versioned metadata, title-page elements, an ordered list of screenplay elements, and a fixed page profile. Each element has one of seven explicit semantic roles: Scene Heading, Action, Character, Dialogue, Parenthetical, Transition, or Note. Role is not inferred from appearance. Canonical text is ordered UTF-8, and each element has a unique opaque stable identifier independent of list position and page geometry.
+- A new project contains exactly one empty Scene Heading. A new editing session starts with a valid caret at element index 0, byte offset 0. Text positions and selections use checked UTF-8 boundaries.
+- Project structure and serialization are bounded to at most 10,000 elements, 262,144 UTF-8 text bytes per element, and 1,048,576 native JSON bytes. Malformed or out-of-bound data yields a typed, recoverable failure.
+- Mutations and bounded paste are transactional. A bounded paste is one undo entry; embedded newlines, carriage returns, whitespace, and Unicode remain canonical text in the active element rather than creating roles or elements. Rejected selections, invalid boundaries, capacity failures, and other failed mutations preserve project, selection, history, revision, and dirty state. Successful changes support bounded collision-checked split identifiers, undo, and redo.
+- Enter and Tab use explicit role policies. Enter maps General/Note to the same role, Scene Heading to Action, Action to Action, Character to Dialogue, Dialogue at its collapsed UTF-8-safe end to Action, Parenthetical to Dialogue, and Transition to Scene Heading. A collapsed Dialogue caret at an interior UTF-8 boundary splits the element: the original identifier and exact prefix remain, a distinct bounded identifier owns the exact suffix as Dialogue, and the caret moves to the new element start. Empty Dialogue is an end-boundary case. Rejected noncollapsed selections, invalid boundaries, and capacity failures preserve the session.
+- Tab maps Scene Heading to Action, Action to Character, blank Character to Transition, Transition to Scene Heading, Dialogue to Parenthetical, and Parenthetical to Dialogue. Unlisted Tab cases are consumed no-ops and never insert literal tab text or create history. Role transitions are transactional and undoable.
+- The persisted `uppercase_cues` policy defaults to enabled for new projects and profiles missing the legacy field. When enabled, transactional insertion, paste, role assignment, and role transitions normalize only Scene Heading and Character text using Unicode uppercase and UTF-8-safe transformed-prefix selection mapping. Opening a project does not rewrite stored text; other roles preserve source casing.
 
-## Architecture Decision Records
+### Parenthetical editing
 
-### ADR-001: One small semantic core before crate splitting
+- The persisted `auto_parenthetical` and `strict_transition_boundaries` profile policies default to enabled for new projects and profiles missing either legacy field. Malformed field types are rejected, and both settings round-trip with the profile.
+- When automatic generation applies to a transition or assignment into Parenthetical, it creates an empty `()` pair with the caret between the delimiters. Its transient provenance is keyed by stable element identifier, participates in undo/redo, and is excluded from native project content. A successful content-changing edit invalidates the mark; a failed edit does not.
+- The Enter-specific generated-pair cleanup applies only when the marked element is still Parenthetical and contains exactly `()`. Parenthetical Enter behavior also supports insertion before the opening delimiter and configured delimiter repair; strict-boundary rejection is a no-op, and edits preserve transactional undo/rollback behavior. These Enter rules do not make provenance a prerequisite for normal later Tab or Delete handling.
+- Pasted parentheses remain intact at paste time and then behave as ordinary document delimiters. With automatic parentheticals enabled, Tab handles delimiter-only `(`, `)`, and `()` as an empty Dialogue transition regardless of provenance. Delete handles delimiter-only Parentheticals using the previous-element fallback, or the first/only-element fallback when no previous element exists. Nonempty authored content is preserved. These explicit commands do not make every authored or partial delimiter permanently immune to handling. Disabling automatic parentheticals honors the setting without changing the distinct generated-pair Enter rules.
 
-**Context:** `.analysis` considers several possible crates, but the current checkout has no verified package baseline and early boundaries are still being discovered.
+### Fixed layout and source mapping
 
-**Decision:** Begin with a deliberately bounded core capability whose modules have clear ownership; split into crates only after an independently demonstrated reuse, dependency, or compile-time need.
+- The named, versioned, bounded `us_letter_screenplay` profile defines US Letter pages of 612 × 792 points; left, right, top, and bottom margins of 108, 72, 72, and 72 points; seven-point fixed character cells; twelve-point same-element line advance; twelve-point boundary gap; and 55 nominal lines.
+- The profile's role boxes are Scene Heading, Action, and Note 108–540 points; Character 259–434; Parenthetical 216–396; Dialogue 180–396; and right-aligned Transition 432–540. New projects default to Courier Prime at 12 points. Supported existing Courier and Courier New profiles remain unchanged when opened and saved.
+- Layout is deterministic for the same semantic project and complete profile and is independent of viewport scaling. Text wraps by role without inserting formatting into canonical text; keep relationships, title-page separation, and a safe oversized-element escape preserve bounded layout behavior. LF, CRLF, and standalone CR are equivalent paragraph delimiters for layout without creating phantom carriage-return lines. Source ranges remain UTF-8 byte based.
+- For body spacing, each incoming Dialogue or Parenthetical receives zero additional boundary gap; every other incoming body role uses the profile boundary gap. Wrapped lines and title-page boundaries do not add body boundary spacing.
+- Layout provides page/content bounds, role-aware line geometry, page assignment, keep-with-next and oversized indicators, source byte ranges, and UTF-8-safe caret and hit-test mappings. Body pointer hit testing chooses the document-global nearest rendered body line by vertical distance, preferring the earlier line and then the lower page index on exact ties. It clamps horizontal misses to the line's source start or end, delegates in-line positions to the source mapping, excludes title pages from the body hit-test domain, falls through empty pages to nonempty body lines, and clamps document-span clicks to the first or last body line.
 
-**Consequences:** Faster discovery and fewer premature public APIs, while preserving a path to separate model/layout/render/persistence packages later.
+### Layout cache and desktop integration
 
-## WO-006 verified persistence facts
+- Cached layout is immutable derived data and is valid only for the current semantic project and its complete profile. A semantic revision or profile change invalidates it, and replacing a project or editing session must not reuse geometry derived from the prior project even when revision and profile values match. Viewport scaling is presentation-only and does not change fixed pagination or source mappings.
+- Desktop paint, hit testing, caret geometry, and visual-line navigation consume the appropriate shared layout and source mappings. Preferred horizontal movement goal is transient and is not persisted. PDF consumes fixed print layout rather than viewport layout.
 
-- Native persistence is implemented in [`crates/scriptcraft-core/src/persistence.rs`](../../../crates/scriptcraft-core/src/persistence.rs) without filesystem dependencies in the semantic model. The supported schema remains version `1` and the existing bounded JSON model is the native representation.
-- [`atomic_save`](../../../crates/scriptcraft-core/src/persistence.rs) prepares bounded bytes and replaces the destination through a sibling temporary path; a failed write/rename leaves the prior destination intact. [`EditingSession::mark_saved`](../../../crates/scriptcraft-core/src/editing.rs) is called only after replacement succeeds.
-- [`save_recovery`](../../../crates/scriptcraft-core/src/persistence.rs) retains three revision-named snapshots. [`discover_recovery`](../../../crates/scriptcraft-core/src/persistence.rs) skips malformed/unknown candidates, filters candidates at or below the saved revision, and returns newer candidates for explicit host offer rather than silent replacement.
+### Native persistence and exports
 
-## Completion evidence placeholder
+- The native representation is schema version 1 and round-trips semantic roles, identifiers, metadata, canonical text, title-page content, and page-profile inputs. Missing legacy profile fields use their specified defaults; malformed data and unsupported schema versions are rejected safely. The contract does not promise cross-version migrations.
+- Native serialization and parsing enforce the project bounds and UTF-8 validity. Native content excludes caret, selection, derived layout, undo history, and transient generated-parenthetical provenance.
+- Saving prepares bounded native data and atomically replaces the named destination. Failed preparation, write, or replacement preserves the last valid destination and the session's unsaved/dirty state. The session is marked clean only after successful replacement. No recovery-snapshot behavior is part of this capability contract.
+- PDF and plain-text outputs are noncanonical and do not replace the native source or mark it clean. PDF uses fixed layout and preserves non-ASCII characters. Plain text is deliberately lossy and communicates that screenplay roles, stable identifiers, and page layout are not preserved.
 
-`TODO: link implementation symbols, headless tests, persistence fixtures, pagination fixtures, and independent blueprint review.`
+## Decisions
 
-## WO-006 measured responsiveness boundary
-
-- The core benchmark fixture [`wo006_responsiveness.rs`](../../../crates/scriptcraft-core/tests/wo006_responsiveness.rs) measures complete deterministic layout builds at 1, 5, 15, 50, 120, and 180 pages with three warmups, ten samples, and beginning/middle/end edits. It retains only generated fixture dimensions and timing summaries; document text is not reported.
-- The reusable core exposes the session-owned `LayoutCache` adapter used by the desktop and the headless benchmark. It is keyed by editing-session revision and the complete persisted `PageProfile`; the profile equality comparison covers paper dimensions, margins, line/page metrics, boundary policy, font identity/size/character metric, role boxes, and casing policy. Viewport scale is presentation-only. A revision or profile change misses the cache, while unchanged reads share the immutable layout.
-- The same cached layout is consumed by page paint, hit testing, caret geometry, and vertical navigation. PDF export continues to request a fresh core layout, preserving deterministic output independent of transient desktop state.
-
-## Revision history
-
-| Date | Change | Evidence/rationale |
-|---|---|---|
-| 2026-10-25 | Created the only necessary shared MVP capability blueprint | `.analysis` architecture synthesis and project-structure proposal; desired behavior clearly labeled |
-| 2026-10-25 | Established one reusable foundation crate | WO-001 kept the one-core direction and proved no UI/window dependency in the reusable crate |
-
-## WO-001 verified foundation facts
-
-- `crates/scriptcraft-core` is the single reusable foundation crate.
-- Its headless startup status and unit test are implemented in [`src/lib.rs`](../../../crates/scriptcraft-core/src/lib.rs).
-- Semantic model, editing/session, layout, and persistence behavior are intentionally not implemented by WO-001.
-
-## WO-004 verified layout facts
-
-- [`ScreenplayLayout`](../../../crates/scriptcraft-core/src/layout.rs:51) is a dependency-free, backend-neutral derived view over a validated project.
-- The approved deterministic format is named/versioned `us_letter_screenplay` profile v1: US Letter `612 × 792` points (`72 points/inch`), margins left/right/top/bottom `108/72/72/72`, seven-unit fixed character cells, twelve-unit same-element line advance, and a twelve-unit boundary gap. Role boxes are scene/action/note `108..540`, character `259..434`, parenthetical `216..396`, dialogue `180..396`, and right-aligned transition `432..540`; notes inherit action geometry. Explicit bounded profile values are persisted without UI pixels or per-element formatting. New profiles default to the `Courier` family; existing supported stored families remain unchanged.
-- Layout emits page/content bounds, role-aware line rectangles, source byte ranges, page assignment, title-page separation, keep-with-next flags, oversized flags, and safe hit/caret mappings. It never mutates canonical model text.
-
-## WO-003 verified long-document facts
-
-- Bounded pasted text remains transactional at the model/editing boundary: an oversized insertion returns `EditError::TextTooLong` before session state, selection, history, revision, or dirty state changes.
-- The existing bounds remain in force (`MAX_ELEMENTS = 10,000`, `MAX_TEXT_BYTES = 262,144`, `MAX_JSON_BYTES = 1,048,576`); `Project::to_json()` now enforces the JSON bound at the model serialization boundary as well as persistence serialization.
-- Layout treats LF, CRLF, and standalone CR as equivalent paragraph delimiters without emitting a phantom carriage-return line. Source ranges remain byte-based, so a bounded multi-page paste reaches its final-page caret and round-trips through native persistence without semantic changes.
-- Invalid layout/model and persistence results are reported as recoverable errors; the desktop surface presents layout failures through the same unchanged-document error path rather than replacing the last valid session.
-
-## WO-002 verified paste facts
-
-- Clipboard insertion is an explicit transactional editing boundary. Embedded LF, CRLF, CR, whitespace, and Unicode remain canonical text in the active semantic element; layout interprets line delimiters for visual wrapping without inventing roles or elements.
-- A bounded paste is one edit-history entry. An oversized paste returns the typed text-size error before committing project, selection, history, revision, or dirty-state changes, and a subsequent valid edit remains possible.
-
-Evidence: [`wo002_paste_safety.rs`](../../../crates/scriptcraft-core/tests/wo002_paste_safety.rs) and [`editing.rs`](../../../crates/scriptcraft-core/src/editing.rs).
-
-## Follow-up: bounded split identity and health probes
-
-- Paragraph splitting generates bounded collision-checked IDs rather than recursively extending the source ID. This preserves the stable-ID limit during long sequences of Enter operations.
-- [`EditingSession::validate()`](../../../crates/scriptcraft-core/src/editing.rs:109) provides a non-mutating host health probe for live project, selection, and serialization diagnostics.
-
-Evidence: [`wo003_long_document.rs`](../../../crates/scriptcraft-core/tests/wo003_long_document.rs), layout/model changes in [`layout.rs`](../../../crates/scriptcraft-core/src/layout.rs) and [`lib.rs`](../../../crates/scriptcraft-core/src/lib.rs), and desktop error routing in [`main.rs`](../../../apps/scriptcraft/src/main.rs).
-
-## WO-002a verified profile and renderer facts
-
-- `PageProfile` is the single bounded, versioned owner of the Courier-family target (`font_family`, `font_size`), deterministic character metric, line advance, boundary gap, and all seven role boxes. New projects select `Courier Prime`; native JSON round trips preserve default and explicitly chosen alternate profiles without migration or rewrite.
-- `ScreenplayLayout` derives wrapping, line rectangles, role edges, hit testing, caret rectangles, pagination, and page capacity from the persisted profile. The desktop renderer uses the embedded Courier Prime regular face for new-profile text at the profile's base size; explicit legacy `Courier` and `Courier New` profiles retain the established monospace rendering path. Fixed character cells remain authoritative and viewport scale is presentation-only.
-- PDF export consumes the same line rectangles and persisted font size. No override editor or per-element pixel formatting exists.
-
-Evidence: [`lib.rs`](../../../crates/scriptcraft-core/src/lib.rs), [`layout.rs`](../../../crates/scriptcraft-core/src/layout.rs), [`exports.rs`](../../../crates/scriptcraft-core/src/exports.rs), [`main.rs`](../../../apps/scriptcraft/src/main.rs), and focused profile/parity tests.
-
-## WO-004 verified spacing and export facts
-
-- The fixed profile is `612 × 792` points with top/bottom/left/right margins `72/72/108/72`, `55` nominal line capacity, seven-unit fixed character cells, twelve-unit same-element line boxes, and twelve-unit inter-element boundary gaps. New projects target the bundled regular Courier Prime face at 12 points and keep viewport scaling out of print geometry.
-- Structural regressions cover content bounds, explicit role edges, adjacent same-element and boundary advances, line boxes, caret heights, source mappings, empty/wrapped/keep-with-next lines, and page-capacity resets. The desktop regression confirms viewport scale transforms fixed layout coordinates without changing page structure.
-- PDF export consumes the same `ScreenplayLayout` line rectangles; regression coverage verifies x positions and the PDF coordinate transform `paper_height - y - height`, including twelve-unit adjacent-line spacing. The shared screen/PDF contract therefore remains unchanged.
-
-Evidence: WO-004 regression coverage in [`layout.rs`](../../../crates/scriptcraft-core/src/layout.rs), [`exports.rs`](../../../crates/scriptcraft-core/src/exports.rs), and [`main.rs`](../../../apps/scriptcraft/src/main.rs); implementer evidence in [`WO-004-screenplay-spacing-contract.md`](../../initiatives/2026-10-25-ui-quality-of-life/work-orders/WO-004-screenplay-spacing-contract.md).
-
-## WO-007 verified policy facts
-
-`PageProfile` schema version 1 owns `auto_parenthetical` and `strict_transition_boundaries`; both default true for new and legacy-missing profiles, reject malformed JSON types, round-trip through native persistence and `replace_with_saved()`, and participate in complete profile cache identity. Parenthetical shape repairs, empty-delete fallback, before-opening Enter, and strict UTF-8 end-boundary transitions preserve transactional rollback and no-op/history invariants.
+- **The semantic native project is canonical; layout and exports are derived.** This keeps editing, saved state, and stable identity anchored in one project while allowing fixed geometry and review outputs to be regenerated without changing that source.
+- **The core is a reusable headless capability, not a desktop widget or independently runnable container.** Desktop and other suitable hosts delegate semantic operations to it; platform interaction and window chrome remain outside its boundary.
+- **Schema version 1 defines the supported native compatibility boundary.** Legacy missing fields receive their specified defaults and unsupported versions fail safely; no cross-version migration commitment is implied.
