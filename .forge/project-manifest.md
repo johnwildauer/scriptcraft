@@ -1,15 +1,15 @@
 # Project Manifest
 
-This is the durable project-specific contract for ScriptCraft. It records the
-initial baseline and the user-approved defaults without treating research notes
-as implemented behavior.
+This is ScriptCraft's durable project-specific contract. It records project intent,
+policy, unresolved decisions, and a dated repository baseline without treating
+research notes or implementation observations as product mandates.
 
 ## Metadata
 
-- **Status:** `complete` — initialization reviews and baseline command evidence are recorded; review warnings remain tracked follow-ups
+- **Status:** `complete` — initialization reviews and historical baseline evidence are linked; review warnings remain follow-ups.
 - **Path type:** `existing`
 - **Initialized on:** `2026-10-25`
-- **Last revised:** `2026-10-25`
+- **Last revised:** `2026-10-30`
 - **Record owner:** `Forge initialization agent`
 
 ## Project intake
@@ -17,13 +17,13 @@ as implemented behavior.
 - **Project:** ScriptCraft
 - **What is being created and for whom:** A desktop-first Rust screenplay-writing app for individual screenwriters.
 - **Problem/opportunity:** Individual writers need a dependable place to draft screenplay content without losing semantic structure, edits, page flow, or saved work.
-- **Primary goal:** Establish a dependable screenplay writing loop: create, edit, role transitions, paginate, save, reopen, recover, and export the useful MVP outputs.
-- **First-pass success:** A writer can complete a representative scene through a headless-capable core and focused desktop UI, with deterministic pagination and no-data-loss save/recovery behavior.
+- **Primary goal:** Establish a dependable screenplay-writing loop: create, edit, transition roles, paginate, save, reopen, and export useful MVP outputs.
+- **First-pass success:** A writer can complete a representative scene through a headless-capable core and focused desktop UI, with deterministic pagination and safe, no-data-loss save/reopen behavior.
 - **Explicit non-goals:** DOCX/FDX compatibility, collaboration, MCP/control infrastructure, planning or beat-board features, broad Word-like formatting, and web/multi-platform polish.
-- **Planning preference:** First initiative recommendation only; replan after the workspace foundation and product baseline are proven.
+- **Planning preference:** Replan after each initiative; do not treat the historical first-initiative handoff as a standing roadmap.
 - **User checkpoint preference:** Guided involvement; no manual checkpoint after each work order. User confirmation is consolidated at initiative-level/closeout if Forge permits, while every work order still receives a separate fresh validation agent immediately after implementation.
 - **Working style:** Guided, safety-conscious, concise explanations for consequential defaults, with independent checks handled in the background.
-- **Technology/constraints:** Rust and desktop-first are user-approved. Other tool, framework, runtime, packaging, and exact desktop UI choices remain unknown until repository discovery and the workspace foundation.
+- **Technology/constraints:** Rust and desktop-first are user-approved. Current package/dependency observations are recorded below; framework approval, product-supported OS, packaging, and exact desktop UI policy remain open unless separately decided.
 - **Additional context:** `.analysis/` is a research/proposal source, not an authorization to copy every recommendation as an implementation command.
 
 ## Involvement level
@@ -34,65 +34,64 @@ as implemented behavior.
 
 ## Technical preferences
 
-States use `confirmed`, `provisional`, `agent-default`, or `unknown`.
+States use `confirmed`, `provisional`, `agent-default`, or `unknown`. Repository observations do not by themselves establish product approval.
 
 - **Language:** Rust — state: `confirmed`
-- **Framework:** none selected in WO-001 — state: `agent-default`; rationale: smallest dependency-free foundation seam; visible UI framework remains a later-WO decision
-- **Runtime:** native Rust binary/headless seam — state: `verified` for foundation; rationale: desktop-first boundary with deterministic no-window checks
-- **Package/build tool:** Cargo workspace — state: `verified`; evidence: root `Cargo.toml`, members `apps/scriptcraft` and `crates/scriptcraft-core`
-- **Target platform:** desktop-first, native first target `aarch64-apple-darwin` — state: `confirmed` for desktop / `verified` for first target; evidence: `rustc -vV`
-- **Technical constraints/preferences:** Keep the core independent of windowing APIs where practical; preserve semantic screenplay roles, canonical UTF-8 text, deterministic page geometry, atomic native saves, bounded recovery, and headless testing. These are desired MVP constraints derived from `.analysis`, not current implementation claims.
+- **Framework:** Product approval/status `unknown`. The desktop package currently declares `eframe` 0.29 and `rfd` 0.15 (observed 2026-10-30); dependency presence is not a claim of user approval or a future product mandate.
+- **Runtime:** Current runtime behavior is not re-verified here; the desktop and reusable-core packages are present in the workspace as recorded below.
+- **Package/build tool:** Cargo workspace — observed 2026-10-30 in root `Cargo.toml`, with members `apps/scriptcraft` and `crates/scriptcraft-core`.
+- **Target platform:** Desktop-first — state: `confirmed`. Toolchain host reported by `rustc -vV` on 2026-10-30: `aarch64-apple-darwin`; this is not a product support or distribution commitment.
+- **Technical constraints/preferences:** Keep the core independent of windowing APIs where practical; preserve semantic screenplay roles, canonical UTF-8 text, deterministic page geometry, atomic native saves, save-failure safety, and headless testing. These remain desired MVP constraints, not claims that all behavior is currently implemented or verified. Snapshot recovery is not a product promise; no replacement recovery capability is implied.
 
 ## Working agreement
 
 - **How the user wants to work:** Dependable results with technical diligence handled by agents; avoid unnecessary scope and checkpoints.
 - **Preferred communication/decision style:** Guided; explain consequential defaults and record rationale, ask only user-only questions.
-- **Ideal user/agent development cycle:** Initiative-level planning/design confirmation and consolidated closeout confirmation when Forge permits; no manual checkpoint after each WO.
-- **Validation cadence:** `per work order` — every WO gets a separate fresh validation agent immediately after implementation. No manual confirmation is required after each validation by default.
-- **Rapid-mode preference:** `standard unless requested` — the current and first initiative mode is standard; rapid must be explicitly requested per initiative.
+- **Ideal user/agent development cycle:** Initiative-level planning/design confirmation and consolidated closeout confirmation when Forge permits; no manual checkpoint after each work order.
+- **Validation cadence:** `per work order` — every work order gets a separate fresh validation agent immediately after implementation. No manual confirmation is required after each validation by default.
+- **Rapid-mode preference:** `standard unless requested` — rapid must be explicitly requested per initiative.
 - **Review configuration:**
-  - Design review required: `yes` — default Forge policy; no design review has happened in this initialization.
+  - Design review required: `yes` by default under Forge policy; initiative-specific user direction may set the appropriate path.
   - Validation cadence: `per work order`.
-  - Requested review depth: independent alignment review for requirements/blueprints and fresh-context implementation validation; do not claim either has happened until artifacts exist.
+  - Requested review depth: independent alignment review for requirements/blueprints and fresh-context implementation validation; do not claim a review or validation without its evidence artifact.
 
 ## Repository baseline
 
-- **Repository state and evidence:** `existing` — observed `.analysis/`, `.forge/`, `apps/`, and `crates/` directories; `apps/scriptcraft/` and `crates/` contained no files through workspace inventory at initialization. Existing analysis documents describe a proposed Rust architecture, but are not source-code evidence.
-- **Git installed:** `yes` — evidence: successful prior initialization evidence and command result on 2026-10-25.
-- **Git repository initialized:** `yes` — evidence: `git status --short --branch` returned a repository state.
-- **Current branch:** `master` — evidence: Git command result.
-- **Default/base branch:** `master` — evidence: user-approved prior successful initialization and current branch result; no commit exists yet.
-- **Local initiative branches available:** `unknown` — not separately verified; discovery: attempt a local branch creation during the first initiative, or run a non-destructive branch capability check in an execution-capable session.
-- **Remote:** `unknown` / no remote currently known — evidence: `git remote -v` returned no entries; discovery: re-check before any remote-dependent action.
-- **Initiative branch policy:** `required` when local branch capability is confirmed; otherwise reduced-capability fallback must be recorded.
+- **Repository state and evidence:** `existing`. On 2026-10-30, the workspace contains the root Cargo manifest, `apps/scriptcraft/`, `crates/scriptcraft-core/`, and source files beneath both packages. The root manifest lists those two workspace members; the desktop package manifest declares `eframe`, `rfd`, and the local core package. These are checkout observations, not claims that product requirements are fully implemented or that checks passed.
+- **Git installed/repository initialized:** `yes` — Git status and history commands succeeded on 2026-10-30.
+- **Current branch:** `dev/2026-10-30-documentation-cleanup` observed on 2026-10-30; this is a dated checkout fact, not the default branch.
+- **Default/base branch:** `master` — recorded in the 2026-10-30 initiative plan as the branch from which the initiative branch was created.
+- **Local initiative branches available:** `yes` — creation and switch to the initiative branch from `master` succeeded, as recorded in the initiative plan on 2026-10-30.
+- **Remote:** No remotes were configured in `git remote -v` on 2026-10-30. This may change; re-check before remote-dependent actions.
+- **Initiative branch policy:** `required` when local branch capability is available; record the reduced-capability fallback if it is not.
 - **Default initiative branch naming convention:** `dev/YYYY-MM-DD-short-slug` — no override.
 - **Commit/pull-request policy:** Git commit and merge are the default closeout actions when capability and policy permit; exact host PR policy is unknown and must be discovered before a PR-based closeout.
-- **Reduced-capability fallback:** Use comparable file/diff evidence and record an explicit no-branch notice; owner is the orchestrator; next action is to restore or verify local branch capability before implementation.
-- **Branch capability decision owner/next action:** Orchestrator; verify local branch creation before dispatching the first implementation WO.
+- **Reduced-capability fallback:** If branch capability is unavailable, use comparable file/diff evidence and record an explicit no-branch notice; owner is the orchestrator, who must verify or restore local branch capability before implementation where possible.
 
 ## Project policy
 
 ### Commands
 
-Commands are intentionally unknown unless verified in this checkout. The source
-analysis mentions common Cargo commands, but that is not execution evidence.
+Use these project checks where applicable; discover any task-specific or external
+gates rather than assuming none. The historical results below come from the
+foundation validation dated 2026-10-25 and are not fresh results for a later checkout.
 
-- **Install/setup:** `not required` — the dependency-free workspace builds with the installed Rust toolchain.
-- **Format:** `cargo fmt --all -- --check` — verified passed after formatter correction.
-- **Lint/static analysis:** `cargo clippy --workspace --all-targets -- -D warnings` — verified passed.
-- **Unit/integration tests:** `cargo test --workspace` — verified passed; 1 core unit test passed.
-- **Build/package:** `cargo build --workspace` and `cargo check --workspace` — verified passed.
-- **Run/manual verification:** `cargo run -p scriptcraft` — verified passed with `scriptcraft foundation ready`; visible-window smoke unavailable because no UI framework is selected.
-- **Command evidence note:** WO-001 records exact output/results in its work-order artifact and the initiative execution log.
+- **Install/setup:** No separate setup command is recorded; prerequisites and setup requirements must be discovered when needed.
+- **Format:** `cargo fmt --all -- --check` — passed in the historical foundation validation dated 2026-10-25.
+- **Lint/static analysis:** `cargo clippy --workspace --all-targets -- -D warnings` — passed in the historical foundation validation dated 2026-10-25.
+- **Unit/integration tests:** `cargo test --workspace` — passed in the historical foundation validation dated 2026-10-25 (1 core unit test at that time).
+- **Build/package:** `cargo build --workspace` and `cargo check --workspace` — passed in the historical foundation validation dated 2026-10-25.
+- **Run/manual verification:** `cargo run -p scriptcraft` — the historical foundation validation dated 2026-10-25 recorded headless output `scriptcraft foundation ready`; this is not a current run result or a visible-window check.
+- **Historical evidence:** [`screenplay MVP foundation validation`](initiatives/2026-10-25-screenplay-mvp/validations/validation-WO-001.md) records those command outcomes and its warnings. No command result is represented as freshly verified by this manifest revision.
 
 ### Gates and intervention
 
-- **Design approval:** human approval required by default at `review -> execute`.
+- **Design approval:** Human approval required by default at `review -> execute`, subject to explicit user direction and applicable external rules.
 - **Validation cadence:** `per work order`; fresh validation agent immediately after each implementation.
-- **Manual/external gates:** none configured yet; any required desktop smoke/manual check must be discovered and recorded before it becomes a hard-stop policy gate.
+- **Manual/external gates:** No additional manual/external gate is recorded as a project-wide policy. Discover and record any gate applicable to a task before treating it as optional or complete.
 - **Automation bypasses:** none.
-- **Network or destructive-action restrictions:** No remote is known; do not require network access. Avoid destructive filesystem or Git actions without explicit authorization and recorded evidence.
-- **User confirmation:** consolidated at initiative-level/closeout if Forge permits; this does not bypass design review, per-WO validation, or closeout evidence.
+- **Network or destructive-action restrictions:** Network access is not required solely by project policy. Avoid destructive filesystem or Git actions without explicit authorization and recorded evidence.
+- **User confirmation:** Consolidated at initiative-level/closeout if Forge permits; this does not bypass applicable design review, per-WO validation, or closeout evidence.
 
 ### Tools and parallelism
 
@@ -110,43 +109,26 @@ the artifact blocked when safe comparison or a required gate is unavailable.
 
 ## Decisions and handoff
 
-- **Unresolved decisions:**
-  - Desktop OS/framework/package layout — owner: workspace-foundation implementer with user confirmation if a consequential choice remains; trigger: before first implementation; next action: inspect repository and verify a runnable baseline.
-  - Exact native project extension and PDF implementation — owner: product/technical owner; trigger: persistence/export design; next action: select and record after core model boundary is validated.
-  - Local branch capability and remote/PR policy — owner: orchestrator; trigger: first initiative; next action: verify before dispatch.
-  - Requirements/blueprint independent reviews — owner: orchestrator; trigger: before initialization can be marked complete under the process; next action: dispatch fresh-context reviews without claiming results in this baseline.
-- **Recommended first initiative:** `workspace-foundation` — establish the smallest runnable/verifiable Rust desktop workspace and headless development loop, then prove one end-to-end screenplay writing slice. Rationale: current source/package baseline is not verified, and the durable product baseline must be exercised before feature expansion.
-- **Recommended scope:** repository discovery, chosen manifest/package structure, baseline checks, minimal core/app seam, and one smoke path; do not add DOCX/FDX, collaboration, MCP, planning, broad formatting, or web polish.
-- **Validation boundary:** verified baseline command(s), headless semantic smoke path, and a desktop startup/manual path once the actual app entry point exists. Exact commands are currently unknown.
-- **Next initiative or roadmap handoff:** after the foundation, replan product MVP slices from `REQ-WRITING-LOOP-001`; do not create an initiative directory or work orders as part of this initialization.
+- **Unresolved decisions and follow-ups:**
+  - Product approval of the current desktop framework/dependency choice, supported desktop OS, and packaging/distribution policy — owner: product/technical owner; trigger: before those choices are treated as durable product commitments; next action: confirm scope and record the decision with evidence.
+  - Exact native project extension and PDF implementation — owner: product/technical owner; trigger: persistence/export design; next action: decide and record after the core model boundary is validated.
+  - Remote/PR policy — owner: orchestrator; trigger: before remote-dependent or PR-based closeout; next action: discover host expectations and recheck configured remotes.
+  - Requirements and blueprint review warnings — owners: requirements/blueprint owners with orchestrator coordination; trigger: before affected intent or contracts are treated as fully resolved; next action: preserve the independent findings and record each warning's disposition. The initialization reviews exist and are linked below; their warnings are not represented as resolved.
+- **Historical first-initiative handoff:** The 2026-10-25 `workspace-foundation` recommendation led into the actual screenplay MVP initiative. See the [`screenplay MVP plan`](initiatives/2026-10-25-screenplay-mvp/2026-10-25-screenplay-mvp-v1.md) and its [`foundation validation`](initiatives/2026-10-25-screenplay-mvp/validations/validation-WO-001.md). This is historical traceability, not a new roadmap recommendation or a claim that all product behavior is complete.
 
 ## Roadmap
 
 - **Roadmap mode:** `open-ended replan`
-- **Planned initiative count:** `1` planning target only (workspace foundation); later product stages are intentionally not pre-created.
-- **Count/sequence approved by:** user-approved first-initiative recommendation; later sequence not approved.
-- **Approval date or status:** `2026-10-25`; recommendation only, no initiative created.
-- **Roadmap revision rule:** revise after each initiative while preserving prior decisions and rationale.
-
-| Stage | Slug | Purpose | Dependency | Observable outcome | Validation boundary | Product MVP relationship | Status |
-|---|---|---|---|---|---|---|---|
-| 1 | `workspace-foundation` | Establish runnable Rust desktop/headless workspace and development loop | none | A verified starter workspace can build/test/run its smoke path | Verified commands plus headless and desktop smoke evidence | Workspace foundation enabling the product MVP | recommended; not created |
+- **Historical handoff:** The initial workspace-foundation recommendation is recorded in the actual screenplay MVP plan linked above. No future initiative count or sequence is approved here.
+- **Roadmap revision rule:** Revise the roadmap after each initiative while preserving prior decisions and rationale.
 
 ## Completion evidence
 
 - Product overview: [`requirements/product-overview.md`](requirements/product-overview.md)
 - Technical context: [`blueprints/technical-context.md`](blueprints/technical-context.md)
 - Project policy: this manifest's Project policy section
-- First-initiative recommendation and roadmap: this manifest's Decisions and handoff/Roadmap sections
+- Historical first-initiative plan: [`2026-10-25-screenplay-mvp-v1.md`](initiatives/2026-10-25-screenplay-mvp/2026-10-25-screenplay-mvp-v1.md)
 - Requirements review findings: [`requirements-review.md`](requirements/requirements-review.md) — independent fresh-context review completed with warnings; warning dispositions remain follow-ups.
 - Blueprint review findings: [`blueprint-review.md`](blueprints/blueprint-review.md) — independent fresh-context review completed with warnings; warning dispositions remain follow-ups.
-- Validation evidence and gate outcomes: Foundation commands are verified in the recorded baseline: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`, `cargo build --workspace`, `cargo run -p scriptcraft`, and `cargo clippy --workspace --all-targets -- -D warnings`. Product validation remains initiative-scoped.
-- Completion evidence: Initialization review artifacts and command evidence are linked above; remaining warnings are preserved as follow-up decisions rather than represented as missing reviews.
-
-## Revision history
-
-| Date | Changed answer | Previous answer | New answer | Why | Owner |
-|---|---|---|---|---|---|
-| 2026-10-25 | Initialization baseline | Template TODOs | Existing ScriptCraft baseline with guided Rust desktop screenplay defaults, standard initiative mode, per-WO fresh validation, Git `master`, no known remote, and explicit command unknowns | User-approved initialization inputs and repository inventory | Forge initialization agent |
-| 2026-10-25 | Initialization status | `draft` | `blocked` pending independent requirements/blueprint reviews and verified non-Git command evidence | Do not claim reviews or validation that have not happened | Forge initialization agent |
-| 2026-10-25 | Initialization gate reconciliation | `blocked` | `complete` with warning follow-ups | Independent requirements/blueprint reviews and baseline command evidence now exist; the UI-quality-of-life design review required the manifest blocker to be reconciled before execution | Forge orchestrator, guided by user approval to proceed |
+- Historical foundation validation: [`validation-WO-001.md`](initiatives/2026-10-25-screenplay-mvp/validations/validation-WO-001.md) records the exact 2026-10-25 checks and warnings; it is not evidence of fresh checks for this revision.
+- Initialization completion evidence consists of the linked independent review artifacts and historical validation; the recorded warnings remain follow-ups rather than missing-review claims.
