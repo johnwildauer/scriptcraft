@@ -3,7 +3,7 @@
 ## Initiative metadata
 
 - **Phase:** `closeout`
-- **Status:** `active`
+- **Status:** `closed`
 - **Owner/orchestrator:** Forge orchestrator
 - **Created:** `2026-10-29`
 - **Updated:** `2026-10-30`
@@ -273,3 +273,9 @@ The initial planning handoff included language assigning post-implementation reg
   | Historical desktop persistence wording in the desktop blueprint | Correct separately if still applicable; it was explicitly outside WO-005's authorized scope. | Future technical-documentation owner/orchestrator |
 
 - **Closeout transaction state:** Preconditions and follow-ups are recorded. Initiative remains `closeout` / `active` until the required commit and merge complete; the final status flip and Git-result evidence are to be recorded only after those operations succeed.
+
+## Closeout completed — 2026-10-30
+
+- **Commit:** `c58632031f60a29ce7e8e7b18eed20bd5a39ca43` (`Close out UI Polish initiative`) contains all 27 non-ignored modified/untracked paths in the inspected worktree, including the pre-existing workflow edit and reference file.
+- **Merge:** `dev/2026-10-29-ui-polish` was fast-forwarded into local `master` from `0df130f26f75bd88cde084b016aaae519761088c` to `c58632031f60a29ce7e8e7b18eed20bd5a39ca43`; no merge commit was created. The initiative branch will be synchronized with the final closeout-record commit after this status flip is committed.
+- **Outcome:** Closeout preconditions and follow-ups are recorded, all authorized changes are committed, the initiative is merged into `master`, and initiative status is now `closed` without advancing its `closeout` phase.
