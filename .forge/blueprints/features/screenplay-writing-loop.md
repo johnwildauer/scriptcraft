@@ -43,7 +43,7 @@ The flow is: writer input → desktop adapter → transactional core session/pro
 
 - **Requirements:** `REQ-WRITING-LOOP-005`; `AC-WRITING-005.1`–`.7`.
 - **Composition and flow:** The desktop toolbar routes project commands and role selection through desktop adapters to the core session, persistence, or fixed-layout export boundary. Elements reflects the selected explicit role and applies a chosen role through the transactional session. On macOS, the operating system owns the native window header; toolbar content begins below it in the application content area.
-- **Contracts:** The default action order, icon-first controls, accessible labels, role choices, narrow-width overflow, measured label-aware widths, flexible-space allocation, and clipped-edge behavior follow the linked criteria. Action and Elements controls request the standard arrow cursor; the whole-document editor requests the text/I-beam cursor, with no competing decorative cursor owner. The supplied requirements assign toolbar width/overflow to `AC-WRITING-005.5`, native header to `.6`, and cursor ownership to `.7`; the ambiguous historical `.5` is not used for cursor ownership. Header interaction remains OS-owned and no additional native gesture or visual outcome is promised.
+- **Contracts:** The default action order, icon-first controls, accessible labels, role choices, narrow-width overflow, measured label-aware widths, flexible-space allocation, and clipped-edge behavior follow the linked criteria. Action and Elements controls request the standard arrow cursor; the whole-document editor requests the text/I-beam cursor, with no competing decorative cursor owner. 
 
 ### Status, visible page, and transient presentation
 
