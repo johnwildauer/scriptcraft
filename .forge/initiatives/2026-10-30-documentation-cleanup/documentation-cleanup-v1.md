@@ -1,10 +1,10 @@
 # Initiative: Documentation Cleanup
 
-> Authoritative v1 plan. At initial drafting, the manifest-specific WO was a draft and no durable project document had been edited or authorized for execution. The user's later direct instruction authorized execution of all seven WOs, subject to the applicable reviews and gates recorded below.
+> Authoritative v1 plan. The manifest-specific work order below is a draft; no durable project document has been edited or authorized for execution by this planning work.
 
 ## Initiative metadata
 
-- **Current activity:** `review`
+- **Current activity:** `plan`
 - **Status:** `active`
 - **Owner/orchestrator:** Forge orchestrator
 - **Created:** `2026-10-30`
@@ -12,7 +12,7 @@
 - **Authoritative version:** `v1`
 - **Initiative mode:** `standard`
 - **Mode requested by:** `user`
-- **Mode confirmation:** The user initially requested a planning-only scaffold; the later direct instruction to execute all seven WOs supersedes that scope, subject to applicable gates.
+- **Mode confirmation:** User directly requested this initiative scaffold and planning-only scope.
 - **Rapid-mode eligibility:** Not evaluated; rapid mode was not requested.
 - **Base/default branch:** `master`
 - **Initiative branch:** `dev/2026-10-30-documentation-cleanup`
@@ -23,14 +23,12 @@
 - **Reduced-capability fallback or opt-out evidence:** Not applicable.
 - **Branch creation failure:** `none`
 - **Validation cadence:** `per work order`
-- **Material approvals/gates:** The user authorized execution of all seven WOs insofar as policy allows. The current directional design review passes; an earlier over-scoped assessment is retained as superseded history. The baseline requirements review findings are assigned to WO-002/WO-003, and a fresh requirements review of their outputs is required before WO-004. External requirements and fresh per-WO validation remain in force. No WO implementation has begun.
+- **Material approvals/gates:** Planning and requested work-order drafting only. No design review, human design approval, durable-document edit, work-order execution, or implementation is authorized here.
 
 ## Standard artifact locations
 
 - **Authoritative plan:** `documentation-cleanup-v1.md`
 - **Design review:** [`reviews/design-review.md`](reviews/design-review.md)
-- **Design-review follow-up:** [`reviews/design-review-follow-up.md`](reviews/design-review-follow-up.md)
-- **Requirements review:** [`reviews/requirements-review.md`](reviews/requirements-review.md)
 - **Validations:** `validations/validation-[work-order-id].md`
 - **Execution log:** [`execution-log.md`](execution-log.md)
 - **Work orders:** [`work-orders/`](work-orders/)
@@ -58,7 +56,7 @@ Use the sizing guidance in [`../../process/02-initiative.md`](../../process/02-i
 - Compare requirement and blueprint content to the current area templates and document-boundary rules in [`../../_index.md`](../../_index.md) and [`../../process/00-overview.md`](../../process/00-overview.md).
 - Preserve stable IDs, intended user-visible behavior, durable project policy, and useful target architecture; distinguish these from work-order evidence and historical implementation notes.
 - Surface uncertainty about which behavior remains intended, what historical information must remain in the manifest, and how to reconcile implementation observations with desired-state documents.
-- Maintain the seven scoped document-only WOs and reconcile their planning language against recorded decisions. The initial scaffold was planning-only; the user's later direct instruction authorizes executing all seven subject to required reviews, approvals, and validations. This present pre-execution review task itself makes no durable-document or implementation edits.
+- Maintain the seven requested document-only work-order drafts and reconcile their planning language against recorded decisions. This is planning-only: it does not authorize durable-document edits, formal review, approval, execution, or implementation.
 
 ### Out of scope
 
@@ -66,7 +64,7 @@ Use the sizing guidance in [`../../process/02-initiative.md`](../../process/02-i
 - Implementing application behavior, changing source or tests, executing existing work orders, or reconciling code to documents.
 - Deleting or rewriting evidence in initiative histories, work-order artifacts, review findings, or validation records.
 - Silently deciding ambiguous product/architecture intent, changing stable requirement IDs without an explicit mapping, or treating implementation facts as desired requirements.
-- For this pre-execution review task: no durable-document edits, source implementation, WO commits, merge, or closeout. Initiative execution is authorized by the user's later instruction only after the required design review passes and all applicable gates are satisfied.
+- Design approval, work-order approval, implementation, commit, merge, and closeout.
 
 ## Context and motivation
 
@@ -93,26 +91,26 @@ Forge defines requirements as durable user-facing intent, blueprints as desired 
 
 - The [`product overview`](../../requirements/product-overview.md) mixes durable product intent with initialization status, owner/date, evidence, obsolete checkout observations, workspace-MVP/authorization notes, implementation-oriented success baselines, open workflow/technology questions, and revision history. Remove those from the requirements document rather than replacing them with today's implementation inventory. Retain the problem, writer and stakeholder needs, semantic writing loop, safety, page and native-save guarantees, explicit exports, desktop/headless boundary, non-goals, and a useful feature-map link in desired-state voice. Its success targets must distinguish native semantic preservation from deliberately lossy text export.
 - User decision for this assignment: remove recovery snapshots as product intent, but preserve lossy plain-text export for now. Remove snapshot promises throughout the overview, including persona and success descriptions; do not infer a replacement recovery policy or remove atomic-save/failure safety. The core has [snapshot operations](../../../crates/scriptcraft-core/src/persistence.rs) and [plain-text export](../../../crates/scriptcraft-core/src/exports.rs), but inspection found no corresponding desktop calls; the [desktop blueprint](../../blueprints/containers/scriptcraft-desktop.md) also describes recovery as core-only. The retained text-export intent therefore has an apparent desktop integration gap, not proof of end-to-end availability; no code work is authorized by this plan.
-- Cross-document coordination: [`AC-WRITING-003.4`](../../requirements/features/screenplay-writing-loop.md) and recovery-related feature prose, [`project manifest`](../../project-manifest.md), and the [core](../../blueprints/components/screenplay-core.md), [desktop](../../blueprints/containers/scriptcraft-desktop.md), and [feature](../../blueprints/features/screenplay-writing-loop.md) blueprints still refer to snapshot recovery. WO-001 owns removal of snapshot-recovery intent from the manifest while preserving unrelated project policy and save safety; the respective document WOs own their single targets. Resolve remaining cross-document references before closeout. Preserve and trace existing IDs; retirement of `AC-WRITING-003.4` belongs to WO-003. The duplicate `AC-WRITING-005.5` remains a separate issue for WO-003.
-- [`WO-002`](work-orders/WO-002-product-overview-cleanup.md) is a draft for the overview alone; the earlier manifest-only scope notes describe the earlier assignment and are superseded for this additional drafting request. No implementation successor is identified; the orchestrator owns the text-export gap and cross-document follow-up.
+- Cross-document coordination: [`REQ-WRITING-LOOP-003` and `AC-WRITING-003.4`](../../requirements/features/screenplay-writing-loop.md) and recovery-related feature prose, [`project manifest`](../../project-manifest.md), and the [core](../../blueprints/components/screenplay-core.md), [desktop](../../blueprints/containers/scriptcraft-desktop.md), and [feature](../../blueprints/features/screenplay-writing-loop.md) blueprints still refer to snapshot recovery. The orchestrator must route the user's decision to their respective owners and resolve the cross-document discrepancy before initiative closeout, without editing those files under WO-002. Preserve and trace existing IDs; any retirement or mapping of `AC-WRITING-003.4` belongs to the separately authorized feature-requirements work, not this overview edit. The duplicate `AC-WRITING-005.5` remains a separate issue.
+- [`WO-002`](work-orders/WO-002-product-overview-cleanup.md) is a draft for the overview alone; the earlier manifest-only scope notes describe the earlier assignment and are superseded for this additional drafting request. The user decision does not approve execution, review, or implementation. No implementation successor is identified; the orchestrator owns the text-export gap and cross-document follow-up.
 
 #### Screenplay-writing-loop requirements finding and proposed scope
 
 - The [feature requirements](../../requirements/features/screenplay-writing-loop.md) mix durable acceptance behavior with lifecycle/owner/date, obsolete implementation claims, work-order refinements, traceability placeholders, and revision history. Recast into the [requirements-area template](../../requirements/features/feature-slug.md): purpose, cohesive capability groups with linked stable IDs, applicable constraints, and related documents. Integrate the dialogue split, generated parenthetical, cue-casing and parenthetical/boundary policies into their relevant criteria without losing behavioral conditions or introducing implementation-state claims. Preserve all other durable behavior, including the detailed toolbar/status/accessibility, save-safety, layout, export, and platform-bounded guarantees.
 - Apply the earlier user decision: retire snapshot criterion `AC-WRITING-003.4` without replacement or ID reuse; remove snapshot promises and terminology, but retain `REQ-WRITING-LOOP-003` and save/reopen/failure safety in `.1`–`.3`. Keep plain-text export and its loss communication in `REQ-WRITING-LOOP-004` and `.1`–`.3`. The [core text adapter](../../../crates/scriptcraft-core/src/exports.rs:46) returns a loss report and warning; the [desktop toolbar](../../../apps/scriptcraft/src/toolbar.rs:121) and [desktop export handler](../../../apps/scriptcraft/src/main.rs:299) expose PDF but no identified text-export route. This is an apparent end-user integration gap, not evidence of an available desktop flow; no code change or successor WO is authorized. Orchestrator owns future disposition; the user's intent/current-state alignment expectation remains unmet for this route until separately addressed or clarified.
-- **Traceable collision resolution:** The pre-review proposal retained `AC-WRITING-005.5` for width/overflow and restored cursor ownership to `AC-WRITING-005.7`, supported by [historical criteria](../2026-10-27-seamless-native-titlebar/work-orders/WO-001-seamless-native-titlebar.md:62) and [toolbar extraction validation](../2026-10-28-status-bar/validations/validation-WO-001.md:35). The follow-up design review passed and the user authorized all seven WOs; this is the approved execution mapping. No historical references are rewritten.
-- **User decision, this assignment:** Keep the native macOS header, retire the old app-owned title-strip requirement, and permit reuse of its ID. The approved execution mapping reuses `AC-WRITING-005.6` only for the narrow, non-equivalent native-header/content-boundary criterion; the historical app-owned strip/maximize criterion is retired and not semantically continued. Source references support the boundary, not native visual or OS-action verification.
-- **Coordination:** [`WO-002`](work-orders/WO-002-product-overview-cleanup.md) and WO-003 edit different files and share snapshot/export intent; no hard predecessor is required, but the orchestrator sequences them and reconciles cross-document references before closeout. WO-001 owns manifest snapshot-intent cleanup; WO-003 owns the feature ID resolution; other WOs retain their separate target boundaries. The old manifest-only and duplicate-ID investigation notes above/below remain historical. Requirements review, design review/approval, and per-WO validation remain separate.
+- **Traceable collision resolution proposed for review, not approved:** retain `AC-WRITING-005.5` for width/overflow and restore `AC-WRITING-005.7` for the currently duplicated `.5` cursor-owner text. The [historical titlebar work order](../2026-10-27-seamless-native-titlebar/work-orders/WO-001-seamless-native-titlebar.md:62) explicitly identifies these as `.5` and `.7`; the [toolbar extraction validation](../2026-10-28-status-bar/validations/validation-WO-001.md:35) corroborates both. No existing history or external references are rewritten. The identifier-only correction is a proposed, reviewable planning resolution, not a product change or an approved mapping.
+- **User decision, this assignment:** keep the native macOS header, retire the old app-owned title-strip requirement, and permit reuse of its old ID. The current feature file omits historical `AC-WRITING-005.6`, although the [prior reconciliation](../2026-10-29-ui-polish/work-orders/WO-005-durable-document-reconciliation.md:92) treated its app-owned strip as unresolved. Propose reusing `.6` only for a narrow native macOS header/content-boundary criterion, explicitly recording that the historical app-owned strip/maximize criterion is retired and is not equivalent. This reuse is permitted by the user but remains part of the proposed, reviewable mapping; it is not approval to edit the requirements. The [native startup options](../../../apps/scriptcraft/src/main.rs:1455) and [toolbar composition](../../../apps/scriptcraft/src/main.rs:1282) support the source-level boundary, not native visual or OS-action verification. Do not confuse this strip with the removed project-metadata heading; do not infer additional native interaction guarantees.
+- **Coordination:** [`WO-002`](work-orders/WO-002-product-overview-cleanup.md) and proposed WO-003 edit different files and share the snapshot/text decision; no hard predecessor is required, but the orchestrator coordinates wording and independently attributable changes before closeout. Route snapshot removal and the titlebar decision/proposed ID mapping to the manifest and applicable core, desktop, and feature-blueprint owners; do not edit them under WO-003. The old manifest-only and duplicate-ID investigation notes above/below remain historical; this finding records the later assignment and proposed disposition. Requirements review, design review/approval, and per-WO validation remain separate; none is performed by drafting.
 
 ### Questions and hypotheses
 
-- **Manifest history/baseline:** WO-001 preserves the manifest baseline and policy role while replacing the revision table with existing evidence links; the user-directed snapshot-intent removal is within its authorized scope.
+- **Manifest history/baseline:** Proposed disposition is recorded in the manifest-specific finding above; it preserves the baseline and policy role while replacing the revision table with existing evidence links. It remains subject to the applicable review and approval before execution.
 - **Product overview:** The disposition is recorded in the product-overview finding above: remove stale current-state and checkout evidence from the durable requirements rather than replacing it with a new implementation inventory.
 - **Requirement intent:** The feature file contains `Approved WO-* refinement` blocks and detailed behavior that may be valid permanent acceptance criteria. Preserve intended behavior while removing work-order framing; do not delete or weaken criteria without an explicit intent decision.
-- **Requirement identifier collision:** The historically supported mapping passed the follow-up design review and is the approved execution baseline: `.5` remains width/overflow, `.7` is cursor ownership, and `.6` is only the user-permitted non-equivalent native-header criterion. Preserve historical references without rewriting them.
+- **Requirement identifier collision:** The feature requirements contain two distinct criteria both labeled `AC-WRITING-005.5` (toolbar width/overflow and cursor ownership). The proposed, historically supported correction is recorded above and in WO-003; it remains reviewable, not approved, and must not be applied before the applicable gates.
 - **Technical-context blueprint:** The disposition is recorded in WO-004: populate the scaffold as a concise navigable target map, subject to its applicable review and approval gates.
 - **Technical specificity:** The desktop/core blueprints include framework/API/version-specific details, measurements, and source-level evidence. Determine which are durable architecture/contracts versus temporary implementation observations before moving or removing them.
-- **Review boundary:** Requirements review is distinct from design review. The current directional design review passes; the earlier over-scoped assessment is retained as superseded history. WO-002/WO-003 address the baseline requirements findings; fresh review of the resulting documents is required before WO-004.
+- **Review boundary:** Requirements review is distinct from design review. Confirm the appropriate independent review of the revised requirements and the standard initiative design review/approval before any later execution.
 
 ### Options considered
 
@@ -123,12 +121,12 @@ Forge defines requirements as durable user-facing intent, blueprints as desired 
 
 ### Decisions and discussion notes
 
-- The user subsequently requested fast-tracked drafting of the manifest WO only; that historical drafting request did not change the standard mode. It was later superseded by the user's direct instruction to execute all seven WOs, subject to the applicable gates.
-- The initiative remains one coherent cleanup boundary; separate architect assignments are scoped per durable file. The later user instruction authorizes sequential execution subject to gates.
+- The user subsequently requested fast-tracked drafting of the manifest work order only. This does not change the initiative's standard mode or authorize durable-document edits, review, approval, or execution.
+- The initiative remains one coherent cleanup boundary for now; separate architect assignments are proposed per durable file, without dispatch or implementation authorization.
 
 ### Next investigation or conversation focus
 
-- The user has directly authorized execution of all seven WOs, subject to applicable policy and genuine gates. The baseline requirements review fails; WO-002/WO-003 are the planned corrections, and the resulting overview and feature requirements need fresh independent review before WO-004 begins. The current directional design review passes.
+- No additional intent question is recorded as blocking this planning reconciliation. The proposed identifier mapping and each draft remain subject to the applicable review and approval gates before any document edit.
 
 ## Requirements and blueprint references
 
@@ -144,30 +142,30 @@ Use the updated Forge templates and artifact-boundary rules as the target struct
 
 - [`WO-001 — manifest cleanup`](work-orders/WO-001-project-manifest-cleanup.md): draft, document-only; only the project manifest is an execution target. No predecessor or dependent implementation WO is identified. It may proceed independently after applicable review and approval gates; no document/code lag is intended.
 - [`WO-002 — product overview cleanup`](work-orders/WO-002-product-overview-cleanup.md): draft, document-only; only the product overview is an execution target. No hard predecessor or dependent implementation WO is identified. Coordinate snapshot-intent wording with WO-003 and the other document owners; the apparent plain-text desktop integration gap remains an orchestrator follow-up, not authorized code work.
-- [`WO-003 — screenplay-writing-loop requirements cleanup`](work-orders/WO-003-screenplay-writing-loop-cleanup.md): draft, document-only; feature requirements alone are the execution target. No hard predecessor or dependent implementation WO is identified. Coordinate with WO-002 and affected document owners. It applies the approved `.5`/`.7` correction, user-permitted `.6` reuse for the non-equivalent native-header criterion, and retirement of `.3.4` without reuse; the apparent text-export integration gap remains an orchestrator follow-up.
+- [`WO-003 — screenplay-writing-loop requirements cleanup`](work-orders/WO-003-screenplay-writing-loop-cleanup.md): draft, document-only; feature requirements alone are the execution target. No hard predecessor or dependent implementation WO is identified. Coordinate with WO-002 and affected document owners. It carries the proposed, reviewable `.5`/`.7` correction, user-permitted but not yet approved `.6` reuse for the non-equivalent native-header criterion, and retirement of `.3.4` without reuse; the apparent text-export integration gap remains an orchestrator follow-up.
 - [`WO-004 — technical-context target map`](work-orders/WO-004-technical-context-target-map.md): draft, document-only; technical context alone is the execution target. No hard predecessor or dependent implementation WO is identified. Coordinate terminology and target-boundary decisions with WO-001–003 and WO-005–007; it need not wait for their execution.
 - [`WO-005 — screenplay core blueprint cleanup`](work-orders/WO-005-screenplay-core-cleanup.md): draft, document-only; the core blueprint alone is the execution target. No hard predecessor or dependent implementation WO is identified. Coordinate the parenthetical decision with WO-003 and cross-document snapshot/export wording with WO-002–004 and WO-006–007; PDF/cache findings remain initiative follow-ups, not assigned fixes.
 - [`WO-006 — ScriptCraft Desktop container blueprint cleanup`](work-orders/WO-006-scriptcraft-desktop-cleanup.md): draft, document-only; the desktop blueprint alone is the execution target. No hard predecessor or dependent implementation WO is identified. Coordinate New-consent and related contracts with WO-002–005 and WO-007, and keep target/code gaps in the initiative handoff.
-- [`WO-007 — screenplay-writing-loop feature blueprint cleanup`](work-orders/WO-007-screenplay-writing-loop-blueprint-cleanup.md): draft, document-only; the feature blueprint alone is the execution target. No hard predecessor or dependent implementation WO is identified. Coordinate traceability with WO-003 and use its approved ID mapping only after the corrected requirements pass the post-WO-003 review; coordinate terminology/contracts with WO-004–006 and do not assume other drafts have executed.
+- [`WO-007 — screenplay-writing-loop feature blueprint cleanup`](work-orders/WO-007-screenplay-writing-loop-blueprint-cleanup.md): draft, document-only; the feature blueprint alone is the execution target. No hard predecessor or dependent implementation WO is identified. Coordinate traceability and the proposed ID mapping with WO-003 and terminology/contracts with WO-004–006; do not treat the requirements mapping as approved or assume other drafts have executed.
 
-**Safe execution sequence:** after the corrected plan passes fresh independent design review and the user approval already given is recorded as the review-to-execute approval, execute serially: WO-001 → WO-002 → WO-003 → fresh requirements review of the revised product overview and feature requirements → WO-004 → WO-005 → WO-006 → WO-007. Complete a dedicated commit and fresh independent validation for each WO before starting the next; stop if any validation fails/blocks or the post-WO-003 requirements review fails. This order coordinates the shared decisions and ensures WO-007 receives WO-003's accepted identifier mapping, while retaining the WOs' single-file scopes and not inventing additional implementation work. No review or validation result is implied by this plan.
+**Suggested coordination order (not a hard execution dependency):** WO-001 may proceed independently; coordinate WO-002 and WO-003 before either is finalized; coordinate WO-004 with WO-005 and WO-006, then WO-007 against the agreed terminology and requirements mapping. Work orders remain independently scoped and may be scheduled differently after review, provided cross-document decisions and traceability are reconciled before closeout. Applicable requirements review, independent design review, human approval, and per-WO validation remain separate gates; none is completed by this planning-only reconciliation.
 
 ## Risks and decisions
 
 - **Risk:** Mechanical cleanup removes lasting behavior or project decisions. **Mitigation:** Require each architect to classify content as durable intent, current-state evidence, initiative history, or unresolved before recommending edits.
 - **Risk:** The manifest's expected repository baseline conflicts with the user's instruction that durable docs should not report implementation state. **Mitigation:** Resolve the manifest-specific boundary explicitly, retaining required project policy and decisions.
-- **Manifest disposition:** WO-001 applies the user's explicit removal of recovery-snapshot intent from the manifest while preserving unrelated project policy and save safety.
-- **Approved execution mapping:** retain width/overflow as `AC-WRITING-005.5`, restore cursor ownership to `AC-WRITING-005.7`, use `.6` only for the user-permitted non-equivalent native-header criterion, and retire snapshot `AC-WRITING-003.4` without reuse. This supersedes the pre-review proposal status; historical traceability is preserved without rewriting old artifacts.
+- **Manifest disposition:** Proposed above for forthcoming review; no product-intent change or execution approval is inferred.
+- **Proposed resolution for review, not approved:** retain width/overflow as `AC-WRITING-005.5`, restore cursor ownership to `AC-WRITING-005.7`, reuse `.6` only for the user-permitted, non-equivalent native-header criterion, and retire snapshot `AC-WRITING-003.4` without reuse. Historical and current-context traceability is recorded above; applicable review and approval remain outstanding.
 
 ## Design readiness prompts
 
-The baseline requirements review returned `fail`; its findings are assigned to WO-002/WO-003 and must be freshly reviewed after those WOs before WO-004. The current directional independent design review returned `pass`; see [`reviews/design-review.md`](reviews/design-review.md). The user's execution instruction does not waive any required gate.
+These prompts are not complete; the initiative is not ready for design review or execution.
 
-- [x] Final scope and exclusions are approved by the user's direct authorization to execute all seven WOs, including the user-directed manifest snapshot-intent cleanup assigned to WO-001.
-- [x] Intent ambiguities and ID mapping are resolved or explicitly retained as blockers to specific work orders; the approved mapping is specified in WO-003 and is subject to its acceptance criteria.
+- [ ] Final scope and exclusions are approved.
+- [ ] Intent ambiguities and ID mapping are resolved or explicitly retained as blockers to specific work orders.
 - [ ] Separate artifact-level architect recommendations are available.
 - [ ] Work orders are drafted with explicit paths, dependencies, document-impact classifications, and acceptance evidence.
-- [x] Applicable requirements review and design review are recorded separately; the baseline requirements review failed and the current directional design review passed. A post-WO-003 requirements review remains a pre-WO-004 gate.
+- [ ] Applicable requirements review and design review/approval are planned without conflating their roles.
 - [ ] No implementation or document edits begin before the applicable approval gate.
 
 ## Technical-context analysis and WO-004 handoff
