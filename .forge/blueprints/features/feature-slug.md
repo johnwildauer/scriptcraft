@@ -1,65 +1,34 @@
-# Feature Blueprint: Feature Name
+# Feature-Area Blueprint: Area Name
 
-> This is the technical counterpart to [`feature-slug.md`](../../requirements/features/feature-slug.md). It explains how shared capabilities and feature-specific components satisfy the feature requirements.
->
-> This blueprint describes the desired technical realization. Evidence about current code is context, not initiative progress; approval does not claim that the code already matches the target.
+> This is the technical counterpart to the linked requirements area. Group related capabilities when they share technical composition; this need not be one file per small feature. Describe the target as established structure, not as a report of what implementation currently exists.
 
-## Feature Summary
+## Scope and requirements
 
-`TODO: Summarize the technical path from user intent to system behavior.`
-
-## Document status
-
-- **Status:** `draft`
-- **Owner:** `TODO`
-- **Last updated:** `TODO`
 - **Requirements:** [`../../requirements/features/feature-slug.md`](../../requirements/features/feature-slug.md)
+- **Technical context:** [`../technical-context.md`](../technical-context.md)
+- **Area summary:** `TODO: Explain the target technical path from user intent to system behavior.`
 
-## Component Blueprint Composition
+## Shared composition
 
-`TODO: Name the shared component blueprints and explain how this feature configures and wires them. Use #ComponentName for runtime components and @Document Name for system documents.`
-
-## Feature-Specific Components
+`TODO: Link the relevant component and container blueprints, and explain how this area uses them.`
 
 ```component
-name: FeatureSpecificComponent
+name: AreaCapability
 container: Container Name
 responsibilities:
-	- TODO
+  - TODO: required responsibility
 ```
 
-`TODO: Add relationship paragraphs where direction or data flow is not obvious.`
+## Capability realization
 
-## Models and contracts
+### Capability name
 
-```model
-name: FeatureModel
-store: TODO
-description: TODO
-fields:
-	- id: TODO
-constraints:
-	- TODO
-```
+- **Requirements:** `REQ-AREA-001`, `AC-AREA-001`
+- **Composition and flow:** `TODO: Describe the components, data flow, and boundaries that satisfy these requirements.`
+- **Contracts:** `TODO: State capability-specific invariants, interfaces, and failure behavior as needed.`
 
-### Key Contracts
+`TODO: Add a section for another capability only when it adds useful technical detail; use stable requirement IDs for traceability.`
 
-- `TODO: feature-specific invariants and reliability behavior.`
+## Decisions
 
-### Integration Contracts
-
-- `TODO: feature-specific APIs, events, and composition expectations.`
-
-## Requirement alignment
-
-- `REQ-FEATURE-001` → `TODO: components and flow satisfying this requirement`
-
-## Architecture Decision Records
-
-### ADR-001: Decision title
-
-**Context:** `TODO`
-
-**Decision:** `TODO`
-
-**Consequences:** `TODO`
+`TODO: Record only decisions that materially clarify the area architecture, with rationale and consequences.`

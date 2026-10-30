@@ -12,7 +12,7 @@ The installed workflow begins at [`../_index.md`](../_index.md). This file defin
 - [`../blueprints/`](../blueprints/) is the durable technical definition: how the system is organized and how behavior is realized.
 - [`../initiatives/`](../initiatives/) contains bounded work. An initiative may update requirements or blueprints only when its work orders explicitly authorize those updates.
 
-Requirements and blueprints express the product/system's durable **desired state**, not the progress or history of a particular initiative or work order. A requirement or blueprint may describe a target that current code does not yet implement; approval of that target is not an implementation claim. Keep initiative status, temporary gaps, execution history, and cancellation outcomes in the initiative and its execution log, not in durable requirements or blueprints.
+Requirements and blueprints express the product/system's durable **desired state**, not the progress or history of a particular initiative or work order. Describe requirements, components, containers, and paths in the established-state voice of the target, including useful structure that does not exist yet. Approval of that target is not an implementation claim. Do not store lifecycle status, implementation evidence, owners/dates, progress, backlog, or initiative history in these documents. Record a discovered mismatch between target and repository in the relevant initiative record.
 
 When an upcoming change has a meaningful durable-document impact, a narrow documentation-first work order before dependent implementation is a useful normal suggestion. It is never compulsory: omit it when there is no durable impact or the change is below the documents' abstraction level. Link dependent implementation work orders. Record a declared document/code gap once in the initiative execution handoff and communicate it once to the user in plain language; this expected lag is not a validation blocker. Implementation agents treat supplied requirements/blueprints as target instructions even when existing code lags. If normal assigned work reveals a meaningful, relevant, unexpected mismatch elsewhere, report it to the orchestrator for initiative-log recording and user communication; do not audit broadly or expand scope. Do not silently revert durable docs if work is canceled or becomes obsolete: record the outcome in the initiative and arrange an authorized documentation correction if the intended target changed.
 
@@ -34,11 +34,11 @@ Route each review by the artifact and evidence it is authorized to assess.
 
 | Review | Reviews | May run when | Must not assess | Required output |
 |---|---|---|---|---|
-| Requirements review | Product and feature intent, scope, users, and acceptance criteria | A requirements draft exists and is ready for independent review | Implementation completeness or unauthorized code | `requirements-review.md` in the initiative's `reviews/` directory, or the configured requirements-review location when no initiative exists yet |
+| Requirements review | Product and feature intent, scope, users, and acceptance criteria | Requirements are ready for independent review | Implementation completeness or unauthorized code | `requirements-review.md` in the initiative's `reviews/` directory, or the configured requirements-review location when no initiative exists yet |
 | Design review | The initiative plan and listed work orders | The plan and work orders are ready for the default review, or the user requests review | Code or implementation obligations not authorized by the plan | `design-review.md` in the initiative's `reviews/` directory |
 | Validation | One completed work order | The orchestrator has prepared the assigned work order and relevant per-WO evidence, unless a user-approved policy adaptation changes this default | Unimplemented design obligations or future scope | `validation-[work-order-id].md` in the initiative's `validations/` directory |
 
-Requirements review is distinct from design review: it determines whether intent is clear, coherent, and testable before technical planning relies on it. Its outcome is `pass` only when no blocker remains; warnings require the configured owner/approver to accept them. A failed or blocked requirements review returns the requirements artifact to `draft` or `blocked` with a recorded next action and does not authorize design work.
+Requirements review is distinct from design review: it determines whether intent is clear, coherent, and testable before technical planning relies on it. Its outcome is `pass` only when no blocker remains; warnings require the configured owner/approver to accept them. A failed or blocked review records findings and required corrections in the separate review artifact and does not authorize design work. Update the desired-state document only when its intended content changes; do not put review state or implementation gaps in it.
 
 When Git is usable for the repository at initiative start, each implementer creates one ordinary, non-merge commit for its assigned work order at closeout. The commit has exactly one parent, contains only that work order's changes, and its exact full hash is reported to the orchestrator. A root commit or merge commit is not a safe default work-order commit. The orchestrator passes that hash with the single assigned work order to the independent validator; validators inspect the passed hash, never moving `HEAD` or a broad branch diff. Initiative/branch and eventual closeout commits remain separate from work-order commits.
 
@@ -61,7 +61,7 @@ Review and validation artifacts record only the outcome, date, reviewed document
 
 ## Status vocabulary
 
-These statuses are useful descriptive conventions; use them where helpful, or follow user-directed project vocabulary. Project or external rules may impose additional requirements:
+These statuses are descriptive conventions for initiative and work-order workflow artifacts; use them where helpful, or follow user-directed project vocabulary. They do not apply to durable requirements or blueprints, which carry no lifecycle status. Project or external rules may impose additional requirements:
 
 | Status | Meaning |
 |---|---|
@@ -76,7 +76,7 @@ Do not imply completion without the evidence or gates that apply. Record materia
 
 ## Initiative lifecycle
 
-The statuses above apply to artifacts as descriptive conventions. Initiatives may use **phases** to summarize current activity and **status** to summarize condition. These labels are not a mandatory state machine; use the vocabulary when it helps, and follow the user's requested path. Gates that remain applicable should be recorded with evidence, without redundant phase bookkeeping.
+The statuses above apply only to initiative and work-order workflow artifacts. Initiatives may use **phases** to summarize current activity and **status** to summarize condition. These labels are not a mandatory state machine; use the vocabulary when it helps, and follow the user's requested path. Gates that remain applicable should be recorded with evidence, without redundant phase bookkeeping.
 
 ```text
 Typical path: explore -> plan/draft work orders -> design review/approval -> implement <-> validate per work order -> closeout

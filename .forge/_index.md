@@ -4,17 +4,17 @@
 
 ## Start here
 
-1. Read [`process/00-overview.md`](process/00-overview.md).
+1. Use [`process/00-overview.md`](process/00-overview.md) as default routing guidance when relevant to the user's task.
 2. Check for [`project-manifest.md`](project-manifest.md) at this directory's root:
-   - **Missing, or not `complete`:** this repository has not been initialized. Briefly introduce the workflow to the user in plain language — what will be set up and that independent checks run in the background — then follow [`process/01-init-new.md`](process/01-init-new.md) for a new or empty repository or [`process/01-init-existing.md`](process/01-init-existing.md) for an existing repository, completing the manifest together during guided intake. Pre-filled intake answers are optional context, not required homework.
-   - **`complete`:** initialization is done. Use [`process/02-initiative.md`](process/02-initiative.md) to begin a new initiative.
-3. On resume at any later time, read [`project-manifest.md`](project-manifest.md) first and continue from its status and revision history.
+   - **Missing, or not `complete`:** by default, initialize the repository using [`process/01-init-new.md`](process/01-init-new.md) for a new or empty repository or [`process/01-init-existing.md`](process/01-init-existing.md) for an existing repository. Follow the user's actual task instead when initialization is not needed or the user directs another appropriate path; pre-filled intake answers are optional context, not required homework.
+   - **`complete`:** initialization is done. The normal starting point for a new initiative is [`process/02-initiative.md`](process/02-initiative.md), subject to the user's actual request.
+3. On resume, use [`project-manifest.md`](project-manifest.md) status and revision history when relevant; do not let a routine read or status label block a direct user task.
 
-Do not edit workflow artifacts until you have read the process document governing the current step. Do not rely on temporary files outside `.forge/` when operating in an initialized host repository.
+Use process documents as default workflow guidance, and read the relevant document when it helps with the current task. The user's actual instructions take precedence over advisory lifecycle labels and defaults. Do not require exact phase wording or redundant confirmation when asked to proceed directly from plans or feature requests to drafting work orders. Drafting work orders is distinct from approving or executing them.
 
-Process documents are swappable: they may be updated or replaced wholesale without re-initializing the repository. [`project-manifest.md`](project-manifest.md) is the durable contract — when a process document requires a field the manifest lacks, ask one targeted question and record the answer with a revision-history entry.
+At the user's explicit direction, adapt and record project-policy changes in the appropriate durable project document; an orchestrator may dispatch an architect or coding agent to adapt host-project process documents. Respect applicable external rules and checks: do not silently discard or weaken them, and communicate genuine uncertainty or blockers. Process documents are swappable and may be updated or replaced without re-initializing the repository. Preserve existing project-specific policy unless the user directs a change, record that change, and keep material decisions traceable without rote synchronization.
 
-Initiatives run in one of two modes. **Standard** is the default and follows the full process order below. **Rapid** is an explicitly user-requested compressed path for small, well-understood changes that takes the initial prompt as a complete draft; see the initiative-mode policy in [`process/00-overview.md`](process/00-overview.md) and the rapid path in [`process/02-initiative.md`](process/02-initiative.md).
+Initiatives normally follow exploration, planning, design review and approval, implementation, per-work-order validation, and closeout. This is guidance, not a rigid transition machine: phases and statuses describe progress, and the user may direct an appropriate path. **Standard** is the default; **Rapid** is an explicitly user-requested compressed path for small, well-understood changes that takes the initial prompt as a complete draft. See [`process/00-overview.md`](process/00-overview.md) and [`process/02-initiative.md`](process/02-initiative.md). Rapid mode and other user-directed paths retain applicable external rules; the user may explicitly adapt and record project-policy defaults.
 
 ## Directory map
 
@@ -28,18 +28,26 @@ Initiatives run in one of two modes. **Standard** is the default and follows the
 
 ## Core boundaries
 
-- **Requirements** describe what users and stakeholders need and why. They should not prescribe internal implementation.
-- **Blueprints** describe how the system is structured and how it satisfies requirements.
-- **Initiatives** coordinate a specific change. They are not a replacement for the durable requirements or blueprints.
+- **Requirements** describe durable desired product behavior: what users and stakeholders need and why. Cohesive area files may group related capabilities and retain stable requirement/acceptance IDs; they do not prescribe internal implementation or carry lifecycle status, implementation evidence, progress, or history.
+- **Blueprints** describe the durable desired technical architecture and contracts in established-state voice. The technical context is a navigable target map, not a current-state inventory; useful intended paths may precede code. Approval describes the target, not proof that current code implements it.
+- **Initiatives** coordinate a specific change and record its plan, execution, status, history, and any temporary gap between desired documents and code. They do not replace or carry initiative progress in requirements or blueprints.
+
+When a planned change needs a durable requirements or blueprint update, a narrow documentation-first work order before related implementation is a useful default, not a requirement. Link dependent work orders and record expected document/code lag once in the initiative execution handoff. Use this only where there is meaningful durable impact; if no relevant durable change is needed, do not create a documentation work order. Existing code may lag target documents until dependent implementation is complete. Initialization reviews remain required by default and their findings belong in separate concise review artifacts; review outcomes do not require status fields in requirements or blueprints.
 
 ## Process order
 
-Initialization establishes the repository baseline in [`project-manifest.md`](project-manifest.md). Each later initiative follows this order:
+Initialization establishes the repository baseline in [`project-manifest.md`](project-manifest.md). Each later initiative normally follows this order, adapted to the user's actual instructions and applicable project or external requirements:
 
-1. Draft and plan the initiative in [`process/02-initiative.md`](process/02-initiative.md) (`draft`, `plan`).
-2. Review the proposed design with [`process/03-design-review.md`](process/03-design-review.md) (`review`).
-3. Execute work orders using [`process/04-work-order.md`](process/04-work-order.md) (`execute`).
-4. Validate each completed work order using [`process/05-validation.md`](process/05-validation.md) (`validate`).
-5. Close the initiative using [`process/06-closeout.md`](process/06-closeout.md) (`closeout`).
+1. Explore and plan the initiative, then draft the requested work orders in [`process/02-initiative.md`](process/02-initiative.md).
+2. Review the proposed design and obtain the default human approval using [`process/03-design-review.md`](process/03-design-review.md).
+3. Implement approved work orders using [`process/04-work-order.md`](process/04-work-order.md).
+4. Independently validate each completed work order by default using [`process/05-validation.md`](process/05-validation.md).
+5. Close out using [`process/06-closeout.md`](process/06-closeout.md), recording material outcomes and follow-ups.
 
-The project-specific policy is maintained in the Project policy section of [`project-manifest.md`](project-manifest.md). It may add stricter gates or commands, but later process documents must not silently weaken it.
+When Git is usable for commit and hash review, each work order closes with one
+dedicated single-parent commit; its exact hash is passed to validation. Only
+Git-unavailable-at-initiative-start permits design review and work-order
+validation to be recorded as `skipped: Git unavailable`; requirements reviews
+remain separate. See [`process/00-overview.md`](process/00-overview.md).
+
+Labels such as `draft`, `plan`, `review`, `execute`, and `validate` are descriptive conventions, not prerequisites for responding to a direct user request. Retain material decisions, blockers, evidence, and user-approved gates; avoid redundant phase-ledger updates. The project-specific policy defaults are maintained in [`project-manifest.md`](project-manifest.md); a user-directed adaptation may be recorded there or in another appropriate durable project document, with a clear reference where needed. Applicable external rules remain in force.

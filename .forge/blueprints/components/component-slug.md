@@ -1,48 +1,27 @@
 # Component Blueprint: Capability Name
 
-> A component is a reusable capability composed of runtime components. It may span multiple containers and should remain feature-agnostic.
->
-> This blueprint describes desired technical structure and contracts. Evidence about current code is context, not initiative progress; approval does not claim that the code already matches the target.
+> A component is a reusable capability composed of runtime components. It may span containers and remains focused on a coherent technical responsibility. This document describes desired structure and contracts in established-state voice, whether or not implementation exists yet.
 
-## Capability Summary
+## Capability
 
-`TODO: Explain the capability, its consumers, and the key data/contracts it handles.`
+`TODO: Describe what this capability provides, its consumers, and the key data or contracts it owns.`
 
-## Document status
-
-- **Status:** `draft`
-- **Owner:** `TODO`
-- **Last updated:** `TODO`
-- **Containers:** `TODO`
-
-## Core Components
+## Composition
 
 ```component
 name: ComponentName
 container: Container Name
 responsibilities:
-	- TODO
-	- TODO
+  - TODO: required responsibility
 ```
 
-`TODO: Add relationship paragraphs between component blocks. State direction, purpose, and data/contracts crossing each boundary.`
+`TODO: Add another block or a short relationship description only when needed to explain ownership, direction, or data crossing a boundary.`
 
-## System Contracts
+## Contracts
 
-### Key Contracts
+- **Invariants and failure behavior:** `TODO: state required ordering, consistency, retry, security, or reliability rules as applicable.`
+- **Interfaces:** `TODO: describe required APIs, events, file formats, or composition contracts as applicable.`
 
-- `TODO: invariants, ordering, idempotency, consistency, retry, and security semantics.`
+## Decisions
 
-### Integration Contracts
-
-- `TODO: events, APIs, webhooks, or composition expectations.`
-
-## Architecture Decision Records
-
-### ADR-001: Decision title
-
-**Context:** `TODO`
-
-**Decision:** `TODO`
-
-**Consequences:** `TODO`
+`TODO: Record only decisions that materially clarify this capability's target structure, with rationale and consequences.`

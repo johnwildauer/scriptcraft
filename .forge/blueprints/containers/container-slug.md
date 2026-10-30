@@ -1,51 +1,30 @@
 # Container Blueprint: Container Name
 
-> A container is a separately deployable or runnable system boundary such as an application, API, worker, database, or build pipeline.
->
-> This blueprint describes desired technical structure and contracts. Evidence about current code is context, not initiative progress; approval does not claim that the code already matches the target.
+> A container is an independently runnable or deployable boundary, such as an application, API, worker, database, or build pipeline. Describe the desired boundary and its contracts in established-state voice; paths and capabilities may be intended future structure.
 
-## Container Summary
+## Purpose and boundary
 
-`TODO: Purpose, users/consumers, and boundary of this container.`
+`TODO: Describe the container's role, consumers, and responsibility boundary.`
 
-## Document status
+## Runtime and delivery
 
-- **Status:** `draft`
-- **Owner:** `TODO`
-- **Last updated:** `TODO`
-- **Technical context:** [`../technical-context.md`](../technical-context.md)
+- **Technology/runtime:** `TODO: target choice`
+- **Build/package:** `TODO: target process`
+- **Deployment/distribution:** `TODO: target environment or delivery`
+- **Configuration:** `TODO: target configuration boundary; do not include secret values.`
+- **Dependencies:** `TODO: important internal and external dependencies`
 
-## Infrastructure
+## Interfaces and composition
 
-- **Technology/runtime:** `TODO`
-- **Build/package:** `TODO`
-- **Deployment/distribution:** `TODO`
-- **Configuration:** `TODO`
-- **Dependencies:** `TODO`
+- **Inputs:** `TODO: commands, HTTP endpoints, events, files, or user actions`
+- **Outputs:** `TODO: responses, events, files, or user-visible results`
+- **Internal areas:** `TODO: component or area blueprints and their roles`
 
-## Entry points and boundaries
+## Contracts
 
-- **Inputs:** `TODO: commands, HTTP endpoints, events, files, or user actions.`
-- **Outputs:** `TODO`
-- **External systems:** `TODO`
-- **Internal areas:** `TODO`
+- **Invariants and failure behavior:** `TODO: required consistency, reliability, security, and failure semantics`
+- **External interfaces:** `TODO: required APIs, events, or formats`
 
-## System Contracts
+## Decisions
 
-### Key Contracts
-
-- `TODO: invariants, consistency, reliability, security, and failure behavior.`
-
-### Integration Contracts
-
-- `TODO: APIs, events, file formats, or external interfaces.`
-
-## Architecture Decision Records
-
-### ADR-001: Decision title
-
-**Context:** `TODO`
-
-**Decision:** `TODO`
-
-**Consequences:** `TODO`
+`TODO: Record only decisions that materially clarify this container's target structure, with rationale and consequences.`

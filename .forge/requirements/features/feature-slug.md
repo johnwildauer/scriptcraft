@@ -1,48 +1,29 @@
-# Feature Requirements: Feature Name
+# Requirements Area: Area Name
 
-> This document is the authoritative desired user-facing specification for one cohesive feature. Keep it implementation-agnostic; its approval is not a claim that code already implements it. Use document status for specification maturity, not initiative progress/history. Replace `TODO` values and remove notes before approval.
+> This document specifies desired user-facing behavior for a cohesive area. Describe requirements in established-state voice, even when implementation is future work. Group related capabilities into sections and keep stable IDs so each requirement and acceptance criterion remains independently traceable. Do not add lifecycle status, implementation evidence, progress, or a backlog here.
 
-## Document status
+## Area purpose
 
-- **Status:** `draft`
-- **Owner:** `TODO`
-- **Last updated:** `TODO`
+`TODO: Summarize the user value and boundary of this area.`
+
+## Capability groups
+
+### Capability group name
+
+`TODO: Explain the related user need and the behavior provided by this group.`
+
+- **REQ-AREA-GROUP-001:** The system `TODO: state one desired, testable behavior.`
+  - **AC-AREA-GROUP-001:** Given `TODO`, when `TODO`, then `TODO`.
+- **REQ-AREA-GROUP-002:** The system `TODO: state another independently traceable behavior when needed.`
+  - **AC-AREA-GROUP-002:** Given `TODO`, when `TODO`, then `TODO`.
+
+`TODO: Add another subgroup only for a distinct cohesive capability group. Replace AREA and GROUP with stable area/group identifiers (for example UI-TOOLBAR, UI-WINDOWS, DOCMODEL, or CLI) and keep each acceptance criterion linked to its requirement.`
+
+## Constraints
+
+`TODO: Include durable user-facing constraints that apply across this area, if any. Omit this section when none apply.`
+
+## Related documents
+
 - **Product overview:** [`../product-overview.md`](../product-overview.md)
-- **Blueprint counterpart:** [`../../blueprints/features/feature-slug.md`](../../blueprints/features/feature-slug.md)
-
-## Overview
-
-`TODO: Write one or two paragraphs explaining what the feature does, why users need it, and the value it provides.`
-
-## Terminology
-
-| Term | Definition |
-|---|---|
-| `TODO` | `TODO` |
-
-## Requirements
-
-Each requirement must represent one cohesive, independently testable capability. Use a stable prefix derived from the feature name.
-
-### REQ-FEATURE-001: Requirement name
-
-**User Story:** As a `[role]`, I want to `[action]`, so that I can `[outcome]`.
-
-**Acceptance Criteria:**
-
-- **AC-FEATURE-001.1:** When `[condition]`, the system shall `[specific observable behavior]`.
-- **AC-FEATURE-001.2:** When `[condition]`, the system shall `[specific observable behavior]`.
-
-## Non-functional requirements
-
-- **NFR-FEATURE-001:** `TODO: performance, security, accessibility, reliability, or compatibility requirement, if applicable.`
-
-## Out of scope
-
-- `TODO: Explicitly deferred behavior and adjacent capabilities not covered here.`
-
-## Traceability notes
-
-- **Related product goal:** `TODO`
-- **Dependencies:** `TODO`
-- **Known risks:** `TODO`
+- **Technical blueprint:** [`../../blueprints/features/feature-slug.md`](../../blueprints/features/feature-slug.md)
