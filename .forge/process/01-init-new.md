@@ -15,6 +15,12 @@ initialization. Treat pre-filled intake answers as user-provided context, not
 repository evidence; technical choices remain provisional until
 implementation validates them.
 
+Initialization steps below are the default path. Follow explicit user direction
+to adapt project policy, record the decision and rationale in the manifest
+revision history or another appropriate durable project document, and retain
+applicable external repository rules. A user may request process-document
+customization by an architect or coding agent.
+
 ## Guided intake
 
 Before asking anything structured, briefly introduce the workflow in plain
@@ -35,9 +41,10 @@ Conduct the intake in stages:
    workspace defaults — versus wanting working results with the diligence
    handled in the background. Ask directly when the signals are unclear, and
    record the `guided` | `collaborative` | `direct` level and how it was
-   decided in the manifest. The level changes who supplies the answers, not
-   what gets recorded: every manifest field is completed at every level, and
-   all gates, reviews, and validation still run.
+    decided in the manifest. The level changes who supplies the answers. Record
+    fields relevant to the current project; default gates and review steps apply
+    unless the user explicitly adapts project policy, and applicable external
+    requirements remain in force.
 3. **Branch by level.**
    - `guided`: propose a short, plain-language defaults summary — what you
      will set up and how the work will be independently checked — and record
@@ -111,17 +118,25 @@ file and comparable diff evidence where possible, explicitly state that no
 branch-level review occurred, strongly recommend installing and initializing
 Git locally where practical, and record the fallback owner and next action.
 
+Record Git usability for work-order commits and exact-hash review separately
+from local branch capability. If commits and hash review are unavailable at
+initiative start, design review and work-order validation are recorded as
+`skipped: Git unavailable` with no commit hash; requirements reviews and other
+required safety gates remain. A later failure in a repository recorded as Git
+usable is blocked, not skipped. Lack of branch creation alone does not disable
+per-work-order commits or hash-based review.
+
 ## Procedure
 
 1. **Establish context.** Confirm the repository root, available tools, constraints, target platform, and what “empty” means. Record unknowns rather than inventing facts.
 2. **Elicit product intent.** Collaborate with the user on the problem, target users, desired outcome, product MVP boundary, non-goals, and success measures. Distinguish the product MVP from the workspace MVP described below.
-3. **Choose the initial roadmap shape.** Ask whether the user wants one first initiative or a sequence toward the product MVP. Accept a count of one or greater, or let the orchestrator propose a provisional sequence for approval. A count is a planning target, not a commitment to create or execute every stage immediately. If the user does not want later stages preplanned, record that the roadmap remains open for replanning after the workspace foundation.
-4. **Draft product overview.** Populate [`../requirements/product-overview.md`](../requirements/product-overview.md), clearly marking provisional decisions and distinguishing workspace MVP from product MVP.
+3. **Choose the initial roadmap shape.** Ask whether the user wants one first initiative or a sequence toward the product MVP. Accept a count of one or greater, or let the orchestrator propose a provisional sequence for approval. Record initiative sequencing in the project manifest, not in product requirements. A count is a planning target, not a commitment to create or execute every stage immediately. If the user does not want later stages preplanned, record that the roadmap remains open for replanning after the workspace foundation.
+4. **Draft product overview.** Populate [`../requirements/product-overview.md`](../requirements/product-overview.md) with desired product scope and outcomes, clearly distinguishing workspace MVP from product MVP. Do not use it as an initiative roadmap or implementation-status record.
 5. **Define initial features.** Create one file per cohesive feature under [`../requirements/features/`](../requirements/features/) using the feature template. Use testable requirement and acceptance-criterion IDs.
-6. **Review requirements.** Set the requirements artifact to `in-review` and route a fresh-context reviewer using the requirements-review row in [`00-overview.md`](00-overview.md). Record `requirements-review.md` (or the configured equivalent) and resolve blockers before continuing; do not treat this as a design review.
+6. **Review requirements (default).** Route a fresh-context reviewer using the requirements-review row in [`00-overview.md`](00-overview.md). Record `requirements-review.md` (or the configured equivalent) and resolve blockers before continuing unless the user explicitly adapts project policy and external rules permit it; do not treat this as a design review.
 7. **Choose a technical baseline.** Based on requirements and user constraints, document runtime, technology, dependency, and validation assumptions in [`../blueprints/technical-context.md`](../blueprints/technical-context.md).
 8. **Create blueprints.** Add only the container, component, and feature blueprints needed to make the next approved initiative implementable. Mark uncertain architecture as provisional.
-9. **Review blueprints.** Spawn a fresh-context reviewer to compare the blueprints with requirements and the stated technical constraints. Resolve blockers.
+9. **Review blueprints (default).** Spawn a fresh-context reviewer to compare the blueprints with requirements and the stated technical constraints. Resolve blockers unless the user explicitly adapts project policy and external rules permit it.
 10. **Configure policy.** Populate the Project policy section of [`../project-manifest.md`](../project-manifest.md) — commands, gates, tools, parallelism, and recovery rules — with verified facts, recording unknowns with owners. Do not place project-specific policy in process documents: they are swappable, and the manifest is the durable contract.
 11. **Finalize initialization.** Set the manifest to `complete` only when completion evidence links the product overview, technical context, policy, reviews, branch capability decision, and first-initiative recommendation/roadmap. If a required decision or validation is unavailable, set it to `blocked` and record the blocking reason, decision needed, owner, and next action. Do not write individual product initiatives or begin implementation in this initialization step.
 
@@ -151,10 +166,10 @@ stages.
 - Product overview exists and has an explicit MVP boundary.
 - Each initial feature has testable requirements or is explicitly deferred.
 - Technical context and necessary blueprints exist, with provisional choices labeled.
-- Requirements and blueprint review findings are recorded and resolved or accepted.
+- Applicable requirements and blueprint review findings are recorded and resolved, accepted, or covered by a recorded user-directed policy adaptation.
 - Project policy is populated in the project manifest or its unknowns are explicitly assigned.
 - A workspace MVP is recommended as the first initiative, with rationale, scope, expected validation, and a linked configurable roadmap or explicit open-replanning decision.
-- [`../project-manifest.md`](../project-manifest.md) is `complete` or `blocked`; a complete manifest links the generated product overview, technical context, policy, review findings, and first-initiative handoff.
+- [`../project-manifest.md`](../project-manifest.md) is `complete` or `blocked`; a complete manifest links the generated product overview, technical context, policy, applicable review findings or recorded adaptations, and first-initiative handoff.
 
 ## Handoff
 

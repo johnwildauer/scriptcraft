@@ -16,6 +16,12 @@ repository evidence. Classify repository findings as **observed**
 (directly supported by files or executed commands), **inferred** (reasonable
 interpretation), or **desired** (requested future behavior).
 
+Initialization steps below are the default path. Follow explicit user direction
+to adapt project policy, record the decision and rationale in the manifest
+revision history or another appropriate durable project document, and retain
+applicable external repository rules. A user may request process-document
+customization by an architect or coding agent.
+
 ## Guided intake
 
 Before asking anything structured, briefly introduce the workflow in plain
@@ -36,9 +42,10 @@ Conduct the intake in stages:
    workspace defaults — versus wanting working results with the diligence
    handled in the background. Ask directly when the signals are unclear, and
    record the `guided` | `collaborative` | `direct` level and how it was
-   decided in the manifest. The level changes who supplies the answers, not
-   what gets recorded: every manifest field is completed at every level, and
-   all gates, reviews, and validation still run.
+    decided in the manifest. The level changes who supplies the answers. Record
+    fields relevant to the current project; default gates and review steps apply
+    unless the user explicitly adapts project policy, and applicable external
+    requirements remain in force.
 3. **Branch by level.**
    - `guided`: propose a short, plain-language defaults summary — what you
      will set up and how the work will be independently checked — and record
@@ -108,16 +115,24 @@ evidence where possible, state explicitly that branch-level review did not
 occur, strongly recommend installing and initializing Git locally where
 practical, and record the fallback owner and next action.
 
+Record Git usability for work-order commits and exact-hash review separately
+from local branch capability. If commits and hash review are unavailable at
+initiative start, design review and work-order validation are recorded as
+`skipped: Git unavailable` with no commit hash; requirements reviews and other
+required safety gates remain. A later failure in a repository recorded as Git
+usable is blocked, not skipped. Lack of branch creation alone does not disable
+per-work-order commits or hash-based review.
+
 ## Procedure
 
 1. **Inventory the repository.** Identify languages, frameworks, package managers, entry points, deployment files, tests, generated files, and important directories.
 2. **Determine runnable state.** Locate documented commands, install dependencies when permitted, run the safest available checks, and record failures verbatim. Do not assume a failing or missing command is a green gate.
 3. **Recover product intent.** Read existing documentation and ask only the questions needed to distinguish intended behavior from current behavior.
-4. **Draft product overview.** Populate [`../requirements/product-overview.md`](../requirements/product-overview.md), separating current state, desired outcomes, stakeholders, constraints, and known gaps.
+4. **Draft product overview.** Populate [`../requirements/product-overview.md`](../requirements/product-overview.md) with stakeholder/business context and desired product outcomes. Distinguish observed behavior from desired behavior; keep repository implementation inventory in technical context and initiative-specific progress/gaps in initiative records.
 5. **Extract feature requirements.** Create or update files under [`../requirements/features/`](../requirements/features/). Use stable IDs and preserve observed behavior when it is part of the current contract.
-6. **Review requirements.** Set the requirements artifact to `in-review` and route a fresh-context requirements reviewer using [`00-overview.md`](00-overview.md). Record `requirements-review.md` (or the configured equivalent), identify ambiguity, unsupported claims, conflicts, and missing acceptance criteria, and resolve blockers before blueprinting. Do not treat this as a design review.
+6. **Review requirements (default).** Route a fresh-context requirements reviewer using [`00-overview.md`](00-overview.md). Record `requirements-review.md` (or the configured equivalent), identify ambiguity, unsupported claims, conflicts, and missing acceptance criteria, and resolve blockers before blueprinting unless the user explicitly adapts project policy and external rules permit it. Do not treat this as a design review.
 7. **Map the technical system.** Populate [`../blueprints/technical-context.md`](../blueprints/technical-context.md) from repository evidence. Add container, component, and feature blueprints with links to real paths or symbols where useful.
-8. **Review blueprints.** Spawn a fresh-context reviewer to compare documented architecture with repository evidence and the requirements. Record discrepancies rather than silently correcting them.
+8. **Review blueprints (default).** Spawn a fresh-context reviewer to check that current-state evidence is distinguished from desired technical architecture and that the target aligns with requirements. Record meaningful baseline discrepancies as evidence/uncertainty, not as initiative progress, unless the user explicitly adapts project policy and external rules permit it.
 9. **Configure policy.** Populate the Project policy section of [`../project-manifest.md`](../project-manifest.md) — commands, gates, tools, parallelism, and recovery rules — with verified facts, recording unknowns with owners. Do not place project-specific policy in process documents: they are swappable, and the manifest is the durable contract.
 10. **Finalize initialization.** If the repository is broken, prioritize restoring a runnable baseline. Otherwise recommend the smallest valuable change that exercises the documented workflow. Set the manifest to `complete` only with linked completion evidence, including the branch capability decision; if the repository cannot be safely understood or validated, set it to `blocked` with the blocking reason, decision needed, owner, and next action.
 
@@ -125,10 +140,10 @@ practical, and record the fallback owner and next action.
 
 - Repository inventory and runnable-state evidence are recorded.
 - Observed, inferred, and desired behavior are distinguishable in durable documents.
-- Requirements and blueprints have independent review findings.
+- Applicable requirements and blueprint reviews have independent findings, or the user's policy adaptation is recorded.
 - Project policy in the project manifest contains verified commands where available and named owners for unknowns.
 - The first initiative addresses the highest-value baseline gap or delivers a small vertical slice.
-- [`../project-manifest.md`](../project-manifest.md) is `complete` or `blocked`; a complete manifest links the generated product overview, technical context, policy, review findings, and first-initiative handoff.
+- [`../project-manifest.md`](../project-manifest.md) is `complete` or `blocked`; a complete manifest links the generated product overview, technical context, policy, applicable review findings or recorded adaptations, and first-initiative handoff.
 
 ## Handoff
 

@@ -1,6 +1,6 @@
 # Feature Requirements: Feature Name
 
-> This document is the authoritative user-facing specification for one cohesive feature. Keep it implementation-agnostic. Replace `TODO` values and remove notes before approval.
+> This document is the authoritative desired user-facing specification for one cohesive feature. Keep it implementation-agnostic; its approval is not a claim that code already implements it. Use document status for specification maturity, not initiative progress/history. Replace `TODO` values and remove notes before approval.
 
 ## Document status
 

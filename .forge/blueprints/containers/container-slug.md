@@ -1,6 +1,8 @@
 # Container Blueprint: Container Name
 
 > A container is a separately deployable or runnable system boundary such as an application, API, worker, database, or build pipeline.
+>
+> This blueprint describes desired technical structure and contracts. Evidence about current code is context, not initiative progress; approval does not claim that the code already matches the target.
 
 ## Container Summary
 

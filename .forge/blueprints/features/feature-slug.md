@@ -1,6 +1,8 @@
 # Feature Blueprint: Feature Name
 
 > This is the technical counterpart to [`feature-slug.md`](../../requirements/features/feature-slug.md). It explains how shared capabilities and feature-specific components satisfy the feature requirements.
+>
+> This blueprint describes the desired technical realization. Evidence about current code is context, not initiative progress; approval does not claim that the code already matches the target.
 
 ## Feature Summary
 

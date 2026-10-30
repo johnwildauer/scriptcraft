@@ -1,6 +1,8 @@
 # Component Blueprint: Capability Name
 
 > A component is a reusable capability composed of runtime components. It may span multiple containers and should remain feature-agnostic.
+>
+> This blueprint describes desired technical structure and contracts. Evidence about current code is context, not initiative progress; approval does not claim that the code already matches the target.
 
 ## Capability Summary
 

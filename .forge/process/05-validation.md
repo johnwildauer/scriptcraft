@@ -2,68 +2,102 @@
 
 ## Dispatch
 
-The orchestrator dispatches one fresh-context validation session per work order
-after implementation, when the work order is `in-review`. Provide the approved
-initiative and work order plus the committed diff or equivalent implementation
-evidence needed for comparison. The execution log or other context may identify
-those artifacts; do not require unrelated material. If the initiative, approved
-work order, or comparison evidence is absent or unavailable, return **blocked**
-and name the missing input; do not infer implementation or fail speculatively.
+By default, the orchestrator dispatches a fresh independent validator for each
+work order after its dedicated commit is finalized and before later work can
+contaminate the evidence. Provide only the single assigned work order, its exact
+full commit hash, and this validation template. For a document-only work order,
+provide only the assigned documents needed to compare its edits with the work
+order; do not inspect application source, search for semantic mismatches with
+code, or block because dependent implementation is outstanding. For an
+implementation work order, provide only relevant desired-state document
+references or excerpts so the validator can compare the assigned code outcome
+with its target. Do not provide a broad branch diff or moving `HEAD` as the
+comparison basis. The orchestrator owns ordering, dependency preparation, and
+separate policy, test, or human gates.
+
+Review the exact commit with:
+
+```sh
+git show --format=fuller --stat --patch --find-renames <hash>
+```
+
+An exact-hash equivalent is acceptable. Confirm the object exists and is reachable
+from a ref (for example, `git branch --all --contains <hash>` returns a branch),
+and inspect its parents (`git show -s --format=%P <hash>`): it must have exactly
+one parent. Root commits, merge commits, missing/unreachable hashes, and commits
+that include unrelated changes or multiple work orders are not acceptable default
+WO commits. Compare the actual commit patch with the assigned work order and
+record the hash reviewed in the validation artifact. Do not substitute the latest
+branch commit for the supplied hash.
+
+Git availability is determined and recorded at initiative start. If Git was
+unavailable for commit and hash review then, the orchestrator records design
+review and work-order validation as `skipped: Git unavailable`, states that no
+commit hash exists, and may supply available implementation notes/diff without
+claiming independent review. This exception does not skip requirements reviews
+or unrelated required safety gates, and does not override a direct user
+instruction to retain a review/gate; continuation is subject to applicable
+external rules and project policy. A transient Git command or commit failure
+after Git was established as usable is **blocked**, not a retroactive skip. An
+explicit no-op has no fabricated commit: the orchestrator records `no-change`
+and decides whether the validator should assess the absence against the work
+order or record the no-change validation policy.
 
 ## Scope and verdict
 
-Compare the implementation diff/evidence with the initiative direction and the
-approved work order. Use those as the minimum comparison basis. Consult other
-documents only when needed to establish explicit authorization. Do not perform a
-repository audit, exhaustive exploration, or general quality review.
+Compare the exact supplied commit patch with the assigned work order's explicit
+outcome and scope. Start from a positive alignment check: report whether the
+changes deliver that outcome and are meaningfully consistent with the work order.
+For document-only work, assess only the assigned document edits and the exact
+work-order commit; the absence of dependent code is expected and is not a
+blocker. For implementation work, use relevant supplied requirements/blueprints
+as desired state, even if legacy code outside the assigned scope lags. Do not
+audit unrelated code, investigate semantic consistency beyond the assigned
+comparison, or penalize a declared document-first gap. Consult additional
+documentation only when necessary to understand an explicit outcome.
 
-Start from **pass**. **Fail only when direct evidence shows that the authored
-implementation is grossly unrelated or rogue relative to the authorized
-initiative and work order.** A large or complex change, many changed files,
-reasonable stack-wide implementation details, minor differences, omissions, or
-ambiguous alignment are not failures. Do not fail for style, quality, security,
-architecture, testing, acceptance-criterion, or documentation opinions or
-deficiencies unless they directly establish grossly unrelated or rogue work.
-If reasonable alignment remains plausible, pass.
+Report **pass** when the dedicated commit meaningfully aligns with the assigned
+work order. Report **fail** only for a significant, evidence-backed mismatch or
+an unmet explicit work-order outcome. Report **blocked** when the hash/commit is
+missing, unreachable, not a dedicated single-parent WO commit, or the evidence is
+insufficient for meaningful comparison. Minor optional issues need not derail
+alignment; do not fail for preferences or speculative concerns.
 
-Project-policy requirements and human approvals/manual gates are separate
-orchestrator-owned requirements, not validation criteria. The orchestrator
-checks, records, and enforces them independently; their status does not change
-the alignment verdict or expand this review.
-
-Return only a short `pass`, `fail`, or `blocked` result and the required artifact.
-State the comparison basis and cite concise, direct evidence for fail or the
-missing evidence for blocked. Use the validation template only for basic
-artifact metadata and this verdict; skip its acceptance-criterion, policy-gate,
-quality, warning, note, and other checklist prompts. Do not spawn or delegate
-agents, investigate further, fix or implement anything, create work orders, give
-unsolicited advice, or perform follow-up review.
+Return `pass`, `fail`, or `blocked` in the validation template and send it to the
+orchestrator. Only the orchestrator may record `skipped: Git unavailable`, and
+only in the defined no-Git case. In the two-to-three-sentence summary, state the
+work order and exact hash reviewed; cite direct evidence for fail or name the
+missing evidence for blocked. Do not spawn agents, change the implementation, or
+perform follow-up review. Applicable project-policy, test, and human gates remain
+separately orchestrator-owned.
 
 ## Artifact and transition
 
 Create `validation-[work-order-id].md` in the initiative's `validations/`
 directory using
 [`../initiatives/YYYY-MM-DD-initiative-template/validations/validation-template.md`](../initiatives/YYYY-MM-DD-initiative-template/validations/validation-template.md)
-as a format reference, not an expanded validation mandate. Record only the work
-order, initiative, compared commit/diff or evidence, verdict, and direct evidence
-for any fail or blocked result. Do not perform its checklists or assess policy or
-human gates; those are recorded by the orchestrator separately. Link the
-validation from the work order and execution log.
+as the concise artifact. The orchestrator links it from the work order and
+execution log, and records separate gates and session identifiers in the
+execution log.
 
-- **Pass:** the orchestrator sets the work order to `complete` and proceeds,
-  subject to any separately required project or human gates at their own
-  workflow transition.
-- **Fail:** only a concrete grossly unrelated or rogue implementation finding
-  qualifies. The orchestrator returns the work order for correction and creates
-  a letter-suffixed fix work order (for example, `WO-001a-short-slug`) when a
-  fix is required; the fix receives a new implementation and validation session.
-  Keep the original work order incomplete until a fix passes, and link the fix
-  chain as evidence.
-- **Blocked:** the orchestrator records the missing comparison evidence, marks
-  the work blocked, and stops until it is available. Blocked is not fail.
+- **Pass:** the orchestrator sets the work order to `complete` after applicable
+  separate gates are satisfied.
+- **Fail:** the orchestrator addresses the significant mismatch or unmet
+  explicit outcome, creating a collision-free fix work order such as
+  `WO-001a-fix-01` or `WO-001-fix-01`. Name its validation artifact with the same
+  ID, for example `validation-WO-001a-fix-01.md` or
+  `validation-WO-001-fix-01.md`; increment the fix number as needed. Keep the
+  original work order incomplete until its correction passes. Existing historic
+  IDs remain valid.
+- **Blocked:** the orchestrator records the missing evidence or attribution
+  reason and stops until resolved. A usable-repository commit failure cannot be
+  converted to skipped. Blocked is not fail.
 
-The default cadence is per work order in dependency order, alternating
-`execute` and `validate`; consolidated validation is opt-in only at the user's
-explicit request. Each work order still receives its own fresh validation
-session. The orchestrator owns all dispatches, state transitions, and separate
-policy or human gates.
+- **Skipped:** the orchestrator may record `skipped: Git unavailable` only when
+  Git was unavailable for commit and hash review at initiative start. No hash
+  exists; this is not pass or approval. Requirements review is unaffected.
+
+The default cadence is fresh validation per work order in dependency order,
+before later work contaminates its evidence. A user-authorized alternative still
+requires attributable per-work-order evidence. The orchestrator owns dispatch,
+state transitions, predecessor verification, and separate policy or human gates.

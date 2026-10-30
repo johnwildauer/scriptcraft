@@ -2,18 +2,22 @@
 
 ## Purpose
 
-This process opens a durable, user-led space for exploring a change and, when
-the direction is clear, turns that exploration into one bounded initiative and
-an ordered set of executable work orders. Creating an initiative does not mean
-that its scope, design, or implementation plan is settled. Implementation
-begins only after [`03-design-review.md`](03-design-review.md) passes and the
-required human design approval is recorded.
+This process turns a request into a useful plan and, when requested, appropriately
+scoped work-order drafts. The normal pattern is exploration, planning, review and
+approval, implementation, per-work-order validation, and closeout, but users may
+direct an appropriate path without obeying exact phase labels. Drafting work
+orders does not approve or authorize their implementation. When Git is usable,
+implementation normally follows a passing
+[`03-design-review.md`](03-design-review.md) and any required human design
+approval. If Git was unavailable for commit and hash review at initiative start,
+the documented exception records design review and work-order validation as
+skipped; requirements reviews and other applicable safety gates remain.
 
-The initiative begins in the `draft` phase. The user guides
-the direction of the conversation; the agent investigates, records useful
-findings in the initiative plan, and responds to the user's current question.
-The agent must not manufacture work orders or advance the initiative merely
-because a template contains those possible later artifacts.
+The initiative may be described as `draft` while being explored. The user guides
+the direction; the agent investigates, records material findings, and responds
+to the user's current request. Do not manufacture work orders, but when asked to
+draft them from plans or feature requests, do so without requiring a phase-label
+transition or redundant confirmation.
 
 ## Define the initiative boundary
 
@@ -31,8 +35,8 @@ When a split is useful, preserve traceability by recording the roadmap or parent
 
 ## Create the initiative
 
-1. Read [`00-overview.md`](00-overview.md), the relevant requirements and blueprints, and the initiative template at [`../initiatives/YYYY-MM-DD-initiative-template/`](../initiatives/YYYY-MM-DD-initiative-template/).
-2. Create a dated, short-slug directory under [`../initiatives/`](../initiatives/). Copy the initiative plan template and rename it to `[initiative-slug]-v1.md`. Copy `execution-log-template.md` to `execution-log.md` for use when work-order execution begins. Do not create work-order or review artifacts yet; copy and rename those templates only when the initiative has converged and is being prepared for design review. Replace initiative-slug, title, and other applicable placeholders in the copied documents. Record the initiative mode metadata (`Initiative mode`, `Mode requested by`, `Mode confirmation`, `Rapid-mode eligibility`) per [`00-overview.md`](00-overview.md): `standard` is the default, and `rapid` requires the user's explicit request and confirmed eligibility. Do not rename the source template directory.
+1. Use [`00-overview.md`](00-overview.md), relevant requirements/blueprints, and the initiative template as practical guidance; follow the user's actual request and applicable external/project requirements.
+2. Create or update a dated, short-slug initiative directory under [`../initiatives/`](../initiatives/). Copy the plan template and, when useful, execution-log template. Work orders may be drafted directly when the user asks; they need not wait for exact phase wording. Create review artifacts when ready for the default design review. Replace applicable placeholders. `standard` is the default; `rapid` requires explicit user request and eligibility. Do not rename the source template directory.
    The resulting layout is:
 
    ```text
@@ -45,9 +49,8 @@ When a split is useful, preserve traceability by recording the roadmap or parent
    ```
 
     Keep the plural `reviews/` and `validations/` directories, but they may remain empty during the draft phase. Requirements and design reviews belong in `reviews/`, named `requirements-review.md` or `design-review.md`; validation artifacts belong in `validations/`, named `validation-[work-order-id].md`. Keep each artifact inside its applicable directory.
-   Update copied links so they target the generated `[initiative-slug]-v1.md`,
-   generated work orders, and these review filenames rather than the source
-   template names.
+    Update copied links so they target generated artifacts rather than source
+    template names.
 3. Resolve the branch decision before dispatching any implementation work. Read the
    branch policy in the project manifest, then:
    - when Git and local branches are available and policy is `required` or
@@ -64,13 +67,24 @@ When a split is useful, preserve traceability by recording the roadmap or parent
    - when the user opts out or policy permits no branch, record the opt-out,
      base branch, and the comparable file/diff evidence that will replace
      branch evidence;
-   - when Git or branch capability is unavailable, mark the initiative as
-     reduced capability, record the no-branch review notice and Git
-     recommendation, and use the named fallback evidence.
+   - when Git is unusable for commit and hash review at initiative start, mark
+     the initiative as reduced capability, record the no-branch notice and Git
+     recommendation, and use named file/diff evidence; design review and
+     work-order validation may be recorded as `skipped: Git unavailable` only
+     under the explicit exception in [`00-overview.md`](00-overview.md);
+   - when Git works but local branch creation is unavailable or disallowed,
+     record the no-branch limitation and fallback evidence. This alone does not
+     skip design review or hash-based validation; per-WO commits remain required
+     when Git is usable.
 
    Record the base branch, initiative branch (or `none`), policy, opt-out, and
    evidence in the initiative metadata. A remote is not required unless the
    recorded project policy says it is.
+
+   Independently record whether Git can commit and review exact hashes at
+   initiative start. A later transient command or commit failure after a `yes`
+   decision is blocked, not retroactively treated as Git unavailable. Keep
+   branch creation capability distinct from commit/hash capability.
 
    If a branch is required and creation fails, apply the `blocked` overlay to
    the initiative, record the failed operation and evidence, name the owner
@@ -93,21 +107,13 @@ silently select it. Eligibility conditions, the insufficient-information rule,
 and the mode metadata fields are defined in [`00-overview.md`](00-overview.md)
 and recorded in the initiative template.
 
-Rapid mode removes the default gates around the draft phase: the initial
-initiative prompt is taken as a complete draft, ready for planning (creating
-work orders) and execution/validation. The exploration/convergence loop is
-replaced by a single confirmation that the prompt-as-draft is accurate, and the
-design-readiness confirmation replaces the full design-review gate. It must
-never omit the initiative plan, explicit selected and excluded scope,
-work-order artifacts, durable-document impact decisions, the per-work-order
-validation loop with separate sessions, or closeout and follow-up
-recording. The transition procedure in
-[Prepare work orders after convergence](#prepare-work-orders-after-convergence)
-still applies in compressed form: the initiative moves from `draft` to
-`plan` when work orders are created, and to `review` when all review artifacts
-are ready. A rapid initiative with one work order still has a work-order
-artifact; a rapid initiative with multiple independent changes still gives each
-change its own work-order file and implementer session.
+Rapid mode takes the initial prompt as a complete draft and compresses
+exploration. It does not imply design approval or execution. Retain a useful
+initiative plan, explicit scope, work orders, proportionate durable-document
+impact decisions, default design review/approval, per-work-order validation,
+and closeout unless the user explicitly adapts project policy and applicable
+external rules permit it. A single work order still gets its own artifact; each
+distinct task gets its own work-order file.
 
 If the user requests rapid mode but has not supplied enough information to
 complete the authorized tasks, prompt the user to fill the gaps before creating
@@ -156,55 +162,65 @@ plan, move to **convergence**. Confirm the following in the initiative plan:
 Do not treat a filled template or an agent's confidence as a convergence signal.
 If the user has not indicated readiness, continue the open-ended planning loop.
 
-## Prepare work orders after convergence
+## Prepare work-order drafts
 
-Create work orders only after convergence and an explicit request or transition
-to formal design preparation. When the user asks to create work orders, the
-orchestrator must:
+Create work orders when the user asks to draft them from a plan or feature set;
+do not require exact phase labels or redundant confirmation. If the requested
+scope is unclear or materially conflicting, clarify the actual blocker. Work
+orders are drafts for subsequent review and approval by default, not permission
+to begin implementation. The orchestrator should:
 
-1. confirm that the initiative has one outcome and explicit boundaries;
-2. summarize the work-order plan and any meaningful reductions or decisions
-   made during convergence;
-3. ask for confirmation when the initial prompt was broad but the resulting
-   work orders are a direct translation of the user's stated authorization, and
-   record the confirmation in the initiative plan;
-4. set the initiative to `plan` and record the transition evidence in the
-   initiative plan;
-5. create the work orders required by the converged plan; and
-6. set the initiative to `review` only when all review artifacts are ready.
+1. preserve the intended outcome and explicit boundaries to the extent known;
+2. capture material decisions, exclusions, dependencies, and actual blockers;
+3. create the work-order drafts requested; and
+4. prepare default design review and approval separately before execution.
 
-At that point, copy the work-order templates and create only the work orders
-needed by the agreed design. Each work order must have one clear owner and
-outcome, explicit in/out-of-scope boundaries, verbatim applicable requirements,
-blueprint references, implementation guidance, files/systems likely to change,
-validation steps, and a durable-document impact classification per
-[`00-overview.md`](00-overview.md). Additional detail and granularity that is
-plausibly subordinate to the agreed outcome is expected and is not drift by
-itself.
+Copy the work-order template for each requested, distinct task. Each work order
+must be intentionally narrow: one agent, one context window, quickly completed,
+and one independently understandable and verifiable outcome. Include explicit
+scope, relevant requirements and blueprint references, general code location,
+needed implementation guidance, tests/checks, and a concise handoff. Include
+durable-document impact when relevant and proportionate per
+[`00-overview.md`](00-overview.md). Additional detail plausibly subordinate to
+the outcome is not drift by itself.
 
-Work orders should be independently reviewable and ordered by dependency. Sequential execution is the default. Parallel work requires non-overlapping ownership or a documented merge strategy in the initiative plan.
+For multiple distinct task groups, use IDs such as `WO-001a`, `WO-001b`,
+`WO-001c`, then `WO-002a`, `WO-002b`. For a single throughline, use `WO-001`,
+`WO-002`, and so on. Every ID names a distinct work order, not merely a group.
+Fixes use collision-free suffixes such as `WO-001a-fix-01` or
+`WO-001-fix-01`, incrementing as needed; validation artifacts use the same ID.
+Older IDs remain valid history. The orchestrator handles dependency ordering,
+verification, and relevant project checks; implementers assume dependencies
+have been prepared. Parallel work should have non-overlapping ownership or a
+documented merge strategy.
+
+## Advisory documentation-first sequencing
+
+When a task group needs a meaningful durable requirements or blueprint change, a useful default is a small document-only work order first, followed by its dependent implementation work order(s). Set dependency IDs explicitly in each affected work order; for many separate groups, sequence only related documents and implementation. In a focused initiative, use the same narrow split when appropriate. Do not create a documentation work order when there is no durable impact or the change is below the relevant abstraction level. The documentation work order defines the target before code changes; dependent implementers treat those documents as desired state even when current code lags. Record expected lag and dependent IDs once in the initiative execution handoff, not in requirements or blueprints. A document-only work order's commit description must identify it as documentation-first/pre-implementation and name its dependent implementation work-order IDs. If cancellation or changed direction makes the target obsolete, record the outcome in the initiative and arrange an authorized documentation correction rather than silently reverting durable documents.
 
 ## Design readiness and transition
 
-Before requesting review, confirm that the user has asked to formalize the
-initiative or has explicitly agreed that it is ready for design review. Then
-confirm that the plan has no known hard-stop blocker, the intended work can be
-identified and compared with the outcome, work orders exist with their expected
-validation boundary, and applicable project-policy gates are identified. Do not
+When the plan and work orders are ready for the default review, confirm that the
+intended work can be identified and compared with the outcome, and identify
+applicable project-policy gates. Do not require phase labels or an extra
+confirmation when the user has already asked directly for the work. Do not
 turn ordinary omissions, optional detail, evidence gaps, or architecture and
-quality preferences into readiness blockers; additional work-order detail is
-expected. Copy the review template, set the initiative to `review`, and
-dispatch [`03-design-review.md`](03-design-review.md). This is a fresh-context
+quality preferences into readiness blockers. Copy the review template and
+dispatch [`03-design-review.md`](03-design-review.md) as the default independent
+review, distinct from drafting and execution. This is a fresh-context
 alignment review of the converged plan and work orders, not a validation of
 implemented work; requirements concerns that are not implementation defects
-route to requirements review only when that review is explicitly required.
+route to requirements review only when that review is explicitly required. If
+Git was unavailable for commit and hash review at initiative start, record the
+design review as `skipped: Git unavailable` instead of dispatching it, subject
+to applicable external rules and project policy.
 
 ## Rework and approval
 
-If design review fails, record the findings and return the initiative to
-`draft` when the direction itself is unsettled, or to `plan` when only the work
-orders need revision, and revise the plan/work orders. Do not implement around a
-failed design gate. When the review passes and the required human design
-approval is recorded, the initiative passes the `review -> execute` gate and
-implementation begins in `execute` per the orchestrator execution loop in
-[`00-overview.md`](00-overview.md).
+If the default design review finds a material issue, record the finding and
+revise the relevant plan or work orders; do not implement around an applicable
+failed design gate. By default, implementation follows a passed review and
+required human design approval, distinct from work-order drafting. Record
+material decisions and evidence without requiring exact phase labels, per-phase
+ledger entries, or a fixed transition sequence. Follow an explicit user-directed
+policy adaptation when external rules permit it; see [`00-overview.md`](00-overview.md).
