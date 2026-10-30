@@ -129,18 +129,10 @@ the semantic editing model.
   control, shall use that same resolved width for allocation and rendering
   without changing the shared padding, gap, flexible-space, overflow, or
   clipped-edge budget.
-- **AC-WRITING-005.6:** Given the desktop app is running, a dedicated compact
-  title strip shall display centered bold `ScriptCraft` placeholder text above
-  the toolbar. A double-click shall request maximize/unmaximize only when the
-  viewport's maximized state is known; unavailable or ignored state shall use
-  a bounded no-op/native fallback rather than an unsafe or exact-restoration
-  claim that the platform cannot support.
-- **AC-WRITING-005.7:** Toolbar action controls and the Elements control/label
+- **AC-WRITING-005.5:** Toolbar action controls and the Elements control/label
   surface shall request the standard arrow cursor, while the existing whole-
   document editing response shall request the text/I-beam cursor. Decorative
   labels and painted page rectangles shall not create competing cursor owners.
-
-> **Unresolved implementation discrepancy:** AC-WRITING-005.6 remains the product requirement for a separate app-owned title strip. The current desktop source renders the toolbar directly below the native titlebar and does not render that app-owned strip. The status-bar initiative's WO-008 removed only the distinct project-metadata heading below the toolbar; it did not remove or disposition AC-WRITING-005.6. This discrepancy is not resolved by the UI Polish work orders.
 
 ### REQ-WRITING-LOOP-006: Desktop status bar and visible page
 

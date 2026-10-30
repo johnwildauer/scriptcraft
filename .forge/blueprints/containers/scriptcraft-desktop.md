@@ -113,15 +113,6 @@ where noted.
   currently render a separate app-owned title strip or a title-strip
   double-click maximize action. Native titlebar appearance and behavior remain
   platform-owned.
-- **Unresolved requirement discrepancy:** AC-WRITING-005.6 still requires a
-  separate centered `ScriptCraft` app-owned title strip and its maximize action.
-  That requirement is not satisfied by the current composition above and is not
-  changed by this blueprint correction. Status-bar WO-008 removed only the
-  different project-metadata heading and separator below the toolbar; it did
-  not authorize removing or restoring the separate title strip. The product
-  owner/orchestrator must disposition AC-WRITING-005.6 through the appropriate
-  process. No title-strip product change or native titlebar equivalence is
-  claimed here.
 - Toolbar action controls and the Elements outer group request the standard
   arrow cursor; the Elements label remains decorative and does not own a
   competing response. The existing whole-surface painted editor response
