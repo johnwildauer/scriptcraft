@@ -1,9 +1,11 @@
-//! Bounded, read-only FDX Version 6 import.
+//! Bounded FDX Version 6 codec for the evidenced element subset.
 //!
-//! The result is a semantic editing projection plus the complete parsed source
-//! tree and original bytes. ScriptCraft-only identity, schema, page-profile and
-//! edit-policy mappings are not established by the inspected FDX evidence; this
-//! reader therefore does not enable native save/reopen or claim interoperability.
+//! The reader returns a semantic editing projection plus the complete parsed
+//! source tree and original bytes. The writer reconciles supported element edits
+//! with that tree, or emits a minimal new document for the evidenced role labels.
+//! ScriptCraft-only identity, schema, complete profile and edit-policy mappings
+//! are not established; these APIs do not enable safe native save/reopen or claim
+//! Final Draft interoperability.
 
 use crate::preservation::{
     BoardEntity, BoardEntityKind, BoardGraph, DependencyConfidence, ForeignIdDomain,
@@ -21,7 +23,7 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::reader::NsReader;
 use quick_xml::XmlVersion;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 pub use crate::preservation::{
@@ -52,6 +54,7 @@ pub enum FdxError {
     AmbiguousIdentity,
     DanglingReference,
     UnsupportedConstruct,
+    UnsupportedAppState,
     Model(ModelErrorKind),
     Preservation(PreservationErrorKind),
 }
@@ -91,6 +94,7 @@ impl fmt::Display for FdxError {
             Self::UnsupportedConstruct => {
                 "FDX contains a construct that cannot be projected safely"
             }
+            Self::UnsupportedAppState => "ScriptCraft-only state has no supported FDX mapping",
             Self::Model(_) => "FDX semantic projection failed model validation",
             Self::Preservation(_) => "FDX preservation state failed validation",
         })
@@ -225,6 +229,705 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     project.preservation = Some(preservation);
     project.validate().map_err(map_model_error)?;
     Ok(FdxDocument { project })
+}
+
+/// Serialize the 17 evidenced screenplay roles to UTF-8 Version 6 XML.
+///
+/// For imported documents, managed paragraphs are reconciled into the retained
+/// ordered source tree; unknown and source-owned nodes are re-emitted in place.
+/// For a new document, only default app state and the semantic title/body content
+/// are accepted. This is a codec operation, not native save/reopen support:
+/// ScriptCraft identity, schema, full profile, and editing policies do not have
+/// an established durable FDX mapping. Output is structurally re-read through
+/// the bounded reader before it is returned. No Final Draft application
+/// interoperability is implied. Imported XML is retained semantically, not
+/// lexically: the XML declaration, entity spelling, quote style and exact
+/// attribute interleaving with namespace declarations are not guaranteed to be
+/// byte-identical. UTF-8 is emitted; supported tree order, expanded names,
+/// attributes, text, comments, processing instructions and opaque children are
+/// checked against the re-read output.
+pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
+    project.validate().map_err(map_model_error)?;
+    validate_project_output_budgets(project)?;
+
+    let (nodes, expected_preserved_sections) = if let Some(state) = &project.preservation {
+        state.validate().map_err(map_preservation_error)?;
+        if state.source.format != SourceFormat::Fdx || state.source.encoding != SourceEncoding::Utf8
+        {
+            return Err(FdxError::UnsupportedConstruct);
+        }
+        let original = read_v6(&state.source.original_bytes)?;
+        if project.id != original.project.id
+            || project.schema_version != original.project.schema_version
+            || project.metadata != original.project.metadata
+            || project.page_profile != original.project.page_profile
+        {
+            return Err(FdxError::UnsupportedAppState);
+        }
+        let original_state = original
+            .project
+            .preservation
+            .as_ref()
+            .ok_or(FdxError::UnsupportedConstruct)?;
+        if state.identities != original_state.identities
+            || state.references != original_state.references
+            || state.board_graph != original_state.board_graph
+        {
+            return Err(FdxError::UnsupportedConstruct);
+        }
+
+        let mut sections = state.sections.clone();
+        reconcile_project_elements(&mut sections, project)?;
+        let expected_sections = sections.clone();
+        let nodes = sections
+            .into_iter()
+            .flat_map(|section| section.children)
+            .collect::<Vec<_>>();
+        (nodes, Some(expected_sections))
+    } else {
+        if project.schema_version != CURRENT_SCHEMA_VERSION
+            || project.metadata != Default::default()
+            || project.page_profile != PageProfile::default()
+        {
+            return Err(FdxError::UnsupportedAppState);
+        }
+        (make_new_document_nodes(project)?, None)
+    };
+
+    let mut output = String::new();
+    for node in &nodes {
+        write_node(node, &mut output, 0)?;
+        if output.len() > MAX_SOURCE_BYTES {
+            return Err(FdxError::SourceTooLarge);
+        }
+    }
+    if output.len() > MAX_SOURCE_BYTES {
+        return Err(FdxError::SourceTooLarge);
+    }
+    let bytes = output.into_bytes();
+    let written = read_v6(&bytes)?;
+    if !same_semantic_elements(&project.title_page, &written.project.title_page)
+        || !same_semantic_elements(&project.elements, &written.project.elements)
+    {
+        return Err(FdxError::UnsupportedConstruct);
+    }
+    if let Some(expected_sections) = expected_preserved_sections {
+        let actual_sections = written
+            .project
+            .preservation
+            .as_ref()
+            .map(|state| &state.sections)
+            .ok_or(FdxError::UnsupportedConstruct)?;
+        if normalize_sections(actual_sections) != normalize_sections(&expected_sections) {
+            return Err(FdxError::UnsupportedConstruct);
+        }
+    }
+    Ok(bytes)
+}
+
+fn same_semantic_elements(left: &[ScreenplayElement], right: &[ScreenplayElement]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.role == right.role
+                && left.text == right.text
+                && if left.runs.is_empty() {
+                    right.runs.iter().all(|run| run.attributes.is_empty())
+                } else {
+                    left.runs == right.runs
+                }
+        })
+}
+
+fn validate_project_output_budgets(project: &Project) -> Result<(), FdxError> {
+    let mut text_bytes = 0usize;
+    let mut event_count = 3usize;
+    for element in project.title_page.iter().chain(&project.elements) {
+        event_count = event_count.saturating_add(1);
+        text_bytes = text_bytes.saturating_add(element.text.len());
+        let run_count = element.runs.len().max(usize::from(element.runs.is_empty()));
+        event_count = event_count.saturating_add(run_count);
+        if element.runs.is_empty() && !element.text.is_empty() {
+            event_count = event_count.saturating_add(1);
+        }
+        for run in &element.runs {
+            if !run.text.is_empty() {
+                event_count = event_count.saturating_add(1);
+            }
+            if run.attributes.len() > MAX_ATTRIBUTES_PER_ELEMENT {
+                return Err(FdxError::ResourceLimit);
+            }
+            event_count = event_count.saturating_add(run.attributes.len());
+            for attribute in &run.attributes {
+                if attribute.name.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES
+                    || attribute.value.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES
+                {
+                    return Err(FdxError::ResourceLimit);
+                }
+                validate_qname(&attribute.name)?;
+                validate_xml_chars(&attribute.value)?;
+            }
+        }
+        if text_bytes > MAX_SOURCE_TEXT_BYTES || event_count > MAX_SOURCE_EVENTS {
+            return Err(FdxError::ResourceLimit);
+        }
+    }
+    Ok(())
+}
+
+fn normalize_sections(sections: &[PreservedSection]) -> Vec<PreservedSection> {
+    sections
+        .iter()
+        .cloned()
+        .map(|mut section| {
+            section.children = normalize_text_nodes(&section.children);
+            section
+        })
+        .collect()
+}
+
+fn normalize_text_nodes(nodes: &[PreservedNode]) -> Vec<PreservedNode> {
+    let mut normalized = Vec::<PreservedNode>::new();
+    for node in nodes {
+        let normalized_node = match node {
+            PreservedNode::Element(element) => {
+                let mut element = element.clone();
+                element.children = normalize_text_nodes(&element.children);
+                PreservedNode::Element(element)
+            }
+            other => other.clone(),
+        };
+        if let PreservedNode::Text(text) = normalized_node {
+            if let Some(PreservedNode::Text(previous)) = normalized.last_mut() {
+                previous.push_str(&text);
+            } else {
+                normalized.push(PreservedNode::Text(text));
+            }
+        } else {
+            normalized.push(normalized_node);
+        }
+    }
+    normalized
+}
+
+fn reconcile_project_elements(
+    sections: &mut [PreservedSection],
+    project: &Project,
+) -> Result<(), FdxError> {
+    let body = project
+        .elements
+        .iter()
+        .map(|element| (element.id.clone(), element))
+        .collect::<BTreeMap<_, _>>();
+    let title = project
+        .title_page
+        .iter()
+        .map(|element| (element.id.clone(), element))
+        .collect::<BTreeMap<_, _>>();
+    let mut body_order = Vec::new();
+    let mut title_order = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut roots = 0usize;
+    let root_namespace = sections
+        .iter()
+        .flat_map(|section| &section.children)
+        .find_map(|node| match node {
+            PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => {
+                element.name.namespace_uri.clone()
+            }
+            _ => None,
+        });
+    for section in sections.iter_mut() {
+        for node in &mut section.children {
+            reconcile_node(
+                node,
+                SectionKind::Other,
+                0,
+                root_namespace.as_deref(),
+                &body,
+                &title,
+                &mut body_order,
+                &mut title_order,
+                &mut seen,
+                &mut roots,
+            )?;
+        }
+    }
+    if roots != 1
+        || body_order
+            != project
+                .elements
+                .iter()
+                .map(|element| element.id.clone())
+                .collect::<Vec<_>>()
+        || title_order
+            != project
+                .title_page
+                .iter()
+                .map(|element| element.id.clone())
+                .collect::<Vec<_>>()
+    {
+        return Err(FdxError::UnsupportedConstruct);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_node(
+    node: &mut PreservedNode,
+    section: SectionKind,
+    depth: usize,
+    root_namespace: Option<&str>,
+    body: &BTreeMap<crate::StableId, &ScreenplayElement>,
+    title: &BTreeMap<crate::StableId, &ScreenplayElement>,
+    body_order: &mut Vec<crate::StableId>,
+    title_order: &mut Vec<crate::StableId>,
+    seen: &mut BTreeSet<crate::StableId>,
+    roots: &mut usize,
+) -> Result<(), FdxError> {
+    let PreservedNode::Element(element) = node else {
+        return Ok(());
+    };
+    if depth == 0 && element.name.local_name == FDX_ROOT {
+        *roots = roots.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+    }
+    let is_fdx_element = element.name.namespace_uri.as_deref() == root_namespace;
+    let current_section = if depth == 1 && is_fdx_element && element.name.local_name == "Content" {
+        SectionKind::Content
+    } else if depth == 1 && is_fdx_element && element.name.local_name == "TitlePage" {
+        SectionKind::TitlePage
+    } else {
+        section
+    };
+    if let SourceOwnership::Managed(id) = &element.ownership {
+        if !seen.insert(id.clone()) {
+            return Err(FdxError::UnsupportedConstruct);
+        }
+        let semantic = match current_section {
+            SectionKind::Content => {
+                body_order.push(id.clone());
+                body.get(id)
+            }
+            SectionKind::TitlePage => {
+                title_order.push(id.clone());
+                title.get(id)
+            }
+            SectionKind::Other => return Err(FdxError::UnsupportedConstruct),
+        }
+        .copied()
+        .ok_or(FdxError::UnsupportedConstruct)?;
+        reconcile_managed_paragraph(element, semantic)?;
+        return Ok(());
+    }
+    for child in &mut element.children {
+        reconcile_node(
+            child,
+            current_section,
+            depth.saturating_add(1),
+            root_namespace,
+            body,
+            title,
+            body_order,
+            title_order,
+            seen,
+            roots,
+        )?;
+    }
+    Ok(())
+}
+
+fn reconcile_managed_paragraph(
+    paragraph: &mut PreservedElement,
+    semantic: &ScreenplayElement,
+) -> Result<(), FdxError> {
+    let role_type = role_to_fdx(semantic.role);
+    if paragraph.source_type.as_deref() != Some(role_type) {
+        return Err(FdxError::UnsupportedConstruct);
+    }
+    let type_attributes = paragraph
+        .attributes
+        .iter()
+        .filter(|attribute| {
+            attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type"
+        })
+        .collect::<Vec<_>>();
+    if type_attributes.len() != 1 || type_attributes[0].value != role_type {
+        return Err(FdxError::UnsupportedConstruct);
+    }
+
+    let mut text_elements = paragraph
+        .children
+        .iter_mut()
+        .filter_map(|node| match node {
+            PreservedNode::Element(element)
+                if element.name.local_name == "Text"
+                    && element.name.namespace_uri == paragraph.name.namespace_uri =>
+            {
+                Some(element)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if text_elements.len() != semantic.runs.len() {
+        if text_elements.is_empty() && semantic.runs.is_empty() && semantic.text.is_empty() {
+            return Ok(());
+        }
+        return Err(FdxError::UnsupportedConstruct);
+    }
+    for (text_element, run) in text_elements.iter_mut().zip(&semantic.runs) {
+        let source_attributes = text_element
+            .attributes
+            .iter()
+            .map(|attribute| RunAttribute {
+                name: attribute
+                    .name
+                    .qualified_name
+                    .clone()
+                    .unwrap_or_else(|| attribute.name.local_name.clone()),
+                value: attribute.value.clone(),
+            })
+            .collect::<Vec<_>>();
+        if source_attributes != run.attributes
+            || text_element
+                .children
+                .iter()
+                .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
+        {
+            return Err(FdxError::UnsupportedConstruct);
+        }
+        if let Some(first) = text_element.children.first_mut() {
+            match first {
+                PreservedNode::Text(value) | PreservedNode::CData(value) => {
+                    *value = run.text.clone();
+                }
+                _ => return Err(FdxError::UnsupportedConstruct),
+            }
+            for child in text_element.children.iter_mut().skip(1) {
+                match child {
+                    PreservedNode::Text(value) | PreservedNode::CData(value) => value.clear(),
+                    _ => return Err(FdxError::UnsupportedConstruct),
+                }
+            }
+        } else if !run.text.is_empty() {
+            text_element
+                .children
+                .push(PreservedNode::Text(run.text.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn make_new_document_nodes(project: &Project) -> Result<Vec<PreservedNode>, FdxError> {
+    let mut root = preserved_element(
+        "FinalDraft",
+        vec![("DocumentType", "Script"), ("Version", FDX_VERSION)],
+    );
+    let mut content = preserved_element("Content", Vec::new());
+    let mut next_id = 1usize;
+    for element in &project.elements {
+        content.children.push(new_paragraph(element, &mut next_id)?);
+    }
+    root.children.push(PreservedNode::Element(content));
+    if !project.title_page.is_empty() {
+        let mut title_page = preserved_element("TitlePage", Vec::new());
+        for element in &project.title_page {
+            title_page
+                .children
+                .push(new_paragraph(element, &mut next_id)?);
+        }
+        root.children.push(PreservedNode::Element(title_page));
+    }
+    Ok(vec![PreservedNode::Element(root)])
+}
+
+fn new_paragraph(
+    semantic: &ScreenplayElement,
+    next_id: &mut usize,
+) -> Result<PreservedNode, FdxError> {
+    let mut paragraph = preserved_element(
+        "Paragraph",
+        vec![("Type", role_to_fdx(semantic.role)), ("id", "")],
+    );
+    paragraph.attributes[1].value = format!("scriptcraft-generated-{}", *next_id);
+    *next_id = next_id.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+    let mut runs = semantic.runs.clone();
+    if runs.is_empty() {
+        runs.push(TextRun {
+            text: semantic.text.clone(),
+            attributes: Vec::new(),
+        });
+    }
+    for run in runs {
+        validate_xml_chars(&run.text)?;
+        let mut text = preserved_element("Text", Vec::new());
+        for attribute in run.attributes {
+            validate_qname(&attribute.name)?;
+            if attribute.name.contains(':') {
+                return Err(FdxError::UnsupportedConstruct);
+            }
+            validate_xml_chars(&attribute.value)?;
+            text.attributes.push(PreservedAttribute {
+                name: SourceName {
+                    namespace_uri: None,
+                    local_name: attribute.name.clone(),
+                    qualified_name: Some(attribute.name),
+                },
+                value: attribute.value,
+            });
+        }
+        if !run.text.is_empty() {
+            text.children.push(PreservedNode::Text(run.text));
+        }
+        paragraph.children.push(PreservedNode::Element(text));
+    }
+    Ok(PreservedNode::Element(paragraph))
+}
+
+fn preserved_element(name: &str, attributes: Vec<(&str, &str)>) -> PreservedElement {
+    PreservedElement {
+        name: SourceName {
+            namespace_uri: None,
+            local_name: name.to_owned(),
+            qualified_name: Some(name.to_owned()),
+        },
+        attributes: attributes
+            .into_iter()
+            .map(|(name, value)| PreservedAttribute {
+                name: SourceName {
+                    namespace_uri: None,
+                    local_name: name.to_owned(),
+                    qualified_name: Some(name.to_owned()),
+                },
+                value: value.to_owned(),
+            })
+            .collect(),
+        namespace_bindings: Vec::new(),
+        source_type: None,
+        ownership: SourceOwnership::Opaque,
+        dependency_confidence: DependencyConfidence::Unknown,
+        anchor: None,
+        children: Vec::new(),
+    }
+}
+
+fn role_to_fdx(role: Role) -> &'static str {
+    match role {
+        Role::SceneHeading => "Scene Heading",
+        Role::Action => "Action",
+        Role::Character => "Character",
+        Role::Dialogue => "Dialogue",
+        Role::Parenthetical => "Parenthetical",
+        Role::Transition => "Transition",
+        Role::Note => "Note",
+        Role::NewAct => "New Act",
+        Role::EndOfAct => "End of Act",
+        Role::CastList => "Cast List",
+        Role::General => "General",
+        Role::Shot => "Shot",
+        Role::Sequence => "Sequence",
+        Role::Outline1 => "Outline 1",
+        Role::Outline2 => "Outline 2",
+        Role::Outline3 => "Outline 3",
+        Role::Summary => "Summary",
+    }
+}
+
+fn write_node(node: &PreservedNode, output: &mut String, depth: usize) -> Result<(), FdxError> {
+    if depth > MAX_SOURCE_DEPTH || output.len() > MAX_SOURCE_BYTES {
+        return Err(FdxError::ResourceLimit);
+    }
+    match node {
+        PreservedNode::Element(element) => write_element(element, output, depth),
+        PreservedNode::Text(text) => escape_text(text, output),
+        PreservedNode::CData(text) => {
+            validate_xml_chars(text)?;
+            if text.contains("]]>") {
+                return Err(FdxError::InvalidValue);
+            }
+            append_output(output, "<![CDATA[")?;
+            append_output(output, text)?;
+            append_output(output, "]]>")?;
+            Ok(())
+        }
+        PreservedNode::Comment(comment) => {
+            validate_xml_chars(comment)?;
+            if comment.contains("--") || comment.ends_with('-') {
+                return Err(FdxError::InvalidValue);
+            }
+            append_output(output, "<!--")?;
+            append_output(output, comment)?;
+            append_output(output, "-->")?;
+            Ok(())
+        }
+        PreservedNode::ProcessingInstruction { target, data } => {
+            validate_qname(target)?;
+            validate_xml_chars(data)?;
+            if data.contains("?>") {
+                return Err(FdxError::InvalidValue);
+            }
+            append_output(output, "<?")?;
+            append_output(output, target)?;
+            if !data.is_empty() {
+                append_output(output, " ")?;
+                append_output(output, data)?;
+            }
+            append_output(output, "?>")?;
+            Ok(())
+        }
+    }
+}
+
+fn write_element(
+    element: &PreservedElement,
+    output: &mut String,
+    depth: usize,
+) -> Result<(), FdxError> {
+    if output.len() > MAX_SOURCE_BYTES {
+        return Err(FdxError::SourceTooLarge);
+    }
+    let name = element
+        .name
+        .qualified_name
+        .as_deref()
+        .unwrap_or(&element.name.local_name);
+    validate_qname(name)?;
+    if element.name.namespace_uri.is_some() && element.name.qualified_name.is_none() {
+        return Err(FdxError::UnsupportedConstruct);
+    }
+    let mut attribute_names = BTreeSet::new();
+    let mut expanded_attribute_names = BTreeSet::new();
+    let mut bindings = BTreeSet::new();
+    append_output(output, "<")?;
+    append_output(output, name)?;
+    for binding in &element.namespace_bindings {
+        if !bindings.insert(binding.prefix.as_str()) {
+            return Err(FdxError::InvalidValue);
+        }
+        let name = if binding.prefix.is_empty() {
+            "xmlns".to_owned()
+        } else {
+            format!("xmlns:{}", binding.prefix)
+        };
+        validate_qname(&name)?;
+        append_output(output, " ")?;
+        append_output(output, &name)?;
+        append_output(output, "=\"")?;
+        escape_attribute(&binding.namespace_uri, output)?;
+        append_output(output, "\"")?;
+    }
+    for attribute in &element.attributes {
+        let name = attribute
+            .name
+            .qualified_name
+            .as_deref()
+            .unwrap_or(&attribute.name.local_name);
+        validate_qname(name)?;
+        if name.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES
+            || attribute.value.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES
+            || !attribute_names.insert(name)
+            || !expanded_attribute_names.insert((
+                attribute.name.namespace_uri.clone(),
+                attribute.name.local_name.clone(),
+            ))
+        {
+            return Err(FdxError::InvalidValue);
+        }
+        append_output(output, " ")?;
+        append_output(output, name)?;
+        append_output(output, "=\"")?;
+        escape_attribute(&attribute.value, output)?;
+        append_output(output, "\"")?;
+    }
+    if element.children.is_empty() {
+        append_output(output, "/>")?;
+        return Ok(());
+    }
+    append_output(output, ">")?;
+    for child in &element.children {
+        write_node(child, output, depth.saturating_add(1))?;
+    }
+    append_output(output, "</")?;
+    append_output(output, name)?;
+    append_output(output, ">")?;
+    Ok(())
+}
+
+fn escape_text(value: &str, output: &mut String) -> Result<(), FdxError> {
+    validate_xml_chars(value)?;
+    for character in value.chars() {
+        match character {
+            '&' => append_output(output, "&amp;")?,
+            '<' => append_output(output, "&lt;")?,
+            '>' => append_output(output, "&gt;")?,
+            '\r' => append_output(output, "&#xD;")?,
+            _ => append_character(output, character)?,
+        }
+    }
+    Ok(())
+}
+
+fn escape_attribute(value: &str, output: &mut String) -> Result<(), FdxError> {
+    validate_xml_chars(value)?;
+    for character in value.chars() {
+        match character {
+            '&' => append_output(output, "&amp;")?,
+            '<' => append_output(output, "&lt;")?,
+            '"' => append_output(output, "&quot;")?,
+            '\r' => append_output(output, "&#xD;")?,
+            '\n' => append_output(output, "&#xA;")?,
+            '\t' => append_output(output, "&#x9;")?,
+            _ => append_character(output, character)?,
+        }
+    }
+    Ok(())
+}
+
+fn append_output(output: &mut String, value: &str) -> Result<(), FdxError> {
+    if output.len().saturating_add(value.len()) > MAX_SOURCE_BYTES {
+        return Err(FdxError::SourceTooLarge);
+    }
+    output.push_str(value);
+    Ok(())
+}
+
+fn append_character(output: &mut String, value: char) -> Result<(), FdxError> {
+    if output.len().saturating_add(value.len_utf8()) > MAX_SOURCE_BYTES {
+        return Err(FdxError::SourceTooLarge);
+    }
+    output.push(value);
+    Ok(())
+}
+
+fn validate_qname(name: &str) -> Result<(), FdxError> {
+    let mut parts = name.split(':');
+    let first = parts.next().ok_or(FdxError::InvalidValue)?;
+    let second = parts.next();
+    if first.is_empty() || parts.next().is_some() || second.is_some_and(str::is_empty) {
+        return Err(FdxError::InvalidValue);
+    }
+    for part in std::iter::once(first).chain(second) {
+        let mut characters = part.chars();
+        let Some(initial) = characters.next() else {
+            return Err(FdxError::InvalidValue);
+        };
+        if !is_xml_name_start(initial) || !characters.all(is_xml_name_char) {
+            return Err(FdxError::InvalidValue);
+        }
+    }
+    Ok(())
+}
+
+fn is_xml_name_start(character: char) -> bool {
+    matches!(character, 'A'..='Z' | '_' | 'a'..='z')
+        || matches!(character as u32,
+            0xC0..=0xD6 | 0xD8..=0xF6 | 0xF8..=0x2FF | 0x370..=0x37D
+            | 0x37F..=0x1FFF | 0x200C..=0x200D | 0x2070..=0x218F
+            | 0x2C00..=0x2FEF | 0x3001..=0xD7FF | 0xF900..=0xFDCF
+            | 0xFDF0..=0xFFFD | 0x10000..=0xEFFFF)
+}
+
+fn is_xml_name_char(character: char) -> bool {
+    is_xml_name_start(character)
+        || matches!(character, '-' | '.' | '0'..='9' | '\u{B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
 }
 
 #[derive(Debug, Clone)]
@@ -1346,5 +2049,175 @@ mod tests {
         }
         let dangling = b"<FinalDraft DocumentType='Script' Version='6'><Content/><DisplayBoards><DisplayBoard ID='board-1'><Item id='missing'/></DisplayBoard></DisplayBoards></FinalDraft>";
         assert_eq!(read_v6(dangling), Err(FdxError::DanglingReference));
+    }
+
+    #[test]
+    fn writes_all_evidenced_roles_with_escaped_unicode_and_runs() {
+        let mut project = Project::new("writer-project", "", "").unwrap_or_else(|_| unreachable!());
+        project.elements.clear();
+        for (index, role) in Role::ALL.into_iter().enumerate() {
+            let text = if index == 0 {
+                "INT. CAFÉ & <ROOM> 🙂".to_owned()
+            } else {
+                format!("role-{index}")
+            };
+            let attributes = if index == 0 {
+                vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Bold+Italic".into(),
+                }]
+            } else {
+                Vec::new()
+            };
+            let element = ScreenplayElement::with_runs(
+                format!("element-{index}"),
+                role,
+                vec![TextRun { text, attributes }],
+                None,
+            )
+            .unwrap_or_else(|_| unreachable!());
+            project.elements.push(element);
+        }
+        project.title_page.push(
+            ScreenplayElement::new("title-element", Role::Action, "Title & Subtitle")
+                .unwrap_or_else(|_| unreachable!()),
+        );
+
+        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let xml = std::str::from_utf8(&bytes).unwrap_or("");
+        assert!(xml.contains("CAFÉ &amp; &lt;ROOM&gt; 🙂"));
+        assert!(xml.contains("Style=\"Bold+Italic\""));
+        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
+        assert!(same_semantic_elements(
+            &project.elements,
+            &reopened.project.elements
+        ));
+        assert!(same_semantic_elements(
+            &project.title_page,
+            &reopened.project.title_page
+        ));
+        assert_eq!(
+            reopened
+                .project
+                .elements
+                .iter()
+                .map(|element| element.role)
+                .collect::<Vec<_>>(),
+            Role::ALL
+        );
+    }
+
+    #[test]
+    fn reconciles_managed_edits_and_retains_opaque_namespaced_source() {
+        let mut project = read_v6(SYNTHETIC)
+            .unwrap_or_else(|_| unreachable!())
+            .project;
+        let original = project
+            .preservation
+            .as_ref()
+            .map(|state| state.source.original_bytes.clone())
+            .unwrap_or_default();
+        project.elements[3].runs[0].text = "edited < & unicode 🙂".into();
+        project.elements[3].text = project.elements[3]
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
+
+        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        assert_ne!(bytes, original);
+        assert!(std::str::from_utf8(&bytes)
+            .unwrap_or("")
+            .contains("edited &lt; &amp; unicode 🙂"));
+        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            reopened.project.elements[3].text,
+            "edited < & unicode 🙂dialogue"
+        );
+        let original_state = project.preservation.as_ref();
+        let reopened_state = reopened.project.preservation.as_ref();
+        assert!(original_state.is_some_and(|state| {
+            reopened_state.is_some_and(|reopened| {
+                state.board_graph == reopened.board_graph
+                    && state.identities == reopened.identities
+                    && state.references == reopened.references
+                    && state.source.original_bytes == original
+            })
+        }));
+        assert!(bytes
+            .windows(b"<test:Opaque".len())
+            .any(|window| window == b"<test:Opaque"));
+        assert!(bytes
+            .windows(b"test:flag=\"keep\"".len())
+            .any(|window| window == b"test:flag=\"keep\""));
+    }
+
+    #[test]
+    fn retains_synthetic_image_payload_and_board_links_when_writing() {
+        let xml = b"<FinalDraft DocumentType='Script' Version='6'><Content><Paragraph Type='Action' id='p1'><Text>preserve me</Text></Paragraph></Content><SmartType><Suggestion>synthetic</Suggestion></SmartType><ListItems><ListItem ID='item-1'/></ListItems><DisplayBoards><DisplayBoard ID='board-1'><Item id='item-1'/><Picture id='image-1'/></DisplayBoard></DisplayBoards><Images><Image ID='image-1' Length='5'>AAECAwQ=</Image></Images></FinalDraft>";
+        let project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
+        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
+        let graph = reopened
+            .project
+            .preservation
+            .as_ref()
+            .map(|state| &state.board_graph);
+        assert!(graph.is_some_and(|graph| {
+            graph.entities.len() == 3
+                && graph.references.len() == 2
+                && graph.entities.iter().any(|entity| {
+                    entity.kind == BoardEntityKind::Image
+                        && entity.declared_image_length == Some(5)
+                        && entity.image_payload.is_none()
+                })
+        }));
+        assert!(std::str::from_utf8(&bytes)
+            .unwrap_or("")
+            .contains("<SmartType>"));
+        assert!(std::str::from_utf8(&bytes)
+            .unwrap_or("")
+            .contains("AAECAwQ="));
+    }
+
+    #[test]
+    fn preserves_ordered_title_page_formatting_and_header_footer() {
+        let xml = b"<FinalDraft DocumentType='Script' Version='6'><Content><Paragraph Type='Scene Heading' id='body-1'><Text>INT. ROOM</Text></Paragraph></Content><TitlePage><HeaderAndFooter><Header>synthetic header</Header></HeaderAndFooter><Paragraph Type='Action' id='title-1' Alignment='Center'><Text Style='Underline+AllCaps'>TITLE</Text></Paragraph><Paragraph><Text>unmapped title line</Text></Paragraph></TitlePage></FinalDraft>";
+        let project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
+        assert_eq!(project.title_page.len(), 1);
+        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
+        assert_eq!(reopened.project.title_page[0].text, "TITLE");
+        assert_eq!(
+            reopened.project.title_page[0].runs[0].attributes[0].value,
+            "Underline+AllCaps"
+        );
+        let output = std::str::from_utf8(&bytes).unwrap_or("");
+        assert!(output.contains("synthetic header"));
+        assert!(output.contains("unmapped title line"));
+        assert!(output.contains("Alignment=\"Center\""));
+    }
+
+    #[test]
+    fn rejects_unmapped_app_state_and_unsafe_source_reconciliation() {
+        let mut metadata = read_v6(SYNTHETIC)
+            .unwrap_or_else(|_| unreachable!())
+            .project;
+        metadata.metadata.title = "not mapped".into();
+        assert_eq!(write_v6(&metadata), Err(FdxError::UnsupportedAppState));
+
+        let mut inserted = read_v6(SYNTHETIC)
+            .unwrap_or_else(|_| unreachable!())
+            .project;
+        inserted.elements.push(
+            ScreenplayElement::new("unanchored-new", Role::Action, "new")
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        assert_eq!(write_v6(&inserted), Err(FdxError::UnsupportedConstruct));
+
+        let mut invalid_text =
+            Project::new("invalid-text", "", "").unwrap_or_else(|_| unreachable!());
+        invalid_text.elements[0].text = "bad\u{1}".into();
+        assert_eq!(write_v6(&invalid_text), Err(FdxError::InvalidValue));
     }
 }
