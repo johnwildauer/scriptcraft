@@ -38,6 +38,12 @@ pub enum PreservationError {
     MissingReferenceSource,
     DanglingReference,
     ImageLengthMismatch,
+    ManagedAnchorMissing,
+    ManagedAnchorAmbiguous,
+    ManagedTextMismatch,
+    UnsupportedTextMapping,
+    UnsupportedRoleMapping,
+    StructuralAttachmentConflict,
 }
 
 /// The source's expanded name and, when available, original qualified spelling.
@@ -532,6 +538,280 @@ impl PreservationState {
         }
         Ok(())
     }
+
+    pub(crate) fn has_managed_element(&self, id: &StableId) -> bool {
+        self.sections
+            .iter()
+            .any(|section| contains_managed_element(&section.children, id))
+    }
+
+    /// Applies a UTF-8 byte-range edit to the exact ordered text children of one
+    /// managed paragraph. If semantic runs are present, each run must correspond
+    /// one-to-one with a source text child; otherwise the source mapping is not
+    /// sufficiently explicit to mutate safely. At a source-child boundary,
+    /// insertion uses right affinity except at end-of-text, which uses left
+    /// affinity; a replacement crossing an intervening opaque child is rejected.
+    pub(crate) fn replace_managed_text(
+        &mut self,
+        id: &StableId,
+        old_text: &str,
+        start: usize,
+        end: usize,
+        inserted: &str,
+        expected_runs: Option<&[String]>,
+    ) -> Result<(), PreservationError> {
+        if start > end
+            || end > old_text.len()
+            || !old_text.is_char_boundary(start)
+            || !old_text.is_char_boundary(end)
+        {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let element = self.managed_element_mut(id)?;
+        let indexes = direct_text_child_indexes(element);
+        if indexes.is_empty() {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let source_segments = indexes
+            .iter()
+            .map(|index| match &element.children[*index] {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => text.clone(),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        if source_segments.concat() != old_text {
+            return Err(PreservationError::ManagedTextMismatch);
+        }
+        if expected_runs.is_some_and(|runs| runs != source_segments.as_slice()) {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let mut boundary = 0usize;
+        for pair in indexes.windows(2) {
+            let previous = pair[0];
+            let next = pair[1];
+            if element.children[previous + 1..next]
+                .iter()
+                .any(|node| !matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_)))
+            {
+                boundary = boundary.saturating_add(match &element.children[previous] {
+                    PreservedNode::Text(text) | PreservedNode::CData(text) => text.len(),
+                    _ => unreachable!(),
+                });
+                if start < boundary && end > boundary {
+                    return Err(PreservationError::UnsupportedTextMapping);
+                }
+            } else {
+                boundary = boundary.saturating_add(match &element.children[previous] {
+                    PreservedNode::Text(text) | PreservedNode::CData(text) => text.len(),
+                    _ => unreachable!(),
+                });
+            }
+        }
+        let updated = replace_segments(&source_segments, start, end, inserted)?;
+        for (index, text) in indexes.into_iter().zip(updated) {
+            match &mut element.children[index] {
+                PreservedNode::Text(value) | PreservedNode::CData(value) => *value = text,
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+
+    /// Keeps source-owned text synchronized for an explicit cue-casing edit.
+    /// Casing is mapped per ordered source run so Unicode expansions remain
+    /// attached to their original run boundaries.
+    pub(crate) fn uppercase_managed_text(
+        &mut self,
+        id: &StableId,
+        old_text: &str,
+        expected_runs: Option<&[String]>,
+        expected_text: &str,
+    ) -> Result<(), PreservationError> {
+        let element = self.managed_element_mut(id)?;
+        let indexes = direct_text_child_indexes(element);
+        if indexes.is_empty() {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let source_segments = indexes
+            .iter()
+            .map(|index| match &element.children[*index] {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => text.clone(),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        if source_segments.concat() != old_text {
+            return Err(PreservationError::ManagedTextMismatch);
+        }
+        if expected_runs.is_some_and(|runs| runs != source_segments.as_slice()) {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let updated = source_segments
+            .iter()
+            .map(|text| text.to_uppercase())
+            .collect::<Vec<_>>();
+        if updated.concat() != expected_text {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        for (index, text) in indexes.into_iter().zip(updated) {
+            match &mut element.children[index] {
+                PreservedNode::Text(value) | PreservedNode::CData(value) => *value = text,
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+
+    /// Updates only a recognized paragraph Type mapping. All other source
+    /// attributes and nested attachments remain byte/structure-owned by source.
+    pub(crate) fn change_managed_role(
+        &mut self,
+        id: &StableId,
+        old_role: &str,
+        new_role: &str,
+    ) -> Result<(), PreservationError> {
+        let element = self.managed_element_mut(id)?;
+        if element.source_type.as_deref() != Some(old_role) {
+            return Err(PreservationError::UnsupportedRoleMapping);
+        }
+        if old_role != new_role
+            && (old_role == "Scene Heading" || new_role == "Scene Heading")
+            && contains_attached_data(&element.children)
+        {
+            return Err(PreservationError::StructuralAttachmentConflict);
+        }
+        let mut type_index = None;
+        for (index, attribute) in element.attributes.iter().enumerate() {
+            if attribute.name.local_name == "Type" {
+                if type_index.is_some() || attribute.value != old_role {
+                    return Err(PreservationError::UnsupportedRoleMapping);
+                }
+                type_index = Some(index);
+            }
+        }
+        let Some(type_index) = type_index else {
+            return Err(PreservationError::UnsupportedRoleMapping);
+        };
+        element.attributes[type_index].value = new_role.to_owned();
+        element.source_type = Some(new_role.to_owned());
+        Ok(())
+    }
+
+    /// Structural operations which remove an anchored paragraph must not leave
+    /// its source node, foreign identity, or nested attachment silently behind.
+    pub(crate) fn ensure_unanchored_elements(
+        &self,
+        ids: impl IntoIterator<Item = StableId>,
+    ) -> Result<(), PreservationError> {
+        if ids.into_iter().any(|id| self.has_managed_element(&id)) {
+            return Err(PreservationError::StructuralAttachmentConflict);
+        }
+        Ok(())
+    }
+
+    fn managed_element_mut(
+        &mut self,
+        id: &StableId,
+    ) -> Result<&mut PreservedElement, PreservationError> {
+        let mut matches = Vec::new();
+        for section in &mut self.sections {
+            collect_managed_elements_mut(&mut section.children, id, &mut matches);
+        }
+        match matches.len() {
+            0 => Err(PreservationError::ManagedAnchorMissing),
+            1 => matches.pop().ok_or(PreservationError::ManagedAnchorMissing),
+            _ => Err(PreservationError::ManagedAnchorAmbiguous),
+        }
+    }
+}
+
+fn contains_managed_element(nodes: &[PreservedNode], id: &StableId) -> bool {
+    nodes.iter().any(|node| match node {
+        PreservedNode::Element(element) => {
+            matches!(&element.ownership, SourceOwnership::Managed(target) if target == id)
+                || contains_managed_element(&element.children, id)
+        }
+        _ => false,
+    })
+}
+
+fn contains_attached_data(nodes: &[PreservedNode]) -> bool {
+    nodes.iter().any(|node| match node {
+        PreservedNode::Element(element) => {
+            matches!(element.ownership, SourceOwnership::Attached(_))
+                || contains_attached_data(&element.children)
+        }
+        _ => false,
+    })
+}
+
+fn collect_managed_elements_mut<'a>(
+    nodes: &'a mut [PreservedNode],
+    id: &StableId,
+    matches: &mut Vec<&'a mut PreservedElement>,
+) {
+    for node in nodes {
+        if let PreservedNode::Element(element) = node {
+            if matches!(&element.ownership, SourceOwnership::Managed(target) if target == id) {
+                matches.push(element);
+            } else {
+                collect_managed_elements_mut(&mut element.children, id, matches);
+            }
+        }
+    }
+}
+
+fn direct_text_child_indexes(element: &PreservedElement) -> Vec<usize> {
+    element
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| {
+            matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_)).then_some(index)
+        })
+        .collect()
+}
+
+fn replace_segments(
+    segments: &[String],
+    start: usize,
+    end: usize,
+    inserted: &str,
+) -> Result<Vec<String>, PreservationError> {
+    let total = segments.iter().map(String::len).sum::<usize>();
+    if start > end || end > total {
+        return Err(PreservationError::UnsupportedTextMapping);
+    }
+    let mut base = 0usize;
+    let mut insertion_segment = None;
+    for (index, segment) in segments.iter().enumerate() {
+        let limit = base.saturating_add(segment.len());
+        if start < limit || (start == total && limit == total) {
+            insertion_segment = Some(index);
+            break;
+        }
+        base = limit;
+    }
+    let insertion_segment = insertion_segment
+        .or_else(|| segments.len().checked_sub(1))
+        .ok_or(PreservationError::UnsupportedTextMapping)?;
+
+    let mut base = 0usize;
+    let mut updated = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
+        let limit = base.saturating_add(segment.len());
+        let before_len = start.saturating_sub(base).min(segment.len());
+        let after_start = end.saturating_sub(base).min(segment.len());
+        let mut value = segment[..before_len].to_owned();
+        if index == insertion_segment {
+            value.push_str(inserted);
+        }
+        if end < limit || end <= base {
+            value.push_str(&segment[after_start..]);
+        }
+        updated.push(value);
+        base = limit;
+    }
+    Ok(updated)
 }
 
 fn validate_name(name: &SourceName) -> Result<(), PreservationError> {

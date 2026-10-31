@@ -1,6 +1,6 @@
 //! Headless, transactional editing over the semantic screenplay model.
 
-use crate::{ModelError, Project, Role, ScreenplayElement, MAX_ELEMENTS, MAX_TEXT_BYTES};
+use crate::{ModelError, Project, Role, ScreenplayElement, TextRun, MAX_ELEMENTS, MAX_TEXT_BYTES};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +41,7 @@ pub enum EditError {
     TextTooLong,
     TooManyElements,
     UnsupportedTransition { from: Role },
+    Preservation(crate::preservation::PreservationError),
     Model(ModelError),
 }
 
@@ -52,6 +53,8 @@ impl From<ModelError> for EditError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Snapshot {
+    // Project includes semantic runs and the complete preservation graph, so
+    // undo/redo restores both authorities rather than only the text projection.
     project: Project,
     selection: Selection,
     generated_parentheticals: BTreeSet<String>,
@@ -139,6 +142,9 @@ impl EditingSession {
         Ok(())
     }
 
+    /// Inserts or replaces text while retaining the existing element identity.
+    /// Mapped source runs and text leaves are transformed in the same candidate;
+    /// unsafe inline intersections reject the whole operation.
     pub fn insert(&mut self, text: &str) -> Result<(), EditError> {
         self.mutate(|project, selection, _generated| {
             let (start, end) = selection.ordered();
@@ -160,6 +166,9 @@ impl EditingSession {
         self.insert(text)
     }
 
+    /// Deletes text without removing an element identity. Operations which
+    /// would remove an anchored paragraph instead fail until its source identity
+    /// and attachments have a verified transform.
     pub fn delete(&mut self) -> Result<(), EditError> {
         self.mutate(|project, selection, generated| {
             let (start, end) = selection.ordered();
@@ -174,6 +183,7 @@ impl EditingSession {
             if item.role == Role::Parenthetical
                 && is_delimiter_only_parenthetical(item.text.as_str())
             {
+                ensure_elements_unanchored(project, [item.id.clone()])?;
                 let id = item.id.as_str().to_owned();
                 generated.remove(&id);
                 if start.element == 0 || project.elements.len() == 1 {
@@ -244,6 +254,9 @@ impl EditingSession {
         })
     }
 
+    /// Splits an unanchored semantic element. A source-owned paragraph is not
+    /// split until its foreign ID, anchor placement and nested data can be
+    /// transformed without duplication or loss.
     pub fn split(&mut self) -> Result<(), EditError> {
         self.mutate(|project, selection, _generated| {
             let (start, end) = selection.ordered();
@@ -410,6 +423,9 @@ impl EditingSession {
         })
     }
 
+    /// Joins unanchored semantic elements. Mapped source identities are retained
+    /// rather than merged or recycled; joining any anchored participant is a
+    /// transactional safe-stop.
     pub fn join_with_next(&mut self) -> Result<(), EditError> {
         self.mutate(|project, selection, _generated| {
             let (start, end) = selection.ordered();
@@ -425,11 +441,17 @@ impl EditingSession {
         })
     }
 
+    /// Changes a known role and its exact mapped source Type attribute together.
+    /// A role change that would invalidate attached scene data is rejected.
     pub fn change_role(&mut self, role: Role) -> Result<(), EditError> {
         self.mutate(|project, selection, generated| {
             let (start, end) = selection.ordered();
             if start.element != end.element {
                 return Err(EditError::InvalidSelection);
+            }
+            let old_role = project.elements[start.element].role;
+            if old_role != role {
+                update_preserved_role(project, start.element, old_role, role)?;
             }
             project.elements[start.element].role = role;
             if role != Role::Parenthetical {
@@ -590,29 +612,324 @@ fn replace_range(
         return Err(EditError::TextTooLong);
     }
     if start.element == end.element {
-        let item = project
-            .elements
-            .get_mut(start.element)
-            .ok_or(EditError::InvalidElement)?;
-        let mut text = String::with_capacity(item.text.len().saturating_add(inserted.len()));
-        text.push_str(&item.text[..start.offset]);
-        text.push_str(inserted);
-        text.push_str(&item.text[end.offset..]);
-        if text.len() > MAX_TEXT_BYTES {
-            return Err(EditError::TextTooLong);
-        }
-        item.text = text;
+        replace_element_text(project, start.element, start.offset, end.offset, inserted)?;
         return Ok(());
     }
+    // Cross-element replacement retains the first internal ID but removes the
+    // other selected IDs. Until source anchors and foreign references can be
+    // reconciled, every mapped participant must remain untouched.
+    ensure_elements_unanchored(
+        project,
+        (start.element..=end.element).map(|index| project.elements[index].id.clone()),
+    )?;
     let prefix = project.elements[start.element].text[..start.offset].to_owned();
     let suffix = project.elements[end.element].text[end.offset..].to_owned();
     let combined = format!("{prefix}{inserted}{suffix}");
     if combined.len() > MAX_TEXT_BYTES {
         return Err(EditError::TextTooLong);
     }
+    let runs = replace_cross_element_runs(project, start, end, inserted, &combined)?;
     project.elements[start.element].text = combined;
+    project.elements[start.element].runs = runs;
     project.elements.drain(start.element + 1..=end.element);
     Ok(())
+}
+
+fn replace_element_text(
+    project: &mut Project,
+    element_index: usize,
+    start: usize,
+    end: usize,
+    inserted: &str,
+) -> Result<(), EditError> {
+    let item = project
+        .elements
+        .get(element_index)
+        .ok_or(EditError::InvalidElement)?;
+    let old_text = item.text.clone();
+    let old_runs = item.runs.clone();
+    let segments = if old_runs.is_empty() {
+        vec![old_text.clone()]
+    } else {
+        old_runs.iter().map(|run| run.text.clone()).collect()
+    };
+    let updated_segments = replace_text_segments(&segments, start, end, inserted)?;
+    let new_text = updated_segments.concat();
+    if new_text.len() > MAX_TEXT_BYTES {
+        return Err(EditError::TextTooLong);
+    }
+    let id = item.id.clone();
+    let has_source_mapping = project
+        .preservation
+        .as_ref()
+        .is_some_and(|state| state.has_managed_element(&id));
+    if has_source_mapping {
+        let expected_run_text = old_runs
+            .iter()
+            .map(|run| run.text.clone())
+            .collect::<Vec<_>>();
+        project
+            .preservation
+            .as_mut()
+            .ok_or(EditError::Preservation(
+                crate::preservation::PreservationError::ManagedAnchorMissing,
+            ))?
+            .replace_managed_text(
+                &id,
+                &old_text,
+                start,
+                end,
+                inserted,
+                (!old_runs.is_empty()).then_some(expected_run_text.as_slice()),
+            )
+            .map_err(EditError::Preservation)?;
+    } else if item.source_provenance.is_some() {
+        return Err(EditError::Preservation(
+            crate::preservation::PreservationError::ManagedAnchorMissing,
+        ));
+    }
+    let item = &mut project.elements[element_index];
+    item.text = new_text;
+    if !old_runs.is_empty() {
+        for (run, text) in item.runs.iter_mut().zip(updated_segments) {
+            run.text = text;
+        }
+    }
+    Ok(())
+}
+
+fn replace_text_segments(
+    segments: &[String],
+    start: usize,
+    end: usize,
+    inserted: &str,
+) -> Result<Vec<String>, EditError> {
+    let total = segments.iter().map(String::len).sum::<usize>();
+    if start > end || end > total {
+        return Err(EditError::InvalidSelection);
+    }
+    let mut insertion_segment = None;
+    let mut base = 0usize;
+    for (index, segment) in segments.iter().enumerate() {
+        let limit = base.saturating_add(segment.len());
+        if start < limit || (start == total && limit == total) {
+            insertion_segment = Some(index);
+            break;
+        }
+        base = limit;
+    }
+    let insertion_segment = insertion_segment
+        .or_else(|| segments.len().checked_sub(1))
+        .ok_or(EditError::InvalidSelection)?;
+    let mut base = 0usize;
+    let mut updated = Vec::with_capacity(segments.len());
+    for (index, segment) in segments.iter().enumerate() {
+        let limit = base.saturating_add(segment.len());
+        let before_len = start.saturating_sub(base).min(segment.len());
+        let after_start = end.saturating_sub(base).min(segment.len());
+        let mut value = segment[..before_len].to_owned();
+        if index == insertion_segment {
+            value.push_str(inserted);
+        }
+        if end < limit || end <= base {
+            value.push_str(&segment[after_start..]);
+        }
+        updated.push(value);
+        base = limit;
+    }
+    Ok(updated)
+}
+
+fn ensure_elements_unanchored(
+    project: &Project,
+    ids: impl IntoIterator<Item = crate::StableId>,
+) -> Result<(), EditError> {
+    let ids = ids.into_iter().collect::<Vec<_>>();
+    if project.elements.iter().any(|element| {
+        ids.iter().any(|id| id == &element.id) && element.source_provenance.is_some()
+    }) {
+        return Err(EditError::Preservation(
+            crate::preservation::PreservationError::StructuralAttachmentConflict,
+        ));
+    }
+    if let Some(preservation) = &project.preservation {
+        preservation
+            .ensure_unanchored_elements(ids)
+            .map_err(EditError::Preservation)?;
+    }
+    Ok(())
+}
+
+fn replace_cross_element_runs(
+    project: &Project,
+    start: Position,
+    end: Position,
+    inserted: &str,
+    combined: &str,
+) -> Result<Vec<TextRun>, EditError> {
+    let left = &project.elements[start.element];
+    let right = &project.elements[end.element];
+    if left.runs.is_empty() && right.runs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let left_runs = effective_runs(left);
+    let right_runs = effective_runs(right);
+    let mut result = slice_runs(&left_runs, 0, start.offset);
+    let insertion_attributes = run_attributes_at(&left_runs, start.offset);
+    push_run(&mut result, inserted, insertion_attributes);
+    let suffix_runs = if start.element == end.element {
+        slice_runs(&left_runs, end.offset, left.text.len())
+    } else {
+        slice_runs(&right_runs, end.offset, right.text.len())
+    };
+    result.extend(suffix_runs);
+    coalesce_runs(&mut result);
+    let actual = result
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<String>();
+    if actual != combined {
+        return Err(EditError::Preservation(
+            crate::preservation::PreservationError::UnsupportedTextMapping,
+        ));
+    }
+    Ok(result)
+}
+
+fn effective_runs(element: &ScreenplayElement) -> Vec<TextRun> {
+    if element.runs.is_empty() {
+        vec![TextRun {
+            text: element.text.clone(),
+            attributes: Vec::new(),
+        }]
+    } else {
+        element.runs.clone()
+    }
+}
+
+fn slice_runs(runs: &[TextRun], start: usize, end: usize) -> Vec<TextRun> {
+    let mut result = Vec::new();
+    let mut base = 0usize;
+    for run in runs {
+        let limit = base.saturating_add(run.text.len());
+        let from = start.saturating_sub(base).min(run.text.len());
+        let to = end.saturating_sub(base).min(run.text.len());
+        if from < to {
+            result.push(TextRun {
+                text: run.text[from..to].to_owned(),
+                attributes: run.attributes.clone(),
+            });
+        }
+        base = limit;
+        if base >= end {
+            break;
+        }
+    }
+    result
+}
+
+fn run_attributes_at(runs: &[TextRun], offset: usize) -> Vec<crate::RunAttribute> {
+    let mut base = 0usize;
+    for run in runs {
+        let limit = base.saturating_add(run.text.len());
+        if offset < limit || (offset == limit && limit == runs.iter().map(|r| r.text.len()).sum()) {
+            return run.attributes.clone();
+        }
+        base = limit;
+    }
+    Vec::new()
+}
+
+fn push_run(runs: &mut Vec<TextRun>, text: &str, attributes: Vec<crate::RunAttribute>) {
+    if text.is_empty() {
+        return;
+    }
+    runs.push(TextRun {
+        text: text.to_owned(),
+        attributes,
+    });
+}
+
+fn coalesce_runs(runs: &mut Vec<TextRun>) {
+    let mut coalesced: Vec<TextRun> = Vec::with_capacity(runs.len());
+    for run in runs.drain(..) {
+        if let Some(previous) = coalesced.last_mut() {
+            if previous.attributes == run.attributes {
+                previous.text.push_str(&run.text);
+                continue;
+            }
+        }
+        coalesced.push(run);
+    }
+    *runs = coalesced;
+}
+
+fn update_preserved_role(
+    project: &mut Project,
+    element_index: usize,
+    old_role: Role,
+    new_role: Role,
+) -> Result<(), EditError> {
+    let element = project
+        .elements
+        .get(element_index)
+        .ok_or(EditError::InvalidElement)?;
+    let id = element.id.clone();
+    let old_fdx_role = fdx_role_name(old_role);
+    if element
+        .source_provenance
+        .as_ref()
+        .and_then(|provenance| provenance.foreign_role.as_deref())
+        .is_some_and(|source_role| source_role != old_fdx_role)
+    {
+        return Err(EditError::Preservation(
+            crate::preservation::PreservationError::UnsupportedRoleMapping,
+        ));
+    }
+    let has_source_mapping = project
+        .preservation
+        .as_ref()
+        .is_some_and(|state| state.has_managed_element(&id));
+    if has_source_mapping {
+        project
+            .preservation
+            .as_mut()
+            .ok_or(EditError::Preservation(
+                crate::preservation::PreservationError::ManagedAnchorMissing,
+            ))?
+            .change_managed_role(&id, old_fdx_role, fdx_role_name(new_role))
+            .map_err(EditError::Preservation)?;
+    } else if element.source_provenance.is_some() {
+        return Err(EditError::Preservation(
+            crate::preservation::PreservationError::ManagedAnchorMissing,
+        ));
+    }
+    if let Some(provenance) = &mut project.elements[element_index].source_provenance {
+        provenance.foreign_role = Some(fdx_role_name(new_role).to_owned());
+    }
+    Ok(())
+}
+
+fn fdx_role_name(role: Role) -> &'static str {
+    match role {
+        Role::SceneHeading => "Scene Heading",
+        Role::Action => "Action",
+        Role::Character => "Character",
+        Role::Dialogue => "Dialogue",
+        Role::Parenthetical => "Parenthetical",
+        Role::Transition => "Transition",
+        Role::Note => "Note",
+        Role::NewAct => "New Act",
+        Role::EndOfAct => "End of Act",
+        Role::CastList => "Cast List",
+        Role::General => "General",
+        Role::Shot => "Shot",
+        Role::Sequence => "Sequence",
+        Role::Outline1 => "Outline 1",
+        Role::Outline2 => "Outline 2",
+        Role::Outline3 => "Outline 3",
+        Role::Summary => "Summary",
+    }
 }
 
 fn strict_boundary_rejects(
@@ -713,11 +1030,50 @@ fn normalize_element(
     if !project.page_profile.uppercase_cues || !is_uppercase_cue(item.role) {
         return Ok(offset);
     }
-    let (text, mapped) = uppercase_with_mapping(&item.text, offset)?;
+    let id = item.id.clone();
+    let old_text = item.text.clone();
+    let old_runs = item.runs.clone();
+    let (text, mapped) = uppercase_with_mapping(&old_text, offset)?;
     if text.len() > MAX_TEXT_BYTES {
         return Err(EditError::TextTooLong);
     }
-    project.elements[element].text = text;
+    if text == old_text {
+        return Ok(mapped);
+    }
+    let has_source_mapping = project
+        .preservation
+        .as_ref()
+        .is_some_and(|state| state.has_managed_element(&id));
+    if has_source_mapping {
+        let expected_runs = old_runs
+            .iter()
+            .map(|run| run.text.clone())
+            .collect::<Vec<_>>();
+        project
+            .preservation
+            .as_mut()
+            .ok_or(EditError::Preservation(
+                crate::preservation::PreservationError::ManagedAnchorMissing,
+            ))?
+            .uppercase_managed_text(
+                &id,
+                &old_text,
+                (!old_runs.is_empty()).then_some(expected_runs.as_slice()),
+                &text,
+            )
+            .map_err(EditError::Preservation)?;
+    } else if project.elements[element].source_provenance.is_some() {
+        return Err(EditError::Preservation(
+            crate::preservation::PreservationError::ManagedAnchorMissing,
+        ));
+    }
+    let item = &mut project.elements[element];
+    item.text = text;
+    if !old_runs.is_empty() {
+        for run in &mut item.runs {
+            run.text = run.text.to_uppercase();
+        }
+    }
     Ok(mapped)
 }
 
@@ -733,12 +1089,50 @@ fn normalize_selection_in_element(
     if !project.page_profile.uppercase_cues || !is_uppercase_cue(item.role) {
         return Ok(selection);
     }
-    let (text, anchor) = uppercase_with_mapping(&item.text, selection.anchor.offset)?;
-    let (_, focus) = uppercase_with_mapping(&item.text, selection.focus.offset)?;
+    let id = item.id.clone();
+    let old_text = item.text.clone();
+    let old_runs = item.runs.clone();
+    let (text, anchor) = uppercase_with_mapping(&old_text, selection.anchor.offset)?;
+    let (_, focus) = uppercase_with_mapping(&old_text, selection.focus.offset)?;
     if text.len() > MAX_TEXT_BYTES {
         return Err(EditError::TextTooLong);
     }
-    project.elements[element].text = text;
+    if text != old_text {
+        let has_source_mapping = project
+            .preservation
+            .as_ref()
+            .is_some_and(|state| state.has_managed_element(&id));
+        if has_source_mapping {
+            let expected_runs = old_runs
+                .iter()
+                .map(|run| run.text.clone())
+                .collect::<Vec<_>>();
+            project
+                .preservation
+                .as_mut()
+                .ok_or(EditError::Preservation(
+                    crate::preservation::PreservationError::ManagedAnchorMissing,
+                ))?
+                .uppercase_managed_text(
+                    &id,
+                    &old_text,
+                    (!old_runs.is_empty()).then_some(expected_runs.as_slice()),
+                    &text,
+                )
+                .map_err(EditError::Preservation)?;
+        } else if project.elements[element].source_provenance.is_some() {
+            return Err(EditError::Preservation(
+                crate::preservation::PreservationError::ManagedAnchorMissing,
+            ));
+        }
+        let item = &mut project.elements[element];
+        item.text = text;
+        if !old_runs.is_empty() {
+            for run in &mut item.runs {
+                run.text = run.text.to_uppercase();
+            }
+        }
+    }
     Ok(Selection {
         anchor: Position {
             element,
@@ -760,11 +1154,22 @@ fn split_at(project: &mut Project, position: Position, role: Role) -> Result<Sel
         .get(position.element)
         .ok_or(EditError::InvalidElement)?
         .clone();
+    ensure_elements_unanchored(project, [item.id.clone()])?;
     let left = item.text[..position.offset].to_owned();
     let right = item.text[position.offset..].to_owned();
+    let old_runs = effective_runs(&item);
+    let left_runs = slice_runs(&old_runs, 0, position.offset);
+    let right_runs = slice_runs(&old_runs, position.offset, item.text.len());
     let id = split_id(project)?;
     let new_item = ScreenplayElement::new(id, role, right)?;
     project.elements[position.element].text = left;
+    if !item.runs.is_empty() {
+        project.elements[position.element].runs = left_runs;
+    }
+    let mut new_item = new_item;
+    if !item.runs.is_empty() {
+        new_item.runs = right_runs;
+    }
     project.elements.insert(position.element + 1, new_item);
     normalize_element(project, position.element + 1, 0)?;
     Ok(Selection::caret(Position {
@@ -781,7 +1186,23 @@ fn join_at(project: &mut Project, index: usize) -> Result<(), EditError> {
     if index + 1 >= project.elements.len() {
         return Err(EditError::InvalidElement);
     }
+    ensure_elements_unanchored(
+        project,
+        [
+            project.elements[index].id.clone(),
+            project.elements[index + 1].id.clone(),
+        ],
+    )?;
     let right = project.elements[index + 1].text.clone();
+    let joined_runs =
+        if project.elements[index].runs.is_empty() && project.elements[index + 1].runs.is_empty() {
+            Vec::new()
+        } else {
+            let mut runs = effective_runs(&project.elements[index]);
+            runs.extend(effective_runs(&project.elements[index + 1]));
+            coalesce_runs(&mut runs);
+            runs
+        };
     let item = project
         .elements
         .get_mut(index)
@@ -790,6 +1211,7 @@ fn join_at(project: &mut Project, index: usize) -> Result<(), EditError> {
         return Err(EditError::TextTooLong);
     }
     item.text.push_str(&right);
+    item.runs = joined_runs;
     project.elements.remove(index + 1);
     Ok(())
 }
@@ -838,7 +1260,14 @@ pub fn enter_transition(role: Role) -> Option<Role> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Project;
+    use crate::preservation::{
+        AnchorRelation, AnchorTarget, BoardEntity, BoardEntityKind, BoardGraph,
+        DependencyConfidence, ForeignIdDomain, ForeignIdentity, ForeignReference, NamespaceBinding,
+        PreservationState, PreservedAttribute, PreservedElement, PreservedNode, PreservedSection,
+        ReferencePolicy, SectionKind, SourceAnchor, SourceAnchorId, SourceEncoding, SourceName,
+        SourceOwnership, SourceSnapshot,
+    };
+    use crate::{Project, RunAttribute, SourceFormat, SourceProvenance, SourceSection};
 
     fn session(text: &str, role: Role) -> EditingSession {
         let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
@@ -850,6 +1279,125 @@ mod tests {
         session
             .set_selection(Selection::caret(Position { element, offset }))
             .unwrap_or_else(|_| unreachable!());
+    }
+
+    fn source_name(local_name: &str) -> SourceName {
+        SourceName {
+            namespace_uri: None,
+            local_name: local_name.into(),
+            qualified_name: None,
+        }
+    }
+
+    fn preserved_project(
+        role: Role,
+        text: &str,
+        runs: Vec<TextRun>,
+        source_children: Vec<PreservedNode>,
+        nested_scene_attachment: bool,
+    ) -> Project {
+        let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let element_id = project.elements[0].id.clone();
+        project.elements[0].role = role;
+        project.elements[0].text = text.into();
+        project.elements[0].runs = runs;
+        project.elements[0].source_provenance = Some(SourceProvenance {
+            format: SourceFormat::Fdx,
+            section: SourceSection::Content,
+            ordinal: 0,
+            foreign_id: Some("foreign-paragraph".into()),
+            foreign_role: Some(fdx_role_name(role).into()),
+        });
+        let paragraph_anchor =
+            SourceAnchorId::new("anchor-paragraph").unwrap_or_else(|_| unreachable!());
+        let mut children = source_children;
+        let mut anchors = vec![SourceAnchor {
+            id: paragraph_anchor.clone(),
+            target: AnchorTarget::ProjectElement(element_id.clone()),
+            relation: AnchorRelation::Represents,
+        }];
+        let mut identities = Vec::new();
+        if nested_scene_attachment {
+            let scene = ForeignIdentity::new(ForeignIdDomain::Scene, "scene-1")
+                .unwrap_or_else(|_| unreachable!());
+            let attachment_anchor =
+                SourceAnchorId::new("anchor-scene-attachment").unwrap_or_else(|_| unreachable!());
+            children.push(PreservedNode::Element(PreservedElement {
+                name: source_name("SceneProperties"),
+                attributes: Vec::new(),
+                namespace_bindings: Vec::new(),
+                source_type: None,
+                ownership: SourceOwnership::Attached(scene.clone()),
+                dependency_confidence: DependencyConfidence::Unknown,
+                anchor: Some(attachment_anchor.clone()),
+                children: vec![PreservedNode::Element(PreservedElement {
+                    name: source_name("Beat"),
+                    attributes: Vec::new(),
+                    namespace_bindings: Vec::new(),
+                    source_type: None,
+                    ownership: SourceOwnership::Opaque,
+                    dependency_confidence: DependencyConfidence::Unknown,
+                    anchor: None,
+                    children: vec![PreservedNode::Text("authored beat".into())],
+                })],
+            }));
+            anchors.push(SourceAnchor {
+                id: attachment_anchor,
+                target: AnchorTarget::Foreign(scene.clone()),
+                relation: AnchorRelation::Attached,
+            });
+            identities.push(scene);
+        }
+        let paragraph = PreservedElement {
+            name: source_name("Paragraph"),
+            attributes: vec![PreservedAttribute {
+                name: source_name("Type"),
+                value: fdx_role_name(role).into(),
+            }],
+            namespace_bindings: Vec::<NamespaceBinding>::new(),
+            source_type: Some(fdx_role_name(role).into()),
+            ownership: SourceOwnership::Managed(element_id.clone()),
+            dependency_confidence: DependencyConfidence::SomeReferencesMapped,
+            anchor: Some(paragraph_anchor),
+            children,
+        };
+        project.preservation = Some(PreservationState {
+            source: SourceSnapshot {
+                format: SourceFormat::Fdx,
+                original_bytes: b"<Script/>".to_vec(),
+                encoding: SourceEncoding::Utf8,
+            },
+            sections: vec![PreservedSection {
+                name: source_name("Content"),
+                kind: SectionKind::Content,
+                ordinal: 0,
+                children: vec![PreservedNode::Element(paragraph)],
+            }],
+            anchors,
+            identities,
+            references: Vec::new(),
+            board_graph: BoardGraph::default(),
+        });
+        project
+    }
+
+    fn text_children(project: &Project) -> Vec<String> {
+        let state = project
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+        let PreservedNode::Element(paragraph) = &state.sections[0].children[0] else {
+            unreachable!();
+        };
+        paragraph
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.clone()),
+                PreservedNode::Element(_) => None,
+                PreservedNode::Comment(_) | PreservedNode::ProcessingInstruction { .. } => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -1036,5 +1584,425 @@ mod tests {
         assert_eq!(s.redo(), Ok(()));
         assert!(s.dirty());
         assert_eq!(s.revision(), 3);
+    }
+
+    #[test]
+    fn text_edit_keeps_runs_and_source_children_transactional_through_history() {
+        let run_a = RunAttribute {
+            name: "Style".into(),
+            value: "Bold".into(),
+        };
+        let run_b = RunAttribute {
+            name: "Style".into(),
+            value: "Italic".into(),
+        };
+        let project = preserved_project(
+            Role::Action,
+            "abcdef",
+            vec![
+                TextRun {
+                    text: "abc".into(),
+                    attributes: vec![run_a.clone()],
+                },
+                TextRun {
+                    text: "def".into(),
+                    attributes: vec![run_b.clone()],
+                },
+            ],
+            vec![
+                PreservedNode::Text("abc".into()),
+                PreservedNode::CData("def".into()),
+            ],
+            true,
+        );
+        assert!(project.validate().is_ok());
+        let mut session = EditingSession::new(project.clone()).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, 2);
+        session
+            .set_selection(Selection {
+                anchor: Position {
+                    element: 0,
+                    offset: 2,
+                },
+                focus: Position {
+                    element: 0,
+                    offset: 5,
+                },
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.insert("Z"), Ok(()));
+        let element = &session.project().elements[0];
+        assert_eq!(element.text, "abZf");
+        assert_eq!(element.runs[0].text, "abZ");
+        assert_eq!(element.runs[0].attributes, vec![run_a]);
+        assert_eq!(element.runs[1].text, "f");
+        assert_eq!(element.runs[1].attributes, vec![run_b]);
+        assert_eq!(text_children(session.project()), vec!["abZ", "f"]);
+        assert!(session.dirty());
+        assert_eq!(session.undo(), Ok(()));
+        assert_eq!(session.project(), &project);
+        assert!(!session.dirty());
+        assert_eq!(session.redo(), Ok(()));
+        assert_eq!(session.project().elements[0].text, "abZf");
+        assert_eq!(text_children(session.project()), vec!["abZ", "f"]);
+    }
+
+    #[test]
+    fn text_mapping_mismatch_fails_without_changing_any_session_state() {
+        let mut project = preserved_project(
+            Role::Action,
+            "actual",
+            Vec::new(),
+            vec![PreservedNode::Text("different".into())],
+            false,
+        );
+        project.elements[0]
+            .source_provenance
+            .as_mut()
+            .unwrap_or_else(|| unreachable!())
+            .foreign_role = Some(Role::Action.as_str().into());
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, 2);
+        let before = session.clone();
+        assert_eq!(
+            session.insert("X"),
+            Err(EditError::Preservation(
+                crate::preservation::PreservationError::ManagedTextMismatch
+            ))
+        );
+        assert_eq!(session, before);
+        assert!(!session.dirty());
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn deleting_or_splitting_an_anchored_scene_with_authored_data_safe_stops() {
+        let project = preserved_project(
+            Role::SceneHeading,
+            "INT. ROOM",
+            Vec::new(),
+            vec![PreservedNode::Text("INT. ROOM".into())],
+            true,
+        );
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, 4);
+        let before = session.clone();
+        assert_eq!(
+            session.split(),
+            Err(EditError::Preservation(
+                crate::preservation::PreservationError::StructuralAttachmentConflict
+            ))
+        );
+        assert_eq!(session, before);
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn removing_an_anchored_scene_by_join_rolls_back_with_its_authored_attachment() {
+        let mut project = preserved_project(
+            Role::SceneHeading,
+            "INT. ROOM",
+            Vec::new(),
+            vec![PreservedNode::Text("INT. ROOM".into())],
+            true,
+        );
+        project.elements.push(
+            ScreenplayElement::new("next", Role::Action, "action")
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 1, 0);
+        let before = session.clone();
+        assert_eq!(
+            session.backspace(),
+            Err(EditError::Preservation(
+                crate::preservation::PreservationError::StructuralAttachmentConflict
+            ))
+        );
+        assert_eq!(session, before);
+        assert!(!session.dirty());
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn role_change_updates_only_the_mapped_type_and_is_undoable() {
+        let project = preserved_project(
+            Role::Dialogue,
+            "hello",
+            Vec::new(),
+            vec![PreservedNode::Text("hello".into())],
+            true,
+        );
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, 0);
+        assert_eq!(session.change_role(Role::Action), Ok(()));
+        let PreservedNode::Element(paragraph) = &session
+            .project()
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!())
+            .sections[0]
+            .children[0]
+        else {
+            unreachable!();
+        };
+        assert_eq!(paragraph.source_type.as_deref(), Some("Action"));
+        assert_eq!(paragraph.attributes[0].value, "Action");
+        assert_eq!(
+            session.project().elements[0]
+                .source_provenance
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .foreign_role
+                .as_deref(),
+            Some("Action")
+        );
+        assert_eq!(session.undo(), Ok(()));
+        assert_eq!(session.project().elements[0].role, Role::Dialogue);
+        assert_eq!(
+            session
+                .project()
+                .preservation
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .sections[0]
+                .children[0],
+            {
+                let original = preserved_project(
+                    Role::Dialogue,
+                    "hello",
+                    Vec::new(),
+                    vec![PreservedNode::Text("hello".into())],
+                    true,
+                );
+                original
+                    .preservation
+                    .unwrap_or_else(|| unreachable!())
+                    .sections[0]
+                    .children[0]
+                    .clone()
+            }
+        );
+    }
+
+    #[test]
+    fn opaque_inline_intersections_stop_but_boundary_insertions_keep_order() {
+        let project = preserved_project(
+            Role::Action,
+            "abcdef",
+            Vec::new(),
+            vec![
+                PreservedNode::Text("abc".into()),
+                PreservedNode::Element(PreservedElement {
+                    name: source_name("OpaqueInline"),
+                    attributes: Vec::new(),
+                    namespace_bindings: Vec::new(),
+                    source_type: None,
+                    ownership: SourceOwnership::Opaque,
+                    dependency_confidence: DependencyConfidence::Unknown,
+                    anchor: None,
+                    children: vec![PreservedNode::Text("unmodeled".into())],
+                }),
+                PreservedNode::CData("def".into()),
+            ],
+            false,
+        );
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        session
+            .set_selection(Selection {
+                anchor: Position {
+                    element: 0,
+                    offset: 2,
+                },
+                focus: Position {
+                    element: 0,
+                    offset: 4,
+                },
+            })
+            .unwrap_or_else(|_| unreachable!());
+        let before = session.clone();
+        assert_eq!(
+            session.insert("X"),
+            Err(EditError::Preservation(
+                crate::preservation::PreservationError::UnsupportedTextMapping
+            ))
+        );
+        assert_eq!(session, before);
+
+        set(&mut session, 0, 3);
+        assert_eq!(session.insert("X"), Ok(()));
+        assert_eq!(session.project().elements[0].text, "abcXdef");
+        assert_eq!(text_children(session.project()), vec!["abc", "Xdef"]);
+        let PreservedNode::Element(paragraph) = &session
+            .project()
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!())
+            .sections[0]
+            .children[0]
+        else {
+            unreachable!();
+        };
+        assert!(matches!(paragraph.children[1], PreservedNode::Element(_)));
+    }
+
+    #[test]
+    fn scene_heading_role_change_with_nested_scene_data_safe_stops() {
+        let project = preserved_project(
+            Role::SceneHeading,
+            "INT. ROOM",
+            Vec::new(),
+            vec![PreservedNode::Text("INT. ROOM".into())],
+            true,
+        );
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, 0);
+        let before = session.clone();
+        assert_eq!(
+            session.change_role(Role::Action),
+            Err(EditError::Preservation(
+                crate::preservation::PreservationError::StructuralAttachmentConflict
+            ))
+        );
+        assert_eq!(session, before);
+        assert!(!session.can_undo());
+    }
+
+    #[test]
+    fn unicode_cue_expansion_updates_source_and_run_offsets_together() {
+        let project = preserved_project(
+            Role::SceneHeading,
+            "straße",
+            vec![TextRun {
+                text: "straße".into(),
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Bold".into(),
+                }],
+            }],
+            vec![PreservedNode::Text("straße".into())],
+            false,
+        );
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, "straße".len());
+        assert_eq!(session.change_role(Role::SceneHeading), Ok(()));
+        assert_eq!(session.project().elements[0].text, "STRASSE");
+        assert_eq!(session.project().elements[0].runs[0].text, "STRASSE");
+        assert_eq!(text_children(session.project()), vec!["STRASSE"]);
+        assert_eq!(session.selection().focus.offset, "STRASSE".len());
+        assert!(session.validate().is_ok());
+    }
+
+    #[test]
+    fn ordinary_script_edits_leave_board_graph_and_cross_domain_links_untouched() {
+        let mut project = preserved_project(
+            Role::Action,
+            "action",
+            Vec::new(),
+            vec![PreservedNode::Text("action".into())],
+            false,
+        );
+        let state = project
+            .preservation
+            .as_mut()
+            .unwrap_or_else(|| unreachable!());
+        let script_paragraph = ForeignIdentity::new(ForeignIdDomain::Paragraph, "para-foreign")
+            .unwrap_or_else(|_| unreachable!());
+        let list_item = ForeignIdentity::new(ForeignIdDomain::ListItem, "list-1")
+            .unwrap_or_else(|_| unreachable!());
+        let board = ForeignIdentity::new(ForeignIdDomain::Board, "board-1")
+            .unwrap_or_else(|_| unreachable!());
+        state.identities.push(script_paragraph.clone());
+        state.board_graph.entities = vec![
+            BoardEntity {
+                identity: list_item.clone(),
+                kind: BoardEntityKind::ListItem,
+                source_order: 1,
+                anchor: None,
+                image_payload: None,
+                declared_image_length: None,
+                source_path: None,
+            },
+            BoardEntity {
+                identity: board.clone(),
+                kind: BoardEntityKind::DisplayBoard,
+                source_order: 2,
+                anchor: None,
+                image_payload: None,
+                declared_image_length: None,
+                source_path: None,
+            },
+        ];
+        state.board_graph.references.push(ForeignReference {
+            source: board,
+            target: list_item,
+            policy: ReferencePolicy::RequiredInternal,
+        });
+        state.references.push(ForeignReference {
+            source: script_paragraph,
+            target: ForeignIdentity::new(ForeignIdDomain::Board, "orphanable-board-link")
+                .unwrap_or_else(|_| unreachable!()),
+            policy: ReferencePolicy::CrossDomainMayOrphan,
+        });
+        assert!(project.validate().is_ok());
+        let state = project
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+        let board_graph = state.board_graph.clone();
+        let references = state.references.clone();
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, 6);
+        assert_eq!(session.insert(" "), Ok(()));
+        let state = session
+            .project()
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(state.board_graph, board_graph);
+        assert_eq!(state.references, references);
+        assert!(session.validate().is_ok());
+    }
+
+    #[test]
+    fn non_preserved_split_and_join_keep_rich_runs_consistent() {
+        let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        project.elements[0].role = Role::Action;
+        project.elements[0].text = "abcdef".into();
+        project.elements[0].runs = vec![
+            TextRun {
+                text: "abc".into(),
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Bold".into(),
+                }],
+            },
+            TextRun {
+                text: "def".into(),
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Italic".into(),
+                }],
+            },
+        ];
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, 4);
+        assert_eq!(session.split(), Ok(()));
+        assert_eq!(session.project().elements[0].runs[0].text, "abc");
+        assert_eq!(session.project().elements[0].runs[1].text, "d");
+        assert_eq!(session.project().elements[1].runs[0].text, "ef");
+        assert_eq!(session.join_with_next(), Err(EditError::InvalidSelection));
+        set(&mut session, 0, 4);
+        assert_eq!(session.join_with_next(), Ok(()));
+        assert_eq!(session.project().elements[0].text, "abcdef");
+        assert_eq!(
+            session.project().elements[0]
+                .runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>(),
+            "abcdef"
+        );
+        assert!(session.validate().is_ok());
     }
 }
