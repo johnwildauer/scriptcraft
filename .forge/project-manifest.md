@@ -9,7 +9,7 @@ research notes or implementation observations as product mandates.
 - **Status:** `complete` — initialization reviews and historical baseline evidence are linked; review warnings remain follow-ups.
 - **Path type:** `existing`
 - **Initialized on:** `2026-10-25`
-- **Last revised:** `2026-10-30`
+- **Last revised:** `2026-10-31`
 - **Record owner:** `Forge initialization agent`
 
 ## Project intake
@@ -19,7 +19,7 @@ research notes or implementation observations as product mandates.
 - **Problem/opportunity:** Individual writers need a dependable place to draft screenplay content without losing semantic structure, edits, page flow, or saved work.
 - **Primary goal:** Establish a dependable screenplay-writing loop: create, edit, transition roles, paginate, save, reopen, and export useful MVP outputs.
 - **First-pass success:** A writer can complete a representative scene through a headless-capable core and focused desktop UI, with deterministic pagination and safe, no-data-loss save/reopen behavior.
-- **Explicit non-goals:** DOCX/FDX compatibility, collaboration, MCP/control infrastructure, planning or beat-board features, broad Word-like formatting, and web/multi-platform polish.
+- **Explicit non-goals:** DOCX compatibility, collaboration, MCP/control infrastructure, planning or beat-board editing features, broad Word-like formatting, and web/multi-platform polish. FDX is the native document direction; preservation of unsupported beat-board data is distinct from editing those features and does not promise blanket Final Draft compatibility.
 - **Planning preference:** Replan after each initiative; do not treat the historical first-initiative handoff as a standing roadmap.
 - **User checkpoint preference:** Guided involvement; no manual checkpoint after each work order. User confirmation is consolidated at initiative-level/closeout if Forge permits, while every work order still receives a separate fresh validation agent immediately after implementation.
 - **Working style:** Guided, safety-conscious, concise explanations for consequential defaults, with independent checks handled in the background.
@@ -111,7 +111,7 @@ the artifact blocked when safe comparison or a required gate is unavailable.
 
 - **Unresolved decisions and follow-ups:**
   - Product approval of the current desktop framework/dependency choice, supported desktop OS, and packaging/distribution policy — owner: product/technical owner; trigger: before those choices are treated as durable product commitments; next action: confirm scope and record the decision with evidence.
-  - Exact native project extension and PDF implementation — owner: product/technical owner; trigger: persistence/export design; next action: decide and record after the core model boundary is validated.
+  - PDF implementation — owner: product/technical owner; trigger: export design; next action: decide and record after the core model boundary is validated. Native projects use FDX.
   - Remote/PR policy — owner: orchestrator; trigger: before remote-dependent or PR-based closeout; next action: discover host expectations and recheck configured remotes.
   - Requirements and blueprint review warnings — owners: requirements/blueprint owners with orchestrator coordination; trigger: before affected intent or contracts are treated as fully resolved; next action: preserve the independent findings and record each warning's disposition. The initialization reviews exist and are linked below; their warnings are not represented as resolved.
 - **Historical first-initiative handoff:** The 2026-10-25 `workspace-foundation` recommendation led into the actual screenplay MVP initiative. See the [`screenplay MVP plan`](initiatives/2026-10-25-screenplay-mvp/2026-10-25-screenplay-mvp-v1.md) and its [`foundation validation`](initiatives/2026-10-25-screenplay-mvp/validations/validation-WO-001.md). This is historical traceability, not a new roadmap recommendation or a claim that all product behavior is complete.
@@ -132,3 +132,9 @@ the artifact blocked when safe comparison or a required gate is unavailable.
 - Blueprint review findings: [`blueprint-review.md`](blueprints/blueprint-review.md) — independent fresh-context review completed with warnings; warning dispositions remain follow-ups.
 - Historical foundation validation: [`validation-WO-001.md`](initiatives/2026-10-25-screenplay-mvp/validations/validation-WO-001.md) records the exact 2026-10-25 checks and warnings; it is not evidence of fresh checks for this revision.
 - Initialization completion evidence consists of the linked independent review artifacts and historical validation; the recorded warnings remain follow-ups rather than missing-review claims.
+
+## Scope revision — 2026-10-31
+
+The user directed FDX-based native documents and preservation of unsupported FDX content, replacing the former FDX non-goal; this does not authorize beat-board editing or claim universal compatibility. Fountain conversion is secondary to completing the FDX model. See the [document-model initiative](initiatives/2026-10-31-document-model-refactor/document-model-refactor-v1.md) for decisions, implementation lag and outstanding review gates. Project workflow policy is unchanged.
+
+The historical requirements and blueprint review artifacts referenced above are absent from the inspected checkout. Their detailed findings and dispositions have not been re-verified; fresh independent alignment reviews remain required for the FDX scope revision.

@@ -26,7 +26,7 @@ and predictable role transitions.
     appearance. For new projects, the persisted boolean `uppercase_cues` policy shall default to
     enabled and apply only at transactional edit boundaries to Scene Heading and Character text.
     Opening an existing project shall not rewrite stored text; other roles shall preserve source
-    casing. An absent legacy setting shall default to enabled.
+    casing. An absent setting shall default to enabled.
   - **AC-WRITING-001.3:** Given a valid selection, the system shall support insertion, deletion,
     split, join, role change, undo, and redo while preserving valid text boundaries and element
     order.
@@ -46,7 +46,7 @@ and predictable role transitions.
     end-boundary case. Rejected non-collapsed selections, invalid boundaries, and capacity
     operations shall preserve session state. For new projects, `PageProfile` schema version 1
     shall persist `auto_parenthetical` and `strict_transition_boundaries`, both defaulting to
-    enabled; absent legacy fields shall default to enabled, and malformed field types shall be
+    enabled; absent fields shall default to enabled, and malformed field types shall be
     typed load errors. When `auto_parenthetical` is enabled and an explicit role transition or
     assignment creates a Parenthetical, automatic behavior shall create transient generated `()`
     with the caret between the delimiters and provenance keyed to the stable element ID;
@@ -97,15 +97,72 @@ project meaning; failures preserve the prior valid destination and unsaved state
 
 - **REQ-WRITING-LOOP-003: Durable native save and reopen.** The system shall let an individual
     screenwriter save and reopen a project without losing its last valid version.
-  - **AC-WRITING-003.1:** Given a valid project, the system shall serialize a schema-version-1
-    native representation containing semantic content, stable IDs, metadata, and page-profile
-    inputs, while excluding transient caret, layout, and undo state from required content.
+  - **AC-WRITING-003.1:** Given a valid project, the system shall serialize native FDX Version 6
+    containing semantic content, stable identities, metadata, and page-profile inputs, while
+    excluding transient caret, layout, and undo state from required content. A field without a
+    safe durable representation shall not be silently lost.
   - **AC-WRITING-003.2:** Given a save preparation or replacement failure, the system shall preserve
     the prior valid destination and retain an unsaved/dirty indication.
   - **AC-WRITING-003.3:** Given a successfully saved native project, reopening it shall preserve
-    semantic roles, text, stable IDs, metadata, and reproducible pagination inputs. Absent
-    legacy fields shall use their specified defaults; malformed or unsupported schema versions
-    shall be rejected safely. The system shall not promise cross-version migrations.
+    semantic roles, text, stable IDs, metadata, reproducible pagination inputs, and retained
+    source content subject to the explicit version and independence boundaries below. Absent
+    supported fields shall use their specified defaults; malformed input shall fail safely.
+
+### FDX document content and preservation
+
+- **REQ-WRITING-LOOP-007: FDX document model.** The system shall represent and edit the ordered
+  main-content types Scene Heading, Action, Character, Parenthetical, Dialogue, Transition, Note,
+  New Act, End of Act, Cast List, General, Shot, Sequence, Outline 1, Outline 2, Outline 3 and
+  Summary without silently changing their type, source text, case or ordering on import.
+  - **AC-WRITING-007.1:** Each type remains distinct through editing and Version 6 save/reopen;
+    explicit role assignment and safe Enter/Tab policies are available, with existing behavior
+    retained for existing roles. Hidden-text settings are honored in print output rather than
+    exposing hidden notes and outline content.
+  - **AC-WRITING-007.2:** Ordered runs, styles, attributes and unknown content remain available
+    across safe edits, undo/redo and save/reopen. Unsupported intersections are safely stopped
+    or escalated when preservation cannot be established; no authored material is silently removed.
+  - **AC-WRITING-007.3:** An imported title page retains its ordered paragraphs, blank lines,
+    alignment, styles and separate header/footer. Title-page editing is deferred; metadata is not
+    inferred from paragraph positions.
+  - **AC-WRITING-007.4:** Beat boards and script content, including outlines and scene beats, are
+    independent: changing one never changes the other. Cross-domain links may be silently orphaned
+    on import and do not block script edits. Board items, images and their internal relationships
+    remain preserved where possible; an actual conflict between authored-data preservation and
+    independence is escalated, not silently resolved by deletion.
+
+- **REQ-WRITING-LOOP-008: Native FDX versions and safety.** The system shall open FDX and save
+  Version 6, without claiming universal Final Draft compatibility.
+  - **AC-WRITING-008.1:** An explicit non-6 version triggers a Continue/Cancel warning before a
+    Version 6 importer attempt: updating may contain errors, lose data and has no compatibility
+    guarantee. Previous versions import only title and content, converting unrecognized elements
+    to General when possible; missing content or unconvertible elements produce an incompatible
+    notification and leave the active session and source unchanged. No partial salvage is implied.
+  - **AC-WRITING-008.2:** Newer explicit versions also receive the warning and importer attempt;
+    newer-specific conversion is not guaranteed. Missing, malformed or duplicate version data and
+    invalid input fail safely rather than being silently assigned a version.
+  - **AC-WRITING-008.3:** Opening never changes the source. Explicit Save may replace the original
+    with Version 6; Save As may select another destination. Failed preparation, conflict or
+    replacement leaves the destination, active model, path and dirty state unchanged. Legacy JSON
+    migration and continued JSON writing are not promised.
+  - **AC-WRITING-008.4:** Untrusted input is bounded and cannot trigger external entity, network
+    or local image-path access; diagnostics do not expose document text, image payloads or paths.
+
+- **REQ-WRITING-LOOP-009: Scene cast lists.** Imported Cast List text is assigned as-is. The
+  internal updater collects Character names after each Scene Heading to the next heading or end,
+  deduplicates and alphabetically sorts them, and periodically updates managed lists.
+  - **AC-WRITING-009.1:** Direct edits may be silently corrected on refresh; Save and Save As check
+    and silently correct the serialized candidate before emitting its text as-is.
+  - **AC-WRITING-009.2:** After a successful save the live document and clean baseline match the
+    corrected output; a failed save publishes no candidate correction. Refresh, edit history and
+    pending saves are transactional and deterministic.
+
+### Secondary Fountain conversion
+
+- **REQ-WRITING-LOOP-010: Fountain conversion.** Fountain import uses a fixed documented
+  conversion protocol to create a new unsaved native document; export produces a separate lossy
+  copy without changing native path or clean state. Import retains as much parseable writer data
+  as the protocol supports. Potential conversion loss does not require a warning; fatal failures
+  are reported. Fountain is not the native format.
 
 ### Explicit noncanonical exports
 
@@ -141,8 +198,8 @@ model. Native window chrome remains owned by macOS where applicable.
     remain outside that response, retain its normal text color, remain available for
     accessibility use, and not add a redundant visible-label tooltip.
   - **AC-WRITING-005.4:** Given the current caret/focus is within a screenplay element, the Elements
-    Item shall display that element's explicit role using the seven supported labels Scene
-    Heading, Action, Character, Dialogue, Parenthetical, Transition, and Note; choosing a label
+    Item shall display that element's explicit role using the supported labels in
+    REQ-WRITING-LOOP-007; choosing a label
     shall apply the role through the transactional session operation and preserve the document
     on rejection.
   - **AC-WRITING-005.5:** Given a toolbar width, Space shall consume one deterministic 72-point
@@ -298,11 +355,10 @@ content.
 
 ## Out of scope
 
-- DOCX/FDX compatibility, collaboration, MCP, planning/beat-board, broad formatting,
+- DOCX and blanket Final Draft compatibility, collaboration, MCP, planning/beat-board editing, broad formatting,
     web/multi-platform polish, and all adjacent non-MVP features listed in the product overview.
 
 ## Related documents
 
 - **Product overview:** [`../product-overview.md`](../product-overview.md)
-- **Technical blueprint:**
-    [`../../blueprints/features/screenplay-writing-loop.md`](../../blueprints/features/screenplay-writing-loop.md)
+- **Technical blueprint:** [`../../blueprints/technical-context.md`](../../blueprints/technical-context.md)

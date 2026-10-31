@@ -19,14 +19,14 @@ screenplay-specific need justifies it.
 
 ScriptCraft is a focused desktop screenplay editor for one writer. A screenplay
 project has a semantic source of truth containing title-page information, an
-ordered sequence of screenplay elements with stable identities, and fixed page
-profile inputs. Editing preserves explicit roles and canonical UTF-8 text;
+ordered sequence of screenplay elements with stable identities, fixed page
+profile inputs, and retained FDX source content. Editing preserves explicit roles and canonical UTF-8 text;
 transient selection, undo/redo, dirty state, and derived layout do not replace
 that source.
 
 The writing experience supports continuous editing and a predictable fixed-page
 preview from shared layout semantics. The native project preserves screenplay
-meaning across save and reopen. PDF is a page-layout export; plain-text export is
+meaning across FDX save and reopen. PDF is a page-layout export; plain-text export is
 deliberately lossy and communicates that roles, identities, and page layout are
 not preserved. Neither export replaces the native project as the source of
 truth.
@@ -38,32 +38,33 @@ screenwriter.
 
 ### In scope
 
-- Create a screenplay project with title-page metadata and an editable semantic
-  element sequence: scene heading, action, character, dialogue, parenthetical,
-  transition, and authored note.
+- Create a screenplay project with title-page information and the FDX content
+  elements specified in the [writing-loop requirements](features/screenplay-writing-loop.md).
 - Edit and navigate UTF-8 text safely, with split, join, delete, undo, and redo.
 - Apply explicit role-aware transitions rather than infer meaning from
   capitalization, spaces, tabs, or indentation.
 - Support continuous writing and deterministic fixed-profile page preview from
   shared layout semantics.
-- Save and reopen a versioned native project while preserving roles, stable
-  element identities, metadata, and page-profile inputs. Save operations are
-  atomic and failed operations preserve the prior valid work.
+- Save and reopen native Version 6 FDX while preserving supported semantic data
+  and safely retaining unsupported source content. Non-6 imports have the
+  explicitly bounded conversion behavior specified in the writing-loop requirements.
+  Save operations are atomic and failed operations preserve the prior valid work.
 - Export PDF from fixed print layout and provide a deliberately lossy plain-text
   copy that communicates its loss.
 - Keep core behavior headless-capable and testable without a desktop window.
 
 ### Out of scope
 
-- DOCX and FDX import/export or native compatibility.
+- DOCX compatibility and blanket Final Draft compatibility.
 - Collaboration, cloud sync, tracked revisions, comments, or revision comparison.
 - MCP, remote control, network automation, or a command catalog as a product
   feature.
 - Planning, beat-board, outline-editor, structure-line, production breakdown,
   scheduling, budgeting, or character databases.
-- Broad Word-like formatting, tables, fields, headers/footers, footnotes, shapes,
-  images, equations, arbitrary nested stories, dual dialogue, scene numbering,
-  colored pages, or locked pages.
+- Editing broad Word-like formatting, tables, fields, headers/footers, footnotes,
+  shapes, images, equations, arbitrary nested stories, dual dialogue, scene numbering,
+  colored pages, or locked pages. Retaining unsupported imported data is distinct
+  from providing these editing features.
 - Web support, multi-platform polish, pixel-perfect editor parity, font
   databases, and unmeasured incremental pagination.
 
