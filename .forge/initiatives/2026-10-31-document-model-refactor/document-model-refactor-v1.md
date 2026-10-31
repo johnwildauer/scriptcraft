@@ -389,3 +389,11 @@ The current writer [compares whole legacy state](../../../crates/scriptcraft-cor
 - **Regression source changes:** Obsolete JSON-native-save/recovery expectations were removed or replaced with coverage for refusal and artifact preservation. The existing legacy fixture and user files were not deleted.
 - **Not performed:** No tests (including the changed/new cases), build, lint, formatting check, `git diff --check`, manual UI or Final Draft verification, review, validator dispatch or other validation was run. All review and validation are user-owned under current repository policy.
 - **Remaining limitations:** There is no snapshot recovery replacement, and existing legacy recovery files cannot be safely restored by the app. WO-012's implementation remains unvalidated and its recorded FDX platform/durability, migration and preservation limitations are unchanged. No Fountain or WO-014 work was performed.
+
+## User-directed as-is closeout — 2026-10-31
+
+At the user's direction, close this initiative as-is and integrate its current branch into `master`. This administrative closeout records the existing implementation and handoff state; it does not complete pending work-order acceptance or imply technical verification.
+
+- WO-012 and WO-013 implementation remain unvalidated; user review and validation are pending. WO-014's user handoff is prepared, but its integrated evidence and acceptance remain pending user validation. No Final Draft interoperability or general compatibility is established.
+- No checks, reviews, manual verification, or other validation were run for this closeout. Historical check records remain historical and are not evidence of validation for the current implementation.
+- Carry forward the limitations recorded above: no replacement snapshot recovery, legacy JSON projects/recovery are not supported by the desktop, and FDX storage, migration, preservation, and external-application behavior remain bounded and unverified. Existing warnings and follow-ups remain open; this closeout does not waive an external requirement or claim a check passed.
