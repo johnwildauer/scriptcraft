@@ -3,59 +3,7 @@
 
 use scriptcraft_core::editing::{EditError, EditingSession, Position, Selection};
 use scriptcraft_core::layout::{Caret, LayoutErrorKind, ScreenplayLayout};
-use scriptcraft_core::persistence::{atomic_save, deserialize, FileSystem, PersistenceError};
 use scriptcraft_core::{LayoutInputs, ModelError, Project, Role, MAX_TEXT_BYTES};
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-
-#[derive(Clone, Default)]
-struct MemFs {
-    files: Arc<Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
-}
-
-impl FileSystem for MemFs {
-    fn read(&self, path: &Path) -> Result<Vec<u8>, PersistenceError> {
-        self.files
-            .lock()
-            .map_err(|_| PersistenceError::Io("lock poisoned".into()))?
-            .get(path)
-            .cloned()
-            .ok_or_else(|| PersistenceError::Io("missing file".into()))
-    }
-
-    fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), PersistenceError> {
-        self.files
-            .lock()
-            .map_err(|_| PersistenceError::Io("lock poisoned".into()))?
-            .insert(path.to_owned(), bytes.to_vec());
-        Ok(())
-    }
-
-    fn rename(&self, from: &Path, to: &Path) -> Result<(), PersistenceError> {
-        let mut files = self
-            .files
-            .lock()
-            .map_err(|_| PersistenceError::Io("lock poisoned".into()))?;
-        let bytes = files
-            .remove(from)
-            .ok_or_else(|| PersistenceError::Io("missing temporary file".into()))?;
-        files.insert(to.to_owned(), bytes);
-        Ok(())
-    }
-
-    fn remove(&self, path: &Path) -> Result<(), PersistenceError> {
-        self.files
-            .lock()
-            .map_err(|_| PersistenceError::Io("lock poisoned".into()))?
-            .remove(path);
-        Ok(())
-    }
-
-    fn list(&self, _directory: &Path) -> Result<Vec<PathBuf>, PersistenceError> {
-        Ok(Vec::new())
-    }
-}
 
 fn project() -> Project {
     let mut project = Project::from_json(include_str!("fixtures/legacy_project.json"))
@@ -127,7 +75,7 @@ fn pasted_newline_patterns_preserve_semantics_without_phantom_cr_lines() {
 }
 
 #[test]
-fn final_page_caret_and_native_round_trip_survive_long_paste() {
+fn final_page_caret_and_long_paste_survive_without_json_persistence() {
     let text = (0..500)
         .map(|line| format!("Action line {line} with enough words to wrap safely."))
         .collect::<Vec<_>>()
@@ -157,14 +105,7 @@ fn final_page_caret_and_native_round_trip_survive_long_paste() {
         })
         .is_ok());
 
-    let fs = MemFs::default();
-    let path = Path::new("/long-document.json");
-    atomic_save(&fs, path, session.project())
-        .unwrap_or_else(|_| unreachable!("bounded project must save"));
-    let reopened = deserialize(&fs.read(path).unwrap_or_default())
-        .unwrap_or_else(|_| unreachable!("saved project must reopen"));
-    assert_eq!(reopened, *session.project());
-    assert_eq!(reopened.elements[0].text, text);
+    assert_eq!(session.project().elements[0].text, text);
 }
 
 #[test]

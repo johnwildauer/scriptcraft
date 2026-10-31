@@ -1,16 +1,21 @@
-//! Bounded native persistence and explicit recovery candidates.
+//! Legacy JSON codec compatibility and shared filesystem access.
+//!
+//! JSON is not a native format. The desktop does not call this module for
+//! opening or saving documents. JSON disk saves and snapshot recovery are
+//! retired because their payload cannot represent complete FDX preservation
+//! state; the retired entry points below fail without touching the filesystem.
 
 use crate::{ModelError, Project, MAX_JSON_BYTES};
 use std::path::{Path, PathBuf};
 
-pub const MAX_RECOVERY_SNAPSHOTS: usize = 3;
 pub const RECOVERY_PREFIX: &str = ".scriptcraft-recovery-";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PersistenceError {
     Io(String),
     Model(ModelError),
-    InvalidPath,
+    LegacyPersistenceRetired,
+    RecoveryUnavailable,
 }
 impl From<ModelError> for PersistenceError {
     fn from(error: ModelError) -> Self {
@@ -53,6 +58,10 @@ impl FileSystem for StdFileSystem {
     }
 }
 
+/// Encode the historical JSON shape for compatibility fixtures only.
+///
+/// This is not supported native persistence and must not be used to save a
+/// user document or recovery snapshot.
 pub fn serialize(project: &Project) -> Result<Vec<u8>, PersistenceError> {
     let json = project.to_json()?;
     if json.len() > MAX_JSON_BYTES {
@@ -60,6 +69,10 @@ pub fn serialize(project: &Project) -> Result<Vec<u8>, PersistenceError> {
     }
     Ok(json.into_bytes())
 }
+/// Decode the historical JSON shape for compatibility fixtures only.
+///
+/// This is not a supported document-open or recovery path. The desktop
+/// explicitly rejects legacy JSON files.
 pub fn deserialize(bytes: &[u8]) -> Result<Project, PersistenceError> {
     if bytes.len() > MAX_JSON_BYTES {
         return Err(PersistenceError::Model(ModelError::StringTooLong));
@@ -70,24 +83,11 @@ pub fn deserialize(bytes: &[u8]) -> Result<Project, PersistenceError> {
 }
 
 pub fn atomic_save<F: FileSystem>(
-    fs: &F,
-    destination: &Path,
-    project: &Project,
+    _fs: &F,
+    _destination: &Path,
+    _project: &Project,
 ) -> Result<(), PersistenceError> {
-    let bytes = serialize(project)?;
-    let name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or(PersistenceError::InvalidPath)?;
-    let temp = destination.with_file_name(format!(".{name}.scriptcraft-tmp"));
-    fs.write(&temp, &bytes)?;
-    match fs.rename(&temp, destination) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs.remove(&temp);
-            Err(error)
-        }
-    }
+    Err(PersistenceError::LegacyPersistenceRetired)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,61 +101,20 @@ pub fn recovery_path(directory: &Path, revision: u64) -> PathBuf {
 }
 
 pub fn save_recovery<F: FileSystem>(
-    fs: &F,
-    directory: &Path,
-    project: &Project,
-    revision: u64,
+    _fs: &F,
+    _directory: &Path,
+    _project: &Project,
+    _revision: u64,
 ) -> Result<PathBuf, PersistenceError> {
-    let path = recovery_path(directory, revision);
-    fs.write(&path, &serialize(project)?)?;
-    let mut paths: Vec<_> = fs
-        .list(directory)?
-        .into_iter()
-        .filter(|path| recovery_revision(path).is_some())
-        .collect();
-    paths.sort_by_key(|path| recovery_revision(path).unwrap_or(0));
-    while paths.len() > MAX_RECOVERY_SNAPSHOTS {
-        if let Some(path) = paths.first().cloned() {
-            fs.remove(&path)?;
-            paths.remove(0);
-        }
-    }
-    Ok(path)
+    Err(PersistenceError::RecoveryUnavailable)
 }
 
 pub fn discover_recovery<F: FileSystem>(
-    fs: &F,
-    directory: &Path,
-    saved_revision: u64,
+    _fs: &F,
+    _directory: &Path,
+    _saved_revision: u64,
 ) -> Result<Vec<RecoveryCandidate>, PersistenceError> {
-    let mut candidates = Vec::new();
-    for path in fs.list(directory)? {
-        let Some(revision) = recovery_revision(&path) else {
-            continue;
-        };
-        if revision <= saved_revision {
-            continue;
-        }
-        let Ok(bytes) = fs.read(&path) else { continue };
-        let Ok(project) = deserialize(&bytes) else {
-            continue;
-        };
-        candidates.push(RecoveryCandidate {
-            path,
-            revision,
-            project,
-        });
-    }
-    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.revision));
-    Ok(candidates)
-}
-fn recovery_revision(path: &Path) -> Option<u64> {
-    path.file_name()?
-        .to_str()?
-        .strip_prefix(RECOVERY_PREFIX)?
-        .strip_suffix(".json")?
-        .parse()
-        .ok()
+    Err(PersistenceError::RecoveryUnavailable)
 }
 
 #[cfg(test)]
@@ -167,7 +126,6 @@ mod tests {
     #[derive(Clone, Default)]
     struct MemFs {
         files: Arc<Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
-        fail_rename: bool,
     }
     impl FileSystem for MemFs {
         fn read(&self, path: &Path) -> Result<Vec<u8>, PersistenceError> {
@@ -186,9 +144,6 @@ mod tests {
             Ok(())
         }
         fn rename(&self, from: &Path, to: &Path) -> Result<(), PersistenceError> {
-            if self.fail_rename {
-                return Err(PersistenceError::Io("rename".into()));
-            }
             let mut files = self
                 .files
                 .lock()
@@ -246,37 +201,40 @@ mod tests {
         );
     }
     #[test]
-    fn failed_replacement_preserves_destination() {
+    fn retired_json_save_preserves_existing_destination() {
         let fs = MemFs::default();
         let destination = Path::new("/doc.json");
-        atomic_save(&fs, destination, &project("old")).unwrap_or_else(|_| unreachable!());
-        let failing = MemFs {
-            files: fs.files.clone(),
-            fail_rename: true,
-        };
-        assert!(atomic_save(&failing, destination, &project("new")).is_err());
+        fs.write(destination, b"existing user JSON")
+            .unwrap_or_else(|_| unreachable!());
         assert_eq!(
-            deserialize(&fs.read(destination).unwrap_or_default())
-                .unwrap_or_else(|_| unreachable!())
-                .elements[0]
-                .text,
-            "old"
+            atomic_save(&fs, destination, &project("new")),
+            Err(PersistenceError::LegacyPersistenceRetired)
         );
+        assert_eq!(fs.read(destination), Ok(b"existing user JSON".to_vec()));
     }
     #[test]
-    fn recovery_rotates_and_ignores_corruption() {
+    fn recovery_is_unavailable_without_reading_or_mutating_old_snapshots() {
         let fs = MemFs::default();
         let dir = Path::new("/");
-        for revision in 1..=4 {
-            save_recovery(&fs, dir, &project(&revision.to_string()), revision)
-                .unwrap_or_else(|_| unreachable!());
-        }
+        let old_snapshot = recovery_path(dir, 4);
         fs.files
             .lock()
             .unwrap_or_else(|_| unreachable!())
-            .insert(recovery_path(dir, 4), b"bad".to_vec());
-        let found = discover_recovery(&fs, dir, 0).unwrap_or_else(|_| unreachable!());
-        assert!(found.iter().all(|candidate| candidate.revision != 4));
-        assert_eq!(found.len(), 2);
+            .insert(old_snapshot.clone(), b"legacy incomplete snapshot".to_vec());
+        let before = fs.files.lock().unwrap_or_else(|_| unreachable!()).clone();
+
+        assert_eq!(
+            save_recovery(&fs, dir, &project("new"), 5),
+            Err(PersistenceError::RecoveryUnavailable)
+        );
+        assert_eq!(
+            discover_recovery(&fs, dir, 0),
+            Err(PersistenceError::RecoveryUnavailable)
+        );
+        assert_eq!(
+            *fs.files.lock().unwrap_or_else(|_| unreachable!()),
+            before
+        );
+        assert_eq!(fs.read(&old_snapshot), Ok(b"legacy incomplete snapshot".to_vec()));
     }
 }
