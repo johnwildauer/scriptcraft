@@ -97,7 +97,7 @@ impl ToolbarItem {
     }
 }
 
-pub(super) const SUPPORTED_SCREENPLAY_ROLES: [(Role, &str); 7] = [
+pub(super) const SUPPORTED_SCREENPLAY_ROLES: [(Role, &str); 17] = [
     (Role::SceneHeading, "Scene Heading"),
     (Role::Action, "Action"),
     (Role::Character, "Character"),
@@ -105,6 +105,16 @@ pub(super) const SUPPORTED_SCREENPLAY_ROLES: [(Role, &str); 7] = [
     (Role::Parenthetical, "Parenthetical"),
     (Role::Transition, "Transition"),
     (Role::Note, "Note"),
+    (Role::NewAct, "New Act"),
+    (Role::EndOfAct, "End of Act"),
+    (Role::CastList, "Cast List"),
+    (Role::General, "General"),
+    (Role::Shot, "Shot"),
+    (Role::Sequence, "Sequence"),
+    (Role::Outline1, "Outline 1"),
+    (Role::Outline2, "Outline 2"),
+    (Role::Outline3, "Outline 3"),
+    (Role::Summary, "Summary"),
 ];
 
 pub(super) fn screenplay_role_label(role: Role) -> &'static str {

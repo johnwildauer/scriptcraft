@@ -367,6 +367,12 @@ pub struct RoleBox {
     pub width: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintVisibility {
+    Visible,
+    Hidden,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageProfile {
     pub name: String,
@@ -391,6 +397,11 @@ pub struct PageProfile {
     pub role_boxes: [RoleBox; LEGACY_ROLE_BOX_COUNT],
     /// Added role geometry is explicitly optional until separately specified.
     pub additional_role_boxes: [Option<RoleBox>; ADDITIONAL_ROLE_BOX_COUNT],
+    /// Explicit per-role print overrides. Defaults are ScriptCraft-visible; an
+    /// importer must set only values it can map and retain unknown source settings.
+    pub role_print_visibility: [PrintVisibility; 17],
+    /// Explicit page-start overrides for body roles; defaults do not infer FDX settings.
+    pub role_starts_new_page: [bool; 17],
 }
 
 impl PageProfile {
@@ -402,6 +413,18 @@ impl PageProfile {
                 .and_then(|index| self.additional_role_boxes.get(index))
                 .and_then(Option::as_ref)
         }
+    }
+
+    pub fn print_visibility(&self, role: Role) -> PrintVisibility {
+        let index = Role::ALL.iter().position(|candidate| *candidate == role);
+        index.map_or(PrintVisibility::Visible, |index| {
+            self.role_print_visibility[index]
+        })
+    }
+
+    pub fn starts_new_page(&self, role: Role) -> bool {
+        let index = Role::ALL.iter().position(|candidate| *candidate == role);
+        index.is_some_and(|index| self.role_starts_new_page[index])
     }
 }
 
@@ -436,6 +459,8 @@ impl Default for PageProfile {
                 RoleBox { x: 108, width: 432 },
             ],
             additional_role_boxes: [None; ADDITIONAL_ROLE_BOX_COUNT],
+            role_print_visibility: [PrintVisibility::Visible; 17],
+            role_starts_new_page: [false; 17],
         }
     }
 }
@@ -661,7 +686,17 @@ fn ensure_legacy_json_compatible(project: &Project) -> Result<(), ModelError> {
         .page_profile
         .additional_role_boxes
         .iter()
-        .any(Option::is_some);
+        .any(Option::is_some)
+        || project
+            .page_profile
+            .role_print_visibility
+            .iter()
+            .any(|visibility| *visibility != PrintVisibility::Visible)
+        || project
+            .page_profile
+            .role_starts_new_page
+            .iter()
+            .any(|starts| *starts);
     let richer_elements = project
         .title_page
         .iter()
@@ -964,6 +999,11 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
     let schema = num_field(envelope, "schema_version")?;
     let m = obj(envelope, "metadata")?;
     let profile = obj(envelope, "page_profile")?;
+    if object_has_field(profile, "role_print_visibility")
+        || object_has_field(profile, "role_starts_new_page")
+    {
+        return Err(ModelError::UnsupportedJsonState);
+    }
     Ok(Project {
         id: StableId::new(str_field(envelope, "id")?)?,
         schema_version: schema,
@@ -1004,6 +1044,8 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
             } else {
                 [None; ADDITIONAL_ROLE_BOX_COUNT]
             },
+            role_print_visibility: [PrintVisibility::Visible; 17],
+            role_starts_new_page: [false; 17],
         },
         elements: decode_elements(obj(envelope, "elements")?)?,
         preservation: None,
@@ -1261,6 +1303,29 @@ mod tests {
         let mut profile = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
         profile.page_profile.additional_role_boxes[0] = Some(RoleBox { x: 10, width: 20 });
         assert_eq!(profile.to_json(), Err(ModelError::UnsupportedJsonState));
+
+        let mut hidden = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        hidden.page_profile.role_print_visibility[Role::ALL
+            .iter()
+            .position(|role| *role == Role::Note)
+            .unwrap_or_else(|| unreachable!())] = PrintVisibility::Hidden;
+        assert_eq!(hidden.to_json(), Err(ModelError::UnsupportedJsonState));
+
+        let mut page_start = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        page_start.page_profile.role_starts_new_page[Role::ALL
+            .iter()
+            .position(|role| *role == Role::NewAct)
+            .unwrap_or_else(|| unreachable!())] = true;
+        assert_eq!(page_start.to_json(), Err(ModelError::UnsupportedJsonState));
+
+        let with_role_settings = legacy.replace(
+            "\"role_boxes\":[",
+            "\"role_print_visibility\":[],\"role_boxes\":[",
+        );
+        assert_eq!(
+            Project::from_json(&with_role_settings),
+            Err(ModelError::UnsupportedJsonState)
+        );
     }
 
     #[test]

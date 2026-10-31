@@ -391,15 +391,7 @@ impl EditingSession {
                 }
             }
             let element = &project.elements[position.element];
-            let next_role = match element.role {
-                Role::SceneHeading => Some(Role::Action),
-                Role::Action => Some(Role::Character),
-                Role::Character if element.text.is_empty() => Some(Role::Transition),
-                Role::Transition => Some(Role::SceneHeading),
-                Role::Dialogue => Some(Role::Parenthetical),
-                Role::Parenthetical => Some(Role::Dialogue),
-                _ => None,
-            };
+            let next_role = tab_transition(element.role, element.text.is_empty());
             if let Some(role) = next_role {
                 project.elements[position.element].role = role;
                 if project.page_profile.auto_parenthetical
@@ -1253,8 +1245,32 @@ pub fn enter_transition(role: Role) -> Option<Role> {
         | Role::Outline1
         | Role::Outline2
         | Role::Outline3
-        | Role::Summary => return None,
+        | Role::Summary => role,
     })
+}
+
+/// Tab changes only the established legacy roles. Added roles are explicit
+/// no-ops until a role-specific cycling policy is evidenced and implemented.
+pub fn tab_transition(role: Role, current_text_is_empty: bool) -> Option<Role> {
+    match role {
+        Role::SceneHeading => Some(Role::Action),
+        Role::Action => Some(Role::Character),
+        Role::Character if current_text_is_empty => Some(Role::Transition),
+        Role::Transition => Some(Role::SceneHeading),
+        Role::Dialogue => Some(Role::Parenthetical),
+        Role::Parenthetical => Some(Role::Dialogue),
+        Role::Character | Role::Note => None,
+        Role::NewAct
+        | Role::EndOfAct
+        | Role::CastList
+        | Role::General
+        | Role::Shot
+        | Role::Sequence
+        | Role::Outline1
+        | Role::Outline2
+        | Role::Outline3
+        | Role::Summary => None,
+    }
 }
 
 #[cfg(test)]
@@ -1483,20 +1499,27 @@ mod tests {
     }
 
     #[test]
-    fn added_roles_do_not_gain_an_implicit_enter_transition() {
+    fn added_roles_split_without_changing_role_on_enter() {
         for role in Role::ALL[7..].iter().copied() {
-            assert_eq!(enter_transition(role), None);
+            assert_eq!(enter_transition(role), Some(role));
             let mut session = session("unchanged", role);
-            let before = session.clone();
             let offset = session.project().elements[0].text.len();
             set(&mut session, 0, offset);
-            let before_enter = session.clone();
-            assert_eq!(
-                session.enter(),
-                Err(EditError::UnsupportedTransition { from: role })
-            );
-            assert_eq!(session, before_enter);
-            assert_eq!(before.project().elements[0].role, role);
+            session.enter().unwrap_or_else(|_| unreachable!());
+            assert_eq!(session.project().elements[1].role, role);
+            assert_eq!(session.project().elements[0].role, role);
+        }
+    }
+
+    #[test]
+    fn added_roles_have_explicit_consumed_tab_noop_policy() {
+        for role in Role::ALL[7..].iter().copied() {
+            assert_eq!(tab_transition(role, false), None);
+            let mut session = session("preserve this role", role);
+            let before = session.clone();
+            session.tab().unwrap_or_else(|_| unreachable!());
+            assert_eq!(session, before);
+            assert!(!session.can_undo());
         }
     }
 

@@ -4,7 +4,7 @@
 //! The initial profile therefore has stable structure on every host: one
 //! character cell is seven units wide and one line is twelve units high.
 
-use crate::{ModelError, PageProfile, Project, Role};
+use crate::{ModelError, PageProfile, PrintVisibility, Project, Role};
 use std::sync::Arc;
 
 pub const FONT_FAMILY: &str = "Courier-family fixed metrics (12 pt target)";
@@ -160,6 +160,17 @@ impl ScreenplayLayout {
             output.pages.push(output.new_page(false));
         }
         for (index, element) in project.elements.iter().enumerate() {
+            if output.profile.print_visibility(element.role) == PrintVisibility::Hidden {
+                continue;
+            }
+            if output.profile.starts_new_page(element.role)
+                && output
+                    .pages
+                    .last()
+                    .is_some_and(|page| !page.title_page && !page.lines.is_empty())
+            {
+                output.pages.push(output.new_page(false));
+            }
             let width = role_width(&output.profile, element.role);
             let lines = wrap_element(element.text.as_str(), index, element.role, width);
             output.place_element(lines, element.role);
@@ -899,6 +910,55 @@ mod tests {
                 offset: 1
             })
             .is_ok());
+    }
+
+    #[test]
+    fn hidden_roles_are_omitted_without_shifting_source_element_indexes() {
+        let mut p = project(&[
+            (Role::Action, "visible before"),
+            (Role::Note, "private note"),
+            (Role::Outline1, "private outline"),
+            (Role::Summary, "private summary"),
+            (Role::Action, "visible after"),
+        ]);
+        for role in [Role::Note, Role::Outline1, Role::Summary] {
+            let index = Role::ALL
+                .iter()
+                .position(|candidate| *candidate == role)
+                .unwrap_or_else(|| unreachable!());
+            p.page_profile.role_print_visibility[index] = PrintVisibility::Hidden;
+        }
+
+        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let lines = layout
+            .pages
+            .iter()
+            .flat_map(|page| page.lines.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].element, 0);
+        assert_eq!(lines[1].element, 4);
+        assert_eq!(lines[0].text, "visible before");
+        assert_eq!(lines[1].text, "visible after");
+    }
+
+    #[test]
+    fn explicit_role_page_start_starts_a_new_body_page() {
+        let mut p = project(&[(Role::Action, "before"), (Role::NewAct, "ACT TWO")]);
+        let index = Role::ALL
+            .iter()
+            .position(|role| *role == Role::NewAct)
+            .unwrap_or_else(|| unreachable!());
+        p.page_profile.role_starts_new_page[index] = true;
+
+        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(layout.pages[0].lines[0].text, "before");
+        assert!(layout.pages[1]
+            .lines
+            .iter()
+            .any(|line| line.text == "ACT TWO"));
+        assert!(layout.pages[1].lines.iter().all(|line| line.element == 1));
     }
 
     #[test]

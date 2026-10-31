@@ -3765,7 +3765,8 @@ mod tests {
         // The custom presentation is intentionally gated on the ComboBox being
         // closed. Popup entries continue to use the stock selectable_value path,
         // whose menu UI owns left-aligned labels and keyboard navigation.
-        assert_eq!(SUPPORTED_SCREENPLAY_ROLES.len(), 7);
+        assert_eq!(SUPPORTED_SCREENPLAY_ROLES.len(), Role::ALL.len());
+        assert_eq!(SUPPORTED_SCREENPLAY_ROLES.map(|(role, _)| role), Role::ALL);
         assert!(SUPPORTED_SCREENPLAY_ROLES
             .iter()
             .all(|(_, label)| !label.is_empty()));
@@ -4194,6 +4195,16 @@ mod tests {
             (Role::Parenthetical, "Parenthetical"),
             (Role::Transition, "Transition"),
             (Role::Note, "Note"),
+            (Role::NewAct, "New Act"),
+            (Role::EndOfAct, "End of Act"),
+            (Role::CastList, "Cast List"),
+            (Role::General, "General"),
+            (Role::Shot, "Shot"),
+            (Role::Sequence, "Sequence"),
+            (Role::Outline1, "Outline 1"),
+            (Role::Outline2, "Outline 2"),
+            (Role::Outline3, "Outline 3"),
+            (Role::Summary, "Summary"),
         ];
         assert_eq!(SUPPORTED_SCREENPLAY_ROLES, expected);
         for (role, label) in expected {
