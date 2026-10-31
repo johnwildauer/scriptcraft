@@ -46,6 +46,9 @@ pub enum FdxError {
     ForbiddenDoctype,
     UnsupportedEntity,
     UnsupportedVersion,
+    MissingVersion,
+    InvalidVersion,
+    DuplicateVersion,
     InvalidRoot,
     MissingContent,
     DuplicateSection,
@@ -84,6 +87,9 @@ impl fmt::Display for FdxError {
             Self::ForbiddenDoctype => "FDX document types are not accepted",
             Self::UnsupportedEntity => "FDX contains an unsupported entity reference",
             Self::UnsupportedVersion => "FDX is not declared as Version 6",
+            Self::MissingVersion => "FDX version declaration is missing",
+            Self::InvalidVersion => "FDX version declaration is not a decimal integer",
+            Self::DuplicateVersion => "FDX contains duplicate version declarations",
             Self::InvalidRoot => "FDX root element is not a Script document",
             Self::MissingContent => "FDX Content section is missing",
             Self::DuplicateSection => "FDX contains ambiguous duplicate managed sections",
@@ -110,6 +116,120 @@ impl std::error::Error for FdxError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FdxDocument {
     pub project: Project,
+}
+
+/// Result of bounded version preflight. Non-6 numeric versions are explicit
+/// migration candidates; the caller must present the migration warning and
+/// obtain consent before invoking the conversion path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FdxVersionStatus {
+    Version6,
+    ExplicitNon6 {
+        declared: String,
+        direction: FdxVersionDirection,
+    },
+    Missing,
+    Malformed,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdxVersionDirection {
+    Older,
+    Newer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdxMigrationConsent {
+    Continue,
+    Cancel,
+}
+
+/// Indicates the bounded conversion attempted for an imported candidate. This
+/// is not a claim of native save/reopen safety or Final Draft compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FdxMigrationKind {
+    OlderLossy { declared: String },
+    NewerBestEffort { declared: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FdxImportCandidate {
+    pub document: FdxDocument,
+    pub migration: Option<FdxMigrationKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FdxImportOutcome {
+    Cancelled { declared_version: String },
+    Candidate(Box<FdxImportCandidate>),
+}
+
+/// Securely parse and classify the root version without building an editing
+/// candidate. Call this before presenting a warning for an explicit non-6
+/// declaration. Input is bounded and never written or resolved externally.
+pub fn preflight_version(input: &[u8]) -> Result<FdxVersionStatus, FdxError> {
+    if input.len() > MAX_SOURCE_BYTES {
+        return Err(FdxError::SourceTooLarge);
+    }
+    std::str::from_utf8(input).map_err(|_| FdxError::InvalidEncoding)?;
+    let parsed = parse_document(input)?;
+    let root = parsed
+        .iter()
+        .find_map(|node| match node {
+            RawNode::Element(element) => Some(element),
+            _ => None,
+        })
+        .ok_or(FdxError::InvalidRoot)?;
+    if root.name.local_name != FDX_ROOT || attribute(root, "DocumentType") != Some("Script") {
+        return Err(FdxError::InvalidRoot);
+    }
+    version_status(root)
+}
+
+/// Import Version 6 directly, or attempt a typed migration after the caller has
+/// shown the required warning and supplied explicit consent. Older files retain
+/// only TitlePage and Content, with unrecognized paragraph types converted to
+/// General. Newer files use the Version 6 importer best-effort and retain source
+/// sections where representable. Neither path mutates the source or a session.
+pub fn import_fdx(
+    input: &[u8],
+    consent: FdxMigrationConsent,
+) -> Result<FdxImportOutcome, FdxError> {
+    match preflight_version(input)? {
+        FdxVersionStatus::Version6 => {
+            Ok(FdxImportOutcome::Candidate(Box::new(FdxImportCandidate {
+                document: read_v6(input)?,
+                migration: None,
+            })))
+        }
+        FdxVersionStatus::ExplicitNon6 {
+            declared,
+            direction,
+        } => {
+            if consent == FdxMigrationConsent::Cancel {
+                return Ok(FdxImportOutcome::Cancelled {
+                    declared_version: declared,
+                });
+            }
+            let migrated = prepare_non_v6_source(input, direction)?;
+            let document = read_v6(&migrated)?;
+            // Require the Version 6 writer's complete bounded reconciliation and
+            // reread before publishing any staged candidate.
+            write_v6(&document.project)?;
+            let migration = match direction {
+                FdxVersionDirection::Older => FdxMigrationKind::OlderLossy { declared },
+                FdxVersionDirection::Newer => FdxMigrationKind::NewerBestEffort { declared },
+            };
+            Ok(FdxImportOutcome::Candidate(Box::new(FdxImportCandidate {
+                document,
+                migration: Some(migration),
+            })))
+        }
+        FdxVersionStatus::Missing => Err(FdxError::MissingVersion),
+        FdxVersionStatus::Malformed => Err(FdxError::InvalidVersion),
+        FdxVersionStatus::Duplicate => Err(FdxError::DuplicateVersion),
+    }
 }
 
 /// Deserialize a bounded UTF-8 FDX Version 6 document without touching a session
@@ -140,8 +260,12 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     if root.name.local_name != FDX_ROOT || attribute(root, "DocumentType") != Some("Script") {
         return Err(FdxError::InvalidRoot);
     }
-    if attribute(root, "Version") != Some(FDX_VERSION) {
-        return Err(FdxError::UnsupportedVersion);
+    match version_status(root)? {
+        FdxVersionStatus::Version6 => {}
+        FdxVersionStatus::ExplicitNon6 { .. } => return Err(FdxError::UnsupportedVersion),
+        FdxVersionStatus::Missing => return Err(FdxError::MissingVersion),
+        FdxVersionStatus::Malformed => return Err(FdxError::InvalidVersion),
+        FdxVersionStatus::Duplicate => return Err(FdxError::DuplicateVersion),
     }
 
     let root_namespace = root.name.namespace_uri.as_deref();
@@ -277,6 +401,7 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
         }
 
         let mut sections = state.sections.clone();
+        set_preserved_root_version(&mut sections)?;
         reconcile_project_elements(&mut sections, project)?;
         let expected_sections = sections.clone();
         let nodes = sections
@@ -336,6 +461,29 @@ fn same_semantic_elements(left: &[ScreenplayElement], right: &[ScreenplayElement
                     left.runs == right.runs
                 }
         })
+}
+
+fn set_preserved_root_version(sections: &mut [PreservedSection]) -> Result<(), FdxError> {
+    let mut roots = sections
+        .iter_mut()
+        .flat_map(|section| &mut section.children)
+        .filter_map(|node| match node {
+            PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => Some(element),
+            _ => None,
+        });
+    let root = roots.next().ok_or(FdxError::InvalidRoot)?;
+    if roots.next().is_some() {
+        return Err(FdxError::InvalidRoot);
+    }
+    let mut versions = root.attributes.iter_mut().filter(|attribute| {
+        attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Version"
+    });
+    let version = versions.next().ok_or(FdxError::MissingVersion)?;
+    if versions.next().is_some() {
+        return Err(FdxError::DuplicateVersion);
+    }
+    version.value = FDX_VERSION.to_owned();
+    Ok(())
 }
 
 fn validate_project_output_budgets(project: &Project) -> Result<(), FdxError> {
@@ -984,7 +1132,7 @@ fn parse_document(input: &[u8]) -> Result<Vec<RawNode>, FdxError> {
                 if stack.len() >= MAX_SOURCE_DEPTH {
                     return Err(FdxError::ResourceLimit);
                 }
-                let element = make_element(&reader, &start)?;
+                let element = make_element(&reader, &start, stack.is_empty())?;
                 add_retained_budget(
                     &mut retained_count,
                     1usize
@@ -994,7 +1142,7 @@ fn parse_document(input: &[u8]) -> Result<Vec<RawNode>, FdxError> {
                 stack.push(element);
             }
             Event::Empty(start) => {
-                let element = make_element(&reader, &start)?;
+                let element = make_element(&reader, &start, stack.is_empty())?;
                 add_retained_budget(
                     &mut retained_count,
                     1usize
@@ -1116,6 +1264,7 @@ fn append_node(
 fn make_element<R: std::io::BufRead>(
     reader: &NsReader<R>,
     start: &BytesStart<'_>,
+    document_root: bool,
 ) -> Result<RawElement, FdxError> {
     let (resolved, local) = reader.resolver().resolve_element(start.name());
     let (namespace_uri, local_name) = resolved_name(resolved, local.as_ref())?;
@@ -1125,7 +1274,9 @@ fn make_element<R: std::io::BufRead>(
     let qualified_name = utf8(start.name().as_ref())?.to_owned();
     let mut attributes = Vec::new();
     let mut namespace_bindings = Vec::new();
-    for item in start.attributes().with_checks(true) {
+    let mut seen_raw_attributes = BTreeSet::new();
+    let mut seen_expanded_attributes = BTreeSet::new();
+    for item in start.attributes().with_checks(false) {
         let attribute = item.map_err(|_| FdxError::MalformedXml)?;
         if attributes.len() + namespace_bindings.len() >= MAX_ATTRIBUTES_PER_ELEMENT {
             return Err(FdxError::ResourceLimit);
@@ -1136,6 +1287,11 @@ fn make_element<R: std::io::BufRead>(
             return Err(FdxError::ResourceLimit);
         }
         let raw_name = utf8(attribute.key.as_ref())?.to_owned();
+        if !seen_raw_attributes.insert(raw_name.clone())
+            && (!document_root || raw_name != "Version")
+        {
+            return Err(FdxError::MalformedXml);
+        }
         let (attribute_ns, attribute_local) = reader.resolver().resolve_attribute(attribute.key);
         let (attribute_namespace, local_name) =
             resolved_name(attribute_ns, attribute_local.as_ref())?;
@@ -1150,6 +1306,11 @@ fn make_element<R: std::io::BufRead>(
                 namespace_uri: value.into_owned(),
             });
         } else {
+            if !seen_expanded_attributes.insert((attribute_namespace.clone(), local_name.clone()))
+                && (!document_root || attribute_namespace.is_some() || local_name != "Version")
+            {
+                return Err(FdxError::MalformedXml);
+            }
             attributes.push(RawAttribute {
                 name: SourceName {
                     namespace_uri: attribute_namespace,
@@ -1242,6 +1403,142 @@ fn attribute<'a>(element: &'a RawElement, name: &str) -> Option<&'a str> {
         }
     }
     found
+}
+
+fn version_status(root: &RawElement) -> Result<FdxVersionStatus, FdxError> {
+    let mut declarations = root.attributes.iter().filter(|attribute| {
+        attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Version"
+    });
+    let Some(declaration) = declarations.next() else {
+        return Ok(FdxVersionStatus::Missing);
+    };
+    if declarations.next().is_some() {
+        return Ok(FdxVersionStatus::Duplicate);
+    }
+    let declared = declaration.value.as_str();
+    if declared.is_empty() || !declared.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Ok(FdxVersionStatus::Malformed);
+    }
+    let normalized = declared.trim_start_matches('0');
+    let normalized = if normalized.is_empty() {
+        "0"
+    } else {
+        normalized
+    };
+    if normalized == FDX_VERSION {
+        return Ok(FdxVersionStatus::Version6);
+    }
+    let direction = if normalized.len() < FDX_VERSION.len()
+        || (normalized.len() == FDX_VERSION.len() && normalized < FDX_VERSION)
+    {
+        FdxVersionDirection::Older
+    } else {
+        FdxVersionDirection::Newer
+    };
+    Ok(FdxVersionStatus::ExplicitNon6 {
+        declared: declared.to_owned(),
+        direction,
+    })
+}
+
+fn prepare_non_v6_source(
+    input: &[u8],
+    direction: FdxVersionDirection,
+) -> Result<Vec<u8>, FdxError> {
+    let mut parsed = parse_document(input)?;
+    let root_index = parsed
+        .iter()
+        .position(|node| matches!(node, RawNode::Element(_)))
+        .ok_or(FdxError::InvalidRoot)?;
+    let root = match &mut parsed[root_index] {
+        RawNode::Element(root) => root,
+        _ => return Err(FdxError::InvalidRoot),
+    };
+    if root.name.local_name != FDX_ROOT || attribute(root, "DocumentType") != Some("Script") {
+        return Err(FdxError::InvalidRoot);
+    }
+    let FdxVersionStatus::ExplicitNon6 {
+        direction: actual_direction,
+        ..
+    } = version_status(root)?
+    else {
+        return Err(FdxError::UnsupportedVersion);
+    };
+    if actual_direction != direction {
+        return Err(FdxError::UnsupportedVersion);
+    }
+    let version_attribute = root.attributes.iter_mut().find(|attribute| {
+        attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Version"
+    });
+    if let Some(attribute) = version_attribute {
+        attribute.value = FDX_VERSION.to_owned();
+    } else {
+        return Err(FdxError::MissingVersion);
+    }
+
+    if direction == FdxVersionDirection::Older {
+        let root_namespace = root.name.namespace_uri.clone();
+        root.children.retain(|node| match node {
+            RawNode::Element(element) => {
+                is_fdx_element(element, "Content", root_namespace.as_deref())
+                    || is_fdx_element(element, "TitlePage", root_namespace.as_deref())
+            }
+            _ => true,
+        });
+        for child in &mut root.children {
+            let RawNode::Element(section) = child else {
+                continue;
+            };
+            if !is_fdx_element(section, "Content", root_namespace.as_deref())
+                && !is_fdx_element(section, "TitlePage", root_namespace.as_deref())
+            {
+                continue;
+            }
+            let is_content = is_fdx_element(section, "Content", root_namespace.as_deref());
+            for item in &mut section.children {
+                let RawNode::Element(paragraph) = item else {
+                    continue;
+                };
+                if paragraph.name.local_name != "Paragraph" {
+                    if is_content {
+                        return Err(FdxError::UnsupportedConstruct);
+                    }
+                    continue;
+                }
+                if paragraph.name.namespace_uri != root_namespace {
+                    return Err(FdxError::UnsupportedConstruct);
+                }
+                let paragraph_type = attribute(paragraph, "Type");
+                if paragraph_type.is_some_and(|value| role_from_fdx(value).is_some()) {
+                    continue;
+                }
+                if let Some(type_attribute) = paragraph.attributes.iter_mut().find(|attribute| {
+                    attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type"
+                }) {
+                    type_attribute.value = "General".to_owned();
+                } else {
+                    paragraph.attributes.push(RawAttribute {
+                        name: SourceName {
+                            namespace_uri: None,
+                            local_name: "Type".to_owned(),
+                            qualified_name: Some("Type".to_owned()),
+                        },
+                        value: "General".to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut output = String::new();
+    for node in parsed {
+        let preserved = preserve_misc_node(node)?;
+        write_node(&preserved, &mut output, 0)?;
+        if output.len() > MAX_SOURCE_BYTES {
+            return Err(FdxError::SourceTooLarge);
+        }
+    }
+    Ok(output.into_bytes())
 }
 
 fn is_fdx_element(element: &RawElement, name: &str, root_ns: Option<&str>) -> bool {
@@ -1902,6 +2199,196 @@ mod tests {
         assert_eq!(read_v6(version), Err(FdxError::UnsupportedVersion));
         let entity = b"<FinalDraft DocumentType='Script' Version='6'><Content>&secret;</Content></FinalDraft>";
         assert_eq!(read_v6(entity), Err(FdxError::UnsupportedEntity));
+    }
+
+    #[test]
+    fn preflight_distinguishes_versions_and_invalid_declarations() {
+        let root = |version: &str| {
+            format!("<FinalDraft DocumentType='Script' Version='{version}'><Content/></FinalDraft>")
+        };
+        assert_eq!(
+            preflight_version(root("6").as_bytes()),
+            Ok(FdxVersionStatus::Version6)
+        );
+        assert_eq!(
+            preflight_version(root("0006").as_bytes()),
+            Ok(FdxVersionStatus::Version6)
+        );
+        let leading_zero_version = root("0006");
+        let leading_zero_document_result = read_v6(leading_zero_version.as_bytes());
+        assert!(leading_zero_document_result.is_ok());
+        let Ok(leading_zero_document) = leading_zero_document_result else {
+            return;
+        };
+        let canonicalized_result = write_v6(&leading_zero_document.project);
+        assert!(canonicalized_result.is_ok());
+        let Ok(canonicalized) = canonicalized_result else {
+            return;
+        };
+        assert!(
+            std::str::from_utf8(&canonicalized).is_ok_and(|text| text.contains("Version=\"6\""))
+        );
+        assert_eq!(
+            preflight_version(root("5").as_bytes()),
+            Ok(FdxVersionStatus::ExplicitNon6 {
+                declared: "5".to_owned(),
+                direction: FdxVersionDirection::Older,
+            })
+        );
+        assert_eq!(
+            preflight_version(root("7").as_bytes()),
+            Ok(FdxVersionStatus::ExplicitNon6 {
+                declared: "7".to_owned(),
+                direction: FdxVersionDirection::Newer,
+            })
+        );
+        assert_eq!(
+            preflight_version(b"<FinalDraft DocumentType='Script'><Content/></FinalDraft>"),
+            Ok(FdxVersionStatus::Missing)
+        );
+        assert_eq!(
+            preflight_version(root("unknown").as_bytes()),
+            Ok(FdxVersionStatus::Malformed)
+        );
+        assert_eq!(
+            preflight_version(
+                b"<FinalDraft DocumentType='Script' Version='5' Version='6'><Content/></FinalDraft>"
+            ),
+            Ok(FdxVersionStatus::Duplicate)
+        );
+        assert_eq!(
+            read_v6(b"<FinalDraft DocumentType='Script'><Content/></FinalDraft>"),
+            Err(FdxError::MissingVersion)
+        );
+        assert_eq!(
+            read_v6(root("latest").as_bytes()),
+            Err(FdxError::InvalidVersion)
+        );
+        assert_eq!(
+            read_v6(
+                b"<FinalDraft DocumentType='Script' Version='5' Version='6'><Content/></FinalDraft>"
+            ),
+            Err(FdxError::DuplicateVersion)
+        );
+        assert_eq!(
+            preflight_version(b"<FinalDraft DocumentType='Script' Version='6'><Content>"),
+            Err(FdxError::MalformedXml)
+        );
+    }
+
+    #[test]
+    fn older_import_requires_consent_and_converts_only_title_and_content_atomically() {
+        let input = b"<FinalDraft DocumentType='Script' Version='5'><DocumentRef/><TitlePage><Paragraph Type='Old Title Type'><Text>synthetic title</Text></Paragraph></TitlePage><Content><Paragraph Type='Old Body Type' id='old-1'><Text>synthetic old role</Text></Paragraph><Paragraph Type='Action' id='old-2'><Text>known role</Text></Paragraph></Content><DisplayBoards><DisplayBoard ID='board-1'/></DisplayBoards></FinalDraft>";
+        let original = input.to_vec();
+        let cancelled_input =
+            b"<FinalDraft DocumentType='Script' Version='5'><TitlePage/></FinalDraft>";
+        assert_eq!(
+            import_fdx(cancelled_input, FdxMigrationConsent::Cancel),
+            Ok(FdxImportOutcome::Cancelled {
+                declared_version: "5".to_owned(),
+            })
+        );
+        assert_eq!(
+            cancelled_input,
+            b"<FinalDraft DocumentType='Script' Version='5'><TitlePage/></FinalDraft>"
+        );
+        assert_eq!(input, original.as_slice());
+
+        let outcome = import_fdx(input, FdxMigrationConsent::Continue);
+        assert!(matches!(&outcome, Ok(FdxImportOutcome::Candidate(_))));
+        let Ok(FdxImportOutcome::Candidate(candidate)) = outcome else {
+            return;
+        };
+        assert_eq!(
+            candidate.migration,
+            Some(FdxMigrationKind::OlderLossy {
+                declared: "5".to_owned(),
+            })
+        );
+        assert_eq!(candidate.document.project.elements.len(), 2);
+        assert_eq!(candidate.document.project.elements[0].role, Role::General);
+        assert_eq!(
+            candidate.document.project.elements[0].text,
+            "synthetic old role"
+        );
+        assert_eq!(candidate.document.project.elements[1].role, Role::Action);
+        assert_eq!(candidate.document.project.title_page.len(), 1);
+        assert_eq!(candidate.document.project.title_page[0].role, Role::General);
+        assert_eq!(input, original.as_slice());
+
+        let emitted_result = write_v6(&candidate.document.project);
+        assert!(emitted_result.is_ok());
+        let Ok(emitted) = emitted_result else {
+            return;
+        };
+        let emitted_root_result = parse_document(&emitted);
+        assert!(emitted_root_result.is_ok());
+        let Ok(emitted_root) = emitted_root_result else {
+            return;
+        };
+        let root_result = emitted_root.iter().find_map(|node| match node {
+            RawNode::Element(root) => Some(root),
+            _ => None,
+        });
+        assert!(root_result.is_some());
+        let Some(root) = root_result else { return };
+        assert_eq!(attribute(root, "Version"), Some("6"));
+        let sections = root
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                RawNode::Element(element) => Some(element.name.local_name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(sections
+            .iter()
+            .all(|name| *name == "TitlePage" || *name == "Content"));
+        assert!(!sections
+            .iter()
+            .any(|name| *name == "DocumentRef" || *name == "DisplayBoards"));
+    }
+
+    #[test]
+    fn older_import_rejects_missing_content_and_unconvertible_paragraphs() {
+        let missing_content =
+            b"<FinalDraft DocumentType='Script' Version='5'><TitlePage/></FinalDraft>";
+        assert_eq!(
+            import_fdx(missing_content, FdxMigrationConsent::Continue),
+            Err(FdxError::MissingContent)
+        );
+        let unconvertible = b"<FinalDraft DocumentType='Script' Version='5'><Content><Paragraph Type='Action'><Text><Unknown/></Text></Paragraph></Content></FinalDraft>";
+        assert_eq!(
+            import_fdx(unconvertible, FdxMigrationConsent::Continue),
+            Err(FdxError::UnsupportedConstruct)
+        );
+        let non_paragraph_content = b"<FinalDraft DocumentType='Script' Version='5'><Content><UnknownElement/></Content></FinalDraft>";
+        assert_eq!(
+            import_fdx(non_paragraph_content, FdxMigrationConsent::Continue),
+            Err(FdxError::UnsupportedConstruct)
+        );
+    }
+
+    #[test]
+    fn newer_import_is_explicitly_best_effort_and_preserves_unknown_sections() {
+        let input = b"<FinalDraft DocumentType='Script' Version='7'><Content><Paragraph Type='Action' id='p1'><Text>newer text</Text></Paragraph></Content><FutureSection><Data value='opaque'/></FutureSection></FinalDraft>";
+        let outcome = import_fdx(input, FdxMigrationConsent::Continue);
+        assert!(matches!(&outcome, Ok(FdxImportOutcome::Candidate(_))));
+        let Ok(FdxImportOutcome::Candidate(candidate)) = outcome else {
+            return;
+        };
+        assert_eq!(
+            candidate.migration,
+            Some(FdxMigrationKind::NewerBestEffort {
+                declared: "7".to_owned(),
+            })
+        );
+        assert_eq!(candidate.document.project.elements[0].text, "newer text");
+        let emitted_result = write_v6(&candidate.document.project);
+        assert!(emitted_result.is_ok());
+        let Ok(emitted) = emitted_result else { return };
+        assert!(std::str::from_utf8(&emitted).is_ok_and(|text| text.contains("FutureSection")));
+        assert!(std::str::from_utf8(&emitted).is_ok_and(|text| text.contains("Version=\"6\"")));
     }
 
     #[test]
