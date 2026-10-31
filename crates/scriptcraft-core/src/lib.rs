@@ -7,6 +7,7 @@ pub mod editing;
 pub mod exports;
 pub mod layout;
 pub mod persistence;
+pub mod preservation;
 
 use std::collections::BTreeSet;
 
@@ -51,6 +52,7 @@ pub enum ModelError {
     UnsupportedJsonState,
     MissingField(&'static str),
     WrongType(&'static str),
+    InvalidPreservationState(preservation::PreservationError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -446,6 +448,9 @@ pub struct Project {
     pub title_page: Vec<ScreenplayElement>,
     pub page_profile: PageProfile,
     pub elements: Vec<ScreenplayElement>,
+    /// Source-owned state is separate from the semantic projection and is not
+    /// representable in transitional JSON.
+    pub preservation: Option<preservation::PreservationState>,
 }
 
 impl Project {
@@ -473,6 +478,7 @@ impl Project {
             title_page: Vec::new(),
             page_profile: PageProfile::default(),
             elements: vec![start],
+            preservation: None,
         })
     }
     pub fn validate(&self) -> Result<(), ModelError> {
@@ -486,11 +492,18 @@ impl Project {
         }
         let mut ids = BTreeSet::new();
         ids.insert(&self.id);
+        let mut element_ids = BTreeSet::new();
         for item in self.title_page.iter().chain(self.elements.iter()) {
             validate_element(item)?;
             if !ids.insert(&item.id) {
                 return Err(ModelError::DuplicateId);
             }
+            element_ids.insert(item.id.clone());
+        }
+        if let Some(preservation) = &self.preservation {
+            preservation
+                .validate_project_elements(&element_ids)
+                .map_err(ModelError::InvalidPreservationState)?;
         }
         Ok(())
     }
@@ -657,7 +670,8 @@ fn ensure_legacy_json_compatible(project: &Project) -> Result<(), ModelError> {
             !element.role.is_legacy()
                 || !element.runs.is_empty()
                 || element.source_provenance.is_some()
-        });
+        })
+        || project.preservation.is_some();
     if richer_profile || richer_elements {
         return Err(ModelError::UnsupportedJsonState);
     }
@@ -944,6 +958,9 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
         return Err(ModelError::InvalidSchemaVersion);
     }
     let envelope = obj(&root, "project")?;
+    if object_has_field(envelope, "preservation") {
+        return Err(ModelError::UnsupportedJsonState);
+    }
     let schema = num_field(envelope, "schema_version")?;
     let m = obj(envelope, "metadata")?;
     let profile = obj(envelope, "page_profile")?;
@@ -989,6 +1006,7 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
             },
         },
         elements: decode_elements(obj(envelope, "elements")?)?,
+        preservation: None,
     })
 }
 
@@ -1200,6 +1218,7 @@ mod tests {
             title_page: Vec::new(),
             page_profile: PageProfile::default(),
             elements: vec![element],
+            preservation: None,
         }
         .validate()
         .is_ok());
@@ -1230,6 +1249,12 @@ mod tests {
         );
         assert_eq!(
             Project::from_json(&with_runs),
+            Err(ModelError::UnsupportedJsonState)
+        );
+        let with_preservation =
+            legacy.replace("\"elements\":[", "\"preservation\":{},\"elements\":[");
+        assert_eq!(
+            Project::from_json(&with_preservation),
             Err(ModelError::UnsupportedJsonState)
         );
 
