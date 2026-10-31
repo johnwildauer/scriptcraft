@@ -208,6 +208,42 @@ impl EditingSession {
         cast_list::prepare_save_candidate(&self.project).map_err(EditError::CastList)
     }
 
+    /// Builds a detached session representing a successfully serialized and
+    /// re-read project. This is prepared before storage publication; callers
+    /// must install it only after the destination has been replaced.
+    pub(crate) fn prepare_saved_rebase(&self, project: Project) -> Result<Self, EditError> {
+        project.validate()?;
+        if project.elements.len() != self.project.elements.len() {
+            return Err(EditError::InvalidSelection);
+        }
+
+        let mut rebased = self.clone();
+        let selection = map_selection_to_project(self.selection, &project)?;
+        let generated_parentheticals = self
+            .project
+            .elements
+            .iter()
+            .zip(&project.elements)
+            .filter(|(old, new)| {
+                old.role == Role::Parenthetical
+                    && new.role == Role::Parenthetical
+                    && self.generated_parentheticals.contains(old.id.as_str())
+            })
+            .map(|(_, new)| new.id.as_str().to_owned())
+            .collect();
+
+        rebased.project = project.clone();
+        rebased.clean_project = project;
+        rebased.selection = selection;
+        rebased.generated_parentheticals = generated_parentheticals;
+        rebased.dirty = false;
+        // Saving changes the preservation baseline and therefore invalidates
+        // render caches even when the visible semantic text did not change.
+        rebased.revision = rebased.revision.saturating_add(1);
+        rebased.validate()?;
+        Ok(rebased)
+    }
+
     pub fn replace_with_saved(&mut self, project: Project) -> Result<(), EditError> {
         let replacement = Self::with_policy(project, self.policy)?;
         *self = replacement;
@@ -642,6 +678,28 @@ impl EditingSession {
             self.history.remove(0);
         }
     }
+}
+
+fn map_selection_to_project(
+    selection: Selection,
+    project: &Project,
+) -> Result<Selection, EditError> {
+    fn map_position(mut position: Position, project: &Project) -> Result<Position, EditError> {
+        let element = project
+            .elements
+            .get(position.element)
+            .ok_or(EditError::InvalidSelection)?;
+        position.offset = position.offset.min(element.text.len());
+        while !element.text.is_char_boundary(position.offset) {
+            position.offset = position.offset.saturating_sub(1);
+        }
+        Ok(position)
+    }
+
+    Ok(Selection {
+        anchor: map_position(selection.anchor, project)?,
+        focus: map_position(selection.focus, project)?,
+    })
 }
 
 fn invalidate_changed_generated_parentheticals(

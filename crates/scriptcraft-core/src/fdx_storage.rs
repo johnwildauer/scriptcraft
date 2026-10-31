@@ -11,6 +11,7 @@
 //! promised. External modifications are checked immediately before replacement;
 //! a non-cooperating writer can still race that final comparison and rename.
 
+use crate::editing::{EditError, EditingSession};
 use crate::fdx::{self, FdxDocument, FdxError, MAX_SOURCE_BYTES};
 use crate::Project;
 use std::ffi::OsString;
@@ -183,6 +184,10 @@ impl FdxBaseline {
     pub fn byte_count(&self) -> usize {
         self.bytes.len()
     }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -232,6 +237,192 @@ impl fmt::Debug for OpenedFdx {
 pub struct FdxSaveReceipt {
     pub baseline: FdxBaseline,
     pub temporary_cleanup_failed: bool,
+}
+
+/// Runtime destination state for the headless transactional save preparation.
+/// It is intentionally not stored in the FDX document model.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct FdxSaveTarget {
+    path: Option<PathBuf>,
+    baseline: Option<FdxBaseline>,
+}
+
+impl fmt::Debug for FdxSaveTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FdxSaveTarget")
+            .field("path_bound", &self.path.is_some())
+            .field("baseline", &self.baseline)
+            .finish()
+    }
+}
+
+impl FdxSaveTarget {
+    pub fn new_unsaved() -> Self {
+        Self::default()
+    }
+
+    pub fn from_baseline(baseline: FdxBaseline) -> Self {
+        Self {
+            path: Some(baseline.path.clone()),
+            baseline: Some(baseline),
+        }
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub fn baseline(&self) -> Option<&FdxBaseline> {
+        self.baseline.as_ref()
+    }
+}
+
+/// Save keeps the opened target and its conflict baseline; Save As installs a
+/// new destination without overwriting an existing file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FdxSaveMode {
+    Save,
+    SaveAs(PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionalSaveError {
+    Session(EditError),
+    Codec(FdxError),
+    Storage(FdxStorageError),
+    MissingBaseline,
+}
+
+impl fmt::Display for TransactionalSaveError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Session(_) => "FDX save candidate could not be prepared",
+            Self::Codec(_) => "FDX save candidate could not be serialized or re-read",
+            Self::Storage(error) => return error.fmt(formatter),
+            Self::MissingBaseline => "FDX Save requires an opened or previously saved target",
+        })
+    }
+}
+
+impl std::error::Error for TransactionalSaveError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionalSaveOutcome {
+    /// Save As installation succeeded, but its temporary hard-link cleanup did
+    /// not. The destination and live session are nevertheless successfully saved.
+    pub temporary_cleanup_warning: bool,
+}
+
+/// Prepares the corrected model, serialized bytes, re-read source baseline and
+/// publishable session before any destination write. Live session and target
+/// state are changed only after storage reports successful replacement/install.
+pub fn save_session<F: FdxStorageFileSystem>(
+    fs: &F,
+    session: &mut EditingSession,
+    target: &mut FdxSaveTarget,
+    mode: FdxSaveMode,
+) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
+    save_session_with_codec(fs, session, target, mode, &NativeSaveCandidateCodec)
+}
+
+trait SaveCandidateCodec {
+    fn serialize(&self, project: &Project) -> Result<PreparedFdx, TransactionalSaveError>;
+    fn reread(&self, bytes: &[u8]) -> Result<Project, FdxError>;
+}
+
+struct NativeSaveCandidateCodec;
+
+impl SaveCandidateCodec for NativeSaveCandidateCodec {
+    fn serialize(&self, project: &Project) -> Result<PreparedFdx, TransactionalSaveError> {
+        PreparedFdx::from_project(project).map_err(|error| match error.kind {
+            FdxStorageErrorKind::InvalidFdx(codec_error) => {
+                TransactionalSaveError::Codec(codec_error)
+            }
+            _ => TransactionalSaveError::Storage(error),
+        })
+    }
+
+    fn reread(&self, bytes: &[u8]) -> Result<Project, FdxError> {
+        fdx::read_v6(bytes).map(|document| document.project)
+    }
+}
+
+fn save_session_with_codec<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
+    fs: &F,
+    session: &mut EditingSession,
+    target: &mut FdxSaveTarget,
+    mode: FdxSaveMode,
+    codec: &C,
+) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
+    let (destination, existing_baseline) = match mode {
+        FdxSaveMode::Save => {
+            let path = target
+                .path
+                .clone()
+                .ok_or(TransactionalSaveError::MissingBaseline)?;
+            let baseline = target
+                .baseline
+                .as_ref()
+                .ok_or(TransactionalSaveError::MissingBaseline)?
+                .clone();
+            (path, Some(baseline))
+        }
+        FdxSaveMode::SaveAs(destination) => (destination, None),
+    };
+
+    let corrected = session
+        .prepare_cast_list_save_candidate()
+        .map_err(TransactionalSaveError::Session)?;
+    let prepared = codec.serialize(&corrected)?;
+    let rebased_project = codec
+        .reread(&prepared.bytes)
+        .map_err(TransactionalSaveError::Codec)?;
+    if !same_save_projection(&corrected, &rebased_project) {
+        return Err(TransactionalSaveError::Codec(
+            FdxError::UnsupportedConstruct,
+        ));
+    }
+    let publishable_session = session
+        .prepare_saved_rebase(rebased_project)
+        .map_err(TransactionalSaveError::Session)?;
+
+    // The destination and all session work are now prepared. No fallible
+    // application transition follows successful filesystem publication.
+    let receipt = match existing_baseline.as_ref() {
+        Some(baseline) => replace(fs, &destination, &prepared, baseline),
+        None => save_as(fs, &destination, &prepared),
+    }
+    .map_err(TransactionalSaveError::Storage)?;
+
+    let outcome = TransactionalSaveOutcome {
+        temporary_cleanup_warning: receipt.temporary_cleanup_failed,
+    };
+    target.path = Some(destination);
+    target.baseline = Some(receipt.baseline);
+    *session = publishable_session;
+    Ok(outcome)
+}
+
+fn same_save_projection(expected: &Project, actual: &Project) -> bool {
+    fn same_elements(
+        expected: &[crate::ScreenplayElement],
+        actual: &[crate::ScreenplayElement],
+    ) -> bool {
+        expected.len() == actual.len()
+            && expected.iter().zip(actual).all(|(expected, actual)| {
+                expected.role == actual.role
+                    && expected.text == actual.text
+                    && if expected.runs.is_empty() {
+                        actual.runs.iter().all(|run| run.attributes.is_empty())
+                    } else {
+                        expected.runs == actual.runs
+                    }
+            })
+    }
+
+    same_elements(&expected.title_page, &actual.title_page)
+        && same_elements(&expected.elements, &actual.elements)
 }
 
 /// Narrow platform seam for deterministic failure injection and filesystem tests.
@@ -488,6 +679,13 @@ fn publish_temp<F: FdxStorageFileSystem>(
     candidate: &PreparedFdx,
     expected: Option<(&F::Permissions, &FdxBaseline)>,
 ) -> Result<FdxSaveReceipt, FdxStorageError> {
+    // Allocate the receipt's new baseline before publication. Once replacement
+    // or no-overwrite installation succeeds, returning the receipt requires
+    // only moving already-prepared state (cleanup remains a separate warning).
+    let published_baseline = FdxBaseline {
+        path: destination.to_owned(),
+        bytes: candidate.bytes.clone(),
+    };
     let (temp_path, mut temp) = fs.create_temp(destination)?;
     let stage_result = (|| {
         temp.write_all(&candidate.bytes)
@@ -538,10 +736,7 @@ fn publish_temp<F: FdxStorageFileSystem>(
         false
     };
     Ok(FdxSaveReceipt {
-        baseline: FdxBaseline {
-            path: destination.to_owned(),
-            bytes: candidate.bytes.clone(),
-        },
+        baseline: published_baseline,
         temporary_cleanup_failed: cleanup_failed,
     })
 }
@@ -583,7 +778,9 @@ mod tests {
     enum Fault {
         #[default]
         None,
+        CreateTemporary,
         WriteAfter(usize),
+        WriteAfterAndCleanup(usize),
         Flush,
         Permissions,
         Sync,
@@ -615,7 +812,7 @@ mod tests {
                 .fault
                 .lock()
                 .map_err(|_| io::Error::other("poisoned"))?;
-            if let Fault::WriteAfter(limit) = fault {
+            if let Fault::WriteAfter(limit) | Fault::WriteAfterAndCleanup(limit) = fault {
                 if self.bytes.len() >= limit {
                     return Err(io::Error::other("injected partial write failure"));
                 }
@@ -712,6 +909,14 @@ mod tests {
             &self,
             destination: &Path,
         ) -> Result<(PathBuf, Self::TempFile), FdxStorageError> {
+            if *self
+                .fault
+                .lock()
+                .map_err(|_| io_error(StorageOperation::CreateTemporary))?
+                == Fault::CreateTemporary
+            {
+                return Err(io_error(StorageOperation::CreateTemporary));
+            }
             for _ in 0..MAX_TEMP_ATTEMPTS {
                 let serial = self.temp_serial.fetch_add(1, Ordering::Relaxed);
                 let path =
@@ -826,12 +1031,11 @@ mod tests {
         }
 
         fn remove_temp(&self, temp: &Path) -> Result<(), FdxStorageError> {
-            if *self
+            let fault = *self
                 .fault
                 .lock()
-                .map_err(|_| io_error(StorageOperation::Cleanup))?
-                == Fault::Cleanup
-            {
+                .map_err(|_| io_error(StorageOperation::Cleanup))?;
+            if matches!(fault, Fault::Cleanup | Fault::WriteAfterAndCleanup(_)) {
                 return Err(io_error(StorageOperation::Cleanup));
             }
             self.files
@@ -851,6 +1055,22 @@ mod tests {
         project.elements = vec![ScreenplayElement::new("scene-1", Role::SceneHeading, text)
             .unwrap_or_else(|_| unreachable!())];
         PreparedFdx::from_project(&project).unwrap_or_else(|_| unreachable!())
+    }
+
+    fn save_test_session(source: &[u8]) -> EditingSession {
+        let project = fdx::read_v6(source)
+            .unwrap_or_else(|_| unreachable!())
+            .project;
+        EditingSession::new(project).unwrap_or_else(|_| unreachable!())
+    }
+
+    fn set_caret(session: &mut EditingSession, element: usize, offset: usize) {
+        session
+            .set_selection(crate::editing::Selection::caret(crate::editing::Position {
+                element,
+                offset,
+            }))
+            .unwrap_or_else(|_| unreachable!());
     }
 
     #[test]
@@ -994,6 +1214,462 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn transactional_save_rebases_source_syncs_cast_and_preserves_history() {
+        let fs = MemFs::default();
+        let path = Path::new("/mem/rebase.fdx");
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Scene Heading" ID="scene"><Text>INT. ROOM - DAY</Text></Paragraph><Paragraph Type="Character" ID="cue"><Text>ALICE</Text></Paragraph><Paragraph Type="Cast List" ID="cast"><Text>(STALE)</Text></Paragraph></Content><VendorData keep="yes"/></FinalDraft>"#;
+        fs.put(path, source.to_vec());
+        let opened = open_source(&fs, path).unwrap_or_else(|_| unreachable!());
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+        let mut session = save_test_session(source);
+        set_caret(&mut session, 1, 5);
+        session.insert("X").unwrap_or_else(|_| unreachable!());
+        let original_selection = session.selection();
+        assert!(session.dirty());
+        assert_eq!(session.project().elements[2].text, "(STALE)");
+
+        let outcome = save_session(&fs, &mut session, &mut target, FdxSaveMode::Save)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!outcome.temporary_cleanup_warning);
+        assert!(!session.dirty());
+        assert!(session.can_undo());
+        assert_eq!(session.selection(), original_selection);
+        assert_eq!(session.project().elements[1].text, "ALICEX");
+        assert_eq!(session.project().elements[2].text, "(ALICEX)");
+        let saved = fs.bytes(path).unwrap_or_default();
+        assert!(std::str::from_utf8(&saved)
+            .unwrap_or("")
+            .contains("VendorData keep=\"yes\""));
+        assert_eq!(
+            session
+                .project()
+                .preservation
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .source
+                .original_bytes,
+            saved
+        );
+        assert_eq!(target.path(), Some(path));
+        assert_eq!(
+            target.baseline(),
+            Some(
+                &open_source(&fs, path)
+                    .unwrap_or_else(|_| unreachable!())
+                    .baseline
+            )
+        );
+
+        // A second edit/save is based on the just-published preservation source,
+        // not the bytes that were present at initial open.
+        set_caret(&mut session, 1, 6);
+        session.insert("Y").unwrap_or_else(|_| unreachable!());
+        save_session(&fs, &mut session, &mut target, FdxSaveMode::Save)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!session.dirty());
+        assert_eq!(session.project().elements[1].text, "ALICEXY");
+        assert_eq!(session.project().elements[2].text, "(ALICEXY)");
+        let latest = fs.bytes(path).unwrap_or_default();
+        let reopened = fdx::read_v6(&latest).unwrap_or_else(|_| unreachable!());
+        assert_eq!(reopened.project.elements[1].text, "ALICEXY");
+        assert_eq!(reopened.project.elements[2].text, "(ALICEXY)");
+        assert_eq!(
+            session
+                .project()
+                .preservation
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .source
+                .original_bytes,
+            latest
+        );
+        session.undo().unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.project().elements[1].text, "ALICEX");
+        assert!(session.dirty());
+        session.redo().unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.project().elements[1].text, "ALICEXY");
+        assert!(!session.dirty());
+    }
+
+    #[test]
+    fn transactional_save_failures_preserve_session_target_and_destination() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" ID="p1"><Text>original</Text></Paragraph></Content><VendorData keep="yes"/></FinalDraft>"#;
+        for fault in [
+            Fault::CreateTemporary,
+            Fault::WriteAfter(7),
+            Fault::Flush,
+            Fault::Permissions,
+            Fault::Sync,
+            Fault::Replace,
+        ] {
+            let fs = MemFs::default();
+            let path = Path::new("/mem/rollback.fdx");
+            fs.put(path, source.to_vec());
+            let opened = open_source(&fs, path).unwrap_or_else(|_| unreachable!());
+            let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+            let before_target = target.clone();
+            let mut session = save_test_session(source);
+            set_caret(&mut session, 0, 8);
+            session.insert(" edited").unwrap_or_else(|_| unreachable!());
+            let before_session = session.clone();
+            fs.set_fault(fault);
+
+            let error = save_session(&fs, &mut session, &mut target, FdxSaveMode::Save)
+                .err()
+                .unwrap_or_else(|| unreachable!());
+            assert_eq!(session, before_session, "fault: {fault:?}");
+            assert_eq!(target, before_target, "fault: {fault:?}");
+            assert_eq!(fs.bytes(path), Some(source.to_vec()), "fault: {fault:?}");
+            let diagnostic = error.to_string();
+            assert!(!diagnostic.contains("original"));
+            assert!(!diagnostic.contains("/mem/rollback.fdx"));
+        }
+
+        // A failed pre-publication write can also report its separate cleanup
+        // failure without changing the destination or candidate publication.
+        let fs = MemFs::default();
+        let path = Path::new("/mem/rollback-cleanup.fdx");
+        fs.put(path, source.to_vec());
+        let opened = open_source(&fs, path).unwrap_or_else(|_| unreachable!());
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+        let mut session = save_test_session(source);
+        set_caret(&mut session, 0, 8);
+        session.insert(" edited").unwrap_or_else(|_| unreachable!());
+        let before = session.clone();
+        fs.set_fault(Fault::WriteAfterAndCleanup(2));
+        let error = save_session(&fs, &mut session, &mut target, FdxSaveMode::Save)
+            .err()
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(session, before);
+        assert_eq!(fs.bytes(path), Some(source.to_vec()));
+        assert!(matches!(
+            error,
+            TransactionalSaveError::Storage(FdxStorageError {
+                temporary_cleanup_failed: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn candidate_codec_and_reread_failures_publish_nothing() {
+        struct InjectedCodec {
+            fail_serialization: bool,
+            fail_reread: bool,
+            mismatch_reread: bool,
+        }
+
+        impl SaveCandidateCodec for InjectedCodec {
+            fn serialize(&self, project: &Project) -> Result<PreparedFdx, TransactionalSaveError> {
+                if self.fail_serialization {
+                    return Err(TransactionalSaveError::Codec(FdxError::InvalidValue));
+                }
+                PreparedFdx::from_project(project).map_err(|error| match error.kind {
+                    FdxStorageErrorKind::InvalidFdx(codec_error) => {
+                        TransactionalSaveError::Codec(codec_error)
+                    }
+                    _ => TransactionalSaveError::Storage(error),
+                })
+            }
+
+            fn reread(&self, bytes: &[u8]) -> Result<Project, FdxError> {
+                if self.fail_reread {
+                    Err(FdxError::MalformedXml)
+                } else {
+                    let mut project = fdx::read_v6(bytes)?.project;
+                    if self.mismatch_reread {
+                        let element = project
+                            .elements
+                            .first_mut()
+                            .ok_or(FdxError::MissingContent)?;
+                        element.text.push_str(" unexpected");
+                        if let Some(run) = element.runs.first_mut() {
+                            run.text.push_str(" unexpected");
+                        }
+                    }
+                    Ok(project)
+                }
+            }
+        }
+
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" ID="p1"><Text>original</Text></Paragraph></Content></FinalDraft>"#;
+        for codec in [
+            InjectedCodec {
+                fail_serialization: true,
+                fail_reread: false,
+                mismatch_reread: false,
+            },
+            InjectedCodec {
+                fail_serialization: false,
+                fail_reread: true,
+                mismatch_reread: false,
+            },
+            InjectedCodec {
+                fail_serialization: false,
+                fail_reread: false,
+                mismatch_reread: true,
+            },
+        ] {
+            let fs = MemFs::default();
+            let path = PathBuf::from("/mem/preparation.fdx");
+            fs.put(&path, source.to_vec());
+            let opened = open_source(&fs, &path).unwrap_or_else(|_| unreachable!());
+            let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+            let before_target = target.clone();
+            let mut session = save_test_session(source);
+            set_caret(&mut session, 0, 8);
+            session.insert(" edited").unwrap_or_else(|_| unreachable!());
+            let before_session = session.clone();
+
+            assert!(save_session_with_codec(
+                &fs,
+                &mut session,
+                &mut target,
+                FdxSaveMode::Save,
+                &codec
+            )
+            .is_err());
+            assert_eq!(session, before_session);
+            assert_eq!(target, before_target);
+            assert_eq!(fs.bytes(&path), Some(source.to_vec()));
+        }
+
+        let formatted_cast = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Scene Heading" ID="scene"><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" ID="cue"><Text>ALICE</Text></Paragraph><Paragraph Type="Cast List" ID="cast"><Text Style="Bold">(STALE)</Text></Paragraph></Content></FinalDraft>"#;
+        let fs = MemFs::default();
+        let mut session = save_test_session(formatted_cast);
+        let before_session = session.clone();
+        let mut target = FdxSaveTarget::new_unsaved();
+        let error = save_session(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAs(PathBuf::from("/mem/candidate.fdx")),
+        )
+        .err()
+        .unwrap_or_else(|| unreachable!());
+        assert!(matches!(error, TransactionalSaveError::Session(_)));
+        assert_eq!(session, before_session);
+        assert_eq!(target, FdxSaveTarget::new_unsaved());
+        assert!(fs.bytes(Path::new("/mem/candidate.fdx")).is_none());
+    }
+
+    #[test]
+    fn transactional_conflict_and_clean_session_are_coherent() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" ID="p1"><Text>original</Text></Paragraph></Content></FinalDraft>"#;
+
+        let fs = MemFs::default();
+        let path = Path::new("/mem/conflict-session.fdx");
+        fs.put(path, source.to_vec());
+        let opened = open_source(&fs, path).unwrap_or_else(|_| unreachable!());
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+        let before_target = target.clone();
+        let mut session = save_test_session(source);
+        set_caret(&mut session, 0, 8);
+        session
+            .insert(" candidate")
+            .unwrap_or_else(|_| unreachable!());
+        let before_session = session.clone();
+        let external = candidate("external replacement").bytes;
+        fs.change_destination_on_sync(path, external.clone());
+
+        assert!(matches!(
+            save_session(&fs, &mut session, &mut target, FdxSaveMode::Save),
+            Err(TransactionalSaveError::Storage(FdxStorageError {
+                kind: FdxStorageErrorKind::Conflict,
+                ..
+            }))
+        ));
+        assert_eq!(session, before_session);
+        assert_eq!(target, before_target);
+        assert_eq!(fs.bytes(path), Some(external));
+
+        let clean_fs = MemFs::default();
+        let clean_path = Path::new("/mem/clean-session.fdx");
+        clean_fs.put(clean_path, source.to_vec());
+        let clean_opened = open_source(&clean_fs, clean_path).unwrap_or_else(|_| unreachable!());
+        let mut clean_target = FdxSaveTarget::from_baseline(clean_opened.baseline);
+        let mut clean_session = save_test_session(source);
+        let original_revision = clean_session.revision();
+        assert!(!clean_session.dirty());
+        save_session(
+            &clean_fs,
+            &mut clean_session,
+            &mut clean_target,
+            FdxSaveMode::Save,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert!(!clean_session.dirty());
+        assert_eq!(
+            clean_session.revision(),
+            original_revision.saturating_add(1)
+        );
+        assert_eq!(
+            clean_session
+                .project()
+                .preservation
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .source
+                .original_bytes,
+            clean_fs.bytes(clean_path).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn save_as_cleanup_warning_is_successfully_published_to_session_and_target() {
+        let fs = MemFs::default();
+        let destination = PathBuf::from("/mem/new-save-as.fdx");
+        let mut session = EditingSession::new(Project::new().unwrap_or_else(|_| unreachable!()))
+            .unwrap_or_else(|_| unreachable!());
+        session
+            .insert("new screenplay")
+            .unwrap_or_else(|_| unreachable!());
+        let before_session = session.clone();
+        let mut target = FdxSaveTarget::new_unsaved();
+        fs.set_fault(Fault::Cleanup);
+
+        let result = save_session(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAs(destination.clone()),
+        );
+        assert_eq!(
+            result,
+            Ok(TransactionalSaveOutcome {
+                temporary_cleanup_warning: true
+            })
+        );
+        assert_eq!(target.path(), Some(destination.as_path()));
+        assert_eq!(
+            target.baseline().map(FdxBaseline::path),
+            Some(destination.as_path())
+        );
+        assert_eq!(
+            fs.bytes(&destination),
+            Some(
+                session
+                    .project()
+                    .preservation
+                    .as_ref()
+                    .unwrap_or_else(|| unreachable!())
+                    .source
+                    .original_bytes
+                    .clone()
+            )
+        );
+        assert!(!session.dirty());
+        assert_eq!(
+            session
+                .project()
+                .elements
+                .iter()
+                .map(|element| (element.role, element.text.as_str()))
+                .collect::<Vec<_>>(),
+            before_session
+                .project()
+                .elements
+                .iter()
+                .map(|element| (element.role, element.text.as_str()))
+                .collect::<Vec<_>>()
+        );
+        assert!(session.revision() > before_session.revision());
+    }
+
+    #[test]
+    fn transactional_save_as_refuses_existing_destination_without_publication() {
+        let fs = MemFs::default();
+        let source_path = Path::new("/mem/save-as-source.fdx");
+        let destination = Path::new("/mem/save-as-existing.fdx");
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" ID="source"><Text>source</Text></Paragraph></Content></FinalDraft>"#.to_vec();
+        let existing = candidate("existing destination").bytes;
+        fs.put(source_path, source.clone());
+        fs.put(destination, existing.clone());
+        let opened = open_source(&fs, source_path).unwrap_or_else(|_| unreachable!());
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+        let before_target = target.clone();
+        let mut session = save_test_session(&source);
+        set_caret(&mut session, 0, 6);
+        session
+            .insert(" changed")
+            .unwrap_or_else(|_| unreachable!());
+        let before_session = session.clone();
+
+        assert!(matches!(
+            save_session(
+                &fs,
+                &mut session,
+                &mut target,
+                FdxSaveMode::SaveAs(destination.to_owned())
+            ),
+            Err(TransactionalSaveError::Storage(FdxStorageError {
+                kind: FdxStorageErrorKind::DestinationExists,
+                ..
+            }))
+        ));
+        assert_eq!(session, before_session);
+        assert_eq!(target, before_target);
+        assert_eq!(fs.bytes(source_path), Some(source));
+        assert_eq!(fs.bytes(destination), Some(existing));
+    }
+
+    #[test]
+    fn save_as_does_not_modify_source_and_older_conversion_replaces_only_on_save() {
+        let fs = MemFs::default();
+        let source_path = Path::new("/mem/older-source.fdx");
+        let older = br#"<FinalDraft DocumentType="Script" Version="5"><TitlePage><Paragraph><Text>Legacy title</Text></Paragraph></TitlePage><Content><Paragraph Type="Vendor Paragraph"><Text>legacy body</Text></Paragraph></Content></FinalDraft>"#;
+        fs.put(source_path, older.to_vec());
+        let opened_source = open_source(&fs, source_path).unwrap_or_else(|_| unreachable!());
+        let target = FdxSaveTarget::from_baseline(opened_source.baseline);
+        let imported = fdx::import_fdx(older, fdx::FdxMigrationConsent::Continue)
+            .unwrap_or_else(|_| unreachable!());
+        let fdx::FdxImportOutcome::Candidate(imported) = imported else {
+            unreachable!();
+        };
+        let mut session =
+            EditingSession::new(imported.document.project).unwrap_or_else(|_| unreachable!());
+        let mut save_as_target = FdxSaveTarget::new_unsaved();
+        let destination = PathBuf::from("/mem/converted-copy.fdx");
+        save_session(
+            &fs,
+            &mut session,
+            &mut save_as_target,
+            FdxSaveMode::SaveAs(destination.clone()),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(fs.bytes(source_path), Some(older.to_vec()));
+        assert!(fs
+            .bytes(&destination)
+            .unwrap_or_default()
+            .windows(b"Version=\"6\"".len())
+            .any(|window| window == b"Version=\"6\""));
+
+        // Explicit in-place save is also supported for a migrated source and
+        // writes nothing until this save transaction is requested.
+        let mut in_place_target = target;
+        let migrated = fdx::import_fdx(older, fdx::FdxMigrationConsent::Continue)
+            .unwrap_or_else(|_| unreachable!());
+        let fdx::FdxImportOutcome::Candidate(migrated) = migrated else {
+            unreachable!();
+        };
+        let mut in_place_session =
+            EditingSession::new(migrated.document.project).unwrap_or_else(|_| unreachable!());
+        assert_eq!(fs.bytes(source_path), Some(older.to_vec()));
+        save_session(
+            &fs,
+            &mut in_place_session,
+            &mut in_place_target,
+            FdxSaveMode::Save,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert!(fs
+            .bytes(source_path)
+            .unwrap_or_default()
+            .windows(b"Version=\"6\"".len())
+            .any(|window| window == b"Version=\"6\""));
     }
 
     #[test]
