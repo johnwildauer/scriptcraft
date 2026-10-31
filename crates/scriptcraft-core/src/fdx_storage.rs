@@ -191,6 +191,31 @@ pub struct OpenedFdx {
     pub baseline: FdxBaseline,
 }
 
+/// Bounded source bytes retained for staged version preflight and import. The
+/// source baseline is captured before the caller shows a migration prompt, so a
+/// later native save can detect a change made while that prompt was open.
+#[derive(PartialEq, Eq)]
+pub struct OpenedFdxSource {
+    pub baseline: FdxBaseline,
+}
+
+impl fmt::Debug for OpenedFdxSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenedFdxSource")
+            .field("byte_count", &self.baseline.bytes.len())
+            .field("baseline", &self.baseline)
+            .finish()
+    }
+}
+
+impl OpenedFdxSource {
+    /// Returns the bounded source for secure content and version inspection.
+    pub fn bytes(&self) -> &[u8] {
+        &self.baseline.bytes
+    }
+}
+
 impl fmt::Debug for OpenedFdx {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -395,12 +420,25 @@ impl FdxStorageFileSystem for StdFdxStorageFileSystem {
 /// Boundedly read and validate an FDX file; the returned baseline is tied to the
 /// exact path and bytes used for later conflict detection.
 pub fn open<F: FdxStorageFileSystem>(fs: &F, path: &Path) -> Result<OpenedFdx, FdxStorageError> {
+    let source = open_source(fs, path)?;
+    let document = fdx::read_v6(source.bytes()).map_err(invalid_fdx)?;
+    Ok(OpenedFdx {
+        document,
+        baseline: source.baseline,
+    })
+}
+
+/// Boundedly read an FDX source without assuming its declared version. The
+/// caller can preflight and stage migration before constructing an active
+/// document, while retaining the exact original bytes for conflict detection.
+pub fn open_source<F: FdxStorageFileSystem>(
+    fs: &F,
+    path: &Path,
+) -> Result<OpenedFdxSource, FdxStorageError> {
     fs.inspect_destination(path)?
         .ok_or_else(|| io_error(StorageOperation::Read))?;
     let bytes = fs.read_bounded(path, MAX_SOURCE_BYTES)?;
-    let document = fdx::read_v6(&bytes).map_err(invalid_fdx)?;
-    Ok(OpenedFdx {
-        document,
+    Ok(OpenedFdxSource {
         baseline: FdxBaseline {
             path: path.to_owned(),
             bytes,

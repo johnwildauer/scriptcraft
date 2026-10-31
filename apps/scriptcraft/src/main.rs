@@ -8,6 +8,8 @@ use eframe::egui::{
 use scriptcraft_core::cast_list::CAST_LIST_REFRESH_INTERVAL;
 use scriptcraft_core::editing::{EditError, EditingSession, Position, Selection};
 use scriptcraft_core::exports;
+use scriptcraft_core::fdx::{self, FdxImportOutcome, FdxMigrationConsent, FdxVersionStatus};
+use scriptcraft_core::fdx_storage::{self, FdxBaseline, OpenedFdxSource, StdFdxStorageFileSystem};
 use scriptcraft_core::layout::{Caret, LayoutCache, ScreenplayLayout};
 use scriptcraft_core::persistence::{self, FileSystem, StdFileSystem};
 use scriptcraft_core::{Project, Role};
@@ -31,6 +33,15 @@ const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
 #[cfg(test)]
 const PRESENTATION_METRIC_TOLERANCE: f32 = 0.01;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+// WO-011 keeps FDX opening in an internal staging path. WO-012 enables it
+// together with native FDX Save/Save As so the public JSON workflow is intact.
+const FDX_OPEN_STAGING_ENABLED: bool = false;
+
+struct PendingFdxOpen {
+    path: PathBuf,
+    source: OpenedFdxSource,
+    declared_version: String,
+}
 
 #[derive(Debug, Default)]
 struct NativeInputDiagnostics {
@@ -79,6 +90,8 @@ struct ScriptCraftApp {
     status: String,
     error: Option<String>,
     native_path: Option<PathBuf>,
+    fdx_baseline: Option<FdxBaseline>,
+    pending_fdx_open: Option<PendingFdxOpen>,
     native_input_diagnostics: NativeInputDiagnostics,
     editor_surface_id: Option<egui::Id>,
     editor_surface_rect: Option<egui::Rect>,
@@ -137,6 +150,8 @@ impl ScriptCraftApp {
             status: String::new(),
             error: None,
             native_path: None,
+            fdx_baseline: None,
+            pending_fdx_open: None,
             native_input_diagnostics: NativeInputDiagnostics::default(),
             editor_surface_id: None,
             editor_surface_rect: None,
@@ -265,10 +280,16 @@ impl ScriptCraftApp {
     }
 
     fn save_native_at(&mut self, path: &std::path::Path) {
+        if self.fdx_baseline.is_some() {
+            self.error = Some("native FDX save is not enabled before WO-012".into());
+            self.status = "Save unavailable: FDX native save cutover is pending".into();
+            return;
+        }
         match persistence::atomic_save(&StdFileSystem, path, self.session.project()) {
             Ok(()) => {
                 self.session.mark_saved();
                 self.native_path = Some(path.to_owned());
+                self.fdx_baseline = None;
                 self.status = format!("Saved {}", path.display());
                 self.clear_error();
             }
@@ -277,15 +298,20 @@ impl ScriptCraftApp {
     }
 
     fn open_native(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("ScriptCraft project", &["json"])
-            .pick_file()
-        {
+        let mut dialog = rfd::FileDialog::new().add_filter("ScriptCraft project", &["json"]);
+        if FDX_OPEN_STAGING_ENABLED {
+            dialog = dialog.add_filter("Final Draft document", &["fdx"]);
+        }
+        if let Some(path) = dialog.pick_file() {
             self.open_native_at(&path);
         }
     }
 
     fn open_native_at(&mut self, path: &std::path::Path) {
+        if FDX_OPEN_STAGING_ENABLED {
+            self.open_staged_native_at(path);
+            return;
+        }
         if self.session.dirty() {
             self.error = None;
             self.status = "Open cancelled: save the unsaved project first".into();
@@ -299,7 +325,9 @@ impl ScriptCraftApp {
             Ok(project) => match self.session.replace_with_saved(project) {
                 Ok(()) => {
                     self.page_geometry.invalidate();
+                    self.layout_cache = LayoutCache::default();
                     self.native_path = Some(path.to_owned());
+                    self.fdx_baseline = None;
                     self.status = format!("Opened {}", path.display());
                     self.clear_error();
                 }
@@ -307,6 +335,151 @@ impl ScriptCraftApp {
             },
             Err(error) => self.show_error(error),
         }
+    }
+
+    /// Internal WO-011 path. Format selection is based on bounded file content;
+    /// the extension only controls the file-picker filter, never the decoder.
+    fn open_staged_native_at(&mut self, path: &std::path::Path) {
+        if self.pending_fdx_open.is_some() {
+            self.status = "Resolve the pending FDX import before opening another document".into();
+            return;
+        }
+        if self.session.dirty() {
+            self.error = None;
+            self.status = "Open cancelled: save the unsaved project first".into();
+            return;
+        }
+        let source = match fdx_storage::open_source(&StdFdxStorageFileSystem, path) {
+            Ok(source) => source,
+            Err(error) => {
+                self.show_error(format!("open failed: {error:?}"));
+                return;
+            }
+        };
+        let first_content_byte = source
+            .bytes()
+            .iter()
+            .copied()
+            .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'));
+        if first_content_byte == Some(b'{') {
+            match persistence::deserialize(source.bytes()) {
+                Ok(project) => self.activate_opened_project(project, path, None, None),
+                Err(error) => self.show_error(format!("open failed: {error:?}")),
+            }
+            return;
+        }
+
+        match fdx::preflight_version(source.bytes()) {
+            Ok(FdxVersionStatus::Version6) => {
+                self.finish_fdx_import(path.to_owned(), source, FdxMigrationConsent::Continue);
+            }
+            Ok(FdxVersionStatus::ExplicitNon6 { declared, .. }) => {
+                self.pending_fdx_open = Some(PendingFdxOpen {
+                    path: path.to_owned(),
+                    source,
+                    declared_version: declared,
+                });
+                self.clear_error();
+                self.status = "FDX version update requires confirmation".into();
+            }
+            Ok(FdxVersionStatus::Missing) => {
+                self.show_error("incompatible FDX: version is missing")
+            }
+            Ok(FdxVersionStatus::Malformed) => {
+                self.show_error("incompatible FDX: version declaration is invalid")
+            }
+            Ok(FdxVersionStatus::Duplicate) => {
+                self.show_error("incompatible FDX: duplicate version declarations")
+            }
+            Err(error) => self.show_error(format!("incompatible FDX: {error:?}")),
+        }
+    }
+
+    fn finish_fdx_import(
+        &mut self,
+        path: PathBuf,
+        source: OpenedFdxSource,
+        consent: FdxMigrationConsent,
+    ) {
+        if consent == FdxMigrationConsent::Cancel {
+            self.status = "FDX import cancelled; active document unchanged".into();
+            self.clear_error();
+            return;
+        }
+        let outcome = fdx::import_fdx(source.bytes(), consent);
+        match outcome {
+            Ok(FdxImportOutcome::Candidate(candidate)) => {
+                let migration_status = match candidate.migration {
+                    None => None,
+                    Some(fdx::FdxMigrationKind::OlderLossy { .. }) => {
+                        Some("Opened previous-version FDX; some data may be lost")
+                    }
+                    Some(fdx::FdxMigrationKind::NewerBestEffort { .. }) => {
+                        Some("Opened non-current FDX with best-effort Version 6 import")
+                    }
+                };
+                self.activate_opened_project(
+                    candidate.document.project,
+                    &path,
+                    Some(source.baseline),
+                    migration_status,
+                );
+            }
+            Ok(FdxImportOutcome::Cancelled { .. }) => {
+                self.status = "FDX import cancelled; active document unchanged".into();
+                self.clear_error();
+            }
+            Err(error) => self.show_error(format!("incompatible FDX document: {error:?}")),
+        }
+    }
+
+    fn activate_opened_project(
+        &mut self,
+        project: Project,
+        path: &std::path::Path,
+        baseline: Option<FdxBaseline>,
+        migration_status: Option<&str>,
+    ) {
+        let replacement = match EditingSession::new(project) {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                self.show_error(format!("incompatible document: {error:?}"));
+                return;
+            }
+        };
+        self.session = replacement;
+        self.native_path = Some(path.to_owned());
+        self.fdx_baseline = baseline;
+        self.pending_fdx_open = None;
+        self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
+        self.page_geometry.invalidate();
+        self.layout_cache = LayoutCache::default();
+        self.rendered_revision = None;
+        self.preferred_vertical_x = None;
+        self.drag_anchor = None;
+        self.ime_preedit.clear();
+        self.ime_active = false;
+        self.status = migration_status
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Opened {}", path.display()));
+        self.clear_error();
+    }
+
+    fn resolve_pending_fdx_import(&mut self, consent: FdxMigrationConsent) {
+        let Some(pending) = self.pending_fdx_open.take() else {
+            return;
+        };
+        if consent == FdxMigrationConsent::Cancel {
+            self.status = "FDX import cancelled; active document unchanged".into();
+            self.clear_error();
+            return;
+        }
+        if self.session.dirty() {
+            self.status = "Open cancelled: save the unsaved project first".into();
+            self.error = None;
+            return;
+        }
+        self.finish_fdx_import(pending.path, pending.source, consent);
     }
 
     fn save_as_native(&mut self) {
@@ -1396,6 +1569,37 @@ fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egu
     central.response.rect
 }
 
+fn show_fdx_migration_dialog(app: &mut ScriptCraftApp, ctx: &egui::Context) {
+    let Some(declared_version) = app
+        .pending_fdx_open
+        .as_ref()
+        .map(|pending| pending.declared_version.clone())
+    else {
+        return;
+    };
+    let mut choice = None;
+    egui::Window::new("Update FDX document")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.label(format!(
+                "This document declares FDX version {declared_version}. It will be opened with the current Version 6 importer. Updating may contain errors, some data may be lost, and compatibility is not guaranteed."
+            ));
+            ui.horizontal(|ui| {
+                if ui.button("Continue").clicked() {
+                    choice = Some(FdxMigrationConsent::Continue);
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(FdxMigrationConsent::Cancel);
+                }
+            });
+        });
+    if let Some(consent) = choice {
+        app.resolve_pending_fdx_import(consent);
+    }
+}
+
 impl eframe::App for ScriptCraftApp {
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         chrome_clear_color(visuals)
@@ -1448,13 +1652,25 @@ impl eframe::App for ScriptCraftApp {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
         self.notification_sink.set_repaint_context(ctx);
-        self.refresh_cast_lists_on_schedule(ctx, Instant::now());
+        let migration_pending = self.pending_fdx_open.is_some();
+        if !migration_pending {
+            self.refresh_cast_lists_on_schedule(ctx, Instant::now());
+        }
         let timer_now = self.timer_now();
         self.reconcile_sprint_timer(timer_now);
-        show_application_panels(self, ctx);
+        if migration_pending {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = ui.allocate_space(ui.available_size());
+            });
+            show_fdx_migration_dialog(self, ctx);
+        } else {
+            show_application_panels(self, ctx);
+        }
         self.schedule_sprint_timer_repaint(ctx, self.timer_now());
         self.schedule_focus_mode_repaint(ctx, self.timer_now());
-        self.handle_surface_input(ctx);
+        if !migration_pending {
+            self.handle_surface_input(ctx);
+        }
         self.performance.frame_nanos = self
             .performance
             .frame_nanos
@@ -5553,5 +5769,155 @@ mod tests {
         assert_eq!(app.session.project().elements[0].text, original_text);
         assert!(!app.session.dirty());
         assert!(app.error.is_some());
+    }
+
+    fn staged_fdx_fixture(version: &str) -> Vec<u8> {
+        format!(
+            "<FinalDraft DocumentType='Script' Version='{version}'><Content><Paragraph Type='Character' id='character-1'><Text>Casey</Text></Paragraph><Paragraph Type='Cast List' id='cast-1'><Text>(CUSTOM)</Text></Paragraph></Content></FinalDraft>"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn staged_fdx_open_activates_version_six_only_after_complete_import_without_writing_source() {
+        let root =
+            std::env::temp_dir().join(format!("scriptcraft-wo011-v6-{}", std::process::id()));
+        let path = root.join("fixture.fdx");
+        let source_bytes = staged_fdx_fixture("6");
+        let _ = std::fs::create_dir_all(&root);
+        let _ = std::fs::write(&path, &source_bytes);
+
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.open_staged_native_at(&path);
+
+        assert!(app.error.is_none());
+        assert_eq!(app.native_path.as_deref(), Some(path.as_path()));
+        assert!(app.fdx_baseline.is_some());
+        assert!(!app.session.dirty());
+        assert_eq!(app.session.project().elements[0].text, "Casey");
+        assert_eq!(app.session.project().elements[1].text, "(CUSTOM)");
+        assert_eq!(std::fs::read(&path).unwrap_or_default(), source_bytes);
+        app.save_native_at(&path);
+        assert!(app.error.is_some());
+        assert_eq!(app.native_path.as_deref(), Some(path.as_path()));
+        assert!(app.fdx_baseline.is_some());
+        assert_eq!(std::fs::read(&path).unwrap_or_default(), source_bytes);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn staged_non_six_open_requires_consent_and_cancel_or_continue_never_writes_input() {
+        let root = std::env::temp_dir().join(format!(
+            "scriptcraft-wo011-migration-{}",
+            std::process::id()
+        ));
+        let path = root.join("older.fdx");
+        let source_bytes = staged_fdx_fixture("5");
+        let _ = std::fs::create_dir_all(&root);
+        let _ = std::fs::write(&path, &source_bytes);
+
+        let mut cancelled = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let original_project = cancelled.session.project().clone();
+        cancelled.open_staged_native_at(&path);
+        assert!(cancelled.pending_fdx_open.is_some());
+        assert_eq!(cancelled.session.project(), &original_project);
+        assert!(cancelled.native_path.is_none());
+        cancelled.resolve_pending_fdx_import(FdxMigrationConsent::Cancel);
+        assert!(cancelled.pending_fdx_open.is_none());
+        assert!(cancelled.fdx_baseline.is_none());
+        assert_eq!(cancelled.session.project(), &original_project);
+        assert!(cancelled.native_path.is_none());
+        assert_eq!(std::fs::read(&path).unwrap_or_default(), source_bytes);
+
+        let mut continued = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        continued.open_staged_native_at(&path);
+        continued.resolve_pending_fdx_import(FdxMigrationConsent::Continue);
+        assert!(continued.error.is_none());
+        assert!(continued.pending_fdx_open.is_none());
+        assert_eq!(continued.native_path.as_deref(), Some(path.as_path()));
+        assert!(continued.fdx_baseline.is_some());
+        assert!(!continued.session.dirty());
+        assert_eq!(continued.session.project().elements[0].text, "Casey");
+        assert_eq!(continued.session.project().elements[1].text, "(CUSTOM)");
+        assert!(continued.status.contains("previous-version"));
+        assert_eq!(std::fs::read(&path).unwrap_or_default(), source_bytes);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn staged_newer_fdx_requires_consent_and_parse_or_dirty_failures_preserve_active_state() {
+        let root =
+            std::env::temp_dir().join(format!("scriptcraft-wo011-safety-{}", std::process::id()));
+        let newer_path = root.join("newer.fdx");
+        let malformed_path = root.join("malformed.fdx");
+        let failed_import_path = root.join("failed-import.fdx");
+        let dirty_path = root.join("dirty.fdx");
+        let newer_bytes = staged_fdx_fixture("7");
+        let malformed_bytes = b"<FinalDraft DocumentType='Script' Version='6'><Content>";
+        let failed_import_bytes =
+            b"<FinalDraft DocumentType='Script' Version='5'><TitlePage/></FinalDraft>";
+        let dirty_bytes = staged_fdx_fixture("6");
+        let _ = std::fs::create_dir_all(&root);
+        let _ = std::fs::write(&newer_path, &newer_bytes);
+        let _ = std::fs::write(&malformed_path, malformed_bytes);
+        let _ = std::fs::write(&failed_import_path, failed_import_bytes);
+        let _ = std::fs::write(&dirty_path, &dirty_bytes);
+
+        let mut newer = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let original_project = newer.session.project().clone();
+        newer.open_staged_native_at(&newer_path);
+        assert!(newer.pending_fdx_open.is_some());
+        assert_eq!(newer.session.project(), &original_project);
+        newer.resolve_pending_fdx_import(FdxMigrationConsent::Continue);
+        assert!(newer.error.is_none());
+        assert!(newer.status.contains("best-effort"));
+        assert_eq!(newer.native_path.as_deref(), Some(newer_path.as_path()));
+        assert!(newer.fdx_baseline.is_some());
+        assert_eq!(std::fs::read(&newer_path).unwrap_or_default(), newer_bytes);
+
+        let mut malformed = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let malformed_original = malformed.session.project().clone();
+        let kept_path = PathBuf::from("kept-project.json");
+        malformed.native_path = Some(kept_path.clone());
+        malformed.open_staged_native_at(&malformed_path);
+        assert!(malformed.error.is_some());
+        assert_eq!(malformed.session.project(), &malformed_original);
+        assert_eq!(malformed.native_path, Some(kept_path.clone()));
+        assert!(malformed.fdx_baseline.is_none());
+        assert_eq!(
+            std::fs::read(&malformed_path).unwrap_or_default(),
+            malformed_bytes
+        );
+
+        let mut failed_import = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let failed_import_original = failed_import.session.project().clone();
+        failed_import.native_path = Some(kept_path.clone());
+        failed_import.open_staged_native_at(&failed_import_path);
+        assert!(failed_import.pending_fdx_open.is_some());
+        failed_import.resolve_pending_fdx_import(FdxMigrationConsent::Continue);
+        assert!(failed_import.error.is_some());
+        assert!(failed_import.pending_fdx_open.is_none());
+        assert_eq!(failed_import.session.project(), &failed_import_original);
+        assert!(!failed_import.session.dirty());
+        assert_eq!(failed_import.native_path, Some(kept_path));
+        assert!(failed_import.fdx_baseline.is_none());
+        assert_eq!(
+            std::fs::read(&failed_import_path).unwrap_or_default(),
+            failed_import_bytes
+        );
+
+        let mut dirty = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        dirty
+            .session
+            .insert("unsaved")
+            .unwrap_or_else(|_| unreachable!());
+        let dirty_original = dirty.session.project().clone();
+        dirty.open_staged_native_at(&dirty_path);
+        assert!(dirty.pending_fdx_open.is_none());
+        assert_eq!(dirty.session.project(), &dirty_original);
+        assert!(dirty.session.dirty());
+        assert!(dirty.native_path.is_none());
+        assert_eq!(std::fs::read(&dirty_path).unwrap_or_default(), dirty_bytes);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
