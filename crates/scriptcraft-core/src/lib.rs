@@ -3,6 +3,7 @@
 
 //! Dependency-free semantic screenplay model and native JSON schema.
 
+pub mod cast_list;
 pub mod editing;
 pub mod exports;
 pub mod fdx;

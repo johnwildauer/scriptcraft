@@ -5,6 +5,7 @@ use eframe::egui::{
     self, Color32, FontFamily, FontId, Key, RichText, Sense, Stroke, TextStyle, TextWrapMode, Vec2,
     WidgetText,
 };
+use scriptcraft_core::cast_list::CAST_LIST_REFRESH_INTERVAL;
 use scriptcraft_core::editing::{EditError, EditingSession, Position, Selection};
 use scriptcraft_core::exports;
 use scriptcraft_core::layout::{Caret, LayoutCache, ScreenplayLayout};
@@ -67,6 +68,7 @@ struct ScriptCraftApp {
     focus_mode: focus_mode::FocusModeController,
     sprint_timer: sprint_timer::SprintTimer,
     timer_clock_origin: Instant,
+    next_cast_list_refresh: Instant,
     notification_sink: sprint_timer::NativeNotificationSink,
     notification_results: Receiver<(u64, NotificationResult)>,
     surface_focused: bool,
@@ -124,6 +126,7 @@ impl ScriptCraftApp {
             focus_mode: focus_mode::FocusModeController::default(),
             sprint_timer: sprint_timer::SprintTimer::default(),
             timer_clock_origin: Instant::now(),
+            next_cast_list_refresh: Instant::now() + CAST_LIST_REFRESH_INTERVAL,
             notification_sink,
             notification_results,
             surface_focused: false,
@@ -206,6 +209,26 @@ impl ScriptCraftApp {
             self.performance.repaint_requests = self.performance.repaint_requests.saturating_add(1);
             ctx.request_repaint_after(delay);
         }
+    }
+
+    fn refresh_cast_lists_on_schedule(&mut self, ctx: &egui::Context, now: Instant) {
+        if now < self.next_cast_list_refresh {
+            ctx.request_repaint_after(self.next_cast_list_refresh.saturating_duration_since(now));
+            return;
+        }
+
+        self.next_cast_list_refresh = now + CAST_LIST_REFRESH_INTERVAL;
+        match self.session.refresh_cast_lists() {
+            Ok(true) => self.request_repaint(ctx),
+            Ok(false) => {}
+            Err(_) => {
+                self.status =
+                    "Cast-list refresh deferred because source data could not be updated safely."
+                        .into();
+            }
+        }
+        self.performance.repaint_requests = self.performance.repaint_requests.saturating_add(1);
+        ctx.request_repaint_after(CAST_LIST_REFRESH_INTERVAL);
     }
 
     fn sync_pinch_zoom_from_controls(&mut self) {
@@ -1425,6 +1448,7 @@ impl eframe::App for ScriptCraftApp {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
         self.notification_sink.set_repaint_context(ctx);
+        self.refresh_cast_lists_on_schedule(ctx, Instant::now());
         let timer_now = self.timer_now();
         self.reconcile_sprint_timer(timer_now);
         show_application_panels(self, ctx);
@@ -1508,6 +1532,33 @@ mod tests {
         modifiers: egui::Modifiers,
     ) -> egui::FullOutput {
         render_app_frame_with_fullscreen(context, app, screen, events, modifiers, None)
+    }
+
+    #[test]
+    fn scheduled_cast_list_refresh_runs_after_one_second_without_undo_noise() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let mut project =
+            Project::new("cast-refresh-ui", "", "").unwrap_or_else(|_| unreachable!());
+        project.elements = vec![
+            scriptcraft_core::ScreenplayElement::new("heading", Role::SceneHeading, "INT. ROOM")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cue", Role::Character, "ALEX")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cast", Role::CastList, "(stale)")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        app.session
+            .replace_with_saved(project)
+            .unwrap_or_else(|_| unreachable!());
+        let context = test_context();
+        let scheduled = app.next_cast_list_refresh;
+
+        app.refresh_cast_lists_on_schedule(&context, scheduled - Duration::from_millis(1));
+        assert_eq!(app.session.project().elements[2].text, "(stale)");
+        app.refresh_cast_lists_on_schedule(&context, scheduled);
+        assert_eq!(app.session.project().elements[2].text, "(ALEX)");
+        assert!(!app.session.can_undo());
+        assert!(app.session.dirty());
     }
 
     fn render_app_frame_with_fullscreen(

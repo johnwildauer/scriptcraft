@@ -617,6 +617,89 @@ impl PreservationState {
         Ok(())
     }
 
+    /// Replaces the complete plain-text projection of a managed FDX paragraph
+    /// whose text is represented by ordered `<Text>` elements. The caller must
+    /// establish that those runs carry no formatting; opaque or mixed children
+    /// are rejected rather than moved or discarded.
+    pub(crate) fn replace_managed_text_elements(
+        &mut self,
+        id: &StableId,
+        expected_runs: &[String],
+        replacement: &str,
+    ) -> Result<(), PreservationError> {
+        if replacement.len() > crate::MAX_TEXT_BYTES {
+            return Err(PreservationError::TextTooLarge);
+        }
+        let paragraph = self.managed_element_mut(id)?;
+        let mut text_elements = Vec::new();
+        for (index, node) in paragraph.children.iter().enumerate() {
+            match node {
+                PreservedNode::Element(element)
+                    if element.name.local_name == "Text"
+                        && element.name.namespace_uri == paragraph.name.namespace_uri =>
+                {
+                    text_elements.push(index);
+                }
+                PreservedNode::Text(text) | PreservedNode::CData(text)
+                    if text.trim().is_empty() => {}
+                _ => return Err(PreservationError::UnsupportedTextMapping),
+            }
+        }
+        if text_elements.is_empty() || text_elements.len() != expected_runs.len() {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+
+        for (index, expected) in text_elements.iter().zip(expected_runs) {
+            let PreservedNode::Element(text_element) = &paragraph.children[*index] else {
+                return Err(PreservationError::UnsupportedTextMapping);
+            };
+            if !text_element.attributes.is_empty() {
+                return Err(PreservationError::UnsupportedTextMapping);
+            }
+            let mut actual = String::new();
+            for child in &text_element.children {
+                match child {
+                    PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                        actual.push_str(text);
+                    }
+                    _ => return Err(PreservationError::UnsupportedTextMapping),
+                }
+            }
+            if &actual != expected {
+                return Err(PreservationError::ManagedTextMismatch);
+            }
+        }
+
+        for (run_index, index) in text_elements.into_iter().enumerate() {
+            let PreservedNode::Element(text_element) = &mut paragraph.children[index] else {
+                return Err(PreservationError::UnsupportedTextMapping);
+            };
+            if let Some(first) = text_element.children.first_mut() {
+                match first {
+                    PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                        *text = if run_index == 0 {
+                            replacement.to_owned()
+                        } else {
+                            String::new()
+                        };
+                    }
+                    _ => return Err(PreservationError::UnsupportedTextMapping),
+                }
+                for child in text_element.children.iter_mut().skip(1) {
+                    match child {
+                        PreservedNode::Text(text) | PreservedNode::CData(text) => text.clear(),
+                        _ => return Err(PreservationError::UnsupportedTextMapping),
+                    }
+                }
+            } else if run_index == 0 {
+                text_element
+                    .children
+                    .push(PreservedNode::Text(replacement.to_owned()));
+            }
+        }
+        Ok(())
+    }
+
     /// Keeps source-owned text synchronized for an explicit cue-casing edit.
     /// Casing is mapped per ordered source run so Unicode expansions remain
     /// attached to their original run boundaries.

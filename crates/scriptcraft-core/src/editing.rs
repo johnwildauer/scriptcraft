@@ -1,6 +1,9 @@
 //! Headless, transactional editing over the semantic screenplay model.
 
-use crate::{ModelError, Project, Role, ScreenplayElement, TextRun, MAX_ELEMENTS, MAX_TEXT_BYTES};
+use crate::{
+    cast_list::{self, CastListError},
+    ModelError, Project, Role, ScreenplayElement, TextRun, MAX_ELEMENTS, MAX_TEXT_BYTES,
+};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +45,7 @@ pub enum EditError {
     TooManyElements,
     UnsupportedTransition { from: Role },
     Preservation(crate::preservation::PreservationError),
+    CastList(CastListError),
     Model(ModelError),
 }
 
@@ -122,6 +126,26 @@ impl EditingSession {
     pub fn mark_saved(&mut self) {
         self.clean_project = self.project.clone();
         self.dirty = false;
+    }
+
+    /// Refreshes derived cast lists without adding a separate undo entry.
+    /// Selection is unchanged; dirty state and revision follow the corrected
+    /// project so cached layout and the clean baseline remain accurate.
+    pub fn refresh_cast_lists(&mut self) -> Result<bool, EditError> {
+        let mut project = self.project.clone();
+        let changed = cast_list::correct_cast_lists(&mut project).map_err(EditError::CastList)?;
+        if changed {
+            self.project = project;
+            self.revision = self.revision.saturating_add(1);
+            self.dirty = self.project != self.clean_project;
+        }
+        Ok(changed)
+    }
+
+    /// Builds corrected detached data for Save or Save As preflight. This does
+    /// not mutate the live session; the storage owner controls publication.
+    pub fn prepare_cast_list_save_candidate(&self) -> Result<Project, EditError> {
+        cast_list::prepare_save_candidate(&self.project).map_err(EditError::CastList)
     }
 
     pub fn replace_with_saved(&mut self, project: Project) -> Result<(), EditError> {
@@ -461,12 +485,21 @@ impl EditingSession {
     }
 
     pub fn undo(&mut self) -> Result<(), EditError> {
-        let snapshot = self.history.pop().ok_or(EditError::EmptyHistory)?;
+        let mut snapshot = self
+            .history
+            .last()
+            .cloned()
+            .ok_or(EditError::EmptyHistory)?;
+        // Undo must remain available even when a derived list's source mapping
+        // cannot be changed safely; retain that snapshot unchanged and let the
+        // scheduled refresh/save preflight report the mapping limitation.
+        let _ = cast_list::correct_cast_lists(&mut snapshot.project);
         let current = Snapshot {
             project: self.project.clone(),
             selection: self.selection,
             generated_parentheticals: self.generated_parentheticals.clone(),
         };
+        self.history.pop();
         self.redo.push(current);
         self.project = snapshot.project;
         self.selection = snapshot.selection;
@@ -477,12 +510,14 @@ impl EditingSession {
     }
 
     pub fn redo(&mut self) -> Result<(), EditError> {
-        let snapshot = self.redo.pop().ok_or(EditError::EmptyHistory)?;
+        let mut snapshot = self.redo.last().cloned().ok_or(EditError::EmptyHistory)?;
+        let _ = cast_list::correct_cast_lists(&mut snapshot.project);
         let current = Snapshot {
             project: self.project.clone(),
             selection: self.selection,
             generated_parentheticals: self.generated_parentheticals.clone(),
         };
+        self.redo.pop();
         self.push_history(current);
         self.project = snapshot.project;
         self.selection = snapshot.selection;
