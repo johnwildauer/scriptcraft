@@ -1,6 +1,6 @@
 # Work Order: WO-012e — Reconcile the FDX-native reader and writer
 
-- **Status:** `draft / not started`; depends on WO-012d.
+- **Status:** implementation recorded in commit `e751810558d6815c896609ca709fdde701d97c3b`; user-owned review and validation have not been performed for this cutover.
 
 ## Outcome and scope
 Replace obsolete unsupported-app-state checks with FDX-native validation and source ownership while retaining strict safety checks for actual content and unsupported structures.
@@ -16,3 +16,5 @@ Replace obsolete unsupported-app-state checks with FDX-native validation and sou
 
 ## Risks and dependency
 Depends on WO-012d and WO-006–008. One attributable commit and implementer checks only. Risk: deleting an unsupported-state check that actually protects authored data; retain identity/reference and ownership guards. Structural edits remain WO-012f.
+
+The earlier status was stale relative to the implementation commit present in the inspected Git history and the corresponding current source. Its implementation-result/check record above is historical evidence only; no check, review, or validation was run or re-asserted during WO-012 execution.

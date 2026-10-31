@@ -1,6 +1,6 @@
 # Work Order: WO-012d — Derive runtime layout without legacy document profile
 
-- **Status:** `draft / not started`; depends on WO-012c.
+- **Status:** implementation recorded in commit `8e2075d8234f818b17e90f376d1d52a45e5befc2`; user-owned review and validation have not been performed for this cutover.
 
 ## Outcome and scope
 Replace persistent ScriptCraft page-profile ownership with explicit runtime layout inputs while preserving actual FDX settings and deterministic editor/PDF behavior.
@@ -16,3 +16,5 @@ Replace persistent ScriptCraft page-profile ownership with explicit runtime layo
 
 ## Risks and dependency
 Depends on WO-012c and WO-005. One attributable commit, implementer checks only. Risk: regression in font metrics or silently displaying hidden content. Hand effective-input/source-settings contract to WO-012e.
+
+The earlier status was stale relative to the implementation commit present in the inspected Git history and the corresponding current source. Its implementation-result/check record above is historical evidence only; no check, review, or validation was run or re-asserted during WO-012 execution.

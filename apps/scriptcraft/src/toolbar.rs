@@ -488,8 +488,14 @@ impl ScriptCraftApp {
                     Ok(session) => {
                         self.session = session;
                         self.page_geometry.invalidate();
+                        self.layout_cache = LayoutCache::default();
                         self.surface_focused = false;
                         self.native_path = None;
+                        self.fdx_baseline = None;
+                        self.pending_fdx_open = None;
+                        self.next_cast_list_refresh = Instant::now()
+                            + scriptcraft_core::cast_list::CAST_LIST_REFRESH_INTERVAL;
+                        self.rendered_revision = None;
                         self.status = "New in-memory project".into();
                         self.clear_error();
                     }

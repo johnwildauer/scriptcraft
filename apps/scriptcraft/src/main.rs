@@ -9,7 +9,9 @@ use scriptcraft_core::cast_list::CAST_LIST_REFRESH_INTERVAL;
 use scriptcraft_core::editing::{EditError, EditPolicy, EditingSession, Position, Selection};
 use scriptcraft_core::exports;
 use scriptcraft_core::fdx::{self, FdxImportOutcome, FdxMigrationConsent, FdxVersionStatus};
-use scriptcraft_core::fdx_storage::{self, FdxBaseline, OpenedFdxSource, StdFdxStorageFileSystem};
+use scriptcraft_core::fdx_storage::{
+    self, FdxBaseline, FdxSaveMode, FdxSaveTarget, OpenedFdxSource, StdFdxStorageFileSystem,
+};
 use scriptcraft_core::layout::{Caret, LayoutCache, ScreenplayLayout};
 use scriptcraft_core::persistence::{self, FileSystem, StdFileSystem};
 use scriptcraft_core::{Project, Role};
@@ -33,10 +35,12 @@ const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
 #[cfg(test)]
 const PRESENTATION_METRIC_TOLERANCE: f32 = 0.01;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
-// WO-011 keeps FDX opening in an internal staging path. WO-012 enables it
-// together with native FDX Save/Save As so the public JSON workflow is intact.
-const FDX_OPEN_STAGING_ENABLED: bool = false;
 
+fn has_extension(path: &std::path::Path, expected: &str) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
+}
 struct PendingFdxOpen {
     path: PathBuf,
     source: OpenedFdxSource,
@@ -281,65 +285,114 @@ impl ScriptCraftApp {
     }
 
     fn save_native_at(&mut self, path: &std::path::Path) {
-        if self.fdx_baseline.is_some() {
-            self.error = Some("native FDX save is not enabled before WO-012".into());
-            self.status = "Save unavailable: FDX native save cutover is pending".into();
+        if has_extension(path, "json") {
+            if self.fdx_baseline.is_some() {
+                self.show_error("Refusing to write FDX data under a JSON filename");
+                return;
+            }
+            if self.session.project().to_json().is_err() {
+                self.show_error("This document cannot be represented by the legacy JSON format");
+                return;
+            }
+            self.save_legacy_json_at(path);
             return;
         }
+
+        let mode = match self.fdx_baseline.as_ref() {
+            Some(baseline) if baseline.path() == path => FdxSaveMode::Save,
+            _ => FdxSaveMode::SaveAs(path.to_owned()),
+        };
+        self.save_fdx_mode_at(path, mode);
+    }
+
+    fn save_fdx_as_at(&mut self, path: &std::path::Path) {
+        if !has_extension(path, "fdx") {
+            self.show_error("Native Save As requires an .fdx destination");
+            return;
+        }
+        self.save_fdx_mode_at(path, FdxSaveMode::SaveAs(path.to_owned()));
+    }
+
+    fn save_fdx_mode_at(&mut self, path: &std::path::Path, mode: FdxSaveMode) {
+        if matches!(&mode, FdxSaveMode::SaveAs(_)) && !has_extension(path, "fdx") {
+            self.show_error("Native Save As requires an .fdx destination");
+            return;
+        }
+        if self.fdx_baseline.is_none()
+            && self
+                .native_path
+                .as_deref()
+                .is_some_and(|source_path| has_extension(source_path, "json"))
+        {
+            self.show_error(
+                "FDX save refused: legacy JSON-origin state has no FDX mapping; source and live session are unchanged",
+            );
+            return;
+        }
+        let mut target = self
+            .fdx_baseline
+            .clone()
+            .map(FdxSaveTarget::from_baseline)
+            .unwrap_or_else(FdxSaveTarget::new_unsaved);
+        match fdx_storage::save_session(
+            &StdFdxStorageFileSystem,
+            &mut self.session,
+            &mut target,
+            mode,
+        ) {
+            Ok(outcome) => {
+                self.native_path = target.path().map(PathBuf::from);
+                self.fdx_baseline = target.baseline().cloned();
+                self.layout_cache = LayoutCache::default();
+                self.page_geometry.invalidate();
+                self.rendered_revision = None;
+                self.preferred_vertical_x = None;
+                self.status = if outcome.temporary_cleanup_warning {
+                    "FDX saved; temporary-file cleanup warning".into()
+                } else {
+                    "Saved FDX document".into()
+                };
+                self.clear_error();
+            }
+            Err(error) => self.show_fdx_save_error(error),
+        }
+    }
+
+    fn save_legacy_json_at(&mut self, path: &std::path::Path) {
         match persistence::atomic_save(&StdFileSystem, path, self.session.project()) {
             Ok(()) => {
                 self.session.mark_saved();
                 self.native_path = Some(path.to_owned());
                 self.fdx_baseline = None;
-                self.status = format!("Saved {}", path.display());
+                self.status = "Saved legacy JSON project".into();
                 self.clear_error();
             }
             Err(error) => self.show_error(error),
         }
     }
 
+    fn show_fdx_save_error(&mut self, error: fdx_storage::TransactionalSaveError) {
+        let detail = error.to_string();
+        let health = self.session_health();
+        self.error = Some(detail.clone());
+        self.status = format!("FDX save failed; document unchanged ({detail}); {health}");
+    }
+
     fn open_native(&mut self) {
-        let mut dialog = rfd::FileDialog::new().add_filter("ScriptCraft project", &["json"]);
-        if FDX_OPEN_STAGING_ENABLED {
-            dialog = dialog.add_filter("Final Draft document", &["fdx"]);
-        }
+        let dialog = rfd::FileDialog::new()
+            .add_filter("Final Draft document", &["fdx"])
+            .add_filter("Legacy ScriptCraft project", &["json"]);
         if let Some(path) = dialog.pick_file() {
             self.open_native_at(&path);
         }
     }
 
     fn open_native_at(&mut self, path: &std::path::Path) {
-        if FDX_OPEN_STAGING_ENABLED {
-            self.open_staged_native_at(path);
-            return;
-        }
-        if self.session.dirty() {
-            self.error = None;
-            self.status = "Open cancelled: save the unsaved project first".into();
-            return;
-        }
-        let result = StdFileSystem
-            .read(path)
-            .and_then(|bytes| persistence::deserialize(&bytes))
-            .map_err(|error| format!("open failed: {error:?}"));
-        match result {
-            Ok(project) => match self.session.replace_with_saved(project) {
-                Ok(()) => {
-                    self.page_geometry.invalidate();
-                    self.layout_cache = LayoutCache::default();
-                    self.native_path = Some(path.to_owned());
-                    self.fdx_baseline = None;
-                    self.status = format!("Opened {}", path.display());
-                    self.clear_error();
-                }
-                Err(error) => self.show_error(error),
-            },
-            Err(error) => self.show_error(error),
-        }
+        self.open_staged_native_at(path);
     }
 
-    /// Internal WO-011 path. Format selection is based on bounded file content;
-    /// the extension only controls the file-picker filter, never the decoder.
+    /// Format selection is based on bounded file content; the extension only
+    /// controls the file-picker filter, never the decoder.
     fn open_staged_native_at(&mut self, path: &std::path::Path) {
         if self.pending_fdx_open.is_some() {
             self.status = "Resolve the pending FDX import before opening another document".into();
@@ -462,7 +515,13 @@ impl ScriptCraftApp {
         self.ime_active = false;
         self.status = migration_status
             .map(str::to_owned)
-            .unwrap_or_else(|| format!("Opened {}", path.display()));
+            .unwrap_or_else(|| {
+                if self.fdx_baseline.is_some() {
+                    "Opened FDX document".into()
+                } else {
+                    "Opened legacy JSON project".into()
+                }
+            });
         self.clear_error();
     }
 
@@ -485,11 +544,15 @@ impl ScriptCraftApp {
 
     fn save_as_native(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("ScriptCraft project", &["json"])
-            .set_file_name("Untitled Screenplay.json")
+            .add_filter("Final Draft document", &["fdx"])
+            .set_file_name("Untitled Screenplay.fdx")
             .save_file()
         {
-            self.save_native_at(&path);
+            if !has_extension(&path, "fdx") {
+                self.show_error("Native Save As requires an .fdx destination");
+                return;
+            }
+            self.save_fdx_as_at(&path);
         }
     }
 
@@ -521,11 +584,14 @@ impl ScriptCraftApp {
             Ok(()) => "session valid".to_owned(),
             Err(error) => format!("session invalid: {error:?}"),
         };
-        let json = match self.session.project().to_json() {
-            Ok(serialized) => format!("live JSON valid ({} bytes)", serialized.len()),
-            Err(error) => format!("live JSON invalid: {error:?}"),
+        let serialization = if self.session.project().to_json().is_ok() {
+            "legacy JSON projection valid"
+        } else if fdx::write_v6(self.session.project()).is_ok() {
+            "FDX projection valid"
+        } else {
+            "no complete native serialization available"
         };
-        format!("{validation}; {json}")
+        format!("{validation}; {serialization}")
     }
 
     fn clear_error(&mut self) {
@@ -2480,7 +2546,7 @@ mod tests {
             .unwrap_or_else(|_| unreachable!());
 
         let diagnostics = app.session_health();
-        assert!(diagnostics.contains("live JSON invalid: UnsupportedJsonState"));
+        assert!(diagnostics.contains("FDX projection valid"));
         assert!(!diagnostics.contains("SENSITIVE-DOCUMENT-CONTENT"));
         assert!(!diagnostics.contains("SENSITIVE DOCUMENT CONTENT"));
     }
@@ -4522,12 +4588,12 @@ mod tests {
     }
 
     #[test]
-    fn session_health_reports_valid_live_model_and_json() {
+    fn session_health_reports_valid_live_model_and_its_legacy_json_projection() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         activate_legacy_json_project(&mut app);
         let health = app.session_health();
         assert!(health.contains("session valid"));
-        assert!(health.contains("live JSON valid"));
+        assert!(health.contains("legacy JSON projection valid"));
     }
 
     #[test]
@@ -5822,10 +5888,144 @@ mod tests {
         assert_eq!(app.session.project().elements[1].text, "(CUSTOM)");
         assert_eq!(std::fs::read(&path).unwrap_or_default(), source_bytes);
         app.save_native_at(&path);
-        assert!(app.error.is_some());
+        assert!(app.error.is_none());
         assert_eq!(app.native_path.as_deref(), Some(path.as_path()));
         assert!(app.fdx_baseline.is_some());
-        assert_eq!(std::fs::read(&path).unwrap_or_default(), source_bytes);
+        assert!(!app.session.dirty());
+        let saved_bytes = std::fs::read(&path).unwrap_or_default();
+        assert_ne!(saved_bytes, source_bytes);
+        assert!(matches!(
+            fdx::preflight_version(&saved_bytes),
+            Ok(FdxVersionStatus::Version6)
+        ));
+        let saved_project = fdx::read_v6(&saved_bytes)
+            .unwrap_or_else(|_| unreachable!())
+            .project;
+        assert_eq!(
+            saved_project.elements[1].text,
+            app.session.project().elements[1].text
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_fdx_save_as_preserves_source_and_publishes_the_saved_candidate() {
+        let root =
+            std::env::temp_dir().join(format!("scriptcraft-wo012-save-as-{}", std::process::id()));
+        let source_path = root.join("source.fdx");
+        let destination = root.join("copy.fdx");
+        let source_bytes = staged_fdx_fixture("6");
+        let _ = std::fs::create_dir_all(&root);
+        let _ = std::fs::write(&source_path, &source_bytes);
+
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.open_native_at(&source_path);
+        let opened_session = app.session.clone();
+        app.save_fdx_as_at(&source_path);
+        assert!(app.error.is_some());
+        assert_eq!(app.session, opened_session);
+        assert_eq!(std::fs::read(&source_path).unwrap_or_default(), source_bytes);
+
+        app.session
+            .insert("pending edit")
+            .unwrap_or_else(|_| unreachable!());
+        let selection_before_save = app.session.selection();
+        let history_before_save = app.session.can_undo();
+        app.save_native_at(&destination);
+
+        assert!(app.error.is_none());
+        assert_eq!(app.native_path.as_deref(), Some(destination.as_path()));
+        assert_eq!(app.fdx_baseline.as_ref().map(FdxBaseline::path), Some(destination.as_path()));
+        assert!(!app.session.dirty());
+        assert_eq!(app.session.can_undo(), history_before_save);
+        assert_eq!(app.session.selection(), selection_before_save);
+        assert_eq!(std::fs::read(&source_path).unwrap_or_default(), source_bytes);
+        let saved_bytes = std::fs::read(&destination).unwrap_or_default();
+        let reopened = fdx::read_v6(&saved_bytes).unwrap_or_else(|_| unreachable!());
+        assert_eq!(reopened.project.elements[0].text, app.session.project().elements[0].text);
+        assert_eq!(reopened.project.elements[1].text, app.session.project().elements[1].text);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_fdx_save_conflict_keeps_external_destination_and_live_pending_edits() {
+        let root = std::env::temp_dir()
+            .join(format!("scriptcraft-wo012-conflict-{}", std::process::id()));
+        let path = root.join("conflict.fdx");
+        let original_bytes = staged_fdx_fixture("6");
+        let external_bytes = staged_fdx_fixture("5");
+        let _ = std::fs::create_dir_all(&root);
+        let _ = std::fs::write(&path, &original_bytes);
+
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.open_native_at(&path);
+        app.session
+            .insert("pending edit")
+            .unwrap_or_else(|_| unreachable!());
+        let project_before = app.session.project().clone();
+        let selection_before = app.session.selection();
+        let baseline_before = app.fdx_baseline.clone();
+        let _ = std::fs::write(&path, &external_bytes);
+
+        app.save_native();
+
+        assert!(app.error.is_some());
+        assert!(app.session.dirty());
+        assert_eq!(app.session.project(), &project_before);
+        assert_eq!(app.session.selection(), selection_before);
+        assert_eq!(app.fdx_baseline, baseline_before);
+        assert_eq!(app.native_path.as_deref(), Some(path.as_path()));
+        assert_eq!(std::fs::read(&path).unwrap_or_default(), external_bytes);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fdx_save_as_refuses_to_drop_legacy_json_origin_state() {
+        let root = std::env::temp_dir()
+            .join(format!("scriptcraft-wo012-json-origin-{}", std::process::id()));
+        let source_path = root.join("legacy.json");
+        let destination = root.join("migrated.fdx");
+        let project = legacy_json_project();
+        let source_bytes = persistence::serialize(&project).unwrap_or_default();
+        let _ = std::fs::create_dir_all(&root);
+        let _ = std::fs::write(&source_path, &source_bytes);
+
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.open_native_at(&source_path);
+        let project_before = app.session.project().clone();
+        let path_before = app.native_path.clone();
+        app.save_native_at(&destination);
+
+        assert!(app.error.is_some());
+        assert!(!app.session.dirty());
+        assert_eq!(app.session.project(), &project_before);
+        assert_eq!(app.native_path, path_before);
+        assert!(app.fdx_baseline.is_none());
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(&source_path).unwrap_or_default(), source_bytes);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn new_document_saves_as_a_native_version_six_fdx() {
+        let root = std::env::temp_dir()
+            .join(format!("scriptcraft-wo012-new-fdx-{}", std::process::id()));
+        let path = root.join("new-document.fdx");
+        let _ = std::fs::create_dir_all(&root);
+
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.save_fdx_as_at(&path);
+
+        assert!(app.error.is_none());
+        assert_eq!(app.native_path.as_deref(), Some(path.as_path()));
+        assert_eq!(app.fdx_baseline.as_ref().map(FdxBaseline::path), Some(path.as_path()));
+        assert!(!app.session.dirty());
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        assert!(matches!(
+            fdx::preflight_version(&bytes),
+            Ok(FdxVersionStatus::Version6)
+        ));
+        assert!(fdx::read_v6(&bytes).is_ok());
         let _ = std::fs::remove_dir_all(root);
     }
 
