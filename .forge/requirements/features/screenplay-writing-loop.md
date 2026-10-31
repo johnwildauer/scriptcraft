@@ -101,8 +101,11 @@ project meaning; failures preserve the prior valid destination and unsaved state
     containing semantic content, stable identities, metadata, and page-profile inputs, while
     excluding transient caret, layout, and undo state from required content. A field without a
     safe durable representation shall not be silently lost.
-  - **AC-WRITING-003.2:** Given a save preparation or replacement failure, the system shall preserve
-    the prior valid destination and retain an unsaved/dirty indication.
+  - **AC-WRITING-003.2:** Given a save preparation, conflict or replacement failure, the system
+    shall preserve the prior valid destination and the active session, path and clean baseline;
+    previously modified or unsaved work remains indicated as unsaved, while an initially clean
+    session remains clean relative to its existing baseline. The failure shall be reported and
+    shall not be presented as a successful save to the attempted destination.
   - **AC-WRITING-003.3:** Given a successfully saved native project, reopening it shall preserve
     semantic roles, text, stable IDs, metadata, reproducible pagination inputs, and retained
     source content subject to the explicit version and independence boundaries below. Absent

@@ -15,10 +15,11 @@ For either save command, stage the live document with pending edits, silently co
 
 ## Acceptance criteria
 - New/open/edit/save/reopen and Save As use Version 6 FDX; source is untouched by Save As and non-6 source changes only on explicit successful Save.
-- Successful save makes live and serialized cast values agree; failures and conflicts publish neither correction nor path/clean-state changes. Pending timer and undo behavior remain coherent.
+- Successful save makes live and serialized cast values agree; failures and conflicts publish neither correction nor path/clean-baseline changes. Pending timer and undo behavior remain coherent.
+- For Save and Save As, failure is reported without a success signal: an initially modified or unsaved session remains unsaved, and an initially clean session remains clean only relative to its existing baseline, not the attempted destination. Preserve pending edits and the prior destination, session and path; no failed candidate correction is published.
 
 ## Useful checks
-- Desktop/headless integration for Save and Save As, periodic race, direct cast edits, failed serialization/write/conflict, output version and reopen; applicable project checks.
+- Desktop/headless integration for Save and Save As, initially clean and modified sessions, pending edits and periodic race, direct cast edits, failed preparation/serialization/write/conflict/replacement, failure reporting, destination/path/baseline preservation, output version and reopen; applicable project checks.
 
 ## Dependency and handoff
 Depends on WO-005, WO-007–WO-011. One dedicated commit and fresh validation; native path is now FDX and subsequent cleanup may remove transitional JSON support.
