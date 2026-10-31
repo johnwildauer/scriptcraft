@@ -5,6 +5,7 @@
 
 pub mod editing;
 pub mod exports;
+pub mod fdx;
 pub mod layout;
 pub mod persistence;
 pub mod preservation;

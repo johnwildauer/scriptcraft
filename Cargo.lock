@@ -2705,6 +2705,9 @@ dependencies = [
 [[package]]
 name = "scriptcraft-core"
 version = "0.1.0"
+dependencies = [
+ "quick-xml 0.41.0",
+]
 
 [[package]]
 name = "sctk-adwaita"
