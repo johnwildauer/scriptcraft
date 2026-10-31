@@ -24,4 +24,4 @@ Create targeted end-to-end regression fixtures and an evidence matrix covering a
 - Run project policy commands, targeted integration tests and applicable manual desktop checks; record exact outcomes and environment. Verify no sensitive payload or private path in artifacts.
 
 ## Dependency and handoff
-Depends on WO-012 and WO-013 and their validated prerequisites. One dedicated commit and fresh validation; provide evidence and unresolved limitations for initiative closeout.
+Depends on WO-012 and WO-013, and transitively WO-012a–g and the earlier implementation prerequisites. One dedicated commit and recorded implementer checks; do not dispatch an independent validation agent under the initiative exception. Record WO-002–011's actual lack of independent validation and provide evidence and unresolved limitations for initiative closeout.

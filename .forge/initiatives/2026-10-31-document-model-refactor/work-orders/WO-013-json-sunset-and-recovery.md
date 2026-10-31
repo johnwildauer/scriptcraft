@@ -23,4 +23,4 @@ No legacy import or JSON writing promise. Make remaining internal-only uses expl
 - Search all JSON/recovery references; tests for old snapshot handling, safe FDX recovery if retained, diagnostics privacy, and workspace checks.
 
 ## Dependency and handoff
-Depends on WO-012. One dedicated commit and fresh validation; hand remaining recovery limitations to WO-014.
+Depends on successful WO-012, which depends on WO-012a–g. One dedicated commit and recorded implementer checks; do not dispatch an independent validation agent under the initiative exception. Hand remaining recovery limitations to WO-014.

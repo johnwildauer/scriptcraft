@@ -1,6 +1,6 @@
 # Work Order: WO-012 — Native FDX Save and Save As cutover
 
-- **Status:** `blocked` — WO-001 mapping evidence has no approved, tested durable home for ScriptCraft-specific project identity/schema, complete deterministic page-profile inputs and geometry, or editing-policy fields. Standard FDX mappings are unproven; neither a private extension nor a sidecar has an approved preservation contract. Do not begin native Save/Save As cutover or silently default away this state.
+- **Status:** `blocked` — the user directed deprecation of non-FDX legacy document state. WO-012a–g must first retire that state safely, preserve actual FDX data, prove structural editing and prepare transactional publication. No private extension or sidecar is required; do not activate an unsafe cutover or silently discard live transitional data.
 
 ## Outcome
 Make FDX the active desktop native format with transactional live/saved cast agreement.
@@ -24,4 +24,4 @@ For either save command, stage the live document with pending edits, silently co
 - Desktop/headless integration for Save and Save As, initially clean and modified sessions, pending edits and periodic race, direct cast edits, failed preparation/serialization/write/conflict/replacement, failure reporting, destination/path/baseline preservation, output version and reopen; applicable project checks.
 
 ## Dependency and handoff
-Depends on WO-005, WO-007–WO-011. One dedicated commit and fresh validation; native path is now FDX and subsequent cleanup may remove transitional JSON support.
+Depends on WO-005, WO-007–WO-011 and all inserted WO-012a–g, in their stated order. One dedicated commit and recorded implementer checks; the initiative-specific user direction prohibits dispatching further independent validation agents. Publish only a fully prepared, re-readable candidate and baseline after successful storage; retain selection/history and failure invariants specified by WO-012g. Native path becomes FDX only on completion; subsequent cleanup may remove transitional JSON support.
