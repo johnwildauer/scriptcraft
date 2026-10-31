@@ -383,7 +383,7 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
             .preservation
             .as_ref()
             .ok_or(FdxError::UnsupportedConstruct)?;
-        if state.identities != original_state.identities
+        if !same_non_paragraph_identities(&state.identities, &original_state.identities)
             || state.references != original_state.references
             || state.board_graph != original_state.board_graph
         {
@@ -421,17 +421,40 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
         return Err(FdxError::UnsupportedConstruct);
     }
     if let Some(expected_sections) = expected_preserved_sections {
-        let actual_sections = written
+        let actual_state = written
             .project
             .preservation
             .as_ref()
-            .map(|state| &state.sections)
             .ok_or(FdxError::UnsupportedConstruct)?;
+        if identity_set(&actual_state.identities)
+            != identity_set(
+                &project
+                    .preservation
+                    .as_ref()
+                    .ok_or(FdxError::UnsupportedConstruct)?
+                    .identities,
+            )
+        {
+            return Err(FdxError::UnsupportedConstruct);
+        }
+        let actual_sections = &actual_state.sections;
         if normalize_sections(actual_sections) != normalize_sections(&expected_sections) {
             return Err(FdxError::UnsupportedConstruct);
         }
     }
     Ok(bytes)
+}
+
+fn same_non_paragraph_identities(left: &[ForeignIdentity], right: &[ForeignIdentity]) -> bool {
+    left.iter()
+        .filter(|identity| identity.domain != ForeignIdDomain::Paragraph)
+        .eq(right
+            .iter()
+            .filter(|identity| identity.domain != ForeignIdDomain::Paragraph))
+}
+
+fn identity_set(identities: &[ForeignIdentity]) -> BTreeSet<ForeignIdentity> {
+    identities.iter().cloned().collect()
 }
 
 fn same_semantic_elements(left: &[ScreenplayElement], right: &[ScreenplayElement]) -> bool {
@@ -511,10 +534,28 @@ fn normalize_sections(sections: &[PreservedSection]) -> Vec<PreservedSection> {
         .iter()
         .cloned()
         .map(|mut section| {
-            section.children = normalize_text_nodes(&section.children);
+            section.children = normalize_source_tree(&section.children);
             section
         })
         .collect()
+}
+
+fn normalize_source_tree(nodes: &[PreservedNode]) -> Vec<PreservedNode> {
+    let mut normalized = normalize_text_nodes(nodes);
+    let mut stack = normalized.iter_mut().collect::<Vec<_>>();
+    while let Some(node) = stack.pop() {
+        if let PreservedNode::Element(element) = node {
+            if matches!(element.ownership, SourceOwnership::Managed(_)) {
+                // Semantic element IDs and source-anchor IDs are session-local;
+                // they are not serialized FDX fields and may be reallocated on
+                // reread. Compare the source XML structure, not these keys.
+                element.ownership = SourceOwnership::Opaque;
+                element.anchor = None;
+            }
+            stack.extend(element.children.iter_mut());
+        }
+    }
+    normalized
 }
 
 fn normalize_text_nodes(nodes: &[PreservedNode]) -> Vec<PreservedNode> {
@@ -699,13 +740,29 @@ fn reconcile_managed_paragraph(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if text_elements.len() != semantic.runs.len() {
-        if text_elements.is_empty() && semantic.runs.is_empty() && semantic.text.is_empty() {
+    let plain_run;
+    let semantic_runs = if semantic.runs.is_empty() && !semantic.text.is_empty() {
+        plain_run = vec![TextRun {
+            text: semantic.text.clone(),
+            attributes: Vec::new(),
+        }];
+        plain_run.as_slice()
+    } else if semantic.runs.is_empty() && text_elements.len() == 1 {
+        plain_run = vec![TextRun {
+            text: String::new(),
+            attributes: Vec::new(),
+        }];
+        plain_run.as_slice()
+    } else {
+        semantic.runs.as_slice()
+    };
+    if text_elements.len() != semantic_runs.len() {
+        if text_elements.is_empty() && semantic_runs.is_empty() && semantic.text.is_empty() {
             return Ok(());
         }
         return Err(FdxError::UnsupportedConstruct);
     }
-    for (text_element, run) in text_elements.iter_mut().zip(&semantic.runs) {
+    for (text_element, run) in text_elements.iter_mut().zip(semantic_runs) {
         let source_attributes = text_element
             .attributes
             .iter()

@@ -5,7 +5,10 @@
 //! content; byte identity and external-application interoperability are not
 //! implied.
 
-use crate::{SourceFormat, SourceLayoutSettings, StableId};
+use crate::{
+    Role, ScreenplayElement, SourceFormat, SourceLayoutSettings, SourceProvenance, SourceSection,
+    StableId, TextRun,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
@@ -44,6 +47,7 @@ pub enum PreservationError {
     UnsupportedTextMapping,
     UnsupportedRoleMapping,
     StructuralAttachmentConflict,
+    PotentialReferenceConflict,
 }
 
 /// The source's expanded name and, when available, original qualified spelling.
@@ -576,9 +580,28 @@ impl PreservationState {
             return Err(PreservationError::UnsupportedTextMapping);
         }
         let element = self.managed_element_mut(id)?;
+        if element.children.iter().any(
+            |node| matches!(node, PreservedNode::Element(child) if is_text_element(child, element)),
+        ) {
+            return replace_text_element_children(
+                element,
+                old_text,
+                start,
+                end,
+                inserted,
+                expected_runs,
+            );
+        }
         let indexes = direct_text_child_indexes(element);
         if indexes.is_empty() {
-            return Err(PreservationError::UnsupportedTextMapping);
+            return replace_text_element_children(
+                element,
+                old_text,
+                start,
+                end,
+                inserted,
+                expected_runs,
+            );
         }
         let source_segments = indexes
             .iter()
@@ -766,7 +789,7 @@ impl PreservationState {
         }
         if old_role != new_role
             && (old_role == "Scene Heading" || new_role == "Scene Heading")
-            && contains_attached_data(&element.children)
+            && (contains_attached_data(&element.children) || contains_unknown_nested_data(element))
         {
             return Err(PreservationError::StructuralAttachmentConflict);
         }
@@ -787,16 +810,291 @@ impl PreservationState {
         Ok(())
     }
 
-    /// Structural operations which remove an anchored paragraph must not leave
-    /// its source node, foreign identity, or nested attachment silently behind.
-    pub(crate) fn ensure_unanchored_elements(
-        &self,
-        ids: impl IntoIterator<Item = StableId>,
+    /// Reconciles a body-structure edit in the same candidate as its semantic
+    /// model. Existing foreign paragraph IDs stay with surviving elements;
+    /// newly inserted paragraphs receive fresh foreign and source-anchor IDs.
+    /// Opaque nested content and plausible non-board references are safe-stops.
+    pub(crate) fn reconcile_body_structure(
+        &mut self,
+        before: &[ScreenplayElement],
+        after: &mut [ScreenplayElement],
     ) -> Result<(), PreservationError> {
-        if ids.into_iter().any(|id| self.has_managed_element(&id)) {
-            return Err(PreservationError::StructuralAttachmentConflict);
+        let before_ids = before
+            .iter()
+            .map(|element| element.id.clone())
+            .collect::<BTreeSet<_>>();
+        let after_ids = after
+            .iter()
+            .map(|element| element.id.clone())
+            .collect::<BTreeSet<_>>();
+        let structural_change = before_ids != after_ids
+            || before.iter().map(|item| &item.id).collect::<Vec<_>>()
+                != after.iter().map(|item| &item.id).collect::<Vec<_>>();
+        if !structural_change {
+            return Ok(());
+        }
+
+        for element in before {
+            if !after_ids.contains(&element.id) && self.has_managed_element(&element.id) {
+                self.remove_managed_paragraph(&element.id, element.source_provenance.as_ref())?;
+            }
+        }
+
+        // A retained identity may have acquired the left or joined text of a
+        // structural operation. Rebuild only simple, explicitly mapped Text
+        // runs; ordinary in-paragraph edits continue to use the finer-grained
+        // source-child transform above.
+        for element in after.iter() {
+            let Some(previous) = before.iter().find(|item| item.id == element.id) else {
+                continue;
+            };
+            if previous.text != element.text && self.has_managed_element(&element.id) {
+                self.replace_managed_projection(element)?;
+            }
+        }
+
+        let ordered_ids = after
+            .iter()
+            .map(|element| element.id.clone())
+            .collect::<Vec<_>>();
+        for (index, element) in after.iter_mut().enumerate() {
+            if before_ids.contains(&element.id) || self.has_managed_element(&element.id) {
+                continue;
+            }
+            let provenance = self.insert_managed_paragraph(element, index, &ordered_ids)?;
+            element.source_provenance = Some(provenance);
         }
         Ok(())
+    }
+
+    fn insert_managed_paragraph(
+        &mut self,
+        semantic: &ScreenplayElement,
+        index: usize,
+        ordered: &[StableId],
+    ) -> Result<SourceProvenance, PreservationError> {
+        let ManagedParagraphTemplate {
+            paragraph_name,
+            paragraph_bindings,
+            text_name,
+            text_bindings,
+            id_spelling,
+        } = {
+            let children = content_children_mut(&mut self.sections)
+                .ok_or(PreservationError::ManagedAnchorMissing)?;
+            let template = find_any_managed_paragraph(children)
+                .ok_or(PreservationError::UnsupportedTextMapping)?;
+            paragraph_template(template)?
+        };
+        let foreign_id = self.fresh_foreign_paragraph_id()?;
+        let anchor_id = self.fresh_anchor_id()?;
+        let text_runs = semantic_text_runs(semantic);
+        let mut paragraph = PreservedElement {
+            name: paragraph_name,
+            attributes: vec![
+                PreservedAttribute {
+                    name: plain_source_name("Type"),
+                    value: fdx_role_name(semantic.role).to_owned(),
+                },
+                PreservedAttribute {
+                    name: plain_source_name(&id_spelling),
+                    value: foreign_id.clone(),
+                },
+            ],
+            namespace_bindings: paragraph_bindings,
+            source_type: Some(fdx_role_name(semantic.role).to_owned()),
+            ownership: SourceOwnership::Managed(semantic.id.clone()),
+            dependency_confidence: DependencyConfidence::Unknown,
+            anchor: Some(anchor_id.clone()),
+            children: Vec::new(),
+        };
+        for run in text_runs {
+            paragraph
+                .children
+                .push(PreservedNode::Element(PreservedElement {
+                    name: text_name.clone(),
+                    attributes: run
+                        .attributes
+                        .iter()
+                        .map(|attribute| PreservedAttribute {
+                            name: source_name_from_qname(&attribute.name),
+                            value: attribute.value.clone(),
+                        })
+                        .collect(),
+                    namespace_bindings: text_bindings.clone(),
+                    source_type: None,
+                    ownership: SourceOwnership::Opaque,
+                    dependency_confidence: DependencyConfidence::Unknown,
+                    anchor: None,
+                    children: vec![PreservedNode::Text(run.text)],
+                }));
+        }
+
+        let children = content_children_mut(&mut self.sections)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let mut insert_at = None;
+        for following in ordered.iter().skip(index + 1) {
+            if let Some(position) = managed_child_index(children, following) {
+                insert_at = Some(position);
+                break;
+            }
+        }
+        if insert_at.is_none() {
+            for preceding in ordered[..index].iter().rev() {
+                if let Some(position) = managed_child_index(children, preceding) {
+                    insert_at = Some(position + 1);
+                    break;
+                }
+            }
+        }
+        let position = insert_at.unwrap_or(children.len());
+        children.insert(position, PreservedNode::Element(paragraph));
+        self.anchors.push(SourceAnchor {
+            id: anchor_id,
+            target: AnchorTarget::ProjectElement(semantic.id.clone()),
+            relation: AnchorRelation::Represents,
+        });
+        self.identities.push(ForeignIdentity::new(
+            ForeignIdDomain::Paragraph,
+            foreign_id.clone(),
+        )?);
+        Ok(SourceProvenance {
+            format: SourceFormat::Fdx,
+            section: SourceSection::Content,
+            ordinal: u32::try_from(index).map_err(|_| PreservationError::TooManyEvents)?,
+            foreign_id: Some(foreign_id),
+            foreign_role: Some(fdx_role_name(semantic.role).to_owned()),
+        })
+    }
+
+    fn remove_managed_paragraph(
+        &mut self,
+        id: &StableId,
+        provenance: Option<&SourceProvenance>,
+    ) -> Result<(), PreservationError> {
+        let target = find_managed_element(&self.sections, id)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        if !is_plain_managed_paragraph(target) {
+            return Err(PreservationError::StructuralAttachmentConflict);
+        }
+        let foreign_id = paragraph_foreign_id(target);
+        if provenance.and_then(|item| item.foreign_id.as_deref()) != foreign_id {
+            return Err(PreservationError::ManagedTextMismatch);
+        }
+        if let Some(value) = foreign_id {
+            let referenced = self
+                .references
+                .iter()
+                .chain(&self.board_graph.references)
+                .any(|reference| {
+                    reference.target.domain == ForeignIdDomain::Paragraph
+                        && reference.target.value == value
+                });
+            if referenced || has_potential_reference(&self.sections, value, id) {
+                return Err(PreservationError::PotentialReferenceConflict);
+            }
+            self.identities.retain(|identity| {
+                !(identity.domain == ForeignIdDomain::Paragraph && identity.value == value)
+            });
+        }
+        let removed = remove_managed_node_from_content(&mut self.sections, id);
+        if !removed {
+            return Err(PreservationError::ManagedAnchorMissing);
+        }
+        self.anchors.retain(|anchor| {
+            !matches!(&anchor.target, AnchorTarget::ProjectElement(target) if target == id)
+        });
+        Ok(())
+    }
+
+    fn replace_managed_projection(
+        &mut self,
+        semantic: &ScreenplayElement,
+    ) -> Result<(), PreservationError> {
+        let paragraph = self.managed_element_mut(&semantic.id)?;
+        if !is_plain_managed_paragraph(paragraph) {
+            return Err(PreservationError::StructuralAttachmentConflict);
+        }
+        let templates = paragraph
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                PreservedNode::Element(element) if is_text_element(element, paragraph) => {
+                    Some(element.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let runs = semantic_text_runs(semantic);
+        let mut rebuilt = Vec::with_capacity(paragraph.children.len().saturating_add(runs.len()));
+        let mut inserted = false;
+        let mut template_cursor = 0usize;
+        for child in &paragraph.children {
+            match child {
+                PreservedNode::Element(element) if is_text_element(element, paragraph) => {
+                    if !inserted {
+                        for run in &runs {
+                            let template = templates
+                                .iter()
+                                .find(|candidate| text_element_matches_run(candidate, run))
+                                .or_else(|| templates.get(template_cursor))
+                                .ok_or(PreservationError::UnsupportedTextMapping)?;
+                            template_cursor = template_cursor.saturating_add(1);
+                            rebuilt
+                                .push(PreservedNode::Element(text_element_for_run(template, run)));
+                        }
+                        inserted = true;
+                    }
+                }
+                PreservedNode::Text(text) | PreservedNode::CData(text)
+                    if text.trim().is_empty() =>
+                {
+                    rebuilt.push(child.clone())
+                }
+                _ => return Err(PreservationError::UnsupportedTextMapping),
+            }
+        }
+        if !inserted && !runs.is_empty() {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        paragraph.children = rebuilt;
+        Ok(())
+    }
+
+    fn fresh_foreign_paragraph_id(&self) -> Result<String, PreservationError> {
+        let mut serial = 1u64;
+        loop {
+            let value = format!("scriptcraft-paragraph-{serial}");
+            let collision = self
+                .identities
+                .iter()
+                .any(|identity| identity.value == value)
+                || self
+                    .board_graph
+                    .entities
+                    .iter()
+                    .any(|entity| entity.identity.value == value)
+                || source_has_id_value(&self.sections, &value);
+            if !collision {
+                return Ok(value);
+            }
+            serial = serial
+                .checked_add(1)
+                .ok_or(PreservationError::TooManyEvents)?;
+        }
+    }
+
+    fn fresh_anchor_id(&self) -> Result<SourceAnchorId, PreservationError> {
+        let mut serial = 1u64;
+        loop {
+            let candidate = SourceAnchorId::new(format!("scriptcraft-anchor-{serial}"))?;
+            if !self.anchors.iter().any(|anchor| anchor.id == candidate) {
+                return Ok(candidate);
+            }
+            serial = serial
+                .checked_add(1)
+                .ok_or(PreservationError::TooManyEvents)?;
+        }
     }
 
     fn managed_element_mut(
@@ -813,6 +1111,300 @@ impl PreservationState {
             _ => Err(PreservationError::ManagedAnchorAmbiguous),
         }
     }
+}
+
+fn plain_source_name(name: &str) -> SourceName {
+    SourceName {
+        namespace_uri: None,
+        local_name: name.to_owned(),
+        qualified_name: Some(name.to_owned()),
+    }
+}
+
+fn source_name_from_qname(name: &str) -> SourceName {
+    let local_name = name.rsplit(':').next().unwrap_or(name).to_owned();
+    SourceName {
+        namespace_uri: None,
+        local_name,
+        qualified_name: Some(name.to_owned()),
+    }
+}
+
+fn fdx_role_name(role: Role) -> &'static str {
+    match role {
+        Role::SceneHeading => "Scene Heading",
+        Role::Action => "Action",
+        Role::Character => "Character",
+        Role::Dialogue => "Dialogue",
+        Role::Parenthetical => "Parenthetical",
+        Role::Transition => "Transition",
+        Role::Note => "Note",
+        Role::NewAct => "New Act",
+        Role::EndOfAct => "End of Act",
+        Role::CastList => "Cast List",
+        Role::General => "General",
+        Role::Shot => "Shot",
+        Role::Sequence => "Sequence",
+        Role::Outline1 => "Outline 1",
+        Role::Outline2 => "Outline 2",
+        Role::Outline3 => "Outline 3",
+        Role::Summary => "Summary",
+    }
+}
+
+fn semantic_text_runs(element: &ScreenplayElement) -> Vec<TextRun> {
+    if !element.runs.is_empty() {
+        element.runs.clone()
+    } else if element.text.is_empty() {
+        Vec::new()
+    } else {
+        vec![TextRun {
+            text: element.text.clone(),
+            attributes: Vec::new(),
+        }]
+    }
+}
+
+fn content_children_mut(sections: &mut [PreservedSection]) -> Option<&mut Vec<PreservedNode>> {
+    for section in sections {
+        for node in &mut section.children {
+            let PreservedNode::Element(root) = node else {
+                continue;
+            };
+            if root.name.local_name != "FinalDraft" {
+                continue;
+            }
+            let namespace = root.name.namespace_uri.clone();
+            for child in &mut root.children {
+                if let PreservedNode::Element(content) = child {
+                    if content.name.local_name == "Content"
+                        && content.name.namespace_uri == namespace
+                    {
+                        return Some(&mut content.children);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_any_managed_paragraph(nodes: &[PreservedNode]) -> Option<&PreservedElement> {
+    for node in nodes {
+        if let PreservedNode::Element(element) = node {
+            if matches!(element.ownership, SourceOwnership::Managed(_)) {
+                return Some(element);
+            }
+            if let Some(found) = find_any_managed_paragraph(&element.children) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+struct ManagedParagraphTemplate {
+    paragraph_name: SourceName,
+    paragraph_bindings: Vec<NamespaceBinding>,
+    text_name: SourceName,
+    text_bindings: Vec<NamespaceBinding>,
+    id_spelling: String,
+}
+
+fn paragraph_template(
+    paragraph: &PreservedElement,
+) -> Result<ManagedParagraphTemplate, PreservationError> {
+    if paragraph.name.local_name != "Paragraph" {
+        return Err(PreservationError::UnsupportedTextMapping);
+    }
+    let text = paragraph.children.iter().find_map(|node| match node {
+        PreservedNode::Element(element) if is_text_element(element, paragraph) => Some(element),
+        _ => None,
+    });
+    let (text_name, text_bindings) = if let Some(text) = text {
+        (text.name.clone(), text.namespace_bindings.clone())
+    } else {
+        let prefix = paragraph
+            .name
+            .qualified_name
+            .as_deref()
+            .and_then(|name| name.split_once(':').map(|(prefix, _)| prefix));
+        let qualified_name =
+            prefix.map_or_else(|| "Text".to_owned(), |prefix| format!("{prefix}:Text"));
+        (
+            SourceName {
+                namespace_uri: paragraph.name.namespace_uri.clone(),
+                local_name: "Text".to_owned(),
+                qualified_name: Some(qualified_name),
+            },
+            Vec::new(),
+        )
+    };
+    let id_spelling = paragraph
+        .attributes
+        .iter()
+        .find(|attribute| {
+            attribute.name.namespace_uri.is_none()
+                && attribute.name.local_name.eq_ignore_ascii_case("id")
+        })
+        .and_then(|attribute| attribute.name.qualified_name.clone())
+        .unwrap_or_else(|| "ID".to_owned());
+    Ok(ManagedParagraphTemplate {
+        paragraph_name: paragraph.name.clone(),
+        paragraph_bindings: paragraph.namespace_bindings.clone(),
+        text_name,
+        text_bindings,
+        id_spelling,
+    })
+}
+
+fn managed_child_index(nodes: &[PreservedNode], id: &StableId) -> Option<usize> {
+    nodes.iter().position(|node| {
+        matches!(node, PreservedNode::Element(element)
+            if matches!(&element.ownership, SourceOwnership::Managed(target) if target == id))
+    })
+}
+
+fn find_managed_element<'a>(
+    sections: &'a [PreservedSection],
+    id: &StableId,
+) -> Option<&'a PreservedElement> {
+    fn find<'a>(nodes: &'a [PreservedNode], id: &StableId) -> Option<&'a PreservedElement> {
+        for node in nodes {
+            if let PreservedNode::Element(element) = node {
+                if matches!(&element.ownership, SourceOwnership::Managed(target) if target == id) {
+                    return Some(element);
+                }
+                if let Some(found) = find(&element.children, id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    sections
+        .iter()
+        .find_map(|section| find(&section.children, id))
+}
+
+fn is_text_element(element: &PreservedElement, paragraph: &PreservedElement) -> bool {
+    element.name.local_name == "Text" && element.name.namespace_uri == paragraph.name.namespace_uri
+}
+
+fn is_plain_managed_paragraph(paragraph: &PreservedElement) -> bool {
+    paragraph.name.local_name == "Paragraph"
+        && paragraph.children.iter().all(|node| match node {
+            PreservedNode::Text(text) | PreservedNode::CData(text) => text.trim().is_empty(),
+            PreservedNode::Element(element) if is_text_element(element, paragraph) => element
+                .children
+                .iter()
+                .all(|child| matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_))),
+            _ => false,
+        })
+}
+
+fn paragraph_foreign_id(paragraph: &PreservedElement) -> Option<&str> {
+    let mut ids = paragraph.attributes.iter().filter(|attribute| {
+        attribute.name.namespace_uri.is_none()
+            && attribute.name.local_name.eq_ignore_ascii_case("id")
+    });
+    let id = ids.next()?.value.as_str();
+    if ids.next().is_some() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+fn text_element_matches_run(element: &PreservedElement, run: &TextRun) -> bool {
+    element.attributes.len() == run.attributes.len()
+        && element
+            .attributes
+            .iter()
+            .zip(&run.attributes)
+            .all(|(source, model)| {
+                source
+                    .name
+                    .qualified_name
+                    .as_deref()
+                    .unwrap_or(source.name.local_name.as_str())
+                    == model.name
+                    && source.value == model.value
+            })
+}
+
+fn text_element_for_run(template: &PreservedElement, run: &TextRun) -> PreservedElement {
+    let mut element = template.clone();
+    element.attributes = run
+        .attributes
+        .iter()
+        .map(|attribute| PreservedAttribute {
+            name: source_name_from_qname(&attribute.name),
+            value: attribute.value.clone(),
+        })
+        .collect();
+    element.children = vec![PreservedNode::Text(run.text.clone())];
+    element
+}
+
+fn remove_managed_node_from_content(sections: &mut [PreservedSection], id: &StableId) -> bool {
+    let Some(children) = content_children_mut(sections) else {
+        return false;
+    };
+    let Some(index) = managed_child_index(children, id) else {
+        return false;
+    };
+    children.remove(index);
+    true
+}
+
+fn source_has_id_value(sections: &[PreservedSection], value: &str) -> bool {
+    fn contains(nodes: &[PreservedNode], value: &str) -> bool {
+        nodes.iter().any(|node| match node {
+            PreservedNode::Element(element) => {
+                element.attributes.iter().any(|attribute| {
+                    attribute.name.namespace_uri.is_none()
+                        && attribute.name.local_name.eq_ignore_ascii_case("id")
+                        && attribute.value == value
+                }) || contains(&element.children, value)
+            }
+            _ => false,
+        })
+    }
+    sections
+        .iter()
+        .any(|section| contains(&section.children, value))
+}
+
+fn has_potential_reference(
+    sections: &[PreservedSection],
+    value: &str,
+    excluded_element: &StableId,
+) -> bool {
+    fn scan(nodes: &[PreservedNode], value: &str, excluded: &StableId) -> bool {
+        nodes.iter().any(|node| {
+            let PreservedNode::Element(element) = node else {
+                return false;
+            };
+            if matches!(
+                element.name.local_name.as_str(),
+                "DisplayBoards" | "ListItems" | "Images" | "StoryMaps" | "Boards"
+            ) {
+                return false;
+            }
+            let is_excluded =
+                matches!(&element.ownership, SourceOwnership::Managed(id) if id == excluded);
+            element.attributes.iter().any(|attribute| {
+                !(is_excluded
+                    && attribute.name.namespace_uri.is_none()
+                    && attribute.name.local_name.eq_ignore_ascii_case("id"))
+                    && attribute.value == value
+            }) || scan(&element.children, value, excluded)
+        })
+    }
+    sections
+        .iter()
+        .any(|section| scan(&section.children, value, excluded_element))
 }
 
 fn contains_managed_element(nodes: &[PreservedNode], id: &StableId) -> bool {
@@ -835,6 +1427,22 @@ fn contains_attached_data(nodes: &[PreservedNode]) -> bool {
     })
 }
 
+fn contains_unknown_nested_data(paragraph: &PreservedElement) -> bool {
+    paragraph.children.iter().any(|node| match node {
+        PreservedNode::Element(element)
+            if element.name.local_name == "Text"
+                && element.name.namespace_uri == paragraph.name.namespace_uri =>
+        {
+            element
+                .children
+                .iter()
+                .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
+        }
+        PreservedNode::Text(text) | PreservedNode::CData(text) => !text.trim().is_empty(),
+        _ => true,
+    })
+}
+
 fn collect_managed_elements_mut<'a>(
     nodes: &'a mut [PreservedNode],
     id: &StableId,
@@ -849,6 +1457,154 @@ fn collect_managed_elements_mut<'a>(
             }
         }
     }
+}
+
+fn replace_text_element_children(
+    paragraph: &mut PreservedElement,
+    old_text: &str,
+    start: usize,
+    end: usize,
+    inserted: &str,
+    expected_runs: Option<&[String]>,
+) -> Result<(), PreservationError> {
+    if start > end
+        || end > old_text.len()
+        || !old_text.is_char_boundary(start)
+        || !old_text.is_char_boundary(end)
+    {
+        return Err(PreservationError::UnsupportedTextMapping);
+    }
+    let mut indexes = paragraph
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| match node {
+            PreservedNode::Element(element) if is_text_element(element, paragraph) => Some(index),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if indexes.is_empty() {
+        if !old_text.is_empty() || start != 0 || end != 0 {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let (name, namespace_bindings) = paragraph_text_name(paragraph);
+        paragraph
+            .children
+            .push(PreservedNode::Element(PreservedElement {
+                name,
+                attributes: Vec::new(),
+                namespace_bindings,
+                source_type: None,
+                ownership: SourceOwnership::Opaque,
+                dependency_confidence: DependencyConfidence::Unknown,
+                anchor: None,
+                children: vec![PreservedNode::Text(String::new())],
+            }));
+        indexes.push(paragraph.children.len().saturating_sub(1));
+    }
+    let source_segments = indexes
+        .iter()
+        .map(|index| {
+            let PreservedNode::Element(text_element) = &paragraph.children[*index] else {
+                return Err(PreservationError::UnsupportedTextMapping);
+            };
+            text_element
+                .children
+                .iter()
+                .try_fold(String::new(), |mut value, child| match child {
+                    PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                        value.push_str(text);
+                        Ok(value)
+                    }
+                    _ => Err(PreservationError::UnsupportedTextMapping),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if source_segments.concat() != old_text {
+        return Err(PreservationError::ManagedTextMismatch);
+    }
+    if expected_runs.is_some_and(|runs| runs != source_segments.as_slice()) {
+        return Err(PreservationError::UnsupportedTextMapping);
+    }
+    let mut boundary = 0usize;
+    for pair in indexes.windows(2) {
+        let previous = pair[0];
+        let next = pair[1];
+        boundary = boundary.saturating_add(
+            source_segments[indexes
+                .iter()
+                .position(|index| *index == previous)
+                .ok_or(PreservationError::UnsupportedTextMapping)?]
+            .len(),
+        );
+        let has_opaque_gap = paragraph.children[previous + 1..next]
+            .iter()
+            .any(|node| match node {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => !text.trim().is_empty(),
+                _ => true,
+            });
+        if has_opaque_gap && start < boundary && end > boundary {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+    }
+    let updated = replace_segments(&source_segments, start, end, inserted)?;
+    for (index, text) in indexes.into_iter().zip(updated) {
+        let PreservedNode::Element(text_element) = &mut paragraph.children[index] else {
+            return Err(PreservationError::UnsupportedTextMapping);
+        };
+        replace_text_element_content(text_element, &text)?;
+    }
+    Ok(())
+}
+
+fn paragraph_text_name(paragraph: &PreservedElement) -> (SourceName, Vec<NamespaceBinding>) {
+    let prefix = paragraph
+        .name
+        .qualified_name
+        .as_deref()
+        .and_then(|name| name.split_once(':').map(|(prefix, _)| prefix));
+    let qualified_name =
+        prefix.map_or_else(|| "Text".to_owned(), |prefix| format!("{prefix}:Text"));
+    (
+        SourceName {
+            namespace_uri: paragraph.name.namespace_uri.clone(),
+            local_name: "Text".to_owned(),
+            qualified_name: Some(qualified_name),
+        },
+        paragraph.namespace_bindings.clone(),
+    )
+}
+
+fn replace_text_element_content(
+    element: &mut PreservedElement,
+    replacement: &str,
+) -> Result<(), PreservationError> {
+    if element
+        .children
+        .iter()
+        .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
+    {
+        return Err(PreservationError::UnsupportedTextMapping);
+    }
+    if let Some(first) = element.children.first_mut() {
+        match first {
+            PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                *text = replacement.to_owned();
+            }
+            _ => return Err(PreservationError::UnsupportedTextMapping),
+        }
+        for child in element.children.iter_mut().skip(1) {
+            match child {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => text.clear(),
+                _ => return Err(PreservationError::UnsupportedTextMapping),
+            }
+        }
+    } else {
+        element
+            .children
+            .push(PreservedNode::Text(replacement.to_owned()));
+    }
+    Ok(())
 }
 
 fn direct_text_child_indexes(element: &PreservedElement) -> Vec<usize> {

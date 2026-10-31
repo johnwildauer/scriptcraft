@@ -251,9 +251,8 @@ impl EditingSession {
         self.insert(text)
     }
 
-    /// Deletes text without removing an element identity. Operations which
-    /// would remove an anchored paragraph instead fail until its source identity
-    /// and attachments have a verified transform.
+    /// Deletes text or, when the selection spans paragraph boundaries, removes
+    /// the selected source-anchored paragraphs transactionally.
     pub fn delete(&mut self) -> Result<(), EditError> {
         self.mutate(|project, selection, generated, _policy| {
             let (start, end) = selection.ordered();
@@ -268,7 +267,6 @@ impl EditingSession {
             if item.role == Role::Parenthetical
                 && is_delimiter_only_parenthetical(item.text.as_str())
             {
-                ensure_elements_unanchored(project, [item.id.clone()])?;
                 let id = item.id.as_str().to_owned();
                 generated.remove(&id);
                 if start.element == 0 || project.elements.len() == 1 {
@@ -339,9 +337,8 @@ impl EditingSession {
         })
     }
 
-    /// Splits an unanchored semantic element. A source-owned paragraph is not
-    /// split until its foreign ID, anchor placement and nested data can be
-    /// transformed without duplication or loss.
+    /// Splits a semantic paragraph while retaining the original foreign ID on
+    /// the left side and allocating a fresh source identity for the right.
     pub fn split(&mut self) -> Result<(), EditError> {
         self.mutate(|project, selection, _generated, policy| {
             let (start, end) = selection.ordered();
@@ -499,9 +496,9 @@ impl EditingSession {
         })
     }
 
-    /// Joins unanchored semantic elements. Mapped source identities are retained
-    /// rather than merged or recycled; joining any anchored participant is a
-    /// transactional safe-stop.
+    /// Joins adjacent paragraphs while retaining the left source identity. Any
+    /// opaque attachment or unsafe reference prevents the candidate from being
+    /// published.
     pub fn join_with_next(&mut self) -> Result<(), EditError> {
         self.mutate(|project, selection, _generated, _policy| {
             let (start, end) = selection.ordered();
@@ -600,6 +597,11 @@ impl EditingSession {
         let mut generated = self.generated_parentheticals.clone();
         let prior_generated = generated.clone();
         let selection = operation(&mut project, &self.selection, &mut generated, &self.policy)?;
+        if let Some(preservation) = project.preservation.as_mut() {
+            preservation
+                .reconcile_body_structure(&self.project.elements, &mut project.elements)
+                .map_err(EditError::Preservation)?;
+        }
         invalidate_changed_generated_parentheticals(
             &self.project,
             &project,
@@ -707,13 +709,8 @@ fn replace_range(
         replace_element_text(project, start.element, start.offset, end.offset, inserted)?;
         return Ok(());
     }
-    // Cross-element replacement retains the first internal ID but removes the
-    // other selected IDs. Until source anchors and foreign references can be
-    // reconciled, every mapped participant must remain untouched.
-    ensure_elements_unanchored(
-        project,
-        (start.element..=end.element).map(|index| project.elements[index].id.clone()),
-    )?;
+    // The transaction-level preservation reconciliation retains the first ID,
+    // removes the consumed source paragraphs and carries source runs forward.
     let prefix = project.elements[start.element].text[..start.offset].to_owned();
     let suffix = project.elements[end.element].text[end.offset..].to_owned();
     let combined = format!("{prefix}{inserted}{suffix}");
@@ -830,26 +827,6 @@ fn replace_text_segments(
         base = limit;
     }
     Ok(updated)
-}
-
-fn ensure_elements_unanchored(
-    project: &Project,
-    ids: impl IntoIterator<Item = crate::StableId>,
-) -> Result<(), EditError> {
-    let ids = ids.into_iter().collect::<Vec<_>>();
-    if project.elements.iter().any(|element| {
-        ids.iter().any(|id| id == &element.id) && element.source_provenance.is_some()
-    }) {
-        return Err(EditError::Preservation(
-            crate::preservation::PreservationError::StructuralAttachmentConflict,
-        ));
-    }
-    if let Some(preservation) = &project.preservation {
-        preservation
-            .ensure_unanchored_elements(ids)
-            .map_err(EditError::Preservation)?;
-    }
-    Ok(())
 }
 
 fn replace_cross_element_runs(
@@ -1254,7 +1231,6 @@ fn split_at(
         .get(position.element)
         .ok_or(EditError::InvalidElement)?
         .clone();
-    ensure_elements_unanchored(project, [item.id.clone()])?;
     let left = item.text[..position.offset].to_owned();
     let right = item.text[position.offset..].to_owned();
     let old_runs = effective_runs(&item);
@@ -1286,13 +1262,6 @@ fn join_at(project: &mut Project, index: usize) -> Result<(), EditError> {
     if index + 1 >= project.elements.len() {
         return Err(EditError::InvalidElement);
     }
-    ensure_elements_unanchored(
-        project,
-        [
-            project.elements[index].id.clone(),
-            project.elements[index + 1].id.clone(),
-        ],
-    )?;
     let right = project.elements[index + 1].text.clone();
     let joined_runs =
         if project.elements[index].runs.is_empty() && project.elements[index + 1].runs.is_empty() {

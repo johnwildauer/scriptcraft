@@ -1,6 +1,6 @@
 # Work Order: WO-012f — Make source-anchored edits safely serializable
 
-- **Status:** `draft / not started`; depends on WO-012e.
+- **Status:** `implemented`; implementer checks passed. No independent validator dispatched under the initiative-specific user direction.
 
 ## Outcome and scope
 Close the gap between editing transactions and writer reconciliation for ordinary structural edits of imported FDX, preserving authored/unknown content or rejecting before state changes.
@@ -16,3 +16,12 @@ Close the gap between editing transactions and writer reconciliation for ordinar
 
 ## Risks and dependency
 Depends on WO-012e and WO-004/009. One attributable commit, implementer checks only. Unknown source references and destructive nested-scene data are genuine blockers, not grounds to invent mappings or blanket cross-domain blocking. Hand source transformations to WO-012g.
+
+## Implementation results — 2026-10-31
+
+- Editing transactions now reconcile body order, source anchors and foreign paragraph identities as part of the same staged project candidate. Existing source IDs stay on surviving paragraphs; inserted/split paragraphs get collision-checked `ID` values and fresh internal anchors. Join/cross-element replacement retain the first paragraph identity; removed paragraphs are removed from the managed source tree only when their contents are structurally understood. Undo/redo restore semantic and preservation state together.
+- The writer permits only paragraph-identity-set changes while still requiring the original non-paragraph identities, references and board graph to remain unchanged. It re-reads output and compares the emitted identity set, semantic body, and retained ordered source structure. Session-local semantic IDs/anchors are excluded from source-tree equality.
+- Text edits map ordered FDX `Text` children and preserve run attributes. Insertion/split/join/delete/cross-element edit/role change were exercised through save bytes and reopen, including unknown paragraph interleaving, mixed runs, foreign-ID collision avoidance, undo/redo and board payload retention. Corrected role changes update only the known `Type` mapping.
+- Opaque nested paragraph children block structural removal, split/join/replacement, and scene-heading role changes before the candidate publishes. An exact attribute-value match to a removed paragraph ID outside recognized board sections returns typed `PotentialReferenceConflict`; board-owned cross-domain references do not block script edits and the board tree remains unchanged. Text edits crossing opaque paragraph children also reject atomically. No generic discovery of undocumented/text-encoded references is claimed.
+- No sidecar, private FDX extension, board editing, title-page editing or extra FDX feature mapping was introduced. Tests use synthetic XML only. No real Final Draft execution, external interoperability validation, or independent validation was performed or claimed.
+- Checks passed: `cargo test -p scriptcraft-core editing` (22 selected editing unit tests); `cargo test -p scriptcraft-core fdx`; `cargo test -p scriptcraft-core cast_list`; `cargo test -p scriptcraft-core --test wo012f_source_structural_edits` (6); `cargo test --workspace` (314 passed: 155 desktop unit, 114 core unit, 45 integration, 0 doc tests); `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo check --workspace`; `cargo build --workspace`; `git diff --check`.
