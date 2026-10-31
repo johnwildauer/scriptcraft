@@ -93,6 +93,10 @@ foundation validation dated 2026-10-25 and are not fresh results for a later che
 - **Network or destructive-action restrictions:** Network access is not required solely by project policy. Avoid destructive filesystem or Git actions without explicit authorization and recorded evidence.
 - **User confirmation:** Consolidated at initiative-level/closeout if Forge permits; this does not bypass applicable design review, per-WO validation, or closeout evidence.
 
+### User-directed validation-dispatch override — 2026-10-31
+
+- At the user's explicit direction on 2026-10-31, do not spawn or dispatch any further independent validation agents after the WO-001 validation; this supersedes the per-work-order validation-agent cadence recorded above for subsequent work. Do not infer that an unperformed validation occurred. This direction remains in effect unless the user changes it.
+
 ### Tools and parallelism
 
 - **Required tools/MCP servers:** none.
