@@ -3,9 +3,9 @@
 //! The reader returns a semantic editing projection plus the complete parsed
 //! source tree and original bytes. The writer reconciles supported element edits
 //! with that tree, or emits a minimal new document for the evidenced role labels.
-//! ScriptCraft-only persistent identity and metadata are not part of the semantic
-//! model. Complete profile and edit-policy mappings remain unestablished; these
-//! APIs do not enable safe native save/reopen or claim Final Draft interoperability.
+//! ScriptCraft-only persistent identity, metadata and geometry are not part of the
+//! semantic model. FDX geometry mappings remain unestablished; these APIs do not
+//! enable safe native save/reopen or claim Final Draft interoperability.
 
 use crate::preservation::{
     BoardEntity, BoardEntityKind, BoardGraph, DependencyConfidence, ForeignIdDomain,
@@ -15,8 +15,8 @@ use crate::preservation::{
     SourceSnapshot,
 };
 use crate::{
-    ModelError, PageProfile, PrintVisibility, Project, Role, RunAttribute, ScreenplayElement,
-    SourceFormat, SourceProvenance, SourceSection, TextRun,
+    ModelError, PrintVisibility, Project, Role, RunAttribute, ScreenplayElement, SourceFormat,
+    SourceLayoutSettings, SourceProvenance, SourceSection, TextRun,
 };
 use quick_xml::escape::unescape;
 use quick_xml::events::{BytesStart, Event};
@@ -109,10 +109,10 @@ impl fmt::Display for FdxError {
 
 impl std::error::Error for FdxError {}
 
-/// A Version 6 reader result. `project` is an editing projection only; it uses
-/// ScriptCraft's default profile and a generated application ID where the FDX
-/// samples do not establish reversible mappings. The source-owned preservation
-/// state retains the FDX values independently.
+/// A Version 6 reader result. `project` is an editing projection only; runtime
+/// layout uses deterministic application defaults where the FDX samples do not
+/// establish reversible geometry mappings. The source-owned preservation state
+/// retains the actual FDX settings and values independently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FdxDocument {
     pub project: Project,
@@ -290,12 +290,11 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
 
     let mut project = Project {
         title_page: Vec::new(),
-        page_profile: PageProfile::default(),
         elements: Vec::new(),
         preservation: None,
         legacy_json_state: None,
     };
-    apply_profile_settings(root, root_namespace, &mut project.page_profile)?;
+    let source_layout_settings = read_source_layout_settings(root, root_namespace)?;
     let mut identities = Vec::new();
     let mut board_graph = BoardGraph::default();
     validate_image_payload_budgets(root)?;
@@ -337,6 +336,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
             original_bytes: input.to_vec(),
             encoding: SourceEncoding::Utf8,
         },
+        source_layout_settings,
         sections: vec![PreservedSection {
             name: document_name,
             kind: SectionKind::Other,
@@ -359,8 +359,8 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
 /// ordered source tree; unknown and source-owned nodes are re-emitted in place.
 /// For a new document, only default app state and the semantic title/body content
 /// are accepted. This is a codec operation, not native save/reopen support:
-/// ScriptCraft identity, schema, full profile, and editing policies do not have
-/// an established durable FDX mapping. Output is structurally re-read through
+/// ScriptCraft identity, schema, runtime geometry inputs, and editing policies do
+/// not have an established durable FDX mapping. Output is structurally re-read through
 /// the bounded reader before it is returned. No Final Draft application
 /// interoperability is implied. Imported XML is retained semantically, not
 /// lexically: the XML declaration, entity spelling, quote style and exact
@@ -382,7 +382,14 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
             return Err(FdxError::UnsupportedConstruct);
         }
         let original = read_v6(&state.source.original_bytes)?;
-        if project.page_profile != original.project.page_profile {
+        let original_layout_settings = original
+            .project
+            .preservation
+            .as_ref()
+            .ok_or(FdxError::UnsupportedConstruct)?
+            .source_layout_settings
+            .clone();
+        if state.source_layout_settings != original_layout_settings {
             return Err(FdxError::UnsupportedAppState);
         }
         let original_state = original
@@ -407,9 +414,6 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
             .collect::<Vec<_>>();
         (nodes, Some(expected_sections))
     } else {
-        if project.page_profile != PageProfile::default() {
-            return Err(FdxError::UnsupportedAppState);
-        }
         (make_new_document_nodes(project)?, None)
     };
 
@@ -1739,11 +1743,11 @@ fn make_semantic_element(
 
 /// Apply only explicit source settings that have direct counterparts in the
 /// model. Unknown settings remain source-owned in the preservation tree.
-fn apply_profile_settings(
+fn read_source_layout_settings(
     root: &RawElement,
     root_ns: Option<&str>,
-    profile: &mut PageProfile,
-) -> Result<(), FdxError> {
+) -> Result<SourceLayoutSettings, FdxError> {
+    let mut settings = SourceLayoutSettings::default();
     let mut seen_roles = BTreeSet::new();
     for child in &root.children {
         let RawNode::Element(setting) = child else {
@@ -1771,24 +1775,24 @@ fn apply_profile_settings(
             if child_setting.name.local_name == "FontSpec" {
                 if let Some(style) = attribute(child_setting, "Style") {
                     let hidden = style.split('+').any(|token| token == "HiddenText");
-                    profile.role_print_visibility[role_index(role)] = if hidden {
+                    settings.role_print_visibility[role_index(role)] = Some(if hidden {
                         PrintVisibility::Hidden
                     } else {
                         PrintVisibility::Visible
-                    };
+                    });
                 }
             } else if child_setting.name.local_name == "ParagraphSpec" {
                 if let Some(starts_new_page) = attribute(child_setting, "StartsNewPage") {
-                    profile.role_starts_new_page[role_index(role)] = match starts_new_page {
+                    settings.role_starts_new_page[role_index(role)] = Some(match starts_new_page {
                         "Yes" => true,
                         "No" => false,
                         _ => return Err(FdxError::InvalidValue),
-                    };
+                    });
                 }
             }
         }
     }
-    Ok(())
+    Ok(settings)
 }
 
 fn role_index(role: Role) -> usize {
@@ -2502,15 +2506,37 @@ mod tests {
 
     #[test]
     fn imports_explicit_hidden_and_page_start_role_settings() {
-        let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Note'><FontSpec Style='Italic+HiddenText'/></ElementSettings><ElementSettings Type='New Act'><ParagraphSpec Type='New Act' StartsNewPage='Yes'/></ElementSettings><Content><Paragraph Type='Note' id='note'><Text>hidden</Text></Paragraph><Paragraph Type='New Act' id='act'><Text>act</Text></Paragraph></Content></FinalDraft>";
+        let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Note'><FontSpec Style='Italic+HiddenText'/></ElementSettings><ElementSettings Type='New Act'><ParagraphSpec Type='New Act' StartsNewPage='Yes'/></ElementSettings><Content><Paragraph Type='Action' id='before'><Text>before</Text></Paragraph><Paragraph Type='Note' id='note'><Text>hidden</Text></Paragraph><Paragraph Type='New Act' id='act'><Text>act</Text></Paragraph></Content></FinalDraft>";
         let result = read_v6(xml);
         assert!(result.is_ok());
         if let Ok(result) = result {
+            let settings = &result
+                .project
+                .preservation
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .source_layout_settings;
             assert_eq!(
-                result.project.page_profile.print_visibility(Role::Note),
+                settings.print_visibility(Role::Note),
                 PrintVisibility::Hidden
             );
-            assert!(result.project.page_profile.starts_new_page(Role::NewAct));
+            assert!(settings.starts_new_page(Role::NewAct));
+            let layout = crate::layout::ScreenplayLayout::build(&result.project)
+                .unwrap_or_else(|_| unreachable!());
+            assert_eq!(layout.pages.len(), 2);
+            assert_eq!(layout.pages[0].lines.len(), 1);
+            assert_eq!(layout.pages[0].lines[0].text, "before");
+            assert_eq!(layout.pages[1].lines[0].text, "act");
+            let preserved = result
+                .project
+                .preservation
+                .as_ref()
+                .unwrap_or_else(|| unreachable!());
+            assert_eq!(preserved.source.original_bytes, xml);
+            let written = write_v6(&result.project).unwrap_or_else(|_| unreachable!());
+            let written = String::from_utf8(written).unwrap_or_else(|_| unreachable!());
+            assert!(written.contains("Style=\"Italic+HiddenText\""));
+            assert!(written.contains("StartsNewPage=\"Yes\""));
         }
     }
 

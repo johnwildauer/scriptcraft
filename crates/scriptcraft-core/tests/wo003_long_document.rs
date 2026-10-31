@@ -4,7 +4,7 @@
 use scriptcraft_core::editing::{EditError, EditingSession, Position, Selection};
 use scriptcraft_core::layout::{Caret, LayoutErrorKind, ScreenplayLayout};
 use scriptcraft_core::persistence::{atomic_save, deserialize, FileSystem, PersistenceError};
-use scriptcraft_core::{ModelError, Project, Role, MAX_TEXT_BYTES};
+use scriptcraft_core::{LayoutInputs, ModelError, Project, Role, MAX_TEXT_BYTES};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -65,11 +65,15 @@ fn project() -> Project {
 }
 
 fn layout_for(text: &str, lines_per_page: u32) -> ScreenplayLayout {
+    let inputs = LayoutInputs {
+        lines_per_page,
+        ..LayoutInputs::default()
+    };
     let mut project = project();
-    project.page_profile.lines_per_page = lines_per_page;
     project.elements[0].role = Role::Action;
     project.elements[0].text = text.into();
-    ScreenplayLayout::build(&project).unwrap_or_else(|_| unreachable!("fixture must lay out"))
+    ScreenplayLayout::build_with_inputs(&project, &inputs)
+        .unwrap_or_else(|_| unreachable!("fixture must lay out"))
 }
 
 #[test]
@@ -180,12 +184,14 @@ fn failed_edit_and_layout_leave_last_valid_state_usable() {
         .insert(" still usable")
         .unwrap_or_else(|_| unreachable!("last valid session must remain editable"));
 
-    let mut invalid = session.project().clone();
-    invalid.page_profile.chars_per_line = 0;
+    let invalid = LayoutInputs {
+        chars_per_line: 0,
+        ..LayoutInputs::default()
+    };
     assert_eq!(
-        ScreenplayLayout::build(&invalid),
+        ScreenplayLayout::build_with_inputs(session.project(), &invalid),
         Err(scriptcraft_core::layout::LayoutError {
-            kind: LayoutErrorKind::Model(ModelError::InvalidNumber),
+            kind: LayoutErrorKind::InvalidProfile,
         })
     );
     assert_eq!(session.project().elements[0].text, "valid still usable");

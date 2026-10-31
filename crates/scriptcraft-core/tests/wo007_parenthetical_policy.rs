@@ -3,7 +3,7 @@
 
 use scriptcraft_core::editing::{EditPolicy, EditingSession, Position, Selection};
 use scriptcraft_core::layout::LayoutCache;
-use scriptcraft_core::{ModelError, Project, Role};
+use scriptcraft_core::{LayoutInputs, ModelError, Project, Role};
 
 fn session(role: Role, text: &str) -> EditingSession {
     let mut project = Project::from_json(include_str!("fixtures/legacy_project.json"))
@@ -66,17 +66,18 @@ fn settings_are_defaulted_typed_and_round_trip_without_schema_bump() {
         );
     }
     let mut cache = LayoutCache::default();
+    let inputs = LayoutInputs::default();
     let _ = cache
-        .get_or_build(0, &project)
+        .get_or_build_with_inputs(0, &project, &inputs)
         .unwrap_or_else(|_| unreachable!());
     let (_, hit) = cache
-        .get_or_build(0, &project)
+        .get_or_build_with_inputs(0, &project, &inputs)
         .unwrap_or_else(|_| unreachable!());
     assert!(hit);
-    let mut changed_layout = project.clone();
-    changed_layout.page_profile.font_size += 1;
+    let mut changed_inputs = inputs;
+    changed_inputs.font_size += 1;
     let (_, hit) = cache
-        .get_or_build(0, &changed_layout)
+        .get_or_build_with_inputs(0, &project, &changed_inputs)
         .unwrap_or_else(|_| unreachable!());
     assert!(!hit);
 }

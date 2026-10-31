@@ -371,6 +371,7 @@ pub(crate) struct LegacyJsonState {
     pub project_id: StableId,
     pub project_schema_version: u32,
     pub metadata: LegacyJsonMetadata,
+    pub layout_inputs: LayoutInputs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -386,7 +387,7 @@ pub enum PrintVisibility {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PageProfile {
+pub struct LayoutInputs {
     pub name: String,
     pub format_version: u32,
     pub paper_width: u32,
@@ -406,14 +407,9 @@ pub struct PageProfile {
     pub role_boxes: [RoleBox; LEGACY_ROLE_BOX_COUNT],
     /// Added role geometry is explicitly optional until separately specified.
     pub additional_role_boxes: [Option<RoleBox>; ADDITIONAL_ROLE_BOX_COUNT],
-    /// Explicit per-role print overrides. Defaults are ScriptCraft-visible; an
-    /// importer must set only values it can map and retain unknown source settings.
-    pub role_print_visibility: [PrintVisibility; 17],
-    /// Explicit page-start overrides for body roles; defaults do not infer FDX settings.
-    pub role_starts_new_page: [bool; 17],
 }
 
-impl PageProfile {
+impl LayoutInputs {
     pub fn role_box(&self, role: Role) -> Option<&RoleBox> {
         if let Some(index) = role.legacy_profile_index() {
             self.role_boxes.get(index)
@@ -423,21 +419,9 @@ impl PageProfile {
                 .and_then(Option::as_ref)
         }
     }
-
-    pub fn print_visibility(&self, role: Role) -> PrintVisibility {
-        let index = Role::ALL.iter().position(|candidate| *candidate == role);
-        index.map_or(PrintVisibility::Visible, |index| {
-            self.role_print_visibility[index]
-        })
-    }
-
-    pub fn starts_new_page(&self, role: Role) -> bool {
-        let index = Role::ALL.iter().position(|candidate| *candidate == role);
-        index.is_some_and(|index| self.role_starts_new_page[index])
-    }
 }
 
-impl Default for PageProfile {
+impl Default for LayoutInputs {
     fn default() -> Self {
         Self {
             name: "us_letter_screenplay".into(),
@@ -465,16 +449,40 @@ impl Default for PageProfile {
                 RoleBox { x: 108, width: 432 },
             ],
             additional_role_boxes: [None; ADDITIONAL_ROLE_BOX_COUNT],
-            role_print_visibility: [PrintVisibility::Visible; 17],
-            role_starts_new_page: [false; 17],
         }
     }
+}
+
+/// Layout behavior explicitly derived from recognized source-document settings.
+/// These values are not application geometry and are retained alongside the
+/// source preservation tree. Unrecognized settings remain source-owned XML.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceLayoutSettings {
+    pub role_print_visibility: [Option<PrintVisibility>; 17],
+    pub role_starts_new_page: [Option<bool>; 17],
+}
+
+impl SourceLayoutSettings {
+    pub fn print_visibility(&self, role: Role) -> PrintVisibility {
+        role_index(role)
+            .and_then(|index| self.role_print_visibility[index])
+            .unwrap_or(PrintVisibility::Visible)
+    }
+
+    pub fn starts_new_page(&self, role: Role) -> bool {
+        role_index(role)
+            .and_then(|index| self.role_starts_new_page[index])
+            .unwrap_or(false)
+    }
+}
+
+fn role_index(role: Role) -> Option<usize> {
+    Role::ALL.iter().position(|candidate| *candidate == role)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     pub title_page: Vec<ScreenplayElement>,
-    pub page_profile: PageProfile,
     pub elements: Vec<ScreenplayElement>,
     /// Source-owned state is separate from the semantic projection and is not
     /// representable in transitional JSON.
@@ -493,7 +501,6 @@ impl Project {
         )?;
         Ok(Self {
             title_page: Vec::new(),
-            page_profile: PageProfile::default(),
             elements: vec![start],
             preservation: None,
             legacy_json_state: None,
@@ -507,7 +514,9 @@ impl Project {
             }
             validate_legacy_json_metadata(&legacy.metadata)?;
         }
-        validate_profile(&self.page_profile)?;
+        if let Some(legacy) = &self.legacy_json_state {
+            validate_layout_inputs(&legacy.layout_inputs)?;
+        }
         if self.elements.len() > MAX_ELEMENTS || self.title_page.len() > MAX_ELEMENTS {
             return Err(ModelError::TooManyElements);
         }
@@ -559,6 +568,16 @@ impl Project {
         }
         allocator.allocate("element")
     }
+
+    /// Runtime layout inputs for a newly constructed session. Legacy JSON keeps
+    /// its original geometry only inside the transitional adapter; FDX projects
+    /// start from deterministic application defaults.
+    pub(crate) fn session_layout_inputs(&self) -> LayoutInputs {
+        self.legacy_json_state
+            .as_ref()
+            .map(|legacy| legacy.layout_inputs.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -604,7 +623,7 @@ fn validate_legacy_json_metadata(m: &LegacyJsonMetadata) -> Result<(), ModelErro
     }
     Ok(())
 }
-fn validate_profile(p: &PageProfile) -> Result<(), ModelError> {
+pub(crate) fn validate_layout_inputs(p: &LayoutInputs) -> Result<(), ModelError> {
     if p.name.len() > MAX_STRING_BYTES
         || p.format_version == 0
         || p.paper_width == 0
@@ -680,21 +699,13 @@ fn validate_element(e: &ScreenplayElement) -> Result<(), ModelError> {
 }
 
 fn ensure_legacy_json_compatible(project: &Project) -> Result<(), ModelError> {
-    let richer_profile = project
-        .page_profile
-        .additional_role_boxes
-        .iter()
-        .any(Option::is_some)
-        || project
-            .page_profile
-            .role_print_visibility
+    let richer_profile = project.legacy_json_state.as_ref().is_some_and(|legacy| {
+        legacy
+            .layout_inputs
+            .additional_role_boxes
             .iter()
-            .any(|visibility| *visibility != PrintVisibility::Visible)
-        || project
-            .page_profile
-            .role_starts_new_page
-            .iter()
-            .any(|starts| *starts);
+            .any(Option::is_some)
+    });
     let richer_elements = project
         .title_page
         .iter()
@@ -740,15 +751,15 @@ fn elements_json(items: &[ScreenplayElement]) -> String {
     items.iter().map(element_json).collect::<Vec<_>>().join(",")
 }
 fn encode_envelope(p: &Project, legacy: &LegacyJsonState) -> String {
-    let role_boxes = p
-        .page_profile
+    let layout_inputs = &legacy.layout_inputs;
+    let role_boxes = layout_inputs
         .role_boxes
         .iter()
         .map(|box_| format!("{{\"x\":{},\"width\":{}}}", box_.x, box_.width))
         .collect::<Vec<_>>()
         .join(",");
     // Emit legacy identity/metadata only for an unchanged JSON-origin session.
-    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"uppercase_cues\":true,\"auto_parenthetical\":true,\"strict_transition_boundaries\":true,\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(legacy.project_id.as_str()), legacy.project_schema_version, quote(&legacy.metadata.title), quote(&legacy.metadata.author), quote(&legacy.metadata.contact), quote(&legacy.metadata.created_at), quote(&legacy.metadata.updated_at), elements_json(&p.title_page), quote(&p.page_profile.name), p.page_profile.format_version, p.page_profile.paper_width, p.page_profile.paper_height, p.page_profile.margin_top, p.page_profile.margin_bottom, p.page_profile.margin_left, p.page_profile.margin_right, p.page_profile.chars_per_line, p.page_profile.lines_per_page, p.page_profile.line_advance, p.page_profile.boundary_gap, quote(&p.page_profile.font_family), p.page_profile.font_size, p.page_profile.char_width, role_boxes, elements_json(&p.elements))
+    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"uppercase_cues\":true,\"auto_parenthetical\":true,\"strict_transition_boundaries\":true,\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(legacy.project_id.as_str()), legacy.project_schema_version, quote(&legacy.metadata.title), quote(&legacy.metadata.author), quote(&legacy.metadata.contact), quote(&legacy.metadata.created_at), quote(&legacy.metadata.updated_at), elements_json(&p.title_page), quote(&layout_inputs.name), layout_inputs.format_version, layout_inputs.paper_width, layout_inputs.paper_height, layout_inputs.margin_top, layout_inputs.margin_bottom, layout_inputs.margin_left, layout_inputs.margin_right, layout_inputs.chars_per_line, layout_inputs.lines_per_page, layout_inputs.line_advance, layout_inputs.boundary_gap, quote(&layout_inputs.font_family), layout_inputs.font_size, layout_inputs.char_width, role_boxes, elements_json(&p.elements))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1068,6 +1079,29 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
     {
         return Err(ModelError::UnsupportedJsonState);
     }
+    let layout_inputs = LayoutInputs {
+        name: str_field(profile, "name")?,
+        format_version: num_field(profile, "format_version")?,
+        paper_width: num_field(profile, "paper_width")?,
+        paper_height: num_field(profile, "paper_height")?,
+        margin_top: num_field(profile, "margin_top")?,
+        margin_bottom: num_field(profile, "margin_bottom")?,
+        margin_left: num_field(profile, "margin_left")?,
+        margin_right: num_field(profile, "margin_right")?,
+        chars_per_line: num_field(profile, "chars_per_line")?,
+        lines_per_page: num_field(profile, "lines_per_page")?,
+        line_advance: num_field(profile, "line_advance")?,
+        boundary_gap: num_field(profile, "boundary_gap")?,
+        font_family: str_field(profile, "font_family")?,
+        font_size: num_field(profile, "font_size")?,
+        char_width: num_field(profile, "char_width")?,
+        role_boxes: decode_role_boxes(obj(profile, "role_boxes")?)?,
+        additional_role_boxes: if object_has_field(profile, "additional_role_boxes") {
+            return Err(ModelError::UnsupportedJsonState);
+        } else {
+            [None; ADDITIONAL_ROLE_BOX_COUNT]
+        },
+    };
     let legacy_json_state = LegacyJsonState {
         project_id: StableId::new(str_field(envelope, "id")?)?,
         project_schema_version: schema,
@@ -1078,34 +1112,10 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
             created_at: str_field(m, "created_at")?,
             updated_at: str_field(m, "updated_at")?,
         },
+        layout_inputs,
     };
     Ok(Project {
         title_page: decode_elements(obj(envelope, "title_page")?)?,
-        page_profile: PageProfile {
-            name: str_field(profile, "name")?,
-            format_version: num_field(profile, "format_version")?,
-            paper_width: num_field(profile, "paper_width")?,
-            paper_height: num_field(profile, "paper_height")?,
-            margin_top: num_field(profile, "margin_top")?,
-            margin_bottom: num_field(profile, "margin_bottom")?,
-            margin_left: num_field(profile, "margin_left")?,
-            margin_right: num_field(profile, "margin_right")?,
-            chars_per_line: num_field(profile, "chars_per_line")?,
-            lines_per_page: num_field(profile, "lines_per_page")?,
-            line_advance: num_field(profile, "line_advance")?,
-            boundary_gap: num_field(profile, "boundary_gap")?,
-            font_family: str_field(profile, "font_family")?,
-            font_size: num_field(profile, "font_size")?,
-            char_width: num_field(profile, "char_width")?,
-            role_boxes: decode_role_boxes(obj(profile, "role_boxes")?)?,
-            additional_role_boxes: if object_has_field(profile, "additional_role_boxes") {
-                return Err(ModelError::UnsupportedJsonState);
-            } else {
-                [None; ADDITIONAL_ROLE_BOX_COUNT]
-            },
-            role_print_visibility: [PrintVisibility::Visible; 17],
-            role_starts_new_page: [false; 17],
-        },
         elements: decode_elements(obj(envelope, "elements")?)?,
         preservation: None,
         legacy_json_state: Some(legacy_json_state),
@@ -1119,6 +1129,22 @@ mod tests {
     fn legacy_project() -> Project {
         Project::from_json(include_str!("../tests/fixtures/legacy_project.json"))
             .unwrap_or_else(|_| unreachable!())
+    }
+
+    fn legacy_layout_inputs(project: &Project) -> &LayoutInputs {
+        &project
+            .legacy_json_state
+            .as_ref()
+            .unwrap_or_else(|| unreachable!())
+            .layout_inputs
+    }
+
+    fn legacy_layout_inputs_mut(project: &mut Project) -> &mut LayoutInputs {
+        &mut project
+            .legacy_json_state
+            .as_mut()
+            .unwrap_or_else(|| unreachable!())
+            .layout_inputs
     }
 
     #[test]
@@ -1173,7 +1199,13 @@ mod tests {
         assert_eq!(p.elements[0].id.as_str(), "element-1");
         assert_eq!(p.elements[0].role, Role::SceneHeading);
         assert!(p.elements[0].text.is_empty());
-        assert_eq!(p.page_profile.font_family, "Courier Prime");
+        assert_eq!(
+            editing::EditingSession::new(p.clone())
+                .unwrap_or_else(|_| unreachable!())
+                .layout_inputs()
+                .font_family,
+            "Courier Prime"
+        );
         assert_eq!(
             editing::EditingSession::new(p.clone())
                 .unwrap_or_else(|_| unreachable!())
@@ -1217,10 +1249,10 @@ mod tests {
     fn supported_profile_fonts_round_trip_without_rewriting() {
         for family in ["Courier", "Courier New", "Courier Prime"] {
             let mut project = legacy_project();
-            project.page_profile.font_family = family.into();
+            legacy_layout_inputs_mut(&mut project).font_family = family.into();
             let json = project.to_json().unwrap_or_else(|_| unreachable!());
             let restored = Project::from_json(&json).unwrap_or_else(|_| unreachable!());
-            assert_eq!(restored.page_profile.font_family, family);
+            assert_eq!(legacy_layout_inputs(&restored).font_family, family);
         }
     }
 
@@ -1253,14 +1285,15 @@ mod tests {
     #[test]
     fn named_profile_round_trips_bounded_alternate_geometry() {
         let mut project = legacy_project();
-        project.page_profile.name = "alternate_screenplay".into();
-        project.page_profile.format_version = 2;
-        project.page_profile.font_family = "Courier Prime".into();
-        project.page_profile.font_size = 12;
-        project.page_profile.char_width = 8;
-        project.page_profile.line_advance = 14;
-        project.page_profile.boundary_gap = 10;
-        project.page_profile.role_boxes[1] = RoleBox { x: 120, width: 400 };
+        let inputs = legacy_layout_inputs_mut(&mut project);
+        inputs.name = "alternate_screenplay".into();
+        inputs.format_version = 2;
+        inputs.font_family = "Courier Prime".into();
+        inputs.font_size = 12;
+        inputs.char_width = 8;
+        inputs.line_advance = 14;
+        inputs.boundary_gap = 10;
+        inputs.role_boxes[1] = RoleBox { x: 120, width: 400 };
         let json = project.to_json().unwrap_or_else(|_| unreachable!());
         let restored = Project::from_json(&json).unwrap_or_else(|_| unreachable!());
         assert_eq!(restored, project);
@@ -1270,10 +1303,10 @@ mod tests {
     #[test]
     fn profile_rejects_unbounded_role_geometry() {
         let mut project = legacy_project();
-        project.page_profile.role_boxes[0].width = 0;
+        legacy_layout_inputs_mut(&mut project).role_boxes[0].width = 0;
         assert_eq!(project.to_json(), Err(ModelError::InvalidNumber));
-        project.page_profile = PageProfile::default();
-        project.page_profile.role_boxes[0].width = 1_001;
+        *legacy_layout_inputs_mut(&mut project) = LayoutInputs::default();
+        legacy_layout_inputs_mut(&mut project).role_boxes[0].width = 1_001;
         assert_eq!(project.to_json(), Err(ModelError::InvalidNumber));
     }
     #[test]
@@ -1368,7 +1401,6 @@ mod tests {
         assert_eq!(element.source_provenance, Some(provenance));
         assert!(Project {
             title_page: Vec::new(),
-            page_profile: PageProfile::default(),
             elements: vec![element],
             preservation: None,
             legacy_json_state: None,
@@ -1411,22 +1443,9 @@ mod tests {
         );
 
         let mut profile = legacy_project();
-        profile.page_profile.additional_role_boxes[0] = Some(RoleBox { x: 10, width: 20 });
+        legacy_layout_inputs_mut(&mut profile).additional_role_boxes[0] =
+            Some(RoleBox { x: 10, width: 20 });
         assert_eq!(profile.to_json(), Err(ModelError::UnsupportedJsonState));
-
-        let mut hidden = legacy_project();
-        hidden.page_profile.role_print_visibility[Role::ALL
-            .iter()
-            .position(|role| *role == Role::Note)
-            .unwrap_or_else(|| unreachable!())] = PrintVisibility::Hidden;
-        assert_eq!(hidden.to_json(), Err(ModelError::UnsupportedJsonState));
-
-        let mut page_start = legacy_project();
-        page_start.page_profile.role_starts_new_page[Role::ALL
-            .iter()
-            .position(|role| *role == Role::NewAct)
-            .unwrap_or_else(|| unreachable!())] = true;
-        assert_eq!(page_start.to_json(), Err(ModelError::UnsupportedJsonState));
 
         let with_role_settings = legacy.replace(
             "\"role_boxes\":[",
@@ -1520,8 +1539,8 @@ mod tests {
     }
 
     #[test]
-    fn role_profile_expansion_leaves_new_geometry_unassigned_by_default() {
-        let mut profile = PageProfile::default();
+    fn role_layout_expansion_leaves_new_geometry_unassigned_by_default() {
+        let mut profile = LayoutInputs::default();
         assert_eq!(
             profile.role_box(Role::SceneHeading),
             Some(&profile.role_boxes[0])
@@ -1532,9 +1551,12 @@ mod tests {
             profile.role_box(Role::NewAct),
             profile.additional_role_boxes[0].as_ref()
         );
-        assert!(validate_profile(&profile).is_ok());
+        assert!(validate_layout_inputs(&profile).is_ok());
         profile.additional_role_boxes[0] = Some(RoleBox { x: 120, width: 0 });
-        assert_eq!(validate_profile(&profile), Err(ModelError::InvalidNumber));
+        assert_eq!(
+            validate_layout_inputs(&profile),
+            Err(ModelError::InvalidNumber)
+        );
     }
 
     #[test]

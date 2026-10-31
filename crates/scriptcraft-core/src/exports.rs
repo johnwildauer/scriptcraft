@@ -4,7 +4,7 @@
 //! project, so exporting cannot change the editing session or its clean state.
 
 use crate::layout::{LayoutError, ScreenplayLayout};
-use crate::{Project, Role};
+use crate::{LayoutInputs, Project, Role};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LossReport {
@@ -45,7 +45,15 @@ impl From<LayoutError> for ExportError {
 
 /// Produces an intentionally lossy, human-readable text copy and its loss contract.
 pub fn export_text(project: &Project) -> Result<TextExport, ExportError> {
-    let layout = ScreenplayLayout::build(project)?;
+    let inputs = project.session_layout_inputs();
+    export_text_with_layout_inputs(project, &inputs)
+}
+
+pub fn export_text_with_layout_inputs(
+    project: &Project,
+    inputs: &LayoutInputs,
+) -> Result<TextExport, ExportError> {
+    let layout = ScreenplayLayout::build_with_inputs(project, inputs)?;
     let loss = LossReport::for_project(project);
     let mut text = String::new();
     text.push_str("# ScriptCraft plain-text export\n# ");
@@ -66,7 +74,15 @@ pub fn export_text(project: &Project) -> Result<TextExport, ExportError> {
 /// Produces a small deterministic PDF 1.4 file from the shared print layout.
 /// The PDF is an output consumer, never a replacement for the native project.
 pub fn export_pdf(project: &Project) -> Result<Vec<u8>, ExportError> {
-    let layout = ScreenplayLayout::build(project)?;
+    let inputs = project.session_layout_inputs();
+    export_pdf_with_layout_inputs(project, &inputs)
+}
+
+pub fn export_pdf_with_layout_inputs(
+    project: &Project,
+    inputs: &LayoutInputs,
+) -> Result<Vec<u8>, ExportError> {
+    let layout = ScreenplayLayout::build_with_inputs(project, inputs)?;
     let mut objects = Vec::<Vec<u8>>::new();
     objects.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
     let page_count = layout.pages.len();
@@ -79,16 +95,16 @@ pub fn export_pdf(project: &Project) -> Result<Vec<u8>, ExportError> {
         kids.push_str(" 0 R");
     }
     objects.push(format!("<< /Type /Pages /Kids [{kids}] /Count {page_count} >>").into_bytes());
-    let font_name = pdf_font_name(&layout.profile.font_family);
+    let font_name = pdf_font_name(&layout.inputs.font_family);
     objects.push(format!("<< /Type /Font /Subtype /Type1 /BaseFont /{font_name} >>").into_bytes());
     for page in &layout.pages {
-        let content = page_content(page, layout.profile.paper_height, layout.profile.font_size);
+        let content = page_content(page, layout.inputs.paper_height, layout.inputs.font_size);
         let length = content.len();
         objects.push(
             format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
-                layout.profile.paper_width,
-                layout.profile.paper_height,
+                layout.inputs.paper_width,
+                layout.inputs.paper_height,
                 5 + (page.number * 2)
             )
             .into_bytes(),
@@ -209,13 +225,14 @@ mod tests {
 
     #[test]
     fn pdf_font_metadata_round_trips_and_uses_safe_deterministic_mapping() {
-        let mut project = project();
-        project.page_profile.font_family = "Courier Prime".into();
-        let json = project.to_json().unwrap_or_else(|_| unreachable!());
-        let restored = Project::from_json(&json).unwrap_or_else(|_| unreachable!());
-        let pdf = export_pdf(&restored).unwrap_or_else(|_| unreachable!());
+        let project = project();
+        let inputs = LayoutInputs {
+            font_family: "Courier Prime".into(),
+            ..LayoutInputs::default()
+        };
+        let pdf =
+            export_pdf_with_layout_inputs(&project, &inputs).unwrap_or_else(|_| unreachable!());
         let pdf = String::from_utf8_lossy(&pdf);
-        assert_eq!(restored.page_profile.font_family, "Courier Prime");
         assert!(pdf.contains("/BaseFont /CourierPrime"));
         assert_eq!(pdf_font_name("untrusted"), "Courier");
     }
@@ -223,15 +240,18 @@ mod tests {
     #[test]
     fn pdf_line_transforms_preserve_layout_positions_and_spacing() {
         let mut project = project();
-        project.page_profile.font_size = 11;
+        let inputs = LayoutInputs {
+            font_size: 11,
+            ..LayoutInputs::default()
+        };
         project.elements.push(
             crate::ScreenplayElement::new("action", Role::Action, "Second line")
                 .unwrap_or_else(|_| unreachable!()),
         );
-        let layout = ScreenplayLayout::build(&project).unwrap_or_else(|_| unreachable!());
+        let layout = ScreenplayLayout::build_with_inputs(&project, &inputs)
+            .unwrap_or_else(|_| unreachable!());
         let page = &layout.pages[0];
-        let content_bytes =
-            page_content(page, layout.profile.paper_height, layout.profile.font_size);
+        let content_bytes = page_content(page, layout.inputs.paper_height, layout.inputs.font_size);
         let content = String::from_utf8_lossy(&content_bytes);
         assert!(content.starts_with("BT\n/F1 11 Tf\n"));
         let transforms: Vec<(u32, u32)> = content
@@ -253,7 +273,7 @@ mod tests {
             assert_eq!(x, line.rect.x);
             assert_eq!(
                 y,
-                layout.profile.paper_height - line.rect.y - line.rect.height
+                layout.inputs.paper_height - line.rect.y - line.rect.height
             );
         }
         assert_eq!(transforms[0].1 - transforms[1].1, LINE_HEIGHT);
@@ -261,12 +281,15 @@ mod tests {
 
     #[test]
     fn failed_export_isolated_from_session_state() {
-        let mut project = project();
-        project.page_profile.paper_width = 1;
+        let project = project();
         let session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
         let before = session.clone();
-        assert!(export_pdf(session.project()).is_err());
-        assert!(export_text(session.project()).is_err());
+        let inputs = LayoutInputs {
+            paper_width: 1,
+            ..LayoutInputs::default()
+        };
+        assert!(export_pdf_with_layout_inputs(session.project(), &inputs).is_err());
+        assert!(export_text_with_layout_inputs(session.project(), &inputs).is_err());
         assert_eq!(session, before);
     }
 }

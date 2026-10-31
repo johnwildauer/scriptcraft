@@ -1,10 +1,13 @@
 //! Deterministic, backend-neutral screenplay layout.
 //!
-//! Layout uses fixed integer metrics rather than a platform font or viewport.
-//! The initial profile therefore has stable structure on every host: one
+//! Layout uses explicit effective inputs and fixed integer metrics rather than
+//! a platform font or viewport. The deterministic defaults therefore have stable structure on every host: one
 //! character cell is seven units wide and one line is twelve units high.
 
-use crate::{ModelError, PageProfile, PrintVisibility, Project, Role};
+use crate::{
+    validate_layout_inputs, LayoutInputs, ModelError, PrintVisibility, Project, Role,
+    SourceLayoutSettings,
+};
 use std::sync::Arc;
 
 pub const FONT_FAMILY: &str = "Courier-family fixed metrics (12 pt target)";
@@ -53,7 +56,8 @@ pub struct LayoutPage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenplayLayout {
-    pub profile: PageProfile,
+    pub inputs: LayoutInputs,
+    pub source_settings: SourceLayoutSettings,
     pub font_family: String,
     pub char_width: u32,
     pub line_height: u32,
@@ -61,12 +65,13 @@ pub struct ScreenplayLayout {
 }
 
 /// Session-owned immutable layout cache shared by desktop adapters and
-/// headless measurements.  The revision and complete persisted profile are
-/// the cache key; viewport presentation state is intentionally not included.
+/// headless measurements. The revision, effective geometry and source-derived
+/// layout settings are the cache key; viewport presentation state is excluded.
 #[derive(Debug, Default)]
 pub struct LayoutCache {
     revision: Option<u64>,
-    profile: Option<PageProfile>,
+    inputs: Option<LayoutInputs>,
+    source_settings: Option<SourceLayoutSettings>,
     layout: Option<Arc<ScreenplayLayout>>,
 }
 
@@ -76,7 +81,25 @@ impl LayoutCache {
         revision: u64,
         project: &Project,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
-        if self.revision == Some(revision) && self.profile.as_ref() == Some(&project.page_profile) {
+        let inputs = project.session_layout_inputs();
+        self.get_or_build_with_inputs(revision, project, &inputs)
+    }
+
+    pub fn get_or_build_with_inputs(
+        &mut self,
+        revision: u64,
+        project: &Project,
+        inputs: &LayoutInputs,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        let source_settings = project
+            .preservation
+            .as_ref()
+            .map(|preservation| preservation.source_layout_settings.clone())
+            .unwrap_or_default();
+        if self.revision == Some(revision)
+            && self.inputs.as_ref() == Some(inputs)
+            && self.source_settings.as_ref() == Some(&source_settings)
+        {
             return self
                 .layout
                 .clone()
@@ -85,9 +108,10 @@ impl LayoutCache {
                 })
                 .map(|layout| (layout, true));
         }
-        let layout = Arc::new(ScreenplayLayout::build(project)?);
+        let layout = Arc::new(ScreenplayLayout::build_with_inputs(project, inputs)?);
         self.revision = Some(revision);
-        self.profile = Some(project.page_profile.clone());
+        self.inputs = Some(inputs.clone());
+        self.source_settings = Some(source_settings);
         self.layout = Some(layout.clone());
         Ok((layout, false))
     }
@@ -122,14 +146,38 @@ impl From<ModelError> for LayoutError {
 
 impl ScreenplayLayout {
     pub fn build(project: &Project) -> Result<Self, LayoutError> {
+        let inputs = project.session_layout_inputs();
+        Self::build_with_inputs(project, &inputs)
+    }
+
+    pub fn build_with_inputs(
+        project: &Project,
+        inputs: &LayoutInputs,
+    ) -> Result<Self, LayoutError> {
+        let source_settings = project
+            .preservation
+            .as_ref()
+            .map(|preservation| preservation.source_layout_settings.clone())
+            .unwrap_or_default();
+        Self::build_with_effective_inputs(project, inputs, &source_settings)
+    }
+
+    pub fn build_with_effective_inputs(
+        project: &Project,
+        inputs: &LayoutInputs,
+        source_settings: &SourceLayoutSettings,
+    ) -> Result<Self, LayoutError> {
         project.validate()?;
-        let profile = project.page_profile.clone();
-        validate_profile(&profile)?;
-        let line_advance = profile.line_advance;
-        let char_width = profile.char_width;
-        let font_family = profile.font_family.clone();
+        validate_layout_inputs(inputs).map_err(|_| LayoutError {
+            kind: LayoutErrorKind::InvalidProfile,
+        })?;
+        validate_profile(inputs)?;
+        let line_advance = inputs.line_advance;
+        let char_width = inputs.char_width;
+        let font_family = inputs.font_family.clone();
         let mut output = Self {
-            profile,
+            inputs: inputs.clone(),
+            source_settings: source_settings.clone(),
             font_family,
             char_width,
             line_height: line_advance,
@@ -143,11 +191,11 @@ impl ScreenplayLayout {
                     index,
                     element.role,
                     output
-                        .profile
+                        .inputs
                         .paper_width
-                        .saturating_sub(output.profile.margin_left)
-                        .saturating_sub(output.profile.margin_right)
-                        / output.profile.char_width.max(1),
+                        .saturating_sub(output.inputs.margin_left)
+                        .saturating_sub(output.inputs.margin_right)
+                        / output.inputs.char_width.max(1),
                 );
                 for line in lines {
                     page.lines.push(output.make_line(&page, line, true));
@@ -160,10 +208,10 @@ impl ScreenplayLayout {
             output.pages.push(output.new_page(false));
         }
         for (index, element) in project.elements.iter().enumerate() {
-            if output.profile.print_visibility(element.role) == PrintVisibility::Hidden {
+            if output.source_settings.print_visibility(element.role) == PrintVisibility::Hidden {
                 continue;
             }
-            if output.profile.starts_new_page(element.role)
+            if output.source_settings.starts_new_page(element.role)
                 && output
                     .pages
                     .last()
@@ -171,7 +219,7 @@ impl ScreenplayLayout {
             {
                 output.pages.push(output.new_page(false));
             }
-            let width = role_width(&output.profile, element.role);
+            let width = role_width(&output.inputs, element.role);
             let lines = wrap_element(element.text.as_str(), index, element.role, width);
             output.place_element(lines, element.role);
         }
@@ -200,7 +248,7 @@ impl ScreenplayLayout {
         if self.pages.get(page)?.title_page {
             return None;
         }
-        let page_height = i64::from(self.profile.paper_height);
+        let page_height = i64::from(self.inputs.paper_height);
         let pointer_y = i64::try_from(page)
             .ok()?
             .saturating_mul(page_height)
@@ -277,33 +325,31 @@ impl ScreenplayLayout {
             bounds: Rect {
                 x: 0,
                 y: 0,
-                width: self.profile.paper_width,
-                height: self.profile.paper_height,
+                width: self.inputs.paper_width,
+                height: self.inputs.paper_height,
             },
             content_bounds: Rect {
-                x: self.profile.margin_left,
-                y: self.profile.margin_top,
-                width: self.profile.paper_width
-                    - self.profile.margin_left
-                    - self.profile.margin_right,
-                height: self.profile.paper_height
-                    - self.profile.margin_top
-                    - self.profile.margin_bottom,
+                x: self.inputs.margin_left,
+                y: self.inputs.margin_top,
+                width: self.inputs.paper_width - self.inputs.margin_left - self.inputs.margin_right,
+                height: self.inputs.paper_height
+                    - self.inputs.margin_top
+                    - self.inputs.margin_bottom,
             },
             lines: Vec::new(),
             occupied_lines: 0,
-            next_line_y: self.profile.margin_top,
+            next_line_y: self.inputs.margin_top,
         }
     }
 
     fn make_line(&self, page: &LayoutPage, line: WrappedLine, title_page: bool) -> LayoutLine {
         let (x, width) = if title_page {
             (
-                self.profile.margin_left,
-                self.profile.paper_width - self.profile.margin_left - self.profile.margin_right,
+                self.inputs.margin_left,
+                self.inputs.paper_width - self.inputs.margin_left - self.inputs.margin_right,
             )
         } else {
-            role_box(&self.profile, line.role)
+            role_box(&self.inputs, line.role)
         };
         LayoutLine {
             page: page.number,
@@ -319,7 +365,7 @@ impl ScreenplayLayout {
                 x,
                 y: page.next_line_y,
                 width,
-                height: self.profile.line_advance,
+                height: self.inputs.line_advance,
             },
             keep_with_next: !title_page && keep_with_next(line.role),
             oversized: line.oversized,
@@ -332,7 +378,7 @@ impl ScreenplayLayout {
         if self.pages.is_empty() {
             self.pages.push(self.new_page(false));
         }
-        let capacity = self.profile.lines_per_page as usize;
+        let capacity = self.inputs.lines_per_page as usize;
         let has_boundary = self.pages.last().is_some_and(|page| !page.lines.is_empty());
         let previous_role = self
             .pages
@@ -340,7 +386,7 @@ impl ScreenplayLayout {
             .and_then(|page| page.lines.last())
             .map(|line| line.role);
         let extra_gap = previous_role
-            .map(|previous| role_boundary_gap(&self.profile, previous, role))
+            .map(|previous| role_boundary_gap(&self.inputs, previous, role))
             .unwrap_or(0);
         if !lines.is_empty()
             && !self.pages.last().is_some_and(|page| page.title_page)
@@ -391,7 +437,7 @@ impl ScreenplayLayout {
                 self.pages[page_index].occupied_lines.saturating_add(1);
             self.pages[page_index].next_line_y = self.pages[page_index]
                 .next_line_y
-                .saturating_add(self.profile.line_advance);
+                .saturating_add(self.inputs.line_advance);
         }
     }
 }
@@ -406,21 +452,21 @@ struct WrappedLine {
     oversized: bool,
 }
 
-fn validate_profile(profile: &PageProfile) -> Result<(), LayoutError> {
-    if profile.margin_left.saturating_add(profile.margin_right) >= profile.paper_width
-        || profile.margin_top.saturating_add(profile.margin_bottom) >= profile.paper_height
-        || profile.lines_per_page == 0
-        || profile.chars_per_line == 0
-        || profile.line_advance == 0
-        || profile
+fn validate_profile(inputs: &LayoutInputs) -> Result<(), LayoutError> {
+    if inputs.margin_left.saturating_add(inputs.margin_right) >= inputs.paper_width
+        || inputs.margin_top.saturating_add(inputs.margin_bottom) >= inputs.paper_height
+        || inputs.lines_per_page == 0
+        || inputs.chars_per_line == 0
+        || inputs.line_advance == 0
+        || inputs
             .role_boxes
             .iter()
-            .any(|box_| box_.width == 0 || box_.x.saturating_add(box_.width) > profile.paper_width)
-        || profile
+            .any(|box_| box_.width == 0 || box_.x.saturating_add(box_.width) > inputs.paper_width)
+        || inputs
             .additional_role_boxes
             .iter()
             .flatten()
-            .any(|box_| box_.width == 0 || box_.x.saturating_add(box_.width) > profile.paper_width)
+            .any(|box_| box_.width == 0 || box_.x.saturating_add(box_.width) > inputs.paper_width)
     {
         return Err(LayoutError {
             kind: LayoutErrorKind::InvalidProfile,
@@ -429,26 +475,26 @@ fn validate_profile(profile: &PageProfile) -> Result<(), LayoutError> {
     Ok(())
 }
 
-fn role_width(profile: &PageProfile, role: Role) -> u32 {
-    let (_, width) = role_box(profile, role);
-    profile
+fn role_width(inputs: &LayoutInputs, role: Role) -> u32 {
+    let (_, width) = role_box(inputs, role);
+    inputs
         .chars_per_line
-        .min(width / profile.char_width.max(1))
+        .min(width / inputs.char_width.max(1))
         .max(1)
 }
 
-fn role_box(profile: &PageProfile, role: Role) -> (u32, u32) {
-    if let Some(box_) = profile.role_box(role) {
+fn role_box(inputs: &LayoutInputs, role: Role) -> (u32, u32) {
+    if let Some(box_) = inputs.role_box(role) {
         return (box_.x, box_.width);
     }
     // New roles have no asserted ScriptCraft geometry yet. Use the full text
     // area as a neutral layout fallback without changing their semantic role.
     (
-        profile.margin_left,
-        profile
+        inputs.margin_left,
+        inputs
             .paper_width
-            .saturating_sub(profile.margin_left)
-            .saturating_sub(profile.margin_right)
+            .saturating_sub(inputs.margin_left)
+            .saturating_sub(inputs.margin_right)
             .max(1),
     )
 }
@@ -460,11 +506,11 @@ fn keep_with_next(role: Role) -> bool {
     )
 }
 
-fn role_boundary_gap(profile: &PageProfile, _previous: Role, next: Role) -> u32 {
+fn role_boundary_gap(inputs: &LayoutInputs, _previous: Role, next: Role) -> u32 {
     if matches!(next, Role::Dialogue | Role::Parenthetical) {
         0
     } else {
-        profile.boundary_gap
+        inputs.boundary_gap
     }
 }
 
@@ -596,9 +642,13 @@ mod tests {
 
     #[test]
     fn wrapping_is_bounded_and_source_mapped() {
-        let mut p = project(&[(Role::Action, "abcdefghij")]);
-        p.page_profile.chars_per_line = 4;
-        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let p = project(&[(Role::Action, "abcdefghij")]);
+        let inputs = LayoutInputs {
+            chars_per_line: 4,
+            ..LayoutInputs::default()
+        };
+        let layout =
+            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
         assert_eq!(layout.pages.len(), 1);
         assert!(layout.pages[0]
             .lines
@@ -657,13 +707,17 @@ mod tests {
 
     #[test]
     fn alternate_profile_drives_role_wrap_line_and_caret_geometry() {
-        let mut p = project(&[(Role::Action, "abcdefghijk"), (Role::Dialogue, "second")]);
-        p.page_profile.char_width = 5;
-        p.page_profile.line_advance = 15;
-        p.page_profile.boundary_gap = 15;
-        p.page_profile.role_boxes[1] = crate::RoleBox { x: 120, width: 50 };
-        p.page_profile.role_boxes[3] = crate::RoleBox { x: 200, width: 40 };
-        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let p = project(&[(Role::Action, "abcdefghijk"), (Role::Dialogue, "second")]);
+        let mut inputs = LayoutInputs {
+            char_width: 5,
+            line_advance: 15,
+            boundary_gap: 15,
+            ..LayoutInputs::default()
+        };
+        inputs.role_boxes[1] = crate::RoleBox { x: 120, width: 50 };
+        inputs.role_boxes[3] = crate::RoleBox { x: 200, width: 40 };
+        let layout =
+            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
         assert_eq!(layout.char_width, 5);
         assert_eq!(layout.line_height, 15);
         assert_eq!(
@@ -703,17 +757,119 @@ mod tests {
     }
 
     #[test]
+    fn effective_layout_inputs_cover_profile_metrics_and_page_geometry() {
+        let p = project(&[(Role::Action, "a screenplay line")]);
+        let mut inputs = LayoutInputs {
+            name: "runtime-alternate".into(),
+            format_version: 2,
+            paper_width: 720,
+            paper_height: 900,
+            margin_top: 30,
+            margin_bottom: 40,
+            margin_left: 50,
+            margin_right: 60,
+            chars_per_line: 40,
+            lines_per_page: 40,
+            line_advance: 14,
+            boundary_gap: 9,
+            font_family: "Courier".into(),
+            font_size: 11,
+            char_width: 8,
+            ..LayoutInputs::default()
+        };
+        inputs.role_boxes[1] = crate::RoleBox { x: 160, width: 320 };
+
+        let first =
+            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
+        let second =
+            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
+        assert_eq!(first, second);
+        assert_eq!(first.inputs, inputs);
+        assert_eq!(first.pages[0].bounds.width, 720);
+        assert_eq!(first.pages[0].bounds.height, 900);
+        assert_eq!(first.pages[0].content_bounds.x, 50);
+        assert_eq!(first.pages[0].content_bounds.y, 30);
+        assert_eq!(first.pages[0].content_bounds.width, 610);
+        assert_eq!(first.pages[0].content_bounds.height, 830);
+        assert_eq!(first.pages[0].lines[0].rect.x, 160);
+        assert_eq!(first.pages[0].lines[0].rect.y, 30);
+        assert_eq!(first.pages[0].lines[0].rect.height, 14);
+    }
+
+    #[test]
+    fn every_role_accepts_independent_runtime_geometry() {
+        let roles_and_text = Role::ALL.map(|role| (role, "x"));
+        let p = project(&roles_and_text);
+        let mut inputs = LayoutInputs::default();
+        let boxes = Role::ALL.map(|_| crate::RoleBox { x: 40, width: 300 });
+        inputs
+            .role_boxes
+            .copy_from_slice(&boxes[..crate::LEGACY_ROLE_BOX_COUNT]);
+        for (index, box_) in boxes[crate::LEGACY_ROLE_BOX_COUNT..].iter().enumerate() {
+            inputs.additional_role_boxes[index] = Some(*box_);
+        }
+
+        let layout =
+            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
+        let lines = layout
+            .pages
+            .iter()
+            .flat_map(|page| &page.lines)
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), Role::ALL.len());
+        for (index, role) in Role::ALL.iter().enumerate() {
+            let line = lines
+                .iter()
+                .find(|line| line.role == *role)
+                .unwrap_or_else(|| unreachable!());
+            assert_eq!(line.rect.x, 40, "role index {index}");
+            assert_eq!(line.rect.width, 300, "role index {index}");
+        }
+    }
+
+    #[test]
+    fn cache_key_tracks_source_derived_visibility_settings() {
+        let visible = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Note'><FontSpec Style='Italic'/></ElementSettings><Content><Paragraph Type='Note' id='note'><Text>note</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let hidden = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Note'><FontSpec Style='Italic+HiddenText'/></ElementSettings><Content><Paragraph Type='Note' id='note'><Text>note</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(visible.project.elements, hidden.project.elements);
+
+        let mut cache = LayoutCache::default();
+        let inputs = LayoutInputs::default();
+        let (visible_layout, hit) = cache
+            .get_or_build_with_inputs(4, &visible.project, &inputs)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!hit);
+        assert_eq!(visible_layout.pages[0].lines.len(), 1);
+
+        let (hidden_layout, hit) = cache
+            .get_or_build_with_inputs(4, &hidden.project, &inputs)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!hit);
+        assert!(hidden_layout.pages[0].lines.is_empty());
+    }
+
+    #[test]
     fn non_multiple_boundary_gap_is_preserved_as_point_geometry() {
-        let mut p = project(&[(Role::Action, "first"), (Role::Action, "second")]);
-        p.page_profile.line_advance = 14;
-        p.page_profile.boundary_gap = 10;
-        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let p = project(&[(Role::Action, "first"), (Role::Action, "second")]);
+        let inputs = LayoutInputs {
+            line_advance: 14,
+            boundary_gap: 10,
+            ..LayoutInputs::default()
+        };
+        let layout =
+            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
         let lines = &layout.pages[0].lines;
         assert_eq!(lines[0].rect.y, 72);
         assert_eq!(lines[1].rect.y - lines[0].rect.y, 24);
         assert_eq!(
             lines[1].rect.y,
-            lines[0].rect.y + p.page_profile.line_advance + p.page_profile.boundary_gap
+            lines[0].rect.y + inputs.line_advance + inputs.boundary_gap
         );
     }
 
@@ -758,7 +914,7 @@ mod tests {
                 let lines = &layout.pages[0].lines;
                 assert_eq!(
                     lines[1].rect.y - lines[0].rect.y,
-                    p.page_profile.line_advance
+                    layout.inputs.line_advance
                 );
             }
         }
@@ -778,32 +934,40 @@ mod tests {
             let lines = &layout.pages[0].lines;
             assert_eq!(
                 lines[1].rect.y - lines[0].rect.y,
-                p.page_profile.line_advance + p.page_profile.boundary_gap
+                layout.inputs.line_advance + layout.inputs.boundary_gap
             );
         }
     }
 
     #[test]
     fn zero_gap_does_not_consume_page_capacity() {
-        let mut p = project(&[(Role::Action, "before"), (Role::Dialogue, "after")]);
-        p.page_profile.lines_per_page = 2;
-        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let p = project(&[(Role::Action, "before"), (Role::Dialogue, "after")]);
+        let inputs = LayoutInputs {
+            lines_per_page: 2,
+            ..LayoutInputs::default()
+        };
+        let layout =
+            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
         assert_eq!(layout.pages.len(), 1);
         assert_eq!(layout.pages[0].occupied_lines, 2);
     }
 
     #[test]
     fn empty_wrapped_and_keep_lines_preserve_geometry_at_page_boundaries() {
-        let mut p = project(&[
+        let p = project(&[
             (Role::SceneHeading, "INT. ROOM"),
             (Role::Action, ""),
             (Role::Action, "abcdefghij"),
             (Role::Character, "BOB"),
             (Role::Dialogue, "Hello"),
         ]);
-        p.page_profile.chars_per_line = 4;
-        p.page_profile.lines_per_page = 3;
-        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let inputs = LayoutInputs {
+            chars_per_line: 4,
+            lines_per_page: 3,
+            ..LayoutInputs::default()
+        };
+        let layout =
+            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
 
         assert!(layout.pages.len() > 1);
         assert!(layout
@@ -866,8 +1030,12 @@ mod tests {
             ScreenplayElement::new("title", Role::Action, "Title")
                 .unwrap_or_else(|_| unreachable!()),
         );
-        p.page_profile.lines_per_page = 2;
-        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let inputs = LayoutInputs {
+            lines_per_page: 2,
+            ..LayoutInputs::default()
+        };
+        let layout =
+            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
         assert!(layout.pages[0].title_page);
         assert_eq!(layout.pages[1].lines[0].role, Role::SceneHeading);
         assert!(layout.pages[1].lines[0].keep_with_next);
@@ -875,10 +1043,14 @@ mod tests {
 
     #[test]
     fn oversized_elements_terminate_without_blank_pages() {
-        let mut p = project(&[(Role::Action, &"x".repeat(100))]);
-        p.page_profile.chars_per_line = 3;
-        p.page_profile.lines_per_page = 2;
-        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let p = project(&[(Role::Action, &"x".repeat(100))]);
+        let inputs = LayoutInputs {
+            chars_per_line: 3,
+            lines_per_page: 2,
+            ..LayoutInputs::default()
+        };
+        let layout =
+            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
         assert_eq!(layout.pages.len(), 17);
         assert!(layout.pages.iter().all(|page| !page.lines.is_empty()));
     }
@@ -914,22 +1086,25 @@ mod tests {
 
     #[test]
     fn hidden_roles_are_omitted_without_shifting_source_element_indexes() {
-        let mut p = project(&[
+        let p = project(&[
             (Role::Action, "visible before"),
             (Role::Note, "private note"),
             (Role::Outline1, "private outline"),
             (Role::Summary, "private summary"),
             (Role::Action, "visible after"),
         ]);
+        let mut settings = SourceLayoutSettings::default();
         for role in [Role::Note, Role::Outline1, Role::Summary] {
             let index = Role::ALL
                 .iter()
                 .position(|candidate| *candidate == role)
                 .unwrap_or_else(|| unreachable!());
-            p.page_profile.role_print_visibility[index] = PrintVisibility::Hidden;
+            settings.role_print_visibility[index] = Some(PrintVisibility::Hidden);
         }
 
-        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let layout =
+            ScreenplayLayout::build_with_effective_inputs(&p, &LayoutInputs::default(), &settings)
+                .unwrap_or_else(|_| unreachable!());
         let lines = layout
             .pages
             .iter()
@@ -944,14 +1119,17 @@ mod tests {
 
     #[test]
     fn explicit_role_page_start_starts_a_new_body_page() {
-        let mut p = project(&[(Role::Action, "before"), (Role::NewAct, "ACT TWO")]);
+        let p = project(&[(Role::Action, "before"), (Role::NewAct, "ACT TWO")]);
+        let mut settings = SourceLayoutSettings::default();
         let index = Role::ALL
             .iter()
             .position(|role| *role == Role::NewAct)
             .unwrap_or_else(|| unreachable!());
-        p.page_profile.role_starts_new_page[index] = true;
+        settings.role_starts_new_page[index] = Some(true);
 
-        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let layout =
+            ScreenplayLayout::build_with_effective_inputs(&p, &LayoutInputs::default(), &settings)
+                .unwrap_or_else(|_| unreachable!());
         assert_eq!(layout.pages.len(), 2);
         assert_eq!(layout.pages[0].lines[0].text, "before");
         assert!(layout.pages[1]
@@ -1010,9 +1188,13 @@ mod tests {
 
     #[test]
     fn nearest_pointer_clamps_document_and_ties_to_earlier_line() {
-        let mut p = project(&[(Role::Action, "first"), (Role::Action, "second")]);
-        p.page_profile.lines_per_page = 1;
-        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let p = project(&[(Role::Action, "first"), (Role::Action, "second")]);
+        let inputs = LayoutInputs {
+            lines_per_page: 1,
+            ..LayoutInputs::default()
+        };
+        let layout =
+            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
         assert!(layout.pages.len() >= 2);
         let first = &layout.pages[0].lines[0];
         let last_page = layout.pages.len() - 1;
@@ -1035,7 +1217,7 @@ mod tests {
             (last.element, last.source.end)
         );
 
-        let page_height = i64::from(layout.profile.paper_height);
+        let page_height = i64::from(layout.inputs.paper_height);
         let previous_y = i64::from(first.rect.y);
         let next_y = page_height + i64::from(layout.pages[1].lines[0].rect.y);
         let midpoint = (previous_y + next_y) / 2;

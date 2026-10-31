@@ -2,7 +2,8 @@
 
 use crate::{
     cast_list::{self, CastListError},
-    ModelError, Project, Role, ScreenplayElement, TextRun, MAX_ELEMENTS, MAX_TEXT_BYTES,
+    validate_layout_inputs, LayoutInputs, ModelError, Project, Role, ScreenplayElement, TextRun,
+    MAX_ELEMENTS, MAX_TEXT_BYTES,
 };
 use std::collections::BTreeSet;
 
@@ -87,6 +88,7 @@ struct Snapshot {
 pub struct EditingSession {
     project: Project,
     policy: EditPolicy,
+    layout_inputs: LayoutInputs,
     selection: Selection,
     dirty: bool,
     revision: u64,
@@ -103,7 +105,17 @@ impl EditingSession {
     }
 
     pub fn with_policy(project: Project, policy: EditPolicy) -> Result<Self, EditError> {
+        let layout_inputs = project.session_layout_inputs();
+        Self::with_policy_and_layout_inputs(project, policy, layout_inputs)
+    }
+
+    pub fn with_policy_and_layout_inputs(
+        project: Project,
+        policy: EditPolicy,
+        layout_inputs: LayoutInputs,
+    ) -> Result<Self, EditError> {
         project.validate()?;
+        validate_layout_inputs(&layout_inputs)?;
         let selection = Selection::caret(Position {
             element: 0,
             offset: 0,
@@ -113,6 +125,7 @@ impl EditingSession {
             clean_project: project.clone(),
             project,
             policy,
+            layout_inputs,
             selection,
             dirty: false,
             revision: 0,
@@ -136,6 +149,18 @@ impl EditingSession {
     /// not restore or alter it; a newly constructed session uses defaults.
     pub const fn policy(&self) -> EditPolicy {
         self.policy
+    }
+    /// Effective geometry inputs are session-scoped and intentionally excluded
+    /// from project snapshots, dirty tracking and native serialization.
+    pub fn layout_inputs(&self) -> &LayoutInputs {
+        &self.layout_inputs
+    }
+    /// Changes effective layout inputs without changing document data or dirty
+    /// state. Callers must supply a complete validated input set.
+    pub fn set_layout_inputs(&mut self, inputs: LayoutInputs) -> Result<(), EditError> {
+        validate_layout_inputs(&inputs)?;
+        self.layout_inputs = inputs;
+        Ok(())
     }
     /// Changes runtime policy without altering document contents, revision,
     /// history, or clean/dirty state.
@@ -1380,6 +1405,40 @@ mod tests {
             .unwrap_or_else(|_| unreachable!());
     }
 
+    #[test]
+    fn runtime_layout_inputs_are_validated_transient_and_outside_edit_history() {
+        let mut session = session("start", Role::Action);
+        let project = session.project().clone();
+        let revision = session.revision();
+        let inputs = LayoutInputs {
+            paper_width: 700,
+            line_advance: 15,
+            ..LayoutInputs::default()
+        };
+
+        session
+            .set_layout_inputs(inputs.clone())
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.layout_inputs(), &inputs);
+        assert_eq!(session.project(), &project);
+        assert_eq!(session.revision(), revision);
+        assert!(!session.dirty());
+
+        let mut invalid = inputs.clone();
+        invalid.char_width = 0;
+        assert_eq!(
+            session.set_layout_inputs(invalid),
+            Err(EditError::Model(ModelError::InvalidNumber))
+        );
+        assert_eq!(session.layout_inputs(), &inputs);
+
+        session.insert("!").unwrap_or_else(|_| unreachable!());
+        session.undo().unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.layout_inputs(), &inputs);
+        assert_eq!(session.project(), &project);
+        assert!(!session.dirty());
+    }
+
     fn source_name(local_name: &str) -> SourceName {
         SourceName {
             namespace_uri: None,
@@ -1466,6 +1525,7 @@ mod tests {
                 original_bytes: b"<Script/>".to_vec(),
                 encoding: SourceEncoding::Utf8,
             },
+            source_layout_settings: crate::SourceLayoutSettings::default(),
             sections: vec![PreservedSection {
                 name: source_name("Content"),
                 kind: SectionKind::Content,

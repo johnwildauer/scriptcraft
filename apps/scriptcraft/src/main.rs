@@ -254,9 +254,11 @@ impl ScriptCraftApp {
     ) -> Result<std::sync::Arc<ScreenplayLayout>, scriptcraft_core::layout::LayoutError> {
         let revision = self.session.revision();
         let started = Instant::now();
-        let (layout, hit) = self
-            .layout_cache
-            .get_or_build(revision, self.session.project())?;
+        let (layout, hit) = self.layout_cache.get_or_build_with_inputs(
+            revision,
+            self.session.project(),
+            self.session.layout_inputs(),
+        )?;
         if hit {
             self.performance.layout_cache_hits =
                 self.performance.layout_cache_hits.saturating_add(1);
@@ -492,7 +494,10 @@ impl ScriptCraftApp {
     }
 
     fn export_pdf(&mut self) {
-        match exports::export_pdf(self.session.project()) {
+        match exports::export_pdf_with_layout_inputs(
+            self.session.project(),
+            self.session.layout_inputs(),
+        ) {
             Ok(bytes) => match StdFileSystem.write(&PathBuf::from("scriptcraft.pdf"), &bytes) {
                 Ok(()) => {
                     self.status = "Exported fixed-layout PDF to scriptcraft.pdf".into();
@@ -667,7 +672,7 @@ impl ScriptCraftApp {
         let scale = metrics.scale;
         let paint_started = Instant::now();
         self.performance.painted_pages = self.performance.painted_pages.saturating_add(1);
-        let page_height = layout.profile.paper_height as f32 * scale;
+        let page_height = layout.inputs.paper_height as f32 * scale;
         let page_rect = ui.allocate_space(Vec2::new(page_width, page_height)).1;
         let painter = ui.painter_at(page_rect);
         let char_width = layout.char_width as f32 * scale;
@@ -699,7 +704,7 @@ impl ScriptCraftApp {
                 &painter,
                 egui::pos2(x, y),
                 &line.text,
-                renderer_font(&layout.profile.font_family, metrics.font_size),
+                renderer_font(&layout.inputs.font_family, metrics.font_size),
                 char_width,
                 FixedMetricTextStyle {
                     color: palette.text,
@@ -745,7 +750,7 @@ impl ScriptCraftApp {
                         egui::pos2(x, y),
                         egui::Align2::LEFT_TOP,
                         &self.ime_preedit,
-                        renderer_font(&layout.profile.font_family, metrics.font_size),
+                        renderer_font(&layout.inputs.font_family, metrics.font_size),
                         palette.ime_text,
                     );
                 }
@@ -787,8 +792,8 @@ impl ScriptCraftApp {
                 let viewport_width = ui.available_width().max(0.0);
                 let metrics = presentation_metrics_at_zoom(
                     viewport_width,
-                    layout.profile.paper_width as f32,
-                    layout.profile.font_size as f32,
+                    layout.inputs.paper_width as f32,
+                    layout.inputs.font_size as f32,
                     self.zoom_percent,
                 );
                 let geometry = page_scroll_geometry(viewport_width, metrics.page_width);
@@ -3816,15 +3821,15 @@ mod tests {
         for zoom_percent in [75, 100, 137, 200, 300] {
             let metrics = presentation_metrics_at_zoom(
                 800.0,
-                layout.profile.paper_width as f32,
-                layout.profile.font_size as f32,
+                layout.inputs.paper_width as f32,
+                layout.inputs.font_size as f32,
                 zoom_percent,
             );
             let page_rect = egui::Rect::from_min_size(
                 page_origin,
                 Vec2::new(
                     metrics.page_width,
-                    layout.profile.paper_height as f32 * metrics.scale,
+                    layout.inputs.paper_height as f32 * metrics.scale,
                 ),
             );
             let pointer = egui::pos2(
@@ -4534,10 +4539,10 @@ mod tests {
         assert_eq!(app.performance.layout_builds, 1);
         assert_eq!(app.performance.layout_cache_hits, 1);
 
-        let mut changed_profile = app.session.project().clone();
-        changed_profile.page_profile.line_advance += 1;
+        let mut changed_inputs = app.session.layout_inputs().clone();
+        changed_inputs.line_advance += 1;
         app.session
-            .replace_with_saved(changed_profile)
+            .set_layout_inputs(changed_inputs)
             .unwrap_or_else(|_| unreachable!());
         let _ = app.layout_for_render().unwrap_or_else(|_| unreachable!());
         assert_eq!(app.performance.layout_builds, 2);
@@ -5041,7 +5046,7 @@ mod tests {
             let line = &layout.pages[0].lines[0];
             let inner_end_pointer = |surface_rect: egui::Rect| {
                 let (_, horizontal_padding, scale) =
-                    presentation_geometry(surface_rect.width(), layout.profile.paper_width as f32);
+                    presentation_geometry(surface_rect.width(), layout.inputs.paper_width as f32);
                 egui::pos2(
                     surface_rect.left()
                         + horizontal_padding
@@ -5197,7 +5202,7 @@ mod tests {
         let layout =
             ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
         let (_, horizontal_padding, scale) =
-            presentation_geometry(800.0, layout.profile.paper_width as f32);
+            presentation_geometry(800.0, layout.inputs.paper_width as f32);
         let line = &layout.pages[0].lines[0];
         let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
         let pointer_click = |pos, pressed| egui::Event::PointerButton {
@@ -5494,9 +5499,9 @@ mod tests {
         let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         let layout =
             ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
-        let font = renderer_font(&layout.profile.font_family, 6.0);
-        assert_eq!(layout.profile.font_family, "Courier Prime");
-        assert_eq!(layout.profile.font_size, 12);
+        let font = renderer_font(&layout.inputs.font_family, 6.0);
+        assert_eq!(layout.inputs.font_family, "Courier Prime");
+        assert_eq!(layout.inputs.font_size, 12);
         assert_eq!(font.size, 6.0);
         assert_eq!(
             font.family,

@@ -2,7 +2,7 @@
 //! retain bounded measurements; output contains dimensions and counters only.
 
 use scriptcraft_core::layout::{LayoutCache, ScreenplayLayout};
-use scriptcraft_core::{Project, Role};
+use scriptcraft_core::{LayoutInputs, Project, Role};
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -29,7 +29,7 @@ struct Measurement {
     counters: Counters,
 }
 
-fn fixture(pages: usize) -> Project {
+fn fixture(pages: usize) -> (Project, LayoutInputs) {
     let mut project = Project::new().unwrap_or_else(|_| unreachable!());
     let text = (0..LINES_PER_PAGE)
         .map(|line| format!("generated benchmark line {line}"))
@@ -45,8 +45,11 @@ fn fixture(pages: usize) -> Project {
             .unwrap_or_else(|_| unreachable!())
         })
         .collect();
-    project.page_profile.boundary_gap = 0;
-    project
+    let inputs = LayoutInputs {
+        boundary_gap: 0,
+        ..LayoutInputs::default()
+    };
+    (project, inputs)
 }
 
 fn percentile(samples: &mut [f64], percentile: f64) -> f64 {
@@ -57,13 +60,14 @@ fn percentile(samples: &mut [f64], percentile: f64) -> f64 {
     samples[index]
 }
 
-fn measure_uncached(project: &Project) -> Measurement {
+fn measure_uncached(project: &Project, inputs: &LayoutInputs) -> Measurement {
     let mut samples = Vec::with_capacity(SAMPLES);
     let mut counters = Counters::default();
     let mut pages = 0;
     for iteration in 0..(WARMUP + SAMPLES) {
         let started = Instant::now();
-        let layout = ScreenplayLayout::build(black_box(project)).unwrap_or_else(|_| unreachable!());
+        let layout = ScreenplayLayout::build_with_inputs(black_box(project), inputs)
+            .unwrap_or_else(|_| unreachable!());
         pages = layout.pages.len();
         black_box(layout);
         if iteration >= WARMUP {
@@ -83,7 +87,7 @@ fn measure_uncached(project: &Project) -> Measurement {
     }
 }
 
-fn measure_cached(project: &Project, edit: Option<usize>) -> Measurement {
+fn measure_cached(project: &Project, inputs: &LayoutInputs, edit: Option<usize>) -> Measurement {
     let mut cache = LayoutCache::default();
     let mut samples = Vec::with_capacity(SAMPLES);
     let mut counters = Counters::default();
@@ -98,7 +102,7 @@ fn measure_cached(project: &Project, edit: Option<usize>) -> Measurement {
         let revision = edit.map_or(0, |index| index as u64 + iteration as u64 + 1);
         let started = Instant::now();
         let (layout, hit) = cache
-            .get_or_build(revision, black_box(&candidate))
+            .get_or_build_with_inputs(revision, black_box(&candidate), inputs)
             .unwrap_or_else(|_| unreachable!());
         pages = layout.pages.len();
         black_box(layout);
@@ -140,10 +144,10 @@ fn print_measurement(pages: usize, edit: &str, measurement: &Measurement) {
 fn controlled_long_document_benchmark_reports_wo006_oracle() {
     println!("WO-006a benchmark: warmup={WARMUP} samples={SAMPLES} unit=ms");
     for pages in PAGE_CASES {
-        let project = fixture(pages);
+        let (project, inputs) = fixture(pages);
         let positions = [("beginning", 0), ("middle", pages / 2), ("end", pages - 1)];
         for (label, element) in positions {
-            let measurement = measure_cached(&project, Some(element));
+            let measurement = measure_cached(&project, &inputs, Some(element));
             print_measurement(pages, label, &measurement);
             assert_eq!(measurement.pages, pages);
             assert_eq!(measurement.counters.frames, SAMPLES as u64);
@@ -154,9 +158,9 @@ fn controlled_long_document_benchmark_reports_wo006_oracle() {
         }
     }
 
-    let long = fixture(180);
-    let uncached = measure_uncached(&long);
-    let cached = measure_cached(&long, None);
+    let (long, inputs) = fixture(180);
+    let uncached = measure_uncached(&long, &inputs);
+    let cached = measure_cached(&long, &inputs, None);
     print_measurement(180, "unchanged-cached", &cached);
     println!(
         "unchanged-read-180-pages uncached_p95_ms={:.6} cached_p95_ms={:.6} reduction_pct={:.1}",
@@ -171,13 +175,13 @@ fn controlled_long_document_benchmark_reports_wo006_oracle() {
 
 #[test]
 fn layout_cache_observes_build_then_unchanged_hit() {
-    let project = fixture(1);
+    let (project, inputs) = fixture(1);
     let mut cache = LayoutCache::default();
     let (built, first_hit) = cache
-        .get_or_build(7, &project)
+        .get_or_build_with_inputs(7, &project, &inputs)
         .unwrap_or_else(|_| unreachable!());
     let (hit, second_hit) = cache
-        .get_or_build(7, &project)
+        .get_or_build_with_inputs(7, &project, &inputs)
         .unwrap_or_else(|_| unreachable!());
     assert!(!first_hit);
     assert!(second_hit);

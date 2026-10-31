@@ -5,7 +5,7 @@
 //! from the ordered tree; a future writer must still establish its own semantic
 //! and lexical preservation guarantees.
 
-use crate::{SourceFormat, StableId};
+use crate::{SourceFormat, SourceLayoutSettings, StableId};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
@@ -266,6 +266,10 @@ pub struct BoardGraph {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreservationState {
     pub source: SourceSnapshot,
+    /// Narrow runtime projection of recognized source layout settings. The
+    /// complete source values remain authoritative in `sections` and
+    /// `source.original_bytes`.
+    pub(crate) source_layout_settings: SourceLayoutSettings,
     pub sections: Vec<PreservedSection>,
     pub anchors: Vec<SourceAnchor>,
     pub identities: Vec<ForeignIdentity>,
@@ -274,6 +278,10 @@ pub struct PreservationState {
 }
 
 impl PreservationState {
+    pub fn source_layout_settings(&self) -> &SourceLayoutSettings {
+        &self.source_layout_settings
+    }
+
     pub fn validate(&self) -> Result<(), PreservationError> {
         if self.source.original_bytes.len() > MAX_SOURCE_BYTES {
             return Err(PreservationError::SourceTooLarge);
@@ -945,7 +953,7 @@ fn validate_ownership(ownership: &SourceOwnership) -> Result<(), PreservationErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PageProfile, Project, Role, ScreenplayElement};
+    use crate::{Project, Role, ScreenplayElement};
 
     fn name(local_name: &str) -> SourceName {
         SourceName {
@@ -968,7 +976,6 @@ mod tests {
             .unwrap_or_else(|_| unreachable!());
         Project {
             title_page: Vec::new(),
-            page_profile: PageProfile::default(),
             elements: vec![element],
             preservation: Some(state),
             legacy_json_state: None,
@@ -997,6 +1004,7 @@ mod tests {
         };
         PreservationState {
             source: snapshot(),
+            source_layout_settings: SourceLayoutSettings::default(),
             sections: vec![PreservedSection {
                 name: name("Content"),
                 kind: SectionKind::Content,
