@@ -4,8 +4,9 @@
 //! source tree and original bytes. The writer reconciles supported element edits
 //! with that tree, or emits a minimal new document for the evidenced role labels.
 //! ScriptCraft-only persistent identity, metadata and geometry are not part of the
-//! semantic model. FDX geometry mappings remain unestablished; these APIs do not
-//! enable safe native save/reopen or claim Final Draft interoperability.
+//! semantic model. Runtime inputs are not serialized; imported FDX source remains
+//! authoritative for source settings. These APIs do not claim Final Draft
+//! interoperability.
 
 use crate::preservation::{
     BoardEntity, BoardEntityKind, BoardGraph, DependencyConfidence, ForeignIdDomain,
@@ -57,7 +58,6 @@ pub enum FdxError {
     AmbiguousIdentity,
     DanglingReference,
     UnsupportedConstruct,
-    UnsupportedAppState,
     Model(ModelErrorKind),
     Preservation(PreservationErrorKind),
 }
@@ -100,7 +100,6 @@ impl fmt::Display for FdxError {
             Self::UnsupportedConstruct => {
                 "FDX contains a construct that cannot be projected safely"
             }
-            Self::UnsupportedAppState => "ScriptCraft-only state has no supported FDX mapping",
             Self::Model(_) => "FDX semantic projection failed model validation",
             Self::Preservation(_) => "FDX preservation state failed validation",
         })
@@ -357,23 +356,20 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
 ///
 /// For imported documents, managed paragraphs are reconciled into the retained
 /// ordered source tree; unknown and source-owned nodes are re-emitted in place.
-/// For a new document, only default app state and the semantic title/body content
-/// are accepted. This is a codec operation, not native save/reopen support:
-/// ScriptCraft identity, schema, runtime geometry inputs, and editing policies do
-/// not have an established durable FDX mapping. Output is structurally re-read through
-/// the bounded reader before it is returned. No Final Draft application
-/// interoperability is implied. Imported XML is retained semantically, not
-/// lexically: the XML declaration, entity spelling, quote style and exact
-/// attribute interleaving with namespace declarations are not guaranteed to be
+/// For a new document, only the semantic title/body content is emitted in a
+/// minimal supported FDX structure. ScriptCraft identity, legacy adapter fields,
+/// runtime geometry inputs, and editing policies are not serialized. Output is
+/// structurally re-read through the bounded reader before it is returned. This
+/// does not establish desktop save/reopen guarantees or Final Draft application
+/// interoperability. Imported XML is retained semantically, not lexically: the
+/// XML declaration, entity spelling, quote style and exact attribute
+/// interleaving with namespace declarations are not guaranteed to be
 /// byte-identical. UTF-8 is emitted; supported tree order, expanded names,
 /// attributes, text, comments, processing instructions and opaque children are
 /// checked against the re-read output.
 pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
     project.validate().map_err(map_model_error)?;
     validate_project_output_budgets(project)?;
-    if project.legacy_json_state.is_some() {
-        return Err(FdxError::UnsupportedAppState);
-    }
 
     let (nodes, expected_preserved_sections) = if let Some(state) = &project.preservation {
         state.validate().map_err(map_preservation_error)?;
@@ -382,16 +378,6 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
             return Err(FdxError::UnsupportedConstruct);
         }
         let original = read_v6(&state.source.original_bytes)?;
-        let original_layout_settings = original
-            .project
-            .preservation
-            .as_ref()
-            .ok_or(FdxError::UnsupportedConstruct)?
-            .source_layout_settings
-            .clone();
-        if state.source_layout_settings != original_layout_settings {
-            return Err(FdxError::UnsupportedAppState);
-        }
         let original_state = original
             .project
             .preservation
@@ -2541,6 +2527,32 @@ mod tests {
     }
 
     #[test]
+    fn source_settings_remain_authoritative_when_runtime_projection_changes() {
+        let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Note'><FontSpec Style='Italic+HiddenText'/></ElementSettings><Content><Paragraph Type='Note' id='source-note'><Text>synthetic hidden note</Text></Paragraph></Content></FinalDraft>";
+        let mut project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
+        let state = project
+            .preservation
+            .as_mut()
+            .unwrap_or_else(|| unreachable!());
+        state.source_layout_settings = SourceLayoutSettings::default();
+
+        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let output = std::str::from_utf8(&bytes).unwrap_or("");
+        assert!(output.contains("Style=\"Italic+HiddenText\""));
+        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
+        let settings = reopened
+            .project
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!())
+            .source_layout_settings();
+        assert_eq!(
+            settings.print_visibility(Role::Note),
+            PrintVisibility::Hidden
+        );
+    }
+
+    #[test]
     fn retains_and_validates_internal_board_item_and_image_links() {
         let xml = b"<FinalDraft DocumentType='Script' Version='6'><Content/><ListItems><ListItem ID='item-1'/></ListItems><DisplayBoards><DisplayBoard ID='board-1'><Item id='item-1'/><Picture id='image-1'/></DisplayBoard></DisplayBoards><Images><Image ID='image-1' Length='0'/></Images></FinalDraft>";
         let result = read_v6(xml);
@@ -2718,11 +2730,34 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsafe_source_reconciliation() {
-        let legacy_json = Project::from_json(include_str!("../tests/fixtures/legacy_project.json"))
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(write_v6(&legacy_json), Err(FdxError::UnsupportedAppState));
+    fn serializes_legacy_adapter_content_without_persisting_retired_app_state() {
+        let legacy_json = include_str!("../tests/fixtures/legacy_project.json")
+            .replace("\"margin_top\":72", "\"margin_top\":73");
+        let project = Project::from_json(&legacy_json).unwrap_or_else(|_| unreachable!());
+        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let output = std::str::from_utf8(&bytes).unwrap_or("");
+        assert!(output.contains("Version=\"6\""));
+        assert!(output.contains("id=\"scriptcraft-generated-1\""));
+        assert!(!output.contains(project.elements[0].id.as_str()));
+        assert!(!output.contains("legacy-project-1"));
+        assert!(!output.contains("Legacy title"));
+        assert!(!output.contains("Legacy author"));
+        assert!(!output.contains("contact@example.invalid"));
+        assert!(!output.contains("2026-10-31T00:00:00Z"));
+        assert!(!output.contains("margin_top"));
+        assert!(!output.contains("Courier Prime"));
+        assert!(!output.contains("uppercase_cues"));
+        assert!(!output.contains("auto_parenthetical"));
+        assert!(!output.contains("strict_transition_boundaries"));
+        assert!(!output.contains("ScriptCraft"));
+        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
+        assert_eq!(reopened.project.elements[0].text, project.elements[0].text);
+        assert_eq!(reopened.project.elements[0].role, project.elements[0].role);
+        assert!(reopened.project.legacy_json_state.is_none());
+    }
 
+    #[test]
+    fn rejects_unsafe_source_reconciliation() {
         let mut inserted = read_v6(SYNTHETIC)
             .unwrap_or_else(|_| unreachable!())
             .project;

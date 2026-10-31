@@ -1,9 +1,9 @@
 //! Bounded, source-owned FDX preservation state.
 //!
-//! This module defines data contracts only. It does not parse, rewrite, or claim
-//! interoperability for FDX. The original byte snapshot is retained separately
-//! from the ordered tree; a future writer must still establish its own semantic
-//! and lexical preservation guarantees.
+//! The FDX codec retains the parsed source tree and original byte snapshot
+//! separately. The ordered tree is the serialization authority for source-owned
+//! content; byte identity and external-application interoperability are not
+//! implied.
 
 use crate::{SourceFormat, SourceLayoutSettings, StableId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -266,9 +266,9 @@ pub struct BoardGraph {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreservationState {
     pub source: SourceSnapshot,
-    /// Narrow runtime projection of recognized source layout settings. The
-    /// complete source values remain authoritative in `sections` and
-    /// `source.original_bytes`.
+    /// Ephemeral projection of recognized source layout settings for runtime
+    /// behavior. The complete source values in `sections` and
+    /// `source.original_bytes` remain authoritative for serialization.
     pub(crate) source_layout_settings: SourceLayoutSettings,
     pub sections: Vec<PreservedSection>,
     pub anchors: Vec<SourceAnchor>,
