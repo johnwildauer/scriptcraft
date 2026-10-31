@@ -7,6 +7,7 @@ pub mod cast_list;
 pub mod editing;
 pub mod exports;
 pub mod fdx;
+pub mod fdx_storage;
 pub mod layout;
 pub mod persistence;
 pub mod preservation;
