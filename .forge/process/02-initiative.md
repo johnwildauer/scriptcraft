@@ -50,15 +50,16 @@ evidence. Raise relevant mismatches to the orchestrator without broadening scope
 
 ## Execution and evidence
 
-Preserve unrelated user changes and isolate attributable work. The implementer
-commits safely attributable work-order changes before validation when Git is
-available. After each completed discrete work order, the orchestrator dispatches
-exactly one fresh coding validator using the prompt in [`05-validation.md`](05-validation.md).
-The validator records its finding in a separate commit, not in the implementation
-commit. If Git is unavailable, no attributable diff exists, or safe attribution is
-not possible, still dispatch one validator and report the evidence limitation
-without claiming alignment or inventing a commit. The validator does not decide
-dependencies or resolve actual issues; the orchestrator handles those, user
-direction, and applicable external requirements. See
+Preserve unrelated user changes and isolate attributable work. Where permitted by
+the authoritative project policy, the implementer commits safely attributable
+work-order changes before validation when Git is available. By default, after each
+completed discrete work order, the orchestrator dispatches exactly one fresh
+coding validator using the prompt in [`05-validation.md`](05-validation.md); an
+explicit project-policy override may disable agent review/validation or assign it
+to the user. When permitted, the validator records its finding in a separate
+commit, not in the implementation commit. Generic guidance to dispatch despite
+missing Git or attribution is likewise subject to project policy. The validator
+does not decide dependencies or resolve actual issues; the orchestrator handles
+those, user direction, and applicable external requirements. See
 [`00-overview.md`](00-overview.md) and the relevant work-order and validation
 guidance for execution details.

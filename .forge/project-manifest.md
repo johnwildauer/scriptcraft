@@ -21,8 +21,8 @@ research notes or implementation observations as product mandates.
 - **First-pass success:** A writer can complete a representative scene through a headless-capable core and focused desktop UI, with deterministic pagination and safe, no-data-loss save/reopen behavior.
 - **Explicit non-goals:** DOCX compatibility, collaboration, MCP/control infrastructure, planning or beat-board editing features, broad Word-like formatting, and web/multi-platform polish. FDX is the native document direction; preservation of unsupported beat-board data is distinct from editing those features and does not promise blanket Final Draft compatibility.
 - **Planning preference:** Replan after each initiative; do not treat the historical first-initiative handoff as a standing roadmap.
-- **User checkpoint preference:** Guided involvement; no manual checkpoint after each work order. User confirmation is consolidated at initiative-level/closeout if Forge permits, while every work order still receives a separate fresh validation agent immediately after implementation.
-- **Working style:** Guided, safety-conscious, concise explanations for consequential defaults, with independent checks handled in the background.
+- **User checkpoint preference:** Guided involvement; all review and validation are completed by the user under the repository-wide policy below. Do not dispatch agent reviewers or validators or run agent-side checks.
+- **Working style:** Guided and safety-conscious, with concise explanations for consequential defaults; the user handles all review and validation.
 - **Technology/constraints:** Rust and desktop-first are user-approved. Current package/dependency observations are recorded below; framework approval, product-supported OS, packaging, and exact desktop UI policy remain open unless separately decided.
 - **Additional context:** `.analysis/` is a research/proposal source, not an authorization to copy every recommendation as an implementation command.
 
@@ -30,7 +30,7 @@ research notes or implementation observations as product mandates.
 
 - **Level:** `guided`
 - **Decided by:** `asked directly` — user explicitly approved guided involvement.
-- **Interpretation:** The agent may select bounded technical defaults, but must label them `agent-default`, preserve unknowns, and never weaken review or validation gates.
+- **Interpretation:** The agent may select bounded technical defaults, but must label them `agent-default`, preserve unknowns, and never weaken product safety behavior or applicable external obligations. The user owns all review and validation.
 
 ## Technical preferences
 
@@ -70,11 +70,20 @@ States use `confirmed`, `provisional`, `agent-default`, or `unknown`. Repository
 
 ## Project policy
 
+### Authoritative internal review and validation policy
+
+**Repository-wide user direction — effective 2026-10-31:** Internal agent review and validation are disabled for this repository. The user performs all review and validation. Agents must not dispatch or conduct design, requirements, blueprint, implementation, or other reviews; dispatch independent validators; or run tests, builds, lint, formatting checks, manual verification, implementation checks, or other validation. This applies to every initiative and supersedes the former initiative-only no-independent-validator exception and all active contrary review, validation, and implementation-check requirements in this manifest, Forge process guidance, and initiative/work-order records. Preserve those prior instructions, findings, and recorded outcomes as historical evidence; do not treat them as current authorization or as newly verified results.
+
+This workflow policy does not remove, weaken, or authorize bypassing in-product safety checks or safeguards. Applicable external rules and obligations remain in force and are not waived by this policy. If a genuine external requirement conflicts with user-owned review/validation or this no-agent-run direction, surface it as a blocker; do not claim the requirement was waived or substitute an agent result. This policy update itself is not evidence that any check passed.
+
 ### Commands
 
-Use these project checks where applicable; discover any task-specific or external
-gates rather than assuming none. The historical results below come from the
-foundation validation dated 2026-10-25 and are not fresh results for a later checkout.
+The commands below are the project's recorded check inventory and historical
+results, not authorization for agent-run checks under the authoritative policy
+above. The user performs any review and validation. Discover applicable external
+gates rather than assuming none; do not treat them as waived. The historical
+results below come from the foundation validation dated 2026-10-25 and are not
+fresh results for a later checkout.
 
 - **Install/setup:** No separate setup command is recorded; prerequisites and setup requirements must be discovered when needed.
 - **Format:** `cargo fmt --all -- --check` — passed in the historical foundation validation dated 2026-10-25.
@@ -87,12 +96,12 @@ foundation validation dated 2026-10-25 and are not fresh results for a later che
 ### Gates and intervention
 
 - **Design approval:** Human approval required by default at `review -> execute`, subject to explicit user direction and applicable external rules.
-- **Validation cadence:** `per work order`; fresh validation agent immediately after each implementation.
-- **Initiative-specific validation exception — document-model-refactor (2026-10-31):** The user explicitly directed: “Do not dispatch further independent validation agents for this initiative; record this policy change and continue with the implementation checks only.” This supersedes the preceding per-work-order fresh-validation-agent cadence only for the `2026-10-31-document-model-refactor` initiative, effective from this direction onward. Continue implementation checks and record their results as implementation-check evidence, not independent validation. WO-001 retains its existing independent validation; WO-002–WO-011 have implementation commits but no independent validation artifacts. Do not dispatch validators for this initiative unless the user changes this direction. Project-wide cadence for other initiatives and applicable external requirements are unchanged.
-- **Manual/external gates:** No additional manual/external gate is recorded as a project-wide policy. Discover and record any gate applicable to a task before treating it as optional or complete.
+- **Validation cadence:** User performs all review and validation repository-wide. No agent validator or agent-run check is permitted under the authoritative policy above.
+- **Historical initiative-specific exception — document-model-refactor (2026-10-31; superseded):** The prior user direction was: “Do not dispatch further independent validation agents for this initiative; record this policy change and continue with the implementation checks only.” It superseded the former per-work-order validator cadence only for that initiative and allowed implementation checks. The newer repository-wide direction supersedes that exception and its implementation-check allowance. Preserve its history, including the existing WO-001 finding and the recorded absence of WO-002–WO-011 validation artifacts; do not dispatch reviewers/validators or run checks under the former exception.
+- **Manual/external gates:** No additional manual/external gate was recorded as a project-wide policy; this is not a waiver. Discover and record any applicable gate and surface genuine conflicts before treating it as optional or complete.
 - **Automation bypasses:** none.
 - **Network or destructive-action restrictions:** Network access is not required solely by project policy. Avoid destructive filesystem or Git actions without explicit authorization and recorded evidence.
-- **User confirmation:** Consolidated at initiative-level/closeout if Forge permits; this does not bypass applicable design review, per-WO validation, or closeout evidence.
+- **User confirmation:** The user completes all review and validation. Existing user approval and closeout requirements remain applicable; this policy does not itself satisfy or waive them.
 
 ### Tools and parallelism
 

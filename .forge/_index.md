@@ -14,6 +14,10 @@ Use process documents as default workflow guidance, and read the relevant docume
 
 At the user's explicit direction, adapt and record project-policy changes in the appropriate durable project document; an orchestrator may dispatch an architect or coding agent to adapt host-project process documents. Respect applicable external rules and checks: do not silently discard or weaken them, and communicate genuine uncertainty or blockers. Process documents are swappable and may be updated or replaced without re-initializing the repository. Preserve existing project-specific policy unless the user directs a change, record that change, and keep material decisions traceable without rote synchronization.
 
+### Authoritative host-project policy
+
+Generic Forge process steps are defaults. An explicit, current repository policy in [`project-manifest.md`](project-manifest.md#authoritative-internal-review-and-validation-policy) overrides conflicting agent workflow requirements across initiatives and process documents. ScriptCraft's current policy makes all review and validation user-owned and disables agent-run internal reviews, validators, checks, and other validation. This changes workflow ownership only: in-product safety behavior and applicable external rules remain in force. Surface genuine conflicts; do not imply an external obligation was waived.
+
 Initiatives normally follow exploration, planning, design review and approval, implementation, per-work-order validation, and closeout. This is guidance, not a rigid transition machine: phases and statuses describe progress, and the user may direct an appropriate path. **Standard** is the default; **Rapid** is an explicitly user-requested compressed path for small, well-understood changes that takes the initial prompt as a complete draft. See [`process/00-overview.md`](process/00-overview.md) and [`process/02-initiative.md`](process/02-initiative.md). Rapid mode and other user-directed paths retain applicable external rules; the user may explicitly adapt and record project-policy defaults.
 
 ## Directory map
@@ -41,7 +45,7 @@ Initialization establishes the repository baseline in [`project-manifest.md`](pr
 1. Explore and plan the initiative, then draft the requested work orders in [`process/02-initiative.md`](process/02-initiative.md).
 2. Review the proposed design and obtain the default human approval using [`process/03-design-review.md`](process/03-design-review.md).
 3. Implement approved work orders using [`process/04-work-order.md`](process/04-work-order.md).
-4. Independently validate each completed work order by default using [`process/05-validation.md`](process/05-validation.md).
+4. Validate each completed work order using [`process/05-validation.md`](process/05-validation.md) only as permitted by the authoritative project policy; generic agent validation is not mandatory where that policy overrides it.
 5. Close out using [`process/06-closeout.md`](process/06-closeout.md), recording material outcomes and follow-ups.
 
 When Git is usable for commit and hash review, each work order closes with one
