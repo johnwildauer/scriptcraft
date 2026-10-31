@@ -7,7 +7,7 @@ use scriptcraft_core::persistence::serialize;
 use scriptcraft_core::{Project, Role, MAX_TEXT_BYTES};
 
 fn session() -> EditingSession {
-    let mut project = Project::new("paste-fixture", "Paste fixture", "Writer")
+    let mut project = Project::from_json(include_str!("fixtures/legacy_project.json"))
         .unwrap_or_else(|_| unreachable!("fixture project must be valid"));
     project.elements[0].role = Role::Action;
     EditingSession::new(project).unwrap_or_else(|_| unreachable!("fixture session must be valid"))

@@ -182,7 +182,7 @@ mod tests {
     }
 
     fn project_with(elements: Vec<ScreenplayElement>) -> Project {
-        let mut project = Project::new("cast-project", "", "").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements = elements;
         project
     }

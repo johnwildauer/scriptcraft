@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-//! Dependency-free semantic screenplay model and native JSON schema.
+//! Dependency-free semantic screenplay model and transitional legacy JSON adapter.
 
 pub mod cast_list;
 pub mod editing;
@@ -355,13 +355,22 @@ impl ScreenplayElement {
     }
 }
 
+/// Legacy fields kept only while an unchanged JSON-origin document uses the
+/// transitional JSON adapter. These are not part of the FDX semantic model.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Metadata {
+pub(crate) struct LegacyJsonMetadata {
     pub title: String,
     pub author: String,
     pub contact: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LegacyJsonState {
+    pub project_id: StableId,
+    pub project_schema_version: u32,
+    pub metadata: LegacyJsonMetadata,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -464,56 +473,45 @@ impl Default for PageProfile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
-    pub id: StableId,
-    pub schema_version: u32,
-    pub metadata: Metadata,
     pub title_page: Vec<ScreenplayElement>,
     pub page_profile: PageProfile,
     pub elements: Vec<ScreenplayElement>,
     /// Source-owned state is separate from the semantic projection and is not
     /// representable in transitional JSON.
     pub preservation: Option<preservation::PreservationState>,
+    /// Transitional JSON-only source state; never consumed by the FDX codec.
+    pub(crate) legacy_json_state: Option<LegacyJsonState>,
 }
 
 impl Project {
-    pub fn new(
-        id: impl Into<String>,
-        title: impl Into<String>,
-        author: impl Into<String>,
-    ) -> Result<Self, ModelError> {
-        let id = StableId::new(id)?;
+    pub fn new() -> Result<Self, ModelError> {
         let mut ids = StableIdAllocator::new();
-        ids.reserve(id.clone())?;
         let start = ScreenplayElement::new(
             ids.allocate("element")?.as_str().to_owned(),
             Role::SceneHeading,
             "",
         )?;
         Ok(Self {
-            id,
-            schema_version: CURRENT_SCHEMA_VERSION,
-            metadata: Metadata {
-                title: title.into(),
-                author: author.into(),
-                ..Metadata::default()
-            },
             title_page: Vec::new(),
             page_profile: PageProfile::default(),
             elements: vec![start],
             preservation: None,
+            legacy_json_state: None,
         })
     }
     pub fn validate(&self) -> Result<(), ModelError> {
-        if self.schema_version != CURRENT_SCHEMA_VERSION {
-            return Err(ModelError::InvalidSchemaVersion);
+        if let Some(legacy) = &self.legacy_json_state {
+            StableId::new(legacy.project_id.0.clone())?;
+            if legacy.project_schema_version != CURRENT_SCHEMA_VERSION {
+                return Err(ModelError::InvalidSchemaVersion);
+            }
+            validate_legacy_json_metadata(&legacy.metadata)?;
         }
-        validate_strings(&self.metadata)?;
         validate_profile(&self.page_profile)?;
         if self.elements.len() > MAX_ELEMENTS || self.title_page.len() > MAX_ELEMENTS {
             return Err(ModelError::TooManyElements);
         }
         let mut ids = BTreeSet::new();
-        ids.insert(&self.id);
         let mut element_ids = BTreeSet::new();
         for item in self.title_page.iter().chain(self.elements.iter()) {
             validate_element(item)?;
@@ -532,7 +530,11 @@ impl Project {
     pub fn to_json(&self) -> Result<String, ModelError> {
         self.validate()?;
         ensure_legacy_json_compatible(self)?;
-        let json = encode_envelope(self);
+        let legacy = self
+            .legacy_json_state
+            .as_ref()
+            .ok_or(ModelError::UnsupportedJsonState)?;
+        let json = encode_envelope(self, legacy);
         if json.len() > MAX_JSON_BYTES {
             return Err(ModelError::StringTooLong);
         }
@@ -548,11 +550,10 @@ impl Project {
         Ok(project)
     }
 
-    /// Allocates an application element ID distinct from the project, title-page,
-    /// and body IDs. Foreign source IDs intentionally remain a separate namespace.
+    /// Allocates an application element ID distinct from title-page and body IDs.
+    /// Foreign source IDs intentionally remain a separate namespace.
     pub fn allocate_element_id(&self) -> Result<StableId, ModelError> {
         let mut allocator = StableIdAllocator::new();
-        allocator.reserve(self.id.clone())?;
         for element in self.title_page.iter().chain(self.elements.iter()) {
             allocator.reserve(element.id.clone())?;
         }
@@ -589,7 +590,7 @@ impl NativeProjectEnvelope {
     }
 }
 
-fn validate_strings(m: &Metadata) -> Result<(), ModelError> {
+fn validate_legacy_json_metadata(m: &LegacyJsonMetadata) -> Result<(), ModelError> {
     for s in [
         &m.title,
         &m.author,
@@ -738,7 +739,7 @@ fn element_json(e: &ScreenplayElement) -> String {
 fn elements_json(items: &[ScreenplayElement]) -> String {
     items.iter().map(element_json).collect::<Vec<_>>().join(",")
 }
-fn encode_envelope(p: &Project) -> String {
+fn encode_envelope(p: &Project, legacy: &LegacyJsonState) -> String {
     let role_boxes = p
         .page_profile
         .role_boxes
@@ -746,9 +747,8 @@ fn encode_envelope(p: &Project) -> String {
         .map(|box_| format!("{{\"x\":{},\"width\":{}}}", box_.x, box_.width))
         .collect::<Vec<_>>()
         .join(",");
-    // Keep the retired fields at their legacy defaults in the transitional JSON
-    // adapter. Nondefault legacy values are rejected on read, never silently reset.
-    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"uppercase_cues\":true,\"auto_parenthetical\":true,\"strict_transition_boundaries\":true,\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(p.id.as_str()), p.schema_version, quote(&p.metadata.title), quote(&p.metadata.author), quote(&p.metadata.contact), quote(&p.metadata.created_at), quote(&p.metadata.updated_at), elements_json(&p.title_page), quote(&p.page_profile.name), p.page_profile.format_version, p.page_profile.paper_width, p.page_profile.paper_height, p.page_profile.margin_top, p.page_profile.margin_bottom, p.page_profile.margin_left, p.page_profile.margin_right, p.page_profile.chars_per_line, p.page_profile.lines_per_page, p.page_profile.line_advance, p.page_profile.boundary_gap, quote(&p.page_profile.font_family), p.page_profile.font_size, p.page_profile.char_width, role_boxes, elements_json(&p.elements))
+    // Emit legacy identity/metadata only for an unchanged JSON-origin session.
+    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"uppercase_cues\":true,\"auto_parenthetical\":true,\"strict_transition_boundaries\":true,\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(legacy.project_id.as_str()), legacy.project_schema_version, quote(&legacy.metadata.title), quote(&legacy.metadata.author), quote(&legacy.metadata.contact), quote(&legacy.metadata.created_at), quote(&legacy.metadata.updated_at), elements_json(&p.title_page), quote(&p.page_profile.name), p.page_profile.format_version, p.page_profile.paper_width, p.page_profile.paper_height, p.page_profile.margin_top, p.page_profile.margin_bottom, p.page_profile.margin_left, p.page_profile.margin_right, p.page_profile.chars_per_line, p.page_profile.lines_per_page, p.page_profile.line_advance, p.page_profile.boundary_gap, quote(&p.page_profile.font_family), p.page_profile.font_size, p.page_profile.char_width, role_boxes, elements_json(&p.elements))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -949,7 +949,22 @@ fn object_has_field(v: &Json, key: &str) -> bool {
     matches!(v, Json::Object(fields) if fields.iter().any(|(name, _)| name == key))
 }
 
+fn ensure_known_unique_fields(v: &Json, known: &[&str]) -> Result<(), ModelError> {
+    let Json::Object(fields) = v else {
+        return Err(ModelError::InvalidJson);
+    };
+    let mut seen = BTreeSet::new();
+    if fields
+        .iter()
+        .any(|(name, _)| !known.contains(&name.as_str()) || !seen.insert(name.as_str()))
+    {
+        return Err(ModelError::UnsupportedJsonState);
+    }
+    Ok(())
+}
+
 fn decode_element(v: &Json) -> Result<ScreenplayElement, ModelError> {
+    ensure_known_unique_fields(v, &["id", "role", "text"])?;
     if object_has_field(v, "runs") || object_has_field(v, "source_provenance") {
         return Err(ModelError::UnsupportedJsonState);
     }
@@ -978,6 +993,7 @@ fn decode_role_boxes(v: &Json) -> Result<[RoleBox; LEGACY_ROLE_BOX_COUNT], Model
     let boxes = items
         .iter()
         .map(|item| {
+            ensure_known_unique_fields(item, &["x", "width"])?;
             Ok(RoleBox {
                 x: num_field(item, "x")?,
                 width: num_field(item, "width")?,
@@ -987,17 +1003,60 @@ fn decode_role_boxes(v: &Json) -> Result<[RoleBox; LEGACY_ROLE_BOX_COUNT], Model
     boxes.try_into().map_err(|_| ModelError::InvalidNumber)
 }
 fn decode_project(root: Json) -> Result<Project, ModelError> {
+    ensure_known_unique_fields(&root, &["schema_version", "project"])?;
     let envelope_schema = num_field(&root, "schema_version")?;
     if envelope_schema != CURRENT_SCHEMA_VERSION {
         return Err(ModelError::InvalidSchemaVersion);
     }
     let envelope = obj(&root, "project")?;
+    ensure_known_unique_fields(
+        envelope,
+        &[
+            "id",
+            "schema_version",
+            "metadata",
+            "title_page",
+            "page_profile",
+            "elements",
+        ],
+    )?;
     if object_has_field(envelope, "preservation") {
         return Err(ModelError::UnsupportedJsonState);
     }
     let schema = num_field(envelope, "schema_version")?;
     let m = obj(envelope, "metadata")?;
+    ensure_known_unique_fields(
+        m,
+        &["title", "author", "contact", "created_at", "updated_at"],
+    )?;
     let profile = obj(envelope, "page_profile")?;
+    ensure_known_unique_fields(
+        profile,
+        &[
+            "name",
+            "format_version",
+            "paper_width",
+            "paper_height",
+            "margin_top",
+            "margin_bottom",
+            "margin_left",
+            "margin_right",
+            "chars_per_line",
+            "lines_per_page",
+            "line_advance",
+            "boundary_gap",
+            "uppercase_cues",
+            "auto_parenthetical",
+            "strict_transition_boundaries",
+            "font_family",
+            "font_size",
+            "char_width",
+            "role_boxes",
+            "role_print_visibility",
+            "role_starts_new_page",
+            "additional_role_boxes",
+        ],
+    )?;
     if object_has_field(profile, "role_print_visibility")
         || object_has_field(profile, "role_starts_new_page")
     {
@@ -1009,16 +1068,18 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
     {
         return Err(ModelError::UnsupportedJsonState);
     }
-    Ok(Project {
-        id: StableId::new(str_field(envelope, "id")?)?,
-        schema_version: schema,
-        metadata: Metadata {
+    let legacy_json_state = LegacyJsonState {
+        project_id: StableId::new(str_field(envelope, "id")?)?,
+        project_schema_version: schema,
+        metadata: LegacyJsonMetadata {
             title: str_field(m, "title")?,
             author: str_field(m, "author")?,
             contact: str_field(m, "contact")?,
             created_at: str_field(m, "created_at")?,
             updated_at: str_field(m, "updated_at")?,
         },
+    };
+    Ok(Project {
         title_page: decode_elements(obj(envelope, "title_page")?)?,
         page_profile: PageProfile {
             name: str_field(profile, "name")?,
@@ -1047,15 +1108,67 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
         },
         elements: decode_elements(obj(envelope, "elements")?)?,
         preservation: None,
+        legacy_json_state: Some(legacy_json_state),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_project() -> Project {
+        Project::from_json(include_str!("../tests/fixtures/legacy_project.json"))
+            .unwrap_or_else(|_| unreachable!())
+    }
+
+    #[test]
+    fn transitional_json_retains_original_project_identity_and_metadata_exactly() {
+        let input = include_str!("../tests/fixtures/legacy_project.json");
+        let project = Project::from_json(input).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            project.to_json().unwrap_or_else(|_| unreachable!()),
+            input.trim_end()
+        );
+        let legacy = project
+            .legacy_json_state
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(legacy.project_id.as_str(), "legacy-project-1");
+        assert_eq!(legacy.metadata.title, "Legacy title");
+        assert_eq!(legacy.metadata.author, "Legacy author");
+        assert_eq!(legacy.metadata.contact, "contact@example.invalid");
+        assert_eq!(legacy.metadata.created_at, "2026-10-31T00:00:00Z");
+        assert_eq!(legacy.metadata.updated_at, "2026-10-31T00:00:00Z");
+    }
+
+    #[test]
+    fn transitional_json_rejects_unknown_or_duplicate_fields_instead_of_dropping_them() {
+        let input = include_str!("../tests/fixtures/legacy_project.json");
+        for unsupported in [
+            input.replace(
+                "\"schema_version\":1,\"project\":",
+                "\"schema_version\":1,\"future\":true,\"project\":",
+            ),
+            input.replace(
+                "\"schema_version\":1,\"project\":",
+                "\"schema_version\":1,\"schema_version\":1,\"project\":",
+            ),
+            input.replace("\"metadata\":{", "\"metadata\":{\"future\":\"unmodeled\","),
+            input.replace(
+                "\"role_boxes\":[{\"x\":108,\"width\":432}",
+                "\"role_boxes\":[{\"x\":108,\"width\":432,\"future\":1}",
+            ),
+        ] {
+            assert_eq!(
+                Project::from_json(&unsupported),
+                Err(ModelError::UnsupportedJsonState)
+            );
+        }
+    }
+
     #[test]
     fn new_project_has_valid_start() {
-        let p = Project::new("p-1", "题名", "作者").unwrap_or_else(|_| unreachable!());
+        let p = Project::new().unwrap_or_else(|_| unreachable!());
         assert_eq!(p.elements.len(), 1);
         assert_eq!(p.elements[0].id.as_str(), "element-1");
         assert_eq!(p.elements[0].role, Role::SceneHeading);
@@ -1068,11 +1181,13 @@ mod tests {
             editing::EditPolicy::default()
         );
         assert!(p.validate().is_ok());
+        assert!(p.legacy_json_state.is_none());
+        assert_eq!(p.to_json(), Err(ModelError::UnsupportedJsonState));
     }
 
     #[test]
     fn new_project_session_starts_with_valid_scene_heading_caret() {
-        let project = Project::new("p-1", "Title", "Author").unwrap_or_else(|_| unreachable!());
+        let project = Project::new().unwrap_or_else(|_| unreachable!());
         let session = editing::EditingSession::new(project).unwrap_or_else(|_| unreachable!());
 
         assert_eq!(
@@ -1090,7 +1205,7 @@ mod tests {
 
     #[test]
     fn legacy_profile_missing_uppercase_policy_defaults_true() {
-        let project = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
+        let project = legacy_project();
         let json = project
             .to_json()
             .unwrap_or_else(|_| unreachable!())
@@ -1101,7 +1216,7 @@ mod tests {
     #[test]
     fn supported_profile_fonts_round_trip_without_rewriting() {
         for family in ["Courier", "Courier New", "Courier Prime"] {
-            let mut project = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
+            let mut project = legacy_project();
             project.page_profile.font_family = family.into();
             let json = project.to_json().unwrap_or_else(|_| unreachable!());
             let restored = Project::from_json(&json).unwrap_or_else(|_| unreachable!());
@@ -1111,7 +1226,7 @@ mod tests {
 
     #[test]
     fn missing_or_malformed_font_fields_remain_typed_errors() {
-        let project = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
+        let project = legacy_project();
         let json = project.to_json().unwrap_or_else(|_| unreachable!());
         let missing = json.replace(",\"font_family\":\"Courier Prime\"", "");
         assert_eq!(
@@ -1126,7 +1241,7 @@ mod tests {
     }
     #[test]
     fn deterministic_unicode_round_trip() {
-        let mut p = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
+        let mut p = legacy_project();
         p.elements[0].text = "naïve café 漢字".into();
         let a = p.to_json().unwrap_or_else(|_| unreachable!());
         let b = Project::from_json(&a).unwrap_or_else(|_| unreachable!());
@@ -1137,7 +1252,7 @@ mod tests {
 
     #[test]
     fn named_profile_round_trips_bounded_alternate_geometry() {
-        let mut project = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
+        let mut project = legacy_project();
         project.page_profile.name = "alternate_screenplay".into();
         project.page_profile.format_version = 2;
         project.page_profile.font_family = "Courier Prime".into();
@@ -1154,7 +1269,7 @@ mod tests {
 
     #[test]
     fn profile_rejects_unbounded_role_geometry() {
-        let mut project = Project::new("p", "Title", "A").unwrap_or_else(|_| unreachable!());
+        let mut project = legacy_project();
         project.page_profile.role_boxes[0].width = 0;
         assert_eq!(project.to_json(), Err(ModelError::InvalidNumber));
         project.page_profile = PageProfile::default();
@@ -1163,7 +1278,7 @@ mod tests {
     }
     #[test]
     fn hostile_bounds_are_typed_errors_without_panics() {
-        let p = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let p = legacy_project();
         let mut s = p.to_json().unwrap_or_else(|_| unreachable!());
         s.push_str(&"x".repeat(MAX_JSON_BYTES));
         assert_eq!(Project::from_json(&s), Err(ModelError::StringTooLong));
@@ -1171,7 +1286,7 @@ mod tests {
     }
     #[test]
     fn unsupported_outer_schema_version_is_a_typed_error() {
-        let p = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let p = legacy_project();
         let json = p.to_json().unwrap_or_else(|_| unreachable!()).replacen(
             "\"schema_version\":1",
             "\"schema_version\":999",
@@ -1192,7 +1307,7 @@ mod tests {
             assert_eq!(Role::parse(role.as_str()), Some(role));
         }
 
-        let mut p = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut p = legacy_project();
         p.elements = Role::ALL[..LEGACY_ROLE_BOX_COUNT]
             .iter()
             .enumerate()
@@ -1211,7 +1326,7 @@ mod tests {
     #[test]
     fn expanded_roles_are_distinct_and_transitional_json_refuses_them() {
         for (index, role) in Role::ALL[LEGACY_ROLE_BOX_COUNT..].iter().enumerate() {
-            let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+            let mut project = legacy_project();
             project.elements[0].role = *role;
             assert!(project.validate().is_ok());
             assert_eq!(Role::parse(role.as_str()), Some(*role));
@@ -1252,13 +1367,11 @@ mod tests {
         assert_eq!(element.runs[0].attributes[0].value, "Bold");
         assert_eq!(element.source_provenance, Some(provenance));
         assert!(Project {
-            id: StableId::new("p").unwrap_or_else(|_| unreachable!()),
-            schema_version: CURRENT_SCHEMA_VERSION,
-            metadata: Metadata::default(),
             title_page: Vec::new(),
             page_profile: PageProfile::default(),
             elements: vec![element],
             preservation: None,
+            legacy_json_state: None,
         }
         .validate()
         .is_ok());
@@ -1266,7 +1379,7 @@ mod tests {
 
     #[test]
     fn richer_model_and_json_payloads_are_rejected_by_transitional_json() {
-        let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements[0] = ScreenplayElement::with_runs(
             "rich",
             Role::Action,
@@ -1279,8 +1392,7 @@ mod tests {
         .unwrap_or_else(|_| unreachable!());
         assert_eq!(project.to_json(), Err(ModelError::UnsupportedJsonState));
 
-        let legacy = Project::new("p", "t", "a")
-            .unwrap_or_else(|_| unreachable!())
+        let legacy = legacy_project()
             .to_json()
             .unwrap_or_else(|_| unreachable!());
         let with_runs = legacy.replace(
@@ -1298,18 +1410,18 @@ mod tests {
             Err(ModelError::UnsupportedJsonState)
         );
 
-        let mut profile = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut profile = legacy_project();
         profile.page_profile.additional_role_boxes[0] = Some(RoleBox { x: 10, width: 20 });
         assert_eq!(profile.to_json(), Err(ModelError::UnsupportedJsonState));
 
-        let mut hidden = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut hidden = legacy_project();
         hidden.page_profile.role_print_visibility[Role::ALL
             .iter()
             .position(|role| *role == Role::Note)
             .unwrap_or_else(|| unreachable!())] = PrintVisibility::Hidden;
         assert_eq!(hidden.to_json(), Err(ModelError::UnsupportedJsonState));
 
-        let mut page_start = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut page_start = legacy_project();
         page_start.page_profile.role_starts_new_page[Role::ALL
             .iter()
             .position(|role| *role == Role::NewAct)
@@ -1427,7 +1539,7 @@ mod tests {
 
     #[test]
     fn all_roles_reach_layout_without_role_coercion() {
-        let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements = Role::ALL
             .iter()
             .enumerate()
@@ -1447,16 +1559,19 @@ mod tests {
     }
 
     #[test]
-    fn project_and_element_ids_share_an_application_collision_domain() {
-        let project = Project::new("element-1", "t", "a").unwrap_or_else(|_| unreachable!());
-        assert_eq!(project.elements[0].id.as_str(), "element-2");
+    fn element_ids_are_unique_across_title_and_body_without_project_identity() {
+        let project = Project::new().unwrap_or_else(|_| unreachable!());
+        assert_eq!(project.elements[0].id.as_str(), "element-1");
         assert!(project.validate().is_ok());
 
-        let mut duplicate = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
-        duplicate.elements[0].id = duplicate.id.clone();
+        let mut duplicate = Project::new().unwrap_or_else(|_| unreachable!());
+        duplicate.title_page.push(
+            ScreenplayElement::new("element-1", Role::Action, "title")
+                .unwrap_or_else(|_| unreachable!()),
+        );
         assert_eq!(duplicate.validate(), Err(ModelError::DuplicateId));
 
-        let mut with_title = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut with_title = Project::new().unwrap_or_else(|_| unreachable!());
         with_title.title_page.push(
             ScreenplayElement::new("element-2", Role::Action, "title")
                 .unwrap_or_else(|_| unreachable!()),

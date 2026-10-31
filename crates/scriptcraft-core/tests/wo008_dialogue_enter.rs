@@ -6,7 +6,7 @@ use scriptcraft_core::persistence::{deserialize, serialize};
 use scriptcraft_core::{Project, Role, ScreenplayElement, MAX_ELEMENTS};
 
 fn project(text: &str) -> Project {
-    let mut project = Project::new("wo008", "Dialogue", "Writer")
+    let mut project = Project::from_json(include_str!("fixtures/legacy_project.json"))
         .unwrap_or_else(|_| unreachable!("fixed fixture must be valid"));
     project.elements[0].role = Role::Dialogue;
     project.elements[0].text = text.into();

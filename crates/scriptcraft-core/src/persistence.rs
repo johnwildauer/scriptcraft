@@ -217,7 +217,8 @@ mod tests {
         }
     }
     fn project(text: &str) -> Project {
-        let mut p = Project::new("p", "Title", "Author").unwrap_or_else(|_| unreachable!());
+        let mut p = Project::from_json(include_str!("../tests/fixtures/legacy_project.json"))
+            .unwrap_or_else(|_| unreachable!());
         p.elements[0].role = Role::Dialogue;
         p.elements[0].text = text.into();
         p

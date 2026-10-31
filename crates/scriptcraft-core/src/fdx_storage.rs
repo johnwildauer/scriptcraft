@@ -847,7 +847,7 @@ mod tests {
     }
 
     fn candidate(text: &str) -> PreparedFdx {
-        let mut project = Project::new("storage-test", "", "").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements = vec![ScreenplayElement::new("scene-1", Role::SceneHeading, text)
             .unwrap_or_else(|_| unreachable!())];
         PreparedFdx::from_project(&project).unwrap_or_else(|_| unreachable!())

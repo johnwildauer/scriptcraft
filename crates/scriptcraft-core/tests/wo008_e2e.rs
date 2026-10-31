@@ -70,7 +70,7 @@ impl FileSystem for MemFs {
 }
 
 fn project() -> Project {
-    Project::new("e2e-project", "Unicode Night", "Writer")
+    Project::from_json(include_str!("fixtures/legacy_project.json"))
         .unwrap_or_else(|_| unreachable!("fixed fixture must be valid"))
 }
 

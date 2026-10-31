@@ -479,7 +479,7 @@ impl ScriptCraftApp {
     pub(super) fn dispatch_toolbar_action(&mut self, action: ToolbarAction) {
         match action {
             ToolbarAction::New => {
-                match Project::new("demo-project", "Untitled Screenplay", "Writer")
+                match Project::new()
                     .map_err(|error| format!("new project failed: {error:?}"))
                     .and_then(|project| {
                         EditingSession::with_policy(project, self.session.policy())

@@ -3,9 +3,9 @@
 //! The reader returns a semantic editing projection plus the complete parsed
 //! source tree and original bytes. The writer reconciles supported element edits
 //! with that tree, or emits a minimal new document for the evidenced role labels.
-//! ScriptCraft-only identity, schema, complete profile and edit-policy mappings
-//! are not established; these APIs do not enable safe native save/reopen or claim
-//! Final Draft interoperability.
+//! ScriptCraft-only persistent identity and metadata are not part of the semantic
+//! model. Complete profile and edit-policy mappings remain unestablished; these
+//! APIs do not enable safe native save/reopen or claim Final Draft interoperability.
 
 use crate::preservation::{
     BoardEntity, BoardEntityKind, BoardGraph, DependencyConfidence, ForeignIdDomain,
@@ -16,7 +16,7 @@ use crate::preservation::{
 };
 use crate::{
     ModelError, PageProfile, PrintVisibility, Project, Role, RunAttribute, ScreenplayElement,
-    SourceFormat, SourceProvenance, SourceSection, StableId, TextRun, CURRENT_SCHEMA_VERSION,
+    SourceFormat, SourceProvenance, SourceSection, TextRun,
 };
 use quick_xml::escape::unescape;
 use quick_xml::events::{BytesStart, Event};
@@ -289,13 +289,11 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     }
 
     let mut project = Project {
-        id: StableId::new("fdx-projection").map_err(|_| FdxError::InvalidValue)?,
-        schema_version: CURRENT_SCHEMA_VERSION,
-        metadata: Default::default(),
         title_page: Vec::new(),
         page_profile: PageProfile::default(),
         elements: Vec::new(),
         preservation: None,
+        legacy_json_state: None,
     };
     apply_profile_settings(root, root_namespace, &mut project.page_profile)?;
     let mut identities = Vec::new();
@@ -373,6 +371,9 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
 pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
     project.validate().map_err(map_model_error)?;
     validate_project_output_budgets(project)?;
+    if project.legacy_json_state.is_some() {
+        return Err(FdxError::UnsupportedAppState);
+    }
 
     let (nodes, expected_preserved_sections) = if let Some(state) = &project.preservation {
         state.validate().map_err(map_preservation_error)?;
@@ -381,11 +382,7 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
             return Err(FdxError::UnsupportedConstruct);
         }
         let original = read_v6(&state.source.original_bytes)?;
-        if project.id != original.project.id
-            || project.schema_version != original.project.schema_version
-            || project.metadata != original.project.metadata
-            || project.page_profile != original.project.page_profile
-        {
+        if project.page_profile != original.project.page_profile {
             return Err(FdxError::UnsupportedAppState);
         }
         let original_state = original
@@ -410,10 +407,7 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
             .collect::<Vec<_>>();
         (nodes, Some(expected_sections))
     } else {
-        if project.schema_version != CURRENT_SCHEMA_VERSION
-            || project.metadata != Default::default()
-            || project.page_profile != PageProfile::default()
-        {
+        if project.page_profile != PageProfile::default() {
             return Err(FdxError::UnsupportedAppState);
         }
         (make_new_document_nodes(project)?, None)
@@ -2540,7 +2534,7 @@ mod tests {
 
     #[test]
     fn writes_all_evidenced_roles_with_escaped_unicode_and_runs() {
-        let mut project = Project::new("writer-project", "", "").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements.clear();
         for (index, role) in Role::ALL.into_iter().enumerate() {
             let text = if index == 0 {
@@ -2686,12 +2680,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unmapped_app_state_and_unsafe_source_reconciliation() {
-        let mut metadata = read_v6(SYNTHETIC)
-            .unwrap_or_else(|_| unreachable!())
-            .project;
-        metadata.metadata.title = "not mapped".into();
-        assert_eq!(write_v6(&metadata), Err(FdxError::UnsupportedAppState));
+    fn retains_foreign_metadata_without_project_metadata_projection() {
+        let xml = b"<FinalDraft DocumentType='Script' Version='6' VendorRoot='keep'><DocumentRef Date='2026-10-31' XRef='foreign-ref'/><Content><Paragraph Type='Action' id='p1'><Text>body</Text></Paragraph></Content><VendorMetadata key='opaque'>foreign title and date</VendorMetadata></FinalDraft>";
+        let project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
+        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let output = std::str::from_utf8(&bytes).unwrap_or("");
+        assert!(output.contains("VendorRoot=\"keep\""));
+        assert!(output.contains("Date=\"2026-10-31\""));
+        assert!(output.contains("XRef=\"foreign-ref\""));
+        assert!(output.contains("foreign title and date"));
+    }
+
+    #[test]
+    fn rejects_unsafe_source_reconciliation() {
+        let legacy_json = Project::from_json(include_str!("../tests/fixtures/legacy_project.json"))
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(write_v6(&legacy_json), Err(FdxError::UnsupportedAppState));
 
         let mut inserted = read_v6(SYNTHETIC)
             .unwrap_or_else(|_| unreachable!())
@@ -2702,8 +2706,7 @@ mod tests {
         );
         assert_eq!(write_v6(&inserted), Err(FdxError::UnsupportedConstruct));
 
-        let mut invalid_text =
-            Project::new("invalid-text", "", "").unwrap_or_else(|_| unreachable!());
+        let mut invalid_text = Project::new().unwrap_or_else(|_| unreachable!());
         invalid_text.elements[0].text = "bad\u{1}".into();
         assert_eq!(write_v6(&invalid_text), Err(FdxError::InvalidValue));
     }

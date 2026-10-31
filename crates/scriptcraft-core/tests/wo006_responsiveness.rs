@@ -30,8 +30,7 @@ struct Measurement {
 }
 
 fn fixture(pages: usize) -> Project {
-    let mut project =
-        Project::new("wo006", "benchmark", "benchmark").unwrap_or_else(|_| unreachable!());
+    let mut project = Project::new().unwrap_or_else(|_| unreachable!());
     let text = (0..LINES_PER_PAGE)
         .map(|line| format!("generated benchmark line {line}"))
         .collect::<Vec<_>>()

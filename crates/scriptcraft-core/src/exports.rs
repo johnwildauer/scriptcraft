@@ -170,7 +170,8 @@ mod tests {
     use crate::layout::LINE_HEIGHT;
 
     fn project() -> Project {
-        let mut project = Project::new("p", "Title", "Author").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::from_json(include_str!("../tests/fixtures/legacy_project.json"))
+            .unwrap_or_else(|_| unreachable!());
         project.elements = vec![
             crate::ScreenplayElement::new("heading", Role::SceneHeading, "INT. ROOM - DAY")
                 .unwrap_or_else(|_| unreachable!()),

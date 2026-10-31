@@ -6,8 +6,8 @@ use scriptcraft_core::persistence::{deserialize, serialize};
 use scriptcraft_core::{Project, Role};
 
 fn session(role: Role, text: &str) -> EditingSession {
-    let mut project = Project::new("wo005", "Title", "Author")
-        .unwrap_or_else(|_| unreachable!("fixed fixture must be valid"));
+    let mut project =
+        Project::new().unwrap_or_else(|_| unreachable!("fixed fixture must be valid"));
     project.elements[0].role = role;
     project.elements[0].text = text.into();
     EditingSession::new(project).unwrap_or_else(|_| unreachable!("fixed fixture must be valid"))
@@ -129,7 +129,10 @@ fn generated_provenance_is_undoable_and_not_persisted() {
     assert_eq!(editing.redo(), Ok(()));
     assert_eq!(editing.project().elements[0].text, "");
 
-    let mut saved = session(Role::Parenthetical, "");
+    let mut legacy = Project::from_json(include_str!("fixtures/legacy_project.json"))
+        .unwrap_or_else(|_| unreachable!());
+    legacy.elements[0].role = Role::Parenthetical;
+    let mut saved = EditingSession::new(legacy).unwrap_or_else(|_| unreachable!());
     saved.insert("()").unwrap_or_else(|_| unreachable!());
     let bytes = serialize(saved.project()).unwrap_or_else(|_| unreachable!());
     assert!(!String::from_utf8_lossy(&bytes).contains("generated"));

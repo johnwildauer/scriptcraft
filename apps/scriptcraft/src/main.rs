@@ -129,8 +129,7 @@ struct ScriptCraftApp {
 
 impl ScriptCraftApp {
     fn new() -> Result<Self, String> {
-        let project = Project::new("demo-project", "Untitled Screenplay", "Writer")
-            .map_err(|error| format!("new project failed: {error:?}"))?;
+        let project = Project::new().map_err(|error| format!("new project failed: {error:?}"))?;
         let session = EditingSession::with_policy(project, EditPolicy::default())
             .map_err(|error| format!("session failed: {error:?}"))?;
         let (notification_sink, notification_results) = sprint_timer::NativeNotificationSink::new();
@@ -1740,6 +1739,19 @@ mod tests {
         context
     }
 
+    fn legacy_json_project() -> Project {
+        Project::from_json(include_str!(
+            "../../../crates/scriptcraft-core/tests/fixtures/legacy_project.json"
+        ))
+        .unwrap_or_else(|_| unreachable!())
+    }
+
+    fn activate_legacy_json_project(app: &mut ScriptCraftApp) {
+        app.session
+            .replace_with_saved(legacy_json_project())
+            .unwrap_or_else(|_| unreachable!());
+    }
+
     fn render_app_frame(
         context: &egui::Context,
         app: &mut ScriptCraftApp,
@@ -1753,8 +1765,7 @@ mod tests {
     #[test]
     fn scheduled_cast_list_refresh_runs_after_one_second_without_undo_noise() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
-        let mut project =
-            Project::new("cast-refresh-ui", "", "").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements = vec![
             scriptcraft_core::ScreenplayElement::new("heading", Role::SceneHeading, "INT. ROOM")
                 .unwrap_or_else(|_| unreachable!()),
@@ -2456,11 +2467,24 @@ mod tests {
     }
 
     #[test]
+    fn new_document_has_no_legacy_json_metadata_and_diagnostics_exclude_script_text() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        assert!(app.session.project().to_json().is_err());
+        app.session
+            .insert("SENSITIVE-DOCUMENT-CONTENT")
+            .unwrap_or_else(|_| unreachable!());
+
+        let diagnostics = app.session_health();
+        assert!(diagnostics.contains("live JSON invalid: UnsupportedJsonState"));
+        assert!(!diagnostics.contains("SENSITIVE-DOCUMENT-CONTENT"));
+        assert!(!diagnostics.contains("SENSITIVE DOCUMENT CONTENT"));
+    }
+
+    #[test]
     fn rendered_application_omits_project_title_strip_and_keeps_title_page() {
         let context = test_context();
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
-        let mut project = Project::new("wo008-project", "Untitled Screenplay", "Writer")
-            .unwrap_or_else(|_| unreachable!());
+        let mut project = legacy_json_project();
         project.title_page.push(
             scriptcraft_core::ScreenplayElement::new(
                 "wo008-title-page-content",
@@ -2469,15 +2493,11 @@ mod tests {
             )
             .unwrap_or_else(|_| unreachable!()),
         );
-        let saved_project = project.to_json().unwrap_or_else(|_| unreachable!());
-        let reopened_project =
-            persistence::deserialize(saved_project.as_bytes()).unwrap_or_else(|_| unreachable!());
         app.session
-            .replace_with_saved(reopened_project)
+            .replace_with_saved(project)
             .unwrap_or_else(|_| unreachable!());
         app.page_geometry.invalidate();
 
-        assert_eq!(app.session.project().metadata.title, "Untitled Screenplay");
         assert_eq!(
             app.session.project().title_page[0].text,
             "VISIBLE TITLE PAGE CONTENT"
@@ -2522,7 +2542,6 @@ mod tests {
             editor_rect.top() - central_rect.top() < 20.0,
             "editor should start at the central panel's normal inset without a reserved title row: editor={editor_rect:?}, central={central_rect:?}"
         );
-        assert_eq!(app.session.project().metadata.title, "Untitled Screenplay");
         assert_eq!(
             app.session.project().title_page[0].text,
             "VISIBLE TITLE PAGE CONTENT"
@@ -2533,8 +2552,7 @@ mod tests {
     fn wo002_rendered_pages_follow_theme_palette_without_mutating_document_state() {
         let context = test_context();
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
-        let mut project = Project::new("wo002-theme-project", "Theme Test", "Writer")
-            .unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.title_page.push(
             scriptcraft_core::ScreenplayElement::new(
                 "wo002-theme-title",
@@ -2562,11 +2580,7 @@ mod tests {
             })
             .unwrap_or_else(|_| unreachable!());
         app.surface_focused = false;
-        let serialized_before = app
-            .session
-            .project()
-            .to_json()
-            .unwrap_or_else(|_| unreachable!());
+        let project_before = app.session.project().clone();
         let revision_before = app.session.revision();
         let selection_before = app.session.selection();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_200.0, 900.0));
@@ -2650,13 +2664,7 @@ mod tests {
             assert!(rendered_text.contains("TITLE PAGE THEME"));
             assert_eq!(app.session.revision(), revision_before);
             assert_eq!(app.session.selection(), selection_before);
-            assert_eq!(
-                app.session
-                    .project()
-                    .to_json()
-                    .unwrap_or_else(|_| unreachable!()),
-                serialized_before
-            );
+            assert_eq!(app.session.project(), &project_before);
         }
 
         app.ime_preedit = "IME PREEDIT".to_owned();
@@ -2937,6 +2945,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&root);
 
         let mut source = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        activate_legacy_json_project(&mut source);
         source
             .session
             .insert(&"action line\n".repeat(260))
@@ -3341,11 +3350,7 @@ mod tests {
     #[test]
     fn zoom_state_is_transient_and_preserves_layout_export_dirty_and_undo_contracts() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
-        let initial_json = app
-            .session
-            .project()
-            .to_json()
-            .unwrap_or_else(|_| unreachable!());
+        let initial_project = app.session.project().clone();
         let initial_pdf =
             exports::export_pdf(app.session.project()).unwrap_or_else(|_| unreachable!());
         let initial_revision = app.session.revision();
@@ -3357,13 +3362,7 @@ mod tests {
             app.zoom_percent = percent;
             assert_eq!(app.session.revision(), initial_revision);
             assert_eq!(app.session.dirty(), initial_dirty);
-            assert_eq!(
-                app.session
-                    .project()
-                    .to_json()
-                    .unwrap_or_else(|_| unreachable!()),
-                initial_json
-            );
+            assert_eq!(app.session.project(), &initial_project);
             assert_eq!(
                 exports::export_pdf(app.session.project()).unwrap_or_else(|_| unreachable!()),
                 initial_pdf
@@ -3383,23 +3382,13 @@ mod tests {
         }
 
         assert!(app.session.insert("draft").is_ok());
-        let dirty_json = app
-            .session
-            .project()
-            .to_json()
-            .unwrap_or_else(|_| unreachable!());
+        let dirty_project = app.session.project().clone();
         let dirty_revision = app.session.revision();
         for percent in status_bar::MIN_ZOOM_PERCENT..=status_bar::MAX_ZOOM_PERCENT {
             app.zoom_percent = percent;
             assert!(app.session.dirty());
             assert_eq!(app.session.revision(), dirty_revision);
-            assert_eq!(
-                app.session
-                    .project()
-                    .to_json()
-                    .unwrap_or_else(|_| unreachable!()),
-                dirty_json
-            );
+            assert_eq!(app.session.project(), &dirty_project);
         }
         assert!(app.session.undo().is_ok());
         assert!(!app.session.dirty());
@@ -3413,11 +3402,7 @@ mod tests {
         let context = test_context();
         let initial_revision = app.session.revision();
         let initial_selection = app.session.selection();
-        let initial_json = app
-            .session
-            .project()
-            .to_json()
-            .unwrap_or_else(|_| unreachable!());
+        let initial_project = app.session.project().clone();
         let mut raw_input = egui::RawInput {
             events: vec![
                 egui::Event::Zoom(1.02),
@@ -3443,13 +3428,7 @@ mod tests {
         app.dispatch_surface_events(&[], egui::Modifiers::default());
         assert_eq!(app.session.revision(), initial_revision);
         assert_eq!(app.session.selection(), initial_selection);
-        assert_eq!(
-            app.session
-                .project()
-                .to_json()
-                .unwrap_or_else(|_| unreachable!()),
-            initial_json
-        );
+        assert_eq!(app.session.project(), &initial_project);
         assert_eq!(app.native_input_diagnostics.received_events, 3);
         assert_eq!(app.native_input_diagnostics.last_event_category, "zoom");
 
@@ -4436,7 +4415,6 @@ mod tests {
 
         app.dispatch_toolbar_action(ToolbarAction::New);
 
-        assert_eq!(app.session.project().metadata.title, "Untitled Screenplay");
         assert_eq!(app.session.project().elements.len(), 1);
         assert_eq!(app.session.project().elements[0].role, Role::SceneHeading);
         assert_eq!(app.session.project().elements[0].text, "");
@@ -4540,7 +4518,8 @@ mod tests {
 
     #[test]
     fn session_health_reports_valid_live_model_and_json() {
-        let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        activate_legacy_json_project(&mut app);
         let health = app.session_health();
         assert!(health.contains("session valid"));
         assert!(health.contains("live JSON valid"));
@@ -5707,6 +5686,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&root);
 
         let mut source = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        activate_legacy_json_project(&mut source);
         source
             .session
             .insert("named project")
@@ -5716,6 +5696,7 @@ mod tests {
         assert!(!source.session.dirty());
 
         let mut replacement = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        activate_legacy_json_project(&mut replacement);
         replacement
             .session
             .insert("second project")
@@ -5737,6 +5718,7 @@ mod tests {
         let destination = root.join("project.json");
         let _ = std::fs::create_dir_all(&root);
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        activate_legacy_json_project(&mut app);
         app.save_native_at(&destination);
         app.session
             .insert("unsaved change")
@@ -5778,7 +5760,7 @@ mod tests {
             std::process::id()
         ));
         let path = root.join("legacy.json");
-        let project = Project::new("legacy", "Title", "Writer").unwrap_or_else(|_| unreachable!());
+        let project = legacy_json_project();
         let incompatible = project
             .to_json()
             .unwrap_or_else(|_| unreachable!())

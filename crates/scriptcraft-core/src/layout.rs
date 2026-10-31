@@ -582,7 +582,7 @@ mod tests {
     use crate::{Project, ScreenplayElement};
 
     fn project(elements: &[(Role, &str)]) -> Project {
-        let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements = elements
             .iter()
             .enumerate()

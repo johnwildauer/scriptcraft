@@ -945,7 +945,7 @@ fn validate_ownership(ownership: &SourceOwnership) -> Result<(), PreservationErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Metadata, PageProfile, Project, Role, ScreenplayElement, CURRENT_SCHEMA_VERSION};
+    use crate::{PageProfile, Project, Role, ScreenplayElement};
 
     fn name(local_name: &str) -> SourceName {
         SourceName {
@@ -964,17 +964,14 @@ mod tests {
     }
 
     fn project_with_preservation(state: PreservationState) -> Project {
-        let id = StableId::new("project").unwrap_or_else(|_| unreachable!());
         let element = ScreenplayElement::new("element", Role::SceneHeading, "INT. ROOM")
             .unwrap_or_else(|_| unreachable!());
         Project {
-            id,
-            schema_version: CURRENT_SCHEMA_VERSION,
-            metadata: Metadata::default(),
             title_page: Vec::new(),
             page_profile: PageProfile::default(),
             elements: vec![element],
             preservation: Some(state),
+            legacy_json_state: None,
         }
     }
 

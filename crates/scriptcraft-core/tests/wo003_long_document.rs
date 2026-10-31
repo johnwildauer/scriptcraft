@@ -4,7 +4,7 @@
 use scriptcraft_core::editing::{EditError, EditingSession, Position, Selection};
 use scriptcraft_core::layout::{Caret, LayoutErrorKind, ScreenplayLayout};
 use scriptcraft_core::persistence::{atomic_save, deserialize, FileSystem, PersistenceError};
-use scriptcraft_core::{ModelError, Project, Role, MAX_JSON_BYTES, MAX_TEXT_BYTES};
+use scriptcraft_core::{ModelError, Project, Role, MAX_TEXT_BYTES};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -58,7 +58,7 @@ impl FileSystem for MemFs {
 }
 
 fn project() -> Project {
-    let mut project = Project::new("wo003-project", "Long Document", "Writer")
+    let mut project = Project::from_json(include_str!("fixtures/legacy_project.json"))
         .unwrap_or_else(|_| unreachable!("fixed fixture must be valid"));
     project.elements[0].role = Role::Action;
     project
@@ -194,6 +194,15 @@ fn failed_edit_and_layout_leave_last_valid_state_usable() {
 #[test]
 fn model_serialization_keeps_json_bound_even_when_text_is_valid() {
     let mut project = project();
-    project.metadata.title = "title".repeat(MAX_JSON_BYTES / 5);
+    project.elements = (0..5)
+        .map(|index| {
+            scriptcraft_core::ScreenplayElement::new(
+                format!("oversize-{index}"),
+                Role::Action,
+                "x".repeat(MAX_TEXT_BYTES - 1),
+            )
+            .unwrap_or_else(|_| unreachable!())
+        })
+        .collect();
     assert_eq!(project.to_json(), Err(ModelError::StringTooLong));
 }

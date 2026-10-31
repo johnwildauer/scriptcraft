@@ -1369,7 +1369,7 @@ mod tests {
     use crate::{Project, RunAttribute, SourceFormat, SourceProvenance, SourceSection};
 
     fn session(text: &str, role: Role) -> EditingSession {
-        let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements[0].role = role;
         project.elements[0].text = text.into();
         EditingSession::new(project).unwrap_or_else(|_| unreachable!())
@@ -1395,7 +1395,7 @@ mod tests {
         source_children: Vec<PreservedNode>,
         nested_scene_attachment: bool,
     ) -> Project {
-        let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         let element_id = project.elements[0].id.clone();
         project.elements[0].role = role;
         project.elements[0].text = text.into();
@@ -1556,7 +1556,7 @@ mod tests {
             set(&mut s, element, offset);
             s.enter().unwrap_or_else(|_| unreachable!());
             assert!(s.validate().is_ok());
-            assert!(s.project().to_json().is_ok());
+            assert_eq!(s.project().to_json(), Err(ModelError::UnsupportedJsonState));
         }
         assert_eq!(s.project().elements.len(), 65);
         assert!(s
@@ -1568,7 +1568,7 @@ mod tests {
 
     #[test]
     fn allocated_split_ids_avoid_project_and_title_page_ids() {
-        let mut project = Project::new("project", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements[0].text = "abcd".into();
         project.title_page.push(
             ScreenplayElement::new("element-2", Role::Action, "title")
@@ -2072,7 +2072,7 @@ mod tests {
 
     #[test]
     fn non_preserved_split_and_join_keep_rich_runs_consistent() {
-        let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements[0].role = Role::Action;
         project.elements[0].text = "abcdef".into();
         project.elements[0].runs = vec![

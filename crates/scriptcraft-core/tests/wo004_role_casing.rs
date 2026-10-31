@@ -5,7 +5,7 @@ use scriptcraft_core::{
 };
 
 fn session(role: Role, text: &str) -> EditingSession {
-    let mut project = Project::new("wo004", "Title", "Author").unwrap_or_else(|_| unreachable!());
+    let mut project = Project::new().unwrap_or_else(|_| unreachable!());
     project.elements[0].role = role;
     project.elements[0].text = text.into();
     EditingSession::new(project).unwrap_or_else(|_| unreachable!())
@@ -62,7 +62,7 @@ fn role_assignment_and_tab_transition_normalize_existing_text_transactionally() 
 
 #[test]
 fn disabled_policy_and_non_cue_roles_preserve_source_casing() {
-    let mut project = Project::new("p", "Title", "Author").unwrap_or_else(|_| unreachable!());
+    let mut project = Project::new().unwrap_or_else(|_| unreachable!());
     project.elements[0].role = Role::SceneHeading;
     let mut disabled = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
     let clean = disabled.project().clone();
@@ -85,7 +85,8 @@ fn disabled_policy_and_non_cue_roles_preserve_source_casing() {
 
 #[test]
 fn runtime_policy_is_not_document_state_and_legacy_nondefault_json_is_rejected() {
-    let mut project = Project::new("p", "Title", "Author").unwrap_or_else(|_| unreachable!());
+    let mut project = Project::from_json(include_str!("fixtures/legacy_project.json"))
+        .unwrap_or_else(|_| unreachable!());
     project.elements[0].role = Role::Character;
     project.elements[0].text = "saved lower text".into();
     let bytes = serialize(&project).unwrap_or_else(|_| unreachable!());

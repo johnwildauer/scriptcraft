@@ -6,7 +6,7 @@ use scriptcraft_core::layout::LayoutCache;
 use scriptcraft_core::{ModelError, Project, Role};
 
 fn session(role: Role, text: &str) -> EditingSession {
-    let mut project = Project::new("wo007", "Title", "Author")
+    let mut project = Project::from_json(include_str!("fixtures/legacy_project.json"))
         .unwrap_or_else(|_| unreachable!("fixture must be valid"));
     project.elements[0].role = role;
     project.elements[0].text = text.into();
@@ -21,7 +21,8 @@ fn caret(session: &mut EditingSession, element: usize, offset: usize) {
 
 #[test]
 fn settings_are_defaulted_typed_and_round_trip_without_schema_bump() {
-    let project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+    let project = Project::from_json(include_str!("fixtures/legacy_project.json"))
+        .unwrap_or_else(|_| unreachable!());
     assert_eq!(
         EditingSession::new(project.clone())
             .unwrap_or_else(|_| unreachable!())
@@ -155,7 +156,7 @@ fn dialogue_insertion_and_setting_off_precedence_are_exact() {
 
 #[test]
 fn empty_delete_matrix_and_noncollapsed_delegation() {
-    let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+    let mut project = Project::new().unwrap_or_else(|_| unreachable!());
     project.elements[0].role = Role::Action;
     project.elements[0].text = "prior".into();
     project.elements.push(
@@ -208,7 +209,7 @@ fn empty_delete_matrix_and_noncollapsed_delegation() {
 fn delimiter_only_parentheticals_delete_from_every_caret_position() {
     for text in ["(", "()", ")"] {
         for offset in 0..=text.len() {
-            let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+            let mut project = Project::new().unwrap_or_else(|_| unreachable!());
             project.elements[0].role = Role::Action;
             project.elements[0].text = "prior".into();
             project.elements.push(
@@ -234,7 +235,7 @@ fn delimiter_only_parentheticals_delete_from_every_caret_position() {
 fn delimiter_only_delete_has_first_only_and_predecessor_fallbacks_with_transactional_history() {
     for text in ["(", "()", ")"] {
         for offset in 0..=text.len() {
-            let mut first_project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+            let mut first_project = Project::new().unwrap_or_else(|_| unreachable!());
             first_project.elements[0].role = Role::Parenthetical;
             first_project.elements[0].text = text.into();
             first_project.elements.push(
@@ -278,7 +279,7 @@ fn delimiter_only_delete_has_first_only_and_predecessor_fallbacks_with_transacti
             assert_eq!(only.selection(), only_before.selection());
             assert!(only.redo().is_ok());
 
-            let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+            let mut project = Project::new().unwrap_or_else(|_| unreachable!());
             project.elements[0].role = Role::Action;
             project.elements[0].text = "prior".into();
             project.elements.push(
