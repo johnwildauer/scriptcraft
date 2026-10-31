@@ -1,6 +1,8 @@
-# Validation: WO-001 — Short Title
+# Finding: WO-001 — Short Title
 
-- **Outcome:** `pass | fail | blocked | skipped: Git unavailable`
-- **Date:** `YYYY-MM-DD`
-- **Documents/evidence reviewed:** `TODO: assigned work order (WO-001) and exact commit hash/patch; for document-only work, assigned document edits only; or concise no-Git/no-change basis`
-- **Summary:** `TODO: 2–3 plain-language sentences stating alignment with the assigned work order. For document-only work, do not assess dependent code or block on its absence. For implementation work, compare against relevant supplied desired-state excerpts without auditing unrelated code. For fail, cite the mismatch; for blocked, name missing evidence. A skip states no hash exists and is not an independent review.`
+- **Work order:** WO-001
+- **Attributable implementation commit/diff:** `TODO: identify the evidence reviewed; state if unavailable`
+
+## Finding
+
+`TODO: State what the actual diff shows and how it aligns with the work-order outcome and scope.`
