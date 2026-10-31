@@ -1,6 +1,6 @@
 # Work Order: WO-012a — Reconcile the FDX-native durable contract
 
-- **Status:** `draft / not started`; insertion before WO-012.
+- **Status:** `implemented`; implementation checks recorded below. Independent validation was not dispatched under the initiative-specific user direction.
 
 ## Outcome and scope
 Update only the durable requirements and architecture affected by retiring ScriptCraft-only persistent document state. Follow the [assessment and field dispositions](../document-model-refactor-v1.md#fdx-native-legacy-state-deprecation-assessment-and-handoff--2026-10-31); preserve historical decisions and review artifacts.
@@ -16,3 +16,8 @@ Update only the durable requirements and architecture affected by retiring Scrip
 
 ## Risks and dependency
 Depends on WO-001 evidence and WO-002–011 implementation history; first of the inserted sequence. Owner checks applicable approval/external gates before execution; no reviewer or independent validator is dispatched under this task. One attributable documentation commit. Risk: accidentally deleting genuine FDX or user-facing pagination guarantees; retain those explicitly. Hands contract to WO-012b.
+
+## Implementation checks — 2026-10-31
+- `git diff --check` — passed (exit 0).
+- Targeted stale app-state persistence scan across the product overview, writing-loop requirements and technical context — passed; no stale requirements that ScriptCraft-only metadata, profile, editing policy or internal identities must persist.
+- Documentation-only change; no Rust/Cargo checks or manual interoperability checks were run. These outcomes are implementation checks, not independent review or validation.

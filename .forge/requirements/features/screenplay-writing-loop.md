@@ -19,14 +19,14 @@ and predictable role transitions.
     screenwriter create and edit an ordered screenplay with explicit element roles so the draft
     retains screenplay meaning while they write.
   - **AC-WRITING-001.1:** Given a new project, the system shall provide exactly one empty, valid
-    editable Scene Heading starting element and title-page metadata without requiring visual
-    formatting tricks. The initial caret shall be valid at element 0, byte offset 0.
+    editable Scene Heading starting element and an initial title-page structure without requiring
+    visual formatting tricks. The initial caret shall be valid at element 0, byte offset 0.
   - **AC-WRITING-001.2:** Given an element, the system shall preserve its explicit role and
     canonical UTF-8 text independently of capitalization, spaces, tabs, indentation, or font
-    appearance. For new projects, the persisted boolean `uppercase_cues` policy shall default to
-    enabled and apply only at transactional edit boundaries to Scene Heading and Character text.
-    Opening an existing project shall not rewrite stored text; other roles shall preserve source
-    casing. An absent setting shall default to enabled.
+    appearance. Cue-casing policy is runtime editing behavior, defaults to enabled for a new
+    session, and applies only at transactional edit boundaries to Scene Heading and Character
+    text. It is not persisted as document state. Opening an existing project shall not rewrite
+    stored text; other roles shall preserve source casing.
   - **AC-WRITING-001.3:** Given a valid selection, the system shall support insertion, deletion,
     split, join, role change, undo, and redo while preserving valid text boundaries and element
     order.
@@ -41,15 +41,16 @@ and predictable role transitions.
     Scene Heading; Dialogue → Parenthetical; and Parenthetical → Dialogue. Other Tab cases shall
     be consumed no-ops with no literal tab, mutation, or undo entry. The Dialogue interior
     branch shall be a transactional split: the original element retains the exact prefix and
-    stable ID, the new Dialogue retains the exact suffix with a bounded distinct ID, and the
-    collapsed selection moves to the new element at byte offset zero. Empty Dialogue shall be an
+    its existing in-session identity, the new Dialogue retains the exact suffix with a bounded
+    distinct in-session identity, and the collapsed selection moves to the new element at byte
+    offset zero. Empty Dialogue shall be an
     end-boundary case. Rejected non-collapsed selections, invalid boundaries, and capacity
-    operations shall preserve session state. For new projects, `PageProfile` schema version 1
-    shall persist `auto_parenthetical` and `strict_transition_boundaries`, both defaulting to
-    enabled; absent fields shall default to enabled, and malformed field types shall be
-    typed load errors. When `auto_parenthetical` is enabled and an explicit role transition or
-    assignment creates a Parenthetical, automatic behavior shall create transient generated `()`
-    with the caret between the delimiters and provenance keyed to the stable element ID;
+    operations shall preserve session state. Automatic parentheticals and strict transition
+    boundaries are runtime editing policies that default to enabled for a new session; they are
+    not persisted as document fields. When automatic parentheticals are enabled and an explicit
+    role transition or assignment creates a Parenthetical, automatic behavior shall create
+    transient generated `()` with the caret between the delimiters and provenance keyed to the
+    current in-session identity;
     provenance shall participate in undo/redo but not be serialized. Successful content-changing
     edits shall invalidate the mark, and failed edits shall not. Generated-pair Enter cleanup
     shall apply only while the marked element remains Parenthetical and contains exactly `()`;
@@ -74,15 +75,16 @@ and predictable role transitions.
 
 ### Shared deterministic writing and page views
 
-Continuous writing and fixed-page preview use shared layout semantics so the same semantic project
-and fixed page profile produce predictable pagination and source mapping independent of viewport
-presentation.
+Continuous writing and fixed-page preview use shared layout semantics so the same semantic content
+and effective runtime layout inputs produce repeatable pagination and source mapping independent of
+viewport presentation. This does not promise exact layout fidelity for every FDX document.
 
 - **REQ-WRITING-LOOP-002: Shared deterministic writing and page views.** The system shall let a
     screenwriter write continuously and inspect a predictable fixed-page result that agrees about
     semantic content and layout inputs.
-  - **AC-WRITING-002.1:** Given the same project and fixed page profile, the system shall derive
-    stable page structure and source mappings independent of window zoom.
+  - **AC-WRITING-002.1:** Given the same semantic content and effective runtime layout inputs, the
+    system shall derive repeatable page structure and source mappings independent of window zoom.
+    This does not promise exact layout fidelity for every imported FDX document.
   - **AC-WRITING-002.2:** Given role-aware layout, the system shall apply role measures and keep
     relationships without inserting spaces or tabs into canonical text.
   - **AC-WRITING-002.3:** Given long text or an oversized element, the system shall wrap or split it
@@ -98,18 +100,26 @@ project meaning; failures preserve the prior valid destination and unsaved state
 - **REQ-WRITING-LOOP-003: Durable native save and reopen.** The system shall let an individual
     screenwriter save and reopen a project without losing its last valid version.
   - **AC-WRITING-003.1:** Given a valid project, the system shall serialize native FDX Version 6
-    containing semantic content, stable identities, metadata, and page-profile inputs, while
-    excluding transient caret, layout, and undo state from required content. A field without a
-    safe durable representation shall not be silently lost.
+    containing semantic content and retained FDX-owned source data, including source metadata,
+    foreign paragraph identities, title-page structure, document settings, and supported opaque
+    content, while excluding transient caret, layout, undo state, and internal editing identities
+    from required content. ScriptCraft-only project identity/schema, metadata, layout inputs, and
+    editing policies are not persisted as FDX fields; no private extension, sidecar, or legacy JSON
+    migration is required. A source field without a safe supported representation shall not be
+    silently lost.
   - **AC-WRITING-003.2:** Given a save preparation, conflict or replacement failure, the system
     shall preserve the prior valid destination and the active session, path and clean baseline;
     previously modified or unsaved work remains indicated as unsaved, while an initially clean
     session remains clean relative to its existing baseline. The failure shall be reported and
     shall not be presented as a successful save to the attempted destination.
   - **AC-WRITING-003.3:** Given a successfully saved native project, reopening it shall preserve
-    semantic roles, text, stable IDs, metadata, reproducible pagination inputs, and retained
-    source content subject to the explicit version and independence boundaries below. Absent
-    supported fields shall use their specified defaults; malformed input shall fail safely.
+    semantic roles, text, retained FDX-owned metadata, foreign paragraph identities, title-page
+    structure, supported document settings, and retained source content subject to the explicit
+    version and independence boundaries below. Transient ScriptCraft editing identities may be
+    regenerated; ScriptCraft-only legacy metadata, schema, nondefault layout configuration, and
+    editing policies may reset and are not a persistence guarantee. Pagination shall be repeatable
+    for the same effective runtime layout inputs, without promising exact fidelity to every FDX
+    layout. Absent supported fields shall use their specified defaults; malformed input shall fail safely.
 
 ### FDX document content and preservation
 
@@ -340,7 +350,8 @@ content.
 
 - Native project data remains the semantic source of truth; transient caret, layout, undo state, and
     presentation scale do not replace it.
-- Pagination and PDF output use fixed page-profile layout, independent of transient viewport zoom.
+- Pagination and PDF output use fixed runtime layout inputs, independent of transient viewport
+  zoom; preservation of source layout settings does not promise exact fidelity to every FDX layout.
 - PDF and plain-text exports are noncanonical and shall not replace or mark the native project
     clean. Plain-text export is deliberately lossy and communicates its loss.
 - Desktop-only and native macOS behavior is limited to the explicit criteria above.
@@ -354,7 +365,7 @@ content.
 - **NFR-WRITING-002:** Core editing, layout, and persistence behavior shall be exercisable without a
     desktop window for deterministic tests.
 - **NFR-WRITING-003:** Native serialization and structural pagination outputs shall be deterministic
-    for the same semantic project/profile inputs.
+    for the same semantic content and effective runtime layout inputs.
 
 ## Out of scope
 
