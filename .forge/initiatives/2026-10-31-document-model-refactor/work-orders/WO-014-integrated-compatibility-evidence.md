@@ -1,5 +1,7 @@
 # Work Order: WO-014 — Integrated FDX compatibility evidence
 
+- **Status:** `not started` — depends on WO-012 and WO-013; no implementation or validation is claimed.
+
 ## Outcome
 Validate the complete FDX migration against the directed behavior and record bounded compatibility evidence.
 

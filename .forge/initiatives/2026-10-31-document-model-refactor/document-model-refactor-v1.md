@@ -2,7 +2,7 @@
 
 ## Initial setup and status
 
-- **Status:** Durable target updated and implementation work orders drafted; independent document review, design review and human approval remain outstanding. No work order is approved, executed or closed.
+- **Current status (reconciled 2026-10-31):** `active / blocked`. WO-001 has an independent `PASS`; WO-002–WO-011 have committed implementations but no independent validation artifacts. WO-012 is blocked by the unresolved durable mapping for ScriptCraft-specific state. WO-013 and WO-014 are not started. Native FDX cutover is not complete; the app is not natively FDX complete.
 - **Readiness review:** User decisions and bounded technical risks are recorded in the 2026-10-31 readiness addendum; the current work-order plan and handoff below supersede conflicting historical statements.
 - **Date:** 2026-10-31.
 - **Initiative branch:** `dev/2026-10-31-document-model-refactor`.
@@ -304,3 +304,32 @@ The project manifest retains human design approval by default before execution a
 - **Exact user approval after review:** “Approve the reviewed plan and execute the work orders sequentially, with immediate independent validation after each commit. The top priority is completing each WO in order. Proceed with each WO sequentially.”
 - **Gate disposition:** This records explicit post-review human approval to execute the reviewed sequence, beginning with WO-001 only. Each completed work order must be committed separately and receive immediate fresh independent validation. This approval does not close review warnings, establish Final Draft compatibility, or authorize bypassing WO scope and safety stops.
 - **Execution boundary:** WO-001 is the only order authorized in this handoff. Later orders remain pending WO-001 completion and its independent validation; no dependent order is started here.
+
+## Current execution status and validation-policy change — 2026-10-31
+
+This dated status is authoritative over the earlier setup and handoff summaries above. It records documentation/progress state only; it does not execute or approve a work order.
+
+- **User-directed policy change (exact instruction):** “Do not dispatch further independent validation agents for this initiative; record this policy change and continue with the implementation checks only.” Received 2026-10-31 in this session (approximately 16:11 UTC / 11:11 CDT). It supersedes the earlier initiative-specific direction at lines 304–305 to obtain immediate independent validation after every committed work order, and the prior per-WO validator cadence inherited from the manifest. The exception is scoped only to this initiative; the project-wide default for other initiatives and applicable external requirements are unchanged. Do not dispatch another independent validator for this initiative unless the user changes the instruction. Implementation checks are not independent validation and must never be represented as such.
+- **Policy-history reconciliation:** Git records `00fa59f0c17d8e737d9bd9a3bfd11a0b0d51799a` (`policy: honor user validation dispatch override`, 2026-10-30 23:57 -0500) adding this broader manifest text: “At the user's explicit direction on 2026-10-31, do not spawn or dispatch any further independent validation agents after the WO-001 validation; this supersedes the per-work-order validation-agent cadence recorded above for subsequent work.” Commit `304a56a5e26e58c50d08f3a972b2088c9b2ae1f5` (2026-10-30 23:58 -0500) reverted that addition. The current scoped exception is newly recorded under the user's exact instruction above; the add/revert history is preserved, not silently treated as continuously effective. Commit `0c1fc0b14fb37c608fbb791db797f994b7a42317` subsequently clarified limitations in the WO-001 finding. This history is evidence of prior contradictory/reverted records, not evidence that any validation was performed beyond the artifact linked below.
+- **WO-001:** Mapping/evidence implementation is recorded in commit `13b488f43001e2c86910c71b8b3a6a76d12fdac4` (single parent `01b768dd1e1a7920d271405eb83c1ed84784b370`). The independent finding artifact [`validation-WO-001.md`](validations/validation-WO-001.md) was recorded in `4b69fbb86eff770efcf2955b05fcf4047613dc2f`, then confirmed in `a064dac56438a4fb2a0435c247ce983730fa42fe`; its outcome is `PASS`. Later clarification is recorded in `0c1fc0b14fb37c608fbb791db797f994b7a42317`. The finding carries forward unresolved mapping and interoperability limitations. This is the initiative's only independent validation artifact.
+- **WO-002–WO-011 implementation commit inventory (Git full hashes):**
+
+  | Work order | Implementation commit | Commit subject |
+  |---|---|---|
+  | WO-002 | `6be36213c8b5e519625ca0bb8b67a1c49ba4eb15` | `feat(core): add directed screenplay content model` |
+  | WO-003 | `8fb58b4c0d5ce3862f82e5e6ff6514ef46aca142` | `feat(core): add source preservation model` |
+  | WO-004 | `027b2269e05cd9e3fa3e9259e565ab32af8a7cc0` | `feat(core): transactional preservation-aware edits (WO-004)` |
+  | WO-005 | `69cfe1841e677a6b9df1ab2ee9b66387f1e411f8` | `feat(core): role layout and controls (WO-005)` |
+  | WO-006 | `9f40da8201697d4502f50fa9a45aa00975eb7991` | `feat(core): bounded FDX v6 reader (WO-006)` |
+  | WO-007 | `6d2fac1b1220468d3d28c88ea67aa3460827c0f0` | `feat(core): add bounded FDX v6 writer (WO-007)` |
+  | WO-008 | `efb3a904503e81625d5f71c1ffe94d08350464da` | `feat(core): add bounded FDX version migration (WO-008)` |
+  | WO-009 | `688dcab44f7d12b4026852a221c5685f63c5211c` | `feat(core): add scene cast-list updater (WO-009)` |
+  | WO-010 | `491e3f3c1e6ba309caa4f743fdd6d18e302e27cd` | `feat(core): add atomic FDX storage (WO-010)` |
+  | WO-011 | `42c9bc851ba7b0e2f86cfa34e76cc54687e94afa` | `feat(desktop): stage native FDX open (WO-011)` |
+
+- **Validation/evidence boundary:** The initiative contains only `validations/validation-WO-001.md`; no independent validation artifacts exist for WO-002 through WO-011. Their implementation commits are not validation artifacts, and implementation checks—whether previously recorded or run now—do not constitute independent validation. No WO-002–WO-011 validation result or completion based on validation is claimed here.
+- **WO-012 — blocked:** Do not start native Save/Save As cutover until there is an approved and tested durable home for ScriptCraft-specific project identity/schema, complete deterministic page-profile inputs and geometry, and editing-policy fields. The WO-001 mapping evidence identifies these as unresolved blockers; neither standard FDX mappings, a private extension nor a sidecar currently supplies an approved, tested preservation contract. This is a mapping blocker, not permission to default away state or claim a native save. The staged WO-011 Open path is not yet an active native cutover.
+- **WO-013 and WO-014 — not started:** They remain downstream of WO-012. No implementation or validation is claimed for either.
+- **Product status:** Current application native persistence remains JSON; WO-011 stages FDX Open but does not activate the complete FDX Open/Save/Save As native boundary. The application is not natively FDX complete, and no blanket Final Draft compatibility or interoperability claim is made.
+- **Current initiative state:** `active / blocked`; retain all committed implementation work. Continue only implementation checks and record their precise results separately from independent validation. No work order is executed by this status/policy update.
+- **Implementation checks run 2026-10-31 at HEAD `42c9bc851ba7b0e2f86cfa34e76cc54687e94afa`:** `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (295 passed, 0 failed: 153 desktop unit tests, 105 core unit tests, 37 integration tests, 0 doc tests), `cargo check --workspace`, `cargo build --workspace`, and `git diff --check` all exited successfully. No Rust source was changed for these checks. These are implementation/workspace checks only; they are not independent validation and do not create missing validation artifacts or establish Final Draft interoperability.

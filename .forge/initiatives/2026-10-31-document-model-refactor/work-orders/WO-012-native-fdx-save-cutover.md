@@ -1,5 +1,7 @@
 # Work Order: WO-012 — Native FDX Save and Save As cutover
 
+- **Status:** `blocked` — WO-001 mapping evidence has no approved, tested durable home for ScriptCraft-specific project identity/schema, complete deterministic page-profile inputs and geometry, or editing-policy fields. Standard FDX mappings are unproven; neither a private extension nor a sidecar has an approved preservation contract. Do not begin native Save/Save As cutover or silently default away this state.
+
 ## Outcome
 Make FDX the active desktop native format with transactional live/saved cast agreement.
 

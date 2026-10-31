@@ -1,5 +1,7 @@
 # Work Order: WO-013 — Retire JSON native paths and reconcile recovery
 
+- **Status:** `not started` — depends on WO-012; no implementation or validation is claimed.
+
 ## Outcome
 Remove obsolete native JSON dependencies without offering legacy migration or unsafe recovery.
 
