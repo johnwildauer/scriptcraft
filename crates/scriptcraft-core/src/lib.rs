@@ -390,9 +390,6 @@ pub struct PageProfile {
     pub lines_per_page: u32,
     pub line_advance: u32,
     pub boundary_gap: u32,
-    pub uppercase_cues: bool,
-    pub auto_parenthetical: bool,
-    pub strict_transition_boundaries: bool,
     pub font_family: String,
     pub font_size: u32,
     pub char_width: u32,
@@ -446,9 +443,6 @@ impl Default for PageProfile {
             lines_per_page: 55,
             line_advance: 12,
             boundary_gap: 12,
-            uppercase_cues: true,
-            auto_parenthetical: true,
-            strict_transition_boundaries: true,
             font_family: "Courier Prime".into(),
             font_size: 12,
             char_width: 7,
@@ -752,7 +746,9 @@ fn encode_envelope(p: &Project) -> String {
         .map(|box_| format!("{{\"x\":{},\"width\":{}}}", box_.x, box_.width))
         .collect::<Vec<_>>()
         .join(",");
-    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"uppercase_cues\":{},\"auto_parenthetical\":{},\"strict_transition_boundaries\":{},\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(p.id.as_str()), p.schema_version, quote(&p.metadata.title), quote(&p.metadata.author), quote(&p.metadata.contact), quote(&p.metadata.created_at), quote(&p.metadata.updated_at), elements_json(&p.title_page), quote(&p.page_profile.name), p.page_profile.format_version, p.page_profile.paper_width, p.page_profile.paper_height, p.page_profile.margin_top, p.page_profile.margin_bottom, p.page_profile.margin_left, p.page_profile.margin_right, p.page_profile.chars_per_line, p.page_profile.lines_per_page, p.page_profile.line_advance, p.page_profile.boundary_gap, p.page_profile.uppercase_cues, p.page_profile.auto_parenthetical, p.page_profile.strict_transition_boundaries, quote(&p.page_profile.font_family), p.page_profile.font_size, p.page_profile.char_width, role_boxes, elements_json(&p.elements))
+    // Keep the retired fields at their legacy defaults in the transitional JSON
+    // adapter. Nondefault legacy values are rejected on read, never silently reset.
+    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"uppercase_cues\":true,\"auto_parenthetical\":true,\"strict_transition_boundaries\":true,\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(p.id.as_str()), p.schema_version, quote(&p.metadata.title), quote(&p.metadata.author), quote(&p.metadata.contact), quote(&p.metadata.created_at), quote(&p.metadata.updated_at), elements_json(&p.title_page), quote(&p.page_profile.name), p.page_profile.format_version, p.page_profile.paper_width, p.page_profile.paper_height, p.page_profile.margin_top, p.page_profile.margin_bottom, p.page_profile.margin_left, p.page_profile.margin_right, p.page_profile.chars_per_line, p.page_profile.lines_per_page, p.page_profile.line_advance, p.page_profile.boundary_gap, quote(&p.page_profile.font_family), p.page_profile.font_size, p.page_profile.char_width, role_boxes, elements_json(&p.elements))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1007,6 +1003,12 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
     {
         return Err(ModelError::UnsupportedJsonState);
     }
+    if !optional_bool_field(profile, "uppercase_cues", true)?
+        || !optional_bool_field(profile, "auto_parenthetical", true)?
+        || !optional_bool_field(profile, "strict_transition_boundaries", true)?
+    {
+        return Err(ModelError::UnsupportedJsonState);
+    }
     Ok(Project {
         id: StableId::new(str_field(envelope, "id")?)?,
         schema_version: schema,
@@ -1031,13 +1033,6 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
             lines_per_page: num_field(profile, "lines_per_page")?,
             line_advance: num_field(profile, "line_advance")?,
             boundary_gap: num_field(profile, "boundary_gap")?,
-            uppercase_cues: optional_bool_field(profile, "uppercase_cues", true)?,
-            auto_parenthetical: optional_bool_field(profile, "auto_parenthetical", true)?,
-            strict_transition_boundaries: optional_bool_field(
-                profile,
-                "strict_transition_boundaries",
-                true,
-            )?,
             font_family: str_field(profile, "font_family")?,
             font_size: num_field(profile, "font_size")?,
             char_width: num_field(profile, "char_width")?,
@@ -1066,7 +1061,12 @@ mod tests {
         assert_eq!(p.elements[0].role, Role::SceneHeading);
         assert!(p.elements[0].text.is_empty());
         assert_eq!(p.page_profile.font_family, "Courier Prime");
-        assert!(p.page_profile.uppercase_cues);
+        assert_eq!(
+            editing::EditingSession::new(p.clone())
+                .unwrap_or_else(|_| unreachable!())
+                .policy(),
+            editing::EditPolicy::default()
+        );
         assert!(p.validate().is_ok());
     }
 
@@ -1095,12 +1095,7 @@ mod tests {
             .to_json()
             .unwrap_or_else(|_| unreachable!())
             .replace(",\"uppercase_cues\":true", "");
-        assert!(
-            Project::from_json(&json)
-                .unwrap_or_else(|_| unreachable!())
-                .page_profile
-                .uppercase_cues
-        );
+        assert!(Project::from_json(&json).is_ok());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use eframe::egui::{
     WidgetText,
 };
 use scriptcraft_core::cast_list::CAST_LIST_REFRESH_INTERVAL;
-use scriptcraft_core::editing::{EditError, EditingSession, Position, Selection};
+use scriptcraft_core::editing::{EditError, EditPolicy, EditingSession, Position, Selection};
 use scriptcraft_core::exports;
 use scriptcraft_core::fdx::{self, FdxImportOutcome, FdxMigrationConsent, FdxVersionStatus};
 use scriptcraft_core::fdx_storage::{self, FdxBaseline, OpenedFdxSource, StdFdxStorageFileSystem};
@@ -131,8 +131,8 @@ impl ScriptCraftApp {
     fn new() -> Result<Self, String> {
         let project = Project::new("demo-project", "Untitled Screenplay", "Writer")
             .map_err(|error| format!("new project failed: {error:?}"))?;
-        let session =
-            EditingSession::new(project).map_err(|error| format!("session failed: {error:?}"))?;
+        let session = EditingSession::with_policy(project, EditPolicy::default())
+            .map_err(|error| format!("session failed: {error:?}"))?;
         let (notification_sink, notification_results) = sprint_timer::NativeNotificationSink::new();
         Ok(Self {
             session,
@@ -440,7 +440,7 @@ impl ScriptCraftApp {
         baseline: Option<FdxBaseline>,
         migration_status: Option<&str>,
     ) {
-        let replacement = match EditingSession::new(project) {
+        let replacement = match EditingSession::with_policy(project, self.session.policy()) {
             Ok(replacement) => replacement,
             Err(error) => {
                 self.show_error(format!("incompatible document: {error:?}"));
@@ -5769,6 +5769,43 @@ mod tests {
         assert_eq!(app.session.project().elements[0].text, original_text);
         assert!(!app.session.dirty());
         assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn legacy_policy_json_rejection_preserves_live_session_path_and_source_file() {
+        let root = std::env::temp_dir().join(format!(
+            "scriptcraft-wo012b-policy-rejection-{}",
+            std::process::id()
+        ));
+        let path = root.join("legacy.json");
+        let project = Project::new("legacy", "Title", "Writer").unwrap_or_else(|_| unreachable!());
+        let incompatible = project
+            .to_json()
+            .unwrap_or_else(|_| unreachable!())
+            .replace(
+                "\"auto_parenthetical\":true",
+                "\"auto_parenthetical\":false",
+            );
+        let source = incompatible.into_bytes();
+        let _ = std::fs::create_dir_all(&root);
+        let _ = std::fs::write(&path, &source);
+
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session.set_policy(EditPolicy {
+            uppercase_cues: false,
+            ..app.session.policy()
+        });
+        let session_before = app.session.clone();
+        let original_path = PathBuf::from("current-project.json");
+        app.native_path = Some(original_path.clone());
+
+        app.open_native_at(&path);
+
+        assert_eq!(app.session, session_before);
+        assert_eq!(app.native_path, Some(original_path));
+        assert_eq!(std::fs::read(&path).unwrap_or_default(), source);
+        assert!(app.error.is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn staged_fdx_fixture(version: &str) -> Vec<u8> {

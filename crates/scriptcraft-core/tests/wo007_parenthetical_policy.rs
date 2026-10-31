@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use scriptcraft_core::editing::{EditingSession, Position, Selection};
+use scriptcraft_core::editing::{EditPolicy, EditingSession, Position, Selection};
 use scriptcraft_core::layout::LayoutCache;
 use scriptcraft_core::{ModelError, Project, Role};
 
@@ -22,15 +22,23 @@ fn caret(session: &mut EditingSession, element: usize, offset: usize) {
 #[test]
 fn settings_are_defaulted_typed_and_round_trip_without_schema_bump() {
     let project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
-    assert!(project.page_profile.auto_parenthetical);
-    assert!(project.page_profile.strict_transition_boundaries);
+    assert_eq!(
+        EditingSession::new(project.clone())
+            .unwrap_or_else(|_| unreachable!())
+            .policy(),
+        EditPolicy::default()
+    );
     let json = project.to_json().unwrap_or_else(|_| unreachable!());
     let legacy = json
         .replace(",\"auto_parenthetical\":true", "")
         .replace(",\"strict_transition_boundaries\":true", "");
     let restored = Project::from_json(&legacy).unwrap_or_else(|_| unreachable!());
-    assert!(restored.page_profile.auto_parenthetical);
-    assert!(restored.page_profile.strict_transition_boundaries);
+    assert_eq!(
+        EditingSession::new(restored)
+            .unwrap_or_else(|_| unreachable!())
+            .policy(),
+        EditPolicy::default()
+    );
     assert_eq!(
         Project::from_json(
             &json.replace("\"auto_parenthetical\":true", "\"auto_parenthetical\":1")
@@ -44,12 +52,18 @@ fn settings_are_defaulted_typed_and_round_trip_without_schema_bump() {
         )),
         Err(ModelError::WrongType("strict_transition_boundaries"))
     );
-    let mut changed = project.clone();
-    changed.page_profile.auto_parenthetical = false;
-    changed.page_profile.strict_transition_boundaries = false;
-    let reopened = Project::from_json(&changed.to_json().unwrap_or_else(|_| unreachable!()))
-        .unwrap_or_else(|_| unreachable!());
-    assert_eq!(reopened.page_profile, changed.page_profile);
+    for key in [
+        "uppercase_cues",
+        "auto_parenthetical",
+        "strict_transition_boundaries",
+    ] {
+        assert_eq!(
+            Project::from_json(
+                &json.replace(&format!("\"{key}\":true"), &format!("\"{key}\":false"))
+            ),
+            Err(ModelError::UnsupportedJsonState)
+        );
+    }
     let mut cache = LayoutCache::default();
     let _ = cache
         .get_or_build(0, &project)
@@ -58,10 +72,58 @@ fn settings_are_defaulted_typed_and_round_trip_without_schema_bump() {
         .get_or_build(0, &project)
         .unwrap_or_else(|_| unreachable!());
     assert!(hit);
+    let mut changed_layout = project.clone();
+    changed_layout.page_profile.font_size += 1;
     let (_, hit) = cache
-        .get_or_build(0, &changed)
+        .get_or_build(0, &changed_layout)
         .unwrap_or_else(|_| unreachable!());
     assert!(!hit);
+}
+
+#[test]
+fn policy_changes_are_transient_non_dirty_and_not_part_of_undo_history() {
+    let mut editing = session(Role::Character, "ABCD");
+    caret(&mut editing, 0, 2);
+    let original_project = editing.project().clone();
+    let original_revision = editing.revision();
+    let runtime_policy = EditPolicy {
+        uppercase_cues: false,
+        auto_parenthetical: false,
+        strict_transition_boundaries: false,
+    };
+
+    editing.set_policy(runtime_policy);
+    assert_eq!(editing.policy(), runtime_policy);
+    assert_eq!(editing.project(), &original_project);
+    assert_eq!(editing.revision(), original_revision);
+    assert!(!editing.dirty());
+    assert!(!editing.can_undo());
+
+    // The session override does not ride along in project JSON: the transitional
+    // adapter emits its legacy defaults and a new session receives those defaults.
+    let json = editing
+        .project()
+        .to_json()
+        .unwrap_or_else(|_| unreachable!());
+    let reopened = Project::from_json(&json).unwrap_or_else(|_| unreachable!());
+    assert_eq!(reopened.elements[0].text, "ABCD");
+    assert_eq!(
+        EditingSession::new(reopened)
+            .unwrap_or_else(|_| unreachable!())
+            .policy(),
+        EditPolicy::default()
+    );
+
+    editing.enter().unwrap_or_else(|_| unreachable!());
+    assert_eq!(editing.project().elements.len(), 2);
+    assert_eq!(editing.project().elements[0].text, "AB");
+    assert_eq!(editing.project().elements[1].role, Role::Dialogue);
+    assert_eq!(editing.project().elements[1].text, "CD");
+    editing.undo().unwrap_or_else(|_| unreachable!());
+    assert_eq!(editing.project(), &original_project);
+    assert_eq!(editing.policy(), runtime_policy);
+    editing.redo().unwrap_or_else(|_| unreachable!());
+    assert_eq!(editing.policy(), runtime_policy);
 }
 
 #[test]
@@ -71,13 +133,24 @@ fn dialogue_insertion_and_setting_off_precedence_are_exact() {
     assert_eq!(on.project().elements[0].text, "()");
     assert_eq!(on.selection().focus.offset, 1);
     let mut off = session(Role::Dialogue, "");
-    let mut project = off.project().clone();
-    project.page_profile.auto_parenthetical = false;
-    off.replace_with_saved(project)
-        .unwrap_or_else(|_| unreachable!());
+    off.set_policy(EditPolicy {
+        auto_parenthetical: false,
+        ..off.policy()
+    });
     off.tab().unwrap_or_else(|_| unreachable!());
     assert_eq!(off.project().elements[0].role, Role::Parenthetical);
     assert_eq!(off.project().elements[0].text, "");
+
+    let mut assigned = session(Role::Action, "");
+    assigned.set_policy(EditPolicy {
+        auto_parenthetical: false,
+        ..assigned.policy()
+    });
+    assigned
+        .change_role(Role::Parenthetical)
+        .unwrap_or_else(|_| unreachable!());
+    assert_eq!(assigned.project().elements[0].role, Role::Parenthetical);
+    assert_eq!(assigned.project().elements[0].text, "");
 }
 
 #[test]
@@ -365,10 +438,10 @@ fn before_opening_enter_uses_setting_and_missing_opening_does_not_trigger() {
     assert_eq!(on.project().elements[1].text, "(x)");
 
     let mut off = session(Role::Parenthetical, "(x)");
-    let mut project = off.project().clone();
-    project.page_profile.auto_parenthetical = false;
-    off.replace_with_saved(project)
-        .unwrap_or_else(|_| unreachable!());
+    off.set_policy(EditPolicy {
+        auto_parenthetical: false,
+        ..off.policy()
+    });
     off.enter().unwrap_or_else(|_| unreachable!());
     assert_eq!(off.project().elements[0].text, "");
     assert_eq!(off.project().elements[1].text, "(x)");

@@ -482,7 +482,7 @@ impl ScriptCraftApp {
                 match Project::new("demo-project", "Untitled Screenplay", "Writer")
                     .map_err(|error| format!("new project failed: {error:?}"))
                     .and_then(|project| {
-                        EditingSession::new(project)
+                        EditingSession::with_policy(project, self.session.policy())
                             .map_err(|error| format!("session failed: {error:?}"))
                     }) {
                     Ok(session) => {

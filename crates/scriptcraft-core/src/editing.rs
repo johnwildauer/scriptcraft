@@ -35,6 +35,25 @@ impl Selection {
     }
 }
 
+/// Ephemeral editing behavior. This is session/application input, not document
+/// state and is intentionally absent from snapshots and native serialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditPolicy {
+    pub uppercase_cues: bool,
+    pub auto_parenthetical: bool,
+    pub strict_transition_boundaries: bool,
+}
+
+impl Default for EditPolicy {
+    fn default() -> Self {
+        Self {
+            uppercase_cues: true,
+            auto_parenthetical: true,
+            strict_transition_boundaries: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditError {
     InvalidElement,
@@ -67,6 +86,7 @@ struct Snapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditingSession {
     project: Project,
+    policy: EditPolicy,
     selection: Selection,
     dirty: bool,
     revision: u64,
@@ -79,6 +99,10 @@ pub struct EditingSession {
 
 impl EditingSession {
     pub fn new(project: Project) -> Result<Self, EditError> {
+        Self::with_policy(project, EditPolicy::default())
+    }
+
+    pub fn with_policy(project: Project, policy: EditPolicy) -> Result<Self, EditError> {
         project.validate()?;
         let selection = Selection::caret(Position {
             element: 0,
@@ -88,6 +112,7 @@ impl EditingSession {
         Ok(Self {
             clean_project: project.clone(),
             project,
+            policy,
             selection,
             dirty: false,
             revision: 0,
@@ -106,6 +131,16 @@ impl EditingSession {
 
     pub fn project(&self) -> &Project {
         &self.project
+    }
+    /// Current ephemeral editing policy. Undo/redo and document replacement do
+    /// not restore or alter it; a newly constructed session uses defaults.
+    pub const fn policy(&self) -> EditPolicy {
+        self.policy
+    }
+    /// Changes runtime policy without altering document contents, revision,
+    /// history, or clean/dirty state.
+    pub fn set_policy(&mut self, policy: EditPolicy) {
+        self.policy = policy;
     }
     pub fn selection(&self) -> Selection {
         self.selection
@@ -149,7 +184,7 @@ impl EditingSession {
     }
 
     pub fn replace_with_saved(&mut self, project: Project) -> Result<(), EditError> {
-        let replacement = Self::new(project)?;
+        let replacement = Self::with_policy(project, self.policy)?;
         *self = replacement;
         Ok(())
     }
@@ -170,10 +205,11 @@ impl EditingSession {
     /// Mapped source runs and text leaves are transformed in the same candidate;
     /// unsafe inline intersections reject the whole operation.
     pub fn insert(&mut self, text: &str) -> Result<(), EditError> {
-        self.mutate(|project, selection, _generated| {
+        self.mutate(|project, selection, _generated, policy| {
             let (start, end) = selection.ordered();
             replace_range(project, start, end, text)?;
-            let offset = normalize_element(project, start.element, start.offset + text.len())?;
+            let offset =
+                normalize_element(project, policy, start.element, start.offset + text.len())?;
             Ok(Selection::caret(Position {
                 element: start.element,
                 offset,
@@ -194,7 +230,7 @@ impl EditingSession {
     /// would remove an anchored paragraph instead fail until its source identity
     /// and attachments have a verified transform.
     pub fn delete(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, generated| {
+        self.mutate(|project, selection, generated, _policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 replace_range(project, start, end, "")?;
@@ -243,7 +279,7 @@ impl EditingSession {
     }
 
     pub fn backspace(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, _generated| {
+        self.mutate(|project, selection, _generated, _policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 replace_range(project, start, end, "")?;
@@ -282,17 +318,17 @@ impl EditingSession {
     /// split until its foreign ID, anchor placement and nested data can be
     /// transformed without duplication or loss.
     pub fn split(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, _generated| {
+        self.mutate(|project, selection, _generated, policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 return Err(EditError::InvalidSelection);
             }
-            split_at(project, start, project.elements[start.element].role)
+            split_at(project, policy, start, project.elements[start.element].role)
         })
     }
 
     pub fn enter(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, generated| {
+        self.mutate(|project, selection, generated, policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 return Err(EditError::InvalidSelection);
@@ -303,6 +339,7 @@ impl EditingSession {
                 .ok_or(EditError::InvalidElement)?;
             if strict_boundary_rejects(
                 project,
+                policy,
                 start.element,
                 item.role,
                 item.text.len(),
@@ -319,14 +356,10 @@ impl EditingSession {
                     let new = ScreenplayElement::new(
                         id.clone(),
                         Role::Parenthetical,
-                        if project.page_profile.auto_parenthetical {
-                            "()"
-                        } else {
-                            ""
-                        },
+                        if policy.auto_parenthetical { "()" } else { "" },
                     )?;
                     project.elements.insert(position.element, new);
-                    if project.page_profile.auto_parenthetical {
+                    if policy.auto_parenthetical {
                         generated.insert(id);
                         return Ok(Selection::caret(Position {
                             element: position.element,
@@ -361,14 +394,14 @@ impl EditingSession {
             } else {
                 enter_transition(role).ok_or(EditError::UnsupportedTransition { from: role })?
             };
-            split_at(project, position, next_role)
+            split_at(project, policy, position, next_role)
         })
     }
 
     /// Applies the explicit Tab policy. Unlisted roles are intentionally consumed
     /// without changing the project, selection, or history.
     pub fn tab(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, generated| {
+        self.mutate(|project, selection, generated, policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 return Ok(*selection);
@@ -379,6 +412,7 @@ impl EditingSession {
                 .ok_or(EditError::InvalidElement)?;
             if strict_boundary_rejects(
                 project,
+                policy,
                 start.element,
                 item.role,
                 item.text.len(),
@@ -389,7 +423,7 @@ impl EditingSession {
             let item_role = item.role;
             let item_text = item.text.clone();
             let mut position = start;
-            if project.page_profile.auto_parenthetical && item_role == Role::Parenthetical {
+            if policy.auto_parenthetical && item_role == Role::Parenthetical {
                 if is_delimiter_only_parenthetical(item_text.as_str()) {
                     project.elements[position.element].role = Role::Dialogue;
                     project.elements[position.element].text.clear();
@@ -418,7 +452,7 @@ impl EditingSession {
             let next_role = tab_transition(element.role, element.text.is_empty());
             if let Some(role) = next_role {
                 project.elements[position.element].role = role;
-                if project.page_profile.auto_parenthetical
+                if policy.auto_parenthetical
                     && role == Role::Parenthetical
                     && project.elements[position.element].text.is_empty()
                 {
@@ -431,6 +465,7 @@ impl EditingSession {
                 }
                 return normalize_selection_in_element(
                     project,
+                    policy,
                     position.element,
                     Selection::caret(position),
                 );
@@ -443,7 +478,7 @@ impl EditingSession {
     /// rather than merged or recycled; joining any anchored participant is a
     /// transactional safe-stop.
     pub fn join_with_next(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, _generated| {
+        self.mutate(|project, selection, _generated, _policy| {
             let (start, end) = selection.ordered();
             if start != end || start.offset != project.elements[start.element].text.len() {
                 return Err(EditError::InvalidSelection);
@@ -460,7 +495,7 @@ impl EditingSession {
     /// Changes a known role and its exact mapped source Type attribute together.
     /// A role change that would invalidate attached scene data is rejected.
     pub fn change_role(&mut self, role: Role) -> Result<(), EditError> {
-        self.mutate(|project, selection, generated| {
+        self.mutate(|project, selection, generated, policy| {
             let (start, end) = selection.ordered();
             if start.element != end.element {
                 return Err(EditError::InvalidSelection);
@@ -472,7 +507,7 @@ impl EditingSession {
             project.elements[start.element].role = role;
             if role != Role::Parenthetical {
                 generated.remove(project.elements[start.element].id.as_str());
-            } else if project.elements[start.element].text.is_empty() {
+            } else if policy.auto_parenthetical && project.elements[start.element].text.is_empty() {
                 project.elements[start.element].text = "()".into();
                 generated.insert(project.elements[start.element].id.as_str().to_owned());
                 return Ok(Selection::caret(Position {
@@ -480,7 +515,7 @@ impl EditingSession {
                     offset: 1,
                 }));
             }
-            normalize_selection_in_element(project, start.element, *selection)
+            normalize_selection_in_element(project, policy, start.element, *selection)
         })
     }
 
@@ -529,12 +564,17 @@ impl EditingSession {
 
     fn mutate<F>(&mut self, operation: F) -> Result<(), EditError>
     where
-        F: FnOnce(&mut Project, &Selection, &mut BTreeSet<String>) -> Result<Selection, EditError>,
+        F: FnOnce(
+            &mut Project,
+            &Selection,
+            &mut BTreeSet<String>,
+            &EditPolicy,
+        ) -> Result<Selection, EditError>,
     {
         let mut project = self.project.clone();
         let mut generated = self.generated_parentheticals.clone();
         let prior_generated = generated.clone();
-        let selection = operation(&mut project, &self.selection, &mut generated)?;
+        let selection = operation(&mut project, &self.selection, &mut generated, &self.policy)?;
         invalidate_changed_generated_parentheticals(
             &self.project,
             &project,
@@ -961,12 +1001,13 @@ fn fdx_role_name(role: Role) -> &'static str {
 
 fn strict_boundary_rejects(
     project: &Project,
+    policy: &EditPolicy,
     element: usize,
     role: Role,
     text_len: usize,
     offset: usize,
 ) -> bool {
-    project.page_profile.strict_transition_boundaries
+    policy.strict_transition_boundaries
         && matches!(
             role,
             Role::SceneHeading | Role::Character | Role::Transition
@@ -1047,6 +1088,7 @@ fn uppercase_with_mapping(text: &str, offset: usize) -> Result<(String, usize), 
 
 fn normalize_element(
     project: &mut Project,
+    policy: &EditPolicy,
     element: usize,
     offset: usize,
 ) -> Result<usize, EditError> {
@@ -1054,7 +1096,7 @@ fn normalize_element(
         .elements
         .get(element)
         .ok_or(EditError::InvalidElement)?;
-    if !project.page_profile.uppercase_cues || !is_uppercase_cue(item.role) {
+    if !policy.uppercase_cues || !is_uppercase_cue(item.role) {
         return Ok(offset);
     }
     let id = item.id.clone();
@@ -1106,6 +1148,7 @@ fn normalize_element(
 
 fn normalize_selection_in_element(
     project: &mut Project,
+    policy: &EditPolicy,
     element: usize,
     selection: Selection,
 ) -> Result<Selection, EditError> {
@@ -1113,7 +1156,7 @@ fn normalize_selection_in_element(
         .elements
         .get(element)
         .ok_or(EditError::InvalidElement)?;
-    if !project.page_profile.uppercase_cues || !is_uppercase_cue(item.role) {
+    if !policy.uppercase_cues || !is_uppercase_cue(item.role) {
         return Ok(selection);
     }
     let id = item.id.clone();
@@ -1172,7 +1215,12 @@ fn normalize_selection_in_element(
     })
 }
 
-fn split_at(project: &mut Project, position: Position, role: Role) -> Result<Selection, EditError> {
+fn split_at(
+    project: &mut Project,
+    policy: &EditPolicy,
+    position: Position,
+    role: Role,
+) -> Result<Selection, EditError> {
     if project.elements.len() >= MAX_ELEMENTS {
         return Err(EditError::TooManyElements);
     }
@@ -1198,7 +1246,7 @@ fn split_at(project: &mut Project, position: Position, role: Role) -> Result<Sel
         new_item.runs = right_runs;
     }
     project.elements.insert(position.element + 1, new_item);
-    normalize_element(project, position.element + 1, 0)?;
+    normalize_element(project, policy, position.element + 1, 0)?;
     Ok(Selection::caret(Position {
         element: position.element + 1,
         offset: 0,
@@ -1571,10 +1619,10 @@ mod tests {
         for (from, to, text) in expected {
             let mut s = session(text, from);
             if from == Role::Parenthetical {
-                let mut project = s.project().clone();
-                project.page_profile.auto_parenthetical = false;
-                s.replace_with_saved(project)
-                    .unwrap_or_else(|_| unreachable!());
+                s.set_policy(EditPolicy {
+                    auto_parenthetical: false,
+                    ..s.policy()
+                });
             }
             let offset = s.project().elements[0].text.len();
             set(&mut s, 0, offset);
