@@ -160,15 +160,7 @@ fn page_content(page: &crate::layout::LayoutPage, paper_height: u32, font_size: 
 
 #[allow(dead_code)]
 fn role_name(role: Role) -> &'static str {
-    match role {
-        Role::SceneHeading => "scene_heading",
-        Role::Action => "action",
-        Role::Character => "character",
-        Role::Dialogue => "dialogue",
-        Role::Parenthetical => "parenthetical",
-        Role::Transition => "transition",
-        Role::Note => "note",
-    }
+    role.as_str()
 }
 
 #[cfg(test)]

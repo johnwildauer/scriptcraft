@@ -405,6 +405,11 @@ fn validate_profile(profile: &PageProfile) -> Result<(), LayoutError> {
             .role_boxes
             .iter()
             .any(|box_| box_.width == 0 || box_.x.saturating_add(box_.width) > profile.paper_width)
+        || profile
+            .additional_role_boxes
+            .iter()
+            .flatten()
+            .any(|box_| box_.width == 0 || box_.x.saturating_add(box_.width) > profile.paper_width)
     {
         return Err(LayoutError {
             kind: LayoutErrorKind::InvalidProfile,
@@ -422,17 +427,19 @@ fn role_width(profile: &PageProfile, role: Role) -> u32 {
 }
 
 fn role_box(profile: &PageProfile, role: Role) -> (u32, u32) {
-    let index = match role {
-        Role::SceneHeading => 0,
-        Role::Action => 1,
-        Role::Character => 2,
-        Role::Dialogue => 3,
-        Role::Parenthetical => 4,
-        Role::Transition => 5,
-        Role::Note => 6,
-    };
-    let box_ = &profile.role_boxes[index];
-    (box_.x, box_.width)
+    if let Some(box_) = profile.role_box(role) {
+        return (box_.x, box_.width);
+    }
+    // New roles have no asserted ScriptCraft geometry yet. Use the full text
+    // area as a neutral layout fallback without changing their semantic role.
+    (
+        profile.margin_left,
+        profile
+            .paper_width
+            .saturating_sub(profile.margin_left)
+            .saturating_sub(profile.margin_right)
+            .max(1),
+    )
 }
 
 fn keep_with_next(role: Role) -> bool {

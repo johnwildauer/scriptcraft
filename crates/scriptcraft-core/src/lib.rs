@@ -18,7 +18,12 @@ pub const MAX_TEXT_BYTES: usize = 262_144;
 pub const MAX_STRING_BYTES: usize = 262_144;
 pub const POINTS_PER_INCH: u32 = 72;
 
-const ROLE_BOX_COUNT: usize = 7;
+const LEGACY_ROLE_BOX_COUNT: usize = 7;
+const ADDITIONAL_ROLE_BOX_COUNT: usize = 10;
+const MAX_RUNS_PER_ELEMENT: usize = 1_024;
+const MAX_RUN_ATTRIBUTES: usize = 128;
+const MAX_RUN_ATTRIBUTE_BYTES: usize = 4_096;
+const MAX_PROVENANCE_STRING_BYTES: usize = 4_096;
 
 const fn points_from_eighths_of_an_inch(eighths: u32) -> u32 {
     eighths * (POINTS_PER_INCH / 8)
@@ -37,9 +42,13 @@ pub enum ModelError {
     TooManyElements,
     TextTooLong,
     StringTooLong,
+    TooManyRuns,
+    TooManyRunAttributes,
+    InvalidRunProjection,
     InvalidUtf8Boundary,
     InvalidNumber,
     InvalidJson,
+    UnsupportedJsonState,
     MissingField(&'static str),
     WrongType(&'static str),
 }
@@ -67,7 +76,51 @@ impl StableId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Allocates deterministic IDs that do not collide with any reserved ID.
+/// Foreign source IDs must be kept in their own namespace and are not reserved here.
+#[derive(Debug, Clone)]
+pub struct StableIdAllocator {
+    reserved: BTreeSet<StableId>,
+    next_serial: u64,
+}
+
+impl Default for StableIdAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StableIdAllocator {
+    pub fn new() -> Self {
+        Self {
+            reserved: BTreeSet::new(),
+            next_serial: 1,
+        }
+    }
+
+    pub fn reserve(&mut self, id: StableId) -> Result<(), ModelError> {
+        if !self.reserved.insert(id) {
+            return Err(ModelError::DuplicateId);
+        }
+        Ok(())
+    }
+
+    pub fn allocate(&mut self, prefix: &str) -> Result<StableId, ModelError> {
+        loop {
+            let serial = self.next_serial;
+            self.next_serial = self
+                .next_serial
+                .checked_add(1)
+                .ok_or(ModelError::InvalidNumber)?;
+            let candidate = StableId::new(format!("{prefix}-{serial}"))?;
+            if self.reserved.insert(candidate.clone()) {
+                return Ok(candidate);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Role {
     SceneHeading,
     Action,
@@ -76,10 +129,40 @@ pub enum Role {
     Parenthetical,
     Transition,
     Note,
+    NewAct,
+    EndOfAct,
+    CastList,
+    General,
+    Shot,
+    Sequence,
+    Outline1,
+    Outline2,
+    Outline3,
+    Summary,
 }
 
 impl Role {
-    fn as_str(self) -> &'static str {
+    pub const ALL: [Self; 17] = [
+        Self::SceneHeading,
+        Self::Action,
+        Self::Character,
+        Self::Dialogue,
+        Self::Parenthetical,
+        Self::Transition,
+        Self::Note,
+        Self::NewAct,
+        Self::EndOfAct,
+        Self::CastList,
+        Self::General,
+        Self::Shot,
+        Self::Sequence,
+        Self::Outline1,
+        Self::Outline2,
+        Self::Outline3,
+        Self::Summary,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::SceneHeading => "scene_heading",
             Self::Action => "action",
@@ -88,9 +171,19 @@ impl Role {
             Self::Parenthetical => "parenthetical",
             Self::Transition => "transition",
             Self::Note => "note",
+            Self::NewAct => "new_act",
+            Self::EndOfAct => "end_of_act",
+            Self::CastList => "cast_list",
+            Self::General => "general",
+            Self::Shot => "shot",
+            Self::Sequence => "sequence",
+            Self::Outline1 => "outline_1",
+            Self::Outline2 => "outline_2",
+            Self::Outline3 => "outline_3",
+            Self::Summary => "summary",
         }
     }
-    fn parse(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "scene_heading" => Self::SceneHeading,
             "action" => Self::Action,
@@ -99,16 +192,98 @@ impl Role {
             "parenthetical" => Self::Parenthetical,
             "transition" => Self::Transition,
             "note" => Self::Note,
+            "new_act" => Self::NewAct,
+            "end_of_act" => Self::EndOfAct,
+            "cast_list" => Self::CastList,
+            "general" => Self::General,
+            "shot" => Self::Shot,
+            "sequence" => Self::Sequence,
+            "outline_1" => Self::Outline1,
+            "outline_2" => Self::Outline2,
+            "outline_3" => Self::Outline3,
+            "summary" => Self::Summary,
             _ => return None,
         })
     }
+
+    const fn legacy_profile_index(self) -> Option<usize> {
+        match self {
+            Self::SceneHeading => Some(0),
+            Self::Action => Some(1),
+            Self::Character => Some(2),
+            Self::Dialogue => Some(3),
+            Self::Parenthetical => Some(4),
+            Self::Transition => Some(5),
+            Self::Note => Some(6),
+            _ => None,
+        }
+    }
+
+    const fn additional_profile_index(self) -> Option<usize> {
+        match self {
+            Self::NewAct => Some(0),
+            Self::EndOfAct => Some(1),
+            Self::CastList => Some(2),
+            Self::General => Some(3),
+            Self::Shot => Some(4),
+            Self::Sequence => Some(5),
+            Self::Outline1 => Some(6),
+            Self::Outline2 => Some(7),
+            Self::Outline3 => Some(8),
+            Self::Summary => Some(9),
+            _ => None,
+        }
+    }
+
+    const fn is_legacy(self) -> bool {
+        self.legacy_profile_index().is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextRun {
+    pub text: String,
+    /// Ordered source attributes are retained as bounded opaque name/value pairs.
+    pub attributes: Vec<RunAttribute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunAttribute {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceFormat {
+    Fdx,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceSection {
+    Content,
+    TitlePage,
+}
+
+/// Minimal source coordinates for later ordered preservation; this is not the
+/// source tree or a claim that the source can yet be safely rewritten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceProvenance {
+    pub format: SourceFormat,
+    pub section: SourceSection,
+    pub ordinal: u32,
+    pub foreign_id: Option<String>,
+    pub foreign_role: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenplayElement {
     pub id: StableId,
     pub role: Role,
+    /// Plain-text compatibility projection used by existing editing/layout clients.
     pub text: String,
+    /// Empty for legacy plain-text elements; populated runs remain source ordered.
+    pub runs: Vec<TextRun>,
+    pub source_provenance: Option<SourceProvenance>,
 }
 
 impl ScreenplayElement {
@@ -122,7 +297,46 @@ impl ScreenplayElement {
         if text.len() > MAX_TEXT_BYTES {
             return Err(ModelError::TextTooLong);
         }
-        Ok(Self { id, role, text })
+        Ok(Self {
+            id,
+            role,
+            text,
+            runs: Vec::new(),
+            source_provenance: None,
+        })
+    }
+
+    pub fn with_runs(
+        id: impl Into<String>,
+        role: Role,
+        runs: Vec<TextRun>,
+        source_provenance: Option<SourceProvenance>,
+    ) -> Result<Self, ModelError> {
+        if runs.len() > MAX_RUNS_PER_ELEMENT {
+            return Err(ModelError::TooManyRuns);
+        }
+        let attribute_count = runs.iter().fold(0usize, |count, run| {
+            count.saturating_add(run.attributes.len())
+        });
+        if attribute_count > MAX_RUN_ATTRIBUTES {
+            return Err(ModelError::TooManyRunAttributes);
+        }
+        let mut text = String::new();
+        for run in &runs {
+            if text.len().saturating_add(run.text.len()) > MAX_TEXT_BYTES {
+                return Err(ModelError::TextTooLong);
+            }
+            text.push_str(&run.text);
+        }
+        let element = Self {
+            id: StableId::new(id)?,
+            role,
+            text,
+            runs,
+            source_provenance,
+        };
+        validate_element(&element)?;
+        Ok(element)
     }
     pub fn is_boundary(&self, byte_offset: usize) -> bool {
         self.text.is_char_boundary(byte_offset)
@@ -145,7 +359,7 @@ pub struct Metadata {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoleBox {
     pub x: u32,
     pub width: u32,
@@ -171,7 +385,22 @@ pub struct PageProfile {
     pub font_family: String,
     pub font_size: u32,
     pub char_width: u32,
-    pub role_boxes: [RoleBox; ROLE_BOX_COUNT],
+    /// The original seven role boxes retain their established indices and values.
+    pub role_boxes: [RoleBox; LEGACY_ROLE_BOX_COUNT],
+    /// Added role geometry is explicitly optional until separately specified.
+    pub additional_role_boxes: [Option<RoleBox>; ADDITIONAL_ROLE_BOX_COUNT],
+}
+
+impl PageProfile {
+    pub fn role_box(&self, role: Role) -> Option<&RoleBox> {
+        if let Some(index) = role.legacy_profile_index() {
+            self.role_boxes.get(index)
+        } else {
+            role.additional_profile_index()
+                .and_then(|index| self.additional_role_boxes.get(index))
+                .and_then(Option::as_ref)
+        }
+    }
 }
 
 impl Default for PageProfile {
@@ -204,6 +433,7 @@ impl Default for PageProfile {
                 RoleBox { x: 432, width: 108 },
                 RoleBox { x: 108, width: 432 },
             ],
+            additional_role_boxes: [None; ADDITIONAL_ROLE_BOX_COUNT],
         }
     }
 }
@@ -224,9 +454,16 @@ impl Project {
         title: impl Into<String>,
         author: impl Into<String>,
     ) -> Result<Self, ModelError> {
-        let start = ScreenplayElement::new("element-1", Role::SceneHeading, "")?;
+        let id = StableId::new(id)?;
+        let mut ids = StableIdAllocator::new();
+        ids.reserve(id.clone())?;
+        let start = ScreenplayElement::new(
+            ids.allocate("element")?.as_str().to_owned(),
+            Role::SceneHeading,
+            "",
+        )?;
         Ok(Self {
-            id: StableId::new(id)?,
+            id,
             schema_version: CURRENT_SCHEMA_VERSION,
             metadata: Metadata {
                 title: title.into(),
@@ -248,6 +485,7 @@ impl Project {
             return Err(ModelError::TooManyElements);
         }
         let mut ids = BTreeSet::new();
+        ids.insert(&self.id);
         for item in self.title_page.iter().chain(self.elements.iter()) {
             validate_element(item)?;
             if !ids.insert(&item.id) {
@@ -258,6 +496,7 @@ impl Project {
     }
     pub fn to_json(&self) -> Result<String, ModelError> {
         self.validate()?;
+        ensure_legacy_json_compatible(self)?;
         let json = encode_envelope(self);
         if json.len() > MAX_JSON_BYTES {
             return Err(ModelError::StringTooLong);
@@ -272,6 +511,17 @@ impl Project {
         let project = decode_project(value)?;
         project.validate()?;
         Ok(project)
+    }
+
+    /// Allocates an application element ID distinct from the project, title-page,
+    /// and body IDs. Foreign source IDs intentionally remain a separate namespace.
+    pub fn allocate_element_id(&self) -> Result<StableId, ModelError> {
+        let mut allocator = StableIdAllocator::new();
+        allocator.reserve(self.id.clone())?;
+        for element in self.title_page.iter().chain(self.elements.iter()) {
+            allocator.reserve(element.id.clone())?;
+        }
+        allocator.allocate("element")
     }
 }
 
@@ -339,6 +589,10 @@ fn validate_profile(p: &PageProfile) -> Result<(), ModelError> {
         || p.role_boxes
             .iter()
             .any(|box_| box_.width == 0 || box_.width > 1_000 || box_.x > 10_000)
+        || p.additional_role_boxes
+            .iter()
+            .flatten()
+            .any(|box_| box_.width == 0 || box_.width > 1_000 || box_.x > 10_000)
     {
         return Err(ModelError::InvalidNumber);
     }
@@ -348,6 +602,64 @@ fn validate_element(e: &ScreenplayElement) -> Result<(), ModelError> {
     StableId::new(e.id.0.clone())?;
     if e.text.len() > MAX_TEXT_BYTES {
         return Err(ModelError::TextTooLong);
+    }
+    if e.runs.len() > MAX_RUNS_PER_ELEMENT {
+        return Err(ModelError::TooManyRuns);
+    }
+    let mut run_text = String::new();
+    let mut attribute_count = 0usize;
+    for run in &e.runs {
+        if run_text.len().saturating_add(run.text.len()) > MAX_TEXT_BYTES {
+            return Err(ModelError::TextTooLong);
+        }
+        run_text.push_str(&run.text);
+        attribute_count = attribute_count.saturating_add(run.attributes.len());
+        if run.attributes.iter().any(|attribute| {
+            attribute.name.is_empty()
+                || attribute.name.len() > MAX_RUN_ATTRIBUTE_BYTES
+                || attribute.value.len() > MAX_RUN_ATTRIBUTE_BYTES
+        }) {
+            return Err(ModelError::StringTooLong);
+        }
+    }
+    if attribute_count > MAX_RUN_ATTRIBUTES {
+        return Err(ModelError::TooManyRunAttributes);
+    }
+    if !e.runs.is_empty() && run_text != e.text {
+        return Err(ModelError::InvalidRunProjection);
+    }
+    if e.source_provenance.as_ref().is_some_and(|source| {
+        source
+            .foreign_id
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_PROVENANCE_STRING_BYTES)
+            || source
+                .foreign_role
+                .as_ref()
+                .is_some_and(|value| value.len() > MAX_PROVENANCE_STRING_BYTES)
+    }) {
+        return Err(ModelError::StringTooLong);
+    }
+    Ok(())
+}
+
+fn ensure_legacy_json_compatible(project: &Project) -> Result<(), ModelError> {
+    let richer_profile = project
+        .page_profile
+        .additional_role_boxes
+        .iter()
+        .any(Option::is_some);
+    let richer_elements = project
+        .title_page
+        .iter()
+        .chain(project.elements.iter())
+        .any(|element| {
+            !element.role.is_legacy()
+                || !element.runs.is_empty()
+                || element.source_provenance.is_some()
+        });
+    if richer_profile || richer_elements {
+        return Err(ModelError::UnsupportedJsonState);
     }
     Ok(())
 }
@@ -585,7 +897,14 @@ fn optional_bool_field(v: &Json, key: &'static str, default: bool) -> Result<boo
         None => Ok(default),
     }
 }
+fn object_has_field(v: &Json, key: &str) -> bool {
+    matches!(v, Json::Object(fields) if fields.iter().any(|(name, _)| name == key))
+}
+
 fn decode_element(v: &Json) -> Result<ScreenplayElement, ModelError> {
+    if object_has_field(v, "runs") || object_has_field(v, "source_provenance") {
+        return Err(ModelError::UnsupportedJsonState);
+    }
     let role = Role::parse(&str_field(v, "role")?).ok_or(ModelError::InvalidJson)?;
     ScreenplayElement::new(str_field(v, "id")?, role, str_field(v, "text")?)
 }
@@ -601,11 +920,11 @@ fn decode_elements(v: &Json) -> Result<Vec<ScreenplayElement>, ModelError> {
     }
 }
 
-fn decode_role_boxes(v: &Json) -> Result<[RoleBox; ROLE_BOX_COUNT], ModelError> {
+fn decode_role_boxes(v: &Json) -> Result<[RoleBox; LEGACY_ROLE_BOX_COUNT], ModelError> {
     let Json::Array(items) = v else {
         return Err(ModelError::WrongType("role_boxes"));
     };
-    if items.len() != ROLE_BOX_COUNT {
+    if items.len() != LEGACY_ROLE_BOX_COUNT {
         return Err(ModelError::InvalidNumber);
     }
     let boxes = items
@@ -663,6 +982,11 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
             font_size: num_field(profile, "font_size")?,
             char_width: num_field(profile, "char_width")?,
             role_boxes: decode_role_boxes(obj(profile, "role_boxes")?)?,
+            additional_role_boxes: if object_has_field(profile, "additional_role_boxes") {
+                return Err(ModelError::UnsupportedJsonState);
+            } else {
+                [None; ADDITIONAL_ROLE_BOX_COUNT]
+            },
         },
         elements: decode_elements(obj(envelope, "elements")?)?,
     })
@@ -801,18 +1125,17 @@ mod tests {
         );
     }
     #[test]
-    fn all_roles_encode() {
-        let roles = [
-            Role::SceneHeading,
-            Role::Action,
-            Role::Character,
-            Role::Dialogue,
-            Role::Parenthetical,
-            Role::Transition,
-            Role::Note,
-        ];
+    fn legacy_roles_keep_json_round_trip() {
+        assert_eq!(Role::ALL.len(), 17);
+        let labels = Role::ALL.map(Role::as_str);
+        let unique = labels.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(unique.len(), 17);
+        for role in Role::ALL {
+            assert_eq!(Role::parse(role.as_str()), Some(role));
+        }
+
         let mut p = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
-        p.elements = roles
+        p.elements = Role::ALL[..LEGACY_ROLE_BOX_COUNT]
             .iter()
             .enumerate()
             .map(|(i, r)| {
@@ -824,6 +1147,238 @@ mod tests {
             p,
             Project::from_json(&p.to_json().unwrap_or_else(|_| unreachable!()))
                 .unwrap_or_else(|_| unreachable!())
+        );
+    }
+
+    #[test]
+    fn expanded_roles_are_distinct_and_transitional_json_refuses_them() {
+        for (index, role) in Role::ALL[LEGACY_ROLE_BOX_COUNT..].iter().enumerate() {
+            let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+            project.elements[0].role = *role;
+            assert!(project.validate().is_ok());
+            assert_eq!(Role::parse(role.as_str()), Some(*role));
+            assert_eq!(Role::ALL[LEGACY_ROLE_BOX_COUNT + index], *role);
+            assert_eq!(project.to_json(), Err(ModelError::UnsupportedJsonState));
+        }
+    }
+
+    #[test]
+    fn runs_and_source_provenance_keep_order_unicode_and_case() {
+        let provenance = SourceProvenance {
+            format: SourceFormat::Fdx,
+            section: SourceSection::Content,
+            ordinal: 9,
+            foreign_id: Some("Foreign-ID-9".into()),
+            foreign_role: Some("nEw Act".into()),
+        };
+        let element = ScreenplayElement::with_runs(
+            "internal-1",
+            Role::NewAct,
+            vec![
+                TextRun {
+                    text: "naïve ".into(),
+                    attributes: vec![RunAttribute {
+                        name: "Style".into(),
+                        value: "Bold".into(),
+                    }],
+                },
+                TextRun {
+                    text: "漢字🙂".into(),
+                    attributes: Vec::new(),
+                },
+            ],
+            Some(provenance.clone()),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(element.text, "naïve 漢字🙂");
+        assert_eq!(element.runs[0].attributes[0].value, "Bold");
+        assert_eq!(element.source_provenance, Some(provenance));
+        assert!(Project {
+            id: StableId::new("p").unwrap_or_else(|_| unreachable!()),
+            schema_version: CURRENT_SCHEMA_VERSION,
+            metadata: Metadata::default(),
+            title_page: Vec::new(),
+            page_profile: PageProfile::default(),
+            elements: vec![element],
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn richer_model_and_json_payloads_are_rejected_by_transitional_json() {
+        let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        project.elements[0] = ScreenplayElement::with_runs(
+            "rich",
+            Role::Action,
+            vec![TextRun {
+                text: "text".into(),
+                attributes: Vec::new(),
+            }],
+            None,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(project.to_json(), Err(ModelError::UnsupportedJsonState));
+
+        let legacy = Project::new("p", "t", "a")
+            .unwrap_or_else(|_| unreachable!())
+            .to_json()
+            .unwrap_or_else(|_| unreachable!());
+        let with_runs = legacy.replace(
+            "\"role\":\"scene_heading\",\"text\":\"\"",
+            "\"role\":\"scene_heading\",\"text\":\"\",\"runs\":[]",
+        );
+        assert_eq!(
+            Project::from_json(&with_runs),
+            Err(ModelError::UnsupportedJsonState)
+        );
+
+        let mut profile = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        profile.page_profile.additional_role_boxes[0] = Some(RoleBox { x: 10, width: 20 });
+        assert_eq!(profile.to_json(), Err(ModelError::UnsupportedJsonState));
+    }
+
+    #[test]
+    fn model_rejects_run_projection_and_resource_limit_violations() {
+        let mut element = ScreenplayElement::with_runs(
+            "e",
+            Role::Action,
+            vec![TextRun {
+                text: "x".into(),
+                attributes: Vec::new(),
+            }],
+            None,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        element.text.push('y');
+        assert_eq!(
+            validate_element(&element),
+            Err(ModelError::InvalidRunProjection)
+        );
+
+        let too_many_runs = vec![
+            TextRun {
+                text: String::new(),
+                attributes: Vec::new(),
+            };
+            MAX_RUNS_PER_ELEMENT + 1
+        ];
+        assert_eq!(
+            ScreenplayElement::with_runs("e", Role::Action, too_many_runs, None),
+            Err(ModelError::TooManyRuns)
+        );
+
+        let too_many_attributes = (0..MAX_RUN_ATTRIBUTES + 1)
+            .map(|index| RunAttribute {
+                name: format!("attr-{index}"),
+                value: String::new(),
+            })
+            .collect();
+        assert_eq!(
+            ScreenplayElement::with_runs(
+                "e",
+                Role::Action,
+                vec![TextRun {
+                    text: String::new(),
+                    attributes: too_many_attributes,
+                }],
+                None,
+            ),
+            Err(ModelError::TooManyRunAttributes)
+        );
+
+        assert_eq!(
+            ScreenplayElement::with_runs(
+                "e",
+                Role::Action,
+                vec![TextRun {
+                    text: String::new(),
+                    attributes: vec![RunAttribute {
+                        name: "x".repeat(MAX_RUN_ATTRIBUTE_BYTES + 1),
+                        value: String::new(),
+                    }],
+                }],
+                None,
+            ),
+            Err(ModelError::StringTooLong)
+        );
+        assert_eq!(
+            ScreenplayElement::with_runs(
+                "e",
+                Role::Action,
+                Vec::new(),
+                Some(SourceProvenance {
+                    format: SourceFormat::Fdx,
+                    section: SourceSection::Content,
+                    ordinal: 0,
+                    foreign_id: Some("x".repeat(MAX_PROVENANCE_STRING_BYTES + 1)),
+                    foreign_role: None,
+                }),
+            ),
+            Err(ModelError::StringTooLong)
+        );
+    }
+
+    #[test]
+    fn role_profile_expansion_leaves_new_geometry_unassigned_by_default() {
+        let mut profile = PageProfile::default();
+        assert_eq!(
+            profile.role_box(Role::SceneHeading),
+            Some(&profile.role_boxes[0])
+        );
+        assert_eq!(profile.role_box(Role::NewAct), None);
+        profile.additional_role_boxes[0] = Some(RoleBox { x: 120, width: 200 });
+        assert_eq!(
+            profile.role_box(Role::NewAct),
+            profile.additional_role_boxes[0].as_ref()
+        );
+        assert!(validate_profile(&profile).is_ok());
+        profile.additional_role_boxes[0] = Some(RoleBox { x: 120, width: 0 });
+        assert_eq!(validate_profile(&profile), Err(ModelError::InvalidNumber));
+    }
+
+    #[test]
+    fn all_roles_reach_layout_without_role_coercion() {
+        let mut project = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        project.elements = Role::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, role)| {
+                ScreenplayElement::new(format!("role-{index}"), *role, "text")
+                    .unwrap_or_else(|_| unreachable!())
+            })
+            .collect();
+        let layout = layout::ScreenplayLayout::build(&project).unwrap_or_else(|_| unreachable!());
+        for role in Role::ALL {
+            assert!(layout
+                .pages
+                .iter()
+                .flat_map(|page| page.lines.iter())
+                .any(|line| line.role == role));
+        }
+    }
+
+    #[test]
+    fn project_and_element_ids_share_an_application_collision_domain() {
+        let project = Project::new("element-1", "t", "a").unwrap_or_else(|_| unreachable!());
+        assert_eq!(project.elements[0].id.as_str(), "element-2");
+        assert!(project.validate().is_ok());
+
+        let mut duplicate = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        duplicate.elements[0].id = duplicate.id.clone();
+        assert_eq!(duplicate.validate(), Err(ModelError::DuplicateId));
+
+        let mut with_title = Project::new("p", "t", "a").unwrap_or_else(|_| unreachable!());
+        with_title.title_page.push(
+            ScreenplayElement::new("element-2", Role::Action, "title")
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        assert_eq!(
+            with_title
+                .allocate_element_id()
+                .unwrap_or_else(|_| unreachable!())
+                .as_str(),
+            "element-3"
         );
     }
 }

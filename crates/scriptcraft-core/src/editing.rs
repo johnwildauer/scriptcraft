@@ -278,7 +278,7 @@ impl EditingSession {
             let mut position = start;
             if item_role == Role::Parenthetical {
                 if position.offset == 0 && item_text.starts_with('(') {
-                    let id = split_id(project);
+                    let id = split_id(project)?;
                     let new = ScreenplayElement::new(
                         id.clone(),
                         Role::Parenthetical,
@@ -673,7 +673,7 @@ fn insert_dialogue_below(project: &mut Project, element: usize) -> Result<Select
     if project.elements.len() >= MAX_ELEMENTS {
         return Err(EditError::TooManyElements);
     }
-    let new = ScreenplayElement::new(split_id(project), Role::Dialogue, "")?;
+    let new = ScreenplayElement::new(split_id(project)?, Role::Dialogue, "")?;
     project.elements.insert(element + 1, new);
     Ok(Selection::caret(Position {
         element: element + 1,
@@ -762,7 +762,7 @@ fn split_at(project: &mut Project, position: Position, role: Role) -> Result<Sel
         .clone();
     let left = item.text[..position.offset].to_owned();
     let right = item.text[position.offset..].to_owned();
-    let id = split_id(project);
+    let id = split_id(project)?;
     let new_item = ScreenplayElement::new(id, role, right)?;
     project.elements[position.element].text = left;
     project.elements.insert(position.element + 1, new_item);
@@ -773,19 +773,8 @@ fn split_at(project: &mut Project, position: Position, role: Role) -> Result<Sel
     }))
 }
 
-fn split_id(project: &Project) -> String {
-    let mut serial = project.elements.len().saturating_add(1);
-    loop {
-        let candidate = format!("element-{serial}");
-        if project
-            .elements
-            .iter()
-            .all(|element| element.id.as_str() != candidate)
-        {
-            return candidate;
-        }
-        serial = serial.saturating_add(1);
-    }
+fn split_id(project: &Project) -> Result<String, ModelError> {
+    Ok(project.allocate_element_id()?.as_str().to_owned())
 }
 
 fn join_at(project: &mut Project, index: usize) -> Result<(), EditError> {
@@ -833,6 +822,16 @@ pub fn enter_transition(role: Role) -> Option<Role> {
         Role::Parenthetical => Role::Dialogue,
         Role::Transition => Role::SceneHeading,
         Role::Note => Role::Note,
+        Role::NewAct
+        | Role::EndOfAct
+        | Role::CastList
+        | Role::General
+        | Role::Shot
+        | Role::Sequence
+        | Role::Outline1
+        | Role::Outline2
+        | Role::Outline3
+        | Role::Summary => return None,
     })
 }
 
@@ -918,6 +917,39 @@ mod tests {
             .elements
             .iter()
             .all(|element| element.id.as_str().len() <= 128));
+    }
+
+    #[test]
+    fn allocated_split_ids_avoid_project_and_title_page_ids() {
+        let mut project = Project::new("project", "t", "a").unwrap_or_else(|_| unreachable!());
+        project.elements[0].text = "abcd".into();
+        project.title_page.push(
+            ScreenplayElement::new("element-2", Role::Action, "title")
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, 2);
+        assert_eq!(session.split(), Ok(()));
+        assert_eq!(session.project().elements[1].id.as_str(), "element-3");
+        assert!(session.validate().is_ok());
+    }
+
+    #[test]
+    fn added_roles_do_not_gain_an_implicit_enter_transition() {
+        for role in Role::ALL[7..].iter().copied() {
+            assert_eq!(enter_transition(role), None);
+            let mut session = session("unchanged", role);
+            let before = session.clone();
+            let offset = session.project().elements[0].text.len();
+            set(&mut session, 0, offset);
+            let before_enter = session.clone();
+            assert_eq!(
+                session.enter(),
+                Err(EditError::UnsupportedTransition { from: role })
+            );
+            assert_eq!(session, before_enter);
+            assert_eq!(before.project().elements[0].role, role);
+        }
     }
 
     #[test]
