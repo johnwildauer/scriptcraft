@@ -8,11 +8,17 @@ pub mod editing;
 pub mod exports;
 pub mod fdx;
 pub mod fdx_storage;
+pub mod formatting;
 pub mod layout;
 pub mod persistence;
 pub mod preservation;
 
 use std::collections::BTreeSet;
+
+pub use formatting::{
+    EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment, PrintVisibility,
+    SourceFontSpec, SourceLayoutSettings, SourceParagraphOverrides, SourceParagraphSpec,
+};
 
 pub const FOUNDATION_STATUS: &str = "scriptcraft foundation ready";
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -375,15 +381,12 @@ pub(crate) struct LegacyJsonState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Integer-point geometry retained at the transitional legacy-JSON boundary.
+/// Shared FDX layout converts these values explicitly to signed hundredth-point
+/// geometry; this type is not part of native FDX persistence.
 pub struct RoleBox {
     pub x: u32,
     pub width: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrintVisibility {
-    Visible,
-    Hidden,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,9 +406,9 @@ pub struct LayoutInputs {
     pub font_family: String,
     pub font_size: u32,
     pub char_width: u32,
-    /// The original seven role boxes retain their established indices and values.
+    /// Transitional integer role boxes retain their legacy JSON indices/values.
     pub role_boxes: [RoleBox; LEGACY_ROLE_BOX_COUNT],
-    /// Added role geometry is explicitly optional until separately specified.
+    /// Legacy JSON-only custom boxes for roles outside the original seven.
     pub additional_role_boxes: [Option<RoleBox>; ADDITIONAL_ROLE_BOX_COUNT],
 }
 
@@ -451,33 +454,6 @@ impl Default for LayoutInputs {
             additional_role_boxes: [None; ADDITIONAL_ROLE_BOX_COUNT],
         }
     }
-}
-
-/// Layout behavior explicitly derived from recognized source-document settings.
-/// These values are not application geometry and are retained alongside the
-/// source preservation tree. Unrecognized settings remain source-owned XML.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SourceLayoutSettings {
-    pub role_print_visibility: [Option<PrintVisibility>; 17],
-    pub role_starts_new_page: [Option<bool>; 17],
-}
-
-impl SourceLayoutSettings {
-    pub fn print_visibility(&self, role: Role) -> PrintVisibility {
-        role_index(role)
-            .and_then(|index| self.role_print_visibility[index])
-            .unwrap_or(PrintVisibility::Visible)
-    }
-
-    pub fn starts_new_page(&self, role: Role) -> bool {
-        role_index(role)
-            .and_then(|index| self.role_starts_new_page[index])
-            .unwrap_or(false)
-    }
-}
-
-fn role_index(role: Role) -> Option<usize> {
-    Role::ALL.iter().position(|candidate| *candidate == role)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -557,6 +557,25 @@ impl PreservationState {
             .any(|section| contains_managed_element(&section.children, id))
     }
 
+    pub(crate) fn has_direct_paragraph_formatting(&self, id: &StableId) -> bool {
+        const DIRECT_FIELDS: [&str; 8] = [
+            "Alignment",
+            "FirstIndent",
+            "Leading",
+            "LeftIndent",
+            "RightIndent",
+            "SpaceBefore",
+            "Spacing",
+            "StartsNewPage",
+        ];
+        find_managed_element(&self.sections, id).is_some_and(|paragraph| {
+            paragraph.attributes.iter().any(|attribute| {
+                attribute.name.namespace_uri.is_none()
+                    && DIRECT_FIELDS.contains(&attribute.name.local_name.as_str())
+            })
+        })
+    }
+
     /// Applies a UTF-8 byte-range edit to the exact ordered text children of one
     /// managed paragraph. If semantic runs are present, each run must correspond
     /// one-to-one with a source text child; otherwise the source mapping is not
@@ -1001,6 +1020,9 @@ impl PreservationState {
         if !removed {
             return Err(PreservationError::ManagedAnchorMissing);
         }
+        self.source_layout_settings
+            .direct_paragraph_overrides
+            .remove(id);
         self.anchors.retain(|anchor| {
             !matches!(&anchor.target, AnchorTarget::ProjectElement(target) if target == id)
         });

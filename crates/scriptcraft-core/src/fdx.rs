@@ -15,6 +15,7 @@ use crate::preservation::{
     SectionKind, SourceAnchor, SourceAnchorId, SourceEncoding, SourceName, SourceOwnership,
     SourceSnapshot,
 };
+use crate::formatting::{formatting_for_role, formatting_in_native_order, role_index};
 use crate::{
     ModelError, PrintVisibility, Project, Role, RunAttribute, ScreenplayElement, SourceFormat,
     SourceLayoutSettings, SourceProvenance, SourceSection, TextRun,
@@ -293,7 +294,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         preservation: None,
         legacy_json_state: None,
     };
-    let source_layout_settings = read_source_layout_settings(root, root_namespace)?;
+    let mut source_layout_settings = read_source_layout_settings(root, root_namespace)?;
     let mut identities = Vec::new();
     let mut board_graph = BoardGraph::default();
     validate_image_payload_budgets(root)?;
@@ -308,6 +309,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         SectionKind::Other,
         root_namespace,
         &mut project,
+        &mut source_layout_settings,
         &mut anchors,
         &mut next_id,
         &mut next_anchor,
@@ -356,8 +358,8 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
 ///
 /// For imported documents, managed paragraphs are reconciled into the retained
 /// ordered source tree; unknown and source-owned nodes are re-emitted in place.
-/// For a new document, only the semantic title/body content is emitted in a
-/// minimal supported FDX structure. ScriptCraft identity, legacy adapter fields,
+/// For a new document, semantic title/body content and the shared native role
+/// defaults are emitted in a minimal supported FDX structure. ScriptCraft identity, legacy adapter fields,
 /// runtime geometry inputs, and editing policies are not serialized. Output is
 /// structurally re-read through the bounded reader before it is returned. This
 /// does not establish desktop save/reopen guarantees or Final Draft application
@@ -810,6 +812,10 @@ fn make_new_document_nodes(project: &Project) -> Result<Vec<PreservedNode>, FdxE
         "FinalDraft",
         vec![("DocumentType", "Script"), ("Version", FDX_VERSION)],
     );
+    for formatting in formatting_in_native_order() {
+        root.children
+            .push(PreservedNode::Element(new_element_settings(formatting)));
+    }
     let mut content = preserved_element("Content", Vec::new());
     let mut next_id = 1usize;
     for element in &project.elements {
@@ -826,6 +832,97 @@ fn make_new_document_nodes(project: &Project) -> Result<Vec<PreservedNode>, FdxE
         root.children.push(PreservedNode::Element(title_page));
     }
     Ok(vec![PreservedNode::Element(root)])
+}
+
+fn new_element_settings(
+    formatting: &crate::formatting::RoleFormatting,
+) -> PreservedElement {
+    let mut settings = preserved_element(
+        "ElementSettings",
+        vec![("Type", formatting.fdx_label)],
+    );
+    let font = formatting.font;
+    let mut font_attributes = vec![("AdornmentStyle".to_owned(), font.adornment_style.to_string())];
+    if let Some(color) = font.color {
+        font_attributes.push(("Color".to_owned(), color.to_owned()));
+    }
+    font_attributes.extend([
+        ("Font".to_owned(), font.family.to_owned()),
+        ("RevisionID".to_owned(), font.revision_id.to_string()),
+        ("Size".to_owned(), font.size.to_string()),
+        ("Style".to_owned(), font.style_tokens.join("+")),
+    ]);
+    settings
+        .children
+        .push(PreservedNode::Element(preserved_element_owned(
+            "FontSpec",
+            font_attributes,
+        )));
+
+    let paragraph = formatting.paragraph;
+    settings
+        .children
+        .push(PreservedNode::Element(preserved_element_owned(
+            "ParagraphSpec",
+            vec![
+                ("Alignment".to_owned(), paragraph.alignment.to_owned()),
+                ("FirstIndent".to_owned(), paragraph.first_indent.to_owned()),
+                ("Leading".to_owned(), paragraph.leading.to_owned()),
+                ("LeftIndent".to_owned(), paragraph.left_indent.to_owned()),
+                ("RightIndent".to_owned(), paragraph.right_indent.to_owned()),
+                ("SpaceBefore".to_owned(), paragraph.space_before.to_string()),
+                ("Spacing".to_owned(), paragraph.spacing.to_string()),
+                (
+                    "StartsNewPage".to_owned(),
+                    if paragraph.starts_new_page { "Yes" } else { "No" }.to_owned(),
+                ),
+                ("Type".to_owned(), formatting.fdx_label.to_owned()),
+            ],
+        )));
+
+    let behavior = formatting.behavior;
+    settings
+        .children
+        .push(PreservedNode::Element(preserved_element_owned(
+            "Behavior",
+            vec![
+                ("PaginateAs".to_owned(), behavior.paginate_as.to_owned()),
+                ("ReturnKey".to_owned(), behavior.return_key.to_owned()),
+                ("Shortcut".to_owned(), behavior.shortcut.to_owned()),
+                ("TabKey".to_owned(), behavior.tab_key.to_owned()),
+                ("WinShortcut".to_owned(), behavior.win_shortcut.to_owned()),
+            ],
+        )));
+
+    settings.children.push(PreservedNode::Element(
+        preserved_element_owned(
+            "Outline",
+            vec![
+                (
+                    "CanHide".to_owned(),
+                    if formatting.outline.can_hide { "Yes" } else { "No" }.to_owned(),
+                ),
+                ("Level".to_owned(), formatting.outline.level.to_string()),
+            ],
+        ),
+    ));
+    settings
+}
+
+fn preserved_element_owned(name: &str, attributes: Vec<(String, String)>) -> PreservedElement {
+    let mut element = preserved_element(name, Vec::new());
+    element.attributes = attributes
+        .into_iter()
+        .map(|(name, value)| PreservedAttribute {
+            name: SourceName {
+                namespace_uri: None,
+                local_name: name.clone(),
+                qualified_name: Some(name),
+            },
+            value,
+        })
+        .collect();
+    element
 }
 
 fn new_paragraph(
@@ -899,25 +996,7 @@ fn preserved_element(name: &str, attributes: Vec<(&str, &str)>) -> PreservedElem
 }
 
 fn role_to_fdx(role: Role) -> &'static str {
-    match role {
-        Role::SceneHeading => "Scene Heading",
-        Role::Action => "Action",
-        Role::Character => "Character",
-        Role::Dialogue => "Dialogue",
-        Role::Parenthetical => "Parenthetical",
-        Role::Transition => "Transition",
-        Role::Note => "Note",
-        Role::NewAct => "New Act",
-        Role::EndOfAct => "End of Act",
-        Role::CastList => "Cast List",
-        Role::General => "General",
-        Role::Shot => "Shot",
-        Role::Sequence => "Sequence",
-        Role::Outline1 => "Outline 1",
-        Role::Outline2 => "Outline 2",
-        Role::Outline3 => "Outline 3",
-        Role::Summary => "Summary",
-    }
+    formatting_for_role(role).fdx_label
 }
 
 fn write_node(node: &PreservedNode, output: &mut String, depth: usize) -> Result<(), FdxError> {
@@ -1631,6 +1710,7 @@ fn preserve_node(
     section: SectionKind,
     root_ns: Option<&str>,
     project: &mut Project,
+    source_layout_settings: &mut SourceLayoutSettings,
     anchors: &mut Vec<SourceAnchor>,
     next_id: &mut usize,
     next_anchor: &mut usize,
@@ -1686,6 +1766,7 @@ fn preserve_node(
             current_section,
             root_ns,
             project,
+            source_layout_settings,
             anchors,
             next_id,
             next_anchor,
@@ -1710,6 +1791,13 @@ fn preserve_node(
         children,
     };
     if let (Some(semantic), Some(anchor_id)) = (managed, anchor_id) {
+        if current_section == SectionKind::Content {
+            if let Some(overrides) = direct_paragraph_overrides(element) {
+                source_layout_settings
+                    .direct_paragraph_overrides
+                    .insert(semantic.id.clone(), overrides);
+            }
+        }
         anchors.push(SourceAnchor {
             id: anchor_id,
             target: crate::preservation::AnchorTarget::ProjectElement(semantic.id.clone()),
@@ -1722,6 +1810,45 @@ fn preserve_node(
         }
     }
     Ok(PreservedNode::Element(preserved))
+}
+
+fn direct_paragraph_overrides(
+    element: &RawElement,
+) -> Option<crate::formatting::SourceParagraphOverrides> {
+    let mut overrides = crate::formatting::SourceParagraphOverrides::default();
+    let paragraph = &mut overrides.paragraph;
+    paragraph.alignment = attribute(element, "Alignment").and_then(|alignment| match alignment {
+        "Right" => Some(crate::ParagraphAlignment::Right),
+        "Center" => Some(crate::ParagraphAlignment::Center),
+        "Left" => Some(crate::ParagraphAlignment::Left),
+        _ => None,
+    });
+    paragraph.first_indent = attribute(element, "FirstIndent")
+        .and_then(|value| bounded_inches(value, true));
+    paragraph.left_indent = attribute(element, "LeftIndent")
+        .and_then(|value| bounded_inches(value, false));
+    paragraph.right_indent = attribute(element, "RightIndent")
+        .and_then(|value| bounded_inches(value, false));
+    paragraph.leading_regular = (attribute(element, "Leading") == Some("Regular")).then_some(true);
+    paragraph.space_before = attribute(element, "SpaceBefore")
+        .and_then(crate::FixedPoint::parse_points)
+        .filter(|value| (0..=79_200).contains(&value.raw()));
+    paragraph.spacing_single = (attribute(element, "Spacing") == Some("1")).then_some(true);
+    overrides.starts_new_page = attribute(element, "StartsNewPage").and_then(|value| match value {
+        "Yes" => Some(true),
+        "No" => Some(false),
+        _ => None,
+    });
+
+    (paragraph.alignment.is_some()
+        || paragraph.first_indent.is_some()
+        || paragraph.left_indent.is_some()
+        || paragraph.right_indent.is_some()
+        || paragraph.leading_regular.is_some()
+        || paragraph.space_before.is_some()
+        || paragraph.spacing_single.is_some()
+        || overrides.starts_new_page.is_some())
+    .then_some(overrides)
 }
 
 fn make_semantic_element(
@@ -1808,64 +1935,128 @@ fn read_source_layout_settings(
         if !seen_roles.insert(role) {
             return Err(FdxError::DuplicateSection);
         }
-        for child_setting in &setting.children {
-            let RawNode::Element(child_setting) = child_setting else {
-                continue;
-            };
-            if child_setting.name.namespace_uri.as_deref() != root_ns {
-                continue;
-            }
-            if child_setting.name.local_name == "FontSpec" {
-                if let Some(style) = attribute(child_setting, "Style") {
-                    let hidden = style.split('+').any(|token| token == "HiddenText");
-                    settings.role_print_visibility[role_index(role)] = Some(if hidden {
+        let font_specs = setting
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                RawNode::Element(child)
+                    if child.name.namespace_uri.as_deref() == root_ns
+                        && child.name.local_name == "FontSpec" =>
+                {
+                    Some(child)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // Duplicate FontSpec children are ambiguous as a whole. Leave every
+        // projected font field at its role default without modifying source.
+        if let [font] = font_specs.as_slice() {
+            let mut projection = crate::formatting::SourceFontSpec::default();
+            projection.family = attribute(font, "Font")
+                .filter(|value| !value.is_empty() && value.len() <= 128)
+                .map(str::to_owned);
+            projection.size = attribute(font, "Size").and_then(parse_bounded_font_size);
+            projection.color = attribute(font, "Color")
+                .filter(|value| value.len() <= 128)
+                .map(str::to_owned);
+            if let Some(style) = attribute(font, "Style") {
+                let tokens = style.split('+').collect::<BTreeSet<_>>();
+                projection.bold = Some(tokens.contains("Bold"));
+                projection.italic = Some(tokens.contains("Italic"));
+                projection.underline = Some(tokens.contains("Underline"));
+                projection.all_caps = Some(tokens.contains("AllCaps"));
+                projection.hidden_text = Some(tokens.contains("HiddenText"));
+                settings.role_print_visibility[role_index(role)] = Some(
+                    if projection.hidden_text == Some(true) {
                         PrintVisibility::Hidden
                     } else {
                         PrintVisibility::Visible
-                    });
-                }
-            } else if child_setting.name.local_name == "ParagraphSpec" {
-                if let Some(starts_new_page) = attribute(child_setting, "StartsNewPage") {
-                    settings.role_starts_new_page[role_index(role)] = Some(match starts_new_page {
-                        "Yes" => true,
-                        "No" => false,
-                        _ => return Err(FdxError::InvalidValue),
-                    });
-                }
+                    },
+                );
             }
+            settings.role_font_specs[role_index(role)] = projection;
+        }
+        let paragraph_specs = setting
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                RawNode::Element(child)
+                    if child.name.namespace_uri.as_deref() == root_ns
+                        && child.name.local_name == "ParagraphSpec" =>
+                {
+                    Some(child)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if paragraph_specs.len() > 1 {
+            return Err(FdxError::DuplicateSection);
+        }
+        let Some(paragraph) = paragraph_specs.first() else {
+            continue;
+        };
+        // A conflicting child Type makes the entire specification ambiguous;
+        // the preserved XML remains untouched and shared role defaults apply.
+        if attribute(paragraph, "Type").is_some_and(|paragraph_role| paragraph_role != source_role) {
+            continue;
+        }
+
+        let index = role_index(role);
+        let mut projection = crate::SourceParagraphSpec::default();
+        projection.alignment = attribute(paragraph, "Alignment").map(|alignment| match alignment {
+            "Right" => crate::ParagraphAlignment::Right,
+            "Center" => crate::ParagraphAlignment::Center,
+            "Left" => crate::ParagraphAlignment::Left,
+            _ => crate::ParagraphAlignment::Left,
+        });
+        projection.first_indent = attribute(paragraph, "FirstIndent")
+            .and_then(|value| bounded_inches(value, true));
+        projection.left_indent = attribute(paragraph, "LeftIndent")
+            .and_then(|value| bounded_inches(value, false));
+        projection.right_indent = attribute(paragraph, "RightIndent")
+            .and_then(|value| bounded_inches(value, false));
+        projection.leading_regular =
+            (attribute(paragraph, "Leading") == Some("Regular")).then_some(true);
+        projection.space_before = attribute(paragraph, "SpaceBefore")
+            .and_then(crate::FixedPoint::parse_points)
+            .filter(|value| (0..=79_200).contains(&value.raw()));
+        projection.spacing_single =
+            (attribute(paragraph, "Spacing") == Some("1")).then_some(true);
+        settings.role_paragraph_specs[index] = projection;
+        if let Some(starts_new_page) = attribute(paragraph, "StartsNewPage") {
+            settings.role_starts_new_page[index] = match starts_new_page {
+                "Yes" => Some(true),
+                "No" => Some(false),
+                _ => None,
+            };
         }
     }
     Ok(settings)
 }
 
-fn role_index(role: Role) -> usize {
-    Role::ALL
-        .iter()
-        .position(|candidate| *candidate == role)
-        .unwrap_or(0)
+fn parse_bounded_font_size(value: &str) -> Option<u8> {
+    if value.is_empty() || value.len() > 2 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let size = value.parse::<u8>().ok()?;
+    (1..=72).contains(&size).then_some(size)
+}
+
+fn bounded_inches(value: &str, signed: bool) -> Option<crate::FixedPoint> {
+    let fixed = crate::FixedPoint::parse_inches(value)?;
+    // The current runtime page is bounded to US Letter. Values outside that
+    // model budget remain source-owned but are not effective projections.
+    if fixed.raw().unsigned_abs() > 61_200 || (!signed && fixed.raw() < 0) {
+        return None;
+    }
+    Some(fixed)
 }
 
 fn role_from_fdx(value: &str) -> Option<Role> {
-    Some(match value {
-        "Scene Heading" => Role::SceneHeading,
-        "Action" => Role::Action,
-        "Character" => Role::Character,
-        "Dialogue" => Role::Dialogue,
-        "Parenthetical" => Role::Parenthetical,
-        "Transition" => Role::Transition,
-        "Note" => Role::Note,
-        "New Act" => Role::NewAct,
-        "End of Act" => Role::EndOfAct,
-        "Cast List" => Role::CastList,
-        "General" => Role::General,
-        "Shot" => Role::Shot,
-        "Sequence" => Role::Sequence,
-        "Outline 1" => Role::Outline1,
-        "Outline 2" => Role::Outline2,
-        "Outline 3" => Role::Outline3,
-        "Summary" => Role::Summary,
-        _ => return None,
-    })
+    formatting_in_native_order()
+        .iter()
+        .find(|formatting| formatting.fdx_label == value)
+        .map(|formatting| formatting.role)
 }
 
 fn collect_identities(
@@ -2584,6 +2775,46 @@ mod tests {
     }
 
     #[test]
+    fn imported_paragraph_fields_project_independently_and_keep_source_authoritative() {
+        let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><ParagraphSpec Type='Action' Alignment='Diagonal' FirstIndent='-0.10' LeftIndent='0.88' RightIndent='7.50' Leading='Future' SpaceBefore='14.25' Spacing='2' StartsNewPage='Maybe'/></ElementSettings><ElementSettings Type='Parenthetical'><ParagraphSpec Type='Dialogue' Alignment='Right' LeftIndent='3.00' RightIndent='5.50' StartsNewPage='Yes'/></ElementSettings><Content><Paragraph Type='Action' id='a'><Text>one</Text></Paragraph></Content></FinalDraft>";
+        let project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
+        let settings = project
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!())
+            .source_layout_settings();
+        let action = settings.paragraph_spec(Role::Action);
+        assert_eq!(action.alignment, Some(crate::ParagraphAlignment::Left));
+        assert_eq!(action.first_indent.map(crate::FixedPoint::raw), Some(-720));
+        assert_eq!(action.left_indent.map(crate::FixedPoint::raw), Some(6_336));
+        assert_eq!(action.right_indent.map(crate::FixedPoint::raw), Some(54_000));
+        assert_eq!(action.leading_regular, None);
+        assert_eq!(action.space_before.map(crate::FixedPoint::raw), Some(1_425));
+        assert_eq!(action.spacing_single, None);
+        assert!(!settings.starts_new_page(Role::Action));
+
+        // The conflicting child Type excludes the full ParagraphSpec projection.
+        assert_eq!(
+            settings.paragraph_spec(Role::Parenthetical),
+            crate::SourceParagraphSpec::default()
+        );
+        assert!(!settings.starts_new_page(Role::Parenthetical));
+
+        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let saved = String::from_utf8(bytes).unwrap_or_else(|_| unreachable!());
+        assert!(saved.contains("Alignment=\"Diagonal\""));
+        assert!(saved.contains("Leading=\"Future\""));
+        assert!(saved.contains("StartsNewPage=\"Maybe\""));
+        assert!(saved.contains("Type=\"Dialogue\" Alignment=\"Right\""));
+    }
+
+    #[test]
+    fn duplicate_role_paragraph_specs_remain_structural_errors() {
+        let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><ParagraphSpec Type='Action'/><ParagraphSpec Type='Action'/></ElementSettings><Content><Paragraph Type='Action' id='a'><Text>one</Text></Paragraph></Content></FinalDraft>";
+        assert!(matches!(read_v6(xml), Err(FdxError::DuplicateSection)));
+    }
+
+    #[test]
     fn source_settings_remain_authoritative_when_runtime_projection_changes() {
         let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Note'><FontSpec Style='Italic+HiddenText'/></ElementSettings><Content><Paragraph Type='Note' id='source-note'><Text>synthetic hidden note</Text></Paragraph></Content></FinalDraft>";
         let mut project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
@@ -2607,6 +2838,227 @@ mod tests {
             settings.print_visibility(Role::Note),
             PrintVisibility::Hidden
         );
+    }
+
+    #[test]
+    fn new_native_documents_emit_complete_ordered_role_defaults() {
+        let project = Project::new().unwrap_or_else(|_| unreachable!());
+        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let document = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
+        let state = document
+            .project
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+        let root = state.sections[0]
+            .children
+            .iter()
+            .find_map(|node| match node {
+                PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => {
+                    Some(element)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| unreachable!());
+        let settings = root
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                PreservedNode::Element(element)
+                    if element.name.local_name == "ElementSettings" =>
+                {
+                    Some(element)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(settings.len(), 17);
+        for (setting, formatting) in settings.iter().zip(formatting_in_native_order()) {
+            assert_eq!(attribute_preserved(setting, "Type"), Some(formatting.fdx_label));
+            let children = setting
+                .children
+                .iter()
+                .filter_map(|node| match node {
+                    PreservedNode::Element(element) => Some(element),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                children
+                    .iter()
+                    .map(|element| element.name.local_name.as_str())
+                    .collect::<Vec<_>>(),
+                ["FontSpec", "ParagraphSpec", "Behavior", "Outline"]
+            );
+            assert_eq!(attribute_preserved(&children[1], "Type"), Some(formatting.fdx_label));
+        }
+
+        let new_act = settings
+            .iter()
+            .find(|setting| attribute_preserved(setting, "Type") == Some("New Act"))
+            .unwrap_or_else(|| unreachable!());
+        let new_act_paragraph = new_act.children.iter().find_map(|node| match node {
+            PreservedNode::Element(element) if element.name.local_name == "ParagraphSpec" => {
+                Some(element)
+            }
+            _ => None,
+        });
+        assert_eq!(
+            new_act_paragraph.and_then(|element| attribute_preserved(element, "StartsNewPage")),
+            Some("Yes")
+        );
+        let summary = settings
+            .iter()
+            .find(|setting| attribute_preserved(setting, "Type") == Some("Summary"))
+            .unwrap_or_else(|| unreachable!());
+        let summary_font = summary.children.iter().find_map(|node| match node {
+            PreservedNode::Element(element) if element.name.local_name == "FontSpec" => {
+                Some(element)
+            }
+            _ => None,
+        });
+        assert_eq!(
+            summary_font.and_then(|element| attribute_preserved(element, "Color")),
+            Some("#87878F8FE0E0")
+        );
+
+        let blank_reference = read_v6(include_bytes!("../../../.reference/reference.fdx"))
+            .unwrap_or_else(|_| unreachable!());
+        let populated_reference = read_v6(include_bytes!("../../../.reference/reference2.fdx"))
+            .unwrap_or_else(|_| unreachable!());
+        let blank_root = preserved_root(&blank_reference.project);
+        let populated_root = preserved_root(&populated_reference.project);
+        assert_eq!(element_settings_shape(root), element_settings_shape(blank_root));
+        assert_eq!(
+            element_settings_shape(root),
+            element_settings_shape(populated_root)
+        );
+    }
+
+    #[test]
+    fn new_document_layout_defaults_match_after_native_save_and_reopen() {
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        project.elements = [
+            ("action", Role::Action, "before"),
+            ("note", Role::Note, "private note"),
+            ("summary", Role::Summary, "private summary"),
+            ("outline", Role::Outline1, "private outline"),
+            ("act", Role::NewAct, "ACT TWO"),
+            ("after", Role::Action, "after"),
+        ]
+        .into_iter()
+        .map(|(id, role, text)| {
+            ScreenplayElement::new(id, role, text).unwrap_or_else(|_| unreachable!())
+        })
+        .collect();
+
+        let before = crate::layout::ScreenplayLayout::build(&project)
+            .unwrap_or_else(|_| unreachable!());
+        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
+        let after = crate::layout::ScreenplayLayout::build(&reopened.project)
+            .unwrap_or_else(|_| unreachable!());
+
+        let rendered_projection = |layout: &crate::layout::ScreenplayLayout| {
+            layout
+                .pages
+                .iter()
+                .map(|page| {
+                    page.lines
+                        .iter()
+                        .map(|line| (line.element, line.role, line.text.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rendered_projection(&before), rendered_projection(&after));
+        assert_eq!(before.pages.len(), 2);
+        assert_eq!(before.pages[0].lines.len(), 1);
+        assert_eq!(before.pages[0].lines[0].role, Role::Action);
+        assert!(before.pages[1]
+            .lines
+            .iter()
+            .any(|line| line.role == Role::NewAct));
+        assert_eq!(before.pages[1].lines.last().map(|line| line.text.as_str()), Some("after"));
+    }
+
+    #[test]
+    fn imported_custom_element_settings_are_not_filled_or_rewritten() {
+        let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action' VendorSetting='keep'><FontSpec Style='' VendorFontFlag='custom'/><ParagraphSpec StartsNewPage='Yes' VendorParagraphFlag='custom'/></ElementSettings><Content><Paragraph Type='Action' id='source-action'><Text>source action</Text></Paragraph></Content><VendorSection Marker='untouched'/></FinalDraft>";
+        let project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
+        let output = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let output = std::str::from_utf8(&output).unwrap_or("");
+        assert_eq!(output.matches("<ElementSettings ").count(), 1);
+        assert!(output.contains("Type=\"Action\" VendorSetting=\"keep\""));
+        assert!(output.contains("VendorFontFlag=\"custom\""));
+        assert!(output.contains("StartsNewPage=\"Yes\" VendorParagraphFlag=\"custom\""));
+        assert!(output.contains("<VendorSection Marker=\"untouched\"/>"));
+    }
+
+    fn attribute_preserved<'a>(element: &'a PreservedElement, name: &str) -> Option<&'a str> {
+        element
+            .attributes
+            .iter()
+            .find(|attribute| {
+                attribute.name.namespace_uri.is_none() && attribute.name.local_name == name
+            })
+            .map(|attribute| attribute.value.as_str())
+    }
+
+    fn preserved_root(project: &Project) -> &PreservedElement {
+        project
+            .preservation
+            .as_ref()
+            .and_then(|state| state.sections.first())
+            .and_then(|section| {
+                section.children.iter().find_map(|node| match node {
+                    PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => {
+                        Some(element)
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_else(|| unreachable!())
+    }
+
+    fn element_settings_shape(
+        root: &PreservedElement,
+    ) -> Vec<Vec<(String, Vec<(String, String)>)>> {
+        root.children
+            .iter()
+            .filter_map(|node| match node {
+                PreservedNode::Element(element)
+                    if element.name.local_name == "ElementSettings" =>
+                {
+                    Some(element)
+                }
+                _ => None,
+            })
+            .map(|setting| {
+                std::iter::once(setting)
+                    .chain(setting.children.iter().filter_map(|node| match node {
+                        PreservedNode::Element(element) => Some(element),
+                        _ => None,
+                    }))
+                    .map(|element| {
+                        (
+                            element.name.local_name.clone(),
+                            element
+                                .attributes
+                                .iter()
+                                .map(|attribute| {
+                                    (
+                                        attribute.name.local_name.clone(),
+                                        attribute.value.clone(),
+                                    )
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     #[test]

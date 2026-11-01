@@ -5,8 +5,11 @@
 //! character cell is seven units wide and one line is twelve units high.
 
 use crate::{
+    formatting::{
+        formatting_for_role, EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment,
+    },
     validate_layout_inputs, LayoutInputs, ModelError, PrintVisibility, Project, Role,
-    SourceLayoutSettings,
+    SourceLayoutSettings, StableId,
 };
 use std::sync::Arc;
 
@@ -24,6 +27,17 @@ pub struct Rect {
     pub height: u32,
 }
 
+/// Precise signed rectangle in hundredths of a point. `Rect` remains as the
+/// integer compatibility projection; all layout and output consumers use this
+/// representation and its single conversion rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedRect {
+    pub x: FixedPoint,
+    pub y: FixedPoint,
+    pub width: FixedPoint,
+    pub height: FixedPoint,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceRange {
     pub element: usize,
@@ -38,9 +52,77 @@ pub struct LayoutLine {
     pub element: usize,
     pub source: SourceRange,
     pub text: String,
+    /// Display-only text; canonical `text` and source byte ranges are untouched.
+    pub display_text: String,
+    /// Source-character to display-character spans, relative to this line's
+    /// display text and absolute within the canonical element text.
+    pub display_source_map: Vec<DisplaySourceSegment>,
+    pub text_style: EffectiveTextStyle,
+    pub char_width: FixedPoint,
+    /// Text extent after first-line indent and alignment.
+    pub geometry: FixedRect,
+    /// Full paragraph bounds, retained separately for hit testing and measure.
+    pub paragraph_bounds: FixedRect,
+    /// Rounded integer-point compatibility geometry for older callers.
     pub rect: Rect,
     pub keep_with_next: bool,
     pub oversized: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutPurpose {
+    Editor,
+    Print,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplaySourceSegment {
+    pub display_start: usize,
+    pub display_end: usize,
+    pub source_start: usize,
+    pub source_end: usize,
+}
+
+impl LayoutLine {
+    /// Maps a canonical UTF-8 boundary to a display-character boundary. The
+    /// optional trailing choice is used only for an offset inside an expanded
+    /// source scalar; normal editing offsets are always scalar boundaries.
+    pub fn display_char_for_source(&self, source_offset: usize, trailing: bool) -> usize {
+        for segment in &self.display_source_map {
+            if source_offset <= segment.source_start {
+                return segment.display_start;
+            }
+            if source_offset < segment.source_end {
+                return if trailing {
+                    segment.display_end
+                } else {
+                    segment.display_start
+                };
+            }
+            if source_offset == segment.source_end {
+                return segment.display_end;
+            }
+        }
+        self.display_text.chars().count()
+    }
+
+    /// Maps a display caret boundary to the nearest valid canonical boundary.
+    /// Boundaries inside a Unicode uppercase expansion deterministically map
+    /// before the source scalar; the boundary after its final cell maps after.
+    pub fn source_for_display_char(&self, display_char: usize) -> usize {
+        for segment in &self.display_source_map {
+            if display_char <= segment.display_start {
+                return segment.source_start;
+            }
+            if display_char < segment.display_end {
+                return segment.source_start;
+            }
+            if display_char == segment.display_end {
+                return segment.source_end;
+            }
+        }
+        self.source.end
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +133,7 @@ pub struct LayoutPage {
     pub content_bounds: Rect,
     pub lines: Vec<LayoutLine>,
     pub occupied_lines: u32,
-    next_line_y: u32,
+    next_line_y: FixedPoint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +143,7 @@ pub struct ScreenplayLayout {
     pub font_family: String,
     pub char_width: u32,
     pub line_height: u32,
+    pub purpose: LayoutPurpose,
     pub pages: Vec<LayoutPage>,
 }
 
@@ -72,6 +155,7 @@ pub struct LayoutCache {
     revision: Option<u64>,
     inputs: Option<LayoutInputs>,
     source_settings: Option<SourceLayoutSettings>,
+    purpose: Option<LayoutPurpose>,
     layout: Option<Arc<ScreenplayLayout>>,
 }
 
@@ -91,6 +175,21 @@ impl LayoutCache {
         project: &Project,
         inputs: &LayoutInputs,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        self.get_or_build_with_inputs_for_purpose(
+            revision,
+            project,
+            inputs,
+            LayoutPurpose::Editor,
+        )
+    }
+
+    pub fn get_or_build_with_inputs_for_purpose(
+        &mut self,
+        revision: u64,
+        project: &Project,
+        inputs: &LayoutInputs,
+        purpose: LayoutPurpose,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
         let source_settings = project
             .preservation
             .as_ref()
@@ -99,6 +198,7 @@ impl LayoutCache {
         if self.revision == Some(revision)
             && self.inputs.as_ref() == Some(inputs)
             && self.source_settings.as_ref() == Some(&source_settings)
+            && self.purpose == Some(purpose)
         {
             return self
                 .layout
@@ -108,10 +208,13 @@ impl LayoutCache {
                 })
                 .map(|layout| (layout, true));
         }
-        let layout = Arc::new(ScreenplayLayout::build_with_inputs(project, inputs)?);
+        let layout = Arc::new(ScreenplayLayout::build_with_inputs_for_purpose(
+            project, inputs, purpose,
+        )?);
         self.revision = Some(revision);
         self.inputs = Some(inputs.clone());
         self.source_settings = Some(source_settings);
+        self.purpose = Some(purpose);
         self.layout = Some(layout.clone());
         Ok((layout, false))
     }
@@ -154,12 +257,20 @@ impl ScreenplayLayout {
         project: &Project,
         inputs: &LayoutInputs,
     ) -> Result<Self, LayoutError> {
+        Self::build_with_inputs_for_purpose(project, inputs, LayoutPurpose::Editor)
+    }
+
+    pub fn build_with_inputs_for_purpose(
+        project: &Project,
+        inputs: &LayoutInputs,
+        purpose: LayoutPurpose,
+    ) -> Result<Self, LayoutError> {
         let source_settings = project
             .preservation
             .as_ref()
             .map(|preservation| preservation.source_layout_settings.clone())
             .unwrap_or_default();
-        Self::build_with_effective_inputs(project, inputs, &source_settings)
+        Self::build_with_effective_inputs_for_purpose(project, inputs, &source_settings, purpose)
     }
 
     pub fn build_with_effective_inputs(
@@ -167,12 +278,25 @@ impl ScreenplayLayout {
         inputs: &LayoutInputs,
         source_settings: &SourceLayoutSettings,
     ) -> Result<Self, LayoutError> {
+        Self::build_with_effective_inputs_for_purpose(
+            project,
+            inputs,
+            source_settings,
+            LayoutPurpose::Editor,
+        )
+    }
+
+    pub fn build_with_effective_inputs_for_purpose(
+        project: &Project,
+        inputs: &LayoutInputs,
+        source_settings: &SourceLayoutSettings,
+        purpose: LayoutPurpose,
+    ) -> Result<Self, LayoutError> {
         project.validate()?;
         validate_layout_inputs(inputs).map_err(|_| LayoutError {
             kind: LayoutErrorKind::InvalidProfile,
         })?;
         validate_profile(inputs)?;
-        let line_advance = inputs.line_advance;
         let char_width = inputs.char_width;
         let font_family = inputs.font_family.clone();
         let mut output = Self {
@@ -180,26 +304,43 @@ impl ScreenplayLayout {
             source_settings: source_settings.clone(),
             font_family,
             char_width,
-            line_height: line_advance,
+            line_height: inputs.line_advance,
+            purpose,
             pages: Vec::new(),
         };
         if !project.title_page.is_empty() {
             let mut page = output.new_page(true);
             for (index, element) in project.title_page.iter().enumerate() {
+                let paragraph = EffectiveParagraph {
+                    left: FixedPoint::from_points(i64::from(output.inputs.margin_left)),
+                    right: FixedPoint::from_points(i64::from(
+                        output.inputs.paper_width - output.inputs.margin_right,
+                    )),
+                    first_indent: FixedPoint::default(),
+                    alignment: ParagraphAlignment::Left,
+                    space_before: FixedPoint::default(),
+                    line_advance: FixedPoint::from_points(i64::from(output.inputs.line_advance)),
+                    char_width: FixedPoint::from_points(i64::from(output.inputs.char_width)),
+                };
+                let style = plain_title_style(inputs);
                 let lines = wrap_element(
-                    element.text.as_str(),
+                    &element.text,
                     index,
                     element.role,
-                    output
-                        .inputs
-                        .paper_width
-                        .saturating_sub(output.inputs.margin_left)
-                        .saturating_sub(output.inputs.margin_right)
-                        / output.inputs.char_width.max(1),
+                    paragraph,
+                    style,
+                    FixedPoint::from_points(i64::from(output.char_width)),
+                    output.inputs.chars_per_line,
                 );
                 for line in lines {
-                    page.lines.push(output.make_line(&page, line, true));
+                    let laid_out = output.make_line(&page, line, true, page.next_line_y);
+                    page.lines.push(laid_out);
                     page.occupied_lines = page.occupied_lines.saturating_add(1);
+                    page.next_line_y = FixedPoint::from_raw(
+                        page.next_line_y
+                            .raw()
+                            .saturating_add(i64::from(output.inputs.line_advance) * FixedPoint::SCALE),
+                    );
                 }
             }
             output.pages.push(page);
@@ -208,10 +349,13 @@ impl ScreenplayLayout {
             output.pages.push(output.new_page(false));
         }
         for (index, element) in project.elements.iter().enumerate() {
-            if output.source_settings.print_visibility(element.role) == PrintVisibility::Hidden {
+            let text_style = output.source_settings.text_style(element.role);
+            if purpose == LayoutPurpose::Print && text_style.hidden_text {
                 continue;
             }
-            if output.source_settings.starts_new_page(element.role)
+            if output
+                .source_settings
+                .starts_new_page_for_element(element.role, &element.id)
                 && output
                     .pages
                     .last()
@@ -219,9 +363,24 @@ impl ScreenplayLayout {
             {
                 output.pages.push(output.new_page(false));
             }
-            let width = role_width(&output.inputs, element.role);
-            let lines = wrap_element(element.text.as_str(), index, element.role, width);
-            output.place_element(lines, element.role);
+            let paragraph = effective_paragraph(
+                &output.inputs,
+                source_settings,
+                element.role,
+                &element.id,
+                project.legacy_json_state.is_some(),
+                &text_style,
+            );
+            let lines = wrap_element(
+                element.text.as_str(),
+                index,
+                element.role,
+                paragraph,
+                text_style,
+                paragraph.char_width,
+                output.inputs.chars_per_line,
+            );
+            output.place_element(lines, element.role, paragraph);
         }
         if output.pages.is_empty() {
             output.pages.push(output.new_page(false));
@@ -230,14 +389,31 @@ impl ScreenplayLayout {
     }
 
     pub fn hit_test(&self, page: usize, x: u32, y: u32) -> Option<Caret> {
+        self.hit_test_fixed(
+            page,
+            FixedPoint::from_points(i64::from(x)),
+            FixedPoint::from_points(i64::from(y)),
+        )
+    }
+
+    pub fn hit_test_fixed(&self, page: usize, x: FixedPoint, y: FixedPoint) -> Option<Caret> {
         let page = self.pages.get(page)?;
         let line = page.lines.iter().find(|line| {
-            x >= line.rect.x
-                && x <= line.rect.x.saturating_add(line.rect.width)
-                && y >= line.rect.y
-                && y < line.rect.y.saturating_add(line.rect.height)
+            let paragraph_left = line.paragraph_bounds.x.raw();
+            let paragraph_right = paragraph_left.saturating_add(line.paragraph_bounds.width.raw());
+            let text_left = line.geometry.x.raw();
+            let text_right = text_left.saturating_add(line.geometry.width.raw());
+            x.raw() >= paragraph_left.min(text_left)
+                && x.raw() <= paragraph_right.max(text_right)
+                && y.raw() >= line.paragraph_bounds.y.raw()
+                && y.raw()
+                    < line
+                        .paragraph_bounds
+                        .y
+                        .raw()
+                        .saturating_add(line.paragraph_bounds.height.raw())
         })?;
-        Some(self.caret_for_line(line, x as i64))
+        Some(self.caret_for_line(line, x))
     }
 
     /// Hit-test the body as one document-flow domain. `page` and `y` describe
@@ -248,11 +424,27 @@ impl ScreenplayLayout {
         if self.pages.get(page)?.title_page {
             return None;
         }
-        let page_height = i64::from(self.inputs.paper_height);
+        self.nearest_line_hit_test_fixed(
+            page,
+            FixedPoint::from_points(x),
+            FixedPoint::from_points(y),
+        )
+    }
+
+    pub fn nearest_line_hit_test_fixed(
+        &self,
+        page: usize,
+        x: FixedPoint,
+        y: FixedPoint,
+    ) -> Option<Caret> {
+        if self.pages.get(page)?.title_page {
+            return None;
+        }
+        let page_height = i64::from(self.inputs.paper_height).saturating_mul(FixedPoint::SCALE);
         let pointer_y = i64::try_from(page)
             .ok()?
             .saturating_mul(page_height)
-            .saturating_add(y);
+            .saturating_add(y.raw());
         self.pages
             .iter()
             .enumerate()
@@ -266,8 +458,8 @@ impl ScreenplayLayout {
                         let line_y = i64::try_from(page_index)
                             .unwrap_or(i64::MAX)
                             .saturating_mul(page_height)
-                            .saturating_add(i64::from(line.rect.y));
-                        let distance = (pointer_y - line_y).abs();
+                            .saturating_add(line.geometry.y.raw());
+                        let distance = pointer_y.saturating_sub(line_y).saturating_abs();
                         (distance, page_index, line_index, line)
                     })
             })
@@ -279,21 +471,21 @@ impl ScreenplayLayout {
             .map(|(_, _, _, line)| self.caret_for_line(line, x))
     }
 
-    fn caret_for_line(&self, line: &LayoutLine, x: i64) -> Caret {
-        let units = x.saturating_sub(i64::from(line.rect.x)).max(0) as u32;
-        let cells = (units.saturating_add(self.char_width / 2)) / self.char_width.max(1);
-        let offset = line
-            .text
-            .char_indices()
-            .nth(cells as usize)
-            .map_or(line.source.end, |(at, _)| line.source.start + at);
+    fn caret_for_line(&self, line: &LayoutLine, x: FixedPoint) -> Caret {
+        let cell = line.char_width.raw().max(1);
+        let units = x.raw().saturating_sub(line.geometry.x.raw()).max(0);
+        let cells = (units.saturating_add(cell / 2) / cell) as usize;
         Caret {
             element: line.element,
-            offset,
+            offset: line.source_for_display_char(cells),
         }
     }
 
     pub fn caret_rect(&self, caret: Caret) -> Result<Rect, LayoutError> {
+        self.caret_geometry(caret).map(compat_rect)
+    }
+
+    pub fn caret_geometry(&self, caret: Caret) -> Result<FixedRect, LayoutError> {
         for page in &self.pages {
             for line in &page.lines {
                 if line.element == caret.element
@@ -301,14 +493,16 @@ impl ScreenplayLayout {
                     && caret.offset <= line.source.end
                     && is_boundary_in_line(line, caret.offset)
                 {
-                    let columns = line.text[..caret.offset - line.source.start]
-                        .chars()
-                        .count() as u32;
-                    return Ok(Rect {
-                        x: line.rect.x + columns.saturating_mul(self.char_width),
-                        y: line.rect.y,
-                        width: 1,
-                        height: line.rect.height,
+                    let columns = line.display_char_for_source(caret.offset, false);
+                    return Ok(FixedRect {
+                        x: FixedPoint::from_raw(
+                            line.geometry.x.raw().saturating_add(
+                                (columns as i64).saturating_mul(line.char_width.raw()),
+                            ),
+                        ),
+                        y: line.geometry.y,
+                        width: FixedPoint::from_points(1),
+                        height: line.geometry.height,
                     });
                 }
             }
@@ -338,18 +532,52 @@ impl ScreenplayLayout {
             },
             lines: Vec::new(),
             occupied_lines: 0,
-            next_line_y: self.inputs.margin_top,
+            next_line_y: FixedPoint::from_points(i64::from(self.inputs.margin_top)),
         }
     }
 
-    fn make_line(&self, page: &LayoutPage, line: WrappedLine, title_page: bool) -> LayoutLine {
-        let (x, width) = if title_page {
-            (
-                self.inputs.margin_left,
-                self.inputs.paper_width - self.inputs.margin_left - self.inputs.margin_right,
-            )
+    fn make_line(
+        &self,
+        page: &LayoutPage,
+        line: WrappedLine,
+        title_page: bool,
+        y: FixedPoint,
+    ) -> LayoutLine {
+        let indent = if line.first_visual_line {
+            line.paragraph.first_indent
         } else {
-            role_box(&self.inputs, line.role)
+            FixedPoint::default()
+        };
+        let line_left = FixedPoint::from_raw(line.paragraph.left.raw().saturating_add(indent.raw()));
+        let line_width = FixedPoint::from_raw(line.paragraph.right.raw().saturating_sub(line_left.raw()));
+        let text_width = FixedPoint::from_raw(
+            (line.display_text.chars().count() as i64)
+                .saturating_mul(line.char_width.raw()),
+        );
+        let spare = line_width.raw().saturating_sub(text_width.raw()).max(0);
+        let text_x = match line.paragraph.alignment {
+            ParagraphAlignment::Left => line_left,
+            ParagraphAlignment::Right => FixedPoint::from_raw(
+                line.paragraph.right.raw().saturating_sub(text_width.raw()),
+            ),
+            ParagraphAlignment::Center => {
+                FixedPoint::from_raw(line_left.raw().saturating_add(spare / 2))
+            }
+        };
+        let height = line.paragraph.line_advance;
+        let paragraph_bounds = FixedRect {
+            x: line.paragraph.left,
+            y,
+            width: FixedPoint::from_raw(
+                line.paragraph.right.raw().saturating_sub(line.paragraph.left.raw()),
+            ),
+            height,
+        };
+        let geometry = FixedRect {
+            x: text_x,
+            y,
+            width: text_width,
+            height,
         };
         LayoutLine {
             page: page.number,
@@ -361,18 +589,24 @@ impl ScreenplayLayout {
                 end: line.end,
             },
             text: line.text,
-            rect: Rect {
-                x,
-                y: page.next_line_y,
-                width,
-                height: self.inputs.line_advance,
-            },
+            display_text: line.display_text,
+            display_source_map: line.display_source_map,
+            text_style: line.text_style,
+            char_width: line.char_width,
+            geometry,
+            paragraph_bounds,
+            rect: compat_rect(paragraph_bounds),
             keep_with_next: !title_page && keep_with_next(line.role),
             oversized: line.oversized,
         }
     }
 
-    fn place_element(&mut self, lines: Vec<WrappedLine>, role: Role) {
+    fn place_element(
+        &mut self,
+        lines: Vec<WrappedLine>,
+        role: Role,
+        paragraph: EffectiveParagraph,
+    ) {
         let keep = keep_with_next(role);
         let minimum = if keep { 2 } else { 1 };
         if self.pages.is_empty() {
@@ -380,48 +614,61 @@ impl ScreenplayLayout {
         }
         let capacity = self.inputs.lines_per_page as usize;
         let has_boundary = self.pages.last().is_some_and(|page| !page.lines.is_empty());
-        let previous_role = self
-            .pages
-            .last()
-            .and_then(|page| page.lines.last())
-            .map(|line| line.role);
-        let extra_gap = previous_role
-            .map(|previous| role_boundary_gap(&self.inputs, previous, role))
-            .unwrap_or(0);
+        let extra_gap = if has_boundary {
+            paragraph.space_before.raw().max(0)
+        } else {
+            0
+        };
+        let content_bottom = FixedPoint::from_points(
+            i64::from(self.inputs.paper_height.saturating_sub(self.inputs.margin_bottom)),
+        );
+        let minimum_height = paragraph
+            .line_advance
+            .raw()
+            .saturating_mul(minimum as i64);
+        let vertical_fit = self.pages.last().is_some_and(|page| {
+            page.next_line_y
+                .raw()
+                .saturating_add(extra_gap)
+                .saturating_add(minimum_height)
+                <= content_bottom.raw()
+        });
         if !lines.is_empty()
             && !self.pages.last().is_some_and(|page| page.title_page)
             && has_boundary
-            && self
-                .pages
-                .last()
-                .map_or(0, |page| page.occupied_lines as usize)
+            && (self.pages.last().map_or(0, |page| page.occupied_lines as usize)
                 .saturating_add(minimum)
-                .saturating_add(usize::from(extra_gap > 0))
                 > capacity
+                || !vertical_fit)
         {
             self.pages.push(self.new_page(false));
         }
-        if has_boundary && self.pages.last().is_some_and(|page| !page.lines.is_empty()) {
-            // The boundary gap is point geometry, not a count of whole line
-            // boxes. Keep it exact even when it is not a multiple of the
-            // profile's line advance.
+        let applied_gap = if has_boundary && self.pages.last().is_some_and(|page| !page.lines.is_empty()) {
             if let Some(page) = self.pages.last_mut() {
-                page.next_line_y = page.next_line_y.saturating_add(extra_gap);
-                // Keep pagination's existing logical line-capacity contract
-                // while the cursor above retains the exact point distance.
-                page.occupied_lines = page
-                    .occupied_lines
-                    .saturating_add(usize::from(extra_gap > 0) as u32);
+                page.next_line_y = FixedPoint::from_raw(
+                    page.next_line_y.raw().saturating_add(extra_gap),
+                );
             }
-        }
-        let oversized_element = lines.len() > capacity;
+            extra_gap
+        } else {
+            0
+        };
+        let total_height = paragraph
+            .line_advance
+            .raw()
+            .saturating_mul(lines.len().min(i64::MAX as usize) as i64)
+            .saturating_add(applied_gap);
+        let content_height = content_bottom.raw()
+            - FixedPoint::from_points(i64::from(self.inputs.margin_top)).raw();
+        let oversized_element = lines.len() > capacity || total_height > content_height;
         for wrapped in lines {
-            let full = self
-                .pages
-                .last()
-                .map_or(0, |page| page.occupied_lines as usize)
-                >= capacity;
-            if full {
+            let current_fits = self.pages.last().is_some_and(|page| {
+                (page.occupied_lines as usize) < capacity
+                    && (page.lines.is_empty()
+                        || page.next_line_y.raw().saturating_add(paragraph.line_advance.raw())
+                            <= content_bottom.raw())
+            });
+            if !current_fits {
                 self.pages.push(self.new_page(false));
             }
             let page_index = self.pages.len() - 1;
@@ -431,13 +678,16 @@ impl ScreenplayLayout {
             let page = self.pages[page_index].clone();
             let mut wrapped = wrapped;
             wrapped.oversized |= oversized_element;
-            let line = self.make_line(&page, wrapped, false);
+            let line = self.make_line(&page, wrapped, false, page.next_line_y);
             self.pages[page_index].lines.push(line);
             self.pages[page_index].occupied_lines =
                 self.pages[page_index].occupied_lines.saturating_add(1);
-            self.pages[page_index].next_line_y = self.pages[page_index]
-                .next_line_y
-                .saturating_add(self.inputs.line_advance);
+            self.pages[page_index].next_line_y = FixedPoint::from_raw(
+                self.pages[page_index]
+                    .next_line_y
+                    .raw()
+                    .saturating_add(paragraph.line_advance.raw()),
+            );
         }
     }
 }
@@ -449,7 +699,24 @@ struct WrappedLine {
     start: usize,
     end: usize,
     text: String,
+    display_text: String,
+    display_source_map: Vec<DisplaySourceSegment>,
+    text_style: EffectiveTextStyle,
+    char_width: FixedPoint,
+    first_visual_line: bool,
+    paragraph: EffectiveParagraph,
     oversized: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EffectiveParagraph {
+    left: FixedPoint,
+    right: FixedPoint,
+    first_indent: FixedPoint,
+    alignment: ParagraphAlignment,
+    space_before: FixedPoint,
+    line_advance: FixedPoint,
+    char_width: FixedPoint,
 }
 
 fn validate_profile(inputs: &LayoutInputs) -> Result<(), LayoutError> {
@@ -475,28 +742,135 @@ fn validate_profile(inputs: &LayoutInputs) -> Result<(), LayoutError> {
     Ok(())
 }
 
-fn role_width(inputs: &LayoutInputs, role: Role) -> u32 {
-    let (_, width) = role_box(inputs, role);
-    inputs
-        .chars_per_line
-        .min(width / inputs.char_width.max(1))
-        .max(1)
+fn effective_paragraph(
+    inputs: &LayoutInputs,
+    source: &SourceLayoutSettings,
+    role: Role,
+    element_id: &StableId,
+    legacy_json_profile: bool,
+    text_style: &EffectiveTextStyle,
+) -> EffectiveParagraph {
+    let native = formatting_for_role(role).paragraph;
+    let fallback_left = FixedPoint::from_points(i64::from(inputs.margin_left));
+    let fallback_right = FixedPoint::from_points(
+        i64::from(inputs.paper_width.saturating_sub(inputs.margin_right)),
+    );
+    let default_left = FixedPoint::parse_inches(native.left_indent).unwrap_or(fallback_left);
+    let default_right = FixedPoint::parse_inches(native.right_indent).unwrap_or(fallback_right);
+    let projected = source.paragraph_spec(role);
+    let direct = source.direct_paragraph_spec(element_id).paragraph;
+    let mut left = projected.left_indent.unwrap_or(default_left);
+    let mut right = projected.right_indent.unwrap_or(default_right);
+
+    // Legacy JSON's explicit role boxes remain a transient compatibility input.
+    // The reference-derived defaults, rather than those historical boxes, drive
+    // all FDX sessions and ordinary new documents.
+    let legacy_defaults = LayoutInputs::default();
+    let role_box = inputs.role_box(role);
+    let legacy_box = role_box.filter(|box_| {
+        legacy_json_profile
+            || legacy_defaults
+                .role_box(role)
+                .map_or(true, |default| *box_ != default)
+    });
+    if let Some(box_) = legacy_box {
+        left = FixedPoint::from_points(i64::from(box_.x));
+        right = FixedPoint::from_points(i64::from(box_.x.saturating_add(box_.width)));
+    }
+
+    let page_right = FixedPoint::from_points(i64::from(inputs.paper_width));
+    if left.raw() < 0 || right <= left || right > page_right {
+        left = default_left;
+        right = default_right;
+    }
+    if left.raw() < 0 || right <= left || right > page_right {
+        left = fallback_left;
+        right = fallback_right;
+    }
+
+    // Direct bounds are a pair at the geometry-validation boundary. If their
+    // combination is unusable, discard that direct pair and retain the already
+    // resolved role/default pair rather than losing a valid role override.
+    let direct_left = direct.left_indent.unwrap_or(left);
+    let direct_right = direct.right_indent.unwrap_or(right);
+    if direct_left.raw() >= 0 && direct_right > direct_left && direct_right <= page_right {
+        left = direct_left;
+        right = direct_right;
+    }
+
+    let default_indent = FixedPoint::parse_inches(native.first_indent).unwrap_or_default();
+    let char_width = i64::from(inputs.char_width.max(1)).saturating_mul(FixedPoint::SCALE);
+    let usable = right.raw().saturating_sub(left.raw());
+    let indent_fits = |indent: FixedPoint| {
+        left.raw().saturating_add(indent.raw()) >= 0
+            && usable.saturating_sub(indent.raw()) >= char_width
+    };
+    let role_indent = projected.first_indent.unwrap_or(default_indent);
+    let role_indent = if indent_fits(role_indent) {
+        role_indent
+    } else if indent_fits(default_indent) {
+        default_indent
+    } else {
+        FixedPoint::default()
+    };
+    let first_indent = direct
+        .first_indent
+        .filter(|indent| indent_fits(*indent))
+        .unwrap_or(role_indent);
+
+    let default_alignment = match native.alignment {
+        "Right" => ParagraphAlignment::Right,
+        "Center" => ParagraphAlignment::Center,
+        _ => ParagraphAlignment::Left,
+    };
+    let alignment = direct
+        .alignment
+        .or(projected.alignment)
+        .unwrap_or(default_alignment);
+    let default_space = FixedPoint::from_points(i64::from(native.space_before));
+    let space_before = direct
+        .space_before
+        .or(projected.space_before)
+        .unwrap_or(default_space);
+    let scaled_metric = |base: u32| {
+        let numerator = i64::from(base)
+            .saturating_mul(i64::from(text_style.size))
+            .saturating_mul(FixedPoint::SCALE);
+        FixedPoint::from_raw(numerator.saturating_add(6).div_euclid(12).max(1))
+    };
+    EffectiveParagraph {
+        left,
+        right,
+        first_indent,
+        alignment,
+        space_before,
+        line_advance: scaled_metric(inputs.line_advance),
+        char_width: scaled_metric(inputs.char_width),
+    }
 }
 
-fn role_box(inputs: &LayoutInputs, role: Role) -> (u32, u32) {
-    if let Some(box_) = inputs.role_box(role) {
-        return (box_.x, box_.width);
+fn plain_title_style(inputs: &LayoutInputs) -> EffectiveTextStyle {
+    EffectiveTextStyle {
+        declared_family: inputs.font_family.clone(),
+        family: FontFallback::CourierPrime,
+        size: inputs.font_size.clamp(1, 72) as u8,
+        bold: false,
+        italic: false,
+        underline: false,
+        all_caps: false,
+        hidden_text: false,
+        source_color: None,
     }
-    // New roles have no asserted ScriptCraft geometry yet. Use the full text
-    // area as a neutral layout fallback without changing their semantic role.
-    (
-        inputs.margin_left,
-        inputs
-            .paper_width
-            .saturating_sub(inputs.margin_left)
-            .saturating_sub(inputs.margin_right)
-            .max(1),
-    )
+}
+
+fn compat_rect(rect: FixedRect) -> Rect {
+    let rounded = |value: FixedPoint| value.rounded_points().clamp(0, i64::from(u32::MAX)) as u32;
+    Rect {
+        x: rounded(rect.x),
+        y: rounded(rect.y),
+        width: rounded(rect.width),
+        height: rounded(rect.height),
+    }
 }
 
 fn keep_with_next(role: Role) -> bool {
@@ -506,14 +880,6 @@ fn keep_with_next(role: Role) -> bool {
     )
 }
 
-fn role_boundary_gap(inputs: &LayoutInputs, _previous: Role, next: Role) -> u32 {
-    if matches!(next, Role::Dialogue | Role::Parenthetical) {
-        0
-    } else {
-        inputs.boundary_gap
-    }
-}
-
 fn is_boundary_in_line(line: &LayoutLine, offset: usize) -> bool {
     if offset == line.source.start || offset == line.source.end {
         return true;
@@ -521,9 +887,33 @@ fn is_boundary_in_line(line: &LayoutLine, offset: usize) -> bool {
     line.text.is_char_boundary(offset - line.source.start)
 }
 
-fn wrap_element(text: &str, element: usize, role: Role, width: u32) -> Vec<WrappedLine> {
-    let limit = width.max(1) as usize;
+fn wrap_element(
+    text: &str,
+    element: usize,
+    role: Role,
+    paragraph: EffectiveParagraph,
+    text_style: EffectiveTextStyle,
+    char_width: FixedPoint,
+    max_chars: u32,
+) -> Vec<WrappedLine> {
+    let cell = char_width.raw().max(1);
+    let first_left = paragraph.left.raw().saturating_add(paragraph.first_indent.raw());
+    let first_limit = paragraph
+        .right
+        .raw()
+        .saturating_sub(first_left)
+        .div_euclid(cell)
+        .min(max_chars.max(1) as i64)
+        .max(1) as usize;
+    let rest_limit = paragraph
+        .right
+        .raw()
+        .saturating_sub(paragraph.left.raw())
+        .div_euclid(cell)
+        .min(max_chars.max(1) as i64)
+        .max(1) as usize;
     let mut output = Vec::new();
+    let mut first_visual_line = true;
     let mut paragraph_start = 0;
     let mut delimiters = text.char_indices().peekable();
     while let Some((newline, delimiter)) = delimiters.next() {
@@ -535,7 +925,12 @@ fn wrap_element(text: &str, element: usize, role: Role, width: u32) -> Vec<Wrapp
             paragraph_start,
             element,
             role,
-            limit,
+            first_limit,
+            rest_limit,
+            paragraph,
+            &text_style,
+            char_width,
+            &mut first_visual_line,
             &mut output,
         );
         paragraph_start = newline + delimiter.len_utf8();
@@ -549,7 +944,12 @@ fn wrap_element(text: &str, element: usize, role: Role, width: u32) -> Vec<Wrapp
         paragraph_start,
         element,
         role,
-        limit,
+        first_limit,
+        rest_limit,
+        paragraph,
+        &text_style,
+        char_width,
+        &mut first_visual_line,
         &mut output,
     );
     if output.is_empty() {
@@ -559,10 +959,25 @@ fn wrap_element(text: &str, element: usize, role: Role, width: u32) -> Vec<Wrapp
             start: 0,
             end: 0,
             text: String::new(),
+            display_text: String::new(),
+            display_source_map: Vec::new(),
+            text_style,
+            char_width,
+            first_visual_line: true,
+            paragraph,
             oversized: false,
         });
     }
     output
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DisplayCell {
+    character: char,
+    local_start: usize,
+    local_end: usize,
+    source_start: usize,
+    source_end: usize,
 }
 
 fn wrap_segment(
@@ -570,7 +985,12 @@ fn wrap_segment(
     base: usize,
     element: usize,
     role: Role,
-    limit: usize,
+    first_limit: usize,
+    rest_limit: usize,
+    paragraph: EffectiveParagraph,
+    text_style: &EffectiveTextStyle,
+    char_width: FixedPoint,
+    first_visual_line: &mut bool,
     output: &mut Vec<WrappedLine>,
 ) {
     if text.is_empty() {
@@ -580,44 +1000,108 @@ fn wrap_segment(
             start: base,
             end: base,
             text: String::new(),
+            display_text: String::new(),
+            display_source_map: Vec::new(),
+            text_style: text_style.clone(),
+            char_width,
+            first_visual_line: *first_visual_line,
+            paragraph,
             oversized: false,
         });
+        *first_visual_line = false;
         return;
     }
-    let mut start = 0;
-    while start < text.len() && output.len() < MAX_LINES_PER_ELEMENT {
-        let mut end = text.len();
-        let mut count = 0;
-        for (at, _) in text[start..].char_indices() {
-            if count == limit {
-                end = start + at;
-                break;
-            }
-            count += 1;
+    let mut cells = Vec::new();
+    for (local_start, source_character) in text.char_indices() {
+        let local_end = local_start + source_character.len_utf8();
+        let source_start = base + local_start;
+        let source_end = base + local_end;
+        if text_style.all_caps {
+            cells.extend(source_character.to_uppercase().map(|character| DisplayCell {
+                character,
+                local_start,
+                local_end,
+                source_start,
+                source_end,
+            }));
+        } else {
+            cells.push(DisplayCell {
+                character: source_character,
+                local_start,
+                local_end,
+                source_start,
+                source_end,
+            });
         }
-        if end == text.len() {
-            end = text.len();
-        } else if let Some(space) = text[start..end].rfind(char::is_whitespace) {
-            let candidate = start + space + 1;
-            if candidate > start {
-                end = candidate;
+    }
+    let mut start = 0;
+    while start < cells.len() && output.len() < MAX_LINES_PER_ELEMENT {
+        let first_line = *first_visual_line;
+        let limit = if first_line { first_limit } else { rest_limit };
+        let mut hard_end = (start + limit).min(cells.len());
+        while hard_end < cells.len()
+            && hard_end > start
+            && cells[hard_end - 1].source_start == cells[hard_end].source_start
+        {
+            hard_end += 1;
+        }
+        let mut end = hard_end;
+        if hard_end < cells.len() {
+            if let Some(space) = (start..hard_end)
+                .rev()
+                .find(|index| cells[*index].character.is_whitespace())
+            {
+                end = space + 1;
             }
         }
         if end <= start {
-            end = text[start..]
-                .char_indices()
-                .nth(1)
-                .map_or(text.len(), |(at, _)| start + at);
+            end = (start + 1).min(cells.len());
         }
-        let source = &text[start..end];
+        let selected = &cells[start..end];
+        let first_cell = selected.first().copied().unwrap_or(DisplayCell {
+            character: '\0',
+            local_start: 0,
+            local_end: 0,
+            source_start: base,
+            source_end: base,
+        });
+        let last_cell = selected.last().copied().unwrap_or(first_cell);
+        let source_start = first_cell.source_start;
+        let source_end = last_cell.source_end;
+        let mut display_text = String::new();
+        let mut display_source_map: Vec<DisplaySourceSegment> = Vec::new();
+        for (display_index, cell) in selected.iter().enumerate() {
+            display_text.push(cell.character);
+            if let Some(previous) = display_source_map.last_mut() {
+                if previous.source_start == cell.source_start
+                    && previous.source_end == cell.source_end
+                {
+                    previous.display_end = display_index + 1;
+                    continue;
+                }
+            }
+            display_source_map.push(DisplaySourceSegment {
+                display_start: display_index,
+                display_end: display_index + 1,
+                source_start: cell.source_start,
+                source_end: cell.source_end,
+            });
+        }
         output.push(WrappedLine {
             element,
             role,
-            start: base + start,
-            end: base + end,
-            text: source.to_owned(),
-            oversized: count > limit,
+            start: source_start,
+            end: source_end,
+            text: text[first_cell.local_start..last_cell.local_end].to_owned(),
+            display_text,
+            display_source_map,
+            text_style: text_style.clone(),
+            char_width,
+            first_visual_line: first_line,
+            paragraph,
+            oversized: selected.len() > limit,
         });
+        *first_visual_line = false;
         start = end;
     }
 }
@@ -676,7 +1160,7 @@ mod tests {
         assert_eq!(page.content_bounds.y, 72);
         assert_eq!(page.content_bounds.width, 432);
         assert_eq!(page.content_bounds.height, 648);
-        assert_eq!(page.lines[0].rect.x, 259);
+        assert_eq!(page.lines[0].rect.x, 252);
         assert!(page
             .lines
             .iter()
@@ -684,7 +1168,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_role_edges_are_point_based_and_notes_inherit_action() {
+    fn native_role_paragraph_bounds_use_fractional_reference_geometry() {
         let p = project(&[
             (Role::SceneHeading, "scene"),
             (Role::Action, "action"),
@@ -694,15 +1178,196 @@ mod tests {
             (Role::Dialogue, "hello"),
             (Role::Transition, "CUT TO:"),
         ]);
-        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let mut visible = SourceLayoutSettings::default();
+        visible.role_print_visibility[crate::formatting::role_index(Role::Note)] =
+            Some(PrintVisibility::Visible);
+        let layout = ScreenplayLayout::build_with_effective_inputs(
+            &p,
+            &LayoutInputs::default(),
+            &visible,
+        )
+        .unwrap_or_else(|_| unreachable!());
         let boxes: Vec<_> = layout.pages.iter().flat_map(|p| &p.lines).collect();
         assert_eq!((boxes[0].rect.x, boxes[0].rect.width), (108, 432));
         assert_eq!((boxes[1].rect.x, boxes[1].rect.width), (108, 432));
-        assert_eq!((boxes[2].rect.x, boxes[2].rect.width), (108, 432));
-        assert_eq!((boxes[3].rect.x, boxes[3].rect.width), (259, 175));
+        assert_eq!((boxes[2].rect.x, boxes[2].rect.width), (117, 423));
+        assert_eq!((boxes[3].rect.x, boxes[3].rect.width), (252, 270));
         assert_eq!((boxes[4].rect.x, boxes[4].rect.width), (216, 180));
-        assert_eq!((boxes[5].rect.x, boxes[5].rect.width), (180, 216));
-        assert_eq!((boxes[6].rect.x, boxes[6].rect.width), (432, 108));
+        assert_eq!((boxes[5].rect.x, boxes[5].rect.width), (180, 252));
+        assert_eq!((boxes[6].rect.x, boxes[6].rect.width), (396, 115));
+    }
+
+    #[test]
+    fn every_role_uses_its_typed_native_paragraph_measure() {
+        let roles_and_text = Role::ALL.map(|role| (role, "x"));
+        let p = project(&roles_and_text);
+        let mut all_visible = SourceLayoutSettings::default();
+        for role in Role::ALL {
+            all_visible.role_print_visibility[crate::formatting::role_index(role)] =
+                Some(PrintVisibility::Visible);
+        }
+        let layout = ScreenplayLayout::build_with_effective_inputs(
+            &p,
+            &LayoutInputs::default(),
+            &all_visible,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        for role in Role::ALL {
+            let line = layout
+                .pages
+                .iter()
+                .flat_map(|page| &page.lines)
+                .find(|line| line.role == role)
+                .unwrap_or_else(|| unreachable!());
+            let spec = formatting_for_role(role).paragraph;
+            let left = FixedPoint::parse_inches(spec.left_indent).unwrap_or_default();
+            let right = FixedPoint::parse_inches(spec.right_indent).unwrap_or_default();
+            assert_eq!(line.paragraph_bounds.x, left, "{role:?} left bound");
+            assert_eq!(line.paragraph_bounds.width.raw(), right.raw() - left.raw());
+        }
+    }
+
+    #[test]
+    fn alignment_first_indent_and_space_before_use_precise_text_geometry() {
+        let p = project(&[
+            (Role::Transition, "CUT"),
+            (Role::NewAct, "ACT"),
+            (Role::Parenthetical, "abcdefghijklmnopqrstuvwxyz1234"),
+        ]);
+        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let transition = layout
+            .pages
+            .iter()
+            .flat_map(|page| &page.lines)
+            .find(|line| line.role == Role::Transition)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(transition.geometry.x.raw(), 51_120 - 3 * 7 * 100);
+        assert_eq!(transition.source.start, 0);
+
+        let new_act = layout
+            .pages
+            .iter()
+            .flat_map(|page| &page.lines)
+            .find(|line| line.role == Role::NewAct)
+            .unwrap_or_else(|| unreachable!());
+        let center_left = FixedPoint::from_points(72).raw();
+        let center_right = FixedPoint::from_points(540).raw();
+        let text_width = 3 * 7 * 100;
+        assert_eq!(
+            new_act.geometry.x.raw(),
+            center_left + (center_right - center_left - text_width) / 2
+        );
+        assert_eq!(new_act.page, 1);
+        assert_eq!(new_act.geometry.y, FixedPoint::from_points(72));
+
+        let parenthetical = layout
+            .pages
+            .iter()
+            .flat_map(|page| &page.lines)
+            .filter(|line| line.role == Role::Parenthetical)
+            .collect::<Vec<_>>();
+        assert_eq!(parenthetical.len(), 2);
+        assert_eq!(parenthetical[0].geometry.x.raw(), 20_880);
+        assert_eq!(parenthetical[1].geometry.x.raw(), 21_600);
+        assert_eq!(parenthetical[0].source.start, 0);
+        assert_eq!(parenthetical[1].source.end, p.elements[2].text.len());
+    }
+
+    #[test]
+    fn empty_aligned_paragraphs_have_stable_caret_anchors() {
+        let p = project(&[(Role::NewAct, ""), (Role::Transition, "")]);
+        let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+        let center = layout.pages[0].lines[0].geometry.x;
+        assert_eq!(center, FixedPoint::from_points(306));
+        let center_caret = layout
+            .caret_geometry(Caret {
+                element: 0,
+                offset: 0,
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(center_caret.x, center);
+
+        let transition = layout
+            .pages
+            .iter()
+            .flat_map(|page| &page.lines)
+            .find(|line| line.role == Role::Transition)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(transition.geometry.x.raw(), 51_120);
+        let right_caret = layout
+            .caret_geometry(Caret {
+                element: transition.element,
+                offset: 0,
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(right_caret.x, transition.geometry.x);
+    }
+
+    #[test]
+    fn incoming_role_space_before_is_used_and_suppressed_on_new_page() {
+        for role in Role::ALL {
+            let p = project(&[(Role::General, "before"), (role, "after")]);
+            let mut all_visible = SourceLayoutSettings::default();
+            for visible_role in Role::ALL {
+                all_visible.role_print_visibility[crate::formatting::role_index(visible_role)] =
+                    Some(PrintVisibility::Visible);
+            }
+            let layout = ScreenplayLayout::build_with_effective_inputs(
+                &p,
+                &LayoutInputs::default(),
+                &all_visible,
+            )
+            .unwrap_or_else(|_| unreachable!());
+            let lines = layout
+                .pages
+                .iter()
+                .flat_map(|page| &page.lines)
+                .collect::<Vec<_>>();
+            let incoming = lines
+                .iter()
+                .find(|line| line.element == 1)
+                .unwrap_or_else(|| unreachable!());
+            if formatting_for_role(role).paragraph.starts_new_page {
+                assert_eq!(incoming.page, 1);
+                assert_eq!(incoming.geometry.y, FixedPoint::from_points(72));
+            } else {
+                let previous = lines
+                    .iter()
+                    .find(|line| line.element == 0)
+                    .unwrap_or_else(|| unreachable!());
+                assert_eq!(incoming.page, previous.page);
+                assert_eq!(
+                    incoming.geometry.y.raw() - previous.geometry.y.raw(),
+                    (12 + i64::from(formatting_for_role(role).paragraph.space_before))
+                        * FixedPoint::SCALE
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn imported_page_start_yes_and_no_override_role_defaults() {
+        let imported = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><ParagraphSpec StartsNewPage='Yes'/></ElementSettings><ElementSettings Type='New Act'><ParagraphSpec StartsNewPage='No'/></ElementSettings><Content><Paragraph Type='General' id='g'><Text>before</Text></Paragraph><Paragraph Type='Action' id='a'><Text>forced</Text></Paragraph><Paragraph Type='New Act' id='n'><Text>continued</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let layout = ScreenplayLayout::build(&imported.project).unwrap_or_else(|_| unreachable!());
+        let action = layout
+            .pages
+            .iter()
+            .flat_map(|page| &page.lines)
+            .find(|line| line.role == Role::Action)
+            .unwrap_or_else(|| unreachable!());
+        let new_act = layout
+            .pages
+            .iter()
+            .flat_map(|page| &page.lines)
+            .find(|line| line.role == Role::NewAct)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(action.page, 1);
+        assert_eq!(action.geometry.y, FixedPoint::from_points(72));
+        assert_eq!(new_act.page, action.page);
+        assert_eq!(new_act.geometry.y.raw() - action.geometry.y.raw(), 24 * FixedPoint::SCALE);
     }
 
     #[test]
@@ -808,9 +1473,21 @@ mod tests {
         for (index, box_) in boxes[crate::LEGACY_ROLE_BOX_COUNT..].iter().enumerate() {
             inputs.additional_role_boxes[index] = Some(*box_);
         }
+        let mut all_roles_visible = SourceLayoutSettings::default();
+        for role in Role::ALL {
+            let index = Role::ALL
+                .iter()
+                .position(|candidate| *candidate == role)
+                .unwrap_or_else(|| unreachable!());
+            all_roles_visible.role_print_visibility[index] = Some(PrintVisibility::Visible);
+        }
 
-        let layout =
-            ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
+        let layout = ScreenplayLayout::build_with_effective_inputs(
+            &p,
+            &inputs,
+            &all_roles_visible,
+        )
+        .unwrap_or_else(|_| unreachable!());
         let lines = layout
             .pages
             .iter()
@@ -842,35 +1519,122 @@ mod tests {
         let mut cache = LayoutCache::default();
         let inputs = LayoutInputs::default();
         let (visible_layout, hit) = cache
-            .get_or_build_with_inputs(4, &visible.project, &inputs)
+            .get_or_build_with_inputs_for_purpose(
+                4,
+                &visible.project,
+                &inputs,
+                LayoutPurpose::Editor,
+            )
             .unwrap_or_else(|_| unreachable!());
         assert!(!hit);
         assert_eq!(visible_layout.pages[0].lines.len(), 1);
 
         let (hidden_layout, hit) = cache
-            .get_or_build_with_inputs(4, &hidden.project, &inputs)
+            .get_or_build_with_inputs_for_purpose(
+                4,
+                &hidden.project,
+                &inputs,
+                LayoutPurpose::Editor,
+            )
             .unwrap_or_else(|_| unreachable!());
         assert!(!hit);
-        assert!(hidden_layout.pages[0].lines.is_empty());
+        assert_eq!(hidden_layout.pages[0].lines.len(), 1);
+        assert!(hidden_layout.pages[0].lines[0].text_style.hidden_text);
+        let (print_layout, print_hit) = cache
+            .get_or_build_with_inputs_for_purpose(
+                4,
+                &hidden.project,
+                &inputs,
+                LayoutPurpose::Print,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!print_hit);
+        assert!(print_layout.pages[0].lines.is_empty());
     }
 
     #[test]
-    fn non_multiple_boundary_gap_is_preserved_as_point_geometry() {
+    fn cache_key_tracks_imported_paragraph_geometry_projection() {
+        let wider = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><ParagraphSpec LeftIndent='1.50' RightIndent='7.50'/></ElementSettings><Content><Paragraph Type='Action' id='a'><Text>same</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let indented = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><ParagraphSpec LeftIndent='0.88' RightIndent='7.50'/></ElementSettings><Content><Paragraph Type='Action' id='a'><Text>same</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(wider.project.elements, indented.project.elements);
+
+        let mut cache = LayoutCache::default();
+        let inputs = LayoutInputs::default();
+        let (first, first_hit) = cache
+            .get_or_build_with_inputs(9, &wider.project, &inputs)
+            .unwrap_or_else(|_| unreachable!());
+        let (second, second_hit) = cache
+            .get_or_build_with_inputs(9, &indented.project, &inputs)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!first_hit);
+        assert!(!second_hit);
+        assert_ne!(first.pages[0].lines[0].geometry.x, second.pages[0].lines[0].geometry.x);
+        assert_eq!(second.pages[0].lines[0].geometry.x.raw(), 6_336);
+    }
+
+    #[test]
+    fn invalid_imported_bound_pair_falls_back_to_both_native_bounds() {
+        let imported = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><ParagraphSpec LeftIndent='5.00' RightIndent='4.00' FirstIndent='NaN'/></ElementSettings><Content><Paragraph Type='Action' id='a'><Text>same</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let layout = ScreenplayLayout::build(&imported.project).unwrap_or_else(|_| unreachable!());
+        assert_eq!(layout.pages[0].lines[0].paragraph_bounds.x.raw(), 10_800);
+        assert_eq!(layout.pages[0].lines[0].paragraph_bounds.width.raw(), 43_200);
+        assert_eq!(
+            imported
+                .project
+                .preservation
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .source_layout_settings()
+                .paragraph_spec(Role::Action)
+                .first_indent,
+            None
+        );
+    }
+
+    #[test]
+    fn imported_alignment_fractional_indent_and_decimal_spacing_are_effective() {
+        let imported = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><ParagraphSpec Alignment='Center' FirstIndent='-0.10' LeftIndent='0.88' RightIndent='7.50' SpaceBefore='14.25' Leading='Regular' Spacing='1'/></ElementSettings><Content><Paragraph Type='Action' id='a'><Text>a</Text></Paragraph><Paragraph Type='Action' id='b'><Text>b</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let canonical = imported.project.elements[0].text.clone();
+        let layout = ScreenplayLayout::build(&imported.project).unwrap_or_else(|_| unreachable!());
+        let first = &layout.pages[0].lines[0];
+        let second = &layout.pages[0].lines[1];
+        assert_eq!(first.text, canonical);
+        assert_eq!(first.source.start, 0);
+        assert_eq!(first.source.end, 1);
+        assert_eq!(first.paragraph_bounds.x.raw(), 6_336);
+        assert_eq!(first.geometry.x.raw(), 29_458);
+        assert_eq!(second.geometry.y.raw() - first.geometry.y.raw(), 2_625);
+        assert_eq!(
+            imported.project.preservation.as_ref().unwrap_or_else(|| unreachable!())
+                .source.original_bytes,
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><ParagraphSpec Alignment='Center' FirstIndent='-0.10' LeftIndent='0.88' RightIndent='7.50' SpaceBefore='14.25' Leading='Regular' Spacing='1'/></ElementSettings><Content><Paragraph Type='Action' id='a'><Text>a</Text></Paragraph><Paragraph Type='Action' id='b'><Text>b</Text></Paragraph></Content></FinalDraft>"
+        );
+    }
+
+    #[test]
+    fn native_role_space_before_is_preserved_as_point_geometry() {
         let p = project(&[(Role::Action, "first"), (Role::Action, "second")]);
         let inputs = LayoutInputs {
             line_advance: 14,
-            boundary_gap: 10,
             ..LayoutInputs::default()
         };
         let layout =
             ScreenplayLayout::build_with_inputs(&p, &inputs).unwrap_or_else(|_| unreachable!());
         let lines = &layout.pages[0].lines;
         assert_eq!(lines[0].rect.y, 72);
-        assert_eq!(lines[1].rect.y - lines[0].rect.y, 24);
-        assert_eq!(
-            lines[1].rect.y,
-            lines[0].rect.y + inputs.line_advance + inputs.boundary_gap
-        );
+        assert_eq!(lines[1].rect.y - lines[0].rect.y, 26);
     }
 
     #[test]
@@ -897,7 +1661,7 @@ mod tests {
     }
 
     #[test]
-    fn every_incoming_dialogue_or_parenthetical_has_no_extra_gap() {
+    fn native_dialogue_and_parenthetical_space_before_is_zero() {
         let predecessors = [
             Role::SceneHeading,
             Role::Action,
@@ -910,7 +1674,15 @@ mod tests {
         for next in [Role::Dialogue, Role::Parenthetical] {
             for previous in predecessors {
                 let p = project(&[(previous, "before"), (next, "after")]);
-                let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+                let mut visible = SourceLayoutSettings::default();
+                visible.role_print_visibility[crate::formatting::role_index(Role::Note)] =
+                    Some(PrintVisibility::Visible);
+                let layout = ScreenplayLayout::build_with_effective_inputs(
+                    &p,
+                    &LayoutInputs::default(),
+                    &visible,
+                )
+                .unwrap_or_else(|_| unreachable!());
                 let lines = &layout.pages[0].lines;
                 assert_eq!(
                     lines[1].rect.y - lines[0].rect.y,
@@ -921,7 +1693,7 @@ mod tests {
     }
 
     #[test]
-    fn other_incoming_roles_use_boundary_gap() {
+    fn other_incoming_roles_use_their_native_space_before() {
         let pairs = [
             (Role::Action, Role::Action),
             (Role::Dialogue, Role::Action),
@@ -930,11 +1702,24 @@ mod tests {
         ];
         for (previous, next) in pairs {
             let p = project(&[(previous, "before"), (next, "after")]);
-            let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
+            let mut visible = SourceLayoutSettings::default();
+            visible.role_print_visibility[crate::formatting::role_index(Role::Note)] =
+                Some(PrintVisibility::Visible);
+            let layout = ScreenplayLayout::build_with_effective_inputs(
+                &p,
+                &LayoutInputs::default(),
+                &visible,
+            )
+            .unwrap_or_else(|_| unreachable!());
             let lines = &layout.pages[0].lines;
+            let expected_space = match next {
+                Role::SceneHeading | Role::Sequence | Role::EndOfAct => 24,
+                Role::Action | Role::Character | Role::Shot | Role::Transition => 12,
+                _ => 0,
+            };
             assert_eq!(
                 lines[1].rect.y - lines[0].rect.y,
-                layout.inputs.line_advance + layout.inputs.boundary_gap
+                layout.inputs.line_advance + expected_space
             );
         }
     }
@@ -1012,8 +1797,8 @@ mod tests {
             })
             .collect();
         let layout = ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!());
-        assert_eq!(layout.pages.len(), 2);
-        assert!(layout.pages[0].occupied_lines <= 55);
+        assert_eq!(layout.pages.len(), 3);
+        assert!(layout.pages.iter().all(|page| page.occupied_lines <= 55));
         assert_eq!(layout.pages[0].lines[0].rect.y, 72);
         assert!(layout.pages[0]
             .lines
@@ -1021,6 +1806,37 @@ mod tests {
             .is_some_and(|line| line.rect.y <= 792 - 72));
         assert_eq!(layout.pages[1].lines[0].rect.y, 72);
         assert_eq!(layout.pages[1].lines[0].page, 1);
+        assert_eq!(layout.pages[2].lines[0].rect.y, 72);
+        assert_eq!(layout.pages[2].lines[0].page, 2);
+    }
+
+    #[test]
+    fn pagination_uses_fixed_vertical_fit_in_addition_to_logical_capacity() {
+        let p = project(&[
+            (Role::Action, "one"),
+            (Role::Action, "two"),
+            (Role::Action, "three"),
+            (Role::Action, "four"),
+            (Role::Action, "five"),
+        ]);
+        let inputs = LayoutInputs {
+            paper_height: 80,
+            margin_top: 10,
+            margin_bottom: 10,
+            line_advance: 15,
+            lines_per_page: 55,
+            ..LayoutInputs::default()
+        };
+        let layout = ScreenplayLayout::build_with_inputs(&p, &inputs)
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(layout.pages.len(), 3);
+        let page_bottom = FixedPoint::from_points(70).raw();
+        for page in &layout.pages {
+            assert!(!page.lines.is_empty());
+            assert!(page.lines.iter().all(|line| {
+                line.geometry.y.raw() + line.geometry.height.raw() <= page_bottom
+            }));
+        }
     }
 
     #[test]
@@ -1102,9 +1918,13 @@ mod tests {
             settings.role_print_visibility[index] = Some(PrintVisibility::Hidden);
         }
 
-        let layout =
-            ScreenplayLayout::build_with_effective_inputs(&p, &LayoutInputs::default(), &settings)
-                .unwrap_or_else(|_| unreachable!());
+        let layout = ScreenplayLayout::build_with_effective_inputs_for_purpose(
+            &p,
+            &LayoutInputs::default(),
+            &settings,
+            LayoutPurpose::Print,
+        )
+        .unwrap_or_else(|_| unreachable!());
         let lines = layout
             .pages
             .iter()
@@ -1238,5 +2058,105 @@ mod tests {
         assert!(layout.pages[0].title_page);
         assert_eq!(layout.nearest_line_hit_test(0, 0, 0), None);
         assert!(layout.nearest_line_hit_test(1, 0, -10_000).is_some());
+    }
+
+    #[test]
+    fn imported_fontspec_projects_supported_tokens_and_maps_unicode_allcaps() {
+        let imported = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Scene Heading'><FontSpec Font='Arial' Size='16' Style='Bold+Italic+Underline+AllCaps+FutureToken' Color='unmapped'/></ElementSettings><Content><Paragraph Type='Scene Heading' id='heading'><Text>Stra\xc3\x9fe</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let canonical = imported.project.elements[0].text.clone();
+        let inputs = LayoutInputs {
+            chars_per_line: 5,
+            ..LayoutInputs::default()
+        };
+        let layout = ScreenplayLayout::build_with_inputs(&imported.project, &inputs)
+            .unwrap_or_else(|_| unreachable!());
+        let lines = layout.pages.iter().flat_map(|page| &page.lines).collect::<Vec<_>>();
+        assert_eq!(canonical, "Stra\u{00df}e");
+        assert_eq!(
+            lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join(""),
+            canonical
+        );
+        assert_eq!(
+            lines.iter().map(|line| line.display_text.as_str()).collect::<Vec<_>>().join(""),
+            "STRASSE"
+        );
+        let styled = lines[0];
+        assert_eq!(styled.text_style.declared_family, "Arial");
+        assert_eq!(styled.text_style.family, FontFallback::CourierPrime);
+        assert_eq!(styled.text_style.size, 16);
+        assert!(styled.text_style.bold && styled.text_style.italic && styled.text_style.underline);
+        assert!(styled.text_style.all_caps);
+        assert!(!styled.text_style.hidden_text);
+        assert_eq!(styled.geometry.height, FixedPoint::from_points(16));
+        let expansion = styled
+            .display_source_map
+            .iter()
+            .find(|segment| segment.source_start == 4)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!((expansion.display_start, expansion.display_end), (4, 6));
+        assert_eq!((expansion.source_start, expansion.source_end), (4, 6));
+        assert_eq!(styled.source_for_display_char(5), 4);
+        assert_eq!(styled.source_for_display_char(6), 6);
+        assert_eq!(styled.display_char_for_source(6, false), 6);
+        let expansion_middle_x = FixedPoint::from_raw(
+            styled.geometry.x.raw()
+                + 5 * styled.char_width.raw()
+                + styled.char_width.raw() / 4,
+        );
+        let middle_hit = layout
+            .hit_test_fixed(0, expansion_middle_x, styled.geometry.y)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(middle_hit.offset, 4);
+        let after_expansion_caret = layout
+            .caret_geometry(Caret {
+                element: styled.element,
+                offset: 6,
+            })
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            after_expansion_caret.x.raw(),
+            styled.geometry.x.raw() + 6 * styled.char_width.raw()
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .flat_map(|line| &line.display_source_map)
+                .filter(|segment| segment.source_start == 4 && segment.source_end == 6)
+                .count(),
+            1
+        );
+        assert_eq!(
+            imported.project.preservation.as_ref().unwrap_or_else(|| unreachable!())
+                .source.original_bytes,
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Scene Heading'><FontSpec Font='Arial' Size='16' Style='Bold+Italic+Underline+AllCaps+FutureToken' Color='unmapped'/></ElementSettings><Content><Paragraph Type='Scene Heading' id='heading'><Text>Stra\xc3\x9fe</Text></Paragraph></Content></FinalDraft>"
+        );
+    }
+
+    #[test]
+    fn unsupported_font_values_fallback_per_field_and_duplicate_specs_are_ambiguous() {
+        let unsupported = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><FontSpec Font='Uninstalled Family' Size='0' Style='Bold+UnknownToken'/></ElementSettings><Content><Paragraph Type='Action' id='a'><Text>x</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let unsupported_layout = ScreenplayLayout::build(&unsupported.project)
+            .unwrap_or_else(|_| unreachable!());
+        let unsupported_line = &unsupported_layout.pages[0].lines[0];
+        assert_eq!(unsupported_line.text_style.declared_family, "Uninstalled Family");
+        assert_eq!(unsupported_line.text_style.size, 12);
+        assert!(unsupported_line.text_style.bold);
+        assert!(!unsupported_line.text_style.italic);
+
+        let ambiguous = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><FontSpec Size='16' Style='Bold'/><FontSpec Size='20' Style='Italic'/></ElementSettings><Content><Paragraph Type='Action' id='a'><Text>x</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let ambiguous_layout = ScreenplayLayout::build(&ambiguous.project)
+            .unwrap_or_else(|_| unreachable!());
+        let ambiguous_line = &ambiguous_layout.pages[0].lines[0];
+        assert_eq!(ambiguous_line.text_style.size, 12);
+        assert!(!ambiguous_line.text_style.bold && !ambiguous_line.text_style.italic);
     }
 }

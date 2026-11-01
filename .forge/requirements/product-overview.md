@@ -32,8 +32,12 @@ inputs. This does not promise exact layout fidelity for every FDX file. The
 native project preserves screenplay meaning and retained FDX source data across
 FDX save and reopen. PDF is a page-layout export; plain-text export is
 deliberately lossy and communicates that roles, identities, and page layout are
-not preserved. Neither export replaces the native project as the source of
-truth.
+not preserved. Role typography uses bounded imported FDX settings with a
+deterministic fixed-cell Courier Prime fallback; presentation transforms do not
+rewrite canonical text. HiddenText roles remain visible and subdued while writing
+but are omitted from print/PDF and plain-text copies. Neither export replaces the
+native project as the source of truth, and no exact FDX or Final Draft rendering
+parity is promised.
 
 ## Product scope
 
@@ -50,6 +54,10 @@ screenwriter.
 - Support continuous writing and repeatable page preview from shared layout
   semantics for the same effective runtime layout inputs; exact fidelity to
   every imported FDX layout is not promised.
+- Apply supported role-level FDX font size/style and AllCaps as presentation,
+  with fixed-cell metrics and source-safe display mapping. Keep HiddenText roles
+  available in the editor with a contrast-safe subdued treatment and omit them
+  from print/PDF and plain-text exports.
 - Save and reopen native Version 6 FDX while preserving supported semantic data
   and safely retaining unsupported source content. Non-6 imports have the
   explicitly bounded conversion behavior specified in the writing-loop requirements.
@@ -95,10 +103,25 @@ screenwriter.
   configuration, or editing policy. Such application-only state is not a
   persistence guarantee; nondefault legacy configuration and internal IDs may
   reset after reopen, and legacy JSON migration is not required.
+- Newly created native FDX documents emit one deterministic ElementSettings
+  block for each of the 17 directed roles from the shared reference-derived
+  defaults. Imported source settings remain preservation-owned and are not
+  regenerated from runtime defaults.
 - Layout remains repeatable for the same effective runtime inputs. Explicit
   application defaults and only validated FDX mappings supply those inputs;
   preserving source layout settings does not assert that every FDX layout is
   interpreted or rendered identically.
+- Body layout resolves native defaults and validated imported role
+  `ParagraphSpec` geometry, alignment, first-line indent, spacing, and page-start
+  fields at signed 1/100-point precision. Unsupported or unusable source values
+  remain source-owned and fall back deterministically; display geometry does not
+  rewrite canonical screenplay text.
+- For managed body paragraphs, supported direct paragraph geometry, spacing, and
+  page-start fields override the same role setting independently. Invalid or
+  unsupported direct values fall through to the role setting and shared default;
+  direct values remain attached to the managed semantic element while source XML
+  remains authoritative for save/reopen. Title-page and run-level formatting are
+  outside this runtime projection.
 - Safety and preservation of the last valid native project take priority over
   breadth of features.
 

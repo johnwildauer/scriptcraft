@@ -3,8 +3,8 @@
 //! Both adapters consume the shared fixed layout. They only borrow the
 //! project, so exporting cannot change the editing session or its clean state.
 
-use crate::layout::{LayoutError, ScreenplayLayout};
-use crate::{LayoutInputs, Project, Role};
+use crate::layout::{LayoutError, LayoutPurpose, ScreenplayLayout};
+use crate::{FixedPoint, LayoutInputs, Project, Role};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LossReport {
@@ -53,7 +53,11 @@ pub fn export_text_with_layout_inputs(
     project: &Project,
     inputs: &LayoutInputs,
 ) -> Result<TextExport, ExportError> {
-    let layout = ScreenplayLayout::build_with_inputs(project, inputs)?;
+    let layout = ScreenplayLayout::build_with_inputs_for_purpose(
+        project,
+        inputs,
+        LayoutPurpose::Print,
+    )?;
     let loss = LossReport::for_project(project);
     let mut text = String::new();
     text.push_str("# ScriptCraft plain-text export\n# ");
@@ -82,7 +86,11 @@ pub fn export_pdf_with_layout_inputs(
     project: &Project,
     inputs: &LayoutInputs,
 ) -> Result<Vec<u8>, ExportError> {
-    let layout = ScreenplayLayout::build_with_inputs(project, inputs)?;
+    let layout = ScreenplayLayout::build_with_inputs_for_purpose(
+        project,
+        inputs,
+        LayoutPurpose::Print,
+    )?;
     let mut objects = Vec::<Vec<u8>>::new();
     objects.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
     let page_count = layout.pages.len();
@@ -91,21 +99,27 @@ pub fn export_pdf_with_layout_inputs(
         if !kids.is_empty() {
             kids.push(' ');
         }
-        kids.push_str(&(4 + index * 2).to_string());
+        kids.push_str(&(7 + index * 2).to_string());
         kids.push_str(" 0 R");
     }
     objects.push(format!("<< /Type /Pages /Kids [{kids}] /Count {page_count} >>").into_bytes());
-    let font_name = pdf_font_name(&layout.inputs.font_family);
-    objects.push(format!("<< /Type /Font /Subtype /Type1 /BaseFont /{font_name} >>").into_bytes());
+    for font_name in [
+        "Courier",
+        "Courier-Bold",
+        "Courier-Oblique",
+        "Courier-BoldOblique",
+    ] {
+        objects.push(format!("<< /Type /Font /Subtype /Type1 /BaseFont /{font_name} >>").into_bytes());
+    }
     for page in &layout.pages {
-        let content = page_content(page, layout.inputs.paper_height, layout.inputs.font_size);
+        let content = page_content(page, layout.inputs.paper_height);
         let length = content.len();
         objects.push(
             format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R >> >> /Contents {} 0 R >>",
                 layout.inputs.paper_width,
                 layout.inputs.paper_height,
-                5 + (page.number * 2)
+                8 + (page.number * 2)
             )
             .into_bytes(),
         );
@@ -142,22 +156,28 @@ pub fn export_pdf_with_layout_inputs(
     Ok(pdf)
 }
 
-fn pdf_font_name(font_family: &str) -> &'static str {
-    match font_family {
-        "Courier" => "Courier",
-        "Courier New" => "CourierNew",
-        "Courier Prime" => "CourierPrime",
-        _ => "Courier",
-    }
-}
-
-fn page_content(page: &crate::layout::LayoutPage, paper_height: u32, font_size: u32) -> Vec<u8> {
-    let mut output = format!("BT\n/F1 {font_size} Tf\n");
+fn page_content(page: &crate::layout::LayoutPage, paper_height: u32) -> Vec<u8> {
+    let mut output = String::new();
     for line in &page.lines {
-        let x = line.rect.x;
-        let y = paper_height.saturating_sub(line.rect.y + line.rect.height);
-        output.push_str(&format!("1 0 0 1 {x} {y} Tm\n("));
-        for character in line.text.chars() {
+        let x = line.geometry.x;
+        let y = FixedPoint::from_points(i64::from(paper_height))
+            .raw()
+            .saturating_sub(line.geometry.y.raw())
+            .saturating_sub(line.geometry.height.raw());
+        let font_resource = match (line.text_style.bold, line.text_style.italic) {
+            (true, true) => "F4",
+            (true, false) => "F2",
+            (false, true) => "F3",
+            (false, false) => "F1",
+        };
+        let font_size = line.text_style.size;
+        let horizontal_scale = pdf_fixed_cell_scale(line.char_width, font_size);
+        output.push_str(&format!(
+            "BT /{font_resource} {font_size} Tf {horizontal_scale} Tz\n1 0 0 1 {} {} Tm\n(",
+            x.decimal_string(),
+            FixedPoint::from_raw(y).decimal_string()
+        ));
+        for character in line.display_text.chars() {
             match character {
                 '(' | ')' | '\\' => {
                     output.push('\\');
@@ -168,10 +188,32 @@ fn page_content(page: &crate::layout::LayoutPage, paper_height: u32, font_size: 
                 _ => output.push('?'),
             }
         }
-        output.push_str(") Tj\n");
+        output.push_str(") Tj\nET\n");
+        if line.text_style.underline && line.geometry.width.raw() > 0 {
+            let underline_y = FixedPoint::from_raw(
+                y.saturating_add((i64::from(font_size) * 12).div_euclid(100)),
+            );
+            let right = FixedPoint::from_raw(x.raw().saturating_add(line.geometry.width.raw()));
+            output.push_str(&format!(
+                "q 0.6 w {} {} m {} {} l S Q\n",
+                x.decimal_string(),
+                underline_y.decimal_string(),
+                right.decimal_string(),
+                underline_y.decimal_string()
+            ));
+        }
     }
-    output.push_str("ET");
     output.into_bytes()
+}
+
+fn pdf_fixed_cell_scale(char_width: FixedPoint, font_size: u8) -> String {
+    let denominator = i64::from(font_size.max(1)).saturating_mul(60);
+    let scaled_thousandths = char_width
+        .raw()
+        .saturating_mul(100_000)
+        .saturating_add(denominator / 2)
+        .div_euclid(denominator);
+    format!("{}.{:03}", scaled_thousandths / 1_000, scaled_thousandths % 1_000)
 }
 
 #[allow(dead_code)]
@@ -211,6 +253,37 @@ mod tests {
     }
 
     #[test]
+    fn print_exports_omit_hidden_roles_but_plain_text_keeps_canonical_casing() {
+        let imported = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Note'><FontSpec Style='HiddenText'/></ElementSettings><Content><Paragraph Type='Scene Heading' id='heading'><Text>MiXeD title</Text></Paragraph><Paragraph Type='Note' id='note'><Text>private note</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let text = export_text(&imported.project).unwrap_or_else(|_| unreachable!());
+        assert!(text.text.contains("MiXeD title"));
+        assert!(!text.text.contains("private note"));
+        assert!(!text.text.contains("MIXED TITLE"));
+
+        let pdf = export_pdf(&imported.project).unwrap_or_else(|_| unreachable!());
+        let pdf = String::from_utf8_lossy(&pdf);
+        assert!(pdf.contains("MIXED TITLE"));
+        assert!(!pdf.contains("private note"));
+    }
+
+    #[test]
+    fn pdf_applies_role_style_resources_size_and_separate_underline_geometry() {
+        let imported = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><Content><Paragraph Type='New Act' id='act'><Text>New Act</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let pdf = export_pdf(&imported.project).unwrap_or_else(|_| unreachable!());
+        let pdf = String::from_utf8_lossy(&pdf);
+        assert!(pdf.contains("BT /F2 12 Tf"));
+        assert!(pdf.contains("NEW ACT"));
+        assert!(pdf.contains("q 0.6 w"));
+        assert!(pdf.contains("/F4 6 0 R"));
+    }
+
+    #[test]
     fn pdf_has_signature_deterministic_pages_and_basic_content() {
         let project = project();
         let first = export_pdf(&project).unwrap_or_else(|_| unreachable!());
@@ -220,11 +293,15 @@ mod tests {
         assert!(first.ends_with(b"%%EOF\n"));
         assert!(String::from_utf8_lossy(&first).contains("/Count 1"));
         assert!(String::from_utf8_lossy(&first).contains("INT. ROOM - DAY"));
-        assert!(String::from_utf8_lossy(&first).contains("/BaseFont /CourierPrime"));
+        let output = String::from_utf8_lossy(&first);
+        assert!(output.contains("/BaseFont /Courier"));
+        assert!(output.contains("/BaseFont /Courier-Bold"));
+        assert!(output.contains("/BaseFont /Courier-Oblique"));
+        assert!(output.contains("/BaseFont /Courier-BoldOblique"));
     }
 
     #[test]
-    fn pdf_font_metadata_round_trips_and_uses_safe_deterministic_mapping() {
+    fn pdf_declares_the_deterministic_standard_courier_style_subset() {
         let project = project();
         let inputs = LayoutInputs {
             font_family: "Courier Prime".into(),
@@ -233,8 +310,10 @@ mod tests {
         let pdf =
             export_pdf_with_layout_inputs(&project, &inputs).unwrap_or_else(|_| unreachable!());
         let pdf = String::from_utf8_lossy(&pdf);
-        assert!(pdf.contains("/BaseFont /CourierPrime"));
-        assert_eq!(pdf_font_name("untrusted"), "Courier");
+        assert!(pdf.contains("/BaseFont /Courier"));
+        assert!(pdf.contains("/BaseFont /Courier-Bold"));
+        assert!(pdf.contains("/BaseFont /Courier-Oblique"));
+        assert!(pdf.contains("/BaseFont /Courier-BoldOblique"));
     }
 
     #[test]
@@ -251,10 +330,11 @@ mod tests {
         let layout = ScreenplayLayout::build_with_inputs(&project, &inputs)
             .unwrap_or_else(|_| unreachable!());
         let page = &layout.pages[0];
-        let content_bytes = page_content(page, layout.inputs.paper_height, layout.inputs.font_size);
+        let content_bytes = page_content(page, layout.inputs.paper_height);
         let content = String::from_utf8_lossy(&content_bytes);
-        assert!(content.starts_with("BT\n/F1 11 Tf\n"));
-        let transforms: Vec<(u32, u32)> = content
+        assert!(content.contains("BT /F1 12 Tf"));
+        assert!(content.contains(" Tz\n"));
+        let transforms: Vec<(String, String)> = content
             .lines()
             .filter_map(|line| {
                 let values = line
@@ -262,21 +342,46 @@ mod tests {
                     .split_whitespace()
                     .collect::<Vec<_>>();
                 if values.len() == 6 && values[0] == "1" && values[1] == "0" {
-                    Some((values[4].parse().ok()?, values[5].parse().ok()?))
+                    Some((values[4].to_owned(), values[5].to_owned()))
                 } else {
                     None
                 }
             })
             .collect();
         assert_eq!(transforms.len(), page.lines.len());
-        for (line, &(x, y)) in page.lines.iter().zip(&transforms) {
-            assert_eq!(x, line.rect.x);
+        for (line, (x, y)) in page.lines.iter().zip(&transforms) {
+            assert_eq!(x, &line.geometry.x.decimal_string());
             assert_eq!(
                 y,
-                layout.inputs.paper_height - line.rect.y - line.rect.height
+                &FixedPoint::from_raw(
+                    FixedPoint::from_points(i64::from(layout.inputs.paper_height)).raw()
+                        - line.geometry.y.raw()
+                        - line.geometry.height.raw()
+                )
+                .decimal_string()
             );
         }
-        assert_eq!(transforms[0].1 - transforms[1].1, LINE_HEIGHT);
+        let first_y = FixedPoint::parse_points(&transforms[0].1)
+            .unwrap_or_default()
+            .raw();
+        let second_y = FixedPoint::parse_points(&transforms[1].1)
+            .unwrap_or_default()
+            .raw();
+        assert_eq!(first_y - second_y, i64::from(LINE_HEIGHT) * FixedPoint::SCALE);
+    }
+
+    #[test]
+    fn pdf_emits_fractional_role_coordinates_from_shared_fixed_geometry() {
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        project.elements = vec![
+            crate::ScreenplayElement::new("transition", Role::Transition, "CUT")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        let layout = ScreenplayLayout::build(&project).unwrap_or_else(|_| unreachable!());
+        let line = &layout.pages[0].lines[0];
+        assert_eq!(line.geometry.x.decimal_string(), "490.2");
+        let pdf = export_pdf(&project).unwrap_or_else(|_| unreachable!());
+        assert!(String::from_utf8_lossy(&pdf).contains("1 0 0 1 490.2 708 Tm"));
     }
 
     #[test]

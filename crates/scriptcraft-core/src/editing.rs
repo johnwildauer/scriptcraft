@@ -1320,6 +1320,16 @@ fn join_at(project: &mut Project, index: usize) -> Result<(), EditError> {
     if index + 1 >= project.elements.len() {
         return Err(EditError::InvalidElement);
     }
+    let removed_id = &project.elements[index + 1].id;
+    if project
+        .preservation
+        .as_ref()
+        .is_some_and(|state| state.has_direct_paragraph_formatting(removed_id))
+    {
+        return Err(EditError::Preservation(
+            crate::preservation::PreservationError::StructuralAttachmentConflict,
+        ));
+    }
     let right = project.elements[index + 1].text.clone();
     let joined_runs =
         if project.elements[index].runs.is_empty() && project.elements[index + 1].runs.is_empty() {
@@ -1357,55 +1367,29 @@ fn next_boundary(text: &str, offset: usize) -> usize {
         .map_or(offset, |character| offset + character.len_utf8())
 }
 
-/// The supported Enter policy is intentionally explicit and finite.
+/// Compatibility alias for the shared native ReturnKey application default.
 pub fn transition(role: Role) -> Option<Role> {
     enter_transition(role)
 }
 
 pub fn enter_transition(role: Role) -> Option<Role> {
-    Some(match role {
-        Role::SceneHeading => Role::Action,
-        Role::Action => Role::Action,
-        Role::Character => Role::Dialogue,
-        Role::Dialogue => Role::Action,
-        Role::Parenthetical => Role::Dialogue,
-        Role::Transition => Role::SceneHeading,
-        Role::Note => Role::Note,
-        Role::NewAct
-        | Role::EndOfAct
-        | Role::CastList
-        | Role::General
-        | Role::Shot
-        | Role::Sequence
-        | Role::Outline1
-        | Role::Outline2
-        | Role::Outline3
-        | Role::Summary => role,
-    })
+    role_for_native_behavior_target(crate::formatting::formatting_for_role(role).behavior.return_key)
 }
 
-/// Tab changes only the established legacy roles. Added roles are explicit
-/// no-ops until a role-specific cycling policy is evidenced and implemented.
+/// Returns the shared native TabKey application default, with the established
+/// empty-Character condition retained as an application-specific boundary.
 pub fn tab_transition(role: Role, current_text_is_empty: bool) -> Option<Role> {
-    match role {
-        Role::SceneHeading => Some(Role::Action),
-        Role::Action => Some(Role::Character),
-        Role::Character if current_text_is_empty => Some(Role::Transition),
-        Role::Transition => Some(Role::SceneHeading),
-        Role::Dialogue => Some(Role::Parenthetical),
-        Role::Parenthetical => Some(Role::Dialogue),
-        Role::Character | Role::Note => None,
-        Role::NewAct
-        | Role::EndOfAct
-        | Role::CastList
-        | Role::General
-        | Role::Shot
-        | Role::Sequence
-        | Role::Outline1
-        | Role::Outline2
-        | Role::Outline3
-        | Role::Summary => None,
+    if role == Role::Character && !current_text_is_empty {
+        return None;
     }
+    role_for_native_behavior_target(crate::formatting::formatting_for_role(role).behavior.tab_key)
+}
+
+fn role_for_native_behavior_target(target: &str) -> Option<Role> {
+    crate::formatting::formatting_in_native_order()
+        .iter()
+        .find(|formatting| formatting.fdx_label == target)
+        .map(|formatting| formatting.role)
 }
 
 #[cfg(test)]
@@ -1615,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_matrix_covers_every_role() {
+    fn legacy_enter_matrix_covers_every_role() {
         let expected = [
             (Role::SceneHeading, Role::Action),
             (Role::Action, Role::Action),
@@ -1623,7 +1607,7 @@ mod tests {
             (Role::Dialogue, Role::Action),
             (Role::Parenthetical, Role::Dialogue),
             (Role::Transition, Role::SceneHeading),
-            (Role::Note, Role::Note),
+            (Role::Note, Role::Summary),
         ];
         for (from, to) in expected {
             let mut s = session("text", from);
@@ -1669,32 +1653,61 @@ mod tests {
     }
 
     #[test]
-    fn added_roles_split_without_changing_role_on_enter() {
-        for role in Role::ALL[7..].iter().copied() {
-            assert_eq!(enter_transition(role), Some(role));
+    fn added_roles_enter_using_the_shared_default_matrix() {
+        let expected = [
+            (Role::NewAct, Role::SceneHeading),
+            (Role::EndOfAct, Role::NewAct),
+            (Role::CastList, Role::Action),
+            (Role::General, Role::General),
+            (Role::Shot, Role::Action),
+            (Role::Sequence, Role::SceneHeading),
+            (Role::Outline1, Role::Summary),
+            (Role::Outline2, Role::Summary),
+            (Role::Outline3, Role::Summary),
+            (Role::Summary, Role::Summary),
+        ];
+        for (role, target) in expected {
+            assert_eq!(enter_transition(role), Some(target));
             let mut session = session("unchanged", role);
             let offset = session.project().elements[0].text.len();
             set(&mut session, 0, offset);
             session.enter().unwrap_or_else(|_| unreachable!());
-            assert_eq!(session.project().elements[1].role, role);
+            assert_eq!(session.project().elements[1].role, target);
             assert_eq!(session.project().elements[0].role, role);
         }
     }
 
     #[test]
-    fn added_roles_have_explicit_consumed_tab_noop_policy() {
-        for role in Role::ALL[7..].iter().copied() {
-            assert_eq!(tab_transition(role, false), None);
+    fn added_roles_tab_using_the_shared_default_matrix() {
+        let expected = [
+            (Role::NewAct, Role::SceneHeading),
+            (Role::EndOfAct, Role::NewAct),
+            (Role::CastList, Role::Action),
+            (Role::General, Role::General),
+            (Role::Shot, Role::Action),
+            (Role::Sequence, Role::SceneHeading),
+            (Role::Outline1, Role::Outline2),
+            (Role::Outline2, Role::Outline3),
+            (Role::Outline3, Role::Note),
+            (Role::Summary, Role::Outline1),
+        ];
+        for (role, target) in expected {
+            assert_eq!(tab_transition(role, false), Some(target));
             let mut session = session("preserve this role", role);
             let before = session.clone();
             session.tab().unwrap_or_else(|_| unreachable!());
-            assert_eq!(session, before);
-            assert!(!session.can_undo());
+            if role == target {
+                assert_eq!(session, before);
+                assert!(!session.can_undo());
+            } else {
+                assert_eq!(session.project().elements[0].role, target);
+                assert!(session.can_undo());
+            }
         }
     }
 
     #[test]
-    fn tab_matrix_is_undoable_and_unspecified_roles_are_consumed_noops() {
+    fn tab_matrix_is_undoable_and_special_cases_are_consumed_noops() {
         let expected = [
             (Role::SceneHeading, Role::Action, "text"),
             (Role::Action, Role::Character, "text"),
@@ -1725,10 +1738,11 @@ mod tests {
         assert_eq!(nonblank, before);
         assert!(!nonblank.can_undo());
 
-        let mut note = session("note", Role::Note);
-        note.tab().unwrap_or_else(|_| unreachable!());
-        assert_eq!(note.project().elements[0].text, "note");
-        assert!(!note.can_undo());
+        let mut general = session("general", Role::General);
+        let before = general.clone();
+        general.tab().unwrap_or_else(|_| unreachable!());
+        assert_eq!(general, before);
+        assert!(!general.can_undo());
     }
 
     #[test]

@@ -33,19 +33,25 @@ and predictable role transitions.
   - **AC-WRITING-001.4:** Given a role transition such as Scene Heading → Action or Character →
     Dialogue, the system shall apply an explicit, testable transition policy and make the
     operation undoable.
-  - **AC-WRITING-001.4a:** Enter shall use this transition matrix: General/Note → same role; Scene
-    Heading → Action; Action → Action; Character → Dialogue; Dialogue → Action at the collapsed
-    UTF-8-safe end of the Dialogue; Dialogue → Dialogue when the collapsed caret is at an
-    interior UTF-8 boundary; Parenthetical → Dialogue; and Transition → Scene Heading. Tab shall
-    use Scene Heading → Action; Action → Character; blank Character → Transition; Transition →
-    Scene Heading; Dialogue → Parenthetical; and Parenthetical → Dialogue. Other Tab cases shall
-    be consumed no-ops with no literal tab, mutation, or undo entry. The Dialogue interior
-    branch shall be a transactional split: the original element retains the exact prefix and
-    its existing in-session identity, the new Dialogue retains the exact suffix with a bounded
-    distinct in-session identity, and the collapsed selection moves to the new element at byte
-    offset zero. Empty Dialogue shall be an
-    end-boundary case. Rejected non-collapsed selections, invalid boundaries, and capacity
-    operations shall preserve session state. Automatic parentheticals and strict transition
+  - **AC-WRITING-001.4a:** Application-default Enter targets shall be General → General, Scene
+    Heading → Action, Action → Action, Character → Dialogue, Parenthetical → Dialogue, Dialogue →
+    Action at the collapsed end or Dialogue at a collapsed interior UTF-8 boundary, Transition →
+    Scene Heading, Shot → Action, Cast List → Action, New Act → Scene Heading, Sequence → Scene
+    Heading, End of Act → New Act, Summary → Summary, Outline 1/2/3 → Summary, and Note → Summary.
+    Except for Dialogue's interior rule, Enter uses the existing transactional split path, including
+    when the target role equals the current role. The Dialogue interior branch shall retain the
+    exact prefix and existing in-session identity in the original element, retain the exact suffix
+    in a new Dialogue with a bounded distinct in-session identity, and move the collapsed selection
+    to the new element at byte offset zero. Empty Dialogue shall be an end-boundary case.
+    Application-default Tab targets shall be General → General, Scene Heading → Action, Action →
+    Character, blank Character → Transition, Parenthetical → Dialogue, Dialogue → Parenthetical,
+    Transition → Scene Heading, Shot → Action, Cast List → Action, New Act → Scene Heading,
+    Sequence → Scene Heading, End of Act → New Act, Summary → Outline 1, Outline 1 → Outline 2,
+    Outline 2 → Outline 3, Outline 3 → Note, and Note → Summary. Tab is always consumed and never
+    inserts a literal tab; same-role targets and existing special-case no-ops do not mutate or add
+    history. Runtime uses shared application defaults, not imported per-document Behavior;
+    imported Behavior remains source-preserved. Rejected non-collapsed selections, invalid
+    boundaries, and capacity operations shall preserve session state. Automatic parentheticals and strict transition
     boundaries are runtime editing policies that default to enabled for a new session; they are
     not persisted as document fields. When automatic parentheticals are enabled and an explicit
     role transition or assignment creates a Parenthetical, automatic behavior shall create
@@ -91,6 +97,41 @@ viewport presentation. This does not promise exact layout fidelity for every FDX
     safely without an infinite loop or unbounded blank-page behavior.
   - **AC-WRITING-002.4:** Given a document position and rendered geometry, the system shall support
     a safe caret/hit-test round trip at valid text boundaries.
+  - **AC-WRITING-002.5:** Given a body role and source-backed role `ParagraphSpec`, layout shall
+    resolve supported alignment, signed first-line indent, left/right paragraph positions,
+    `SpaceBefore`, mapped `Leading`/`Spacing`, and `StartsNewPage` independently against the
+    shared defaults. Effective geometry and vertical fit shall use signed fixed-point hundredths
+    of a point; desktop editing, hit testing, navigation, selection, PDF coordinates, and cached
+    layouts shall consume the same geometry. Unsupported, conflicting, out-of-budget, or unusable
+    fields shall remain preserved in FDX and fall back deterministically. Alignment and indentation
+    shall not modify canonical UTF-8 text or source ranges. This remains a bounded interpretation
+    of the supported role fields, not a promise of exact Final Draft pagination.
+  - **AC-WRITING-002.6:** Given a body role and source-backed `FontSpec`, the system shall resolve
+    supported family, bounded positive size, and the `Bold`, `Italic`, `Underline`, `AllCaps`, and
+    `HiddenText` style tokens independently over the shared role defaults. Desktop typography shall
+    use the bundled Courier Prime faces with fixed-cell metrics (7 character-width units and 12 line
+    advance units at 12 points, scaled by effective role size); Courier Final Draft maps to Courier
+    Prime, while Arial and unsupported families use the same deterministic fallback without
+    rewriting the source family. Unsupported values and unknown tokens remain preserved and use
+    deterministic fallback. This is not a claim of proportional-font measurement or exact FDX
+    visual parity.
+  - **AC-WRITING-002.7:** `AllCaps` shall transform display text only, retaining canonical text
+    and valid source-byte boundaries when Unicode uppercase expands a source scalar. HiddenText roles
+    shall remain visible, editable, and contrast-safe/subdued in editor-purpose layout, but be
+    omitted from print/PDF and plain-text export-purpose layout without renumbering source elements.
+    A role made visible by source settings shall use ordinary role presentation. PDF may apply only
+    the supported role style subset using deterministic non-embedded Courier resources; this does
+    not establish Final Draft interoperability or change the existing non-ASCII substitution
+    limitation.
+
+  - **AC-WRITING-002.8:** For managed body paragraphs, each supported direct `Paragraph` field
+    (`Alignment`, `FirstIndent`, `Leading`, `LeftIndent`, `RightIndent`, `SpaceBefore`, `Spacing`,
+    and `StartsNewPage`) shall override only that field's role setting, which in turn overrides the
+    shared default. Direct values shall be associated with the paragraph's managed semantic identity;
+    invalid values shall remain source-preserved and fall back independently. Direct geometry shall
+    not alter role typography, visibility, title-page interpretation, or run formatting. Splitting
+    shall not copy direct XML attributes to a new paragraph, and a join that would remove a paragraph
+    carrying supported direct-format attributes shall stop transactionally rather than lose them.
 
 ### Durable native project persistence
 
@@ -103,7 +144,10 @@ project meaning; failures preserve the prior valid destination and unsaved state
     containing semantic content and retained FDX-owned source data, including source metadata,
     foreign paragraph identities, title-page structure, document settings, and supported opaque
     content, while excluding transient caret, layout, undo state, and internal editing identities
-    from required content. ScriptCraft-only project identity/schema, metadata, layout inputs, and
+    from required content. Newly created native documents shall include one ordered ElementSettings
+    block for each of the 17 directed roles, using the shared defaults evidenced by the approved
+    native references; imported source-backed settings remain authoritative and shall not be
+    regenerated merely because runtime interpretation changes. ScriptCraft-only project identity/schema, metadata, layout inputs, and
     editing policies are not persisted as FDX fields; no private extension, sidecar, or legacy JSON
     migration is required. A source field without a safe supported representation shall not be
     silently lost.
@@ -128,8 +172,9 @@ project meaning; failures preserve the prior valid destination and unsaved state
   New Act, End of Act, Cast List, General, Shot, Sequence, Outline 1, Outline 2, Outline 3 and
   Summary without silently changing their type, source text, case or ordering on import.
   - **AC-WRITING-007.1:** Each type remains distinct through editing and Version 6 save/reopen;
-    explicit role assignment and safe Enter/Tab policies are available, with existing behavior
-    retained for existing roles. Hidden-text settings are honored in print output rather than
+    explicit role assignment and safe application-default Enter/Tab policies are available, with
+    role transitions following AC-WRITING-001.4a. Absent recognized role visibility and page-start settings use the
+    shared native defaults; explicit imported values remain source-backed. Hidden-text settings are honored in print output rather than
     exposing hidden notes and outline content.
   - **AC-WRITING-007.2:** Ordered runs, styles, attributes and unknown content remain available
     across safe edits, undo/redo and save/reopen. Unsupported intersections are safely stopped

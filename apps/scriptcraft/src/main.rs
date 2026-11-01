@@ -12,9 +12,9 @@ use scriptcraft_core::fdx::{self, FdxImportOutcome, FdxMigrationConsent, FdxVers
 use scriptcraft_core::fdx_storage::{
     self, FdxBaseline, FdxSaveMode, FdxSaveTarget, OpenedFdxSource, StdFdxStorageFileSystem,
 };
-use scriptcraft_core::layout::{Caret, LayoutCache, ScreenplayLayout};
+use scriptcraft_core::layout::{Caret, LayoutCache, LayoutPurpose, ScreenplayLayout};
 use scriptcraft_core::persistence::{FileSystem, StdFileSystem};
-use scriptcraft_core::{Project, Role};
+use scriptcraft_core::{FixedPoint, Project, Role};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -110,7 +110,7 @@ struct ScriptCraftApp {
     editor_surface_id: Option<egui::Id>,
     editor_surface_rect: Option<egui::Rect>,
     reveal_intent: RevealIntent,
-    preferred_vertical_x: Option<u32>,
+    preferred_vertical_x: Option<i64>,
     page_geometry: ViewportPageTracker,
     page_scale: Option<f32>,
     effective_pixels_per_point: Option<f32>,
@@ -268,10 +268,11 @@ impl ScriptCraftApp {
     ) -> Result<std::sync::Arc<ScreenplayLayout>, scriptcraft_core::layout::LayoutError> {
         let revision = self.session.revision();
         let started = Instant::now();
-        let (layout, hit) = self.layout_cache.get_or_build_with_inputs(
+        let (layout, hit) = self.layout_cache.get_or_build_with_inputs_for_purpose(
             revision,
             self.session.project(),
             self.session.layout_inputs(),
+            LayoutPurpose::Editor,
         )?;
         if hit {
             self.performance.layout_cache_hits =
@@ -610,10 +611,14 @@ impl ScriptCraftApp {
         scale: f32,
         pointer: egui::Pos2,
     ) -> Option<Position> {
-        let local_x = ((pointer.x - page_rect.left()) / scale).round() as i64;
-        let local_y = ((pointer.y - page_rect.top()) / scale).round() as i64;
+        let local_x = FixedPoint::from_points_f64(
+            f64::from((pointer.x - page_rect.left()) / scale),
+        )?;
+        let local_y = FixedPoint::from_points_f64(
+            f64::from((pointer.y - page_rect.top()) / scale),
+        )?;
         layout
-            .nearest_line_hit_test(page, local_x, local_y)
+            .nearest_line_hit_test_fixed(page, local_x, local_y)
             .map(|caret| Position {
                 element: caret.element,
                 offset: caret.offset,
@@ -719,26 +724,25 @@ impl ScriptCraftApp {
         let page_height = layout.inputs.paper_height as f32 * scale;
         let page_rect = ui.allocate_space(Vec2::new(page_width, page_height)).1;
         let painter = ui.painter_at(page_rect);
-        let char_width = layout.char_width as f32 * scale;
         let palette = self.page_palette;
         painter.rect_filled(page_rect, 2.0, palette.paper);
         painter.rect_stroke(page_rect, 2.0, Stroke::new(1.0_f32, palette.border));
 
         for line in &layout.pages[page_index].lines {
-            let x = page_rect.left() + line.rect.x as f32 * scale;
-            let y = page_rect.top() + line.rect.y as f32 * scale;
+            let x = page_rect.left() + line.geometry.x.to_points_f32() * scale;
+            let y = page_rect.top() + line.geometry.y.to_points_f32() * scale;
+            let char_width = line.char_width.to_points_f32() * scale;
             let selection = self.selection_range(line.source.start, line.source.end, line.element);
             if let Some((from, to)) = selection {
+                let display_from = line.display_char_for_source(from, false);
+                let display_to = line.display_char_for_source(to, true);
                 let left =
-                    x + line.text[..from - line.source.start].chars().count() as f32 * char_width;
-                let width = line.text[from - line.source.start..to - line.source.start]
-                    .chars()
-                    .count() as f32
-                    * char_width;
+                    x + display_from as f32 * char_width;
+                let width = display_to.saturating_sub(display_from) as f32 * char_width;
                 painter.rect_filled(
                     egui::Rect::from_min_size(
                         egui::pos2(left, y),
-                        Vec2::new(width.max(1.0), layout.line_height as f32 * scale),
+                        Vec2::new(width.max(1.0), line.geometry.height.to_points_f32() * scale),
                     ),
                     0.0,
                     palette.selection,
@@ -747,16 +751,42 @@ impl ScriptCraftApp {
             paint_fixed_metric_text_with_selection(
                 &painter,
                 egui::pos2(x, y),
-                &line.text,
-                renderer_font(&layout.inputs.font_family, metrics.font_size),
+                &line.display_text,
+                renderer_font_for_style(
+                    line.text_style.bold,
+                    line.text_style.italic,
+                    line.text_style.size as f32 * scale,
+                ),
                 char_width,
                 FixedMetricTextStyle {
-                    color: palette.text,
+                    color: if line.text_style.hidden_text {
+                        palette.subdued_text
+                    } else {
+                        palette.text
+                    },
                     selected_color: palette.selection_text,
-                    selection: selection
-                        .map(|(start, end)| (start - line.source.start, end - line.source.start)),
+                    selection: selection.map(|(start, end)| {
+                        (
+                            line.display_char_for_source(start, false),
+                            line.display_char_for_source(end, true),
+                        )
+                    }),
                 },
             );
+            if line.text_style.underline {
+                let underline_y = y + line.geometry.height.to_points_f32() * scale * 0.88;
+                painter.line_segment(
+                    [
+                        egui::pos2(x, underline_y),
+                        egui::pos2(x + line.geometry.width.to_points_f32() * scale, underline_y),
+                    ],
+                    Stroke::new(1.0, if line.text_style.hidden_text {
+                        palette.subdued_text
+                    } else {
+                        palette.text
+                    }),
+                );
+            }
         }
 
         let selection = self.session.selection();
@@ -772,7 +802,7 @@ impl ScriptCraftApp {
                 caret.offset,
                 self.caret_blink_focus_generation,
             ));
-            if let Ok(rect) = layout.caret_rect(caret) {
+            if let Ok(rect) = layout.caret_geometry(caret.clone()) {
                 let blink_active = self.surface_focused;
                 if caret_blink_visible(
                     ui.ctx(),
@@ -788,13 +818,34 @@ impl ScriptCraftApp {
                         self.performance.repaint_requests.saturating_add(1);
                 }
                 if !self.ime_preedit.is_empty() {
-                    let x = page_rect.left() + rect.x as f32 * scale + char_width;
-                    let y = page_rect.top() + rect.y as f32 * scale;
+                    let caret_line = layout.pages[page_index]
+                        .lines
+                        .iter()
+                        .find(|line| {
+                            line.element == caret.element
+                                && caret.offset >= line.source.start
+                                && caret.offset <= line.source.end
+                        });
+                    let line_char_width = caret_line
+                        .map_or(7.0, |line| line.char_width.to_points_f32())
+                        * scale;
+                    let ime_font = caret_line.map_or_else(
+                        || renderer_font(&layout.inputs.font_family, metrics.font_size),
+                        |line| {
+                            renderer_font_for_style(
+                                line.text_style.bold,
+                                line.text_style.italic,
+                                line.text_style.size as f32 * scale,
+                            )
+                        },
+                    );
+                    let x = page_rect.left() + rect.x.to_points_f32() * scale + line_char_width;
+                    let y = page_rect.top() + rect.y.to_points_f32() * scale;
                     painter.text(
                         egui::pos2(x, y),
                         egui::Align2::LEFT_TOP,
                         &self.ime_preedit,
-                        renderer_font(&layout.inputs.font_family, metrics.font_size),
+                        ime_font,
                         palette.ime_text,
                     );
                 }
@@ -882,17 +933,17 @@ impl ScriptCraftApp {
                                 && focus.offset <= line.source.end
                         })
                     }) {
-                        if let Ok(caret) = layout.caret_rect(Caret {
+                        if let Ok(caret) = layout.caret_geometry(Caret {
                             element: focus.element,
                             offset: focus.offset,
                         }) {
                             let page_rect = page_rects[page_index];
                             let caret_rect = egui::Rect::from_min_size(
                                 egui::pos2(
-                                    page_rect.left() + caret.x as f32 * scale,
-                                    page_rect.top() + caret.y as f32 * scale,
+                                    page_rect.left() + caret.x.to_points_f32() * scale,
+                                    page_rect.top() + caret.y.to_points_f32() * scale,
                                 ),
-                                Vec2::new(CARET_WIDTH, caret.height as f32 * scale),
+                                Vec2::new(CARET_WIDTH, caret.height.to_points_f32() * scale),
                             );
                             let visible_clip = ui.clip_rect();
                             if caret_needs_reveal(caret_rect, visible_clip) {
@@ -1242,25 +1293,20 @@ impl ScriptCraftApp {
             });
         };
         let goal = self.preferred_vertical_x.unwrap_or_else(|| {
-            let columns = current_line.text[..current.offset - current_line.source.start]
-                .chars()
-                .count() as u32;
-            current_line.rect.x + columns.saturating_mul(layout.char_width)
+            let columns = current_line.display_char_for_source(current.offset, false) as i64;
+            current_line.geometry.x.raw()
+                + columns.saturating_mul(current_line.char_width.raw())
         });
         self.preferred_vertical_x = Some(goal);
         let target_line = lines[target_index];
-        let columns = goal
-            .saturating_sub(target_line.rect.x)
-            .saturating_add(layout.char_width / 2)
-            / layout.char_width.max(1);
-        let offset_in_line = target_line
-            .text
-            .char_indices()
-            .nth(columns as usize)
-            .map_or(target_line.text.len(), |(offset, _)| offset);
+        let cell = target_line.char_width.raw().max(1);
+        let columns = (goal
+            .saturating_sub(target_line.geometry.x.raw())
+            .saturating_add(cell / 2)
+            / cell) as u32;
         let next = Position {
             element: target_line.element,
-            offset: target_line.source.start + offset_in_line,
+            offset: target_line.source_for_display_char(columns as usize),
         };
         self.session.set_selection(if extend {
             Selection {
@@ -1383,10 +1429,10 @@ fn paint_fixed_metric_text_with_selection(
     char_width: f32,
     style: FixedMetricTextStyle,
 ) {
-    for (column, (byte, character)) in text.char_indices().enumerate() {
+    for (column, character) in text.chars().enumerate() {
         let glyph_color = if style
             .selection
-            .is_some_and(|(start, end)| byte >= start && byte < end)
+            .is_some_and(|(start, end)| column >= start && column < end)
         {
             style.selected_color
         } else {
@@ -1414,6 +1460,16 @@ fn renderer_font(font_family: &str, font_size: f32) -> FontId {
             FontFamily::Monospace
         },
     )
+}
+
+fn renderer_font_for_style(bold: bool, italic: bool, font_size: f32) -> FontId {
+    let family = match (bold, italic) {
+        (true, true) => "Courier Prime Bold Italic",
+        (true, false) => "Courier Prime Bold",
+        (false, true) => "Courier Prime Italic",
+        (false, false) => document_font::COURIER_PRIME_FAMILY,
+    };
+    FontId::new(font_size.max(1.0), FontFamily::Name(family.into()))
 }
 
 fn fixed_metric_x(origin: f32, column: usize, char_width: f32) -> f32 {
@@ -1453,15 +1509,15 @@ fn caret_blink_repaint_delay(time: f64) -> Duration {
 
 fn caret_bar_rect(
     page_rect: egui::Rect,
-    caret: scriptcraft_core::layout::Rect,
+    caret: scriptcraft_core::layout::FixedRect,
     scale: f32,
 ) -> egui::Rect {
     egui::Rect::from_min_size(
         egui::pos2(
-            page_rect.left() + caret.x as f32 * scale,
-            page_rect.top() + caret.y as f32 * scale,
+            page_rect.left() + caret.x.to_points_f32() * scale,
+            page_rect.top() + caret.y.to_points_f32() * scale,
         ),
-        Vec2::new(CARET_WIDTH, caret.height as f32 * scale),
+        Vec2::new(CARET_WIDTH, caret.height.to_points_f32() * scale),
     )
 }
 
@@ -3878,8 +3934,8 @@ mod tests {
                 ),
             );
             let pointer = egui::pos2(
-                page_rect.left() + line.rect.x as f32 * metrics.scale,
-                page_rect.top() + line.rect.y as f32 * metrics.scale,
+                page_rect.left() + line.geometry.x.to_points_f32() * metrics.scale,
+                page_rect.top() + line.geometry.y.to_points_f32() * metrics.scale,
             );
             assert_eq!(
                 app.caret_from_pointer(&layout, 0, page_rect, metrics.scale, pointer),
@@ -5096,10 +5152,10 @@ mod tests {
                 egui::pos2(
                     surface_rect.left()
                         + horizontal_padding
-                        + (line.rect.x as f32
+                        + (line.geometry.x.to_points_f32()
                             + ("(words".chars().count() as f32 * layout.char_width as f32))
                             * scale,
-                    surface_rect.top() + (line.rect.y as f32 + 1.0) * scale,
+                    surface_rect.top() + (line.geometry.y.to_points_f32() + 1.0) * scale,
                 )
             };
             let pointer_click = |pos| egui::Event::PointerButton {
@@ -5278,8 +5334,10 @@ mod tests {
 
         let surface_rect = app.editor_surface_rect.unwrap_or_else(|| unreachable!());
         let pointer = egui::pos2(
-            surface_rect.left() + horizontal_padding + (line.rect.x as f32 + 1.0) * scale,
-            surface_rect.top() + (line.rect.y as f32 + 1.0) * scale,
+            surface_rect.left()
+                + horizontal_padding
+                + (line.geometry.x.to_points_f32() + 1.0) * scale,
+            surface_rect.top() + (line.geometry.y.to_points_f32() + 1.0) * scale,
         );
         let blank_pointer = egui::pos2(surface_rect.right() - 4.0, surface_rect.top() + 4.0);
         let _ = context.run(
@@ -5509,11 +5567,11 @@ mod tests {
 
         let bar = caret_bar_rect(
             egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(360.0, 460.0)),
-            scriptcraft_core::layout::Rect {
-                x: 90 + (columns as u32) * CHAR_WIDTH,
-                y: 72,
-                width: 1,
-                height: LINE_HEIGHT,
+            scriptcraft_core::layout::FixedRect {
+                x: FixedPoint::from_points(90 + (columns as i64) * i64::from(CHAR_WIDTH)),
+                y: FixedPoint::from_points(72),
+                width: FixedPoint::from_points(1),
+                height: FixedPoint::from_points(i64::from(LINE_HEIGHT)),
             },
             scale,
         );
@@ -5558,6 +5616,18 @@ mod tests {
             renderer_font("Courier New", 6.0).family,
             FontFamily::Monospace
         );
+        assert_eq!(
+            renderer_font_for_style(true, false, 6.0).family,
+            FontFamily::Name("Courier Prime Bold".into())
+        );
+        assert_eq!(
+            renderer_font_for_style(false, true, 6.0).family,
+            FontFamily::Name("Courier Prime Italic".into())
+        );
+        assert_eq!(
+            renderer_font_for_style(true, true, 6.0).family,
+            FontFamily::Name("Courier Prime Bold Italic".into())
+        );
     }
 
     #[test]
@@ -5595,14 +5665,90 @@ mod tests {
             })
             .collect::<Vec<_>>();
         glyphs.sort_by(|left, right| left.0.total_cmp(&right.0));
-        assert_eq!(glyphs.len(), line.text.chars().count());
+        assert_eq!(glyphs.len(), line.display_text.chars().count());
         assert!(glyphs
             .iter()
             .all(|(_, character)| character.chars().count() == 1));
         for pair in glyphs.windows(2) {
-            assert!(((pair[1].0 - pair[0].0) - layout.char_width as f32 * scale).abs() < 0.01);
+            assert!(
+                ((pair[1].0 - pair[0].0) - line.char_width.to_points_f32() * scale).abs() < 0.01
+            );
         }
         assert_eq!(line.source.end - line.source.start, line.text.len());
+    }
+
+    #[test]
+    fn rendered_role_typography_allcaps_expansion_and_hidden_editor_treatment() {
+        let context = test_context();
+        let imported = fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Scene Heading'><FontSpec Size='16' Style='Bold+Italic+AllCaps'/></ElementSettings><ElementSettings Type='Note'><FontSpec Style='Italic+HiddenText'/></ElementSettings><Content><Paragraph Type='Scene Heading' id='heading'><Text>Stra\xc3\x9fe</Text></Paragraph><Paragraph Type='Note' id='note'><Text>private</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .replace_with_saved(imported.project)
+            .unwrap_or_else(|_| unreachable!());
+        app.appearance_mode = status_bar::AppearanceMode::Day;
+        app.page_palette = status_bar::PagePalette::for_theme(
+            app.appearance_mode,
+            egui::Theme::Light,
+        );
+        let output = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+        );
+        let glyph_shapes = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(shape) => {
+                    let section = shape.galley.job.sections.first()?;
+                    Some((
+                        shape.pos.y,
+                        shape.pos.x,
+                        shape.galley.text().to_owned(),
+                        section.format.font_id.clone(),
+                        section.format.color,
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut heading_glyphs = glyph_shapes
+            .iter()
+            .filter(|(_, _, _, font, _)| {
+                font.family == FontFamily::Name("Courier Prime Bold Italic".into())
+            })
+            .map(|(y, x, text, font, _)| (*y, *x, text.as_str(), font.size))
+            .collect::<Vec<_>>();
+        heading_glyphs.sort_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then_with(|| left.1.total_cmp(&right.1))
+        });
+        assert_eq!(
+            heading_glyphs
+                .iter()
+                .map(|(_, _, text, _)| *text)
+                .collect::<Vec<_>>()
+                .join(""),
+            "STRASSE"
+        );
+        assert!(heading_glyphs
+            .iter()
+            .all(|(_, _, _, size)| (*size - 16.0 * app.page_scale.unwrap_or(1.0)).abs() < 0.01));
+        assert!(glyph_shapes.iter().any(|(_, _, text, font, color)| {
+            font.family == FontFamily::Name("Courier Prime Italic".into())
+                && *color == app.page_palette.subdued_text
+                && text == "p"
+        }));
     }
 
     #[test]

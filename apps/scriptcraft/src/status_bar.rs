@@ -40,6 +40,7 @@ impl AppearanceMode {
 pub(super) struct PagePalette {
     pub(super) paper: Color32,
     pub(super) text: Color32,
+    pub(super) subdued_text: Color32,
     pub(super) border: Color32,
     pub(super) selection: Color32,
     pub(super) selection_text: Color32,
@@ -53,6 +54,7 @@ impl PagePalette {
             (egui::Theme::Light, _) => Self {
                 paper: Color32::from_rgb(246, 246, 246),
                 text: Color32::from_rgb(32, 32, 32),
+                subdued_text: Color32::from_rgb(98, 98, 98),
                 border: Color32::from_rgb(105, 105, 105),
                 selection: Color32::from_rgb(56, 109, 177),
                 selection_text: Color32::WHITE,
@@ -62,6 +64,7 @@ impl PagePalette {
             (egui::Theme::Dark, true) => Self {
                 paper: Color32::from_rgb(12, 14, 18),
                 text: Color32::from_rgb(238, 240, 244),
+                subdued_text: Color32::from_rgb(156, 163, 173),
                 border: Color32::from_rgb(112, 118, 130),
                 selection: Color32::from_rgb(75, 117, 163),
                 selection_text: Color32::WHITE,
@@ -71,6 +74,7 @@ impl PagePalette {
             (egui::Theme::Dark, false) => Self {
                 paper: Color32::from_rgb(28, 30, 35),
                 text: Color32::from_rgb(238, 238, 238),
+                subdued_text: Color32::from_rgb(156, 163, 173),
                 border: Color32::from_rgb(128, 130, 138),
                 selection: Color32::from_rgb(75, 117, 163),
                 selection_text: Color32::WHITE,
@@ -1988,7 +1992,7 @@ mod tests {
     }
 
     #[test]
-    fn wo002_page_palettes_meet_text_selection_caret_ime_and_border_contrast() {
+    fn page_palettes_meet_visible_hidden_selected_ime_caret_and_border_contrast() {
         for (mode, theme) in [
             (AppearanceMode::System, egui::Theme::Light),
             (AppearanceMode::Day, egui::Theme::Light),
@@ -1998,6 +2002,7 @@ mod tests {
         ] {
             let palette = PagePalette::for_theme(mode, theme);
             assert!(contrast_ratio(palette.text, palette.paper) >= 4.5);
+            assert!(contrast_ratio(palette.subdued_text, palette.paper) >= 4.5);
             assert!(contrast_ratio(palette.ime_text, palette.paper) >= 4.5);
             assert!(contrast_ratio(palette.selection_text, palette.selection) >= 4.5);
             assert!(contrast_ratio(palette.selection, palette.paper) >= 3.0);
