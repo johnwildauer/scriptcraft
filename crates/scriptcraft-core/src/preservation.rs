@@ -698,6 +698,43 @@ impl PreservationState {
                 _ => return Err(PreservationError::UnsupportedTextMapping),
             }
         }
+        if expected_runs.is_empty() {
+            for index in &text_elements {
+                let PreservedNode::Element(text_element) = &paragraph.children[*index] else {
+                    return Err(PreservationError::UnsupportedTextMapping);
+                };
+                if !text_element.attributes.is_empty()
+                    || text_element.children.iter().any(|child| {
+                        !matches!(child, PreservedNode::Text(text) if text.is_empty())
+                    })
+                {
+                    return Err(PreservationError::UnsupportedTextMapping);
+                }
+            }
+            let indexes = text_elements.into_iter().collect::<BTreeSet<_>>();
+            paragraph.children = paragraph
+                .children
+                .drain(..)
+                .enumerate()
+                .filter_map(|(index, child)| (!indexes.contains(&index)).then_some(child))
+                .collect();
+            if !replacement.is_empty() {
+                let (name, namespace_bindings) = paragraph_text_name(paragraph);
+                paragraph
+                    .children
+                    .push(PreservedNode::Element(PreservedElement {
+                        name,
+                        attributes: Vec::new(),
+                        namespace_bindings,
+                        source_type: None,
+                        ownership: SourceOwnership::Opaque,
+                        dependency_confidence: DependencyConfidence::Unknown,
+                        anchor: None,
+                        children: vec![PreservedNode::Text(replacement.to_owned())],
+                    }));
+            }
+            return Ok(());
+        }
         if text_elements.is_empty() || text_elements.len() != expected_runs.len() {
             return Err(PreservationError::UnsupportedTextMapping);
         }
@@ -721,6 +758,17 @@ impl PreservationState {
             if &actual != expected {
                 return Err(PreservationError::ManagedTextMismatch);
             }
+        }
+
+        if replacement.is_empty() {
+            let indexes = text_elements.into_iter().collect::<BTreeSet<_>>();
+            paragraph.children = paragraph
+                .children
+                .drain(..)
+                .enumerate()
+                .filter_map(|(index, child)| (!indexes.contains(&index)).then_some(child))
+                .collect();
+            return Ok(());
         }
 
         for (run_index, index) in text_elements.into_iter().enumerate() {
@@ -1484,6 +1532,9 @@ fn replace_text_element_children(
         if !old_text.is_empty() || start != 0 || end != 0 {
             return Err(PreservationError::UnsupportedTextMapping);
         }
+        if inserted.is_empty() {
+            return Ok(());
+        }
         let (name, namespace_bindings) = paragraph_text_name(paragraph);
         paragraph
             .children
@@ -1495,7 +1546,7 @@ fn replace_text_element_children(
                 ownership: SourceOwnership::Opaque,
                 dependency_confidence: DependencyConfidence::Unknown,
                 anchor: None,
-                children: vec![PreservedNode::Text(String::new())],
+                children: Vec::new(),
             }));
         indexes.push(paragraph.children.len().saturating_sub(1));
     }
@@ -1545,6 +1596,22 @@ fn replace_text_element_children(
         }
     }
     let updated = replace_segments(&source_segments, start, end, inserted)?;
+    if updated.iter().all(String::is_empty) {
+        if indexes.iter().any(|index| {
+            matches!(&paragraph.children[*index], PreservedNode::Element(element)
+                if element.children.iter().any(|child| matches!(child, PreservedNode::CData(_))))
+        }) {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let indexes = indexes.into_iter().collect::<BTreeSet<_>>();
+        paragraph.children = paragraph
+            .children
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, child)| (!indexes.contains(&index)).then_some(child))
+            .collect();
+        return Ok(());
+    }
     for (index, text) in indexes.into_iter().zip(updated) {
         let PreservedNode::Element(text_element) = &mut paragraph.children[index] else {
             return Err(PreservationError::UnsupportedTextMapping);
@@ -1596,7 +1663,7 @@ fn replace_text_element_content(
                 _ => return Err(PreservationError::UnsupportedTextMapping),
             }
         }
-    } else {
+    } else if !replacement.is_empty() {
         element
             .children
             .push(PreservedNode::Text(replacement.to_owned()));

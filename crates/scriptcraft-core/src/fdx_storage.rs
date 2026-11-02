@@ -38,7 +38,7 @@ pub enum StorageOperation {
     Cleanup,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FdxStorageErrorKind {
     InvalidPath,
     UnsupportedPlatform,
@@ -54,7 +54,7 @@ pub enum FdxStorageErrorKind {
 }
 
 /// Safe-to-report storage failure; it never embeds document text or paths.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FdxStorageError {
     pub kind: FdxStorageErrorKind,
     pub temporary_cleanup_failed: bool,
@@ -76,7 +76,7 @@ impl FdxStorageError {
 
 impl fmt::Display for FdxStorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self.kind {
+        let message = match &self.kind {
             FdxStorageErrorKind::InvalidPath => "FDX storage path is invalid",
             FdxStorageErrorKind::UnsupportedPlatform => {
                 "atomic FDX storage is unsupported on this platform"
@@ -359,16 +359,23 @@ struct NativeSaveCandidateCodec;
 
 impl SaveCandidateCodec for NativeSaveCandidateCodec {
     fn serialize(&self, project: &Project) -> Result<PreparedFdx, TransactionalSaveError> {
-        PreparedFdx::from_project(project).map_err(|error| match error.kind {
+        PreparedFdx::from_project(project).map_err(|error| match &error.kind {
             FdxStorageErrorKind::InvalidFdx(codec_error) => {
-                TransactionalSaveError::Codec(codec_error)
+                TransactionalSaveError::Codec(codec_error.clone())
             }
             _ => TransactionalSaveError::Storage(error),
         })
     }
 
     fn reread(&self, bytes: &[u8]) -> Result<Project, FdxError> {
-        fdx::read_v6(bytes).map(|document| document.project)
+        fdx::read_v6(bytes)
+            .map(|document| document.project)
+            .map_err(|error| {
+                fdx::save_diagnostic_at(
+                    error,
+                    fdx::SaveDiagnosticCode::StorageRereadPropagation,
+                )
+            })
     }
 }
 
@@ -404,7 +411,7 @@ fn save_session_with_codec<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
         .map_err(TransactionalSaveError::Codec)?;
     if !same_save_projection(&corrected, &rebased_project) {
         return Err(TransactionalSaveError::Codec(
-            FdxError::UnsupportedConstruct,
+            fdx::SaveDiagnosticCode::StorageSemanticProjectionMismatch.error(),
         ));
     }
     let publishable_session = session
@@ -1490,9 +1497,9 @@ mod tests {
                 if self.fail_serialization {
                     return Err(TransactionalSaveError::Codec(FdxError::InvalidValue));
                 }
-                PreparedFdx::from_project(project).map_err(|error| match error.kind {
+                PreparedFdx::from_project(project).map_err(|error| match &error.kind {
                     FdxStorageErrorKind::InvalidFdx(codec_error) => {
-                        TransactionalSaveError::Codec(codec_error)
+                        TransactionalSaveError::Codec(codec_error.clone())
                     }
                     _ => TransactionalSaveError::Storage(error),
                 })
@@ -1875,6 +1882,109 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn empty_managed_paragraph_save_and_save_as_are_atomic_on_injected_failure() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" ID="blank"/></Content></FinalDraft>"#;
+        let fs = MemFs::default();
+        let source_path = Path::new("/mem/empty-managed-source.fdx");
+        let copy_path = Path::new("/mem/empty-managed-copy.fdx");
+        let failed_copy_path = Path::new("/mem/empty-managed-failed-copy.fdx");
+        fs.put(source_path, source.to_vec());
+        let opened = open(&fs, source_path).unwrap_or_else(|_| unreachable!());
+        let mut session = EditingSession::new(opened.document.project)
+            .unwrap_or_else(|_| unreachable!("childless managed paragraph forms a session"));
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+
+        save_session(&fs, &mut session, &mut target, FdxSaveMode::Save)
+            .unwrap_or_else(|_| unreachable!("native empty paragraph Save succeeds"));
+        let saved = fs
+            .bytes(source_path)
+            .unwrap_or_else(|| unreachable!("Save publishes source destination"));
+        assert!(!std::str::from_utf8(&saved).unwrap_or("").contains("<Text"));
+        let reopened = fdx::read_v6(&saved)
+            .unwrap_or_else(|_| unreachable!("empty paragraph Save output reopens"))
+            .project;
+        assert!(reopened.elements[0].text.is_empty());
+        assert!(reopened.elements[0].runs.is_empty());
+
+        let mut copy_target = FdxSaveTarget::new_unsaved();
+        save_session(
+            &fs,
+            &mut session,
+            &mut copy_target,
+            FdxSaveMode::SaveAs(copy_path.to_owned()),
+        )
+        .unwrap_or_else(|_| unreachable!("native empty paragraph Save As succeeds"));
+        let copied = fs
+            .bytes(copy_path)
+            .unwrap_or_else(|| unreachable!("Save As publishes destination"));
+        assert!(!std::str::from_utf8(&copied).unwrap_or("").contains("<Text"));
+        save_session(&fs, &mut session, &mut copy_target, FdxSaveMode::Save)
+            .unwrap_or_else(|_| unreachable!("second Save after Save As succeeds"));
+
+        let session_before_failure = session.clone();
+        let target_before_failure = target.clone();
+        let destination_before_failure = fs.bytes(source_path);
+        fs.set_fault(Fault::WriteAfter(1));
+        assert!(save_session(&fs, &mut session, &mut target, FdxSaveMode::Save).is_err());
+        assert_eq!(session, session_before_failure);
+        assert_eq!(target, target_before_failure);
+        assert_eq!(fs.bytes(source_path), destination_before_failure);
+
+        let mut failed_target = FdxSaveTarget::new_unsaved();
+        let failed_target_before = failed_target.clone();
+        let session_before_save_as_failure = session.clone();
+        fs.set_fault(Fault::WriteAfter(1));
+        assert!(save_session(
+            &fs,
+            &mut session,
+            &mut failed_target,
+            FdxSaveMode::SaveAs(failed_copy_path.to_owned()),
+        )
+        .is_err());
+        assert_eq!(session, session_before_save_as_failure);
+        assert_eq!(failed_target, failed_target_before);
+        assert_eq!(fs.bytes(failed_copy_path), None);
+    }
+
+    #[test]
+    fn multi_run_plain_cast_list_empty_later_run_survives_repeated_save() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Scene Heading" ID="heading"><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" ID="cue"><Text>ALPHA</Text></Paragraph><Paragraph Type="Cast List" ID="cast"><Text>(stale</Text><Text>)</Text></Paragraph></Content></FinalDraft>"#;
+        let fs = MemFs::default();
+        let path = Path::new("/mem/multi-run-cast-list-empty-run.fdx");
+        fs.put(path, source.to_vec());
+        let opened = open(&fs, path).unwrap_or_else(|_| unreachable!());
+        let mut session = EditingSession::new(opened.document.project)
+            .unwrap_or_else(|_| unreachable!("plain multi-run Cast List imports"));
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+
+        save_session(&fs, &mut session, &mut target, FdxSaveMode::Save)
+            .unwrap_or_else(|_| unreachable!("first corrected Cast List Save succeeds"));
+        let first = fs
+            .bytes(path)
+            .unwrap_or_else(|| unreachable!("first Save publishes candidate"));
+        let reopened = fdx::read_v6(&first)
+            .unwrap_or_else(|_| unreachable!("corrected Cast List reopens"))
+            .project;
+        assert!(reopened
+            .elements
+            .iter()
+            .any(|element| element.role == Role::CastList && element.text == "(ALPHA)"));
+
+        save_session(&fs, &mut session, &mut target, FdxSaveMode::Save)
+            .unwrap_or_else(|_| unreachable!("second corrected Cast List Save succeeds"));
+        let second = fs
+            .bytes(path)
+            .unwrap_or_else(|| unreachable!("second Save publishes candidate"));
+        let reopened_again = fdx::read_v6(&second)
+            .unwrap_or_else(|_| unreachable!("second corrected Cast List output reopens"))
+            .project;
+        assert!(reopened_again
+            .elements
+            .iter()
+            .any(|element| element.role == Role::CastList && element.text == "(ALPHA)"));
     }
 
     #[test]

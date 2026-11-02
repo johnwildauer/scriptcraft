@@ -38,12 +38,14 @@ pub use crate::preservation::{
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 const FDX_ROOT: &str = "FinalDraft";
 const FDX_VERSION: &str = "6";
+const XML_DECLARATION_WITHOUT_TRAILING_LF: &str =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>";
 const XML_DECLARATION: &str =
     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n";
 
 /// Bounded, privacy-safe reader failures. Variants intentionally carry no source
 /// text, identifiers, file paths, or image payloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FdxError {
     SourceTooLarge,
     InvalidEncoding,
@@ -62,6 +64,10 @@ pub enum FdxError {
     AmbiguousIdentity,
     DanglingReference,
     UnsupportedConstruct,
+    /// Save-path UnsupportedConstruct failure with a stable call-site code.
+    SaveDiagnosticUnsupportedConstruct(u16),
+    /// Code 30 with bounded, value-free structural detail for a normalized tree mismatch.
+    SaveDiagnosticSourceTreeMismatch(String),
     ParagraphIdentityEntropyUnavailable,
     ParagraphIdentityCollisionLimit,
     Model(ModelErrorKind),
@@ -106,6 +112,18 @@ impl fmt::Display for FdxError {
             Self::UnsupportedConstruct => {
                 "FDX contains a construct that cannot be projected safely"
             }
+            Self::SaveDiagnosticUnsupportedConstruct(code) => {
+                return write!(
+                    formatter,
+                    "{code}: FDX contains a construct that cannot be projected safely"
+                );
+            }
+            Self::SaveDiagnosticSourceTreeMismatch(detail) => {
+                return write!(
+                    formatter,
+                    "30: FDX contains a construct that cannot be projected safely; {detail}"
+                );
+            }
             Self::ParagraphIdentityEntropyUnavailable => {
                 "secure randomness for a new FDX paragraph identity is unavailable"
             }
@@ -119,6 +137,104 @@ impl fmt::Display for FdxError {
 }
 
 impl std::error::Error for FdxError {}
+
+/// Stable Save/Save As diagnostics. Values are persistent diagnostic identifiers,
+/// not source-line numbers. Keep this map centralized and append new values rather
+/// than reassigning existing ones. The corresponding human-readable map is also
+/// recorded in `.forge/blueprints/technical-context.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub(crate) enum SaveDiagnosticCode {
+    WriteSourceFormat = 1,
+    WriteOriginalRereadPropagation = 2,
+    WriteOriginalPreservationMissing = 3,
+    WriteOriginalIdentityGraphMismatch = 4,
+    ReconcileProjectManagedOrderMismatch = 5,
+    ReconcileNodeDuplicateManagedIdentity = 6,
+    ReconcileNodeManagedOutsideSection = 7,
+    ReconcileNodeSemanticElementMissing = 8,
+    ReconcileProjectNodePropagation = 9,
+    ReconcileParagraphRoleMismatch = 10,
+    ReconcileParagraphTypeAttributeMismatch = 11,
+    ReconcileParagraphEmptyRunsMismatch = 12,
+    ReconcileParagraphCdataInEmptyText = 13,
+    ReconcileParagraphUnsupportedEmptyChild = 14,
+    ReconcileParagraphUnexpectedEmptyText = 15,
+    ReconcileParagraphRunCountMismatch = 16,
+    ReconcileParagraphRunProjectionMismatch = 17,
+    ReconcileParagraphUnexpectedFirstChild = 18,
+    ReconcileParagraphUnexpectedLaterChild = 19,
+    NewDocumentHeadingNodeMismatch = 20,
+    NewDocumentScenePropertiesUnsupported = 21,
+    NewParagraphEmptyRunsMismatch = 22,
+    NewParagraphNamespacedRunAttribute = 23,
+    WriteElementNamespacePrefixMissing = 24,
+    WriteOutputRereadPropagation = 25,
+    WriteSemanticRereadMismatch = 26,
+    WriteOutputPreservationMissing = 27,
+    WriteCandidatePreservationMissing = 28,
+    WriteIdentitySetMismatch = 29,
+    WriteNormalizedSourceTreeMismatch = 30,
+    StorageRereadPropagation = 31,
+    StorageSemanticProjectionMismatch = 32,
+    ReconcileProjectChildPropagation = 33,
+    ReconcileManagedParagraphPropagation = 34,
+}
+
+impl SaveDiagnosticCode {
+    const fn number(self) -> u16 {
+        self as u16
+    }
+
+    pub(crate) const fn error(self) -> FdxError {
+        FdxError::SaveDiagnosticUnsupportedConstruct(self.number())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriterStage {
+    ProjectValidation,
+    PreservationValidation,
+    OriginalSourceGraphComparison,
+    ManagedSourceReconciliation,
+    NewDocumentGeneration,
+    XmlWriting,
+    OutputReread,
+    SemanticComparison,
+    IdentityComparison,
+    SourceTreeComparison,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WriterFailure {
+    error: FdxError,
+    stage: WriterStage,
+    structural_difference: Option<SourceTreeDifference>,
+    identity_difference: Option<IdentitySetDifference>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentityDomainSummary {
+    Document,
+    Paragraph,
+    Scene,
+    Beat,
+    CastMember,
+    Character,
+    ListItem,
+    Board,
+    Image,
+    Revision,
+    Tag,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IdentitySetDifference {
+    domain: IdentityDomainSummary,
+    missing: bool,
+    unexpected: bool,
+}
 
 /// A Version 6 reader result. `project` is an editing projection only; runtime
 /// layout uses deterministic application defaults where the FDX samples do not
@@ -382,30 +498,64 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
 /// attributes, text, comments, processing instructions and opaque children are
 /// checked against the re-read output.
 pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
+    write_v6_with_diagnostics(project).map_err(|failure| failure.error)
+}
+
+fn write_v6_with_diagnostics(project: &Project) -> Result<Vec<u8>, WriterFailure> {
+    let mut stage = WriterStage::ProjectValidation;
+    let mut structural_difference = None;
+    let mut identity_difference = None;
+    write_v6_inner(
+        project,
+        &mut stage,
+        &mut structural_difference,
+        &mut identity_difference,
+    )
+    .map_err(|error| {
+        WriterFailure {
+            error,
+            stage,
+            structural_difference,
+            identity_difference,
+        }
+    })
+}
+
+fn write_v6_inner(
+    project: &Project,
+    stage: &mut WriterStage,
+    structural_difference: &mut Option<SourceTreeDifference>,
+    identity_difference: &mut Option<IdentitySetDifference>,
+) -> Result<Vec<u8>, FdxError> {
     project.validate().map_err(map_model_error)?;
     validate_project_output_budgets(project)?;
 
     let (nodes, expected_preserved_sections) = if let Some(state) = &project.preservation {
+        *stage = WriterStage::PreservationValidation;
         state.validate().map_err(map_preservation_error)?;
         if state.source.format != SourceFormat::Fdx || state.source.encoding != SourceEncoding::Utf8
         {
-            return Err(FdxError::UnsupportedConstruct);
+            return Err(SaveDiagnosticCode::WriteSourceFormat.error());
         }
-        let original = read_v6(&state.source.original_bytes)?;
+        *stage = WriterStage::OriginalSourceGraphComparison;
+        let original = read_v6(&state.source.original_bytes).map_err(|error| {
+            save_diagnostic_at(error, SaveDiagnosticCode::WriteOriginalRereadPropagation)
+        })?;
         let original_state = original
             .project
             .preservation
             .as_ref()
-            .ok_or(FdxError::UnsupportedConstruct)?;
+            .ok_or_else(|| SaveDiagnosticCode::WriteOriginalPreservationMissing.error())?;
         if !same_non_paragraph_identities(&state.identities, &original_state.identities)
             || state.references != original_state.references
             || state.board_graph != original_state.board_graph
         {
-            return Err(FdxError::UnsupportedConstruct);
+            return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
         }
 
         let mut sections = state.sections.clone();
         set_preserved_root_version(&mut sections)?;
+        *stage = WriterStage::ManagedSourceReconciliation;
         reconcile_project_elements(&mut sections, project)?;
         let original_paragraph_ids = original_state
             .identities
@@ -425,12 +575,22 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
             .collect::<Vec<_>>();
         (nodes, Some(expected_sections))
     } else {
+        *stage = WriterStage::NewDocumentGeneration;
         let mut nodes = make_new_document_nodes(project)?;
         format_generated_structure(&mut nodes);
         (nodes, None)
     };
 
-    let mut output = XML_DECLARATION.to_owned();
+    *stage = WriterStage::XmlWriting;
+    let declaration = if project.preservation.is_some() {
+        // Source-backed output assigns declaration-to-root separation solely to
+        // the retained top-level nodes emitted below.
+        XML_DECLARATION_WITHOUT_TRAILING_LF
+    } else {
+        // Preserve the canonical declaration-plus-LF convention for new files.
+        XML_DECLARATION
+    };
+    let mut output = declaration.to_owned();
     for node in &nodes {
         write_node(node, &mut output, 0)?;
         if output.len() > MAX_SOURCE_BYTES {
@@ -441,35 +601,58 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
         return Err(FdxError::SourceTooLarge);
     }
     let bytes = output.into_bytes();
-    let written = read_v6(&bytes)?;
+    *stage = WriterStage::OutputReread;
+    let written = read_v6(&bytes).map_err(|error| {
+        save_diagnostic_at(error, SaveDiagnosticCode::WriteOutputRereadPropagation)
+    })?;
+    *stage = WriterStage::SemanticComparison;
     if !same_semantic_elements(&project.title_page, &written.project.title_page)
         || !same_semantic_elements(&project.elements, &written.project.elements)
     {
-        return Err(FdxError::UnsupportedConstruct);
+        return Err(SaveDiagnosticCode::WriteSemanticRereadMismatch.error());
     }
     if let Some(expected_sections) = expected_preserved_sections {
+        *stage = WriterStage::IdentityComparison;
         let actual_state = written
             .project
             .preservation
             .as_ref()
-            .ok_or(FdxError::UnsupportedConstruct)?;
-        if identity_set(&actual_state.identities)
-            != identity_set(
-                &project
-                    .preservation
-                    .as_ref()
-                    .ok_or(FdxError::UnsupportedConstruct)?
-                    .identities,
-            )
-        {
-            return Err(FdxError::UnsupportedConstruct);
+            .ok_or_else(|| SaveDiagnosticCode::WriteOutputPreservationMissing.error())?;
+        let expected_identities = &project
+            .preservation
+            .as_ref()
+            .ok_or_else(|| SaveDiagnosticCode::WriteCandidatePreservationMissing.error())?
+            .identities;
+        let actual_identity_set = identity_set(&actual_state.identities);
+        let expected_identity_set = identity_set(expected_identities);
+        if actual_identity_set != expected_identity_set {
+            *identity_difference = first_identity_set_difference(
+                &expected_identity_set,
+                &actual_identity_set,
+            );
+            return Err(SaveDiagnosticCode::WriteIdentitySetMismatch.error());
         }
         let actual_sections = &actual_state.sections;
         if normalize_sections(actual_sections) != normalize_sections(&expected_sections) {
-            return Err(FdxError::UnsupportedConstruct);
+            *stage = WriterStage::SourceTreeComparison;
+            let expected = normalize_sections(&expected_sections);
+            let actual = normalize_sections(actual_sections);
+            let difference = first_source_tree_difference(&expected, &actual)
+                .expect("unequal normalized source trees must have a structural difference");
+            let public_detail = difference.public_detail();
+            *structural_difference = Some(difference);
+            return Err(FdxError::SaveDiagnosticSourceTreeMismatch(public_detail));
         }
     }
     Ok(bytes)
+}
+
+pub(crate) fn save_diagnostic_at(error: FdxError, code: SaveDiagnosticCode) -> FdxError {
+    if error == FdxError::UnsupportedConstruct {
+        code.error()
+    } else {
+        error
+    }
 }
 
 fn same_non_paragraph_identities(left: &[ForeignIdentity], right: &[ForeignIdentity]) -> bool {
@@ -482,6 +665,41 @@ fn same_non_paragraph_identities(left: &[ForeignIdentity], right: &[ForeignIdent
 
 fn identity_set(identities: &[ForeignIdentity]) -> BTreeSet<ForeignIdentity> {
     identities.iter().cloned().collect()
+}
+
+fn first_identity_set_difference(
+    expected: &BTreeSet<ForeignIdentity>,
+    actual: &BTreeSet<ForeignIdentity>,
+) -> Option<IdentitySetDifference> {
+    if let Some(identity) = expected.difference(actual).next() {
+        return Some(IdentitySetDifference {
+            domain: identity_domain_summary(&identity.domain),
+            missing: true,
+            unexpected: false,
+        });
+    }
+    actual.difference(expected).next().map(|identity| IdentitySetDifference {
+        domain: identity_domain_summary(&identity.domain),
+        missing: false,
+        unexpected: true,
+    })
+}
+
+fn identity_domain_summary(domain: &ForeignIdDomain) -> IdentityDomainSummary {
+    match domain {
+        ForeignIdDomain::Document => IdentityDomainSummary::Document,
+        ForeignIdDomain::Paragraph => IdentityDomainSummary::Paragraph,
+        ForeignIdDomain::Scene => IdentityDomainSummary::Scene,
+        ForeignIdDomain::Beat => IdentityDomainSummary::Beat,
+        ForeignIdDomain::CastMember => IdentityDomainSummary::CastMember,
+        ForeignIdDomain::Character => IdentityDomainSummary::Character,
+        ForeignIdDomain::ListItem => IdentityDomainSummary::ListItem,
+        ForeignIdDomain::Board => IdentityDomainSummary::Board,
+        ForeignIdDomain::Image => IdentityDomainSummary::Image,
+        ForeignIdDomain::Revision => IdentityDomainSummary::Revision,
+        ForeignIdDomain::Tag => IdentityDomainSummary::Tag,
+        ForeignIdDomain::Other(_) => IdentityDomainSummary::Other,
+    }
 }
 
 fn same_semantic_elements(left: &[ScreenplayElement], right: &[ScreenplayElement]) -> bool {
@@ -567,6 +785,411 @@ fn normalize_sections(sections: &[PreservedSection]) -> Vec<PreservedSection> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StructuralNodeKind {
+    Element,
+    Text,
+    CData,
+    Comment,
+    ProcessingInstruction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructuralNodeSummary {
+    kind: StructuralNodeKind,
+    namespace_uri: Option<String>,
+    local_name: Option<String>,
+    child_count: usize,
+    attribute_count: usize,
+}
+
+/// Private, value-free first-difference metadata for unit tests. The path is a
+/// sequence of ordered child indexes prefixed by the source-section index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceTreeDifference {
+    node_path: Vec<usize>,
+    field: &'static str,
+    expected_detail: Option<String>,
+    actual_detail: Option<String>,
+    expected: Option<StructuralNodeSummary>,
+    actual: Option<StructuralNodeSummary>,
+}
+
+impl SourceTreeDifference {
+    fn public_detail(&self) -> String {
+        const MAX_DETAIL_BYTES: usize = 240;
+        const MAX_PATH_DEPTH: usize = 12;
+        let mut path = String::from("section[");
+        path.push_str(&self.node_path.first().copied().unwrap_or(0).to_string());
+        path.push(']');
+        for (depth, index) in self.node_path.iter().skip(1).enumerate() {
+            if depth >= MAX_PATH_DEPTH {
+                path.push_str("/…");
+                break;
+            }
+            path.push_str("/node[");
+            path.push_str(&index.to_string());
+            path.push(']');
+        }
+        let expected = self.expected_detail.as_deref().unwrap_or("absent");
+        let actual = self.actual_detail.as_deref().unwrap_or("absent");
+        let detail = format!("path={path}; field={}; expected={expected}; actual={actual}", self.field);
+        if detail.len() <= MAX_DETAIL_BYTES {
+            detail
+        } else {
+            let mut bounded = detail;
+            bounded.truncate(MAX_DETAIL_BYTES.saturating_sub(3));
+            bounded.push_str("...");
+            bounded
+        }
+    }
+}
+
+fn difference(
+    node_path: Vec<usize>,
+    field: &'static str,
+    expected_detail: Option<String>,
+    actual_detail: Option<String>,
+    expected: Option<StructuralNodeSummary>,
+    actual: Option<StructuralNodeSummary>,
+) -> SourceTreeDifference {
+    SourceTreeDifference {
+        node_path,
+        field,
+        expected_detail,
+        actual_detail,
+        expected,
+        actual,
+    }
+}
+
+fn safe_xml_name(name: &str) -> String {
+    const MAX_NAME_BYTES: usize = 36;
+    let mut safe = String::new();
+    for character in name.chars() {
+        if safe.len() >= MAX_NAME_BYTES {
+            safe.push_str("...");
+            break;
+        }
+        safe.push(if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
+            character
+        } else {
+            '_'
+        });
+    }
+    safe
+}
+
+fn safe_name_detail(value: Option<&str>) -> Option<String> {
+    value.map(|value| safe_xml_name(value))
+}
+
+fn source_name_difference(
+    expected: &SourceName,
+    actual: &SourceName,
+) -> Option<(&'static str, Option<String>, Option<String>)> {
+    if expected.local_name != actual.local_name {
+        return Some((
+            "element.local-name",
+            safe_name_detail(Some(&expected.local_name)),
+            safe_name_detail(Some(&actual.local_name)),
+        ));
+    }
+    if expected.namespace_uri != actual.namespace_uri {
+        return Some((
+            "element.namespace",
+            Some(if expected.namespace_uri.is_some() { "present" } else { "absent" }.into()),
+            Some(if actual.namespace_uri.is_some() { "present" } else { "absent" }.into()),
+        ));
+    }
+    if expected.qualified_name != actual.qualified_name {
+        return Some((
+            "element.qualified-name",
+            Some(if expected.qualified_name.is_some() { "present" } else { "absent" }.into()),
+            Some(if actual.qualified_name.is_some() { "present" } else { "absent" }.into()),
+        ));
+    }
+    None
+}
+
+fn ownership_category(ownership: &SourceOwnership) -> &'static str {
+    match ownership {
+        SourceOwnership::Opaque => "opaque",
+        SourceOwnership::Managed(_) => "managed",
+        SourceOwnership::Attached(_) => "attached",
+    }
+}
+
+fn anchor_category(anchor: &Option<SourceAnchorId>) -> &'static str {
+    if anchor.is_some() { "present" } else { "absent" }
+}
+
+fn text_classification(text: &str) -> String {
+    let class = if text.is_empty() {
+        "empty"
+    } else if text.chars().all(char::is_whitespace) {
+        "whitespace-only"
+    } else {
+        "contains-non-whitespace"
+    };
+    format!("length={},{}", text.chars().count(), class)
+}
+
+fn node_description(node: &PreservedNode) -> String {
+    match node {
+        PreservedNode::Element(element) => format!(
+            "element:{};children={};attributes={}",
+            safe_xml_name(&element.name.local_name),
+            element.children.len(),
+            element.attributes.len()
+        ),
+        PreservedNode::Text(text) => format!("text:{}", text_classification(text)),
+        PreservedNode::CData(text) => format!("cdata:{}", text_classification(text)),
+        PreservedNode::Comment(text) => format!("comment:{}", text_classification(text)),
+        PreservedNode::ProcessingInstruction { .. } => "processing-instruction".into(),
+    }
+}
+
+fn structural_node_summary(node: &PreservedNode) -> StructuralNodeSummary {
+    match node {
+        PreservedNode::Element(element) => StructuralNodeSummary {
+            kind: StructuralNodeKind::Element,
+            namespace_uri: element.name.namespace_uri.clone(),
+            local_name: Some(element.name.local_name.clone()),
+            child_count: element.children.len(),
+            attribute_count: element.attributes.len(),
+        },
+        PreservedNode::Text(_) => StructuralNodeSummary {
+            kind: StructuralNodeKind::Text,
+            namespace_uri: None,
+            local_name: None,
+            child_count: 0,
+            attribute_count: 0,
+        },
+        PreservedNode::CData(_) => StructuralNodeSummary {
+            kind: StructuralNodeKind::CData,
+            namespace_uri: None,
+            local_name: None,
+            child_count: 0,
+            attribute_count: 0,
+        },
+        PreservedNode::Comment(_) => StructuralNodeSummary {
+            kind: StructuralNodeKind::Comment,
+            namespace_uri: None,
+            local_name: None,
+            child_count: 0,
+            attribute_count: 0,
+        },
+        PreservedNode::ProcessingInstruction { .. } => StructuralNodeSummary {
+            kind: StructuralNodeKind::ProcessingInstruction,
+            namespace_uri: None,
+            local_name: None,
+            child_count: 0,
+            attribute_count: 0,
+        },
+    }
+}
+
+fn first_source_tree_difference(
+    expected: &[PreservedSection],
+    actual: &[PreservedSection],
+) -> Option<SourceTreeDifference> {
+    let section_count = expected.len().max(actual.len());
+    for section_index in 0..section_count {
+        let expected_section = expected.get(section_index);
+        let actual_section = actual.get(section_index);
+        let Some(expected_section) = expected_section else {
+            return Some(difference(vec![section_index], "section.presence", None,
+                actual_section.map(|section| format!("kind={:?},ordinal={}", section.kind, section.ordinal)),
+                None, actual_section.and_then(|section| section.children.first()).map(structural_node_summary)));
+        };
+        let Some(actual_section) = actual_section else {
+            return Some(difference(vec![section_index], "section.presence",
+                Some(format!("kind={:?},ordinal={}", expected_section.kind, expected_section.ordinal)), None,
+                expected_section.children.first().map(structural_node_summary), None));
+        };
+        let section_path = vec![section_index];
+        if let Some((field, left, right)) = source_name_difference(&expected_section.name, &actual_section.name) {
+            let field = match field {
+                "element.local-name" => "section.local-name",
+                "element.namespace" => "section.namespace",
+                _ => "section.qualified-name",
+            };
+            return Some(difference(section_path, field, left, right,
+                expected_section.children.first().map(structural_node_summary), actual_section.children.first().map(structural_node_summary)));
+        }
+        if expected_section.kind != actual_section.kind {
+            return Some(difference(section_path, "section.kind", Some(format!("{:?}", expected_section.kind)),
+                Some(format!("{:?}", actual_section.kind)), expected_section.children.first().map(structural_node_summary),
+                actual_section.children.first().map(structural_node_summary)));
+        }
+        if expected_section.ordinal != actual_section.ordinal {
+            return Some(difference(section_path, "section.ordinal", Some(expected_section.ordinal.to_string()),
+                Some(actual_section.ordinal.to_string()), expected_section.children.first().map(structural_node_summary),
+                actual_section.children.first().map(structural_node_summary)));
+        }
+        if let Some(difference) = first_node_sequence_difference(
+            &expected_section.children,
+            &actual_section.children,
+            vec![section_index],
+        ) {
+            return Some(difference);
+        }
+    }
+    None
+}
+
+fn first_node_sequence_difference(
+    expected: &[PreservedNode],
+    actual: &[PreservedNode],
+    path: Vec<usize>,
+) -> Option<SourceTreeDifference> {
+    let node_count = expected.len().max(actual.len());
+    for child_index in 0..node_count {
+        let mut child_path = path.clone();
+        child_path.push(child_index);
+        let expected_node = expected.get(child_index);
+        let actual_node = actual.get(child_index);
+        let (Some(expected_node), Some(actual_node)) = (expected_node, actual_node) else {
+            let expected_detail = expected_node.map_or_else(
+                || format!("absent;sibling-count={}", expected.len()),
+                |node| format!("{};sibling-count={}", node_description(node), expected.len()),
+            );
+            let actual_detail = actual_node.map_or_else(
+                || format!("absent;sibling-count={}", actual.len()),
+                |node| format!("{};sibling-count={}", node_description(node), actual.len()),
+            );
+            return Some(difference(child_path, "child.presence", Some(expected_detail),
+                Some(actual_detail), expected_node.map(structural_node_summary), actual_node.map(structural_node_summary)));
+        };
+        if expected_node != actual_node
+            && (actual[child_index + 1..].contains(expected_node)
+                || expected[child_index + 1..].contains(actual_node))
+        {
+            return Some(difference(
+                child_path,
+                "child.order",
+                Some(node_description(expected_node)),
+                Some(node_description(actual_node)),
+                Some(structural_node_summary(expected_node)),
+                Some(structural_node_summary(actual_node)),
+            ));
+        }
+        match (expected_node, actual_node) {
+            (PreservedNode::Element(expected_element), PreservedNode::Element(actual_element)) => {
+                let expected_summary = Some(structural_node_summary(expected_node));
+                let actual_summary = Some(structural_node_summary(actual_node));
+                if let Some((field, left, right)) = source_name_difference(&expected_element.name, &actual_element.name) {
+                    return Some(difference(child_path, field, left, right, expected_summary, actual_summary));
+                }
+                let common_attributes = expected_element.attributes.len().min(actual_element.attributes.len());
+                for attribute_index in 0..common_attributes {
+                    let left = &expected_element.attributes[attribute_index];
+                    let right = &actual_element.attributes[attribute_index];
+                    if left.name != right.name {
+                        return Some(difference(child_path, "attribute.name-or-order",
+                            safe_name_detail(Some(&left.name.local_name)), safe_name_detail(Some(&right.name.local_name)),
+                            expected_summary, actual_summary));
+                    }
+                    if left.value != right.value {
+                        return Some(difference(child_path, "attribute.value", safe_name_detail(Some(&left.name.local_name)),
+                            safe_name_detail(Some(&right.name.local_name)), expected_summary, actual_summary));
+                    }
+                }
+                if expected_element.attributes.len() != actual_element.attributes.len() {
+                    let left = expected_element.attributes.get(common_attributes).map(|attribute| safe_xml_name(&attribute.name.local_name));
+                    let right = actual_element.attributes.get(common_attributes).map(|attribute| safe_xml_name(&attribute.name.local_name));
+                    return Some(difference(child_path, "attribute.count-or-presence", left, right, expected_summary, actual_summary));
+                }
+                let common_bindings = expected_element.namespace_bindings.len().min(actual_element.namespace_bindings.len());
+                for binding_index in 0..common_bindings {
+                    let left = &expected_element.namespace_bindings[binding_index];
+                    let right = &actual_element.namespace_bindings[binding_index];
+                    if left.prefix != right.prefix {
+                        return Some(difference(child_path, "namespace-binding.prefix-or-order",
+                            Some(if left.prefix.is_empty() { "default".into() } else { safe_xml_name(&left.prefix) }),
+                            Some(if right.prefix.is_empty() { "default".into() } else { safe_xml_name(&right.prefix) }),
+                            expected_summary, actual_summary));
+                    }
+                    if left.namespace_uri != right.namespace_uri {
+                        return Some(difference(child_path, "namespace-binding.namespace",
+                            Some("present".into()), Some("present".into()), expected_summary, actual_summary));
+                    }
+                }
+                if expected_element.namespace_bindings.len() != actual_element.namespace_bindings.len() {
+                    return Some(difference(child_path, "namespace-binding.count-or-presence",
+                        expected_element.namespace_bindings.get(common_bindings).map(|binding| safe_xml_name(&binding.prefix)),
+                        actual_element.namespace_bindings.get(common_bindings).map(|binding| safe_xml_name(&binding.prefix)),
+                        expected_summary, actual_summary));
+                }
+                if expected_element.source_type != actual_element.source_type {
+                    return Some(difference(child_path, "source-type", Some(if expected_element.source_type.is_some() { "present".into() } else { "absent".into() }),
+                        Some(if actual_element.source_type.is_some() { "present".into() } else { "absent".into() }), expected_summary, actual_summary));
+                }
+                if expected_element.ownership != actual_element.ownership {
+                    return Some(difference(child_path, "ownership", Some(ownership_category(&expected_element.ownership).into()),
+                        Some(ownership_category(&actual_element.ownership).into()), expected_summary, actual_summary));
+                }
+                if expected_element.dependency_confidence != actual_element.dependency_confidence {
+                    return Some(difference(child_path, "dependency-confidence", Some(format!("{:?}", expected_element.dependency_confidence)),
+                        Some(format!("{:?}", actual_element.dependency_confidence)), expected_summary, actual_summary));
+                }
+                if expected_element.anchor != actual_element.anchor {
+                    return Some(difference(child_path, "anchor", Some(anchor_category(&expected_element.anchor).into()),
+                        Some(anchor_category(&actual_element.anchor).into()), expected_summary, actual_summary));
+                }
+                if let Some(difference) = first_node_sequence_difference(
+                    &expected_element.children,
+                    &actual_element.children,
+                    child_path,
+                ) {
+                    return Some(difference);
+                }
+            }
+            (PreservedNode::Text(expected_text), PreservedNode::Text(actual_text)) if expected_text == actual_text => {}
+            (PreservedNode::Text(expected_text), PreservedNode::Text(actual_text)) => {
+                return Some(difference(child_path, "text.content", Some(text_classification(expected_text)),
+                    Some(text_classification(actual_text)), Some(structural_node_summary(expected_node)), Some(structural_node_summary(actual_node))));
+            }
+            (PreservedNode::CData(expected_text), PreservedNode::CData(actual_text)) if expected_text == actual_text => {}
+            (PreservedNode::CData(expected_text), PreservedNode::CData(actual_text)) => {
+                return Some(difference(child_path, "cdata.content", Some(text_classification(expected_text)),
+                    Some(text_classification(actual_text)), Some(structural_node_summary(expected_node)), Some(structural_node_summary(actual_node))));
+            }
+            (PreservedNode::Comment(expected_text), PreservedNode::Comment(actual_text)) if expected_text == actual_text => {}
+            (PreservedNode::Comment(expected_text), PreservedNode::Comment(actual_text)) => {
+                return Some(difference(child_path, "comment.content", Some(text_classification(expected_text)),
+                    Some(text_classification(actual_text)), Some(structural_node_summary(expected_node)), Some(structural_node_summary(actual_node))));
+            }
+            (
+                PreservedNode::ProcessingInstruction {
+                    target: expected_target,
+                    data: expected_data,
+                },
+                PreservedNode::ProcessingInstruction {
+                    target: actual_target,
+                    data: actual_data,
+                },
+            ) if expected_target == actual_target && expected_data == actual_data => {}
+            (PreservedNode::ProcessingInstruction { target: expected_target, data: expected_data },
+             PreservedNode::ProcessingInstruction { target: actual_target, data: actual_data }) => {
+                let (field, left, right) = if expected_target != actual_target {
+                    ("processing-instruction.target", Some("present".into()), Some("present".into()))
+                } else {
+                    ("processing-instruction.data", Some(text_classification(expected_data)), Some(text_classification(actual_data)))
+                };
+                return Some(difference(child_path, field, left, right, Some(structural_node_summary(expected_node)),
+                    Some(structural_node_summary(actual_node))));
+            }
+            _ => {
+                return Some(difference(child_path, "node.kind-or-order", Some(node_description(expected_node)),
+                    Some(node_description(actual_node)), Some(structural_node_summary(expected_node)), Some(structural_node_summary(actual_node))));
+            }
+        }
+    }
+    None
+}
+
 fn normalize_source_tree(nodes: &[PreservedNode]) -> Vec<PreservedNode> {
     let mut normalized = normalize_text_nodes(nodes);
     let mut stack = normalized.iter_mut().collect::<Vec<_>>();
@@ -596,6 +1219,11 @@ fn normalize_text_nodes(nodes: &[PreservedNode]) -> Vec<PreservedNode> {
             }
             other => other.clone(),
         };
+        if matches!(&normalized_node, PreservedNode::Text(text) if text.is_empty()) {
+            // The XML writer emits no bytes for an empty text node, so a reader
+            // cannot reconstruct it. Omit it only at this comparison boundary.
+            continue;
+        }
         if let PreservedNode::Text(text) = normalized_node {
             if let Some(PreservedNode::Text(previous)) = normalized.last_mut() {
                 previous.push_str(&text);
@@ -872,7 +1500,10 @@ fn reconcile_project_elements(
                 &mut title_order,
                 &mut seen,
                 &mut roots,
-            )?;
+            )
+            .map_err(|error| {
+                save_diagnostic_at(error, SaveDiagnosticCode::ReconcileProjectNodePropagation)
+            })?;
         }
     }
     if roots != 1
@@ -889,7 +1520,7 @@ fn reconcile_project_elements(
                 .map(|element| element.id.clone())
                 .collect::<Vec<_>>()
     {
-        return Err(FdxError::UnsupportedConstruct);
+        return Err(SaveDiagnosticCode::ReconcileProjectManagedOrderMismatch.error());
     }
     Ok(())
 }
@@ -923,7 +1554,7 @@ fn reconcile_node(
     };
     if let SourceOwnership::Managed(id) = &element.ownership {
         if !seen.insert(id.clone()) {
-            return Err(FdxError::UnsupportedConstruct);
+            return Err(SaveDiagnosticCode::ReconcileNodeDuplicateManagedIdentity.error());
         }
         let semantic = match current_section {
             SectionKind::Content => {
@@ -934,11 +1565,15 @@ fn reconcile_node(
                 title_order.push(id.clone());
                 title.get(id)
             }
-            SectionKind::Other => return Err(FdxError::UnsupportedConstruct),
+            SectionKind::Other => {
+                return Err(SaveDiagnosticCode::ReconcileNodeManagedOutsideSection.error())
+            }
         }
         .copied()
-        .ok_or(FdxError::UnsupportedConstruct)?;
-        reconcile_managed_paragraph(element, semantic)?;
+        .ok_or_else(|| SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error())?;
+        reconcile_managed_paragraph(element, semantic).map_err(|error| {
+            save_diagnostic_at(error, SaveDiagnosticCode::ReconcileManagedParagraphPropagation)
+        })?;
         return Ok(());
     }
     for child in &mut element.children {
@@ -953,7 +1588,10 @@ fn reconcile_node(
             title_order,
             seen,
             roots,
-        )?;
+        )
+        .map_err(|error| {
+            save_diagnostic_at(error, SaveDiagnosticCode::ReconcileProjectChildPropagation)
+        })?;
     }
     Ok(())
 }
@@ -964,7 +1602,7 @@ fn reconcile_managed_paragraph(
 ) -> Result<(), FdxError> {
     let role_type = role_to_fdx(semantic.role);
     if paragraph.source_type.as_deref() != Some(role_type) {
-        return Err(FdxError::UnsupportedConstruct);
+        return Err(SaveDiagnosticCode::ReconcileParagraphRoleMismatch.error());
     }
     let type_attributes = paragraph
         .attributes
@@ -974,7 +1612,47 @@ fn reconcile_managed_paragraph(
         })
         .collect::<Vec<_>>();
     if type_attributes.len() != 1 || type_attributes[0].value != role_type {
-        return Err(FdxError::UnsupportedConstruct);
+        return Err(SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch.error());
+    }
+
+    if semantic.text.is_empty() {
+        if !semantic.runs.is_empty() {
+            return Err(SaveDiagnosticCode::ReconcileParagraphEmptyRunsMismatch.error());
+        }
+        for child in &paragraph.children {
+            let PreservedNode::Element(text_element) = child else {
+                continue;
+            };
+            if text_element.name.local_name != "Text"
+                || text_element.name.namespace_uri != paragraph.name.namespace_uri
+            {
+                continue;
+            }
+            let mut text = String::new();
+            for inline in &text_element.children {
+                match inline {
+                    PreservedNode::Text(value) => text.push_str(value),
+                    // CDATA has explicit serialized syntax and is not an
+                    // interchangeable serializer-invisible text leaf.
+                    PreservedNode::CData(_) => {
+                        return Err(SaveDiagnosticCode::ReconcileParagraphCdataInEmptyText.error())
+                    }
+                    _ => {
+                        return Err(SaveDiagnosticCode::ReconcileParagraphUnsupportedEmptyChild.error())
+                    }
+                }
+            }
+            if !text.is_empty() {
+                return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedEmptyText.error());
+            }
+        }
+        paragraph.children.retain(|child| {
+            !matches!(child,
+                PreservedNode::Element(element)
+                    if element.name.local_name == "Text"
+                        && element.name.namespace_uri == paragraph.name.namespace_uri)
+        });
+        return Ok(());
     }
 
     let mut text_elements = paragraph
@@ -997,12 +1675,6 @@ fn reconcile_managed_paragraph(
             attributes: Vec::new(),
         }];
         plain_run.as_slice()
-    } else if semantic.runs.is_empty() && text_elements.len() == 1 {
-        plain_run = vec![TextRun {
-            text: String::new(),
-            attributes: Vec::new(),
-        }];
-        plain_run.as_slice()
     } else {
         semantic.runs.as_slice()
     };
@@ -1010,7 +1682,7 @@ fn reconcile_managed_paragraph(
         if text_elements.is_empty() && semantic_runs.is_empty() && semantic.text.is_empty() {
             return Ok(());
         }
-        return Err(FdxError::UnsupportedConstruct);
+        return Err(SaveDiagnosticCode::ReconcileParagraphRunCountMismatch.error());
     }
     for (text_element, run) in text_elements.iter_mut().zip(semantic_runs) {
         let source_attributes = text_element
@@ -1031,19 +1703,23 @@ fn reconcile_managed_paragraph(
                 .iter()
                 .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
         {
-            return Err(FdxError::UnsupportedConstruct);
+            return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
         }
         if let Some(first) = text_element.children.first_mut() {
             match first {
                 PreservedNode::Text(value) | PreservedNode::CData(value) => {
                     *value = run.text.clone();
                 }
-                _ => return Err(FdxError::UnsupportedConstruct),
+                _ => {
+                    return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedFirstChild.error())
+                }
             }
             for child in text_element.children.iter_mut().skip(1) {
                 match child {
                     PreservedNode::Text(value) | PreservedNode::CData(value) => value.clear(),
-                    _ => return Err(FdxError::UnsupportedConstruct),
+                    _ => {
+                        return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedLaterChild.error())
+                    }
                 }
             }
         } else if !run.text.is_empty() {
@@ -1076,7 +1752,7 @@ fn make_new_document_nodes(project: &Project) -> Result<Vec<PreservedNode>, FdxE
             .map(|(_, name)| name)
             .collect::<Vec<_>>();
             let PreservedNode::Element(heading) = &mut paragraph else {
-                return Err(FdxError::UnsupportedConstruct);
+                return Err(SaveDiagnosticCode::NewDocumentHeadingNodeMismatch.error());
             };
             let properties = crate::scene_metadata::new_scene_properties(
                 &names,
@@ -1089,7 +1765,7 @@ fn make_new_document_nodes(project: &Project) -> Result<Vec<PreservedNode>, FdxE
                 crate::scene_metadata::SceneMetadataError::ParagraphIdentityCollisionLimit => {
                     FdxError::ParagraphIdentityCollisionLimit
                 }
-                _ => FdxError::UnsupportedConstruct,
+                _ => SaveDiagnosticCode::NewDocumentScenePropertiesUnsupported.error(),
             })?;
             let text_index = heading
                 .children
@@ -1219,6 +1895,12 @@ fn new_paragraph(
         vec![("Type", role_to_fdx(semantic.role)), ("id", "")],
     );
     paragraph.attributes[1].value = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
+    if semantic.text.is_empty() {
+        if !semantic.runs.is_empty() {
+            return Err(SaveDiagnosticCode::NewParagraphEmptyRunsMismatch.error());
+        }
+        return Ok(PreservedNode::Element(paragraph));
+    }
     let mut runs = semantic.runs.clone();
     if runs.is_empty() {
         runs.push(TextRun {
@@ -1232,7 +1914,7 @@ fn new_paragraph(
         for attribute in run.attributes {
             validate_qname(&attribute.name)?;
             if attribute.name.contains(':') {
-                return Err(FdxError::UnsupportedConstruct);
+                return Err(SaveDiagnosticCode::NewParagraphNamespacedRunAttribute.error());
             }
             validate_xml_chars(&attribute.value)?;
             text.attributes.push(PreservedAttribute {
@@ -1352,7 +2034,7 @@ fn write_element(
         .unwrap_or(&element.name.local_name);
     validate_qname(name)?;
     if element.name.namespace_uri.is_some() && element.name.qualified_name.is_none() {
-        return Err(FdxError::UnsupportedConstruct);
+        return Err(SaveDiagnosticCode::WriteElementNamespacePrefixMissing.error());
     }
     let mut attribute_names = BTreeSet::new();
     let mut expanded_attribute_names = BTreeSet::new();
@@ -2197,9 +2879,11 @@ fn make_semantic_element(
             .collect();
         runs.push(TextRun { text, attributes });
     }
-    if runs.is_empty() {
-        // A paragraph with no Text child is still faithfully represented as an
-        // empty semantic paragraph; all source structure remains in preservation.
+    if runs.iter().all(|run| run.text.is_empty()) {
+        // Empty Text elements have no canonical semantic contribution, regardless
+        // of their formatting attributes. The preservation tree retains them
+        // until managed writer reconciliation.
+        runs.clear();
     }
     ScreenplayElement::with_runs(id, role, runs, Some(source_provenance)).map_err(map_model_error)
 }
@@ -3339,7 +4023,7 @@ mod tests {
 
         let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
         let output = std::str::from_utf8(&bytes).unwrap_or("");
-        assert!(output.starts_with(XML_DECLARATION));
+        assert!(output.starts_with(XML_DECLARATION_WITHOUT_TRAILING_LF));
         assert_eq!(output.matches("<?xml").count(), 1);
         let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
         assert_eq!(
@@ -3726,10 +4410,389 @@ mod tests {
             ScreenplayElement::new("unanchored-new", Role::Action, "new")
                 .unwrap_or_else(|_| unreachable!()),
         );
-        assert_eq!(write_v6(&inserted), Err(FdxError::UnsupportedConstruct));
+        assert_eq!(
+            write_v6(&inserted),
+            Err(SaveDiagnosticCode::ReconcileProjectManagedOrderMismatch.error())
+        );
 
         let mut invalid_text = Project::new().unwrap_or_else(|_| unreachable!());
         invalid_text.elements[0].text = "bad\u{1}".into();
         assert_eq!(write_v6(&invalid_text), Err(FdxError::InvalidValue));
+    }
+
+    #[test]
+    fn v4_wo003_codes_are_unique_stable_and_prefix_the_underlying_error() {
+        let codes = [
+            (SaveDiagnosticCode::WriteSourceFormat, 1),
+            (SaveDiagnosticCode::WriteOriginalRereadPropagation, 2),
+            (SaveDiagnosticCode::WriteOriginalPreservationMissing, 3),
+            (SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch, 4),
+            (SaveDiagnosticCode::ReconcileProjectManagedOrderMismatch, 5),
+            (SaveDiagnosticCode::ReconcileNodeDuplicateManagedIdentity, 6),
+            (SaveDiagnosticCode::ReconcileNodeManagedOutsideSection, 7),
+            (SaveDiagnosticCode::ReconcileNodeSemanticElementMissing, 8),
+            (SaveDiagnosticCode::ReconcileProjectNodePropagation, 9),
+            (SaveDiagnosticCode::ReconcileParagraphRoleMismatch, 10),
+            (SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch, 11),
+            (SaveDiagnosticCode::ReconcileParagraphEmptyRunsMismatch, 12),
+            (SaveDiagnosticCode::ReconcileParagraphCdataInEmptyText, 13),
+            (SaveDiagnosticCode::ReconcileParagraphUnsupportedEmptyChild, 14),
+            (SaveDiagnosticCode::ReconcileParagraphUnexpectedEmptyText, 15),
+            (SaveDiagnosticCode::ReconcileParagraphRunCountMismatch, 16),
+            (SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch, 17),
+            (SaveDiagnosticCode::ReconcileParagraphUnexpectedFirstChild, 18),
+            (SaveDiagnosticCode::ReconcileParagraphUnexpectedLaterChild, 19),
+            (SaveDiagnosticCode::NewDocumentHeadingNodeMismatch, 20),
+            (SaveDiagnosticCode::NewDocumentScenePropertiesUnsupported, 21),
+            (SaveDiagnosticCode::NewParagraphEmptyRunsMismatch, 22),
+            (SaveDiagnosticCode::NewParagraphNamespacedRunAttribute, 23),
+            (SaveDiagnosticCode::WriteElementNamespacePrefixMissing, 24),
+            (SaveDiagnosticCode::WriteOutputRereadPropagation, 25),
+            (SaveDiagnosticCode::WriteSemanticRereadMismatch, 26),
+            (SaveDiagnosticCode::WriteOutputPreservationMissing, 27),
+            (SaveDiagnosticCode::WriteCandidatePreservationMissing, 28),
+            (SaveDiagnosticCode::WriteIdentitySetMismatch, 29),
+            (SaveDiagnosticCode::WriteNormalizedSourceTreeMismatch, 30),
+            (SaveDiagnosticCode::StorageRereadPropagation, 31),
+            (SaveDiagnosticCode::StorageSemanticProjectionMismatch, 32),
+            (SaveDiagnosticCode::ReconcileProjectChildPropagation, 33),
+            (SaveDiagnosticCode::ReconcileManagedParagraphPropagation, 34),
+        ];
+        for (code, expected_number) in &codes {
+            assert_eq!(code.number(), *expected_number);
+        }
+        let numbers = codes
+            .iter()
+            .map(|(code, _)| code.number())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(numbers.len(), codes.len());
+        assert_eq!(numbers, (1..=34).collect());
+        assert_eq!(
+            SaveDiagnosticCode::NewParagraphNamespacedRunAttribute.error().to_string(),
+            "23: FDX contains a construct that cannot be projected safely"
+        );
+        assert_eq!(
+            SaveDiagnosticCode::StorageSemanticProjectionMismatch.number(),
+            32
+        );
+    }
+
+    #[test]
+    fn v4_wo003_writer_failure_exposes_private_stage_and_numeric_prefix() {
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        project.elements[0].text = "safe text".to_owned();
+        project.elements[0].runs = vec![TextRun {
+            text: "safe text".to_owned(),
+            attributes: vec![RunAttribute {
+                name: "vendor:style".to_owned(),
+                value: "private value is never included in the diagnostic".to_owned(),
+            }],
+        }];
+
+        let failure = match write_v6_with_diagnostics(&project) {
+            Ok(_) => unreachable!("namespaced generated run attributes are unsupported"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.stage, WriterStage::NewDocumentGeneration);
+        assert_eq!(
+            failure.error,
+            SaveDiagnosticCode::NewParagraphNamespacedRunAttribute.error()
+        );
+        assert!(failure.error.to_string().starts_with("23:"));
+        assert!(failure.structural_difference.is_none());
+        assert!(failure.identity_difference.is_none());
+    }
+
+    #[test]
+    fn v4_wo003_structural_difference_is_ordered_and_value_free() {
+        let mut expected_root = preserved_element("Root", Vec::new());
+        expected_root.children.push(PreservedNode::Element(preserved_element(
+            "ExpectedChild",
+            Vec::new(),
+        )));
+        let mut actual_root = preserved_element("Root", Vec::new());
+        actual_root.children.push(PreservedNode::Element(preserved_element(
+            "ActualChild",
+            Vec::new(),
+        )));
+        let section = |root| PreservedSection {
+            name: SourceName {
+                namespace_uri: None,
+                local_name: "Section".to_owned(),
+                qualified_name: Some("Section".to_owned()),
+            },
+            kind: SectionKind::Other,
+            ordinal: 0,
+            children: vec![PreservedNode::Element(root)],
+        };
+        let difference = first_source_tree_difference(
+            &[section(expected_root)],
+            &[section(actual_root)],
+        )
+        .unwrap_or_else(|| unreachable!("different expanded element names have a first difference"));
+
+        assert_eq!(difference.node_path, vec![0, 0, 0]);
+        assert_eq!(difference.field, "element.local-name");
+        assert_eq!(
+            difference.expected.as_ref().map(|summary| summary.kind),
+            Some(StructuralNodeKind::Element)
+        );
+        assert_eq!(
+            difference.expected.as_ref().and_then(|summary| summary.local_name.as_deref()),
+            Some("ExpectedChild")
+        );
+        assert_eq!(
+            difference.actual.as_ref().and_then(|summary| summary.local_name.as_deref()),
+            Some("ActualChild")
+        );
+        assert_eq!(
+            difference.expected.as_ref().map(|summary| summary.attribute_count),
+            Some(0)
+        );
+        assert!(difference.public_detail().contains("expected=ExpectedChild"));
+        assert!(difference.public_detail().contains("field=element.local-name"));
+    }
+
+    #[test]
+    fn v5_wo001_classifies_internal_xml_and_text_difference_fields() {
+        fn section() -> PreservedSection {
+            PreservedSection {
+                name: SourceName {
+                    namespace_uri: None,
+                    local_name: "Section".into(),
+                    qualified_name: Some("Section".into()),
+                },
+                kind: SectionKind::Other,
+                ordinal: 0,
+                children: vec![PreservedNode::Element(preserved_element("Root", Vec::new()))],
+            }
+        }
+        fn diff(expected: &PreservedSection, actual: &PreservedSection) -> SourceTreeDifference {
+            first_source_tree_difference(std::slice::from_ref(expected), std::slice::from_ref(actual))
+                .unwrap_or_else(|| unreachable!("deliberately unequal trees have a categorized difference"))
+        }
+        fn assert_category(expected: PreservedSection, actual: PreservedSection, field: &str) {
+            let result = diff(&expected, &actual);
+            assert_eq!(result.field, field);
+            let detail = result.public_detail();
+            assert!(detail.starts_with("path=section[0]"));
+            assert!(detail.len() <= 240);
+            assert!(!detail.contains("secret"));
+            assert!(!detail.contains("uuid"));
+        }
+
+        let expected = section();
+        let mut actual = expected.clone();
+        actual.name.local_name = "OtherSection".into();
+        assert_category(expected, actual, "section.local-name");
+
+        let expected = section();
+        let mut actual = expected.clone();
+        actual.kind = SectionKind::Content;
+        assert_category(expected, actual, "section.kind");
+
+        let expected = section();
+        let mut actual = expected.clone();
+        actual.ordinal = 1;
+        assert_category(expected, actual, "section.ordinal");
+
+        let expected = section();
+        let mut actual = expected.clone();
+        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
+        root.name.namespace_uri = Some("urn:private-namespace".into());
+        assert_category(expected, actual, "element.namespace");
+
+        let expected = section();
+        let mut actual = expected.clone();
+        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
+        root.name.qualified_name = Some("prefix:Root".into());
+        assert_category(expected, actual, "element.qualified-name");
+
+        let expected = section();
+        let mut actual = expected.clone();
+        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
+        root.attributes.push(PreservedAttribute {
+            name: SourceName { namespace_uri: None, local_name: "id".into(), qualified_name: Some("id".into()) },
+            value: "uuid-secret".into(),
+        });
+        assert_category(expected, actual, "attribute.count-or-presence");
+
+        let mut expected = section();
+        let mut actual = section();
+        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
+        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
+        expected_root.attributes.push(PreservedAttribute {
+            name: SourceName { namespace_uri: None, local_name: "id".into(), qualified_name: Some("id".into()) },
+            value: "uuid-secret-one".into(),
+        });
+        actual_root.attributes.push(PreservedAttribute {
+            name: SourceName { namespace_uri: None, local_name: "id".into(), qualified_name: Some("id".into()) },
+            value: "uuid-secret-two".into(),
+        });
+        assert_category(expected, actual, "attribute.value");
+
+        let mut expected = section();
+        let mut actual = section();
+        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
+        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
+        for root in [expected_root, actual_root] {
+            root.attributes = vec![
+                PreservedAttribute {
+                    name: SourceName { namespace_uri: None, local_name: "id".into(), qualified_name: Some("id".into()) },
+                    value: "first-secret".into(),
+                },
+                PreservedAttribute {
+                    name: SourceName { namespace_uri: None, local_name: "Length".into(), qualified_name: Some("Length".into()) },
+                    value: "second-secret".into(),
+                },
+            ];
+        }
+        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
+        actual_root.attributes.swap(0, 1);
+        assert_category(expected, actual, "attribute.name-or-order");
+
+        let mut expected = section();
+        let mut actual = section();
+        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
+        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
+        expected_root.attributes.push(PreservedAttribute {
+            name: SourceName { namespace_uri: None, local_name: "id".into(), qualified_name: Some("id".into()) },
+            value: "secret-one".into(),
+        });
+        actual_root.attributes.push(PreservedAttribute {
+            name: SourceName { namespace_uri: None, local_name: "other".into(), qualified_name: Some("other".into()) },
+            value: "secret-two".into(),
+        });
+        assert_category(expected, actual, "attribute.name-or-order");
+
+        let expected = section();
+        let mut actual = expected.clone();
+        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
+        root.namespace_bindings.push(NamespaceBinding { prefix: "p".into(), namespace_uri: "urn:secret".into() });
+        assert_category(expected, actual, "namespace-binding.count-or-presence");
+
+        let mut expected = section();
+        let mut actual = section();
+        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
+        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
+        expected_root.namespace_bindings.push(NamespaceBinding { prefix: "p".into(), namespace_uri: "urn:one".into() });
+        actual_root.namespace_bindings.push(NamespaceBinding { prefix: "p".into(), namespace_uri: "urn:two".into() });
+        assert_category(expected, actual, "namespace-binding.namespace");
+
+        let mut expected = section();
+        let mut actual = section();
+        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
+        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
+        expected_root.namespace_bindings.push(NamespaceBinding { prefix: "p".into(), namespace_uri: "urn:same".into() });
+        actual_root.namespace_bindings.push(NamespaceBinding { prefix: "q".into(), namespace_uri: "urn:same".into() });
+        assert_category(expected, actual, "namespace-binding.prefix-or-order");
+
+        let expected = section();
+        let mut actual = expected.clone();
+        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
+        root.source_type = Some("secret-source-type".into());
+        assert_category(expected, actual, "source-type");
+
+        let expected = section();
+        let mut actual = expected.clone();
+        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
+        root.ownership = SourceOwnership::Attached(ForeignIdentity {
+            domain: ForeignIdDomain::Paragraph,
+            value: "uuid-secret".into(),
+        });
+        assert_category(expected, actual, "ownership");
+
+        let expected = section();
+        let mut actual = expected.clone();
+        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
+        root.dependency_confidence = DependencyConfidence::SomeReferencesMapped;
+        assert_category(expected, actual, "dependency-confidence");
+
+        let expected = section();
+        let mut actual = expected.clone();
+        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
+        root.anchor = Some(SourceAnchorId::new("anchor-secret").unwrap_or_else(|_| unreachable!()));
+        assert_category(expected, actual, "anchor");
+
+        for (left, right, field) in [
+            (PreservedNode::Text("secret-left".into()), PreservedNode::Text("secret-right".into()), "text.content"),
+            (PreservedNode::CData("secret-left".into()), PreservedNode::CData("secret-right".into()), "cdata.content"),
+            (PreservedNode::Comment("secret-left".into()), PreservedNode::Comment("secret-right".into()), "comment.content"),
+            (PreservedNode::ProcessingInstruction { target: "left".into(), data: "secret".into() },
+             PreservedNode::ProcessingInstruction { target: "right".into(), data: "secret".into() }, "processing-instruction.target"),
+            (PreservedNode::ProcessingInstruction { target: "target".into(), data: "secret-left".into() },
+             PreservedNode::ProcessingInstruction { target: "target".into(), data: "secret-right".into() }, "processing-instruction.data"),
+        ] {
+            let mut expected = section();
+            let mut actual = section();
+            let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
+            let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
+            expected_root.children.push(left);
+            actual_root.children.push(right);
+            assert_category(expected, actual, field);
+        }
+
+        let mut expected = section();
+        let mut actual = section();
+        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
+        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
+        expected_root.children.push(PreservedNode::Text("secret".into()));
+        actual_root.children.push(PreservedNode::CData("secret".into()));
+        assert_category(expected, actual, "node.kind-or-order");
+
+        let mut expected = section();
+        let actual = section();
+        let PreservedNode::Element(root) = &mut expected.children[0] else { unreachable!() };
+        root.children.push(PreservedNode::Text("secret".into()));
+        assert_category(expected, actual, "child.presence");
+
+        let mut expected = section();
+        let mut actual = section();
+        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
+        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
+        expected_root.children = vec![
+            PreservedNode::Element(preserved_element("First", Vec::new())),
+            PreservedNode::Element(preserved_element("Second", Vec::new())),
+        ];
+        actual_root.children = vec![
+            PreservedNode::Element(preserved_element("Second", Vec::new())),
+            PreservedNode::Element(preserved_element("First", Vec::new())),
+        ];
+        assert_category(expected, actual, "child.order");
+
+        let mut expected = section();
+        let mut actual = section();
+        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
+        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
+        expected_root.children.push(PreservedNode::Text(String::new()));
+        actual_root.children.push(PreservedNode::Text("   ".into()));
+        let expected = normalize_sections(&[expected]);
+        let actual = normalize_sections(&[actual]);
+        let whitespace_difference = first_source_tree_difference(&expected, &actual)
+            .unwrap_or_else(|| unreachable!("normalized empty and whitespace-only text differ"));
+        assert_eq!(whitespace_difference.field, "child.presence");
+        assert!(whitespace_difference.public_detail().contains("length=3,whitespace-only"));
+        assert!(!whitespace_difference.public_detail().contains("   "));
+
+        let equal = section();
+        assert!(first_source_tree_difference(&[equal.clone()], &[equal]).is_none());
+    }
+
+    #[test]
+    fn v4_wo003_identity_difference_reports_only_domain_and_direction() {
+        let required = ForeignIdentity {
+            domain: ForeignIdDomain::Paragraph,
+            value: "sensitive-id".to_owned(),
+        };
+        let expected = BTreeSet::from([required]);
+        let actual = BTreeSet::new();
+        assert_eq!(
+            first_identity_set_difference(&expected, &actual),
+            Some(IdentitySetDifference {
+                domain: IdentityDomainSummary::Paragraph,
+                missing: true,
+                unexpected: false,
+            })
+        );
     }
 }

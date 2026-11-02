@@ -28,19 +28,22 @@ changes, and history operations. AllCaps affects display rather than canonical
 text or native FDX source; transient selection, undo/redo, dirty state, and
 derived layout do not replace that source.
 
-Managed Scene Headings retain native SceneProperties and SceneArcBeats as the
-derived scene-cast storage. After import, supported CharacterArcBeat membership
-is app-owned and reconciled from normalized Character names: matched nested
-Paragraph IDs and their ordered text/run content, formatting, and source
-attributes remain associated by name; stored derived names are uppercase; and
-new names receive fresh IDs. Retained Characters keep their arc content through
-unrelated roster edits, while removed Characters lose the complete derived arc
-and text. A rename to a different normalized name creates a blank arc rather than
-transferring content by position or nested ID. Canonical cue text is unchanged.
-Supported arc Paragraphs remain opaque to screenplay body content. Duplicate,
-ambiguous, or unknown non-text arc structures remain preserved and defer only
-that scene's derived refresh; they do not prevent an otherwise valid canonical
-native Save or Save As, and independent supported scenes may still update.
+Managed Scene Headings use generated SceneProperties/SceneArcBeats containers
+for supported scenes. Length defaults to `1/8`, Page to `1`, and Title to empty;
+supported imported non-arc container attributes and children are regenerated on
+refresh, without claiming Page or Length recalculation. Supported
+CharacterArcBeat membership is reconciled from normalized Character names:
+matched nested Paragraph IDs and their ordered text/run content, formatting, and
+source attributes remain associated by name; stored derived names are uppercase;
+and new names receive fresh IDs. Retained Characters keep their arc content
+through unrelated roster edits, while removed Characters lose the complete
+derived arc and text. A rename to a different normalized name creates a blank
+arc rather than transferring content by position or nested ID. Canonical cue
+text is unchanged. Supported arc Paragraphs remain opaque to screenplay body
+content. Duplicate, ambiguous, or unknown non-text arc structures remain
+preserved and defer only that scene's derived refresh; they do not prevent an
+otherwise valid canonical native Save or Save As, and independent supported
+scenes may still update.
 Cast List presentation consumes uppercase synchronized scene-arc names with the
 existing alphabetical case-insensitive ordering. Lists in deferred scenes, and
 formatted lists that cannot be corrected without rewriting their runs, remain

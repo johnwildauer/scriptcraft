@@ -133,5 +133,8 @@ fn formatting_best_effort_does_not_weaken_source_reconciliation_rejection() {
         ScreenplayElement::new("unanchored", Role::Action, "new")
             .unwrap_or_else(|_| unreachable!()),
     );
-    assert_eq!(write_v6(&project), Err(FdxError::UnsupportedConstruct));
+    assert_eq!(
+        write_v6(&project),
+        Err(FdxError::SaveDiagnosticUnsupportedConstruct(5))
+    );
 }

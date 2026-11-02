@@ -4675,6 +4675,37 @@ mod tests {
     }
 
     #[test]
+    fn fdx_save_numeric_diagnostic_prefix_survives_desktop_detail_projection() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.show_fdx_save_error(fdx_storage::TransactionalSaveError::Codec(
+            fdx::FdxError::SaveDiagnosticUnsupportedConstruct(23),
+        ));
+
+        assert_eq!(
+            app.error.as_deref(),
+            Some("FDX save candidate could not be serialized or re-read: 23: FDX contains a construct that cannot be projected safely")
+        );
+        assert!(app.status.contains("FDX save failed; document unchanged"));
+    }
+
+    #[test]
+    fn fdx_save_code30_structural_detail_survives_desktop_projection() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.show_fdx_save_error(fdx_storage::TransactionalSaveError::Codec(
+            fdx::FdxError::SaveDiagnosticSourceTreeMismatch(
+                "path=section[2]/node[0]/node[3]; field=attribute.value; expected=id; actual=id".into(),
+            ),
+        ));
+
+        let detail = app.error.as_deref().unwrap_or_default();
+        assert!(detail.contains("30: FDX contains a construct"));
+        assert!(detail.contains("path=section[2]/node[0]/node[3]"));
+        assert!(detail.contains("field=attribute.value"));
+        assert!(detail.len() <= 320);
+        assert!(app.status.contains("FDX save failed; document unchanged"));
+    }
+
+    #[test]
     fn app_has_one_live_surface_and_no_ui_text_buffer() {
         let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         assert_eq!(app.session.project().elements.len(), 1);

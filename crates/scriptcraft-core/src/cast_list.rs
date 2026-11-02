@@ -182,7 +182,9 @@ fn replace_cast_list_text(
 
     let element = &mut project.elements[element_index];
     element.text = replacement.to_owned();
-    if let Some((first, remaining)) = element.runs.split_first_mut() {
+    if element.text.is_empty() {
+        element.runs.clear();
+    } else if let Some((first, remaining)) = element.runs.split_first_mut() {
         first.text = replacement.to_owned();
         for run in remaining {
             run.text.clear();

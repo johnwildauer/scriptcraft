@@ -185,18 +185,21 @@ pub(crate) fn new_scene_properties(
     names: &[String],
     paragraph_ids: &mut ParagraphIdAllocator,
 ) -> Result<PreservedElement, SceneMetadataError> {
-    let mut properties = element(
-        "SceneProperties",
-        vec![("Length", "1/8"), ("Page", "1"), ("Title", "")],
-    );
-    let mut arcs = element("SceneArcBeats", Vec::new());
+    let parent = SourceName {
+        namespace_uri: None,
+        local_name: "Paragraph".to_owned(),
+        qualified_name: None,
+    };
+    let mut properties = generated_scene_properties(&parent);
+    let PreservedNode::Element(arcs) = &mut properties.children[0] else {
+        return Err(SceneMetadataError::UnsupportedSceneMetadata);
+    };
     for name in names {
         arcs.children.push(PreservedNode::Element(new_character_arc(
             name,
             paragraph_ids,
         )?));
     }
-    properties.children.push(PreservedNode::Element(arcs));
     Ok(properties)
 }
 
@@ -237,6 +240,13 @@ fn reconcile_heading(
         .filter(|identity| identity.domain == ForeignIdDomain::Paragraph)
         .map(|identity| identity.value.clone())
         .collect::<BTreeSet<_>>();
+    let (heading_depth, inherited_space_preserve) = managed_element_context(
+        &state.sections,
+        heading_id,
+    )
+    .ok_or(SceneMetadataError::Preservation(
+        PreservationError::ManagedAnchorMissing,
+    ))?;
     let heading = find_managed_mut(&mut state.sections, heading_id)
         .ok_or(SceneMetadataError::Preservation(
             PreservationError::ManagedAnchorMissing,
@@ -256,56 +266,39 @@ fn reconcile_heading(
     if props_indexes.iter().any(|(_, same_ns)| !same_ns) || props_indexes.len() > 1 {
         return Err(SceneMetadataError::UnsupportedSceneMetadata);
     }
-    let props_index = if let Some((index, _)) = props_indexes.first() {
-        *index
-    } else {
-        let properties = scene_properties_for(heading);
-        let insert_at = heading
-            .children
-            .iter()
-            .position(|node| matches!(node, PreservedNode::Element(child) if child.name.local_name == "Text" && child.name.namespace_uri == namespace))
-            .unwrap_or(heading.children.len());
-        heading
-            .children
-            .insert(insert_at, PreservedNode::Element(properties));
-        insert_at
-    };
-    let PreservedNode::Element(properties) = &mut heading.children[props_index] else {
-        return Err(SceneMetadataError::UnsupportedSceneMetadata);
-    };
-    if properties.name.namespace_uri != namespace {
-        return Err(SceneMetadataError::UnsupportedSceneMetadata);
-    }
-    let mut arc_indexes = Vec::new();
-    for (index, child) in properties.children.iter().enumerate() {
-        match child {
-            PreservedNode::Element(element) if element.name.local_name == "SceneArcBeats" => {
-                if element.name.namespace_uri != namespace {
-                    return Err(SceneMetadataError::UnsupportedSceneMetadata);
-                }
-                arc_indexes.push(index);
-            }
-            PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => {}
-            _ => return Err(SceneMetadataError::UnsupportedSceneMetadata),
+    let props_index = props_indexes.first().map(|(index, _)| *index);
+    let original_properties = props_index.and_then(|index| match &heading.children[index] {
+        PreservedNode::Element(properties) => Some(properties.clone()),
+        _ => None,
+    });
+    let original_properties_preserve = original_properties.as_ref().is_some_and(|properties| {
+        has_effective_xml_space_preserve(properties, inherited_space_preserve)
+    });
+    let mut original_arc_children = None;
+    if let Some(properties) = &original_properties {
+        if properties.name.namespace_uri != namespace {
+            return Err(SceneMetadataError::UnsupportedSceneMetadata);
         }
+        let mut arc_containers = Vec::new();
+        for child in &properties.children {
+            if let PreservedNode::Element(element) = child {
+                if element.name.local_name == "SceneArcBeats" {
+                    if element.name.namespace_uri != namespace {
+                        return Err(SceneMetadataError::UnsupportedSceneMetadata);
+                    }
+                    arc_containers.push(element);
+                }
+            }
+        }
+        if arc_containers.len() > 1 {
+            return Err(SceneMetadataError::UnsupportedSceneMetadata);
+        }
+        original_arc_children = arc_containers.first().map(|arcs| arcs.children.clone());
     }
-    if arc_indexes.len() > 1 {
-        return Err(SceneMetadataError::UnsupportedSceneMetadata);
-    }
-    let arc_index = if let Some(index) = arc_indexes.first() {
-        *index
-    } else {
-        properties
-            .children
-            .push(PreservedNode::Element(element("SceneArcBeats", Vec::new())));
-        properties.children.len().saturating_sub(1)
-    };
-    let PreservedNode::Element(arcs) = &mut properties.children[arc_index] else {
-        return Err(SceneMetadataError::UnsupportedSceneMetadata);
-    };
+
     let mut existing = Vec::<(String, String, String, PreservedElement)>::new();
     let mut seen = BTreeSet::new();
-    for child in &arcs.children {
+    for child in original_arc_children.as_deref().unwrap_or_default() {
         match child {
             PreservedNode::Element(beat) if beat.name.local_name == "CharacterArcBeat" => {
                 let Some((key, name, id)) = recognized_beat(beat, &namespace) else {
@@ -341,11 +334,11 @@ fn reconcile_heading(
             set_attribute(&mut beat, "Name", name);
             ordered_beats.push(PreservedNode::Element(beat));
         } else {
-            let beat = new_character_arc_for(&arcs.name, name, &mut paragraph_ids, &mut allocated)?;
+            let beat = new_character_arc_for(&heading.name, name, &mut paragraph_ids, &mut allocated)?;
             ordered_beats.push(PreservedNode::Element(beat));
         }
     }
-    let old_children = std::mem::take(&mut arcs.children);
+    let old_children = original_arc_children.unwrap_or_default();
     let mut replacement = Vec::with_capacity(old_children.len().max(ordered_beats.len()));
     let mut next_beat = ordered_beats.into_iter();
     for child in old_children {
@@ -364,7 +357,29 @@ fn reconcile_heading(
         .count();
     let insert_at = replacement.len().saturating_sub(trailing_whitespace);
     replacement.splice(insert_at..insert_at, next_beat);
+
+    // SceneProperties and SceneArcBeats are generated containers for supported
+    // headings. Only validated CharacterArcBeat subtrees cross this boundary.
+    let mut properties = scene_properties_for(heading);
+    let PreservedNode::Element(arcs) = &mut properties.children[0] else {
+        return Err(SceneMetadataError::UnsupportedSceneMetadata);
+    };
     arcs.children = replacement;
+    if let Some(index) = props_index {
+        heading.children[index] = PreservedNode::Element(properties);
+    } else {
+        let insert_at = heading
+            .children
+            .iter()
+            .position(|node| matches!(node, PreservedNode::Element(child) if child.name.local_name == "Text" && child.name.namespace_uri == namespace))
+            .unwrap_or(heading.children.len());
+        heading
+            .children
+            .insert(insert_at, PreservedNode::Element(properties));
+    }
+    if !inherited_space_preserve && !original_properties_preserve {
+        format_supported_scene_properties(heading, heading_depth);
+    }
     for id in removed {
         state.identities.retain(|identity| {
             !(identity.domain == ForeignIdDomain::Paragraph && identity.value == id)
@@ -379,18 +394,254 @@ fn reconcile_heading(
     Ok(())
 }
 
+/// Returns an element's depth in the preserved document tree and its effective
+/// xml:space state, including that element and every element ancestor.
+fn managed_element_context(
+    sections: &[crate::preservation::PreservedSection],
+    id: &StableId,
+) -> Option<(usize, bool)> {
+    fn visit(
+        nodes: &[PreservedNode],
+        id: &StableId,
+        depth: usize,
+        inherited_space_preserve: bool,
+    ) -> Option<(usize, bool)> {
+        for node in nodes {
+            let PreservedNode::Element(element) = node else {
+                continue;
+            };
+            let space_preserve = effective_xml_space_preserve(element, inherited_space_preserve);
+            if matches!(&element.ownership, SourceOwnership::Managed(target) if target == id) {
+                return Some((depth, space_preserve));
+            }
+            if let Some(found) = visit(
+                &element.children,
+                id,
+                depth.saturating_add(1),
+                space_preserve,
+            ) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    sections
+        .iter()
+        .find_map(|section| visit(&section.children, id, 0, false))
+}
+
+fn effective_xml_space_preserve(element: &PreservedElement, inherited: bool) -> bool {
+    element
+        .attributes
+        .iter()
+        .find(|attribute| {
+            attribute.name.local_name == "space"
+                && (attribute.name.namespace_uri.as_deref()
+                    == Some("http://www.w3.org/XML/1998/namespace")
+                    || attribute.name.qualified_name.as_deref() == Some("xml:space"))
+        })
+        .map_or(inherited, |attribute| match attribute.value.as_str() {
+            "default" => false,
+            "preserve" => true,
+            _ => true,
+        })
+}
+
+/// Formats only the already-validated container generated for this supported
+/// managed scene. Arc Paragraph children are deliberately opaque: only their
+/// containing CharacterArcBeat gets element-only indentation.
+fn format_supported_scene_properties(heading: &mut PreservedElement, heading_depth: usize) {
+    let namespace = heading.name.namespace_uri.clone();
+    let mut properties_indexes = heading.children.iter().enumerate().filter_map(|(index, node)| {
+        match node {
+            PreservedNode::Element(element)
+                if element.name.local_name == "SceneProperties"
+                    && element.name.namespace_uri == namespace =>
+            {
+                Some(index)
+            }
+            _ => None,
+        }
+    });
+    let Some(properties_index) = properties_indexes.next() else {
+        return;
+    };
+    if properties_indexes.next().is_some() {
+        return;
+    }
+
+    // A mixed or opaque heading child list is not a formatting context. Keep
+    // its existing whitespace and content exactly as supplied.
+    if !heading.children.iter().all(|node| match node {
+        PreservedNode::Element(_) => true,
+        PreservedNode::Text(text) => text.chars().all(char::is_whitespace),
+        _ => false,
+    }) {
+        return;
+    }
+    let mut properties = match heading.children.get(properties_index) {
+        Some(PreservedNode::Element(element)) => element.clone(),
+        _ => return,
+    };
+    if has_effective_xml_space_preserve(&properties, false) {
+        return;
+    }
+    let arcs_index = properties.children.iter().position(|node| {
+        matches!(node, PreservedNode::Element(element)
+            if element.name.local_name == "SceneArcBeats"
+                && element.name.namespace_uri == namespace)
+    });
+    let Some(arcs_index) = arcs_index else {
+        return;
+    };
+    if properties.children.iter().any(|node| match node {
+        PreservedNode::Element(element) => {
+            element.name.local_name != "SceneArcBeats" || element.name.namespace_uri != namespace
+        }
+        PreservedNode::Text(text) => !text.chars().all(char::is_whitespace),
+        _ => true,
+    }) {
+        return;
+    }
+
+    let mut arcs = match properties.children.get(arcs_index) {
+        Some(PreservedNode::Element(element)) => element.clone(),
+        _ => return,
+    };
+    if arcs.children.iter().any(|node| match node {
+        PreservedNode::Element(element) => {
+            element.name.local_name != "CharacterArcBeat" || element.name.namespace_uri != namespace
+        }
+        PreservedNode::Text(text) => !text.chars().all(char::is_whitespace),
+        _ => true,
+    }) {
+        return;
+    }
+
+    let properties_depth = heading_depth.saturating_add(1);
+    let arcs_depth = properties_depth.saturating_add(1);
+    if !format_element_only_children(&mut properties, properties_depth) {
+        return;
+    }
+    if !arcs.children.is_empty() {
+        if !format_element_only_children(&mut arcs, arcs_depth) {
+            return;
+        }
+        for node in &mut arcs.children {
+            let PreservedNode::Element(beat) = node else {
+                continue;
+            };
+            if beat.name.local_name == "CharacterArcBeat"
+                && beat.name.namespace_uri == namespace
+                && !format_element_only_children(beat, arcs_depth.saturating_add(1))
+            {
+                return;
+            }
+        }
+    }
+
+    let Some(formatted_arcs_index) = properties.children.iter().position(|node| {
+        matches!(node, PreservedNode::Element(element)
+            if element.name.local_name == "SceneArcBeats"
+                && element.name.namespace_uri == namespace)
+    }) else {
+        return;
+    };
+    properties.children[formatted_arcs_index] = PreservedNode::Element(arcs);
+    heading.children[properties_index] = PreservedNode::Element(properties);
+    format_scene_properties_sibling_gaps(heading, properties_index, heading_depth);
+}
+
+fn has_effective_xml_space_preserve(element: &PreservedElement, inherited: bool) -> bool {
+    let current = effective_xml_space_preserve(element, inherited);
+    current
+        || element.children.iter().any(|node| match node {
+            PreservedNode::Element(child) => has_effective_xml_space_preserve(child, current),
+            _ => false,
+        })
+}
+
+/// Replaces whitespace only in element-only generated containers, using the
+/// element's absolute source-tree depth. Empty containers stay self-closing.
+fn format_element_only_children(element: &mut PreservedElement, depth: usize) -> bool {
+    if element.children.is_empty() {
+        return true;
+    }
+    if element.children.iter().any(|node| match node {
+        PreservedNode::Element(_) => false,
+        PreservedNode::Text(text) => !text.chars().all(char::is_whitespace),
+        _ => true,
+    }) {
+        return false;
+    }
+
+    let child_indent = format!("\n{}", "  ".repeat(depth.saturating_add(1)));
+    let closing_indent = format!("\n{}", "  ".repeat(depth));
+    let mut formatted = Vec::with_capacity(element.children.len().saturating_mul(2) + 1);
+    for child in std::mem::take(&mut element.children) {
+        if matches!(child, PreservedNode::Element(_)) {
+            formatted.push(PreservedNode::Text(child_indent.clone()));
+            formatted.push(child);
+        }
+    }
+    formatted.push(PreservedNode::Text(closing_indent));
+    element.children = formatted;
+    true
+}
+
+fn format_scene_properties_sibling_gaps(
+    heading: &mut PreservedElement,
+    properties_index: usize,
+    heading_depth: usize,
+) {
+    let child_indent = format!("\n{}", "  ".repeat(heading_depth.saturating_add(1)));
+    let closing_indent = format!("\n{}", "  ".repeat(heading_depth));
+    let mut formatted = Vec::with_capacity(heading.children.len().saturating_add(2));
+    let mut pending_whitespace = Vec::new();
+    let mut previous_was_properties = false;
+    let mut saw_child = false;
+    for (index, child) in std::mem::take(&mut heading.children).into_iter().enumerate() {
+        if matches!(&child, PreservedNode::Text(text) if text.chars().all(char::is_whitespace)) {
+            pending_whitespace.push(child);
+            continue;
+        }
+        let is_properties = index == properties_index;
+        if !saw_child && is_properties {
+            formatted.push(PreservedNode::Text(child_indent.clone()));
+        } else if previous_was_properties || is_properties {
+            formatted.push(PreservedNode::Text(child_indent.clone()));
+        } else {
+            formatted.append(&mut pending_whitespace);
+        }
+        pending_whitespace.clear();
+        formatted.push(child);
+        previous_was_properties = is_properties;
+        saw_child = true;
+    }
+    if previous_was_properties {
+        formatted.push(PreservedNode::Text(closing_indent));
+    } else {
+        formatted.append(&mut pending_whitespace);
+    }
+    heading.children = formatted;
+}
+
 fn scene_properties_for(heading: &PreservedElement) -> PreservedElement {
-    let mut properties = namespaced_element(heading, "SceneProperties", Vec::new());
+    generated_scene_properties(&heading.name)
+}
+
+fn generated_scene_properties(parent: &SourceName) -> PreservedElement {
+    let mut properties = namespaced_element_from_name(parent, "SceneProperties");
     properties.attributes = [("Length", "1/8"), ("Page", "1"), ("Title", "")]
         .into_iter()
         .map(|(name, value)| attribute(name, value))
         .collect();
     properties
         .children
-        .push(PreservedNode::Element(namespaced_element(
-            heading,
+        .push(PreservedNode::Element(namespaced_element_from_name(
+            parent,
             "SceneArcBeats",
-            Vec::new(),
         )));
     properties
 }
@@ -784,13 +1035,15 @@ mod tests {
     }
 
     #[test]
-    fn existing_scene_properties_values_and_matching_arc_identity_are_retained() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><SceneProperties Length="3/8" Page="7" Title="kept" Vendor="untouched"><SceneArcBeats><CharacterArcBeat Name="ALPHA"><Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="0.00" OutlineLevel="0" RightIndent="1.39" SpaceBefore="0" Spacing="1" StartsNewPage="No" id="authored-arc-id"/></CharacterArcBeat></SceneArcBeats></SceneProperties><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>ALPHA</Text></Paragraph></Content></FinalDraft>"#;
+    fn supported_scene_properties_regenerate_but_matching_arc_identity_is_retained() {
+        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><SceneProperties Length="3/8" Page="7" Title="kept" Vendor="removed"><VendorGeneratedField>removed</VendorGeneratedField><SceneArcBeats><CharacterArcBeat Name="ALPHA"><Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="0.00" OutlineLevel="0" RightIndent="1.39" SpaceBefore="0" Spacing="1" StartsNewPage="No" id="authored-arc-id"/></CharacterArcBeat></SceneArcBeats></SceneProperties><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>ALPHA</Text></Paragraph></Content></FinalDraft>"#;
         let mut project = read_v6(source.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        assert!(!reconcile_project(&mut project).unwrap_or(true));
+        assert!(reconcile_project(&mut project).unwrap_or(false));
         let output = write_v6(&project).unwrap_or_else(|_| unreachable!());
         let text = String::from_utf8(output).unwrap_or_else(|_| unreachable!());
-        assert!(text.contains("Length=\"3/8\" Page=\"7\" Title=\"kept\" Vendor=\"untouched\""));
+        assert!(text.contains("Length=\"1/8\" Page=\"1\" Title=\"\""));
+        assert!(!text.contains("Vendor=\"removed\""));
+        assert!(!text.contains("VendorGeneratedField"));
         assert!(text.contains("id=\"authored-arc-id\""));
     }
 

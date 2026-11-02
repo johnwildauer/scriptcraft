@@ -880,7 +880,9 @@ fn replace_element_text(
     }
     let item = &mut project.elements[element_index];
     item.text = new_text;
-    if !old_runs.is_empty() {
+    if item.text.is_empty() {
+        item.runs.clear();
+    } else if !old_runs.is_empty() {
         for (run, text) in item.runs.iter_mut().zip(updated_segments) {
             run.text = text;
         }
