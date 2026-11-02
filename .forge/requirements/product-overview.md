@@ -29,13 +29,24 @@ text or native FDX source; transient selection, undo/redo, dirty state, and
 derived layout do not replace that source.
 
 Managed Scene Headings retain native SceneProperties and SceneArcBeats as the
-derived scene-cast storage. Supported CharacterArcBeat names are synchronized
-from Character elements, and Cast List presentation consumes that synchronized
-projection with alphabetical case-insensitive ordering. Projects without
-preservation use the same shared Character projection for initial generation.
-Opaque or ambiguously owned source payloads remain preserved and may safe-stop an
-update. This bounded projection does not promise editing of other Final Draft
-beat-board structures or recalculation of scene page/length values.
+derived scene-cast storage. After import, supported CharacterArcBeat membership
+is app-owned and reconciled from normalized Character names: matched nested
+Paragraph IDs and their ordered text/run content, formatting, and source
+attributes remain associated by name; stored derived names are uppercase; and
+new names receive fresh IDs. Retained Characters keep their arc content through
+unrelated roster edits, while removed Characters lose the complete derived arc
+and text. A rename to a different normalized name creates a blank arc rather than
+transferring content by position or nested ID. Canonical cue text is unchanged.
+Supported arc Paragraphs remain opaque to screenplay body content. Duplicate,
+ambiguous, or unknown non-text arc structures remain preserved and defer only
+that scene's derived refresh; they do not prevent an otherwise valid canonical
+native Save or Save As, and independent supported scenes may still update.
+Cast List presentation consumes uppercase synchronized scene-arc names with the
+existing alphabetical case-insensitive ordering. Lists in deferred scenes, and
+formatted lists that cannot be corrected without rewriting their runs, remain
+unchanged rather than blocking canonical saves. This bounded projection does
+not promise editing of other Final Draft beat-board structures or recalculation
+of scene page/length values.
 
 The writing experience supports continuous editing and repeatable fixed-page
 preview from shared layout semantics for the same effective runtime layout
@@ -57,7 +68,10 @@ New FDX paragraph identities use collision-checked UUID v4 values. Imported para
 identities remain verbatim even when they are not UUIDs. A never-saved project may
 receive different random identities on separate first-time serializations; once a
 saved/re-read source establishes those identities, later saves preserve them. This
-identity contract does not add historical ID tombstones.
+identity contract does not add historical ID tombstones. Repeated raw IDs on opaque,
+non-managed TitlePage Paragraph occurrences are preserved verbatim per occurrence but
+are not treated as globally unique definitions; managed roles and other global identity
+consumers continue to require unambiguous identities.
 
 ## Product scope
 

@@ -282,10 +282,6 @@ pub struct PreservationState {
     pub identities: Vec<ForeignIdentity>,
     pub references: Vec<ForeignReference>,
     pub board_graph: BoardGraph,
-    /// Runtime proof that these nested scene-arc paragraph nodes were created
-    /// by reconciliation. It is not serialized into FDX; reopening intentionally
-    /// removes deletion authority rather than inferring ownership from XML shape.
-    pub(crate) generated_scene_arc_paragraph_ids: BTreeSet<String>,
 }
 
 impl PreservationState {
@@ -1778,7 +1774,6 @@ mod tests {
             identities: Vec::new(),
             references: Vec::new(),
             board_graph: BoardGraph::default(),
-            generated_scene_arc_paragraph_ids: BTreeSet::new(),
         }
     }
 

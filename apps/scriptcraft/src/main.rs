@@ -1893,6 +1893,34 @@ mod tests {
         assert!(app.session.dirty());
     }
 
+    #[test]
+    fn scheduled_refresh_does_not_report_deferred_unsupported_scene_as_an_error() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let source = br#"<FinalDraft Version="6"><Content>
+<Paragraph Type="Scene Heading" id="heading"><SceneProperties><SceneArcBeats><CharacterArcBeat Name="OLD"><Paragraph id="arc"><VendorArcPayload/></Paragraph></CharacterArcBeat></SceneArcBeats></SceneProperties><Text>INT. ROOM</Text></Paragraph>
+<Paragraph Type="Character" id="cue"><Text>ALICE</Text></Paragraph>
+<Paragraph Type="Cast List" id="cast"><Text>(stale)</Text></Paragraph>
+</Content></FinalDraft>"#;
+        let project = scriptcraft_core::fdx::read_v6(source)
+            .unwrap_or_else(|_| unreachable!("unsupported arc fixture imports"))
+            .project;
+        app.session
+            .replace_with_saved(project)
+            .unwrap_or_else(|_| unreachable!("imported session is valid"));
+        app.status = "Existing status remains visible".into();
+        let context = test_context();
+        let first_refresh = app.next_cast_list_refresh;
+
+        app.refresh_cast_lists_on_schedule(&context, first_refresh);
+        assert_eq!(app.session.project().elements[2].text, "(stale)");
+        assert_eq!(app.status, "Existing status remains visible");
+
+        let second_refresh = app.next_cast_list_refresh;
+        app.refresh_cast_lists_on_schedule(&context, second_refresh);
+        assert_eq!(app.session.project().elements[2].text, "(stale)");
+        assert_eq!(app.status, "Existing status remains visible");
+    }
+
     fn render_app_frame_with_fullscreen(
         context: &egui::Context,
         app: &mut ScriptCraftApp,

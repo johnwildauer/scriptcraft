@@ -407,7 +407,6 @@ fn save_session_with_codec<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
             FdxError::UnsupportedConstruct,
         ));
     }
-    crate::scene_metadata::carry_generated_ownership(&corrected, &mut rebased_project);
     let publishable_session = session
         .prepare_saved_rebase(rebased_project)
         .map_err(TransactionalSaveError::Session)?;

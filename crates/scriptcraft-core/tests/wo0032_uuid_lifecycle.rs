@@ -269,13 +269,13 @@ fn scene_arc_matching_retains_ids_and_new_or_removed_names_reconcile_by_identity
     project.elements[1].text = "alpha".to_owned();
     assert!(correct_cast_lists(&mut project).unwrap_or(false));
     let case_renamed_arcs = arc_ids_by_name(&project);
-    assert_eq!(case_renamed_arcs.get("alpha"), Some(&alpha_id));
+    assert_eq!(case_renamed_arcs.get("ALPHA"), Some(&alpha_id));
     assert_eq!(case_renamed_arcs.get("BETA"), Some(&beta_id));
 
     project.elements[2].text = "GAMMA".to_owned();
     assert!(correct_cast_lists(&mut project).unwrap_or(false));
     let renamed_arcs = arc_ids_by_name(&project);
-    assert_eq!(renamed_arcs.get("alpha"), Some(&alpha_id));
+    assert_eq!(renamed_arcs.get("ALPHA"), Some(&alpha_id));
     let gamma_id = renamed_arcs.get("GAMMA").cloned().unwrap_or_default();
     assert!(uuid_v4(&gamma_id));
     assert_ne!(gamma_id, beta_id);
@@ -284,13 +284,13 @@ fn scene_arc_matching_retains_ids_and_new_or_removed_names_reconcile_by_identity
     project.elements.pop();
     assert!(correct_cast_lists(&mut project).unwrap_or(false));
     let reduced_arcs = arc_ids_by_name(&project);
-    assert_eq!(reduced_arcs, BTreeMap::from([("alpha".to_owned(), alpha_id)]));
+    assert_eq!(reduced_arcs, BTreeMap::from([("ALPHA".to_owned(), alpha_id)]));
     assert!(!paragraph_ids(&project).contains(&gamma_id));
     assert!(!paragraph_ids(&project).contains(&beta_id));
 }
 
 #[test]
-fn separately_reopened_stale_imported_scene_arc_safe_stops_without_mutation() {
+fn separately_reopened_stale_imported_scene_arc_is_reconciled_as_derived_data() {
     let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content>
 <Paragraph Type="Scene Heading" id="scene"><Text>INT. ROOM</Text></Paragraph>
 <Paragraph Type="Character" id="alpha"><Text>ALPHA</Text></Paragraph>
@@ -300,8 +300,10 @@ fn separately_reopened_stale_imported_scene_arc_safe_stops_without_mutation() {
     let saved = write_v6(&authored).unwrap_or_else(|_| unreachable!());
     let mut reopened = read_v6(&saved).unwrap_or_else(|_| unreachable!()).project;
     reopened.elements.pop();
-    let before = reopened.clone();
-
-    assert!(correct_cast_lists(&mut reopened).is_err());
-    assert_eq!(reopened, before);
+    assert!(correct_cast_lists(&mut reopened).unwrap_or(false));
+    let arcs = arc_ids_by_name(&reopened);
+    assert!(arcs.is_empty());
+    let output = write_v6(&reopened).unwrap_or_else(|_| unreachable!());
+    let reopened_again = read_v6(&output).unwrap_or_else(|_| unreachable!()).project;
+    assert!(arc_ids_by_name(&reopened_again).is_empty());
 }

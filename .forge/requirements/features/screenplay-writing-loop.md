@@ -158,17 +158,18 @@ project meaning; failures preserve the prior valid destination and unsaved state
     indentation level, blank lines between direct FinalDraft children and adjacent ElementSettings,
     no blank lines between Content paragraphs, and one final LF. Generated whitespace may be added
     only in element-only generated structure. Newly inserted or split managed Content paragraphs
-    shall receive LF/two-space sibling indentation only where the Content child sequence is
-    unambiguously Paragraph elements plus structural whitespace and no effective `xml:space="preserve"`
-    applies. Any detached structural-whitespace normalization shall be applied equally to the
-    expected source-tree comparison; re-read integrity checks remain strict. Canonical Text content,
-    including empty/whitespace-only values, tabs, LF and CR, and CDATA, comments, processing
-    instructions, mixed content, namespaces, unknown imported structures, and source order shall not
-    be rewritten. Ambiguous mixed-content and `xml:space` contexts are preserved conservatively;
-    imported opaque structures are never globally pretty-printed. If a new/split managed paragraph
-    requires sibling formatting in an ambiguous or `xml:space`-preserving context, serialization
-    shall fail safely rather than emit ambiguous formatting or alter source content. This formatting
-    boundary does not promise lexical identity or blanket Final Draft compatibility.
+    shall receive LF/two-space sibling indentation as a best-effort cosmetic normalization only when
+    the Content child sequence is unambiguously Paragraph elements plus structural whitespace and no
+    effective `xml:space="preserve"` applies. Any detached structural-whitespace normalization shall
+    be applied equally to the expected source-tree comparison; re-read integrity checks remain strict.
+    Canonical Text content, including empty/whitespace-only values, tabs, LF and CR, and CDATA,
+    comments, processing instructions, mixed content, namespaces, unknown imported structures, and
+    source order shall not be rewritten. Ambiguous mixed-content and `xml:space` contexts are
+    preserved conservatively; imported opaque structures are never globally pretty-printed. When
+    cosmetic normalization is unsafe or ambiguous, the reconciled managed paragraph shall be emitted
+    at its source-tree position without adding sibling formatting; missing beautification shall not
+    refuse an otherwise valid save. This formatting boundary does not promise lexical identity or
+    blanket Final Draft compatibility.
     ScriptCraft-only project identity/schema, metadata, layout inputs, and
     editing policies are not persisted as FDX fields; no private extension, sidecar, or legacy JSON
     migration is required. A source field without a safe supported representation shall not be
@@ -195,17 +196,30 @@ project meaning; failures preserve the prior valid destination and unsaved state
   - **AC-WRITING-003.5:** Every managed Scene Heading shall contain `SceneProperties` and
     `SceneArcBeats` before its first `Text` child. Missing properties shall use Length `1/8`, Page
     `1`, and empty Title; existing values and unknown attributes remain source-owned, and Page or
-    Length is not recalculated. Scene-cast arcs are a derived projection of nonblank Character
-    elements until the next heading: outer Unicode whitespace is trimmed, duplicate names are
-    compared with Unicode lowercase keys, and first spelling/occurrence order is retained. Each
-    supported entry contains the reference-shaped nested Paragraph; its source ID remains opaque
-    and is registered in the preservation identity graph without becoming a managed screenplay
-    element or anchor. Matching entries retain their nested Paragraph ID. Removal requires
-    positively tracked ScriptCraft creation ownership, a supported entry shape, and no known or
-    source-tree ID reference; source entries whose ownership cannot be established, opaque nested
-    authored payloads, ambiguous entries, or unsafe references remain intact and stop scene
-    reconciliation. Ownership is not inferred from shape on reopen. Existing Scene Heading
-    split/join attachment safe-stops remain unchanged.
+    Length is not recalculated. For newly generated documents, scene-cast arcs project Character
+    elements until the next heading: trim outer Unicode whitespace, remove one recognized trailing
+    delivery extension ((V.O.), (O.S.), (O.C.), (CONT'D), (SUBTITLE), (TEXT), or (V.O)), ignore
+    empty results, deduplicate by Unicode lowercase association key in first-occurrence order, and
+    store the derived name in Unicode uppercase. Canonical Character text remains unchanged. This
+    normalized projection applies to new documents and supported imported scenes. Supported imported
+    entries with one nested Paragraph and an ordered sequence of same-namespace `Text` runs containing
+    only text or CDATA are app-owned derived membership after deserialization; whitespace-only
+    formatting nodes between runs are allowed. The nested Paragraph remains opaque to screenplay
+    content and retains its source attributes, current ID, ordered run nodes, text, and run formatting.
+    Match entries by normalized Character name, update only the derived beat Name/order, add missing
+    names with fresh UUID v4 nested IDs, and remove unmatched names without requiring ScriptCraft
+    creation history. A retained Character keeps its nested arc content through unrelated Character
+    additions, removals, reordering, and cue-case changes. Removing a Character removes its complete
+    derived arc Paragraph and text; renaming to a different normalized key is removal plus a new
+    blank arc, never a transfer by position or nested ID. Removal still requires a unique registered
+    paragraph ID without known references or external source-tree uses. Duplicate beats, multiple
+    nested Paragraphs, unknown non-text child structures, and unsafe references defer only that
+    scene's derived update: its complete SceneProperties/SceneArcBeats subtree and Cast Lists remain
+    unchanged while independent supported scenes may reconcile. This safe-stop scopes the derived
+    update, not an otherwise valid canonical native Save or Save As. Model/preservation validation,
+    managed-source synchronization, required identity allocation, serialization/re-read comparison,
+    conflict detection, and atomic publication remain strict and fatal on failure. Existing Scene
+    Heading split/join attachment safe-stops remain unchanged.
   - **AC-WRITING-003.6:** Every newly generated FDX paragraph identity (managed body and title-page
     paragraphs and nested scene-arc Paragraphs) shall be a lowercase, hyphenated UUID version 4.
     Allocation shall use secure operating-system randomness, reject collisions against current
@@ -221,10 +235,18 @@ project meaning; failures preserve the prior valid destination and unsaved state
     right paragraph; joining or deleting removes only the removed paragraph's ID. Undo/redo within
     the active session restores the exact identity state in its history snapshots. Content recreated
     after deletion receives a new allocation, but with no historical tombstone registry the
-    allocator cannot guarantee uniqueness against every ID deleted in the past. Matching scene-arc
-    names retain nested IDs; new or renamed names receive fresh allocations and safely owned removed
-    entries lose their IDs. If a stale entry is encountered after a separate reopen without creation
-    proof, reconciliation stops atomically and preserves it rather than guessing at ownership.
+     allocator cannot guarantee uniqueness against every ID deleted in the past. Matching normalized
+     scene-arc names retain their nested Paragraph ID and complete supported text/run subtree; new or
+     renamed names receive fresh allocations and removed entries in the supported derived shape lose
+     their IDs and arc text after reference-safety checks, including when the document was separately
+     reopened. Nested ID shape or ScriptCraft creation history is not used as character-association or
+     deletion-ownership evidence. Unsupported arc payloads still stop reconciliation atomically and
+     remain source-preserved. Opaque TitlePage Paragraphs that are not managed title roles remain
+     source-tree occurrences: a distinct occurrence retains its existing global Paragraph identity,
+     while repeated occurrences of the same raw ID are excluded from the global identity registry and
+     preserve each element, order, attributes, content, and ID verbatim. Repeated opaque occurrences
+     may not collide with a globally registered managed or otherwise referenced Paragraph identity;
+     duplicate checks remain strict for managed body/title roles and identity consumers.
 
 ### FDX document content and preservation
 
@@ -267,13 +289,21 @@ project meaning; failures preserve the prior valid destination and unsaved state
     or local image-path access; diagnostics do not expose document text, image payloads or paths.
 
 - **REQ-WRITING-LOOP-009: Scene cast lists.** Imported Cast List text is assigned as-is. The
-  internal updater collects Character names after each Scene Heading to the next heading or end,
-  deduplicates and alphabetically sorts them, and periodically updates managed lists.
+  internal updater consumes the uppercase derived scene-arc projection after each Scene Heading to
+  the next heading or end, retaining case-insensitive alphabetical sorting and parenthesized
+  formatting, and periodically updates safely correctable managed lists.
   - **AC-WRITING-009.1:** Direct edits may be silently corrected on refresh; Save and Save As check
-    and silently correct the serialized candidate before emitting its text as-is.
-  - **AC-WRITING-009.2:** After a successful save the live document and clean baseline match the
-    corrected output; a failed save publishes no candidate correction. Refresh, edit history and
-    pending saves are transactional and deterministic.
+    and silently correct the detached candidate before emitting it. Stored derived Cast List text
+    is uppercase; canonical Character cues retain their typed casing.
+  - **AC-WRITING-009.2:** A deferred unsupported scene leaves its entire SceneProperties/SceneArcBeats
+    subtree and all Cast Lists unchanged, while other supported scenes may update. A formatted Cast
+    List that cannot be corrected without rewriting its runs keeps its text and run attributes;
+    neither limitation blocks an otherwise valid canonical native Save or Save As.
+  - **AC-WRITING-009.3:** After successful save, the live document and clean baseline match the
+    published candidate; failed preparation, conflict or replacement publishes no candidate
+    correction. Refresh, undo/redo correction, and pending saves use the same per-scene deferral and
+    remain transactional and deterministic. Genuine model, managed-source, identity, preservation,
+    re-read, conflict, and storage failures remain fatal.
 
 ### Secondary Fountain conversion
 

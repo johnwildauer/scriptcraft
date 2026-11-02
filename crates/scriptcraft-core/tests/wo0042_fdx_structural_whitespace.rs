@@ -1,5 +1,5 @@
 use scriptcraft_core::editing::{EditingSession, Position, Selection};
-use scriptcraft_core::fdx::{read_v6, write_v6, FdxError};
+use scriptcraft_core::fdx::{read_v6, write_v6};
 use scriptcraft_core::{Project, Role, ScreenplayElement};
 
 #[test]
@@ -92,7 +92,10 @@ fn xml_space_preserve_and_mixed_content_are_not_prettified() {
         .unwrap_or_else(|_| unreachable!());
     assert_eq!(session.split(), Ok(()));
 
-    assert_eq!(write_v6(session.project()), Err(FdxError::UnsupportedConstruct));
+    let saved = write_v6(session.project()).unwrap_or_else(|_| unreachable!());
+    let reopened = read_v6(&saved).unwrap_or_else(|_| unreachable!());
+    assert_eq!(reopened.project.elements[0].text, "alpha");
+    assert_eq!(reopened.project.elements[1].text, " beta");
     assert_eq!(session.project().elements[0].text, "alpha");
     assert_eq!(session.project().elements[1].text, " beta");
     assert_eq!(
@@ -126,8 +129,8 @@ fn xml_space_preserve_and_mixed_content_are_not_prettified() {
         })
         .unwrap_or_else(|_| unreachable!());
     assert_eq!(mixed_session.split(), Ok(()));
-    assert_eq!(
-        write_v6(mixed_session.project()),
-        Err(FdxError::UnsupportedConstruct)
-    );
+    let saved = write_v6(mixed_session.project()).unwrap_or_else(|_| unreachable!());
+    let reopened = read_v6(&saved).unwrap_or_else(|_| unreachable!());
+    assert_eq!(reopened.project.elements[0].text, "alpha");
+    assert_eq!(reopened.project.elements[1].text, " beta");
 }

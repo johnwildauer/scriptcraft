@@ -1439,7 +1439,6 @@ mod tests {
             identities,
             references: Vec::new(),
             board_graph: BoardGraph::default(),
-            generated_scene_arc_paragraph_ids: std::collections::BTreeSet::new(),
         });
         project
     }

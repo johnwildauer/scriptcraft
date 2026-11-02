@@ -359,7 +359,6 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         identities,
         references: Vec::new(),
         board_graph,
-        generated_scene_arc_paragraph_ids: BTreeSet::new(),
     };
     project.preservation = Some(preservation);
     project.validate().map_err(map_model_error)?;
@@ -418,7 +417,7 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
             &sections,
             &original_paragraph_ids,
         );
-        format_inserted_paragraph_whitespace(&mut sections, &inserted_paragraph_ids)?;
+        format_inserted_paragraph_whitespace(&mut sections, &inserted_paragraph_ids);
         let expected_sections = sections.clone();
         let nodes = sections
             .into_iter()
@@ -724,16 +723,15 @@ fn collect_inserted_managed_paragraph_ids(
 fn format_inserted_paragraph_whitespace(
     sections: &mut [PreservedSection],
     inserted_ids: &BTreeSet<String>,
-) -> Result<(), FdxError> {
+) {
     if inserted_ids.is_empty() {
-        return Ok(());
+        return;
     }
 
     fn visit(
         nodes: &mut [PreservedNode],
         inherited_space_preserve: bool,
         inserted_ids: &BTreeSet<String>,
-        formatted_ids: &mut BTreeSet<String>,
     ) {
         for node in nodes {
             let PreservedNode::Element(root) = node else {
@@ -747,65 +745,31 @@ fn format_inserted_paragraph_whitespace(
                     };
                     if content.name.local_name == "Content" {
                         let content_preserve = xml_space_preserve(content, root_preserve);
-                        if !content_preserve
-                            && format_content_insertions(&mut content.children, inserted_ids)
-                        {
-                            formatted_ids.extend(direct_inserted_paragraph_ids(
-                                &content.children,
-                                inserted_ids,
-                            ));
+                        if !content_preserve {
+                            format_content_insertions(&mut content.children, inserted_ids);
                         }
                     }
                     visit(
                         std::slice::from_mut(child),
                         root_preserve,
                         inserted_ids,
-                        formatted_ids,
                     );
                 }
             } else {
-                visit(
-                    &mut root.children,
-                    root_preserve,
-                    inserted_ids,
-                    formatted_ids,
-                );
+                visit(&mut root.children, root_preserve, inserted_ids);
             }
         }
     }
 
-    let mut formatted_ids = BTreeSet::new();
     for section in sections {
-        visit(&mut section.children, false, inserted_ids, &mut formatted_ids);
+        visit(&mut section.children, false, inserted_ids);
     }
-    if formatted_ids != *inserted_ids {
-        return Err(FdxError::UnsupportedConstruct);
-    }
-    Ok(())
-}
-
-fn direct_inserted_paragraph_ids(
-    children: &[PreservedNode],
-    inserted_ids: &BTreeSet<String>,
-) -> BTreeSet<String> {
-    children
-        .iter()
-        .filter_map(|child| match child {
-            PreservedNode::Element(element) if element.name.local_name == "Paragraph" => element
-                    .attributes
-                    .iter()
-                    .find(|attribute| attribute.name.local_name.eq_ignore_ascii_case("id"))
-                .map(|attribute| attribute.value.clone()),
-            _ => None,
-        })
-        .filter(|id| inserted_ids.contains(id))
-        .collect()
 }
 
 fn format_content_insertions(
     children: &mut Vec<PreservedNode>,
     inserted_ids: &BTreeSet<String>,
-) -> bool {
+) {
     // Only the unambiguous element-only Content shape is eligible. Comments,
     // PIs, CDATA, non-whitespace text and non-Paragraph children make the
     // context mixed/opaque, so source order and all whitespace remain intact.
@@ -814,7 +778,7 @@ fn format_content_insertions(
         PreservedNode::Element(element) => element.name.local_name != "Paragraph",
         _ => true,
     }) {
-        return false;
+        return;
     }
     let has_inserted = children.iter().any(|child| match child {
         PreservedNode::Element(element) if element.name.local_name == "Paragraph" => element
@@ -825,7 +789,7 @@ fn format_content_insertions(
         _ => false,
     });
     if !has_inserted {
-        return false;
+        return;
     }
 
     let mut formatted = Vec::with_capacity(children.len().saturating_mul(2) + 1);
@@ -866,7 +830,6 @@ fn format_content_insertions(
         formatted.append(&mut pending_whitespace);
     }
     *children = formatted;
-    true
 }
 
 fn reconcile_project_elements(
@@ -1106,9 +1069,12 @@ fn make_new_document_nodes(project: &Project) -> Result<Vec<PreservedNode>, FdxE
                 .iter()
                 .position(|candidate| candidate.role == Role::SceneHeading)
                 .map_or(project.elements.len(), |offset| index + 1 + offset);
-            let names = crate::scene_metadata::character_names(
+            let names = crate::scene_metadata::derived_character_projection(
                 &project.elements[index + 1..scene_end],
-            );
+            )
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>();
             let PreservedNode::Element(heading) = &mut paragraph else {
                 return Err(FdxError::UnsupportedConstruct);
             };
@@ -2392,8 +2358,9 @@ fn collect_identities(
     board_graph: &mut BoardGraph,
 ) -> Result<(), FdxError> {
     let mut seen = BTreeSet::new();
+    let mut scoped_title_page_paragraphs = BTreeMap::new();
     let mut definitions = Vec::new();
-    walk_elements(root, &mut |element, nearest_board| {
+    walk_elements(root, &mut |element, nearest_board, in_title_page, depth| {
         if identity_attribute_count(element) > 1 {
             return Err(FdxError::AmbiguousIdentity);
         }
@@ -2420,6 +2387,25 @@ fn collect_identities(
         let domain = identity_domain(&element.name.local_name);
         let identity = ForeignIdentity::new(domain.clone(), value.to_owned())
             .map_err(map_preservation_error)?;
+        // Paragraphs in TitlePage source content are opaque unless they are
+        // direct, recognized title-page roles managed by preserve_node. Count
+        // those raw ID occurrences separately so only repetitions that have no
+        // global consumer are omitted from the global Paragraph definitions.
+        let opaque_title_page_paragraph = in_title_page
+            && element.name.local_name == "Paragraph"
+            && !(depth == 2 && attribute(element, "Type").and_then(role_from_fdx).is_some());
+        if opaque_title_page_paragraph {
+            *scoped_title_page_paragraphs
+                .entry(identity.clone())
+                .or_insert(0usize) += 1;
+            definitions.push((
+                element.name.local_name.clone(),
+                identity,
+                element.attributes.clone(),
+                true,
+            ));
+            return Ok(());
+        }
         if !seen.insert(identity.clone()) {
             return Err(FdxError::AmbiguousIdentity);
         }
@@ -2427,12 +2413,29 @@ fn collect_identities(
             element.name.local_name.clone(),
             identity,
             element.attributes.clone(),
+            false,
         ));
         Ok(())
     })?;
 
+    // Repeated scoped occurrences are deliberately not global definitions, but
+    // they may not shadow an identity that is globally registered elsewhere.
+    // A single opaque title-page Paragraph retains its existing global identity.
+    for (identity, count) in &scoped_title_page_paragraphs {
+        if seen.contains(identity) {
+            return Err(FdxError::AmbiguousIdentity);
+        }
+        if *count == 1 {
+            seen.insert(identity.clone());
+        }
+    }
+
     let mut source_order = 0u32;
-    for (name, identity, attributes) in &definitions {
+    for (name, identity, attributes, scoped_title_page) in &definitions {
+        let repeated_scoped_title_page = *scoped_title_page
+            && scoped_title_page_paragraphs
+                .get(identity)
+                .is_some_and(|count| *count > 1);
         let kind = match name.as_str() {
             "ListItem" => Some(BoardEntityKind::ListItem),
             "DisplayBoard" => Some(BoardEntityKind::DisplayBoard),
@@ -2464,16 +2467,24 @@ fn collect_identities(
                 source_path,
             });
         } else {
-            identities.push(identity.clone());
+            if !repeated_scoped_title_page {
+                identities.push(identity.clone());
+            }
         }
     }
 
     let defined = definitions
         .iter()
-        .map(|(_, identity, _)| identity.clone())
+        .filter(|(_, identity, _, scoped_title_page)| {
+            !(*scoped_title_page
+                && scoped_title_page_paragraphs
+                    .get(identity)
+                    .is_some_and(|count| *count > 1))
+        })
+        .map(|(_, identity, _, _)| identity.clone())
         .collect::<BTreeSet<_>>();
     let mut references = Vec::new();
-    walk_elements(root, &mut |element, nearest_board| {
+    walk_elements(root, &mut |element, nearest_board, _in_title_page, _depth| {
         let board = if element.name.local_name == "DisplayBoard" {
             identity_attribute(element)
                 .map(|value| ForeignIdentity::new(ForeignIdDomain::Board, value.to_owned()))
@@ -2513,15 +2524,18 @@ fn collect_identities(
 
 fn walk_elements<F>(element: &RawElement, visitor: &mut F) -> Result<(), FdxError>
 where
-    F: FnMut(&RawElement, Option<&ForeignIdentity>) -> Result<(), FdxError>,
+    F: FnMut(&RawElement, Option<&ForeignIdentity>, bool, usize) -> Result<(), FdxError>,
 {
     fn visit<F>(
         element: &RawElement,
         nearest_board: Option<&ForeignIdentity>,
+        in_title_page: bool,
+        depth: usize,
+        root_namespace: Option<&str>,
         visitor: &mut F,
     ) -> Result<(), FdxError>
     where
-        F: FnMut(&RawElement, Option<&ForeignIdentity>) -> Result<(), FdxError>,
+        F: FnMut(&RawElement, Option<&ForeignIdentity>, bool, usize) -> Result<(), FdxError>,
     {
         let local_board = if element.name.local_name == "DisplayBoard" {
             identity_attribute(element)
@@ -2532,15 +2546,31 @@ where
             None
         };
         let active_board = local_board.as_ref().or(nearest_board);
-        visitor(element, active_board)?;
+        visitor(element, active_board, in_title_page, depth)?;
         for child in &element.children {
             if let RawNode::Element(child) = child {
-                visit(child, active_board, visitor)?;
+                let child_in_title_page = in_title_page
+                    || (depth == 0 && is_fdx_element(child, "TitlePage", root_namespace));
+                visit(
+                    child,
+                    active_board,
+                    child_in_title_page,
+                    depth.saturating_add(1),
+                    root_namespace,
+                    visitor,
+                )?;
             }
         }
         Ok(())
     }
-    visit(element, None, visitor)
+    visit(
+        element,
+        None,
+        false,
+        0,
+        element.name.namespace_uri.as_deref(),
+        visitor,
+    )
 }
 
 fn identity_domain(name: &str) -> ForeignIdDomain {
