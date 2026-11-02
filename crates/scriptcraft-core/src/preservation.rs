@@ -9,6 +9,7 @@ use crate::{
     Role, ScreenplayElement, SourceFormat, SourceLayoutSettings, SourceProvenance, SourceSection,
     StableId, TextRun,
 };
+use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
@@ -48,6 +49,8 @@ pub enum PreservationError {
     UnsupportedRoleMapping,
     StructuralAttachmentConflict,
     PotentialReferenceConflict,
+    ParagraphIdentityEntropyUnavailable,
+    ParagraphIdentityCollisionLimit,
 }
 
 /// The source's expanded name and, when available, original qualified spelling.
@@ -279,6 +282,10 @@ pub struct PreservationState {
     pub identities: Vec<ForeignIdentity>,
     pub references: Vec<ForeignReference>,
     pub board_graph: BoardGraph,
+    /// Runtime proof that these nested scene-arc paragraph nodes were created
+    /// by reconciliation. It is not serialized into FDX; reopening intentionally
+    /// removes deletion authority rather than inferring ownership from XML shape.
+    pub(crate) generated_scene_arc_paragraph_ids: BTreeSet<String>,
 }
 
 impl PreservationState {
@@ -750,50 +757,6 @@ impl PreservationState {
         Ok(())
     }
 
-    /// Keeps source-owned text synchronized for an explicit cue-casing edit.
-    /// Casing is mapped per ordered source run so Unicode expansions remain
-    /// attached to their original run boundaries.
-    pub(crate) fn uppercase_managed_text(
-        &mut self,
-        id: &StableId,
-        old_text: &str,
-        expected_runs: Option<&[String]>,
-        expected_text: &str,
-    ) -> Result<(), PreservationError> {
-        let element = self.managed_element_mut(id)?;
-        let indexes = direct_text_child_indexes(element);
-        if indexes.is_empty() {
-            return Err(PreservationError::UnsupportedTextMapping);
-        }
-        let source_segments = indexes
-            .iter()
-            .map(|index| match &element.children[*index] {
-                PreservedNode::Text(text) | PreservedNode::CData(text) => text.clone(),
-                _ => unreachable!(),
-            })
-            .collect::<Vec<_>>();
-        if source_segments.concat() != old_text {
-            return Err(PreservationError::ManagedTextMismatch);
-        }
-        if expected_runs.is_some_and(|runs| runs != source_segments.as_slice()) {
-            return Err(PreservationError::UnsupportedTextMapping);
-        }
-        let updated = source_segments
-            .iter()
-            .map(|text| text.to_uppercase())
-            .collect::<Vec<_>>();
-        if updated.concat() != expected_text {
-            return Err(PreservationError::UnsupportedTextMapping);
-        }
-        for (index, text) in indexes.into_iter().zip(updated) {
-            match &mut element.children[index] {
-                PreservedNode::Text(value) | PreservedNode::CData(value) => *value = text,
-                _ => unreachable!(),
-            }
-        }
-        Ok(())
-    }
-
     /// Updates only a recognized paragraph Type mapping. All other source
     /// attributes and nested attachments remain byte/structure-owned by source.
     pub(crate) fn change_managed_role(
@@ -1084,26 +1047,38 @@ impl PreservationState {
     }
 
     fn fresh_foreign_paragraph_id(&self) -> Result<String, PreservationError> {
-        let mut serial = 1u64;
-        loop {
-            let value = format!("scriptcraft-paragraph-{serial}");
-            let collision = self
-                .identities
-                .iter()
-                .any(|identity| identity.value == value)
-                || self
-                    .board_graph
+        let reserved = self
+            .identities
+            .iter()
+            .map(|identity| identity.value.clone())
+            .chain(
+                self.board_graph
                     .entities
                     .iter()
-                    .any(|entity| entity.identity.value == value)
-                || source_has_id_value(&self.sections, &value);
-            if !collision {
-                return Ok(value);
+                    .map(|entity| entity.identity.value.clone()),
+            )
+            .chain(self.references.iter().flat_map(|reference| {
+                [
+                    reference.source.value.clone(),
+                    reference.target.value.clone(),
+                ]
+            }))
+            .chain(self.board_graph.references.iter().flat_map(|reference| {
+                [
+                    reference.source.value.clone(),
+                    reference.target.value.clone(),
+                ]
+            }))
+            .chain(source_id_values(&self.sections));
+        let mut allocator = ParagraphIdAllocator::new(reserved);
+        allocator.allocate().map_err(|error| match error {
+            ParagraphIdAllocationError::EntropyUnavailable => {
+                PreservationError::ParagraphIdentityEntropyUnavailable
             }
-            serial = serial
-                .checked_add(1)
-                .ok_or(PreservationError::TooManyEvents)?;
-        }
+            ParagraphIdAllocationError::CollisionLimit => {
+                PreservationError::ParagraphIdentityCollisionLimit
+            }
+        })
     }
 
     fn fresh_anchor_id(&self) -> Result<SourceAnchorId, PreservationError> {
@@ -1380,22 +1355,26 @@ fn remove_managed_node_from_content(sections: &mut [PreservedSection], id: &Stab
     true
 }
 
-fn source_has_id_value(sections: &[PreservedSection], value: &str) -> bool {
-    fn contains(nodes: &[PreservedNode], value: &str) -> bool {
-        nodes.iter().any(|node| match node {
-            PreservedNode::Element(element) => {
-                element.attributes.iter().any(|attribute| {
-                    attribute.name.namespace_uri.is_none()
+fn source_id_values(sections: &[PreservedSection]) -> BTreeSet<String> {
+    fn collect(nodes: &[PreservedNode], ids: &mut BTreeSet<String>) {
+        for node in nodes {
+            if let PreservedNode::Element(element) = node {
+                for attribute in &element.attributes {
+                    if attribute.name.namespace_uri.is_none()
                         && attribute.name.local_name.eq_ignore_ascii_case("id")
-                        && attribute.value == value
-                }) || contains(&element.children, value)
+                    {
+                        ids.insert(attribute.value.clone());
+                    }
+                }
+                collect(&element.children, ids);
             }
-            _ => false,
-        })
+        }
     }
-    sections
-        .iter()
-        .any(|section| contains(&section.children, value))
+    let mut ids = BTreeSet::new();
+    for section in sections {
+        collect(&section.children, &mut ids);
+    }
+    ids
 }
 
 fn has_potential_reference(
@@ -1799,6 +1778,7 @@ mod tests {
             identities: Vec::new(),
             references: Vec::new(),
             board_graph: BoardGraph::default(),
+            generated_scene_arc_paragraph_ids: BTreeSet::new(),
         }
     }
 

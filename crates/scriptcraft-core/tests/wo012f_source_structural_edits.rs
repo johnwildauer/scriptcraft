@@ -64,9 +64,25 @@ fn split_and_insert_keep_ids_runs_unknown_order_and_board_data_through_undo_redo
         .map(|identity| identity.value.as_str())
         .collect::<Vec<_>>();
     assert!(paragraph_ids.contains(&"p1"));
-    assert!(paragraph_ids
+    let generated_ids = paragraph_ids
         .iter()
-        .any(|id| id.starts_with("scriptcraft-paragraph-")));
+        .filter_map(|id| {
+            let parsed = uuid::Uuid::parse_str(id).ok()?;
+            let canonical = parsed.hyphenated().to_string();
+            (parsed.get_version() == Some(uuid::Version::Random)
+                && parsed.get_variant() == uuid::Variant::RFC4122
+                && *id == canonical)
+                .then_some(*id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(generated_ids.len(), 2);
+    assert_eq!(
+        generated_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        generated_ids.len()
+    );
     assert_eq!(
         state.board_graph,
         original
@@ -78,11 +94,14 @@ fn split_and_insert_keep_ids_runs_unknown_order_and_board_data_through_undo_redo
     let (bytes, reopened) = save_and_reopen(&session);
     let xml = std::str::from_utf8(&bytes).unwrap_or("");
     assert!(xml.contains("opaque paragraph"));
-    assert!(xml.contains("ID=\"scriptcraft-paragraph-2\""));
-    assert!(
-        xml.find("opaque paragraph").unwrap_or(usize::MAX)
-            < xml.find("scriptcraft-paragraph-2").unwrap_or(usize::MAX)
-    );
+    assert!(generated_ids
+        .iter()
+        .all(|generated_id| xml.contains(&format!("ID=\"{generated_id}\""))));
+    let opaque_position = xml.find("opaque paragraph").unwrap_or(usize::MAX);
+    assert!(generated_ids.iter().any(|generated_id| {
+        opaque_position < xml.find(generated_id).unwrap_or(usize::MAX)
+    }));
+    assert!(xml.contains("ID=\"scriptcraft-paragraph-1\""));
     assert_eq!(
         reopened
             .elements

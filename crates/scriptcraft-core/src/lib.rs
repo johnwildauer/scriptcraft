@@ -10,8 +10,10 @@ pub mod fdx;
 pub mod fdx_storage;
 pub mod formatting;
 pub mod layout;
+mod paragraph_id;
 pub mod persistence;
 pub mod preservation;
+pub mod scene_metadata;
 
 use std::collections::BTreeSet;
 

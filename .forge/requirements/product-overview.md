@@ -23,8 +23,19 @@ screenplay elements and retained FDX source content, including source-owned
 metadata, paragraph identities, title-page structure, and document settings.
 Internal identities used to edit and anchor content are transient; they are not
 a promise of stable ScriptCraft IDs across reopen. Editing preserves explicit
-roles and canonical UTF-8 text; transient selection, undo/redo, dirty state, and
+roles and the writer's exact canonical UTF-8 casing across typing, paste, role
+changes, and history operations. AllCaps affects display rather than canonical
+text or native FDX source; transient selection, undo/redo, dirty state, and
 derived layout do not replace that source.
+
+Managed Scene Headings retain native SceneProperties and SceneArcBeats as the
+derived scene-cast storage. Supported CharacterArcBeat names are synchronized
+from Character elements, and Cast List presentation consumes that synchronized
+projection with alphabetical case-insensitive ordering. Projects without
+preservation use the same shared Character projection for initial generation.
+Opaque or ambiguously owned source payloads remain preserved and may safe-stop an
+update. This bounded projection does not promise editing of other Final Draft
+beat-board structures or recalculation of scene page/length values.
 
 The writing experience supports continuous editing and repeatable fixed-page
 preview from shared layout semantics for the same effective runtime layout
@@ -32,12 +43,21 @@ inputs. This does not promise exact layout fidelity for every FDX file. The
 native project preserves screenplay meaning and retained FDX source data across
 FDX save and reopen. PDF is a page-layout export; plain-text export is
 deliberately lossy and communicates that roles, identities, and page layout are
-not preserved. Role typography uses bounded imported FDX settings with a
-deterministic fixed-cell Courier Prime fallback; presentation transforms do not
-rewrite canonical text. HiddenText roles remain visible and subdued while writing
-but are omitted from print/PDF and plain-text copies. Neither export replaces the
-native project as the source of truth, and no exact FDX or Final Draft rendering
-parity is promised.
+not preserved. Plain-text export uses the shared print-layout display text, so
+effective AllCaps presentation (including Unicode expansions) appears in the text
+copy while roles without AllCaps retain canonical casing. This transformation does
+not rewrite semantic text or native FDX. Role typography uses bounded imported FDX
+settings with a deterministic fixed-cell Courier Prime fallback; presentation
+transforms do not rewrite canonical text. HiddenText roles remain visible and
+subdued while writing but are omitted from print/PDF and plain-text copies. Neither
+export replaces the native project as the source of truth, and no exact FDX or
+Final Draft rendering parity is promised.
+
+New FDX paragraph identities use collision-checked UUID v4 values. Imported paragraph
+identities remain verbatim even when they are not UUIDs. A never-saved project may
+receive different random identities on separate first-time serializations; once a
+saved/re-read source establishes those identities, later saves preserve them. This
+identity contract does not add historical ID tombstones.
 
 ## Product scope
 

@@ -670,18 +670,15 @@ impl ViewportPageTracker {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CenterProjection {
-    pub(super) clean_label: &'static str,
     pub(super) operation: String,
     pub(super) error: Option<String>,
 }
 
 pub(super) fn project_center(
-    dirty: bool,
     operation: &str,
     error: Option<&str>,
 ) -> CenterProjection {
     CenterProjection {
-        clean_label: if dirty { "Unsaved changes" } else { "Clean" },
         operation: operation.to_owned(),
         error: error.map(str::to_owned),
     }
@@ -1019,7 +1016,6 @@ fn overflow_menu(
             .max_height(320.0)
             .show(ui, |ui| {
                 ui.label(page.label());
-                ui.label(center.clean_label);
                 if let Some(message) = status_message(center) {
                     ui.label(message);
                 }
@@ -1150,12 +1146,6 @@ fn show_impl_with_appearance(
     let mut timer_just_opened = timer_just_opened;
     let mut focus_activated = focus_activated;
     let message = status_message(center);
-    let clean_label =
-        if uses_compact_status_layout(available_width) && center.clean_label == "Unsaved changes" {
-            "Dirty"
-        } else {
-            center.clean_label
-        };
     let row_height = ui.spacing().interact_size.y;
     let timer_width = ui.spacing().interact_size.x.max(36.0);
     ui.columns(3, |regions| {
@@ -1280,23 +1270,6 @@ fn show_impl_with_appearance(
             egui::vec2(status_width, row_height),
             |region| {
                 let status_rect = region.max_rect().intersect(region.clip_rect());
-                let clean_width = (status_rect.width() * 0.4).max(0.0);
-                let clean_rect = Rect::from_min_max(
-                    status_rect.min,
-                    egui::pos2(status_rect.left() + clean_width, status_rect.bottom()),
-                );
-                let message_rect = Rect::from_min_max(
-                    egui::pos2(clean_rect.right(), status_rect.top()),
-                    status_rect.max,
-                );
-                paint_clipped_single_line(
-                    region,
-                    "clean-state",
-                    clean_label,
-                    center.clean_label,
-                    region.visuals().text_color(),
-                    clean_rect,
-                );
                 if let Some(message) = message.as_deref() {
                     paint_clipped_single_line(
                         region,
@@ -1308,7 +1281,7 @@ fn show_impl_with_appearance(
                         } else {
                             region.visuals().text_color()
                         },
-                        message_rect,
+                        status_rect,
                     );
                 }
             },
@@ -2163,20 +2136,18 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_center_projection_reports_clean_unsaved_path_and_errors() {
-        let clean_unsaved = project_center(false, "", None);
-        assert_eq!(clean_unsaved.clean_label, "Clean");
-        assert_eq!(status_message(&clean_unsaved), None);
+    fn status_bar_center_projection_contains_only_operation_and_error() {
+        let empty = project_center("", None);
+        assert_eq!(status_message(&empty), None);
 
-        let dirty = project_center(true, "Save failed", Some("unchanged destination"));
-        assert_eq!(dirty.clean_label, "Unsaved changes");
-        assert_eq!(dirty.operation, "Save failed");
-        assert_eq!(dirty.error.as_deref(), Some("unchanged destination"));
+        let failed = project_center("Save failed; document unchanged", Some("codec category"));
+        assert_eq!(failed.operation, "Save failed; document unchanged");
+        assert_eq!(failed.error.as_deref(), Some("codec category"));
         assert_eq!(
-            status_message(&dirty).as_deref(),
-            Some("Save failed: unchanged destination")
+            status_message(&failed).as_deref(),
+            Some("Save failed; document unchanged: codec category")
         );
-        assert_eq!(project_center(false, "Saved", None).clean_label, "Clean");
+        assert_eq!(status_message(&project_center("Saved", None)).as_deref(), Some("Saved"));
     }
 
     #[test]
@@ -2752,7 +2723,7 @@ mod tests {
             painted_pages: 0,
             repaint_requests: 0,
         };
-        let center = project_center(true, "Save failed", Some("destination unchanged"));
+        let center = project_center("Save failed; document unchanged", Some("destination unchanged"));
 
         for (width, layout_name) in [(1_200.0, "normal"), (480.0, "compact")] {
             let context = egui::Context::default();
@@ -2871,38 +2842,50 @@ mod tests {
                 text_is_visible("Page 2 of 8"),
                 "{layout_name} status renderer omitted the visible page"
             );
+            let labels = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(!labels.iter().any(|label| matches!(
+                label.as_str(),
+                "Clean" | "Unsaved changes" | "Dirty"
+            )));
             assert!(
                 output.shapes.iter().any(|clipped| matches!(
                     &clipped.shape,
                     egui::epaint::Shape::Text(text)
-                        if if layout_name == "normal" {
-                            text.galley.text() == "Unsaved changes"
-                        } else {
-                            text.galley.text().starts_with("Dirty")
-                        }
-                )),
-                "{layout_name} status renderer omitted its clean/unsaved state; labels={:?}",
-                output
-                    .shapes
-                    .iter()
-                    .filter_map(|clipped| match &clipped.shape {
-                        egui::epaint::Shape::Text(text) => Some(text.galley.text().to_owned()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            );
-            assert!(
-                output.shapes.iter().any(|clipped| matches!(
-                    &clipped.shape,
-                    egui::epaint::Shape::Text(text)
-                        if if layout_name == "normal" {
-                            text.galley.text() == "Save failed: destination unchanged"
-                        } else {
-                            text.galley.text().starts_with("Save failed")
-                        }
+                        if text.galley.text()
+                            == "Save failed; document unchanged: destination unchanged"
                 )),
                 "{layout_name} status renderer omitted operation/error feedback"
             );
+            let message_shape = output.shapes.iter().find_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text)
+                    if text.galley.text()
+                        == "Save failed; document unchanged: destination unchanged" =>
+                {
+                    Some((text, clipped))
+                }
+                _ => None,
+            });
+            let (message, clipped) = message_shape.unwrap_or_else(|| unreachable!());
+            assert!(
+                (message.pos.x - clipped.clip_rect.left()).abs() <= 0.1,
+                "{layout_name} status message is not left-aligned: text_x={}, region_left={}",
+                message.pos.x,
+                clipped.clip_rect.left()
+            );
+            if layout_name == "normal" {
+                assert!(
+                    clipped.clip_rect.width() > width * 0.25,
+                    "wide status message did not receive the freed center space: {:?}",
+                    clipped.clip_rect
+                );
+            }
         }
     }
 
@@ -2912,7 +2895,7 @@ mod tests {
             let context = egui::Context::default();
             context.enable_accesskit();
             let mut zoom_percent = 137;
-            let initial_center = project_center(false, "", None);
+            let initial_center = project_center("", None);
             let initial_diagnostics = DiagnosticProjection {
                 focused: false,
                 focus_lock: false,
@@ -3042,12 +3025,11 @@ mod tests {
                 let long = frame % 2 == 0;
                 let center = if long {
                     project_center(
-                        true,
                         "Operation status with a deliberately variable-width payload",
                         Some("destination unchanged after a detailed recoverable failure"),
                     )
                 } else {
-                    project_center(false, "Saved", None)
+                    project_center("Saved", None)
                 };
                 let diagnostics = DiagnosticProjection {
                     focused: frame % 2 == 0,
@@ -3100,7 +3082,6 @@ mod tests {
                 )
             }) {
                 let center = project_center(
-                    true,
                     "Operation status with a deliberately variable-width payload",
                     Some("destination unchanged after a detailed recoverable failure"),
                 );
@@ -3195,10 +3176,10 @@ mod tests {
     }
 
     #[test]
-    fn narrow_status_layout_keeps_zoom_page_error_and_project_state_rendered() {
+    fn narrow_status_layout_keeps_zoom_page_and_error_rendered_without_dirty_label() {
         let context = egui::Context::default();
         let width = 320.0;
-        let center = project_center(true, "Save failed", Some("destination unchanged"));
+        let center = project_center("Save failed; document unchanged", Some("destination unchanged"));
         let diagnostics = DiagnosticProjection {
             focused: false,
             focus_lock: false,
@@ -3236,12 +3217,15 @@ mod tests {
                 )
             })
         };
-        for expected in ["Page 2 of 8", "Dirty", "! More"] {
+        for expected in ["Page 2 of 8", "! More"] {
             assert!(
                 text_is_visible(expected),
                 "missing compact status text: {expected}"
             );
         }
+        assert!(!text_is_visible("Clean"));
+        assert!(!text_is_visible("Dirty"));
+        assert!(!text_is_visible("Unsaved changes"));
         assert!(output.shapes.iter().any(|clipped| matches!(
             &clipped.shape,
             egui::epaint::Shape::Text(text)
@@ -3256,7 +3240,7 @@ mod tests {
             &mut zoom_percent,
             None,
         );
-        for expected in ["137%", "Page 2 of 8", "Unsaved changes", "Save failed"] {
+        for expected in ["137%", "Page 2 of 8", "Save failed", "document unchanged"] {
             assert!(
                 overflow.shapes.iter().any(|clipped| matches!(
                     &clipped.shape,
@@ -3265,5 +3249,10 @@ mod tests {
                 "overflow omitted {expected}"
             );
         }
+        assert!(!overflow.shapes.iter().any(|clipped| matches!(
+            &clipped.shape,
+            egui::epaint::Shape::Text(text)
+                if matches!(text.galley.text(), "Clean" | "Dirty" | "Unsaved changes")
+        )));
     }
 }

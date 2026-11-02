@@ -296,12 +296,36 @@ pub enum TransactionalSaveError {
 
 impl fmt::Display for TransactionalSaveError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Session(_) => "FDX save candidate could not be prepared",
-            Self::Codec(_) => "FDX save candidate could not be serialized or re-read",
-            Self::Storage(error) => return error.fmt(formatter),
-            Self::MissingBaseline => "FDX Save requires an opened or previously saved target",
-        })
+        match self {
+            Self::Session(error) => write!(
+                formatter,
+                "FDX save candidate could not be prepared: {}",
+                session_error_category(error)
+            ),
+            Self::Codec(error) => write!(
+                formatter,
+                "FDX save candidate could not be serialized or re-read: {error}"
+            ),
+            Self::Storage(error) => error.fmt(formatter),
+            Self::MissingBaseline => {
+                formatter.write_str("FDX Save requires an opened or previously saved target")
+            }
+        }
+    }
+}
+
+fn session_error_category(error: &EditError) -> &'static str {
+    match error {
+        EditError::InvalidElement => "invalid element state",
+        EditError::InvalidUtf8Boundary => "invalid text boundary",
+        EditError::InvalidSelection => "invalid selection",
+        EditError::EmptyHistory => "empty edit history",
+        EditError::TextTooLong => "text size limit",
+        EditError::TooManyElements => "element count limit",
+        EditError::UnsupportedTransition { .. } => "unsupported role transition",
+        EditError::Preservation(_) => "source preservation constraint",
+        EditError::CastList(_) => "cast-list reconciliation constraint",
+        EditError::Model(_) => "model validation constraint",
     }
 }
 
@@ -375,7 +399,7 @@ fn save_session_with_codec<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
         .prepare_cast_list_save_candidate()
         .map_err(TransactionalSaveError::Session)?;
     let prepared = codec.serialize(&corrected)?;
-    let rebased_project = codec
+    let mut rebased_project = codec
         .reread(&prepared.bytes)
         .map_err(TransactionalSaveError::Codec)?;
     if !same_save_projection(&corrected, &rebased_project) {
@@ -383,6 +407,7 @@ fn save_session_with_codec<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
             FdxError::UnsupportedConstruct,
         ));
     }
+    crate::scene_metadata::carry_generated_ownership(&corrected, &mut rebased_project);
     let publishable_session = session
         .prepare_saved_rebase(rebased_project)
         .map_err(TransactionalSaveError::Session)?;
@@ -774,6 +799,37 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
+    #[test]
+    fn transactional_save_error_display_preserves_safe_categories_only() {
+        let session = TransactionalSaveError::Session(EditError::InvalidElement).to_string();
+        let codec = TransactionalSaveError::Codec(FdxError::UnsupportedConstruct).to_string();
+        let storage = TransactionalSaveError::Storage(FdxStorageError::new(
+            FdxStorageErrorKind::Io(StorageOperation::Replace),
+        ))
+        .to_string();
+        let missing_baseline = TransactionalSaveError::MissingBaseline.to_string();
+
+        assert_eq!(
+            session,
+            "FDX save candidate could not be prepared: invalid element state"
+        );
+        assert_eq!(
+            codec,
+            "FDX save candidate could not be serialized or re-read: FDX contains a construct that cannot be projected safely"
+        );
+        assert_eq!(storage, "FDX destination replacement failed");
+        assert_eq!(
+            missing_baseline,
+            "FDX Save requires an opened or previously saved target"
+        );
+
+        for detail in [session, codec, storage, missing_baseline] {
+            assert!(!detail.contains("EXT. PRIVATE LOCATION"));
+            assert!(!detail.contains("screenplay dialogue"));
+            assert!(!detail.contains("/Users/"));
+        }
+    }
+
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     enum Fault {
         #[default]
@@ -1064,6 +1120,36 @@ mod tests {
         EditingSession::new(project).unwrap_or_else(|_| unreachable!())
     }
 
+    fn assert_saved_character_role(project: &Project) {
+        assert_eq!(project.elements[0].role, Role::Character);
+        assert_eq!(
+            project.elements[0]
+                .source_provenance
+                .as_ref()
+                .and_then(|provenance| provenance.foreign_role.as_deref()),
+            Some("Character")
+        );
+        let paragraph = match &project
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("reopened import retains preservation"))
+            .sections[0]
+            .children[0]
+        {
+            crate::preservation::PreservedNode::Element(paragraph) => paragraph,
+            _ => unreachable!("first content child is the managed paragraph"),
+        };
+        assert_eq!(paragraph.source_type.as_deref(), Some("Character"));
+        assert_eq!(
+            paragraph
+                .attributes
+                .iter()
+                .find(|attribute| attribute.name.local_name == "Type")
+                .map(|attribute| attribute.value.as_str()),
+            Some("Character")
+        );
+    }
+
     fn set_caret(session: &mut EditingSession, element: usize, offset: usize) {
         session
             .set_selection(crate::editing::Selection::caret(crate::editing::Position {
@@ -1071,6 +1157,44 @@ mod tests {
                 offset,
             }))
             .unwrap_or_else(|_| unreachable!());
+    }
+
+    #[test]
+    fn imported_action_tab_can_be_saved_and_saved_as_before_reopen() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" ID="source-action"><Text>line</Text></Paragraph></Content></FinalDraft>"#;
+        let fs = MemFs::default();
+
+        let save_path = Path::new("/mem/imported-role-save.fdx");
+        fs.put(save_path, source.to_vec());
+        let opened = open_source(&fs, save_path).unwrap_or_else(|_| unreachable!());
+        let mut save_target = FdxSaveTarget::from_baseline(opened.baseline);
+        let mut session_to_save = save_test_session(source);
+        set_caret(&mut session_to_save, 0, "line".len());
+        session_to_save.tab().unwrap_or_else(|_| unreachable!());
+        assert_eq!(session_to_save.project().elements[0].role, Role::Character);
+        save_session(&fs, &mut session_to_save, &mut save_target, FdxSaveMode::Save)
+            .unwrap_or_else(|_| unreachable!("synchronized role must Save"));
+        let saved = fs.bytes(save_path).unwrap_or_else(|| unreachable!());
+        let reopened = fdx::read_v6(&saved)
+            .unwrap_or_else(|_| unreachable!("saved Action-to-Character file must reopen"))
+            .project;
+        assert_saved_character_role(&reopened);
+
+        let copy_source_path = Path::new("/mem/imported-role-copy-source.fdx");
+        let copy_path = Path::new("/mem/imported-role-copy.fdx");
+        fs.put(copy_source_path, source.to_vec());
+        let mut copy_session = save_test_session(source);
+        set_caret(&mut copy_session, 0, "line".len());
+        copy_session.tab().unwrap_or_else(|_| unreachable!());
+        let mut copy_target = FdxSaveTarget::new_unsaved();
+        save_session(&fs, &mut copy_session, &mut copy_target, FdxSaveMode::SaveAs(copy_path.to_owned()))
+            .unwrap_or_else(|_| unreachable!("synchronized role must Save As"));
+        assert_eq!(fs.bytes(copy_source_path), Some(source.to_vec()));
+        let copied = fs.bytes(copy_path).unwrap_or_else(|| unreachable!());
+        let reopened_copy = fdx::read_v6(&copied)
+            .unwrap_or_else(|_| unreachable!("Save As Action-to-Character file must reopen"))
+            .project;
+        assert_saved_character_role(&reopened_copy);
     }
 
     #[test]
@@ -1670,6 +1794,88 @@ mod tests {
             .unwrap_or_default()
             .windows(b"Version=\"6\"".len())
             .any(|window| window == b"Version=\"6\""));
+    }
+
+    #[test]
+    fn transactional_save_and_save_as_reopen_with_established_paragraph_ids() {
+        let fs = MemFs::default();
+        let source_path = Path::new("/mem/uuid-lifecycle-source.fdx");
+        let copy_path = PathBuf::from("/mem/uuid-lifecycle-copy.fdx");
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><TitlePage>
+<Paragraph Type="Action" id="title"><Text>TITLE</Text></Paragraph>
+</TitlePage><Content>
+<Paragraph Type="Scene Heading" id="scene"><Text>INT. ROOM</Text></Paragraph>
+<Paragraph Type="Character" id="character"><Text>ALPHA</Text></Paragraph>
+</Content></FinalDraft>"#;
+        fs.put(source_path, source.to_vec());
+        let opened = open(&fs, source_path).unwrap_or_else(|_| unreachable!());
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+        let mut session = EditingSession::new(opened.document.project)
+            .unwrap_or_else(|_| unreachable!());
+
+        save_session(&fs, &mut session, &mut target, FdxSaveMode::Save)
+            .unwrap_or_else(|_| unreachable!("identity-preserving Save must publish"));
+        let saved = fs
+            .bytes(source_path)
+            .unwrap_or_else(|| unreachable!("Save destination must exist"));
+        let saved_ids = paragraph_ids_for_storage_test(
+            &fdx::read_v6(&saved)
+                .unwrap_or_else(|_| unreachable!("saved document must reopen"))
+                .project,
+        );
+        assert!(saved_ids.contains("scene"));
+        assert!(saved_ids.contains("character"));
+        assert!(saved_ids.contains("title"));
+        assert_eq!(
+            session
+                .project()
+                .preservation
+                .as_ref()
+                .map(|state| {
+                    state
+                        .identities
+                        .iter()
+                        .filter(|identity| identity.domain == crate::preservation::ForeignIdDomain::Paragraph)
+                        .map(|identity| identity.value.clone())
+                        .collect::<std::collections::BTreeSet<_>>()
+                }),
+            Some(saved_ids.clone())
+        );
+
+        let original_source = fs.bytes(source_path);
+        let mut copy_target = FdxSaveTarget::new_unsaved();
+        save_session(
+            &fs,
+            &mut session,
+            &mut copy_target,
+            FdxSaveMode::SaveAs(copy_path.clone()),
+        )
+        .unwrap_or_else(|_| unreachable!("identity-preserving Save As must publish"));
+        assert_eq!(fs.bytes(source_path), original_source);
+        let copied = fs
+            .bytes(&copy_path)
+            .unwrap_or_else(|| unreachable!("Save As destination must exist"));
+        let copied_project = fdx::read_v6(&copied)
+            .unwrap_or_else(|_| unreachable!("Save As output must reopen"))
+            .project;
+        assert_eq!(paragraph_ids_for_storage_test(&copied_project), saved_ids);
+    }
+
+    fn paragraph_ids_for_storage_test(project: &Project) -> std::collections::BTreeSet<String> {
+        project
+            .preservation
+            .as_ref()
+            .map(|state| {
+                state
+                    .identities
+                    .iter()
+                    .filter(|identity| {
+                        identity.domain == crate::preservation::ForeignIdDomain::Paragraph
+                    })
+                    .map(|identity| identity.value.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     #[test]

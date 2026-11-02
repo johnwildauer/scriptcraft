@@ -68,7 +68,7 @@ pub fn export_text_with_layout_inputs(
     text.push_str("\n\n");
     for page in &layout.pages {
         for line in &page.lines {
-            text.push_str(&line.text);
+            text.push_str(&line.display_text);
             text.push('\n');
         }
     }
@@ -253,15 +253,15 @@ mod tests {
     }
 
     #[test]
-    fn print_exports_omit_hidden_roles_but_plain_text_keeps_canonical_casing() {
+    fn print_exports_omit_hidden_roles_and_plain_text_uses_display_casing() {
         let imported = crate::fdx::read_v6(
             b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Note'><FontSpec Style='HiddenText'/></ElementSettings><Content><Paragraph Type='Scene Heading' id='heading'><Text>MiXeD title</Text></Paragraph><Paragraph Type='Note' id='note'><Text>private note</Text></Paragraph></Content></FinalDraft>",
         )
         .unwrap_or_else(|_| unreachable!());
         let text = export_text(&imported.project).unwrap_or_else(|_| unreachable!());
-        assert!(text.text.contains("MiXeD title"));
+        assert!(text.text.contains("MIXED TITLE"));
         assert!(!text.text.contains("private note"));
-        assert!(!text.text.contains("MIXED TITLE"));
+        assert!(!text.text.contains("MiXeD title"));
 
         let pdf = export_pdf(&imported.project).unwrap_or_else(|_| unreachable!());
         let pdf = String::from_utf8_lossy(&pdf);

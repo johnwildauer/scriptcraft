@@ -40,7 +40,6 @@ impl Selection {
 /// state and is intentionally absent from snapshots and native serialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EditPolicy {
-    pub uppercase_cues: bool,
     pub auto_parenthetical: bool,
     pub strict_transition_boundaries: bool,
 }
@@ -48,7 +47,6 @@ pub struct EditPolicy {
 impl Default for EditPolicy {
     fn default() -> Self {
         Self {
-            uppercase_cues: true,
             auto_parenthetical: true,
             strict_transition_boundaries: true,
         }
@@ -266,14 +264,12 @@ impl EditingSession {
     /// Mapped source runs and text leaves are transformed in the same candidate;
     /// unsafe inline intersections reject the whole operation.
     pub fn insert(&mut self, text: &str) -> Result<(), EditError> {
-        self.mutate(|project, selection, _generated, policy| {
+        self.mutate(|project, selection, _generated, _policy| {
             let (start, end) = selection.ordered();
             replace_range(project, start, end, text)?;
-            let offset =
-                normalize_element(project, policy, start.element, start.offset + text.len())?;
             Ok(Selection::caret(Position {
                 element: start.element,
-                offset,
+                offset: start.offset + text.len(),
             }))
         })
     }
@@ -303,11 +299,24 @@ impl EditingSession {
             if item.role == Role::Parenthetical
                 && is_delimiter_only_parenthetical(item.text.as_str())
             {
+                let item_text_len = item.text.len();
                 let id = item.id.as_str().to_owned();
                 generated.remove(&id);
                 if start.element == 0 || project.elements.len() == 1 {
+                    replace_range(
+                        project,
+                        Position {
+                            element: 0,
+                            offset: 0,
+                        },
+                        Position {
+                            element: 0,
+                            offset: item_text_len,
+                        },
+                        "",
+                    )?;
+                    update_preserved_role(project, 0, Role::Parenthetical, Role::Dialogue)?;
                     project.elements[0].role = Role::Dialogue;
-                    project.elements[0].text.clear();
                     return Ok(Selection::caret(Position {
                         element: 0,
                         offset: 0,
@@ -376,12 +385,12 @@ impl EditingSession {
     /// Splits a semantic paragraph while retaining the original foreign ID on
     /// the left side and allocating a fresh source identity for the right.
     pub fn split(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, _generated, policy| {
+        self.mutate(|project, selection, _generated, _policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 return Err(EditError::InvalidSelection);
             }
-            split_at(project, policy, start, project.elements[start.element].role)
+            split_at(project, start, project.elements[start.element].role)
         })
     }
 
@@ -452,7 +461,7 @@ impl EditingSession {
             } else {
                 enter_transition(role).ok_or(EditError::UnsupportedTransition { from: role })?
             };
-            split_at(project, policy, position, next_role)
+            split_at(project, position, next_role)
         })
     }
 
@@ -483,8 +492,20 @@ impl EditingSession {
             let mut position = start;
             if policy.auto_parenthetical && item_role == Role::Parenthetical {
                 if is_delimiter_only_parenthetical(item_text.as_str()) {
+                    replace_range(
+                        project,
+                        Position {
+                            element: position.element,
+                            offset: 0,
+                        },
+                        Position {
+                            element: position.element,
+                            offset: item_text.len(),
+                        },
+                        "",
+                    )?;
+                    update_preserved_role(project, position.element, item_role, Role::Dialogue)?;
                     project.elements[position.element].role = Role::Dialogue;
-                    project.elements[position.element].text.clear();
                     generated.remove(project.elements[position.element].id.as_str());
                     position.offset = 0;
                     return Ok(Selection::caret(position));
@@ -507,26 +528,37 @@ impl EditingSession {
                 }
             }
             let element = &project.elements[position.element];
-            let next_role = tab_transition(element.role, element.text.is_empty());
+            let element_role = element.role;
+            let element_is_empty = element.text.is_empty();
+            let next_role = tab_transition(element_role, element_is_empty);
             if let Some(role) = next_role {
-                project.elements[position.element].role = role;
+                if element_role != role {
+                    update_preserved_role(project, position.element, element_role, role)?;
+                    project.elements[position.element].role = role;
+                }
                 if policy.auto_parenthetical
                     && role == Role::Parenthetical
                     && project.elements[position.element].text.is_empty()
                 {
-                    project.elements[position.element].text = "()".into();
+                    replace_range(
+                        project,
+                        Position {
+                            element: position.element,
+                            offset: 0,
+                        },
+                        Position {
+                            element: position.element,
+                            offset: 0,
+                        },
+                        "()",
+                    )?;
                     generated.insert(project.elements[position.element].id.as_str().to_owned());
                     return Ok(Selection::caret(Position {
                         element: position.element,
                         offset: 1,
                     }));
                 }
-                return normalize_selection_in_element(
-                    project,
-                    policy,
-                    position.element,
-                    Selection::caret(position),
-                );
+                return Ok(Selection::caret(position));
             }
             Ok(Selection::caret(position))
         })
@@ -566,14 +598,25 @@ impl EditingSession {
             if role != Role::Parenthetical {
                 generated.remove(project.elements[start.element].id.as_str());
             } else if policy.auto_parenthetical && project.elements[start.element].text.is_empty() {
-                project.elements[start.element].text = "()".into();
+                replace_range(
+                    project,
+                    Position {
+                        element: start.element,
+                        offset: 0,
+                    },
+                    Position {
+                        element: start.element,
+                        offset: 0,
+                    },
+                    "()",
+                )?;
                 generated.insert(project.elements[start.element].id.as_str().to_owned());
                 return Ok(Selection::caret(Position {
                     element: start.element,
                     offset: 1,
                 }));
             }
-            normalize_selection_in_element(project, policy, start.element, *selection)
+            Ok(*selection)
         })
     }
 
@@ -1126,158 +1169,8 @@ fn insert_dialogue_below(project: &mut Project, element: usize) -> Result<Select
     }))
 }
 
-fn is_uppercase_cue(role: Role) -> bool {
-    matches!(role, Role::SceneHeading | Role::Character)
-}
-
-fn uppercase_with_mapping(text: &str, offset: usize) -> Result<(String, usize), EditError> {
-    if !text.is_char_boundary(offset) {
-        return Err(EditError::InvalidUtf8Boundary);
-    }
-    let mut output = String::with_capacity(text.len());
-    let mut mapped = 0;
-    for (index, character) in text.char_indices() {
-        let uppercase = character.to_uppercase().collect::<String>();
-        if index < offset {
-            mapped += uppercase.len();
-        }
-        output.push_str(&uppercase);
-    }
-    Ok((output, mapped))
-}
-
-fn normalize_element(
-    project: &mut Project,
-    policy: &EditPolicy,
-    element: usize,
-    offset: usize,
-) -> Result<usize, EditError> {
-    let item = project
-        .elements
-        .get(element)
-        .ok_or(EditError::InvalidElement)?;
-    if !policy.uppercase_cues || !is_uppercase_cue(item.role) {
-        return Ok(offset);
-    }
-    let id = item.id.clone();
-    let old_text = item.text.clone();
-    let old_runs = item.runs.clone();
-    let (text, mapped) = uppercase_with_mapping(&old_text, offset)?;
-    if text.len() > MAX_TEXT_BYTES {
-        return Err(EditError::TextTooLong);
-    }
-    if text == old_text {
-        return Ok(mapped);
-    }
-    let has_source_mapping = project
-        .preservation
-        .as_ref()
-        .is_some_and(|state| state.has_managed_element(&id));
-    if has_source_mapping {
-        let expected_runs = old_runs
-            .iter()
-            .map(|run| run.text.clone())
-            .collect::<Vec<_>>();
-        project
-            .preservation
-            .as_mut()
-            .ok_or(EditError::Preservation(
-                crate::preservation::PreservationError::ManagedAnchorMissing,
-            ))?
-            .uppercase_managed_text(
-                &id,
-                &old_text,
-                (!old_runs.is_empty()).then_some(expected_runs.as_slice()),
-                &text,
-            )
-            .map_err(EditError::Preservation)?;
-    } else if project.elements[element].source_provenance.is_some() {
-        return Err(EditError::Preservation(
-            crate::preservation::PreservationError::ManagedAnchorMissing,
-        ));
-    }
-    let item = &mut project.elements[element];
-    item.text = text;
-    if !old_runs.is_empty() {
-        for run in &mut item.runs {
-            run.text = run.text.to_uppercase();
-        }
-    }
-    Ok(mapped)
-}
-
-fn normalize_selection_in_element(
-    project: &mut Project,
-    policy: &EditPolicy,
-    element: usize,
-    selection: Selection,
-) -> Result<Selection, EditError> {
-    let item = project
-        .elements
-        .get(element)
-        .ok_or(EditError::InvalidElement)?;
-    if !policy.uppercase_cues || !is_uppercase_cue(item.role) {
-        return Ok(selection);
-    }
-    let id = item.id.clone();
-    let old_text = item.text.clone();
-    let old_runs = item.runs.clone();
-    let (text, anchor) = uppercase_with_mapping(&old_text, selection.anchor.offset)?;
-    let (_, focus) = uppercase_with_mapping(&old_text, selection.focus.offset)?;
-    if text.len() > MAX_TEXT_BYTES {
-        return Err(EditError::TextTooLong);
-    }
-    if text != old_text {
-        let has_source_mapping = project
-            .preservation
-            .as_ref()
-            .is_some_and(|state| state.has_managed_element(&id));
-        if has_source_mapping {
-            let expected_runs = old_runs
-                .iter()
-                .map(|run| run.text.clone())
-                .collect::<Vec<_>>();
-            project
-                .preservation
-                .as_mut()
-                .ok_or(EditError::Preservation(
-                    crate::preservation::PreservationError::ManagedAnchorMissing,
-                ))?
-                .uppercase_managed_text(
-                    &id,
-                    &old_text,
-                    (!old_runs.is_empty()).then_some(expected_runs.as_slice()),
-                    &text,
-                )
-                .map_err(EditError::Preservation)?;
-        } else if project.elements[element].source_provenance.is_some() {
-            return Err(EditError::Preservation(
-                crate::preservation::PreservationError::ManagedAnchorMissing,
-            ));
-        }
-        let item = &mut project.elements[element];
-        item.text = text;
-        if !old_runs.is_empty() {
-            for run in &mut item.runs {
-                run.text = run.text.to_uppercase();
-            }
-        }
-    }
-    Ok(Selection {
-        anchor: Position {
-            element,
-            offset: anchor,
-        },
-        focus: Position {
-            element,
-            offset: focus,
-        },
-    })
-}
-
 fn split_at(
     project: &mut Project,
-    policy: &EditPolicy,
     position: Position,
     role: Role,
 ) -> Result<Selection, EditError> {
@@ -1305,7 +1198,6 @@ fn split_at(
         new_item.runs = right_runs;
     }
     project.elements.insert(position.element + 1, new_item);
-    normalize_element(project, policy, position.element + 1, 0)?;
     Ok(Selection::caret(Position {
         element: position.element + 1,
         offset: 0,
@@ -1547,6 +1439,7 @@ mod tests {
             identities,
             references: Vec::new(),
             board_graph: BoardGraph::default(),
+            generated_scene_arc_paragraph_ids: std::collections::BTreeSet::new(),
         });
         project
     }
@@ -2076,7 +1969,7 @@ mod tests {
     }
 
     #[test]
-    fn unicode_cue_expansion_updates_source_and_run_offsets_together() {
+    fn mixed_case_role_change_preserves_source_and_run_text_exactly() {
         let project = preserved_project(
             Role::SceneHeading,
             "straße",
@@ -2093,10 +1986,10 @@ mod tests {
         let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
         set(&mut session, 0, "straße".len());
         assert_eq!(session.change_role(Role::SceneHeading), Ok(()));
-        assert_eq!(session.project().elements[0].text, "STRASSE");
-        assert_eq!(session.project().elements[0].runs[0].text, "STRASSE");
-        assert_eq!(text_children(session.project()), vec!["STRASSE"]);
-        assert_eq!(session.selection().focus.offset, "STRASSE".len());
+        assert_eq!(session.project().elements[0].text, "straße");
+        assert_eq!(session.project().elements[0].runs[0].text, "straße");
+        assert_eq!(text_children(session.project()), vec!["straße"]);
+        assert_eq!(session.selection().focus.offset, "straße".len());
         assert!(session.validate().is_ok());
     }
 

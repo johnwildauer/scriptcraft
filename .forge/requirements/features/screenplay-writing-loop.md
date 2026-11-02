@@ -21,12 +21,14 @@ and predictable role transitions.
   - **AC-WRITING-001.1:** Given a new project, the system shall provide exactly one empty, valid
     editable Scene Heading starting element and an initial title-page structure without requiring
     visual formatting tricks. The initial caret shall be valid at element 0, byte offset 0.
-  - **AC-WRITING-001.2:** Given an element, the system shall preserve its explicit role and
+  - **AC-WRITING-001.2:** Given an element, the system shall preserve its explicit role and exact
     canonical UTF-8 text independently of capitalization, spaces, tabs, indentation, or font
-    appearance. Cue-casing policy is runtime editing behavior, defaults to enabled for a new
-    session, and applies only at transactional edit boundaries to Scene Heading and Character
-    text. It is not persisted as document state. Opening an existing project shall not rewrite
-    stored text; other roles shall preserve source casing.
+    appearance. Typing, paste, split, join, role assignment, Tab transitions, undo, and redo shall
+    retain the writer's or imported source's exact text casing; editing shall not normalize cue
+    text. `AllCaps` is display-only and shall not rewrite canonical text, native FDX text, or source
+    offsets, including when Unicode uppercase expands a source scalar. Opening an existing project
+    shall not rewrite stored text, and source FontSpec overrides without `AllCaps` shall display
+    canonical case.
   - **AC-WRITING-001.3:** Given a valid selection, the system shall support insertion, deletion,
     split, join, role change, undo, and redo while preserving valid text boundaries and element
     order.
@@ -147,15 +149,37 @@ project meaning; failures preserve the prior valid destination and unsaved state
     from required content. Newly created native documents shall include one ordered ElementSettings
     block for each of the 17 directed roles, using the shared defaults evidenced by the approved
     native references; imported source-backed settings remain authoritative and shall not be
-    regenerated merely because runtime interpretation changes. ScriptCraft-only project identity/schema, metadata, layout inputs, and
+    regenerated merely because runtime interpretation changes. Generated sections shall be ordered
+    Content, then the 17 ElementSettings blocks in directed role order, then TitlePage when present.
+    Serialized output shall begin with exactly one reference-compatible UTF-8 standalone XML
+    declaration; this lexical declaration is emitted once on each save/re-serialization. The
+    generated section order shall not reorder imported top-level or opaque source content.
+    Newly generated ScriptCraft structure shall use LF line endings, two ASCII spaces per markup
+    indentation level, blank lines between direct FinalDraft children and adjacent ElementSettings,
+    no blank lines between Content paragraphs, and one final LF. Generated whitespace may be added
+    only in element-only generated structure. Newly inserted or split managed Content paragraphs
+    shall receive LF/two-space sibling indentation only where the Content child sequence is
+    unambiguously Paragraph elements plus structural whitespace and no effective `xml:space="preserve"`
+    applies. Any detached structural-whitespace normalization shall be applied equally to the
+    expected source-tree comparison; re-read integrity checks remain strict. Canonical Text content,
+    including empty/whitespace-only values, tabs, LF and CR, and CDATA, comments, processing
+    instructions, mixed content, namespaces, unknown imported structures, and source order shall not
+    be rewritten. Ambiguous mixed-content and `xml:space` contexts are preserved conservatively;
+    imported opaque structures are never globally pretty-printed. If a new/split managed paragraph
+    requires sibling formatting in an ambiguous or `xml:space`-preserving context, serialization
+    shall fail safely rather than emit ambiguous formatting or alter source content. This formatting
+    boundary does not promise lexical identity or blanket Final Draft compatibility.
+    ScriptCraft-only project identity/schema, metadata, layout inputs, and
     editing policies are not persisted as FDX fields; no private extension, sidecar, or legacy JSON
     migration is required. A source field without a safe supported representation shall not be
     silently lost.
   - **AC-WRITING-003.2:** Given a save preparation, conflict or replacement failure, the system
     shall preserve the prior valid destination and the active session, path and clean baseline;
-    previously modified or unsaved work remains indicated as unsaved, while an initially clean
-    session remains clean relative to its existing baseline. The failure shall be reported and
-    shall not be presented as a successful save to the attempted destination.
+    the live session's dirty/clean state shall remain accurate, including retaining dirty state for
+    previously modified work and retaining clean state for an initially clean session. The failure
+    shall be reported with document-unchanged wording and shall not be presented as a successful
+    save to the attempted destination. The status presentation does not duplicate session-owned
+    dirty/clean state with a separate Clean/Dirty indicator.
   - **AC-WRITING-003.3:** Given a successfully saved native project, reopening it shall preserve
     semantic roles, text, retained FDX-owned metadata, foreign paragraph identities, title-page
     structure, supported document settings, and retained source content subject to the explicit
@@ -164,6 +188,43 @@ project meaning; failures preserve the prior valid destination and unsaved state
     editing policies may reset and are not a persistence guarantee. Pagination shall be repeatable
     for the same effective runtime layout inputs, without promising exact fidelity to every FDX
     layout. Absent supported fields shall use their specified defaults; malformed input shall fail safely.
+    Foreign paragraph identity lifecycle follows AC-WRITING-003.6: established IDs remain stable
+    through ordinary edits, role and scene-cast refresh, Save/Save As, and reopen; structural edits
+    remove or create only the affected paragraph identities, and session undo/redo restores its exact
+    prior identity snapshot.
+  - **AC-WRITING-003.5:** Every managed Scene Heading shall contain `SceneProperties` and
+    `SceneArcBeats` before its first `Text` child. Missing properties shall use Length `1/8`, Page
+    `1`, and empty Title; existing values and unknown attributes remain source-owned, and Page or
+    Length is not recalculated. Scene-cast arcs are a derived projection of nonblank Character
+    elements until the next heading: outer Unicode whitespace is trimmed, duplicate names are
+    compared with Unicode lowercase keys, and first spelling/occurrence order is retained. Each
+    supported entry contains the reference-shaped nested Paragraph; its source ID remains opaque
+    and is registered in the preservation identity graph without becoming a managed screenplay
+    element or anchor. Matching entries retain their nested Paragraph ID. Removal requires
+    positively tracked ScriptCraft creation ownership, a supported entry shape, and no known or
+    source-tree ID reference; source entries whose ownership cannot be established, opaque nested
+    authored payloads, ambiguous entries, or unsafe references remain intact and stop scene
+    reconciliation. Ownership is not inferred from shape on reopen. Existing Scene Heading
+    split/join attachment safe-stops remain unchanged.
+  - **AC-WRITING-003.6:** Every newly generated FDX paragraph identity (managed body and title-page
+    paragraphs and nested scene-arc Paragraphs) shall be a lowercase, hyphenated UUID version 4.
+    Allocation shall use secure operating-system randomness, reject collisions against current
+    preservation identities and source ID attributes, and stop safely after a bounded retry limit
+    or entropy failure. Existing imported identities, including non-UUID values, remain verbatim;
+    no migration or historical tombstone registry is used. Newly allocated identities become
+    source-owned once established by save/re-read and remain unchanged in later edits and saves.
+    Serializing the same never-saved, preservation-free project more than once may allocate
+    different first-time identities; identity stability is promised after source identities have
+    been established, not as byte-for-byte determinism for first-time output.
+    Ordinary text edits, role changes, scene-cast refresh, Save, Save As, and reopen retain
+    established paragraph IDs. Splitting retains the original/left ID and allocates one ID for the
+    right paragraph; joining or deleting removes only the removed paragraph's ID. Undo/redo within
+    the active session restores the exact identity state in its history snapshots. Content recreated
+    after deletion receives a new allocation, but with no historical tombstone registry the
+    allocator cannot guarantee uniqueness against every ID deleted in the past. Matching scene-arc
+    names retain nested IDs; new or renamed names receive fresh allocations and safely owned removed
+    entries lose their IDs. If a stale entry is encountered after a separate reopen without creation
+    proof, reconciliation stops atomically and preserves it rather than guessing at ownership.
 
 ### FDX document content and preservation
 
@@ -235,6 +296,11 @@ of the native source. Plain text communicates the semantic and layout informatio
     the native source of truth or falsely mark the native project clean.
   - **AC-WRITING-004.3:** Given a lossy plain-text export, the result shall communicate that roles,
     IDs, and page layout are not preserved as a lossless round trip.
+  - **AC-WRITING-004.4:** Plain-text export shall emit each fixed print-layout line's display text,
+    including the effective role-level `AllCaps` presentation and Unicode uppercase expansions;
+    roles without effective `AllCaps` shall retain their canonical casing. This export-only
+    presentation shall not mutate semantic text or native FDX, and shall retain print-layout
+    wrapping and HiddenText omission while continuing to report its losses under AC-WRITING-004.3.
 
 ### Desktop command toolbar and native header
 
@@ -298,17 +364,21 @@ content.
     zoom in that order, whether presented inline or through the status overflow disclosure. Each
     control shall appear as one actionable representation at a time; no other status action or
     icon assignment shall be introduced without authorization.
-  - **AC-WRITING-006.2:** The status bar shall report the live editing session's clean/unsaved state
-    and current operation status, without displaying a cumulative frame count or project path. A
-    clean in-memory project without a named path shall not be described as previously saved; it
-    may be labeled `Clean` without asserting that it has been saved.
+  - **AC-WRITING-006.2:** The status bar shall report the current operation status without
+    displaying a cumulative frame count, project path, or separate Clean/Dirty indicator. Clean
+    and dirty state remain owned by the live editing session and shall not be changed by status
+    presentation. A clean in-memory project without a named path shall not be described as
+    previously saved.
   - **AC-WRITING-006.3:** Operation errors shall remain visibly identifiable, and bounded
-    diagnostics shall remain reachable without exposing screenplay text, source text, or
-    serialized project contents. Diagnostics is retained for the current release scope, with its
-    removal deferred until pre-release.
+    diagnostics shall remain reachable without exposing screenplay text, source text, serialized
+    project contents, or unnecessary filesystem paths. Save errors shall retain a concise
+    privacy-safe category distinguishing session preparation, codec serialization/re-read,
+    storage, and missing-baseline failures. Save-failure wording shall state that the document is
+    unchanged. Diagnostics is retained for the current release scope, with its removal deferred
+    until pre-release.
   - **AC-WRITING-006.4:** At narrow widths where the status controls remain usable, a deterministic
-    bounded fallback shall retain access to visible-page state, clean/unsaved state,
-    operation/error status, privacy-safe Diagnostics, Sprint Timer, Focus Mode, Appearance, and
+    bounded fallback shall retain access to visible-page state, operation/error status,
+    privacy-safe Diagnostics, Sprint Timer, Focus Mode, Appearance, and
     both page-zoom controls through inline content or the accessible overflow disclosure. Error
     state shall remain identifiable and its details reachable. Status text shall clip
     horizontally as single-line content rather than wrap or grow the footer. Below the minimum

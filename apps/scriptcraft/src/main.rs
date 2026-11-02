@@ -367,7 +367,7 @@ impl ScriptCraftApp {
         let detail = error.to_string();
         let health = self.session_health();
         self.error = Some(detail.clone());
-        self.status = format!("FDX save failed; document unchanged ({detail}); {health}");
+        self.status = format!("FDX save failed; document unchanged; {health}");
     }
 
     fn open_native(&mut self) {
@@ -1593,7 +1593,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egu
         app.reveal_intent == RevealIntent::Conditional
             || page_geometry_input_invalidated(ctx, app.page_geometry.clip()),
     );
-    let center = status_bar::project_center(app.session.dirty(), &app.status, app.error.as_deref());
+    let center = status_bar::project_center(&app.status, app.error.as_deref());
     let performance = app.performance;
     let input_diagnostics = &app.native_input_diagnostics;
     let diagnostics = DiagnosticProjection {
@@ -3549,7 +3549,7 @@ mod tests {
                         one_based: 1,
                         total: 1,
                     },
-                    &status_bar::project_center(false, "", None),
+                    &status_bar::project_center("", None),
                     status_bar::DiagnosticProjection {
                         focused: false,
                         focus_lock: false,
@@ -4613,6 +4613,37 @@ mod tests {
         assert_eq!(app.session, before);
         assert!(app.error.is_some());
         assert!(app.status.contains("document unchanged"));
+    }
+
+    #[test]
+    fn fdx_save_error_projects_safe_category_without_changing_session_dirty_state() {
+        let error = || {
+            fdx_storage::TransactionalSaveError::Codec(fdx::FdxError::UnsupportedConstruct)
+        };
+        let mut dirty_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        dirty_app
+            .session
+            .insert("private screenplay dialogue")
+            .unwrap_or_else(|_| unreachable!());
+        let dirty_session = dirty_app.session.clone();
+
+        dirty_app.show_fdx_save_error(error());
+
+        assert!(dirty_app.session.dirty());
+        assert_eq!(dirty_app.session, dirty_session);
+        assert_eq!(
+            dirty_app.error.as_deref(),
+            Some("FDX save candidate could not be serialized or re-read: FDX contains a construct that cannot be projected safely")
+        );
+        assert!(dirty_app.status.contains("FDX save failed; document unchanged"));
+        assert!(!dirty_app.status.contains("private screenplay dialogue"));
+        assert!(!dirty_app.error.as_deref().unwrap_or_default().contains("private screenplay dialogue"));
+
+        let mut clean_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let clean_session = clean_app.session.clone();
+        clean_app.show_fdx_save_error(error());
+        assert!(!clean_app.session.dirty());
+        assert_eq!(clean_app.session, clean_session);
     }
 
     #[test]
@@ -5973,10 +6004,6 @@ mod tests {
         let _ = std::fs::write(&path, &source);
 
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
-        app.session.set_policy(EditPolicy {
-            uppercase_cues: false,
-            ..app.session.policy()
-        });
         let session_before = app.session.clone();
         let original_path = PathBuf::from("current-project.fdx");
         app.native_path = Some(original_path.clone());

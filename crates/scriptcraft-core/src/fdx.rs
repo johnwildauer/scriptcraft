@@ -15,6 +15,7 @@ use crate::preservation::{
     SectionKind, SourceAnchor, SourceAnchorId, SourceEncoding, SourceName, SourceOwnership,
     SourceSnapshot,
 };
+use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
 use crate::formatting::{formatting_for_role, formatting_in_native_order, role_index};
 use crate::{
     ModelError, PrintVisibility, Project, Role, RunAttribute, ScreenplayElement, SourceFormat,
@@ -37,6 +38,8 @@ pub use crate::preservation::{
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 const FDX_ROOT: &str = "FinalDraft";
 const FDX_VERSION: &str = "6";
+const XML_DECLARATION: &str =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n";
 
 /// Bounded, privacy-safe reader failures. Variants intentionally carry no source
 /// text, identifiers, file paths, or image payloads.
@@ -59,6 +62,8 @@ pub enum FdxError {
     AmbiguousIdentity,
     DanglingReference,
     UnsupportedConstruct,
+    ParagraphIdentityEntropyUnavailable,
+    ParagraphIdentityCollisionLimit,
     Model(ModelErrorKind),
     Preservation(PreservationErrorKind),
 }
@@ -100,6 +105,12 @@ impl fmt::Display for FdxError {
             Self::DanglingReference => "FDX contains an unresolved internal reference",
             Self::UnsupportedConstruct => {
                 "FDX contains a construct that cannot be projected safely"
+            }
+            Self::ParagraphIdentityEntropyUnavailable => {
+                "secure randomness for a new FDX paragraph identity is unavailable"
+            }
+            Self::ParagraphIdentityCollisionLimit => {
+                "a unique FDX paragraph identity could not be allocated within the retry limit"
             }
             Self::Model(_) => "FDX semantic projection failed model validation",
             Self::Preservation(_) => "FDX preservation state failed validation",
@@ -348,6 +359,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         identities,
         references: Vec::new(),
         board_graph,
+        generated_scene_arc_paragraph_ids: BTreeSet::new(),
     };
     project.preservation = Some(preservation);
     project.validate().map_err(map_model_error)?;
@@ -363,8 +375,9 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
 /// runtime geometry inputs, and editing policies are not serialized. Output is
 /// structurally re-read through the bounded reader before it is returned. This
 /// does not establish desktop save/reopen guarantees or Final Draft application
-/// interoperability. Imported XML is retained semantically, not lexically: the
-/// XML declaration, entity spelling, quote style and exact attribute
+/// interoperability. The reference-compatible UTF-8 standalone declaration is
+/// emitted once for every serialization; imported XML is otherwise retained
+/// semantically, not lexically: entity spelling, quote style and exact attribute
 /// interleaving with namespace declarations are not guaranteed to be
 /// byte-identical. UTF-8 is emitted; supported tree order, expanded names,
 /// attributes, text, comments, processing instructions and opaque children are
@@ -395,6 +408,17 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
         let mut sections = state.sections.clone();
         set_preserved_root_version(&mut sections)?;
         reconcile_project_elements(&mut sections, project)?;
+        let original_paragraph_ids = original_state
+            .identities
+            .iter()
+            .filter(|identity| identity.domain == ForeignIdDomain::Paragraph)
+            .map(|identity| identity.value.clone())
+            .collect::<BTreeSet<_>>();
+        let inserted_paragraph_ids = collect_inserted_managed_paragraph_ids(
+            &sections,
+            &original_paragraph_ids,
+        );
+        format_inserted_paragraph_whitespace(&mut sections, &inserted_paragraph_ids)?;
         let expected_sections = sections.clone();
         let nodes = sections
             .into_iter()
@@ -402,10 +426,12 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
             .collect::<Vec<_>>();
         (nodes, Some(expected_sections))
     } else {
-        (make_new_document_nodes(project)?, None)
+        let mut nodes = make_new_document_nodes(project)?;
+        format_generated_structure(&mut nodes);
+        (nodes, None)
     };
 
-    let mut output = String::new();
+    let mut output = XML_DECLARATION.to_owned();
     for node in &nodes {
         write_node(node, &mut output, 0)?;
         if output.len() > MAX_SOURCE_BYTES {
@@ -582,6 +608,265 @@ fn normalize_text_nodes(nodes: &[PreservedNode]) -> Vec<PreservedNode> {
         }
     }
     normalized
+}
+
+fn format_generated_structure(nodes: &mut [PreservedNode]) {
+    for node in nodes {
+        if let PreservedNode::Element(element) = node {
+            format_generated_element(element, 0, false);
+        }
+    }
+}
+
+fn format_generated_element(
+    element: &mut PreservedElement,
+    depth: usize,
+    inherited_space_preserve: bool,
+) {
+    let space_preserve = xml_space_preserve(element, inherited_space_preserve);
+    if space_preserve {
+        return;
+    }
+
+    // Generated elements are formatted only when their children are known to
+    // be element-only. Character data, comments, PIs and CDATA are never
+    // surrounded with serializer whitespace.
+    if element.children.is_empty()
+        || !element
+            .children
+            .iter()
+            .all(|child| matches!(child, PreservedNode::Element(_)))
+    {
+        return;
+    }
+
+    for child in &mut element.children {
+        if let PreservedNode::Element(child) = child {
+            format_generated_element(child, depth.saturating_add(1), space_preserve);
+        }
+    }
+
+    let root_children = depth == 0 && element.name.local_name == FDX_ROOT;
+    let child_indent = "  ".repeat(depth.saturating_add(1));
+    let closing_indent = "  ".repeat(depth);
+    let mut formatted = Vec::with_capacity(element.children.len().saturating_mul(2) + 1);
+    for (index, child) in std::mem::take(&mut element.children).into_iter().enumerate() {
+        if index == 0 {
+            formatted.push(PreservedNode::Text(if root_children {
+                format!("\n\n{child_indent}")
+            } else {
+                format!("\n{child_indent}")
+            }));
+        } else {
+            formatted.push(PreservedNode::Text(if root_children {
+                format!("\n\n{child_indent}")
+            } else {
+                format!("\n{child_indent}")
+            }));
+        }
+        formatted.push(child);
+    }
+    formatted.push(PreservedNode::Text(format!("\n{closing_indent}")));
+    element.children = formatted;
+}
+
+fn xml_space_preserve(element: &PreservedElement, inherited: bool) -> bool {
+    element
+        .attributes
+        .iter()
+        .find(|attribute| {
+            attribute.name.local_name == "space"
+                && (attribute.name.namespace_uri.as_deref()
+                    == Some("http://www.w3.org/XML/1998/namespace")
+                    || attribute.name.qualified_name.as_deref() == Some("xml:space"))
+        })
+        .map_or(inherited, |attribute| match attribute.value.as_str() {
+            "default" => false,
+            "preserve" => true,
+            _ => true,
+        })
+}
+
+fn collect_inserted_managed_paragraph_ids(
+    sections: &[PreservedSection],
+    original_ids: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    fn visit(nodes: &[PreservedNode], original_ids: &BTreeSet<String>, found: &mut BTreeSet<String>) {
+        for node in nodes {
+            let PreservedNode::Element(element) = node else {
+                continue;
+            };
+            if element.name.local_name == "Paragraph"
+                && matches!(element.ownership, SourceOwnership::Managed(_))
+            {
+                if let Some(id) = element
+                    .attributes
+                    .iter()
+                    .find(|attribute| attribute.name.local_name.eq_ignore_ascii_case("id"))
+                    .map(|attribute| attribute.value.as_str())
+                {
+                    if !original_ids.contains(id) {
+                        found.insert(id.to_owned());
+                    }
+                }
+            }
+            visit(&element.children, original_ids, found);
+        }
+    }
+
+    let mut found = BTreeSet::new();
+    for section in sections {
+        visit(&section.children, original_ids, &mut found);
+    }
+    found
+}
+
+fn format_inserted_paragraph_whitespace(
+    sections: &mut [PreservedSection],
+    inserted_ids: &BTreeSet<String>,
+) -> Result<(), FdxError> {
+    if inserted_ids.is_empty() {
+        return Ok(());
+    }
+
+    fn visit(
+        nodes: &mut [PreservedNode],
+        inherited_space_preserve: bool,
+        inserted_ids: &BTreeSet<String>,
+        formatted_ids: &mut BTreeSet<String>,
+    ) {
+        for node in nodes {
+            let PreservedNode::Element(root) = node else {
+                continue;
+            };
+            let root_preserve = xml_space_preserve(root, inherited_space_preserve);
+            if root.name.local_name == FDX_ROOT {
+                for child in &mut root.children {
+                    let PreservedNode::Element(content) = child else {
+                        continue;
+                    };
+                    if content.name.local_name == "Content" {
+                        let content_preserve = xml_space_preserve(content, root_preserve);
+                        if !content_preserve
+                            && format_content_insertions(&mut content.children, inserted_ids)
+                        {
+                            formatted_ids.extend(direct_inserted_paragraph_ids(
+                                &content.children,
+                                inserted_ids,
+                            ));
+                        }
+                    }
+                    visit(
+                        std::slice::from_mut(child),
+                        root_preserve,
+                        inserted_ids,
+                        formatted_ids,
+                    );
+                }
+            } else {
+                visit(
+                    &mut root.children,
+                    root_preserve,
+                    inserted_ids,
+                    formatted_ids,
+                );
+            }
+        }
+    }
+
+    let mut formatted_ids = BTreeSet::new();
+    for section in sections {
+        visit(&mut section.children, false, inserted_ids, &mut formatted_ids);
+    }
+    if formatted_ids != *inserted_ids {
+        return Err(FdxError::UnsupportedConstruct);
+    }
+    Ok(())
+}
+
+fn direct_inserted_paragraph_ids(
+    children: &[PreservedNode],
+    inserted_ids: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    children
+        .iter()
+        .filter_map(|child| match child {
+            PreservedNode::Element(element) if element.name.local_name == "Paragraph" => element
+                    .attributes
+                    .iter()
+                    .find(|attribute| attribute.name.local_name.eq_ignore_ascii_case("id"))
+                .map(|attribute| attribute.value.clone()),
+            _ => None,
+        })
+        .filter(|id| inserted_ids.contains(id))
+        .collect()
+}
+
+fn format_content_insertions(
+    children: &mut Vec<PreservedNode>,
+    inserted_ids: &BTreeSet<String>,
+) -> bool {
+    // Only the unambiguous element-only Content shape is eligible. Comments,
+    // PIs, CDATA, non-whitespace text and non-Paragraph children make the
+    // context mixed/opaque, so source order and all whitespace remain intact.
+    if children.iter().any(|child| match child {
+        PreservedNode::Text(text) => !text.chars().all(char::is_whitespace),
+        PreservedNode::Element(element) => element.name.local_name != "Paragraph",
+        _ => true,
+    }) {
+        return false;
+    }
+    let has_inserted = children.iter().any(|child| match child {
+        PreservedNode::Element(element) if element.name.local_name == "Paragraph" => element
+                .attributes
+                .iter()
+                .find(|attribute| attribute.name.local_name.eq_ignore_ascii_case("id"))
+            .is_some_and(|attribute| inserted_ids.contains(&attribute.value)),
+        _ => false,
+    });
+    if !has_inserted {
+        return false;
+    }
+
+    let mut formatted = Vec::with_capacity(children.len().saturating_mul(2) + 1);
+    let mut pending_whitespace = Vec::new();
+    let mut previous_was_inserted = false;
+    let mut saw_paragraph = false;
+    for child in std::mem::take(children) {
+        if matches!(&child, PreservedNode::Text(text) if text.chars().all(char::is_whitespace)) {
+            pending_whitespace.push(child);
+            continue;
+        }
+        let PreservedNode::Element(element) = &child else {
+            // Already excluded above; keep defensive fallback lossless.
+            formatted.append(&mut pending_whitespace);
+            formatted.push(child);
+            continue;
+        };
+        let is_inserted = element
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name.local_name.eq_ignore_ascii_case("id"))
+            .is_some_and(|attribute| inserted_ids.contains(&attribute.value));
+        if !saw_paragraph && is_inserted {
+            formatted.push(PreservedNode::Text("\n    ".to_owned()));
+        } else if saw_paragraph && (previous_was_inserted || is_inserted) {
+            formatted.push(PreservedNode::Text("\n    ".to_owned()));
+        } else {
+            formatted.append(&mut pending_whitespace);
+        }
+        pending_whitespace.clear();
+        formatted.push(child);
+        saw_paragraph = true;
+        previous_was_inserted = is_inserted;
+    }
+    if previous_was_inserted {
+        formatted.push(PreservedNode::Text("\n  ".to_owned()));
+    } else {
+        formatted.append(&mut pending_whitespace);
+    }
+    *children = formatted;
+    true
 }
 
 fn reconcile_project_elements(
@@ -812,22 +1097,56 @@ fn make_new_document_nodes(project: &Project) -> Result<Vec<PreservedNode>, FdxE
         "FinalDraft",
         vec![("DocumentType", "Script"), ("Version", FDX_VERSION)],
     );
+    let mut content = preserved_element("Content", Vec::new());
+    let mut paragraph_ids = ParagraphIdAllocator::new(std::iter::empty());
+    for (index, element) in project.elements.iter().enumerate() {
+        let mut paragraph = new_paragraph(element, &mut paragraph_ids)?;
+        if element.role == Role::SceneHeading {
+            let scene_end = project.elements[index + 1..]
+                .iter()
+                .position(|candidate| candidate.role == Role::SceneHeading)
+                .map_or(project.elements.len(), |offset| index + 1 + offset);
+            let names = crate::scene_metadata::character_names(
+                &project.elements[index + 1..scene_end],
+            );
+            let PreservedNode::Element(heading) = &mut paragraph else {
+                return Err(FdxError::UnsupportedConstruct);
+            };
+            let properties = crate::scene_metadata::new_scene_properties(
+                &names,
+                &mut paragraph_ids,
+            )
+            .map_err(|error| match error {
+                crate::scene_metadata::SceneMetadataError::ParagraphIdentityEntropyUnavailable => {
+                    FdxError::ParagraphIdentityEntropyUnavailable
+                }
+                crate::scene_metadata::SceneMetadataError::ParagraphIdentityCollisionLimit => {
+                    FdxError::ParagraphIdentityCollisionLimit
+                }
+                _ => FdxError::UnsupportedConstruct,
+            })?;
+            let text_index = heading
+                .children
+                .iter()
+                .position(|node| matches!(node, PreservedNode::Element(child) if child.name.local_name == "Text"))
+                .unwrap_or(heading.children.len());
+            heading
+                .children
+                .insert(text_index, PreservedNode::Element(properties));
+        }
+        content.children.push(paragraph);
+    }
+    root.children.push(PreservedNode::Element(content));
     for formatting in formatting_in_native_order() {
         root.children
             .push(PreservedNode::Element(new_element_settings(formatting)));
     }
-    let mut content = preserved_element("Content", Vec::new());
-    let mut next_id = 1usize;
-    for element in &project.elements {
-        content.children.push(new_paragraph(element, &mut next_id)?);
-    }
-    root.children.push(PreservedNode::Element(content));
     if !project.title_page.is_empty() {
         let mut title_page = preserved_element("TitlePage", Vec::new());
         for element in &project.title_page {
             title_page
                 .children
-                .push(new_paragraph(element, &mut next_id)?);
+                .push(new_paragraph(element, &mut paragraph_ids)?);
         }
         root.children.push(PreservedNode::Element(title_page));
     }
@@ -927,14 +1246,13 @@ fn preserved_element_owned(name: &str, attributes: Vec<(String, String)>) -> Pre
 
 fn new_paragraph(
     semantic: &ScreenplayElement,
-    next_id: &mut usize,
+    paragraph_ids: &mut ParagraphIdAllocator,
 ) -> Result<PreservedNode, FdxError> {
     let mut paragraph = preserved_element(
         "Paragraph",
         vec![("Type", role_to_fdx(semantic.role)), ("id", "")],
     );
-    paragraph.attributes[1].value = format!("scriptcraft-generated-{}", *next_id);
-    *next_id = next_id.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+    paragraph.attributes[1].value = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
     let mut runs = semantic.runs.clone();
     if runs.is_empty() {
         runs.push(TextRun {
@@ -966,6 +1284,15 @@ fn new_paragraph(
         paragraph.children.push(PreservedNode::Element(text));
     }
     Ok(PreservedNode::Element(paragraph))
+}
+
+fn map_paragraph_id_error(error: ParagraphIdAllocationError) -> FdxError {
+    match error {
+        ParagraphIdAllocationError::EntropyUnavailable => {
+            FdxError::ParagraphIdentityEntropyUnavailable
+        }
+        ParagraphIdAllocationError::CollisionLimit => FdxError::ParagraphIdentityCollisionLimit,
+    }
 }
 
 fn preserved_element(name: &str, attributes: Vec<(&str, &str)>) -> PreservedElement {
@@ -2355,6 +2682,10 @@ fn map_preservation_error(error: PreservationError) -> FdxError {
             FdxError::Preservation(PreservationErrorKind::ResourceLimit)
         }
         Error::DuplicateIdentity => FdxError::AmbiguousIdentity,
+        Error::ParagraphIdentityEntropyUnavailable => {
+            FdxError::ParagraphIdentityEntropyUnavailable
+        }
+        Error::ParagraphIdentityCollisionLimit => FdxError::ParagraphIdentityCollisionLimit,
         Error::DanglingReference | Error::MissingReferenceSource | Error::ImageLengthMismatch => {
             FdxError::DanglingReference
         }
@@ -2937,6 +3268,62 @@ mod tests {
     }
 
     #[test]
+    fn reference_declaration_and_generated_section_order_survive_reopened_saves() {
+        for include_title_page in [false, true] {
+            let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+            if include_title_page {
+                project.title_page.push(
+                    ScreenplayElement::new("title-element", Role::Action, "Title")
+                        .unwrap_or_else(|_| unreachable!()),
+                );
+            }
+
+            let mut expected_order = vec!["Content".to_owned()];
+            expected_order.extend((0..17).map(|_| "ElementSettings".to_owned()));
+            if include_title_page {
+                expected_order.push("TitlePage".to_owned());
+            }
+
+            for _ in 0..3 {
+                let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+                let output = std::str::from_utf8(&bytes).unwrap_or("");
+                assert!(output.starts_with(XML_DECLARATION));
+                assert_eq!(output.matches("<?xml").count(), 1);
+
+                let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
+                assert_eq!(
+                    top_level_element_names(preserved_root(&reopened.project)),
+                    expected_order
+                );
+                project = reopened.project;
+            }
+        }
+    }
+
+    #[test]
+    fn imported_top_level_source_order_is_not_canonicalized() {
+        let source = b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?><FinalDraft DocumentType=\"Script\" Version=\"6\"><VendorBefore/><ElementSettings Type=\"Action\"/><Content/><VendorAfter/></FinalDraft>";
+        let project = read_v6(source)
+            .unwrap_or_else(|_| unreachable!())
+            .project;
+
+        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let output = std::str::from_utf8(&bytes).unwrap_or("");
+        assert!(output.starts_with(XML_DECLARATION));
+        assert_eq!(output.matches("<?xml").count(), 1);
+        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            top_level_element_names(preserved_root(&reopened.project)),
+            vec![
+                "VendorBefore".to_owned(),
+                "ElementSettings".to_owned(),
+                "Content".to_owned(),
+                "VendorAfter".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
     fn new_document_layout_defaults_match_after_native_save_and_reopen() {
         let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements = [
@@ -3020,6 +3407,16 @@ mod tests {
                 })
             })
             .unwrap_or_else(|| unreachable!())
+    }
+
+    fn top_level_element_names(root: &PreservedElement) -> Vec<String> {
+        root.children
+            .iter()
+            .filter_map(|node| match node {
+                PreservedNode::Element(element) => Some(element.name.local_name.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn element_settings_shape(
@@ -3246,7 +3643,32 @@ mod tests {
         let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
         let output = std::str::from_utf8(&bytes).unwrap_or("");
         assert!(output.contains("Version=\"6\""));
-        assert!(output.contains("id=\"scriptcraft-generated-1\""));
+        let generated = read_v6(&bytes)
+            .ok()
+            .and_then(|document| {
+                document.project.preservation.and_then(|state| {
+                    state
+                        .identities
+                        .into_iter()
+                        .find(|identity| identity.domain == ForeignIdDomain::Paragraph)
+                        .map(|identity| identity.value)
+                })
+            })
+            .unwrap_or_default();
+        let parsed = uuid::Uuid::parse_str(&generated).ok();
+        assert_eq!(generated.len(), 36);
+        assert_eq!(
+            parsed.as_ref().and_then(|value| value.get_version()),
+            Some(uuid::Version::Random)
+        );
+        assert_eq!(
+            parsed.as_ref().map(|value| value.get_variant()),
+            Some(uuid::Variant::RFC4122)
+        );
+        assert_eq!(
+            parsed.map(|value| value.hyphenated().to_string()).as_deref(),
+            Some(generated.as_str())
+        );
         assert!(!output.contains(project.elements[0].id.as_str()));
         assert!(!output.contains("legacy-project-1"));
         assert!(!output.contains("Legacy title"));

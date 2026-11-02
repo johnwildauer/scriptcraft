@@ -54,7 +54,6 @@ fn settings_are_defaulted_typed_and_round_trip_without_schema_bump() {
         Err(ModelError::WrongType("strict_transition_boundaries"))
     );
     for key in [
-        "uppercase_cues",
         "auto_parenthetical",
         "strict_transition_boundaries",
     ] {
@@ -89,7 +88,6 @@ fn policy_changes_are_transient_non_dirty_and_not_part_of_undo_history() {
     let original_project = editing.project().clone();
     let original_revision = editing.revision();
     let runtime_policy = EditPolicy {
-        uppercase_cues: false,
         auto_parenthetical: false,
         strict_transition_boundaries: false,
     };

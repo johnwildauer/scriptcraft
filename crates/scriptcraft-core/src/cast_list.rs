@@ -1,6 +1,7 @@
 //! Bounded scene cast-list derivation and detached save candidates.
 
 use crate::preservation::PreservationError;
+use crate::scene_metadata::SceneMetadataError;
 use crate::{ModelError, Project, Role, MAX_TEXT_BYTES};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -12,6 +13,7 @@ pub const CAST_LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 pub enum CastListError {
     Model(ModelError),
     Preservation(PreservationError),
+    SceneMetadata(SceneMetadataError),
     UnsupportedFormattedCastList,
 }
 
@@ -33,22 +35,33 @@ impl From<ModelError> for CastListError {
 /// Source-backed formatted lists or lists whose source text cannot be safely
 /// replaced are rejected atomically rather than dropping style or opaque data.
 pub fn correct_cast_lists(project: &mut Project) -> Result<bool, CastListError> {
+    let original = project.clone();
+    let mut candidate = project.clone();
+    crate::scene_metadata::reconcile_project(&mut candidate)
+        .map_err(CastListError::SceneMetadata)?;
     let mut updates = Vec::new();
-    let mut scene_start = None;
+    let mut scene_start: Option<usize> = None;
 
-    for index in 0..=project.elements.len() {
-        let is_heading = project
+    for index in 0..=candidate.elements.len() {
+        let is_heading = candidate
             .elements
             .get(index)
             .is_some_and(|element| element.role == Role::SceneHeading);
-        if is_heading || index == project.elements.len() {
+        if is_heading || index == candidate.elements.len() {
             if let Some(start) = scene_start {
-                let scene = &project.elements[start + 1..index];
+                let scene = &candidate.elements[start + 1..index];
                 if scene.iter().any(|element| element.role == Role::CastList) {
-                    let cast = scene_cast_text(project, start + 1, index)?;
+                    let heading_id = &candidate.elements[start].id;
+                    let names = if candidate.preservation.is_some() {
+                        crate::scene_metadata::scene_arc_names(&candidate, heading_id)
+                            .map_err(CastListError::SceneMetadata)?
+                    } else {
+                        crate::scene_metadata::character_names(scene)
+                    };
+                    let cast = scene_cast_text(&names)?;
                     for element_index in start + 1..index {
-                        if project.elements[element_index].role == Role::CastList
-                            && project.elements[element_index].text != cast
+                        if candidate.elements[element_index].role == Role::CastList
+                            && candidate.elements[element_index].text != cast
                         {
                             updates.push((element_index, cast.clone()));
                         }
@@ -59,18 +72,15 @@ pub fn correct_cast_lists(project: &mut Project) -> Result<bool, CastListError> 
         }
     }
 
-    if updates.is_empty() {
-        return Ok(false);
-    }
-
-    project.validate()?;
-    let mut candidate = project.clone();
     for (element_index, replacement) in updates {
         replace_cast_list_text(&mut candidate, element_index, &replacement)?;
     }
     candidate.validate()?;
-    *project = candidate;
-    Ok(true)
+    let changed = candidate != original;
+    if changed {
+        *project = candidate;
+    }
+    Ok(changed)
 }
 
 /// Returns a corrected clone suitable for Save or Save As preflight.
@@ -81,22 +91,19 @@ pub fn prepare_save_candidate(project: &Project) -> Result<Project, CastListErro
     Ok(candidate)
 }
 
-fn scene_cast_text(project: &Project, start: usize, end: usize) -> Result<String, CastListError> {
-    let mut names = BTreeMap::<String, String>::new();
+fn scene_cast_text(names: &[String]) -> Result<String, CastListError> {
+    let mut sorted_names = BTreeMap::<String, String>::new();
     let mut names_bytes = 2usize; // Parentheses.
-    for element in &project.elements[start..end] {
-        if element.role != Role::Character {
-            continue;
-        }
-        let name = element.text.trim();
+    for source_name in names {
+        let name = source_name.trim();
         if name.is_empty() {
             continue;
         }
         let key = name.to_lowercase();
-        if names.contains_key(&key) {
+        if sorted_names.contains_key(&key) {
             continue;
         }
-        let separator_bytes = if names.is_empty() { 0 } else { 2 };
+        let separator_bytes = if sorted_names.is_empty() { 0 } else { 2 };
         names_bytes = names_bytes
             .checked_add(separator_bytes)
             .and_then(|length| length.checked_add(name.len()))
@@ -104,12 +111,12 @@ fn scene_cast_text(project: &Project, start: usize, end: usize) -> Result<String
         if names_bytes > MAX_TEXT_BYTES {
             return Err(CastListError::Model(ModelError::TextTooLong));
         }
-        names.insert(key, name.to_owned());
+        sorted_names.insert(key, name.to_owned());
     }
 
     let mut output = String::with_capacity(names_bytes);
     output.push('(');
-    for (index, name) in names.values().enumerate() {
+    for (index, name) in sorted_names.values().enumerate() {
         if index > 0 {
             output.push_str(", ");
         }
@@ -187,6 +194,28 @@ mod tests {
         project
     }
 
+    fn imported_project_without_scene_metadata() -> Project {
+        let source = std::str::from_utf8(include_bytes!(
+            "../../../.forge/initiatives/2026-10-31-document-model-refactor/evidence/wo001-preservation-shapes-synthetic.xml"
+        ))
+        .unwrap_or_else(|_| unreachable!());
+        let source = source.replace(
+            "<SceneProperties><SceneArcBeats><SceneArcBeat id=\"s-beat-1\">synthetic beat</SceneArcBeat></SceneArcBeats></SceneProperties>",
+            "",
+        );
+        let source = source.replace(
+            "<Paragraph Type=\"General\" id=\"s-general-1\">",
+            "<Paragraph Type=\"Character\" id=\"s-character-2\"><Text>ada</Text></Paragraph><Paragraph Type=\"General\" id=\"s-general-1\">",
+        );
+        let source = source.replace(
+            "</Content>",
+            "<Paragraph Type=\"Scene Heading\" id=\"s-heading-2\"><Text>EXT. STREET - DAY</Text></Paragraph><Paragraph Type=\"Character\" id=\"s-character-3\"><Text>Mara</Text></Paragraph><Paragraph Type=\"Cast List\" id=\"s-cast-list-2\"><Text>(stale)</Text></Paragraph></Content>",
+        );
+        crate::fdx::read_v6(source.as_bytes())
+            .unwrap_or_else(|_| unreachable!())
+            .project
+    }
+
     #[test]
     fn derives_sorted_deduplicated_cast_per_scene_including_final_scene() {
         let mut project = project_with(vec![
@@ -240,6 +269,339 @@ mod tests {
         assert_eq!(candidate.elements[2].text, "(ALEX)");
         assert_eq!(candidate.elements[2].runs[0].text, "(ALEX)");
         assert_eq!(candidate.elements[2].runs[1].text, "");
+    }
+
+    #[test]
+    fn imported_cast_list_consumes_reconciled_arc_projection_in_detached_save_candidate() {
+        let mut project = imported_project_without_scene_metadata();
+        assert!(correct_cast_lists(&mut project).unwrap_or(false));
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        let character_index = session
+            .project()
+            .elements
+            .iter()
+            .find(|element| element.role == Role::Character)
+            .map(|element| element.id.as_str())
+            .and_then(|id| {
+                session
+                    .project()
+                    .elements
+                    .iter()
+                    .position(|element| element.id.as_str() == id)
+            })
+            .unwrap_or_else(|| unreachable!());
+        session
+            .set_selection(Selection {
+                anchor: Position {
+                    element: character_index,
+                    offset: 0,
+                },
+                focus: Position {
+                    element: character_index,
+                    offset: "ALPHA".len(),
+                },
+            })
+            .unwrap_or_else(|_| unreachable!());
+        session.insert("ZOË").unwrap_or_else(|_| unreachable!());
+        let original = session.clone();
+
+        let candidate = session
+            .prepare_cast_list_save_candidate()
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(session, original);
+        let cast_list = candidate
+            .elements
+            .iter()
+            .find(|element| element.role == Role::CastList)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(cast_list.text, "(ada, Zoë)");
+        let heading = candidate
+            .elements
+            .iter()
+            .find(|element| element.role == Role::SceneHeading)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(&candidate, &heading.id)
+                .unwrap_or_else(|_| unreachable!()),
+            vec!["ZOË".to_owned(), "ada".to_owned()]
+        );
+        let second_heading = candidate
+            .elements
+            .iter()
+            .filter(|element| element.role == Role::SceneHeading)
+            .nth(1)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(&candidate, &second_heading.id)
+                .unwrap_or_else(|_| unreachable!()),
+            vec!["Mara".to_owned()]
+        );
+        assert_eq!(
+            candidate
+                .elements
+                .iter()
+                .filter(|element| element.role == Role::CastList)
+                .nth(1)
+                .unwrap_or_else(|| unreachable!())
+                .text,
+            "(Mara)"
+        );
+
+        let emitted = crate::fdx::write_v6(&candidate).unwrap_or_else(|_| unreachable!());
+        let reopened = crate::fdx::read_v6(&emitted).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            reopened
+                .project
+                .elements
+                .iter()
+                .find(|element| element.role == Role::CastList)
+                .unwrap_or_else(|| unreachable!())
+                .text,
+            "(ada, ZOË)"
+        );
+        let reopened_heading = reopened
+            .project
+            .elements
+            .iter()
+            .find(|element| element.role == Role::SceneHeading)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(&reopened.project, &reopened_heading.id)
+                .unwrap_or_else(|_| unreachable!()),
+            vec!["ZOË".to_owned(), "ada".to_owned()]
+        );
+    }
+
+    #[test]
+    fn refreshed_imported_arc_and_cast_list_follow_undo_redo_together() {
+        let mut project = imported_project_without_scene_metadata();
+        assert!(correct_cast_lists(&mut project).unwrap_or(false));
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        session.mark_saved();
+        let character_index = session
+            .project()
+            .elements
+            .iter()
+            .position(|element| element.role == Role::Character)
+            .unwrap_or_else(|| unreachable!());
+        session
+            .set_selection(Selection::caret(Position {
+                element: character_index,
+                offset: "ALPHA".len(),
+            }))
+            .unwrap_or_else(|_| unreachable!());
+        session.insert("X").unwrap_or_else(|_| unreachable!());
+
+        assert!(session.refresh_cast_lists().unwrap_or(false));
+        let heading = session
+            .project()
+            .elements
+            .iter()
+            .find(|element| element.role == Role::SceneHeading)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(session.project(), &heading.id)
+                .unwrap_or_else(|_| unreachable!()),
+            vec!["ALPHAX".to_owned(), "ada".to_owned()]
+        );
+        assert_eq!(
+            session
+                .project()
+                .elements
+                .iter()
+                .find(|element| element.role == Role::CastList)
+                .unwrap_or_else(|| unreachable!())
+                .text,
+            "(ada, ALPHAX)"
+        );
+
+        session.undo().unwrap_or_else(|_| unreachable!());
+        let heading = session
+            .project()
+            .elements
+            .iter()
+            .find(|element| element.role == Role::SceneHeading)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(session.project(), &heading.id)
+                .unwrap_or_else(|_| unreachable!()),
+            vec!["ALPHA".to_owned(), "ada".to_owned()]
+        );
+        assert_eq!(
+            session
+                .project()
+                .elements
+                .iter()
+                .find(|element| element.role == Role::CastList)
+                .unwrap_or_else(|| unreachable!())
+                .text,
+            "(ada, ALPHA)"
+        );
+
+        session.redo().unwrap_or_else(|_| unreachable!());
+        let heading = session
+            .project()
+            .elements
+            .iter()
+            .find(|element| element.role == Role::SceneHeading)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(session.project(), &heading.id)
+                .unwrap_or_else(|_| unreachable!()),
+            vec!["ALPHAX".to_owned(), "ada".to_owned()]
+        );
+        assert_eq!(
+            session
+                .project()
+                .elements
+                .iter()
+                .find(|element| element.role == Role::CastList)
+                .unwrap_or_else(|| unreachable!())
+                .text,
+            "(ada, ALPHAX)"
+        );
+    }
+
+    #[test]
+    fn stale_arc_after_reopen_stops_cast_list_refresh_without_dropping_source_data() {
+        let mut project = imported_project_without_scene_metadata();
+        assert!(correct_cast_lists(&mut project).unwrap_or(false));
+        let emitted = crate::fdx::write_v6(&project).unwrap_or_else(|_| unreachable!());
+        let reopened = crate::fdx::read_v6(&emitted)
+            .unwrap_or_else(|_| unreachable!())
+            .project;
+        let mut session = EditingSession::new(reopened).unwrap_or_else(|_| unreachable!());
+        let character_index = session
+            .project()
+            .elements
+            .iter()
+            .find(|element| element.role == Role::Character)
+            .map(|element| element.id.as_str())
+            .and_then(|id| {
+                session
+                    .project()
+                    .elements
+                    .iter()
+                    .position(|element| element.id.as_str() == id)
+            })
+            .unwrap_or_else(|| unreachable!());
+        session
+            .set_selection(Selection {
+                anchor: Position {
+                    element: character_index,
+                    offset: 0,
+                },
+                focus: Position {
+                    element: character_index,
+                    offset: "ALPHA".len(),
+                },
+            })
+            .unwrap_or_else(|_| unreachable!());
+        session.insert("BETA").unwrap_or_else(|_| unreachable!());
+        let mut refreshed = session.project().clone();
+        let original = refreshed.clone();
+
+        assert_eq!(
+            correct_cast_lists(&mut refreshed),
+            Err(CastListError::SceneMetadata(
+                SceneMetadataError::UnsupportedSceneMetadata
+            ))
+        );
+        assert_eq!(refreshed, original);
+    }
+
+    #[test]
+    fn removing_character_role_removes_owned_arc_and_refreshes_cast_list() {
+        let mut project = imported_project_without_scene_metadata();
+        assert!(correct_cast_lists(&mut project).unwrap_or(false));
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        let character_index = session
+            .project()
+            .elements
+            .iter()
+            .position(|element| element.role == Role::Character)
+            .unwrap_or_else(|| unreachable!());
+        session
+            .set_selection(Selection::caret(Position {
+                element: character_index,
+                offset: 0,
+            }))
+            .unwrap_or_else(|_| unreachable!());
+        session
+            .change_role(Role::Action)
+            .unwrap_or_else(|_| unreachable!());
+
+        assert!(session.refresh_cast_lists().unwrap_or(false));
+        let first_heading = session
+            .project()
+            .elements
+            .iter()
+            .find(|element| element.role == Role::SceneHeading)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(session.project(), &first_heading.id)
+                .unwrap_or_else(|_| unreachable!()),
+            vec!["ada".to_owned()]
+        );
+        assert_eq!(
+            session
+                .project()
+                .elements
+                .iter()
+                .find(|element| element.role == Role::CastList)
+                .unwrap_or_else(|| unreachable!())
+                .text,
+            "(ada)"
+        );
+    }
+
+    #[test]
+    fn adding_character_role_adds_arc_and_refreshes_cast_list() {
+        let mut project = imported_project_without_scene_metadata();
+        assert!(correct_cast_lists(&mut project).unwrap_or(false));
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        let action_index = session
+            .project()
+            .elements
+            .iter()
+            .position(|element| element.role == Role::Action)
+            .unwrap_or_else(|| unreachable!());
+        session
+            .set_selection(Selection::caret(Position {
+                element: action_index,
+                offset: 0,
+            }))
+            .unwrap_or_else(|_| unreachable!());
+        session
+            .change_role(Role::Character)
+            .unwrap_or_else(|_| unreachable!());
+
+        assert!(session.refresh_cast_lists().unwrap_or(false));
+        let first_heading = session
+            .project()
+            .elements
+            .iter()
+            .find(|element| element.role == Role::SceneHeading)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(session.project(), &first_heading.id)
+                .unwrap_or_else(|_| unreachable!()),
+            vec![
+                "SYNTHETIC ACTION".to_owned(),
+                "ALPHA".to_owned(),
+                "ada".to_owned()
+            ]
+        );
+        assert_eq!(
+            session
+                .project()
+                .elements
+                .iter()
+                .find(|element| element.role == Role::CastList)
+                .unwrap_or_else(|| unreachable!())
+                .text,
+            "(ada, ALPHA, SYNTHETIC ACTION)"
+        );
     }
 
     #[test]
