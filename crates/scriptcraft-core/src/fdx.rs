@@ -17,6 +17,8 @@ use crate::preservation::{
 };
 use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
 use crate::formatting::{formatting_for_role, formatting_in_native_order, role_index};
+use crate::text_state::{self};
+pub use crate::text_state::TextState;
 use crate::{
     ModelError, PrintVisibility, Project, Role, RunAttribute, ScreenplayElement, SourceFormat,
     SourceLayoutSettings, SourceProvenance, SourceSection, TextRun,
@@ -28,6 +30,7 @@ use quick_xml::reader::NsReader;
 use quick_xml::XmlVersion;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use time::OffsetDateTime;
 
 pub use crate::preservation::{
     MAX_ATTRIBUTES_PER_ELEMENT, MAX_IMAGE_BYTES, MAX_SOURCE_BYTES, MAX_SOURCE_DEPTH,
@@ -179,6 +182,10 @@ pub(crate) enum SaveDiagnosticCode {
     StorageSemanticProjectionMismatch = 32,
     ReconcileProjectChildPropagation = 33,
     ReconcileManagedParagraphPropagation = 34,
+    LineageAmbiguousDocumentRef = 35,
+    LineageAmbiguousDocumentRefDateTime = 36,
+    LineageIdentityEntropyUnavailable = 37,
+    LineageIdentityCollisionLimit = 38,
 }
 
 impl SaveDiagnosticCode {
@@ -243,6 +250,210 @@ struct IdentitySetDifference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FdxDocument {
     pub project: Project,
+    /// Valid root DocumentRef DateTime observed during deserialization.
+    /// Malformed or ambiguous values remain source-preserved but are not typed.
+    pub opened_document_ref_datetime: Option<String>,
+    /// Valid direct-root disposable native geometry. Invalid or ambiguous source
+    /// state remains preserved but is not projected.
+    pub window_state: Option<WindowState>,
+    /// Direct-root disposable zoom and body-editor selection, with safe defaults.
+    pub text_state: TextState,
+}
+
+/// Supported native-window geometry in OS logical coordinates. FDX V6 currently
+/// emits only Normal mode; unknown imported modes safely project as Normal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowState {
+    pub left: i32,
+    pub top: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl WindowState {
+    pub const DEFAULT: Self = Self {
+        left: 0,
+        top: 95,
+        width: 870,
+        height: 854,
+    };
+
+    pub fn new(left: i32, top: i32, width: i32, height: i32) -> Option<Self> {
+        (width > 0 && height > 0).then_some(Self { left, top, width, height })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SaveOperation {
+    DirectSerialization,
+    Save,
+    SaveAs,
+}
+
+/// Save-scoped writer authority. Direct serialization has no lineage side
+/// effects; transactional saves capture one timestamp before candidate work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SaveContext {
+    pub(crate) operation: SaveOperation,
+    pub(crate) timestamp: String,
+    pub(crate) opened_timestamp: Option<String>,
+    pub(crate) window_state: WindowState,
+    pub(crate) text_state: TextState,
+    injected_lineage_ids: Vec<String>,
+    next_injected_lineage_id: usize,
+    #[cfg(test)]
+    fail_lineage_entropy: bool,
+}
+
+impl SaveContext {
+    pub(crate) fn new(operation: SaveOperation) -> Self {
+        Self {
+            operation,
+            timestamp: current_save_timestamp(),
+            opened_timestamp: None,
+            window_state: WindowState::DEFAULT,
+            text_state: TextState::DEFAULT,
+            injected_lineage_ids: Vec::new(),
+            next_injected_lineage_id: 0,
+            #[cfg(test)]
+            fail_lineage_entropy: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_timestamp(operation: SaveOperation, timestamp: String) -> Self {
+        Self {
+            operation,
+            timestamp,
+            opened_timestamp: None,
+            window_state: WindowState::DEFAULT,
+            text_state: TextState::DEFAULT,
+            injected_lineage_ids: Vec::new(),
+            next_injected_lineage_id: 0,
+            #[cfg(test)]
+            fail_lineage_entropy: false,
+        }
+    }
+
+    pub(crate) fn with_opened_timestamp(mut self, timestamp: Option<String>) -> Self {
+        self.opened_timestamp = timestamp;
+        self
+    }
+
+    pub(crate) fn with_window_state(mut self, window_state: WindowState) -> Self {
+        self.window_state = window_state;
+        self
+    }
+
+    pub(crate) fn with_text_state(mut self, text_state: TextState) -> Self {
+        self.text_state = text_state;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_lineage_ids(mut self, ids: Vec<String>) -> Self {
+        self.injected_lineage_ids = ids;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_lineage_entropy_failure(mut self) -> Self {
+        self.fail_lineage_entropy = true;
+        self
+    }
+
+    fn allocate_lineage_id(
+        &mut self,
+        reserved: &mut BTreeSet<String>,
+    ) -> Result<String, FdxError> {
+        const MAX_ATTEMPTS: usize = 16;
+        for _ in 0..MAX_ATTEMPTS {
+            let candidate = if let Some(candidate) = self
+                .injected_lineage_ids
+                .get(self.next_injected_lineage_id)
+            {
+                self.next_injected_lineage_id += 1;
+                candidate.clone()
+            } else {
+                #[cfg(test)]
+                if self.fail_lineage_entropy {
+                    return Err(SaveDiagnosticCode::LineageIdentityEntropyUnavailable.error());
+                }
+                let mut bytes = [0; 16];
+                getrandom::fill(&mut bytes)
+                    .map_err(|_| SaveDiagnosticCode::LineageIdentityEntropyUnavailable.error())?;
+                bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                uuid::Uuid::from_bytes(bytes).hyphenated().to_string()
+            };
+            if is_lowercase_uuid_v4(&candidate) && reserved.insert(candidate.clone()) {
+                return Ok(candidate);
+            }
+        }
+        Err(SaveDiagnosticCode::LineageIdentityCollisionLimit.error())
+    }
+}
+
+fn is_lowercase_uuid_v4(value: &str) -> bool {
+    if value.len() != 36 || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return false;
+    }
+    uuid::Uuid::parse_str(value).is_ok_and(|uuid| {
+        uuid.hyphenated().to_string() == value
+            && uuid.get_version() == Some(uuid::Version::Random)
+            && uuid.get_variant() == uuid::Variant::RFC4122
+    })
+}
+
+pub(crate) fn valid_document_ref_datetime(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 15
+        || bytes[8] != b'T'
+        || !bytes[..8].iter().all(u8::is_ascii_digit)
+        || !bytes[9..].iter().all(u8::is_ascii_digit)
+    {
+        return false;
+    }
+    let number = |range: std::ops::Range<usize>| value.get(range)?.parse::<u32>().ok();
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        number(0..4),
+        number(4..6),
+        number(6..8),
+        number(9..11),
+        number(11..13),
+        number(13..15),
+    ) else {
+        return false;
+    };
+    if year == 0
+        || !(1..=12).contains(&month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return false;
+    }
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap_year => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=days_in_month).contains(&day)
+}
+
+fn current_save_timestamp() -> String {
+    let local = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}",
+        local.year(),
+        u8::from(local.month()),
+        local.day(),
+        local.hour(),
+        local.minute(),
+        local.second()
+    )
 }
 
 /// Result of bounded version preflight. Non-6 numeric versions are explicit
@@ -377,6 +588,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
             _ => None,
         })
         .ok_or(FdxError::InvalidRoot)?;
+    let root_for_text_state = root.clone();
     if parsed
         .iter()
         .enumerate()
@@ -394,6 +606,8 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         FdxVersionStatus::Malformed => return Err(FdxError::InvalidVersion),
         FdxVersionStatus::Duplicate => return Err(FdxError::DuplicateVersion),
     }
+    let opened_document_ref_datetime = raw_opened_document_ref_datetime(root);
+    let window_state = raw_root_window_state(root);
 
     let root_namespace = root.name.namespace_uri.as_deref();
     let mut content_count = 0usize;
@@ -478,7 +692,13 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     };
     project.preservation = Some(preservation);
     project.validate().map_err(map_model_error)?;
-    Ok(FdxDocument { project })
+    let text_state = raw_root_text_state(&root_for_text_state, &project);
+    Ok(FdxDocument {
+        project,
+        opened_document_ref_datetime,
+        window_state,
+        text_state,
+    })
 }
 
 /// Serialize the 17 evidenced screenplay roles to UTF-8 Version 6 XML.
@@ -501,12 +721,28 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
     write_v6_with_diagnostics(project).map_err(|failure| failure.error)
 }
 
+pub(crate) fn write_v6_for_save(
+    project: &Project,
+    context: &mut SaveContext,
+) -> Result<Vec<u8>, FdxError> {
+    write_v6_with_context(project, context).map_err(|failure| failure.error)
+}
+
 fn write_v6_with_diagnostics(project: &Project) -> Result<Vec<u8>, WriterFailure> {
+    let mut context = SaveContext::new(SaveOperation::DirectSerialization);
+    write_v6_with_context(project, &mut context)
+}
+
+fn write_v6_with_context(
+    project: &Project,
+    context: &mut SaveContext,
+) -> Result<Vec<u8>, WriterFailure> {
     let mut stage = WriterStage::ProjectValidation;
     let mut structural_difference = None;
     let mut identity_difference = None;
     write_v6_inner(
         project,
+        context,
         &mut stage,
         &mut structural_difference,
         &mut identity_difference,
@@ -523,11 +759,24 @@ fn write_v6_with_diagnostics(project: &Project) -> Result<Vec<u8>, WriterFailure
 
 fn write_v6_inner(
     project: &Project,
+    context: &mut SaveContext,
     stage: &mut WriterStage,
     structural_difference: &mut Option<SourceTreeDifference>,
     identity_difference: &mut Option<IdentitySetDifference>,
 ) -> Result<Vec<u8>, FdxError> {
     project.validate().map_err(map_model_error)?;
+    if !valid_document_ref_datetime(&context.timestamp) {
+        return Err(FdxError::InvalidValue);
+    }
+    if WindowState::new(
+        context.window_state.left,
+        context.window_state.top,
+        context.window_state.width,
+        context.window_state.height,
+    ) != Some(context.window_state)
+    {
+        return Err(FdxError::InvalidValue);
+    }
     validate_project_output_budgets(project)?;
 
     let (nodes, expected_preserved_sections) = if let Some(state) = &project.preservation {
@@ -554,7 +803,17 @@ fn write_v6_inner(
         }
 
         let mut sections = state.sections.clone();
+        let mut effective_identities = state.identities.clone();
         set_preserved_root_version(&mut sections)?;
+        if context.operation != SaveOperation::DirectSerialization {
+            effective_identities.extend(reconcile_document_lineage(
+                &mut sections,
+                &state.identities,
+                context,
+            )?);
+            reconcile_root_window_state(&mut sections, context.window_state)?;
+            reconcile_root_text_state(&mut sections, &project, context.text_state)?;
+        }
         *stage = WriterStage::ManagedSourceReconciliation;
         reconcile_project_elements(&mut sections, project)?;
         let original_paragraph_ids = original_state
@@ -573,10 +832,10 @@ fn write_v6_inner(
             .into_iter()
             .flat_map(|section| section.children)
             .collect::<Vec<_>>();
-        (nodes, Some(expected_sections))
+        (nodes, Some((expected_sections, effective_identities)))
     } else {
         *stage = WriterStage::NewDocumentGeneration;
-        let mut nodes = make_new_document_nodes(project)?;
+        let mut nodes = make_new_document_nodes(project, context)?;
         format_generated_structure(&mut nodes);
         (nodes, None)
     };
@@ -611,20 +870,15 @@ fn write_v6_inner(
     {
         return Err(SaveDiagnosticCode::WriteSemanticRereadMismatch.error());
     }
-    if let Some(expected_sections) = expected_preserved_sections {
+    if let Some((expected_sections, expected_identities)) = expected_preserved_sections {
         *stage = WriterStage::IdentityComparison;
         let actual_state = written
             .project
             .preservation
             .as_ref()
             .ok_or_else(|| SaveDiagnosticCode::WriteOutputPreservationMissing.error())?;
-        let expected_identities = &project
-            .preservation
-            .as_ref()
-            .ok_or_else(|| SaveDiagnosticCode::WriteCandidatePreservationMissing.error())?
-            .identities;
         let actual_identity_set = identity_set(&actual_state.identities);
-        let expected_identity_set = identity_set(expected_identities);
+        let expected_identity_set = identity_set(&expected_identities);
         if actual_identity_set != expected_identity_set {
             *identity_difference = first_identity_set_difference(
                 &expected_identity_set,
@@ -736,6 +990,310 @@ fn set_preserved_root_version(sections: &mut [PreservedSection]) -> Result<(), F
     }
     version.value = FDX_VERSION.to_owned();
     Ok(())
+}
+
+fn reconcile_document_lineage(
+    sections: &mut [PreservedSection],
+    existing_identities: &[ForeignIdentity],
+    context: &mut SaveContext,
+) -> Result<Vec<ForeignIdentity>, FdxError> {
+    if !valid_document_ref_datetime(&context.timestamp) {
+        return Err(FdxError::InvalidValue);
+    }
+    let mut roots = sections
+        .iter_mut()
+        .flat_map(|section| &mut section.children)
+        .filter_map(|node| match node {
+            PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => Some(element),
+            _ => None,
+        });
+    let root = roots.next().ok_or(FdxError::InvalidRoot)?;
+    if roots.next().is_some() {
+        return Err(FdxError::InvalidRoot);
+    }
+
+    let mut reserved = existing_identities
+        .iter()
+        .map(|identity| identity.value.clone())
+        .collect::<BTreeSet<_>>();
+    collect_preserved_id_attributes(&root.children, &mut reserved);
+
+    let document_ref_indices = root
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| match node {
+            PreservedNode::Element(element) if element.name.local_name == "DocumentRef" => {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if document_ref_indices.len() > 1 {
+        return Err(SaveDiagnosticCode::LineageAmbiguousDocumentRef.error());
+    }
+
+    let mut additions = Vec::new();
+    let document_ref_index = if let Some(index) = document_ref_indices.first().copied() {
+        let PreservedNode::Element(document_ref) = &root.children[index] else {
+            return Err(SaveDiagnosticCode::LineageAmbiguousDocumentRef.error());
+        };
+        if document_ref.name.namespace_uri != root.name.namespace_uri {
+            return Err(SaveDiagnosticCode::LineageAmbiguousDocumentRef.error());
+        }
+        index
+    } else {
+        let document_ref_id = context.allocate_lineage_id(&mut reserved)?;
+        additions.push(ForeignIdentity::new(
+            ForeignIdDomain::Document,
+            document_ref_id.clone(),
+        ).map_err(map_preservation_error)?);
+        let document_ref = new_lineage_element(
+            &root.name,
+            "DocumentRef",
+            vec![
+                ("DateTime".to_owned(), context.timestamp.clone()),
+                ("id".to_owned(), document_ref_id),
+            ],
+        );
+        let content_index = root
+            .children
+            .iter()
+            .position(|node| matches!(node,
+                PreservedNode::Element(element)
+                    if element.name.local_name == "Content"
+                        && element.name.namespace_uri == root.name.namespace_uri
+            ))
+            .ok_or(FdxError::MissingContent)?;
+        root.children
+            .insert(content_index, PreservedNode::Element(document_ref));
+        content_index
+    };
+
+    let PreservedNode::Element(document_ref) = &mut root.children[document_ref_index] else {
+        return Err(SaveDiagnosticCode::LineageAmbiguousDocumentRef.error());
+    };
+    let datetime_indices = document_ref
+        .attributes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, attribute)| {
+            (attribute.name.namespace_uri.is_none() && attribute.name.local_name == "DateTime")
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if datetime_indices.len() > 1 {
+        return Err(SaveDiagnosticCode::LineageAmbiguousDocumentRefDateTime.error());
+    }
+    let previous_datetime = datetime_indices
+        .first()
+        .and_then(|index| document_ref.attributes.get(*index))
+        .map(|attribute| attribute.value.as_str())
+        .filter(|value| valid_document_ref_datetime(value))
+        .map(str::to_owned);
+    let xref_datetime = context
+        .opened_timestamp
+        .as_deref()
+        .filter(|value| valid_document_ref_datetime(value))
+        .or(previous_datetime.as_deref())
+        .unwrap_or(context.timestamp.as_str())
+        .to_owned();
+
+    if let Some(index) = datetime_indices.first().copied() {
+        document_ref.attributes[index].value = context.timestamp.clone();
+    } else {
+        let insert_at = document_ref
+            .attributes
+            .iter()
+            .position(|attribute| {
+                attribute.name.namespace_uri.is_none()
+                    && attribute.name.local_name.eq_ignore_ascii_case("id")
+            })
+            .unwrap_or(0);
+        document_ref.attributes.insert(
+            insert_at,
+            PreservedAttribute {
+                name: plain_source_name("DateTime"),
+                value: context.timestamp.clone(),
+            },
+        );
+    }
+
+    if context.operation == SaveOperation::SaveAs {
+        let xref_id = context.allocate_lineage_id(&mut reserved)?;
+        let xref_identity = ForeignIdentity::new(identity_domain("XRef"), xref_id.clone())
+            .map_err(map_preservation_error)?;
+        let xref = new_lineage_element(
+            &document_ref.name,
+            "XRef",
+            vec![
+                ("DateTime".to_owned(), xref_datetime),
+                ("id".to_owned(), xref_id),
+            ],
+        );
+        append_lineage_xref(root, document_ref_index, xref)?;
+        additions.push(xref_identity);
+    }
+    Ok(additions)
+}
+
+fn collect_preserved_id_attributes(nodes: &[PreservedNode], values: &mut BTreeSet<String>) {
+    for node in nodes {
+        let PreservedNode::Element(element) = node else {
+            continue;
+        };
+        values.extend(element.attributes.iter().filter_map(|attribute| {
+            (attribute.name.namespace_uri.is_none()
+                && attribute.name.local_name.eq_ignore_ascii_case("id"))
+                .then(|| attribute.value.clone())
+        }));
+        collect_preserved_id_attributes(&element.children, values);
+    }
+}
+
+fn new_lineage_element(
+    parent: &SourceName,
+    local_name: &str,
+    attributes: Vec<(String, String)>,
+) -> PreservedElement {
+    let prefix = parent
+        .qualified_name
+        .as_deref()
+        .and_then(|qualified| qualified.rsplit_once(':').map(|(prefix, _)| prefix));
+    let qualified_name = prefix.map_or_else(
+        || local_name.to_owned(),
+        |prefix| format!("{prefix}:{local_name}"),
+    );
+    PreservedElement {
+        name: SourceName {
+            namespace_uri: parent.namespace_uri.clone(),
+            local_name: local_name.to_owned(),
+            qualified_name: Some(qualified_name),
+        },
+        attributes: attributes
+            .into_iter()
+            .map(|(name, value)| PreservedAttribute {
+                name: plain_source_name(&name),
+                value,
+            })
+            .collect(),
+        namespace_bindings: Vec::new(),
+        source_type: None,
+        ownership: SourceOwnership::Opaque,
+        dependency_confidence: DependencyConfidence::Unknown,
+        anchor: None,
+        children: Vec::new(),
+    }
+}
+
+fn plain_source_name(local_name: &str) -> SourceName {
+    SourceName {
+        namespace_uri: None,
+        local_name: local_name.to_owned(),
+        qualified_name: Some(local_name.to_owned()),
+    }
+}
+
+fn append_lineage_xref(
+    root: &mut PreservedElement,
+    document_ref_index: usize,
+    xref: PreservedElement,
+) -> Result<(), FdxError> {
+    let root_preserves_space = root.attributes.iter().any(|attribute| {
+        attribute.name.namespace_uri.as_deref() == Some("http://www.w3.org/XML/1998/namespace")
+            && attribute.name.local_name == "space"
+            && attribute.value == "preserve"
+    });
+    let PreservedNode::Element(document_ref) = root
+        .children
+        .get_mut(document_ref_index)
+        .ok_or(SaveDiagnosticCode::LineageAmbiguousDocumentRef.error())?
+    else {
+        return Err(SaveDiagnosticCode::LineageAmbiguousDocumentRef.error());
+    };
+    let document_ref_preserves_space = document_ref
+        .attributes
+        .iter()
+        .any(|attribute| {
+            attribute.name.namespace_uri.as_deref() == Some("http://www.w3.org/XML/1998/namespace")
+                && attribute.name.local_name == "space"
+                && attribute.value == "preserve"
+        });
+    if root_preserves_space || document_ref_preserves_space {
+        return append_xref_without_formatting(document_ref, xref);
+    }
+    let format_safe = document_ref.children.iter().all(|node| match node {
+        PreservedNode::Element(element) => element.name.namespace_uri == document_ref.name.namespace_uri,
+        PreservedNode::Text(text) => text.chars().all(char::is_whitespace),
+        _ => false,
+    });
+    if !format_safe {
+        return append_xref_without_formatting(document_ref, xref);
+    }
+    append_xref_with_formatting(document_ref, xref)
+}
+
+fn append_xref_without_formatting(
+    document_ref: &mut PreservedElement,
+    xref: PreservedElement,
+) -> Result<(), FdxError> {
+    let index = lineage_xref_insert_index(document_ref)?;
+    document_ref
+        .children
+        .insert(index, PreservedNode::Element(xref));
+    Ok(())
+}
+
+fn append_xref_with_formatting(
+    document_ref: &mut PreservedElement,
+    xref: PreservedElement,
+) -> Result<(), FdxError> {
+    let index = lineage_xref_insert_index(document_ref)?;
+    let has_following_node = index < document_ref.children.len();
+    let following_is_whitespace = matches!(
+        document_ref.children.get(index),
+        Some(PreservedNode::Text(text)) if text.chars().all(char::is_whitespace)
+    );
+    document_ref
+        .children
+        .insert(index, PreservedNode::Text("\n    ".to_owned()));
+    document_ref
+        .children
+        .insert(index + 1, PreservedNode::Element(xref));
+    if has_following_node && !following_is_whitespace {
+        document_ref
+            .children
+            .insert(index + 2, PreservedNode::Text("\n    ".to_owned()));
+    } else if !has_following_node {
+        document_ref
+            .children
+            .push(PreservedNode::Text("\n  ".to_owned()));
+    }
+    Ok(())
+}
+
+fn lineage_xref_insert_index(document_ref: &PreservedElement) -> Result<usize, FdxError> {
+    let mut last_xref = None;
+    for (index, node) in document_ref.children.iter().enumerate() {
+        if let PreservedNode::Element(element) = node {
+            if element.name.local_name == "XRef" {
+                if element.name.namespace_uri != document_ref.name.namespace_uri {
+                    return Err(SaveDiagnosticCode::LineageAmbiguousDocumentRef.error());
+                }
+                last_xref = Some(index);
+            }
+        }
+    }
+    Ok(last_xref.map_or_else(
+        || {
+            document_ref
+                .children
+                .iter()
+                .rposition(|node| !matches!(node, PreservedNode::Text(text) if text.chars().all(char::is_whitespace)))
+                .map_or(0, |index| index + 1)
+        },
+        |index| index + 1,
+    ))
 }
 
 fn validate_project_output_budgets(project: &Project) -> Result<(), FdxError> {
@@ -1731,13 +2289,35 @@ fn reconcile_managed_paragraph(
     Ok(())
 }
 
-fn make_new_document_nodes(project: &Project) -> Result<Vec<PreservedNode>, FdxError> {
+fn make_new_document_nodes(
+    project: &Project,
+    context: &mut SaveContext,
+) -> Result<Vec<PreservedNode>, FdxError> {
     let mut root = preserved_element(
         "FinalDraft",
         vec![("DocumentType", "Script"), ("Version", FDX_VERSION)],
     );
+    let mut lineage_ids = BTreeSet::new();
+    let document_ref_id = context.allocate_lineage_id(&mut lineage_ids)?;
+    let xref_id = if context.operation == SaveOperation::SaveAs {
+        Some(context.allocate_lineage_id(&mut lineage_ids)?)
+    } else {
+        None
+    };
+    let mut document_ref = preserved_element(
+        "DocumentRef",
+        vec![("DateTime", context.timestamp.as_str()), ("id", &document_ref_id)],
+    );
+    if let Some(xref_id) = xref_id {
+        document_ref.children.push(PreservedNode::Element(preserved_element(
+            "XRef",
+            vec![("DateTime", context.timestamp.as_str()), ("id", &xref_id)],
+        )));
+    }
+    root.children
+        .push(PreservedNode::Element(document_ref));
     let mut content = preserved_element("Content", Vec::new());
-    let mut paragraph_ids = ParagraphIdAllocator::new(std::iter::empty());
+    let mut paragraph_ids = ParagraphIdAllocator::new(lineage_ids.into_iter());
     for (index, element) in project.elements.iter().enumerate() {
         let mut paragraph = new_paragraph(element, &mut paragraph_ids)?;
         if element.role == Role::SceneHeading {
@@ -1779,6 +2359,15 @@ fn make_new_document_nodes(project: &Project) -> Result<Vec<PreservedNode>, FdxE
         content.children.push(paragraph);
     }
     root.children.push(PreservedNode::Element(content));
+    root.children.push(PreservedNode::Element(window_state_element(
+        &root.name,
+        context.window_state,
+    )));
+    root.children.push(PreservedNode::Element(text_state_element(
+        &root.name,
+        project,
+        context.text_state,
+    )?));
     for formatting in formatting_in_native_order() {
         root.children
             .push(PreservedNode::Element(new_element_settings(formatting)));
@@ -1793,6 +2382,194 @@ fn make_new_document_nodes(project: &Project) -> Result<Vec<PreservedNode>, FdxE
         root.children.push(PreservedNode::Element(title_page));
     }
     Ok(vec![PreservedNode::Element(root)])
+}
+
+fn window_state_element(parent: &SourceName, state: WindowState) -> PreservedElement {
+    new_lineage_element(
+        parent,
+        "WindowState",
+        vec![
+            ("Height".to_owned(), state.height.to_string()),
+            ("Left".to_owned(), state.left.to_string()),
+            ("Mode".to_owned(), "Normal".to_owned()),
+            ("Top".to_owned(), state.top.to_string()),
+            ("Width".to_owned(), state.width.to_string()),
+        ],
+    )
+}
+
+fn text_state_element(
+    parent: &SourceName,
+    project: &Project,
+    state: TextState,
+) -> Result<PreservedElement, FdxError> {
+    let (start, end) = text_state::selection_to_flat_offsets(project, state.selection)
+        .ok_or(FdxError::InvalidValue)?;
+    Ok(new_lineage_element(
+        parent,
+        "TextState",
+        vec![
+            ("Scaling".to_owned(), state.scaling.clamp(
+                text_state::MIN_TEXT_SCALING,
+                text_state::MAX_TEXT_SCALING,
+            ).to_string()),
+            ("Selection".to_owned(), format!("{start},{end}")),
+            ("ShowInvisibles".to_owned(), "No".to_owned()),
+        ],
+    ))
+}
+
+fn reconcile_root_text_state(
+    sections: &mut [PreservedSection],
+    project: &Project,
+    state: TextState,
+) -> Result<(), FdxError> {
+    let mut roots = sections.iter_mut().flat_map(|section| &mut section.children)
+        .filter_map(|node| match node {
+            PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => Some(element),
+            _ => None,
+        });
+    let root = roots.next().ok_or(FdxError::InvalidRoot)?;
+    if roots.next().is_some() {
+        return Err(FdxError::InvalidRoot);
+    }
+    let indices = root.children.iter().enumerate().filter_map(|(index, node)| match node {
+        PreservedNode::Element(element)
+            if element.name.local_name == "TextState"
+                && element.name.namespace_uri == root.name.namespace_uri => Some(index),
+        _ => None,
+    }).collect::<Vec<_>>();
+    let canonical = text_state_element(&root.name, project, state)?;
+    if let Some(first) = indices.first().copied() {
+        root.children[first] = PreservedNode::Element(canonical);
+        for index in indices.into_iter().skip(1).rev() {
+            root.children.remove(index);
+        }
+        return Ok(());
+    }
+
+    let window = root.children.iter().position(|node| matches!(node,
+        PreservedNode::Element(element)
+            if element.name.local_name == "WindowState"
+                && element.name.namespace_uri == root.name.namespace_uri
+    ));
+    let page_layout = root.children.iter().position(|node| matches!(node,
+        PreservedNode::Element(element)
+            if element.name.local_name == "PageLayout"
+                && element.name.namespace_uri == root.name.namespace_uri
+    ));
+    let settings = root.children.iter().position(|node| matches!(node,
+        PreservedNode::Element(element)
+            if element.name.local_name == "ElementSettings"
+                && element.name.namespace_uri == root.name.namespace_uri
+    ));
+    let mut insertion = window.map(|index| index + 1)
+        .or_else(|| page_layout.map(|index| index + 1))
+        .or(settings)
+        .unwrap_or(root.children.len());
+    while insertion < root.children.len()
+        && matches!(root.children.get(insertion), Some(PreservedNode::Text(text)) if text.trim().is_empty())
+    {
+        insertion += 1;
+    }
+    let needs_leading_space = insertion == 0
+        || matches!(insertion.checked_sub(1).and_then(|index| root.children.get(index)), Some(PreservedNode::Element(_)));
+    if needs_leading_space {
+        root.children.insert(insertion, PreservedNode::Text("\n\n  ".to_owned()));
+        insertion += 1;
+    }
+    root.children.insert(insertion, PreservedNode::Element(canonical));
+    let after = insertion + 1;
+    if after == root.children.len()
+        || matches!(root.children.get(after), Some(PreservedNode::Element(_)))
+    {
+        root.children.insert(after, PreservedNode::Text("\n\n  ".to_owned()));
+    }
+    Ok(())
+}
+
+fn reconcile_root_window_state(
+    sections: &mut [PreservedSection],
+    state: WindowState,
+) -> Result<(), FdxError> {
+    let mut roots = sections
+        .iter_mut()
+        .flat_map(|section| &mut section.children)
+        .filter_map(|node| match node {
+            PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => Some(element),
+            _ => None,
+        });
+    let root = roots.next().ok_or(FdxError::InvalidRoot)?;
+    if roots.next().is_some() {
+        return Err(FdxError::InvalidRoot);
+    }
+    let window_indices = root
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| match node {
+            PreservedNode::Element(element)
+                if element.name.local_name == "WindowState"
+                    && element.name.namespace_uri == root.name.namespace_uri =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let canonical = window_state_element(&root.name, state);
+    if let Some(first) = window_indices.first().copied() {
+        root.children[first] = PreservedNode::Element(canonical);
+        for index in window_indices.into_iter().skip(1).rev() {
+            root.children.remove(index);
+        }
+        return Ok(());
+    }
+
+    let page_layout = root.children.iter().position(|node| matches!(node,
+        PreservedNode::Element(element)
+            if element.name.local_name == "PageLayout"
+                && element.name.namespace_uri == root.name.namespace_uri
+    ));
+    let settings = root.children.iter().position(|node| matches!(node,
+        PreservedNode::Element(element)
+            if element.name.local_name == "ElementSettings"
+                && element.name.namespace_uri == root.name.namespace_uri
+    ));
+    let anchor = page_layout.map(|index| index + 1).or(settings).unwrap_or(root.children.len());
+    // Keep existing inter-element whitespace on the leading side; where the
+    // source is compact, add only the generated block's local separator.
+    let mut insertion = anchor;
+    if page_layout.is_some() {
+        while insertion < root.children.len()
+            && matches!(root.children.get(insertion), Some(PreservedNode::Text(text)) if text.trim().is_empty())
+        {
+            insertion += 1;
+        }
+    } else if settings.is_some() {
+        while insertion > 0
+            && matches!(root.children.get(insertion - 1), Some(PreservedNode::Text(text)) if text.trim().is_empty())
+        {
+            insertion -= 1;
+        }
+    }
+    let needs_leading_space = insertion == 0
+        || matches!(insertion.checked_sub(1).and_then(|index| root.children.get(index)), Some(PreservedNode::Element(_)));
+    if needs_leading_space {
+        root.children
+            .insert(insertion, PreservedNode::Text("\n\n  ".to_owned()));
+        insertion += 1;
+    }
+    root.children
+        .insert(insertion, PreservedNode::Element(canonical));
+    let after = insertion + 1;
+    if after == root.children.len()
+        || matches!(root.children.get(after), Some(PreservedNode::Element(_)))
+    {
+        root.children
+            .insert(after, PreservedNode::Text("\n\n  ".to_owned()));
+    }
+    Ok(())
 }
 
 fn new_element_settings(
@@ -2638,6 +3415,132 @@ fn prepare_non_v6_source(
 
 fn is_fdx_element(element: &RawElement, name: &str, root_ns: Option<&str>) -> bool {
     element.name.local_name == name && element.name.namespace_uri.as_deref() == root_ns
+}
+
+fn raw_opened_document_ref_datetime(root: &RawElement) -> Option<String> {
+    let root_namespace = root.name.namespace_uri.as_deref();
+    let mut document_refs = root.children.iter().filter_map(|node| match node {
+        RawNode::Element(element) if element.name.local_name == "DocumentRef" => Some(element),
+        _ => None,
+    });
+    let document_ref = document_refs.next()?;
+    if document_refs.next().is_some()
+        || document_ref.name.namespace_uri.as_deref() != root_namespace
+    {
+        return None;
+    }
+    let mut datetimes = document_ref.attributes.iter().filter(|attribute| {
+        attribute.name.namespace_uri.is_none() && attribute.name.local_name == "DateTime"
+    });
+    let value = datetimes.next()?.value.as_str();
+    if datetimes.next().is_some() || !valid_document_ref_datetime(value) {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn raw_root_window_state(root: &RawElement) -> Option<WindowState> {
+    let root_namespace = root.name.namespace_uri.as_deref();
+    let mut windows = root.children.iter().filter_map(|node| match node {
+        RawNode::Element(element) if is_fdx_element(element, "WindowState", root_namespace) => {
+            Some(element)
+        }
+        _ => None,
+    });
+    let window = windows.next()?;
+    if windows.next().is_some() {
+        return None;
+    }
+
+    let mut parsed = BTreeMap::new();
+    for attribute in &window.attributes {
+        if attribute.name.namespace_uri.is_none()
+            && matches!(attribute.name.local_name.as_str(), "Left" | "Top" | "Width" | "Height")
+            && parsed
+                .insert(attribute.name.local_name.as_str(), attribute.value.as_str())
+                .is_some()
+        {
+            return None;
+        }
+    }
+    let parse = |name: &'static str| parsed.get(name)?.parse::<i32>().ok();
+    WindowState::new(
+        parse("Left")?,
+        parse("Top")?,
+        parse("Width")?,
+        parse("Height")?,
+    )
+}
+
+fn raw_root_text_state(root: &RawElement, project: &Project) -> TextState {
+    let namespace = root.name.namespace_uri.as_deref();
+    let mut blocks = root.children.iter().filter_map(|node| match node {
+        RawNode::Element(element) if is_fdx_element(element, "TextState", namespace) => Some(element),
+        _ => None,
+    });
+    let Some(block) = blocks.next() else { return TextState::DEFAULT };
+    if blocks.next().is_some() {
+        return TextState::DEFAULT;
+    }
+    let mut scaling = None;
+    let mut selection = None;
+    let mut scaling_ambiguous = false;
+    let mut selection_ambiguous = false;
+    for attribute in &block.attributes {
+        if attribute.name.namespace_uri.is_some() { continue; }
+        match attribute.name.local_name.as_str() {
+            "Scaling" => {
+                if scaling.replace(attribute.value.as_str()).is_some() { scaling_ambiguous = true; }
+            }
+            "Selection" => {
+                if selection.replace(attribute.value.as_str()).is_some() { selection_ambiguous = true; }
+            }
+            _ => {}
+        }
+    }
+    let scale = if scaling_ambiguous { 100 } else {
+        scaling.and_then(|value| value.parse::<u64>().ok())
+            .and_then(TextState::normalized_scaling)
+            .unwrap_or(100)
+    };
+    let mapped = if selection_ambiguous { None } else {
+        selection.and_then(|value| text_state::parse_flat_selection(project, value))
+    };
+    TextState { scaling: scale, selection: mapped.unwrap_or(TextState::DEFAULT.selection) }
+}
+
+pub(crate) fn opened_document_ref_datetime_from_project(project: &Project) -> Option<String> {
+    let preservation = project.preservation.as_ref()?;
+    let mut roots = preservation
+        .sections
+        .iter()
+        .flat_map(|section| &section.children)
+        .filter_map(|node| match node {
+            PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => Some(element),
+            _ => None,
+        });
+    let root = roots.next()?;
+    if roots.next().is_some() {
+        return None;
+    }
+    let mut document_refs = root.children.iter().filter_map(|node| match node {
+        PreservedNode::Element(element) if element.name.local_name == "DocumentRef" => Some(element),
+        _ => None,
+    });
+    let document_ref = document_refs.next()?;
+    if document_refs.next().is_some()
+        || document_ref.name.namespace_uri != root.name.namespace_uri
+    {
+        return None;
+    }
+    let mut datetimes = document_ref.attributes.iter().filter(|attribute| {
+        attribute.name.namespace_uri.is_none() && attribute.name.local_name == "DateTime"
+    });
+    let value = datetimes.next()?.value.as_str();
+    if datetimes.next().is_some() || !valid_document_ref_datetime(value) {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 fn preserve_misc_node(node: RawNode) -> Result<PreservedNode, FdxError> {
@@ -4794,5 +5697,115 @@ mod tests {
                 unexpected: false,
             })
         );
+    }
+
+    #[test]
+    fn v6_wo0011_documentref_datetime_validation_checks_shape_and_calendar() {
+        for valid in [
+            "20261001T120000",
+            "20000229T000000",
+            "20261231T235959",
+        ] {
+            assert!(valid_document_ref_datetime(valid));
+        }
+        for invalid in [
+            "20260229T120000",
+            "20261301T120000",
+            "20261131T120000",
+            "20261001T240000",
+            "20261001T126000",
+            "20261001T120060",
+            "00000101T000000",
+            "20261001T12000",
+            "20261001T120000Z",
+            "2026-10-01T120000",
+        ] {
+            assert!(!valid_document_ref_datetime(invalid));
+        }
+    }
+
+    #[test]
+    fn v6_wo0011_original_identity_gate_precedes_authorized_lineage_additions() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef DateTime="20261001T120000" id="document-original"/><Content><Paragraph Type="Action" id="p1"><Text>identity gate</Text></Paragraph></Content></FinalDraft>"#;
+        let mut project = read_v6(source)
+            .unwrap_or_else(|_| unreachable!("lineage identity fixture is valid"))
+            .project;
+        project
+            .preservation
+            .as_mut()
+            .unwrap_or_else(|| unreachable!("imported FDX has preservation"))
+            .identities
+            .push(
+                ForeignIdentity::new(ForeignIdDomain::Other("Injected".to_owned()), "unrelated")
+                    .unwrap_or_else(|_| unreachable!("injected identity is valid")),
+            );
+        let mut context = SaveContext::with_timestamp(
+            SaveOperation::SaveAs,
+            "20261103T101112".to_owned(),
+        )
+        .with_opened_timestamp(Some("20261001T120000".to_owned()))
+        .with_test_lineage_ids(vec!["b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned()]);
+
+        assert_eq!(
+            write_v6_for_save(&project, &mut context),
+            Err(FdxError::SaveDiagnosticUnsupportedConstruct(4))
+        );
+    }
+
+    #[test]
+    fn v6_wo0011_ambiguous_documentref_structures_refuse_lineage_selection() {
+        let duplicate_refs = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef DateTime="20261001T120000" id="document-1"/><DocumentRef DateTime="20261002T120000" id="document-2"/><Content><Paragraph Type="Action" id="p1"><Text>ambiguity</Text></Paragraph></Content></FinalDraft>"#;
+        let project = read_v6(duplicate_refs)
+            .unwrap_or_else(|_| unreachable!("distinct DocumentRef identities are readable"))
+            .project;
+        let mut context = SaveContext::with_timestamp(
+            SaveOperation::Save,
+            "20261103T101112".to_owned(),
+        );
+        assert_eq!(
+            write_v6_for_save(&project, &mut context),
+            Err(FdxError::SaveDiagnosticUnsupportedConstruct(35))
+        );
+
+        let single_ref = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef DateTime="20261001T120000" id="document-1"/><Content><Paragraph Type="Action" id="p1"><Text>ambiguity</Text></Paragraph></Content></FinalDraft>"#;
+        let mut project = read_v6(single_ref)
+            .unwrap_or_else(|_| unreachable!("single DocumentRef fixture is valid"))
+            .project;
+        let state = project
+            .preservation
+            .as_mut()
+            .unwrap_or_else(|| unreachable!("imported FDX has preservation"));
+        let document_ref = state
+            .sections
+            .iter_mut()
+            .flat_map(|section| &mut section.children)
+            .find_map(|node| match node {
+                PreservedNode::Element(root) if root.name.local_name == FDX_ROOT => {
+                    root.children.iter_mut().find_map(|child| match child {
+                        PreservedNode::Element(element)
+                            if element.name.local_name == "DocumentRef" => Some(element),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| unreachable!("DocumentRef is in the retained root"));
+        document_ref.attributes.push(PreservedAttribute {
+            name: plain_source_name("DateTime"),
+            value: "20261002T120000".to_owned(),
+        });
+        let mut context = SaveContext::with_timestamp(
+            SaveOperation::SaveAs,
+            "20261103T101112".to_owned(),
+        )
+        .with_opened_timestamp(Some("20261001T120000".to_owned()))
+        .with_test_lineage_ids(vec!["b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned()]);
+        let error = write_v6_for_save(&project, &mut context)
+            .err()
+            .unwrap_or_else(|| unreachable!("duplicate DateTime must stop lineage editing"));
+        assert_eq!(error, FdxError::SaveDiagnosticUnsupportedConstruct(36));
+        let message = error.to_string();
+        assert!(!message.contains("20261001T120000"));
+        assert!(!message.contains("20261002T120000"));
     }
 }

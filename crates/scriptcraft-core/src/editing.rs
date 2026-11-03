@@ -85,6 +85,9 @@ struct Snapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditingSession {
     project: Project,
+    /// Timestamp captured from the imported DocumentRef at session creation.
+    /// It is session lineage state, not canonical content or undoable state.
+    opened_document_ref_datetime: Option<String>,
     policy: EditPolicy,
     layout_inputs: LayoutInputs,
     selection: Selection,
@@ -119,9 +122,12 @@ impl EditingSession {
             offset: 0,
         });
         validate_selection(&project, selection)?;
+        let opened_document_ref_datetime =
+            crate::fdx::opened_document_ref_datetime_from_project(&project);
         Ok(Self {
             clean_project: project.clone(),
             project,
+            opened_document_ref_datetime,
             policy,
             layout_inputs,
             selection,
@@ -142,6 +148,9 @@ impl EditingSession {
 
     pub fn project(&self) -> &Project {
         &self.project
+    }
+    pub(crate) fn opened_document_ref_datetime(&self) -> Option<&str> {
+        self.opened_document_ref_datetime.as_deref()
     }
     /// Current ephemeral editing policy. Undo/redo and document replacement do
     /// not restore or alter it; a newly constructed session uses defaults.

@@ -150,7 +150,19 @@ project meaning; failures preserve the prior valid destination and unsaved state
     block for each of the 17 directed roles, using the shared defaults evidenced by the approved
     native references; imported source-backed settings remain authoritative and shall not be
     regenerated merely because runtime interpretation changes. Generated sections shall be ordered
-    Content, then the 17 ElementSettings blocks in directed role order, then TitlePage when present.
+    DocumentRef, Content, WindowState, TextState, then the 17 ElementSettings blocks in directed role
+    order, then TitlePage when present. Generated root TextState has Scaling, Selection, and
+    ShowInvisibles attributes in that order. A generated DocumentRef carries one current save
+    timestamp and a fresh UUID v4 ID.
+    TextState is disposable root-only view state: Open projects only one direct FinalDraft child,
+    defaults invalid/missing Scaling to 100 before 75–300% normalization, and rejects a complete
+    malformed/unmappable Selection to caret 0,0. Its ordered Selection uses the bounded ScriptCraft
+    UTF-16 flat-offset mapping over canonical body text with one paragraph separator, mapped to
+    editor UTF-8 byte positions. Open applies zoom and Selection once; transactional Save/Save As
+    overwrite the direct root block with current zoom and ordered Selection plus ShowInvisibles No.
+    Nested TitlePage TextState is source-preserved and never projected into the screenplay editor.
+    Zoom and caret movement do not alter Project semantics, dirty state, history, fixed layout, or
+    exports.
     Serialized output shall begin with exactly one reference-compatible UTF-8 standalone XML
     declaration; this lexical declaration is emitted once on each save/re-serialization. Newly
     generated preservation-free output uses the canonical declaration followed by one LF. For
@@ -283,6 +295,42 @@ project meaning; failures preserve the prior valid destination and unsaved state
     intentionally not mirrored: matched normalized Character names retain their IDs in ScriptCraft.
     Revisit this difference only if concrete interoperability evidence shows regeneration is required
     for semantics, references, or reopen behavior.
+  - **AC-WRITING-003.7:** A native FDX root DocumentRef is the durable current-save record. Preserve
+    its existing ID verbatim across Save and Save As; every successful transactional Save and Save As
+    writes one current local-wall-clock DateTime in the exact `YYYYMMDDTHHMMSS` shape (falling back
+    to UTC only when local offset discovery fails). At Open, capture a valid root DocumentRef DateTime
+    as private per-session lineage state; missing, malformed, or ambiguous values provide no typed
+    anchor while remaining source-preserved. Every Save As appends exactly one direct DocumentRef
+    child XRef with a fresh collision-checked lowercase UUID v4 and the session's captured timestamp;
+    when no session timestamp exists, use the valid pre-save DocumentRef timestamp, then the current
+    save timestamp. Ordinary Save appends no XRef. Existing XRefs and unrelated DocumentRef source
+    data remain unchanged. A missing DocumentRef is generated before Content with DateTime then id
+    attributes; a present DocumentRef retains its ID and source position while only its recognized
+    DateTime value is updated (or added without normalizing unrelated attributes). Direct
+    source-backed serialization has no lineage side effects. The authorized DocumentRef/XRef delta
+    is reconciled only in the detached save candidate after original code 4 graph comparison and
+    before strict code 29 identity and code 30 source-tree checks. Any preparation, codec, conflict,
+    or publication failure leaves destination, live lineage tree, opened-session anchor, path,
+    baseline, selection, and dirty state unchanged.
+  - **AC-WRITING-003.8:** Root WindowState is disposable native desktop view state, not screenplay
+    semantics or session history. Open projects only one unambiguous direct FinalDraft/WindowState
+    in the root element's expanded namespace; nested lookalikes are ignored. Left and Top accept
+    bounded signed integers, Width and Height require bounded positive integers, and malformed,
+    overflowing, missing, duplicate, or otherwise unusable root state shall not block screenplay
+    Open or trigger a restore. Unknown/missing Mode uses Normal. A valid imported geometry is sent
+    once as a best-effort native outer position and inner logical size after activation; absent or
+    unusable geometry leaves the current window unchanged, and no later frame retries the request.
+    Save/Save As serialize the latest valid OS-logical outer position and inner size, using the
+    documented 870 × 854 at (0,95) agent-default when no complete native snapshot is available.
+    Window movement/resizing does not alter Project semantics, revision, dirty state, history, fixed
+    layout, or PDF output. Actual transactional Save/Save As replaces all direct root WindowState
+    duplicates with one canonical Height, Left, Mode, Top, Width block, inserting a missing block
+    after PageLayout or before ElementSettings; preservation-free output places it after Content.
+    Direct source-backed serialization leaves imported WindowState untouched. TitlePage, nested
+    lookalikes, Content, DocumentRef/XRef, ElementSettings, and unrelated opaque source remain
+    unchanged. WindowState is reconciled only in the detached save candidate and participates in the
+    expected tree before strict source-tree comparison; failed saves publish neither its replacement
+    nor other candidate changes.
 
 ### FDX document content and preservation
 
@@ -475,15 +523,21 @@ content.
   - **AC-WRITING-006.7:** The desktop status bar shall provide one accessible, apparently continuous
     whole-percent page zoom slider from 75% through 300% and an adjacent menu containing exactly
     75%, 90%, 100%, 125%, 150%, 175%, 200%, 250%, and 300%. Both controls shall share one
-    transient per-window value and show every intermediate integer accurately. At 100%, the page
-    shall have a fixed 360-logical-point presentation width independent of viewport width; the
-    selected percentage shall be retained across resizes. The page shall be centered within the
+    whole-percent page-zoom value and show every intermediate integer accurately. At 100%, page
+    presentation width shall use the effective paper width in document points multiplied by the
+    platform's logical-points-per-document-point conversion: 1.0 on macOS, 96/72 on Windows, and
+    neutral 1.0 on unsupported platforms. The selected percentage shall be retained across resizes.
+    The page shall be centered within the
     actual editor viewport when it and its 16-point exterior side buffers fit, and remain
     reachable by horizontal as well as vertical navigation when they do not. Zoom shall scale
-    only page presentation without changing editor source mapping or focus/IME ownership. Zoom
-    shall not persist or alter native project data, session revision, saved/dirty or undo state,
-    fixed pagination/source ranges, or fixed-layout PDF output, and shall not globally scale
-    toolbar/status controls.
+    only page presentation without changing editor source mapping or focus/IME ownership. Its
+    whole-percent value is disposable native view state in direct-root FDX TextState: Open restores
+    it once, and transactional Save/Save As overwrite it from current zoom. Zoom changes alone shall
+    not alter semantic Project content, session revision, dirty or undo state, fixed
+    pagination/source ranges, or fixed-layout PDF output, and shall not globally scale toolbar/status
+    controls. OS conversion applies only to desktop presentation; shared document points, fixed
+    pagination, source mapping, and PDF geometry remain OS-independent. Persisted TextState Scaling
+    is only the user's whole-percent zoom and never stores platform or native display multipliers.
   - **AC-WRITING-006.8:** With status content and viewport size unchanged, the bottom status panel
     shall remain height-stable across 60 consecutive egui frames at normal (1200 × 820 logical
     points) and compact (480 × 820 logical points) widths. After frame 1, the panel-height range
@@ -501,7 +555,7 @@ content.
     supported zoom event; delivery is platform/backend dependent and no distinct squeeze event
     is promised. A valid finite positive OS-native pixels-per-point value, including 1.0, shall
     be applied once with UI zoom 1.0; when the native value is absent or invalid, the effective
-    UI scale shall use the 2.3 fallback. A later valid native value shall replace the fallback.
+    UI scale shall use neutral 1.0. A later valid native value shall replace the fallback.
     UI scale is independent of page zoom and shall not multiply native scale twice.
   - **AC-WRITING-006.11:** Appearance shall offer exactly System, Day Mode, Night Mode, and Midnight
     Mode through an accessible control and begin each app window in transient System mode.
@@ -540,6 +594,9 @@ content.
 
 - Native project data remains the semantic source of truth; transient caret, layout, undo state, and
     presentation scale do not replace it.
+- Document and PDF geometry use OS-independent document points (72 points per inch). Only the
+    desktop page presentation converts those points to platform logical coordinates and then applies
+    the native display multiplier once; absent or invalid native scale is neutral 1.0.
 - Pagination and PDF output use fixed runtime layout inputs, independent of transient viewport
   zoom; preservation of source layout settings does not promise exact fidelity to every FDX layout.
 - PDF and plain-text exports are noncanonical and shall not replace or mark the native project

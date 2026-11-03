@@ -25,8 +25,9 @@ Internal identities used to edit and anchor content are transient; they are not
 a promise of stable ScriptCraft IDs across reopen. Editing preserves explicit
 roles and the writer's exact canonical UTF-8 casing across typing, paste, role
 changes, and history operations. AllCaps affects display rather than canonical
-text or native FDX source; transient selection, undo/redo, dirty state, and
-derived layout do not replace that source.
+text or native FDX source; runtime selection, undo/redo, dirty state, and derived
+layout do not replace that source. Selection is serialized only as disposable
+root TextState view state during transactional native saves.
 
 Managed Scene Headings use generated SceneProperties/SceneArcBeats containers
 for supported scenes. Length defaults to `1/8`, Page to `1`, and Title to empty;
@@ -75,6 +76,35 @@ identity contract does not add historical ID tombstones. Repeated raw IDs on opa
 non-managed TitlePage Paragraph occurrences are preserved verbatim per occurrence but
 are not treated as globally unique definitions; managed roles and other global identity
 consumers continue to require unambiguous identities.
+
+Native FDX lineage is durable source data distinct from semantic screenplay content:
+DocumentRef retains its imported ID and records the current timestamp after each successful
+Save or Save As. Each Save As appends one fresh XRef whose timestamp is the DocumentRef
+timestamp captured when the current session opened the file; earlier XRefs remain unchanged.
+The session anchor is not undoable content, and direct serialization does not mutate imported
+lineage. Failed saves publish neither lineage changes nor destination/session changes.
+
+The native root WindowState is a separate disposable view-state exception to semantic persistence:
+the desktop projects only bounded direct-root geometry, attempts a valid imported restore once after
+Open, and overwrites it on transactional Save/Save As from the latest native logical geometry. It is
+not part of screenplay Project semantics, dirty state, undo history, fixed document layout, or PDF
+geometry. Nested/title-page structures and unrelated source data remain preservation-owned.
+
+Root TextState is the corresponding disposable body-editor view-state exception. Open projects
+only a unique direct-root block, restores whole-percent page zoom and a valid ordered Selection
+once, then actual Save/Save As overwrite it from current runtime values. Selection uses ScriptCraft's
+bounded reversible UTF-16 flat offsets over canonical body paragraphs, with one separator per
+paragraph boundary and UTF-8 session byte positions. Malformed or unmappable values safely become
+caret 0,0; unusable Scaling defaults to 100 and valid values clamp to 75–300. Nested TitlePage
+TextState remains source-preserved and is never applied to the body editor. Neither zoom nor caret
+movement changes semantic content, dirty/history state, fixed layout, or export output.
+
+Document layout and PDF use OS-independent document points at 72 points per inch; default Letter
+remains 612 × 792 points. The desktop alone converts document points to logical presentation
+coordinates using 1.0 on macOS and 96/72 on Windows, then lets egui apply the native display scale
+once. Missing or invalid native scale uses neutral 1.0. TextState Scaling persists only the user's
+whole-percent zoom, never either platform conversion or native display scale. These conversions
+approximate physical size under the OS coordinate model and do not promise monitor calibration.
 
 ## Product scope
 
@@ -132,8 +162,9 @@ screenwriter.
 
 - Desktop-first and focused on a single writer's project.
 - Native project data remains semantic and independent of screen presentation;
-  page coordinates, caret geometry, UI state, and undo stacks are derived or
-  transient.
+  page coordinates, caret geometry, TextState/editor state, and undo stacks are
+  derived or transient. Root WindowState alone is persisted as disposable FDX
+  desktop view state and is never promoted into screenplay semantics.
 - FDX is the durable owner of document metadata, foreign paragraph identities,
   title-page structure, and source document settings. ScriptCraft does not add
   a private FDX extension or sidecar for project identity, schema, layout

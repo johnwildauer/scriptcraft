@@ -14,6 +14,7 @@ mod paragraph_id;
 pub mod persistence;
 pub mod preservation;
 pub mod scene_metadata;
+pub mod text_state;
 
 use std::collections::BTreeSet;
 

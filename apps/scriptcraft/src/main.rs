@@ -30,7 +30,6 @@ use toolbar::{toolbar_chrome_color, toolbar_content_height};
 
 const EDITOR_SURFACE_ID: &str = "page-editor-surface";
 const CARET_WIDTH: f32 = 1.5;
-const CURRENT_DEFAULT_PAGE_WIDTH: f32 = 360.0;
 const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
 #[cfg(test)]
 const PRESENTATION_METRIC_TOLERANCE: f32 = 0.01;
@@ -105,6 +104,8 @@ struct ScriptCraftApp {
     error: Option<String>,
     native_path: Option<PathBuf>,
     fdx_baseline: Option<FdxBaseline>,
+    pending_window_restore: Option<fdx::WindowState>,
+    latest_window_state: Option<fdx::WindowState>,
     pending_fdx_open: Option<PendingFdxOpen>,
     native_input_diagnostics: NativeInputDiagnostics,
     editor_surface_id: Option<egui::Id>,
@@ -164,6 +165,8 @@ impl ScriptCraftApp {
             error: None,
             native_path: None,
             fdx_baseline: None,
+            pending_window_restore: None,
+            latest_window_state: None,
             pending_fdx_open: None,
             native_input_diagnostics: NativeInputDiagnostics::default(),
             editor_surface_id: None,
@@ -339,11 +342,20 @@ impl ScriptCraftApp {
             .clone()
             .map(FdxSaveTarget::from_baseline)
             .unwrap_or_else(FdxSaveTarget::new_unsaved);
-        match fdx_storage::save_session(
+        let text_state = fdx::TextState {
+            scaling: self.zoom_percent.clamp(
+                scriptcraft_core::text_state::MIN_TEXT_SCALING,
+                scriptcraft_core::text_state::MAX_TEXT_SCALING,
+            ),
+            selection: self.session.selection(),
+        };
+        match fdx_storage::save_session_with_view_state(
             &StdFdxStorageFileSystem,
             &mut self.session,
             &mut target,
             mode,
+            self.latest_window_state.unwrap_or(fdx::WindowState::DEFAULT),
+            text_state,
         ) {
             Ok(outcome) => {
                 self.native_path = target.path().map(PathBuf::from);
@@ -462,6 +474,8 @@ impl ScriptCraftApp {
                     &path,
                     Some(source.baseline),
                     migration_status,
+                    candidate.document.window_state,
+                    candidate.document.text_state,
                 );
             }
             Ok(FdxImportOutcome::Cancelled { .. }) => {
@@ -478,17 +492,28 @@ impl ScriptCraftApp {
         path: &std::path::Path,
         baseline: Option<FdxBaseline>,
         migration_status: Option<&str>,
+        window_state: Option<fdx::WindowState>,
+        text_state: fdx::TextState,
     ) {
-        let replacement = match EditingSession::with_policy(project, self.session.policy()) {
+        let mut replacement = match EditingSession::with_policy(project, self.session.policy()) {
             Ok(replacement) => replacement,
             Err(error) => {
                 self.show_error(format!("incompatible document: {error:?}"));
                 return;
             }
         };
+        if replacement.set_selection(text_state.selection).is_err() {
+            let _ = replacement.set_selection(Selection::caret(Position { element: 0, offset: 0 }));
+        }
         self.session = replacement;
+        self.zoom_percent = text_state.scaling.clamp(
+            scriptcraft_core::text_state::MIN_TEXT_SCALING,
+            scriptcraft_core::text_state::MAX_TEXT_SCALING,
+        );
+        self.sync_pinch_zoom_from_controls();
         self.native_path = Some(path.to_owned());
         self.fdx_baseline = baseline;
+        self.pending_window_restore = window_state;
         self.pending_fdx_open = None;
         self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
         self.page_geometry.invalidate();
@@ -1352,16 +1377,60 @@ struct PresentationMetrics {
     font_size: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresentationPlatform {
+    MacOS,
+    Windows,
+    Other,
+}
+
+fn logical_points_per_document_point(platform: PresentationPlatform) -> f32 {
+    match platform {
+        PresentationPlatform::MacOS | PresentationPlatform::Other => 1.0,
+        PresentationPlatform::Windows => 96.0 / 72.0,
+    }
+}
+
+fn current_presentation_platform() -> PresentationPlatform {
+    #[cfg(target_os = "macos")]
+    {
+        PresentationPlatform::MacOS
+    }
+    #[cfg(target_os = "windows")]
+    {
+        PresentationPlatform::Windows
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        PresentationPlatform::Other
+    }
+}
+
 fn presentation_metrics_at_zoom(
-    _available_width: f32,
+    available_width: f32,
     paper_width: f32,
     base_font_size: f32,
     zoom_percent: u16,
 ) -> PresentationMetrics {
+    presentation_metrics_at_zoom_for_platform(
+        available_width,
+        paper_width,
+        base_font_size,
+        zoom_percent,
+        current_presentation_platform(),
+    )
+}
+
+fn presentation_metrics_at_zoom_for_platform(
+    _available_width: f32,
+    paper_width: f32,
+    base_font_size: f32,
+    zoom_percent: u16,
+    platform: PresentationPlatform,
+) -> PresentationMetrics {
     let normalized = status_bar::normalized_zoom_percent(zoom_percent as f64);
-    let zoom_factor = normalized as f32 / 100.0;
-    let page_width = CURRENT_DEFAULT_PAGE_WIDTH * zoom_factor;
-    let scale = page_width / paper_width;
+    let scale = logical_points_per_document_point(platform) * normalized as f32 / 100.0;
+    let page_width = paper_width * scale;
     PresentationMetrics {
         page_width,
         scale,
@@ -1712,8 +1781,8 @@ impl eframe::App for ScriptCraftApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         // egui computes total pixels-per-point as zoom_factor × native scale.
         // Resolve the factor against this frame's native scale before begin_pass
-        // so moving between monitors never briefly multiplies fallback 2.3 by
-        // the newly reported OS scale.
+        // so moving between monitors never briefly multiplies a stale UI factor
+        // by the newly reported OS scale.
         let viewport = raw_input.viewports.get_mut(&raw_input.viewport_id);
         let native_scale = viewport.and_then(|viewport| {
             if viewport
@@ -1755,6 +1824,7 @@ impl eframe::App for ScriptCraftApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
+        self.update_native_window_state(ctx);
         self.notification_sink.set_repaint_context(ctx);
         let migration_pending = self.pending_fdx_open.is_some();
         if !migration_pending {
@@ -1780,6 +1850,62 @@ impl eframe::App for ScriptCraftApp {
             .frame_nanos
             .saturating_add(frame_started.elapsed().as_nanos());
     }
+}
+
+impl ScriptCraftApp {
+    fn update_native_window_state(&mut self, ctx: &egui::Context) {
+        let reported = ctx.input(|input| {
+            let viewport = input.viewport();
+            window_state_from_rects(viewport.inner_rect, viewport.outer_rect)
+        });
+        if let Some(reported) = reported {
+            self.latest_window_state = Some(reported);
+        }
+        if let Some(commands) = take_window_restore_commands(&mut self.pending_window_restore) {
+            for command in commands {
+                ctx.send_viewport_cmd(command);
+            }
+        }
+    }
+}
+
+fn window_state_from_rects(
+    inner: Option<egui::Rect>,
+    outer: Option<egui::Rect>,
+) -> Option<fdx::WindowState> {
+    fn bounded_integer(value: f32) -> Option<i32> {
+        let value = f64::from(value);
+        (value.is_finite() && value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX))
+            .then(|| value.round() as i32)
+    }
+
+    let inner = inner?;
+    let outer = outer?;
+    fdx::WindowState::new(
+        bounded_integer(outer.min.x)?,
+        bounded_integer(outer.min.y)?,
+        bounded_integer(inner.width())?,
+        bounded_integer(inner.height())?,
+    )
+}
+
+fn window_restore_commands(state: fdx::WindowState) -> [egui::ViewportCommand; 2] {
+    [
+        egui::ViewportCommand::OuterPosition(egui::pos2(
+            state.left as f32,
+            state.top as f32,
+        )),
+        egui::ViewportCommand::InnerSize(egui::vec2(
+            state.width as f32,
+            state.height as f32,
+        )),
+    ]
+}
+
+fn take_window_restore_commands(
+    pending: &mut Option<fdx::WindowState>,
+) -> Option<[egui::ViewportCommand; 2]> {
+    pending.take().map(window_restore_commands)
 }
 
 fn page_geometry_input_invalidated(ctx: &egui::Context, previous_clip: Option<egui::Rect>) -> bool {
@@ -1855,6 +1981,168 @@ mod tests {
         app.session
             .replace_with_saved(legacy_json_project())
             .unwrap_or_else(|_| unreachable!());
+    }
+
+    #[test]
+    fn window_geometry_capture_uses_logical_outer_position_and_inner_size() {
+        let inner = egui::Rect::from_min_size(egui::pos2(40.0, 60.0), egui::vec2(870.4, 854.6));
+        let outer = egui::Rect::from_min_size(egui::pos2(-1919.6, -40.4), egui::vec2(900.0, 900.0));
+        assert_eq!(
+            window_state_from_rects(Some(inner), Some(outer)),
+            Some(fdx::WindowState { left: -1920, top: -40, width: 870, height: 855 })
+        );
+        assert_eq!(window_state_from_rects(Some(inner), None), None);
+        assert_eq!(window_state_from_rects(None, Some(outer)), None);
+        let invalid_inner = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(0.0, 40.0));
+        assert_eq!(window_state_from_rects(Some(invalid_inner), Some(outer)), None);
+    }
+
+    #[test]
+    fn imported_window_restore_commands_are_generated_once_and_never_retried() {
+        let requested = fdx::WindowState { left: -1920, top: 95, width: 1510, height: 854 };
+        let mut pending = Some(requested);
+        let commands = take_window_restore_commands(&mut pending)
+            .unwrap_or_else(|| unreachable!("valid imported window state generates commands"));
+        assert!(pending.is_none());
+        assert!(matches!(&commands[0], egui::ViewportCommand::OuterPosition(position)
+            if *position == egui::pos2(-1920.0, 95.0)));
+        assert!(matches!(&commands[1], egui::ViewportCommand::InnerSize(size)
+            if *size == egui::vec2(1510.0, 854.0)));
+        assert!(take_window_restore_commands(&mut pending).is_none());
+
+        let mut absent = None;
+        assert!(take_window_restore_commands(&mut absent).is_none());
+    }
+
+    #[test]
+    fn successful_open_queues_one_restore_without_mutating_session_state() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let project = Project::new().unwrap_or_else(|_| unreachable!());
+        let expected_project = project.clone();
+        let revision_before = app.session.revision();
+        let dirty_before = app.session.dirty();
+        let requested = fdx::WindowState { left: 12, top: -30, width: 1000, height: 800 };
+        app.activate_opened_project(
+            project,
+            std::path::Path::new("imported.fdx"),
+            None,
+            None,
+            Some(requested),
+            fdx::TextState::DEFAULT,
+        );
+        assert_eq!(app.pending_window_restore, Some(requested));
+        let context = test_context();
+        app.update_native_window_state(&context);
+        assert!(app.pending_window_restore.is_none());
+        assert_eq!(app.session.revision(), revision_before);
+        assert_eq!(app.session.dirty(), dirty_before);
+        app.update_native_window_state(&context);
+        assert!(app.pending_window_restore.is_none());
+    }
+
+    #[test]
+    fn v6_wo0013_open_restores_text_state_once_without_dirty_history_or_project_changes() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><TextState Scaling="100" Selection="0,0"/><Content><Paragraph Type="Action" id="p1"><Text>body</Text></Paragraph></Content></FinalDraft>"#;
+        let project = fdx::read_v6(source).unwrap_or_else(|_| unreachable!()).project;
+        let expected_project = project.clone();
+        let expected_selection = Selection::caret(Position { element: 0, offset: 0 });
+        let text_state = fdx::TextState { scaling: 175, selection: expected_selection };
+        let revision_before = app.session.revision();
+        app.activate_opened_project(
+            project,
+            std::path::Path::new("text-state.fdx"),
+            None,
+            None,
+            None,
+            text_state,
+        );
+        assert_eq!(app.session.selection(), expected_selection);
+        assert_eq!(app.zoom_percent, 175);
+        assert_eq!(app.pinch_zoom_percent, 175.0);
+        assert_eq!(app.session.revision(), revision_before);
+        assert!(!app.session.dirty());
+        assert!(!app.session.can_undo());
+        assert_eq!(app.session.project(), &expected_project);
+        let restored_revision = app.session.revision();
+        app.sync_pinch_zoom_from_controls();
+        assert_eq!(app.session.selection(), expected_selection);
+        assert_eq!(app.zoom_percent, 175);
+        assert_eq!(app.session.revision(), restored_revision);
+        assert!(!app.session.dirty());
+        let layout_before = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        let pdf_before = exports::export_pdf_with_layout_inputs(
+            app.session.project(),
+            app.session.layout_inputs(),
+        ).unwrap_or_else(|_| unreachable!());
+        app.session.set_selection(Selection::caret(Position { element: 0, offset: 2 }))
+            .unwrap_or_else(|_| unreachable!("caret movement is valid"));
+        app.zoom_percent = 200;
+        app.sync_pinch_zoom_from_controls();
+        assert_eq!(app.session.project(), &expected_project);
+        assert_eq!(app.pinch_zoom_percent, 200.0);
+        assert_eq!(app.session.revision(), restored_revision);
+        assert!(!app.session.dirty());
+        assert!(!app.session.can_undo());
+        assert_eq!(app.layout_for_render().unwrap_or_else(|_| unreachable!()), layout_before);
+        assert_eq!(
+            exports::export_pdf_with_layout_inputs(app.session.project(), app.session.layout_inputs())
+                .unwrap_or_else(|_| unreachable!()),
+            pdf_before,
+        );
+    }
+
+    #[test]
+    fn unusable_open_geometry_leaves_the_current_native_geometry_unchanged() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let current = fdx::WindowState { left: 30, top: 40, width: 900, height: 700 };
+        app.latest_window_state = Some(current);
+        app.activate_opened_project(
+            Project::new().unwrap_or_else(|_| unreachable!()),
+            std::path::Path::new("no-window-state.fdx"),
+            None,
+            None,
+            None,
+            fdx::TextState::DEFAULT,
+        );
+        app.update_native_window_state(&test_context());
+        assert_eq!(app.pending_window_restore, None);
+        assert_eq!(app.latest_window_state, Some(current));
+    }
+
+    #[test]
+    fn changing_desktop_geometry_does_not_change_project_history_layout_or_pdf() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let project_before = app.session.project().clone();
+        let revision_before = app.session.revision();
+        let dirty_before = app.session.dirty();
+        let can_undo_before = app.session.can_undo();
+        let layout_before = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        let pdf_before = exports::export_pdf_with_layout_inputs(
+            app.session.project(),
+            app.session.layout_inputs(),
+        )
+        .unwrap_or_else(|_| unreachable!());
+
+        app.latest_window_state = Some(fdx::WindowState {
+            left: -1920,
+            top: 85,
+            width: 1510,
+            height: 854,
+        });
+
+        let layout_after = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        let pdf_after = exports::export_pdf_with_layout_inputs(
+            app.session.project(),
+            app.session.layout_inputs(),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(app.session.project(), &project_before);
+        assert_eq!(app.session.revision(), revision_before);
+        assert_eq!(app.session.dirty(), dirty_before);
+        assert_eq!(app.session.can_undo(), can_undo_before);
+        assert_eq!(*layout_after, *layout_before);
+        assert_eq!(pdf_after, pdf_before);
     }
 
     fn render_app_frame(
@@ -3454,17 +3742,82 @@ mod tests {
     }
 
     #[test]
-    fn presentation_metrics_do_not_shrink_to_narrow_viewports() {
+    fn presentation_metrics_use_the_effective_paper_width_not_viewport_width() {
         let narrow = presentation_metrics(400.0, 612.0, 12.0);
         let stable = presentation_metrics(800.0, 612.0, 12.0);
 
-        assert_eq!(narrow.page_width, CURRENT_DEFAULT_PAGE_WIDTH);
+        assert_eq!(narrow.page_width, 612.0 * logical_points_per_document_point(current_presentation_platform()));
         assert_eq!(narrow, stable);
         assert_eq!(TOOLBAR_ELEMENTS_WIDTH, 128.0);
     }
 
     #[test]
-    fn wo001_zoom_geometry_uses_fixed_baseline_and_scales_every_integer_percent() {
+    fn wo0014_platform_presentation_uses_physical_paper_width_and_linear_zoom() {
+        for (platform, expected_factor) in [
+            (PresentationPlatform::MacOS, 1.0),
+            (PresentationPlatform::Windows, 96.0 / 72.0),
+            (PresentationPlatform::Other, 1.0),
+        ] {
+            assert_eq!(logical_points_per_document_point(platform), expected_factor);
+            let letter = presentation_metrics_at_zoom_for_platform(400.0, 612.0, 12.0, 100, platform);
+            assert!((letter.page_width - 612.0 * expected_factor).abs() < 0.001);
+            assert!((letter.scale - expected_factor).abs() < 0.001);
+
+            let arbitrary = presentation_metrics_at_zoom_for_platform(400.0, 480.0, 12.0, 100, platform);
+            assert!((arbitrary.page_width - 480.0 * expected_factor).abs() < 0.001);
+
+            for percent in [75, 100, 137, 300] {
+                let zoomed = presentation_metrics_at_zoom_for_platform(
+                    320.0,
+                    612.0,
+                    12.0,
+                    percent,
+                    platform,
+                );
+                let expected_scale = expected_factor * f32::from(percent) / 100.0;
+                assert!((zoomed.scale - expected_scale).abs() < 0.001);
+                assert!((zoomed.page_width - 612.0 * expected_scale).abs() < 0.001);
+                assert!((zoomed.font_size - 12.0 * expected_scale).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn wo0014_os_presentation_conversion_stays_outside_fixed_layout_and_pdf() {
+        let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let project = app.session.project();
+        let fixed_layout = ScreenplayLayout::build(project).unwrap_or_else(|_| unreachable!());
+        let fixed_pdf = exports::export_pdf(project).unwrap_or_else(|_| unreachable!());
+
+        for platform in [
+            PresentationPlatform::MacOS,
+            PresentationPlatform::Windows,
+            PresentationPlatform::Other,
+        ] {
+            for zoom_percent in [75, 100, 137, 300] {
+                let presentation = presentation_metrics_at_zoom_for_platform(
+                    800.0,
+                    fixed_layout.inputs.paper_width as f32,
+                    fixed_layout.inputs.font_size as f32,
+                    zoom_percent,
+                    platform,
+                );
+                assert!(presentation.page_width > 0.0);
+                assert!(presentation.scale > 0.0);
+                assert_eq!(
+                    ScreenplayLayout::build(project).unwrap_or_else(|_| unreachable!()),
+                    fixed_layout
+                );
+                assert_eq!(
+                    exports::export_pdf(project).unwrap_or_else(|_| unreachable!()),
+                    fixed_pdf
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wo001_zoom_geometry_scales_every_integer_percent_for_the_host_platform() {
         for available_width in [320.0, 400.0, 800.0, 1_400.0] {
             let baseline = presentation_metrics(available_width, 612.0, 12.0);
             let at_100 = presentation_metrics_at_zoom(available_width, 612.0, 12.0, 100);
@@ -3658,14 +4011,14 @@ mod tests {
             (Some(1.0), 1.0, 1.0),
             (Some(1.5), 1.0, 1.5),
             (Some(2.0), 1.0, 2.0),
-            (None, 2.3, 2.3),
+            (None, 1.0, 1.0),
             (Some(1.5), 1.0, 1.5),
-            (Some(f32::NAN), 2.3, 2.3),
-            (Some(0.0), 2.3, 2.3),
-            (Some(-1.0), 2.3, 2.3),
-            (Some(f32::INFINITY), 2.3, 2.3),
-            (Some(f32::NEG_INFINITY), 2.3, 2.3),
-            (None, 2.3, 2.3),
+            (Some(f32::NAN), 1.0, 1.0),
+            (Some(0.0), 1.0, 1.0),
+            (Some(-1.0), 1.0, 1.0),
+            (Some(f32::INFINITY), 1.0, 1.0),
+            (Some(f32::NEG_INFINITY), 1.0, 1.0),
+            (None, 1.0, 1.0),
         ] {
             let mut input = egui::RawInput::default();
             if let Some(viewport) = input.viewports.get_mut(&input.viewport_id) {
@@ -3677,7 +4030,7 @@ mod tests {
             assert_eq!(context.pixels_per_point(), expected_pixels_per_point);
         }
         assert_eq!(status_bar::resolved_ui_pixels_per_point(Some(1.5)), 1.5);
-        assert_eq!(status_bar::resolved_ui_pixels_per_point(None), 2.3);
+        assert_eq!(status_bar::resolved_ui_pixels_per_point(None), 1.0);
     }
 
     #[test]
@@ -3935,44 +4288,51 @@ mod tests {
         assert!(app.last_scroll_offset.x.abs() < 0.01);
         assert_eq!(
             app.last_scroll_page_rects.first().map(egui::Rect::width),
-            Some(CURRENT_DEFAULT_PAGE_WIDTH)
+            Some(612.0 * logical_points_per_document_point(current_presentation_platform()))
         );
     }
 
     #[test]
-    fn zoom_transforms_keep_pointer_hit_testing_on_the_same_source_position() {
+    fn os_and_zoom_transforms_keep_pointer_hit_testing_on_the_same_source_position() {
         let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         let layout =
             ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
         let line = &layout.pages[0].lines[0];
         let page_origin = egui::pos2(25.0, 40.0);
 
-        for zoom_percent in [75, 100, 137, 200, 300] {
-            let metrics = presentation_metrics_at_zoom(
-                800.0,
-                layout.inputs.paper_width as f32,
-                layout.inputs.font_size as f32,
-                zoom_percent,
-            );
-            let page_rect = egui::Rect::from_min_size(
-                page_origin,
-                Vec2::new(
-                    metrics.page_width,
-                    layout.inputs.paper_height as f32 * metrics.scale,
-                ),
-            );
-            let pointer = egui::pos2(
-                page_rect.left() + line.geometry.x.to_points_f32() * metrics.scale,
-                page_rect.top() + line.geometry.y.to_points_f32() * metrics.scale,
-            );
-            assert_eq!(
-                app.caret_from_pointer(&layout, 0, page_rect, metrics.scale, pointer),
-                Some(Position {
-                    element: line.element,
-                    offset: line.source.start,
-                }),
-                "zoom {zoom_percent}% must preserve semantic pointer mapping"
-            );
+        for platform in [
+            PresentationPlatform::MacOS,
+            PresentationPlatform::Windows,
+            PresentationPlatform::Other,
+        ] {
+            for zoom_percent in [75, 100, 137, 200, 300] {
+                let metrics = presentation_metrics_at_zoom_for_platform(
+                    800.0,
+                    layout.inputs.paper_width as f32,
+                    layout.inputs.font_size as f32,
+                    zoom_percent,
+                    platform,
+                );
+                let page_rect = egui::Rect::from_min_size(
+                    page_origin,
+                    Vec2::new(
+                        metrics.page_width,
+                        layout.inputs.paper_height as f32 * metrics.scale,
+                    ),
+                );
+                let pointer = egui::pos2(
+                    page_rect.left() + line.geometry.x.to_points_f32() * metrics.scale,
+                    page_rect.top() + line.geometry.y.to_points_f32() * metrics.scale,
+                );
+                assert_eq!(
+                    app.caret_from_pointer(&layout, 0, page_rect, metrics.scale, pointer),
+                    Some(Position {
+                        element: line.element,
+                        offset: line.source.start,
+                    }),
+                    "platform {platform:?}, zoom {zoom_percent}% must preserve semantic pointer mapping"
+                );
+            }
         }
     }
 
@@ -4749,51 +5109,56 @@ mod tests {
     #[test]
     fn wo001_presentation_geometry_keeps_fixed_page_and_centers_it() {
         let (page_width, padding, scale) = presentation_geometry(800.0, 612.0);
-        assert!((page_width - 360.0).abs() < f32::EPSILON);
-        assert!((padding - 220.0).abs() < f32::EPSILON);
-        assert!((scale - (360.0 / 612.0)).abs() < f32::EPSILON);
+        let expected_width = 612.0 * logical_points_per_document_point(current_presentation_platform());
+        let expected_content_width = 800.0f32.max(expected_width + PAGE_HORIZONTAL_PADDING * 2.0);
+        assert!((page_width - expected_width).abs() < f32::EPSILON);
+        assert!((padding - (expected_content_width - expected_width) / 2.0).abs() < f32::EPSILON);
+        assert!((scale - logical_points_per_document_point(current_presentation_platform())).abs() < f32::EPSILON);
 
         let (narrow_width, narrow_padding, narrow_scale) = presentation_geometry(400.0, 612.0);
-        assert!((narrow_width - 360.0).abs() < f32::EPSILON);
-        assert!((narrow_padding - 20.0).abs() < f32::EPSILON);
+        assert!((narrow_width - expected_width).abs() < f32::EPSILON);
+        assert!((narrow_padding - PAGE_HORIZONTAL_PADDING).abs() < f32::EPSILON);
         assert_eq!(narrow_scale, scale);
     }
 
     #[test]
     fn wo001_scroll_geometry_has_exact_buffered_overflow_threshold() {
-        let wide = page_scroll_geometry(800.0, 360.0);
-        assert_eq!(wide.content_width, 800.0);
-        assert_eq!(wide.leading_padding, 220.0);
+        let page_width = 612.0 * logical_points_per_document_point(current_presentation_platform());
+        let threshold = page_width + PAGE_HORIZONTAL_PADDING * 2.0;
+        let wide = page_scroll_geometry(1_000.0, page_width);
+        assert_eq!(wide.content_width, 1_000.0);
+        assert_eq!(wide.leading_padding, (1_000.0 - page_width) / 2.0);
         assert!(!wide.horizontal_overflow);
 
-        let exact = page_scroll_geometry(392.0, 360.0);
-        assert_eq!(exact.content_width, 392.0);
+        let exact = page_scroll_geometry(threshold, page_width);
+        assert_eq!(exact.content_width, threshold);
         assert_eq!(exact.leading_padding, 16.0);
         assert!(!exact.horizontal_overflow);
 
-        let overflow = page_scroll_geometry(391.0, 360.0);
-        assert_eq!(overflow.content_width, 392.0);
+        let overflow = page_scroll_geometry(threshold - 1.0, page_width);
+        assert_eq!(overflow.content_width, threshold);
         assert_eq!(overflow.leading_padding, 16.0);
         assert!(overflow.horizontal_overflow);
 
-        let tiny = page_scroll_geometry(0.0, 360.0);
-        assert_eq!(tiny.content_width, 392.0);
+        let tiny = page_scroll_geometry(0.0, page_width);
+        assert_eq!(tiny.content_width, threshold);
         assert_eq!(tiny.leading_padding, 16.0);
         assert!(tiny.horizontal_overflow);
 
-        let invalid = page_scroll_geometry(f32::NAN, 360.0);
+        let invalid = page_scroll_geometry(f32::NAN, page_width);
         assert_eq!(invalid.viewport_width, 0.0);
-        assert_eq!(invalid.content_width, 392.0);
+        assert_eq!(invalid.content_width, threshold);
         assert!(invalid.horizontal_overflow);
     }
 
     #[test]
-    fn wo001_rendered_sheet_uses_fixed_logical_width_and_single_system_scaling() {
+    fn wo0014_rendered_sheet_uses_paper_width_and_single_native_system_scaling() {
         for (native_scale, effective_scale) in [
             (Some(1.0), 1.0),
+            (Some(1.25), 1.25),
             (Some(1.5), 1.5),
             (Some(2.0), 2.0),
-            (None, 2.3),
+            (None, 1.0),
         ] {
             for zoom_percent in [100, 150] {
                 let context = test_context();
@@ -4824,7 +5189,8 @@ mod tests {
                         _ => None,
                     })
                     .unwrap_or(egui::Rect::NOTHING);
-                let expected_logical = 360.0 * f32::from(zoom_percent) / 100.0;
+                let factor = logical_points_per_document_point(current_presentation_platform());
+                let expected_logical = 612.0 * factor * f32::from(zoom_percent) / 100.0;
                 assert!((page.width() - expected_logical).abs() < 0.01);
                 assert!(
                     (page.width() * context.pixels_per_point()
@@ -4836,10 +5202,10 @@ mod tests {
                 assert!((context.pixels_per_point() - effective_scale).abs() < 0.001);
                 assert_eq!(
                     context.zoom_factor(),
-                    if native_scale.is_some() { 1.0 } else { 2.3 },
+                    1.0,
                     "page zoom must not alter global UI zoom"
                 );
-                assert!((app.page_scale.unwrap_or(0.0) - expected_logical / 612.0).abs() < 0.001);
+                assert!((app.page_scale.unwrap_or(0.0) - factor * f32::from(zoom_percent) / 100.0).abs() < 0.001);
                 assert_eq!(app.session.revision(), 0);
                 assert!(!app.session.dirty());
             }
@@ -4848,10 +5214,12 @@ mod tests {
 
     #[test]
     fn wo001_rendered_inner_clip_controls_centering_and_horizontal_overflow() {
+        let page_width = 612.0 * logical_points_per_document_point(current_presentation_platform());
+        let threshold = page_width + PAGE_HORIZONTAL_PADDING * 2.0;
         for (viewport_width, expected_padding, should_overflow) in [
-            (800.0, 220.0, false),
-            (392.0, 16.0, false),
-            (390.0, 16.0, true),
+            (threshold + 408.0, 220.0, false),
+            (threshold, PAGE_HORIZONTAL_PADDING, false),
+            (threshold - 2.0, PAGE_HORIZONTAL_PADDING, true),
         ] {
             let context = test_context();
             let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
@@ -4876,13 +5244,13 @@ mod tests {
             let inner = app.last_scroll_inner_rect;
             assert!((inner.width() - viewport_width).abs() < 0.01);
             assert!((page.left() - inner.left() - expected_padding).abs() < 0.01);
-            assert!((page.width() - CURRENT_DEFAULT_PAGE_WIDTH).abs() < 0.01);
+            assert!((page.width() - page_width).abs() < 0.01);
             assert!(
                 (inner.left() + app.last_scroll_content_size.x - page.right() - expected_padding)
                     .abs()
                     < 0.01
             );
-            assert!((app.last_scroll_content_size.x - viewport_width.max(392.0)).abs() < 0.01);
+            assert!((app.last_scroll_content_size.x - viewport_width.max(threshold)).abs() < 0.01);
             assert_eq!(app.last_scroll_horizontal_item_spacing, 0.0);
             assert_eq!(
                 app.last_scroll_content_size.x > inner.width() + 0.01,

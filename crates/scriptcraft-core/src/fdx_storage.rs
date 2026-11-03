@@ -347,19 +347,77 @@ pub fn save_session<F: FdxStorageFileSystem>(
     target: &mut FdxSaveTarget,
     mode: FdxSaveMode,
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
-    save_session_with_codec(fs, session, target, mode, &NativeSaveCandidateCodec)
+    let text_state = fdx::TextState { scaling: 100, selection: session.selection() };
+    save_session_with_view_state(
+        fs,
+        session,
+        target,
+        mode,
+        fdx::WindowState::DEFAULT,
+        text_state,
+    )
+}
+
+/// Save using the latest desktop-reported logical native geometry. Geometry is
+/// save-scoped disposable FDX view state and never enters the editing session.
+pub fn save_session_with_window_state<F: FdxStorageFileSystem>(
+    fs: &F,
+    session: &mut EditingSession,
+    target: &mut FdxSaveTarget,
+    mode: FdxSaveMode,
+    window_state: fdx::WindowState,
+) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
+    let text_state = fdx::TextState { scaling: 100, selection: session.selection() };
+    save_session_with_view_state(
+        fs,
+        session,
+        target,
+        mode,
+        window_state,
+        text_state,
+    )
+}
+
+/// Save with the current editor selection and persisted whole-percent page zoom.
+/// Both values are captured in the detached save candidate only.
+pub fn save_session_with_view_state<F: FdxStorageFileSystem>(
+    fs: &F,
+    session: &mut EditingSession,
+    target: &mut FdxSaveTarget,
+    mode: FdxSaveMode,
+    window_state: fdx::WindowState,
+    text_state: fdx::TextState,
+) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
+    save_session_with_codec_and_view_state(
+        fs,
+        session,
+        target,
+        mode,
+        &NativeSaveCandidateCodec,
+        window_state,
+        text_state,
+    )
 }
 
 trait SaveCandidateCodec {
-    fn serialize(&self, project: &Project) -> Result<PreparedFdx, TransactionalSaveError>;
+    fn serialize(
+        &self,
+        project: &Project,
+        context: &mut fdx::SaveContext,
+    ) -> Result<PreparedFdx, TransactionalSaveError>;
     fn reread(&self, bytes: &[u8]) -> Result<Project, FdxError>;
 }
 
 struct NativeSaveCandidateCodec;
 
 impl SaveCandidateCodec for NativeSaveCandidateCodec {
-    fn serialize(&self, project: &Project) -> Result<PreparedFdx, TransactionalSaveError> {
-        PreparedFdx::from_project(project).map_err(|error| match &error.kind {
+    fn serialize(
+        &self,
+        project: &Project,
+        context: &mut fdx::SaveContext,
+    ) -> Result<PreparedFdx, TransactionalSaveError> {
+        let bytes = fdx::write_v6_for_save(project, context).map_err(TransactionalSaveError::Codec)?;
+        PreparedFdx::from_validated_bytes(bytes).map_err(|error| match &error.kind {
             FdxStorageErrorKind::InvalidFdx(codec_error) => {
                 TransactionalSaveError::Codec(codec_error.clone())
             }
@@ -386,6 +444,48 @@ fn save_session_with_codec<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
     mode: FdxSaveMode,
     codec: &C,
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
+    let text_state = fdx::TextState { scaling: 100, selection: session.selection() };
+    save_session_with_codec_and_view_state(
+        fs,
+        session,
+        target,
+        mode,
+        codec,
+        fdx::WindowState::DEFAULT,
+        text_state,
+    )
+}
+
+fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
+    fs: &F,
+    session: &mut EditingSession,
+    target: &mut FdxSaveTarget,
+    mode: FdxSaveMode,
+    codec: &C,
+    window_state: fdx::WindowState,
+    text_state: fdx::TextState,
+) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
+    let operation = match &mode {
+        FdxSaveMode::Save => fdx::SaveOperation::Save,
+        FdxSaveMode::SaveAs(_) => fdx::SaveOperation::SaveAs,
+    };
+    let context = fdx::SaveContext::new(operation).with_opened_timestamp(
+        session
+            .opened_document_ref_datetime()
+            .map(str::to_owned),
+    ).with_window_state(window_state);
+    let context = context.with_text_state(text_state);
+    save_session_with_context(fs, session, target, mode, context, codec)
+}
+
+fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
+    fs: &F,
+    session: &mut EditingSession,
+    target: &mut FdxSaveTarget,
+    mode: FdxSaveMode,
+    mut context: fdx::SaveContext,
+    codec: &C,
+) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
     let (destination, existing_baseline) = match mode {
         FdxSaveMode::Save => {
             let path = target
@@ -405,7 +505,7 @@ fn save_session_with_codec<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
     let corrected = session
         .prepare_cast_list_save_candidate()
         .map_err(TransactionalSaveError::Session)?;
-    let prepared = codec.serialize(&corrected)?;
+    let prepared = codec.serialize(&corrected, &mut context)?;
     let mut rebased_project = codec
         .reread(&prepared.bytes)
         .map_err(TransactionalSaveError::Codec)?;
@@ -1493,7 +1593,11 @@ mod tests {
         }
 
         impl SaveCandidateCodec for InjectedCodec {
-            fn serialize(&self, project: &Project) -> Result<PreparedFdx, TransactionalSaveError> {
+            fn serialize(
+                &self,
+                project: &Project,
+                _context: &mut fdx::SaveContext,
+            ) -> Result<PreparedFdx, TransactionalSaveError> {
                 if self.fail_serialization {
                     return Err(TransactionalSaveError::Codec(FdxError::InvalidValue));
                 }
@@ -1584,6 +1688,47 @@ mod tests {
         assert_eq!(session, before_session);
         assert_eq!(target, FdxSaveTarget::new_unsaved());
         assert!(fs.bytes(Path::new("/mem/candidate.fdx")).is_none());
+    }
+
+    #[test]
+    fn injected_save_as_failure_does_not_publish_window_text_state_or_lineage_candidate() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef DateTime="20261001T120000" id="doc"/><Content><Paragraph Type="Action" ID="p1"><Text>original</Text></Paragraph></Content></FinalDraft>"#;
+        let fs = MemFs::default();
+        fs.set_fault(Fault::WriteAfter(0));
+        let mut session = save_test_session(source);
+        let before_session = session.clone();
+        let mut target = FdxSaveTarget::new_unsaved();
+        let before_target = target.clone();
+        let destination = PathBuf::from("/mem/window-lineage-failure.fdx");
+        let context = fdx::SaveContext::with_timestamp(
+            fdx::SaveOperation::SaveAs,
+            "20261103T101112".to_owned(),
+        )
+        .with_opened_timestamp(Some("20261001T120000".to_owned()))
+        .with_test_lineage_ids(vec!["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned()])
+        .with_window_state(fdx::WindowState {
+            left: -1440,
+            top: 95,
+            width: 1200,
+            height: 900,
+        })
+        .with_text_state(fdx::TextState {
+            scaling: 188,
+            selection: session.selection(),
+        });
+
+        assert!(save_session_with_context(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAs(destination.clone()),
+            context,
+            &NativeSaveCandidateCodec,
+        )
+        .is_err());
+        assert_eq!(session, before_session);
+        assert_eq!(target, before_target);
+        assert!(fs.bytes(&destination).is_none());
     }
 
     #[test]
@@ -2017,6 +2162,253 @@ mod tests {
             PreparedFdx::from_bytes(vec![b'x'; MAX_SOURCE_BYTES + 1]).map(|_| ()),
             Err(FdxStorageError::new(FdxStorageErrorKind::SourceTooLarge))
         );
+    }
+
+    #[test]
+    fn lineage_save_context_uses_fixed_clock_and_ids_across_session_rebases() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef DateTime="20261001T120000" id="document-original"><XRef DateTime="20260930T120000" id="xref-original"/></DocumentRef><Content><Paragraph Type="Action" id="p1"><Text>lineage</Text></Paragraph></Content></FinalDraft>"#;
+        let fs = MemFs::default();
+        let source_path = Path::new("/mem/lineage-open.fdx");
+        fs.put(source_path, source.to_vec());
+        let opened = open(&fs, source_path).unwrap_or_else(|_| unreachable!());
+        let mut session = EditingSession::new(opened.document.project)
+            .unwrap_or_else(|_| unreachable!());
+        let opened_timestamp = session
+            .opened_document_ref_datetime()
+            .map(str::to_owned);
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+        let first_id = "b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned();
+        let second_id = "17ebd8dd-7497-4e6d-99fd-a88fb7a2c620".to_owned();
+        let first_destination = PathBuf::from("/mem/lineage-copy-1.fdx");
+        let first_context = fdx::SaveContext::with_timestamp(
+            fdx::SaveOperation::SaveAs,
+            "20261103T101112".to_owned(),
+        )
+        .with_opened_timestamp(opened_timestamp.clone())
+        .with_test_lineage_ids(vec![first_id.clone()]);
+        save_session_with_context(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAs(first_destination.clone()),
+            first_context,
+            &NativeSaveCandidateCodec,
+        )
+        .unwrap_or_else(|_| unreachable!("fixed-context Save As succeeds"));
+        let first_bytes = fs
+            .bytes(&first_destination)
+            .unwrap_or_else(|| unreachable!("first fixed-context output exists"));
+        let first_xml = String::from_utf8(first_bytes)
+            .unwrap_or_else(|_| unreachable!("writer emits UTF-8"));
+        assert!(first_xml.contains("DateTime=\"20261103T101112\" id=\"document-original\""));
+        assert!(first_xml.contains("DateTime=\"20261001T120000\" id=\"b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa\""));
+
+        let second_destination = PathBuf::from("/mem/lineage-copy-2.fdx");
+        let second_context = fdx::SaveContext::with_timestamp(
+            fdx::SaveOperation::SaveAs,
+            "20261103T121314".to_owned(),
+        )
+        .with_opened_timestamp(opened_timestamp)
+        .with_test_lineage_ids(vec![second_id.clone()]);
+        save_session_with_context(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAs(second_destination.clone()),
+            second_context,
+            &NativeSaveCandidateCodec,
+        )
+        .unwrap_or_else(|_| unreachable!("repeated fixed-context Save As succeeds"));
+        let second_bytes = fs
+            .bytes(&second_destination)
+            .unwrap_or_else(|| unreachable!("second fixed-context output exists"));
+        let second_xml = String::from_utf8(second_bytes)
+            .unwrap_or_else(|_| unreachable!("writer emits UTF-8"));
+        assert!(second_xml.contains("DateTime=\"20261103T121314\" id=\"document-original\""));
+        assert!(second_xml.contains("DateTime=\"20261001T120000\" id=\"b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa\""));
+        assert!(second_xml.contains("DateTime=\"20261001T120000\" id=\"17ebd8dd-7497-4e6d-99fd-a88fb7a2c620\""));
+        assert_ne!(first_id, second_id);
+    }
+
+    #[test]
+    fn lineage_publication_failure_keeps_live_tree_anchor_path_and_destination_unchanged() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef DateTime="20261001T120000" id="document-original"><XRef DateTime="20260930T120000" id="xref-original"/></DocumentRef><Content><Paragraph Type="Action" id="p1"><Text>lineage</Text></Paragraph></Content></FinalDraft>"#;
+        let fs = MemFs::default();
+        let source_path = Path::new("/mem/lineage-failure.fdx");
+        fs.put(source_path, source.to_vec());
+        let opened = open(&fs, source_path).unwrap_or_else(|_| unreachable!());
+        let mut session = EditingSession::new(opened.document.project)
+            .unwrap_or_else(|_| unreachable!());
+        let before_session = session.clone();
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+        let before_target = target.clone();
+        fs.set_fault(Fault::Replace);
+
+        let context = fdx::SaveContext::with_timestamp(
+            fdx::SaveOperation::Save,
+            "20261103T101112".to_owned(),
+        )
+        .with_opened_timestamp(Some("20261001T120000".to_owned()));
+        let result = save_session_with_context(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::Save,
+            context,
+            &NativeSaveCandidateCodec,
+        );
+
+        assert!(matches!(
+            result,
+            Err(TransactionalSaveError::Storage(FdxStorageError {
+                kind: FdxStorageErrorKind::Io(StorageOperation::Replace),
+                ..
+            }))
+        ));
+        assert_eq!(session, before_session);
+        assert_eq!(target, before_target);
+        assert_eq!(fs.bytes(source_path), Some(source.to_vec()));
+    }
+
+    #[test]
+    fn lineage_id_allocation_retries_registered_collisions_and_keeps_failures_transactional() {
+        let collision = "b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned();
+        let allocated = "17ebd8dd-7497-4e6d-99fd-a88fb7a2c620".to_owned();
+        let source = format!(
+            "<FinalDraft DocumentType=\"Script\" Version=\"6\"><DocumentRef DateTime=\"20261001T120000\" id=\"document-original\"/><Vendor id=\"{collision}\"/><Content><Paragraph Type=\"Action\" id=\"p1\"><Text>lineage</Text></Paragraph></Content></FinalDraft>"
+        )
+        .into_bytes();
+        let fs = MemFs::default();
+        let source_path = Path::new("/mem/lineage-collision.fdx");
+        fs.put(source_path, source.clone());
+        let opened = open(&fs, source_path).unwrap_or_else(|_| unreachable!());
+        let mut session = EditingSession::new(opened.document.project)
+            .unwrap_or_else(|_| unreachable!());
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+        let destination = PathBuf::from("/mem/lineage-collision-copy.fdx");
+        let context = fdx::SaveContext::with_timestamp(
+            fdx::SaveOperation::SaveAs,
+            "20261103T101112".to_owned(),
+        )
+        .with_opened_timestamp(Some("20261001T120000".to_owned()))
+        .with_test_lineage_ids(vec![collision.clone(), allocated.clone()]);
+        save_session_with_context(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAs(destination.clone()),
+            context,
+            &NativeSaveCandidateCodec,
+        )
+        .unwrap_or_else(|_| unreachable!("allocator retries a registered ID collision"));
+        let output = fs
+            .bytes(&destination)
+            .unwrap_or_else(|| unreachable!("collision retry output exists"));
+        let output = String::from_utf8(output)
+            .unwrap_or_else(|_| unreachable!("writer emits UTF-8"));
+        assert!(output.contains(&format!("id=\"{allocated}\"")));
+        assert!(!output.contains(&format!("DateTime=\"20261001T120000\" id=\"{collision}\"")));
+
+        let fs = MemFs::default();
+        let source_path = Path::new("/mem/lineage-collision-limit.fdx");
+        fs.put(source_path, source.clone());
+        let opened = open(&fs, source_path).unwrap_or_else(|_| unreachable!());
+        let mut session = EditingSession::new(opened.document.project)
+            .unwrap_or_else(|_| unreachable!());
+        let before_session = session.clone();
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+        let before_target = target.clone();
+        let destination = PathBuf::from("/mem/lineage-collision-limit-copy.fdx");
+        let context = fdx::SaveContext::with_timestamp(
+            fdx::SaveOperation::SaveAs,
+            "20261103T101112".to_owned(),
+        )
+        .with_opened_timestamp(Some("20261001T120000".to_owned()))
+        .with_test_lineage_ids(vec![collision.clone(); 16]);
+        let result = save_session_with_context(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAs(destination.clone()),
+            context,
+            &NativeSaveCandidateCodec,
+        );
+        assert!(matches!(
+            result,
+            Err(TransactionalSaveError::Codec(
+                FdxError::SaveDiagnosticUnsupportedConstruct(38)
+            ))
+        ));
+        assert_eq!(session, before_session);
+        assert_eq!(target, before_target);
+        assert_eq!(fs.bytes(source_path), Some(source));
+        assert!(fs.bytes(&destination).is_none());
+    }
+
+    #[test]
+    fn lineage_entropy_failure_does_not_publish_a_new_document() {
+        let fs = MemFs::default();
+        let mut session = EditingSession::new(Project::new().unwrap_or_else(|_| unreachable!()))
+            .unwrap_or_else(|_| unreachable!());
+        let before_session = session.clone();
+        let mut target = FdxSaveTarget::new_unsaved();
+        let destination = PathBuf::from("/mem/lineage-entropy-failure.fdx");
+        let context = fdx::SaveContext::with_timestamp(
+            fdx::SaveOperation::SaveAs,
+            "20261103T101112".to_owned(),
+        )
+        .with_test_lineage_entropy_failure();
+
+        let result = save_session_with_context(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAs(destination.clone()),
+            context,
+            &NativeSaveCandidateCodec,
+        );
+        assert!(matches!(
+            result,
+            Err(TransactionalSaveError::Codec(
+                FdxError::SaveDiagnosticUnsupportedConstruct(37)
+            ))
+        ));
+        assert_eq!(session, before_session);
+        assert_eq!(target, FdxSaveTarget::new_unsaved());
+        assert!(fs.bytes(&destination).is_none());
+    }
+
+    #[test]
+    fn first_new_document_save_as_uses_one_fixed_timestamp_for_documentref_and_initial_xref() {
+        let fs = MemFs::default();
+        let project = Project::new().unwrap_or_else(|_| unreachable!());
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        let mut target = FdxSaveTarget::new_unsaved();
+        let destination = PathBuf::from("/mem/lineage-new-project.fdx");
+        let document_id = "b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned();
+        let xref_id = "17ebd8dd-7497-4e6d-99fd-a88fb7a2c620".to_owned();
+        let context = fdx::SaveContext::with_timestamp(
+            fdx::SaveOperation::SaveAs,
+            "20261103T101112".to_owned(),
+        )
+        .with_test_lineage_ids(vec![document_id.clone(), xref_id.clone()]);
+
+        save_session_with_context(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAs(destination.clone()),
+            context,
+            &NativeSaveCandidateCodec,
+        )
+        .unwrap_or_else(|_| unreachable!("new fixed-context Save As succeeds"));
+        let output = fs
+            .bytes(&destination)
+            .unwrap_or_else(|| unreachable!("new project Save As output exists"));
+        let output = String::from_utf8(output)
+            .unwrap_or_else(|_| unreachable!("writer emits UTF-8"));
+        assert!(output.contains("<DocumentRef DateTime=\"20261103T101112\" id=\"b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa\">"));
+        assert!(output.contains("<XRef DateTime=\"20261103T101112\" id=\"17ebd8dd-7497-4e6d-99fd-a88fb7a2c620\"/>"));
     }
 
     #[cfg(unix)]

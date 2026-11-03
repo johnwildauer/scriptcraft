@@ -6,7 +6,6 @@ const COMPACT_STATUS_BREAKPOINT: f32 = 720.0;
 pub(super) const MIN_ZOOM_PERCENT: u16 = 75;
 pub(super) const MAX_ZOOM_PERCENT: u16 = 300;
 pub(super) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250, 300];
-const FALLBACK_UI_PIXELS_PER_POINT: f32 = 2.3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum AppearanceMode {
@@ -215,7 +214,7 @@ pub(super) fn plan_right_status_items(
 pub(super) fn resolved_ui_pixels_per_point(native: Option<f32>) -> f32 {
     native
         .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(FALLBACK_UI_PIXELS_PER_POINT)
+        .unwrap_or(1.0)
 }
 
 pub(super) fn ui_zoom_factor(native: Option<f32>) -> f32 {
@@ -2342,8 +2341,8 @@ mod tests {
     }
 
     #[test]
-    fn native_ui_scale_prefers_valid_os_value_once_and_uses_2_3_fallback() {
-        for native in [Some(1.0), Some(1.5), Some(2.0)] {
+    fn native_ui_scale_prefers_valid_os_value_once_and_uses_neutral_fallback() {
+        for native in [Some(1.0), Some(1.25), Some(1.5), Some(2.0)] {
             assert_eq!(resolved_ui_pixels_per_point(native), native.unwrap_or(0.0));
             assert_eq!(ui_zoom_factor(native), 1.0);
             assert_eq!(
@@ -2359,10 +2358,11 @@ mod tests {
             Some(f32::INFINITY),
             Some(f32::NEG_INFINITY),
         ] {
-            assert_eq!(resolved_ui_pixels_per_point(invalid), 2.3);
-            assert_eq!(ui_zoom_factor(invalid), 2.3);
+            assert_eq!(resolved_ui_pixels_per_point(invalid), 1.0);
+            assert_eq!(ui_zoom_factor(invalid), 1.0);
         }
-        assert!((ui_zoom_factor(None) * 1.5 - 3.45).abs() < 0.000_001);
+        assert_eq!(resolved_ui_pixels_per_point(None), 1.0);
+        assert_eq!(ui_zoom_factor(None), 1.0);
         assert_eq!(ui_zoom_factor(Some(1.5)) * 1.5, 1.5);
     }
 
