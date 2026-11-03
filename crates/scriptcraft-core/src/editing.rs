@@ -85,9 +85,9 @@ struct Snapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditingSession {
     project: Project,
-    /// Timestamp captured from the imported DocumentRef at session creation.
-    /// It is session lineage state, not canonical content or undoable state.
-    opened_document_ref_datetime: Option<String>,
+    /// Wall-clock time captured when this editing session begins. It is
+    /// ephemeral lineage state, independent of DocumentRef and undo history.
+    session_open_timestamp: String,
     policy: EditPolicy,
     layout_inputs: LayoutInputs,
     selection: Selection,
@@ -115,6 +115,20 @@ impl EditingSession {
         policy: EditPolicy,
         layout_inputs: LayoutInputs,
     ) -> Result<Self, EditError> {
+        Self::with_policy_layout_and_session_timestamp(
+            project,
+            policy,
+            layout_inputs,
+            crate::fdx::current_timestamp(),
+        )
+    }
+
+    fn with_policy_layout_and_session_timestamp(
+        project: Project,
+        policy: EditPolicy,
+        layout_inputs: LayoutInputs,
+        session_open_timestamp: String,
+    ) -> Result<Self, EditError> {
         project.validate()?;
         validate_layout_inputs(&layout_inputs)?;
         let selection = Selection::caret(Position {
@@ -122,12 +136,10 @@ impl EditingSession {
             offset: 0,
         });
         validate_selection(&project, selection)?;
-        let opened_document_ref_datetime =
-            crate::fdx::opened_document_ref_datetime_from_project(&project);
         Ok(Self {
             clean_project: project.clone(),
             project,
-            opened_document_ref_datetime,
+            session_open_timestamp,
             policy,
             layout_inputs,
             selection,
@@ -140,6 +152,20 @@ impl EditingSession {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_session_open_timestamp_for_test(
+        project: Project,
+        session_open_timestamp: String,
+    ) -> Result<Self, EditError> {
+        let layout_inputs = project.session_layout_inputs();
+        Self::with_policy_layout_and_session_timestamp(
+            project,
+            EditPolicy::default(),
+            layout_inputs,
+            session_open_timestamp,
+        )
+    }
+
     pub fn with_history_limit(project: Project, history_limit: usize) -> Result<Self, EditError> {
         let mut session = Self::new(project)?;
         session.history_limit = history_limit;
@@ -149,8 +175,8 @@ impl EditingSession {
     pub fn project(&self) -> &Project {
         &self.project
     }
-    pub(crate) fn opened_document_ref_datetime(&self) -> Option<&str> {
-        self.opened_document_ref_datetime.as_deref()
+    pub(crate) fn session_open_timestamp(&self) -> &str {
+        &self.session_open_timestamp
     }
     /// Current ephemeral editing policy. Undo/redo and document replacement do
     /// not restore or alter it; a newly constructed session uses defaults.
@@ -252,7 +278,8 @@ impl EditingSession {
     }
 
     pub fn replace_with_saved(&mut self, project: Project) -> Result<(), EditError> {
-        let replacement = Self::with_policy(project, self.policy)?;
+        let mut replacement = Self::with_policy(project, self.policy)?;
+        replacement.session_open_timestamp = self.session_open_timestamp.clone();
         *self = replacement;
         Ok(())
     }
@@ -1317,6 +1344,26 @@ mod tests {
         session
             .set_selection(Selection::caret(Position { element, offset }))
             .unwrap_or_else(|_| unreachable!());
+    }
+
+    #[test]
+    fn session_open_timestamp_is_ephemeral_and_survives_saved_replacements() {
+        let project = Project::new().unwrap_or_else(|_| unreachable!());
+        let session_open_timestamp = "20261103T090807".to_owned();
+        let mut session = EditingSession::with_session_open_timestamp_for_test(
+            project.clone(),
+            session_open_timestamp.clone(),
+        )
+        .unwrap_or_else(|_| unreachable!());
+
+        let rebased = session
+            .prepare_saved_rebase(project.clone())
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(rebased.session_open_timestamp(), session_open_timestamp);
+        session
+            .replace_with_saved(project)
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.session_open_timestamp(), session_open_timestamp);
     }
 
     #[test]

@@ -144,7 +144,7 @@ fn ordinary_saves_refresh_documentref_only_and_direct_write_is_lineage_neutral()
 }
 
 #[test]
-fn repeated_save_as_uses_session_open_timestamp_until_reopen() {
+fn repeated_save_as_reuses_the_session_open_timestamp_and_reopen_starts_another_session() {
     let directory = TestDirectory::new();
     let source_path = directory.path("opened.fdx");
     std::fs::write(&source_path, OPENED)
@@ -152,7 +152,6 @@ fn repeated_save_as_uses_session_open_timestamp_until_reopen() {
     let fs = StdFdxStorageFileSystem;
     let opened = open(&fs, &source_path)
         .unwrap_or_else(|_| unreachable!("lineage fixture opens"));
-    assert_eq!(opened.document.opened_document_ref_datetime.as_deref(), Some("20261001T120000"));
     let mut session = EditingSession::new(opened.document.project)
         .unwrap_or_else(|_| unreachable!("lineage session initializes"));
     let mut target = FdxSaveTarget::from_baseline(opened.baseline);
@@ -172,18 +171,13 @@ fn repeated_save_as_uses_session_open_timestamp_until_reopen() {
     let second_xrefs = xrefs(&second_ref);
     assert_eq!(second_xrefs.len(), 3);
     assert_eq!(second_xrefs[0], ("20260930T120000".into(), "xref-original".into()));
-    assert_eq!(second_xrefs[1].0, "20261001T120000");
-    assert_eq!(second_xrefs[2].0, "20261001T120000");
+    assert!(valid_timestamp(&second_xrefs[1].0));
+    assert_eq!(second_xrefs[1].0, second_xrefs[2].0);
     assert_ne!(second_xrefs[1].1, second_xrefs[2].1);
     assert_ne!(attribute(&second_ref, "DateTime"), Some("20261001T120000"));
 
     let reopened = open(&fs, &second_copy)
         .unwrap_or_else(|_| unreachable!("saved copy reopens"));
-    let new_anchor = reopened
-        .document
-        .opened_document_ref_datetime
-        .clone()
-        .unwrap_or_else(|| unreachable!("saved DocumentRef timestamp becomes the new anchor"));
     let mut reopened_session = EditingSession::new(reopened.document.project)
         .unwrap_or_else(|_| unreachable!("reopened session initializes"));
     let mut reopened_target = FdxSaveTarget::from_baseline(reopened.baseline);
@@ -192,11 +186,13 @@ fn repeated_save_as_uses_session_open_timestamp_until_reopen() {
     let third_bytes = std::fs::read(&third_copy)
         .unwrap_or_else(|_| unreachable!("third Save As output is readable"));
     let third_xrefs = xrefs(&document_ref(&third_bytes));
-    assert_eq!(third_xrefs.last().map(|xref| xref.0.as_str()), Some(new_anchor.as_str()));
+    assert_eq!(third_xrefs.len(), 4);
+    assert!(valid_timestamp(&third_xrefs[3].0));
+    assert_ne!(third_xrefs[2].1, third_xrefs[3].1);
 }
 
 #[test]
-fn first_save_as_and_missing_or_malformed_documentref_use_current_save_timestamp() {
+fn save_as_and_missing_or_malformed_documentref_keep_session_and_save_times_separate() {
     let directory = TestDirectory::new();
     let fs = StdFdxStorageFileSystem;
 
@@ -211,7 +207,8 @@ fn first_save_as_and_missing_or_malformed_documentref_use_current_save_timestamp
     let new_ref = document_ref(&new_bytes);
     let new_xrefs = xrefs(&new_ref);
     assert_eq!(new_xrefs.len(), 1);
-    assert_eq!(new_xrefs[0].0, attribute(&new_ref, "DateTime").unwrap_or(""));
+    assert!(valid_timestamp(&new_xrefs[0].0));
+    assert!(valid_timestamp(attribute(&new_ref, "DateTime").unwrap_or("")));
     assert_ne!(new_xrefs[0].1, attribute(&new_ref, "id").unwrap_or(""));
 
     for (filename, source, expected_id) in [
@@ -242,7 +239,11 @@ fn first_save_as_and_missing_or_malformed_documentref_use_current_save_timestamp
         if let Some(expected_id) = expected_id {
             assert_eq!(attribute(&reference, "id"), Some(expected_id));
         }
-        assert_eq!(xrefs(&reference).last().map(|xref| xref.0.as_str()), attribute(&reference, "DateTime"));
+        let output_xrefs = xrefs(&reference);
+        let expected_xref_count = if filename == "malformed-date.fdx" { 2 } else { 1 };
+        assert_eq!(output_xrefs.len(), expected_xref_count);
+        assert!(valid_timestamp(&output_xrefs[expected_xref_count - 1].0));
+        assert!(valid_timestamp(attribute(&reference, "DateTime").unwrap_or("")));
         let document = imported(&output);
         let root_children = direct_children(
             &document
@@ -261,4 +262,38 @@ fn first_save_as_and_missing_or_malformed_documentref_use_current_save_timestamp
         ));
         assert!(document_ref_index.zip(content_index).is_some_and(|(reference, content)| reference < content));
     }
+}
+
+#[test]
+fn ordinary_save_initializes_only_missing_xref_history() {
+    let directory = TestDirectory::new();
+    let source_path = directory.path("no-xref-history.fdx");
+    let source = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef DateTime="20261001T120000" id="document-original"/><Content><Paragraph Type="Action" id="paragraph-1"><Text>lineage fixture</Text></Paragraph></Content></FinalDraft>"#;
+    std::fs::write(&source_path, source)
+        .unwrap_or_else(|_| unreachable!("lineage fixture can be written"));
+    let fs = StdFdxStorageFileSystem;
+    let opened = open(&fs, &source_path)
+        .unwrap_or_else(|_| unreachable!("lineage fixture opens"));
+    let mut session = EditingSession::new(opened.document.project)
+        .unwrap_or_else(|_| unreachable!("lineage session initializes"));
+    let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+
+    save_session(&fs, &mut session, &mut target, FdxSaveMode::Save)
+        .unwrap_or_else(|_| unreachable!("ordinary Save initializes lineage"));
+    let saved = std::fs::read(&source_path)
+        .unwrap_or_else(|_| unreachable!("ordinary Save output is readable"));
+    let saved_ref = document_ref(&saved);
+    assert_eq!(attribute(&saved_ref, "id"), Some("document-original"));
+    assert_eq!(xrefs(&saved_ref).len(), 1);
+    assert!(valid_timestamp(&xrefs(&saved_ref)[0].0));
+    assert!(valid_timestamp(attribute(&saved_ref, "DateTime").unwrap_or("")));
+}
+
+fn valid_timestamp(value: &str) -> bool {
+    value.len() == 15
+        && value.as_bytes().get(8) == Some(&b'T')
+        && value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| index == 8 || byte.is_ascii_digit())
 }

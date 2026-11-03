@@ -250,9 +250,10 @@ struct IdentitySetDifference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FdxDocument {
     pub project: Project,
-    /// Valid root DocumentRef DateTime observed during deserialization.
+    /// Valid root DocumentRef DateTime observed during deserialization. This is
+    /// source metadata, not the ephemeral session-open timestamp used for XRefs.
     /// Malformed or ambiguous values remain source-preserved but are not typed.
-    pub opened_document_ref_datetime: Option<String>,
+    pub document_ref_datetime: Option<String>,
     /// Valid direct-root disposable native geometry. Invalid or ambiguous source
     /// state remains preserved but is not projected.
     pub window_state: Option<WindowState>,
@@ -296,7 +297,7 @@ pub(crate) enum SaveOperation {
 pub(crate) struct SaveContext {
     pub(crate) operation: SaveOperation,
     pub(crate) timestamp: String,
-    pub(crate) opened_timestamp: Option<String>,
+    pub(crate) session_open_timestamp: Option<String>,
     pub(crate) window_state: WindowState,
     pub(crate) text_state: TextState,
     injected_lineage_ids: Vec<String>,
@@ -309,8 +310,8 @@ impl SaveContext {
     pub(crate) fn new(operation: SaveOperation) -> Self {
         Self {
             operation,
-            timestamp: current_save_timestamp(),
-            opened_timestamp: None,
+            timestamp: current_timestamp(),
+            session_open_timestamp: None,
             window_state: WindowState::DEFAULT,
             text_state: TextState::DEFAULT,
             injected_lineage_ids: Vec::new(),
@@ -325,7 +326,7 @@ impl SaveContext {
         Self {
             operation,
             timestamp,
-            opened_timestamp: None,
+            session_open_timestamp: None,
             window_state: WindowState::DEFAULT,
             text_state: TextState::DEFAULT,
             injected_lineage_ids: Vec::new(),
@@ -335,8 +336,8 @@ impl SaveContext {
         }
     }
 
-    pub(crate) fn with_opened_timestamp(mut self, timestamp: Option<String>) -> Self {
-        self.opened_timestamp = timestamp;
+    pub(crate) fn with_session_open_timestamp(mut self, timestamp: String) -> Self {
+        self.session_open_timestamp = Some(timestamp);
         self
     }
 
@@ -443,7 +444,7 @@ pub(crate) fn valid_document_ref_datetime(value: &str) -> bool {
     (1..=days_in_month).contains(&day)
 }
 
-fn current_save_timestamp() -> String {
+pub(crate) fn current_timestamp() -> String {
     let local = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
     format!(
         "{:04}{:02}{:02}T{:02}{:02}{:02}",
@@ -606,7 +607,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         FdxVersionStatus::Malformed => return Err(FdxError::InvalidVersion),
         FdxVersionStatus::Duplicate => return Err(FdxError::DuplicateVersion),
     }
-    let opened_document_ref_datetime = raw_opened_document_ref_datetime(root);
+    let document_ref_datetime = raw_document_ref_datetime(root);
     let window_state = raw_root_window_state(root);
 
     let root_namespace = root.name.namespace_uri.as_deref();
@@ -695,7 +696,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     let text_state = raw_root_text_state(&root_for_text_state, &project);
     Ok(FdxDocument {
         project,
-        opened_document_ref_datetime,
+        document_ref_datetime,
         window_state,
         text_state,
     })
@@ -766,6 +767,14 @@ fn write_v6_inner(
 ) -> Result<Vec<u8>, FdxError> {
     project.validate().map_err(map_model_error)?;
     if !valid_document_ref_datetime(&context.timestamp) {
+        return Err(FdxError::InvalidValue);
+    }
+    if context.operation != SaveOperation::DirectSerialization
+        && context
+            .session_open_timestamp
+            .as_deref()
+            .map_or(true, |timestamp| !valid_document_ref_datetime(timestamp))
+    {
         return Err(FdxError::InvalidValue);
     }
     if WindowState::new(
@@ -1085,18 +1094,10 @@ fn reconcile_document_lineage(
     if datetime_indices.len() > 1 {
         return Err(SaveDiagnosticCode::LineageAmbiguousDocumentRefDateTime.error());
     }
-    let previous_datetime = datetime_indices
-        .first()
-        .and_then(|index| document_ref.attributes.get(*index))
-        .map(|attribute| attribute.value.as_str())
-        .filter(|value| valid_document_ref_datetime(value))
-        .map(str::to_owned);
     let xref_datetime = context
-        .opened_timestamp
+        .session_open_timestamp
         .as_deref()
-        .filter(|value| valid_document_ref_datetime(value))
-        .or(previous_datetime.as_deref())
-        .unwrap_or(context.timestamp.as_str())
+        .ok_or(FdxError::InvalidValue)?
         .to_owned();
 
     if let Some(index) = datetime_indices.first().copied() {
@@ -1119,7 +1120,17 @@ fn reconcile_document_lineage(
         );
     }
 
-    if context.operation == SaveOperation::SaveAs {
+    let has_direct_xref = document_ref.children.iter().any(|node| matches!(node,
+        PreservedNode::Element(element)
+            if element.name.local_name == "XRef"
+                && element.name.namespace_uri == document_ref.name.namespace_uri
+    ));
+    let should_append_xref = match context.operation {
+        SaveOperation::DirectSerialization => false,
+        SaveOperation::Save => !has_direct_xref,
+        SaveOperation::SaveAs => true,
+    };
+    if should_append_xref {
         let xref_id = context.allocate_lineage_id(&mut reserved)?;
         let xref_identity = ForeignIdentity::new(identity_domain("XRef"), xref_id.clone())
             .map_err(map_preservation_error)?;
@@ -2299,7 +2310,7 @@ fn make_new_document_nodes(
     );
     let mut lineage_ids = BTreeSet::new();
     let document_ref_id = context.allocate_lineage_id(&mut lineage_ids)?;
-    let xref_id = if context.operation == SaveOperation::SaveAs {
+    let xref_id = if matches!(context.operation, SaveOperation::Save | SaveOperation::SaveAs) {
         Some(context.allocate_lineage_id(&mut lineage_ids)?)
     } else {
         None
@@ -2309,9 +2320,16 @@ fn make_new_document_nodes(
         vec![("DateTime", context.timestamp.as_str()), ("id", &document_ref_id)],
     );
     if let Some(xref_id) = xref_id {
+        let xref_datetime = match context.operation {
+            SaveOperation::DirectSerialization => context.timestamp.as_str(),
+            SaveOperation::Save | SaveOperation::SaveAs => context
+                .session_open_timestamp
+                .as_deref()
+                .ok_or(FdxError::InvalidValue)?,
+        };
         document_ref.children.push(PreservedNode::Element(preserved_element(
             "XRef",
-            vec![("DateTime", context.timestamp.as_str()), ("id", &xref_id)],
+            vec![("DateTime", xref_datetime), ("id", &xref_id)],
         )));
     }
     root.children
@@ -3417,7 +3435,7 @@ fn is_fdx_element(element: &RawElement, name: &str, root_ns: Option<&str>) -> bo
     element.name.local_name == name && element.name.namespace_uri.as_deref() == root_ns
 }
 
-fn raw_opened_document_ref_datetime(root: &RawElement) -> Option<String> {
+fn raw_document_ref_datetime(root: &RawElement) -> Option<String> {
     let root_namespace = root.name.namespace_uri.as_deref();
     let mut document_refs = root.children.iter().filter_map(|node| match node {
         RawNode::Element(element) if element.name.local_name == "DocumentRef" => Some(element),
@@ -3507,40 +3525,6 @@ fn raw_root_text_state(root: &RawElement, project: &Project) -> TextState {
         selection.and_then(|value| text_state::parse_flat_selection(project, value))
     };
     TextState { scaling: scale, selection: mapped.unwrap_or(TextState::DEFAULT.selection) }
-}
-
-pub(crate) fn opened_document_ref_datetime_from_project(project: &Project) -> Option<String> {
-    let preservation = project.preservation.as_ref()?;
-    let mut roots = preservation
-        .sections
-        .iter()
-        .flat_map(|section| &section.children)
-        .filter_map(|node| match node {
-            PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => Some(element),
-            _ => None,
-        });
-    let root = roots.next()?;
-    if roots.next().is_some() {
-        return None;
-    }
-    let mut document_refs = root.children.iter().filter_map(|node| match node {
-        PreservedNode::Element(element) if element.name.local_name == "DocumentRef" => Some(element),
-        _ => None,
-    });
-    let document_ref = document_refs.next()?;
-    if document_refs.next().is_some()
-        || document_ref.name.namespace_uri != root.name.namespace_uri
-    {
-        return None;
-    }
-    let mut datetimes = document_ref.attributes.iter().filter(|attribute| {
-        attribute.name.namespace_uri.is_none() && attribute.name.local_name == "DateTime"
-    });
-    let value = datetimes.next()?.value.as_str();
-    if datetimes.next().is_some() || !valid_document_ref_datetime(value) {
-        return None;
-    }
-    Some(value.to_owned())
 }
 
 fn preserve_misc_node(node: RawNode) -> Result<PreservedNode, FdxError> {
@@ -5743,7 +5727,7 @@ mod tests {
             SaveOperation::SaveAs,
             "20261103T101112".to_owned(),
         )
-        .with_opened_timestamp(Some("20261001T120000".to_owned()))
+        .with_session_open_timestamp("20261103T090807".to_owned())
         .with_test_lineage_ids(vec!["b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned()]);
 
         assert_eq!(
@@ -5761,7 +5745,8 @@ mod tests {
         let mut context = SaveContext::with_timestamp(
             SaveOperation::Save,
             "20261103T101112".to_owned(),
-        );
+        )
+        .with_session_open_timestamp("20261103T090807".to_owned());
         assert_eq!(
             write_v6_for_save(&project, &mut context),
             Err(FdxError::SaveDiagnosticUnsupportedConstruct(35))
@@ -5798,7 +5783,7 @@ mod tests {
             SaveOperation::SaveAs,
             "20261103T101112".to_owned(),
         )
-        .with_opened_timestamp(Some("20261001T120000".to_owned()))
+        .with_session_open_timestamp("20261103T090807".to_owned())
         .with_test_lineage_ids(vec!["b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned()]);
         let error = write_v6_for_save(&project, &mut context)
             .err()

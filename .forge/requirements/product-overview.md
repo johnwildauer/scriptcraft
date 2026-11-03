@@ -78,11 +78,14 @@ are not treated as globally unique definitions; managed roles and other global i
 consumers continue to require unambiguous identities.
 
 Native FDX lineage is durable source data distinct from semantic screenplay content:
-DocumentRef retains its imported ID and records the current timestamp after each successful
-Save or Save As. Each Save As appends one fresh XRef whose timestamp is the DocumentRef
-timestamp captured when the current session opened the file; earlier XRefs remain unchanged.
-The session anchor is not undoable content, and direct serialization does not mutate imported
-lineage. Failed saves publish neither lineage changes nor destination/session changes.
+DocumentRef retains its imported ID and records the current saving time after each successful
+Save or Save As. A separate ephemeral session-open timestamp is captured when an editing session
+starts and remains fixed through saves and rebases. Ordinary Save creates one XRef only when
+DocumentRef has no direct-child XRefs; Save As always appends one. New XRefs use the session-open
+timestamp, while existing XRefs remain unchanged. This timestamp is not undoable content, does not
+come from DocumentRef DateTime, and may equal a saving timestamp within the same second. Direct
+serialization does not mutate imported lineage. Failed saves publish neither lineage changes nor
+destination/session changes.
 
 The native root WindowState is a separate disposable view-state exception to semantic persistence:
 the desktop projects only bounded direct-root geometry, attempts a valid imported restore once after

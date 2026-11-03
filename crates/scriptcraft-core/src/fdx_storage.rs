@@ -469,11 +469,9 @@ fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandid
         FdxSaveMode::Save => fdx::SaveOperation::Save,
         FdxSaveMode::SaveAs(_) => fdx::SaveOperation::SaveAs,
     };
-    let context = fdx::SaveContext::new(operation).with_opened_timestamp(
-        session
-            .opened_document_ref_datetime()
-            .map(str::to_owned),
-    ).with_window_state(window_state);
+    let context = fdx::SaveContext::new(operation)
+        .with_session_open_timestamp(session.session_open_timestamp().to_owned())
+        .with_window_state(window_state);
     let context = context.with_text_state(text_state);
     save_session_with_context(fs, session, target, mode, context, codec)
 }
@@ -1704,7 +1702,7 @@ mod tests {
             fdx::SaveOperation::SaveAs,
             "20261103T101112".to_owned(),
         )
-        .with_opened_timestamp(Some("20261001T120000".to_owned()))
+        .with_session_open_timestamp("20261001T120000".to_owned())
         .with_test_lineage_ids(vec!["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned()])
         .with_window_state(fdx::WindowState {
             left: -1440,
@@ -2165,17 +2163,82 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_save_initializes_empty_xref_history_once_with_session_open_time() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef id="document-original"/><Content><Paragraph Type="Action" id="p1"><Text>lineage</Text></Paragraph></Content></FinalDraft>"#;
+        let fs = MemFs::default();
+        let source_path = Path::new("/mem/lineage-empty-history.fdx");
+        fs.put(source_path, source.to_vec());
+        let opened = open(&fs, source_path).unwrap_or_else(|_| unreachable!());
+        let session_open_timestamp = "20261103T090807".to_owned();
+        let mut session = EditingSession::with_session_open_timestamp_for_test(
+            opened.document.project,
+            session_open_timestamp.clone(),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+        let xref_id = "b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned();
+        let first_context = fdx::SaveContext::with_timestamp(
+            fdx::SaveOperation::Save,
+            "20261103T101112".to_owned(),
+        )
+        .with_session_open_timestamp(session_open_timestamp.clone())
+        .with_test_lineage_ids(vec![xref_id.clone()]);
+        save_session_with_context(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::Save,
+            first_context,
+            &NativeSaveCandidateCodec,
+        )
+        .unwrap_or_else(|_| unreachable!("first Save writes initial XRef history"));
+        let first_xml = String::from_utf8(
+            fs.bytes(source_path)
+                .unwrap_or_else(|| unreachable!("first Save output exists")),
+        )
+        .unwrap_or_else(|_| unreachable!("writer emits UTF-8"));
+        assert!(first_xml.contains("DateTime=\"20261103T101112\" id=\"document-original\""));
+        assert!(first_xml.contains(&format!("DateTime=\"{session_open_timestamp}\" id=\"{xref_id}\"")));
+        assert_eq!(first_xml.matches("<XRef").count(), 1);
+
+        let second_context = fdx::SaveContext::with_timestamp(
+            fdx::SaveOperation::Save,
+            "20261103T121314".to_owned(),
+        )
+        .with_session_open_timestamp(session_open_timestamp.clone());
+        save_session_with_context(
+            &fs,
+            &mut session,
+            &mut target,
+            FdxSaveMode::Save,
+            second_context,
+            &NativeSaveCandidateCodec,
+        )
+        .unwrap_or_else(|_| unreachable!("subsequent Save preserves initialized history"));
+        let second_xml = String::from_utf8(
+            fs.bytes(source_path)
+                .unwrap_or_else(|| unreachable!("second Save output exists")),
+        )
+        .unwrap_or_else(|_| unreachable!("writer emits UTF-8"));
+        assert!(second_xml.contains("DateTime=\"20261103T121314\" id=\"document-original\""));
+        assert!(second_xml.contains(&format!("DateTime=\"{session_open_timestamp}\" id=\"{xref_id}\"")));
+        assert_eq!(second_xml.matches("<XRef").count(), 1);
+        assert_eq!(session.session_open_timestamp(), session_open_timestamp);
+    }
+
+    #[test]
     fn lineage_save_context_uses_fixed_clock_and_ids_across_session_rebases() {
         let source = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef DateTime="20261001T120000" id="document-original"><XRef DateTime="20260930T120000" id="xref-original"/></DocumentRef><Content><Paragraph Type="Action" id="p1"><Text>lineage</Text></Paragraph></Content></FinalDraft>"#;
         let fs = MemFs::default();
         let source_path = Path::new("/mem/lineage-open.fdx");
         fs.put(source_path, source.to_vec());
         let opened = open(&fs, source_path).unwrap_or_else(|_| unreachable!());
-        let mut session = EditingSession::new(opened.document.project)
-            .unwrap_or_else(|_| unreachable!());
-        let opened_timestamp = session
-            .opened_document_ref_datetime()
-            .map(str::to_owned);
+        let mut session = EditingSession::with_session_open_timestamp_for_test(
+            opened.document.project,
+            "20261103T090807".to_owned(),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let session_open_timestamp = session.session_open_timestamp().to_owned();
         let mut target = FdxSaveTarget::from_baseline(opened.baseline);
         let first_id = "b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned();
         let second_id = "17ebd8dd-7497-4e6d-99fd-a88fb7a2c620".to_owned();
@@ -2184,7 +2247,7 @@ mod tests {
             fdx::SaveOperation::SaveAs,
             "20261103T101112".to_owned(),
         )
-        .with_opened_timestamp(opened_timestamp.clone())
+        .with_session_open_timestamp(session_open_timestamp.clone())
         .with_test_lineage_ids(vec![first_id.clone()]);
         save_session_with_context(
             &fs,
@@ -2201,14 +2264,15 @@ mod tests {
         let first_xml = String::from_utf8(first_bytes)
             .unwrap_or_else(|_| unreachable!("writer emits UTF-8"));
         assert!(first_xml.contains("DateTime=\"20261103T101112\" id=\"document-original\""));
-        assert!(first_xml.contains("DateTime=\"20261001T120000\" id=\"b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa\""));
+        assert!(first_xml.contains(&format!("DateTime=\"{session_open_timestamp}\" id=\"b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa\"")));
+        assert_eq!(session.session_open_timestamp(), session_open_timestamp);
 
         let second_destination = PathBuf::from("/mem/lineage-copy-2.fdx");
         let second_context = fdx::SaveContext::with_timestamp(
             fdx::SaveOperation::SaveAs,
             "20261103T121314".to_owned(),
         )
-        .with_opened_timestamp(opened_timestamp)
+        .with_session_open_timestamp(session_open_timestamp.clone())
         .with_test_lineage_ids(vec![second_id.clone()]);
         save_session_with_context(
             &fs,
@@ -2225,9 +2289,43 @@ mod tests {
         let second_xml = String::from_utf8(second_bytes)
             .unwrap_or_else(|_| unreachable!("writer emits UTF-8"));
         assert!(second_xml.contains("DateTime=\"20261103T121314\" id=\"document-original\""));
-        assert!(second_xml.contains("DateTime=\"20261001T120000\" id=\"b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa\""));
-        assert!(second_xml.contains("DateTime=\"20261001T120000\" id=\"17ebd8dd-7497-4e6d-99fd-a88fb7a2c620\""));
+        assert!(second_xml.contains(&format!("DateTime=\"{session_open_timestamp}\" id=\"b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa\"")));
+        assert!(second_xml.contains(&format!("DateTime=\"{session_open_timestamp}\" id=\"17ebd8dd-7497-4e6d-99fd-a88fb7a2c620\"")));
+        assert_eq!(session.session_open_timestamp(), session_open_timestamp);
         assert_ne!(first_id, second_id);
+
+        let reopened = open(&fs, &second_destination).unwrap_or_else(|_| unreachable!());
+        let reopened_timestamp = "20261103T151617".to_owned();
+        let mut reopened_session = EditingSession::with_session_open_timestamp_for_test(
+            reopened.document.project,
+            reopened_timestamp.clone(),
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let mut reopened_target = FdxSaveTarget::from_baseline(reopened.baseline);
+        let third_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_owned();
+        let third_destination = PathBuf::from("/mem/lineage-copy-reopened.fdx");
+        let third_context = fdx::SaveContext::with_timestamp(
+            fdx::SaveOperation::SaveAs,
+            "20261103T171819".to_owned(),
+        )
+        .with_session_open_timestamp(reopened_timestamp.clone())
+        .with_test_lineage_ids(vec![third_id.clone()]);
+        save_session_with_context(
+            &fs,
+            &mut reopened_session,
+            &mut reopened_target,
+            FdxSaveMode::SaveAs(third_destination.clone()),
+            third_context,
+            &NativeSaveCandidateCodec,
+        )
+        .unwrap_or_else(|_| unreachable!("reopened session Save As succeeds"));
+        let third_xml = String::from_utf8(
+            fs.bytes(&third_destination)
+                .unwrap_or_else(|| unreachable!("reopened output exists")),
+        )
+        .unwrap_or_else(|_| unreachable!("writer emits UTF-8"));
+        assert!(third_xml.contains(&format!("DateTime=\"{reopened_timestamp}\" id=\"{third_id}\"")));
+        assert!(third_xml.contains("DateTime=\"20261103T171819\" id=\"document-original\""));
     }
 
     #[test]
@@ -2248,7 +2346,7 @@ mod tests {
             fdx::SaveOperation::Save,
             "20261103T101112".to_owned(),
         )
-        .with_opened_timestamp(Some("20261001T120000".to_owned()));
+        .with_session_open_timestamp(session.session_open_timestamp().to_owned());
         let result = save_session_with_context(
             &fs,
             &mut session,
@@ -2290,7 +2388,7 @@ mod tests {
             fdx::SaveOperation::SaveAs,
             "20261103T101112".to_owned(),
         )
-        .with_opened_timestamp(Some("20261001T120000".to_owned()))
+        .with_session_open_timestamp("20261001T120000".to_owned())
         .with_test_lineage_ids(vec![collision.clone(), allocated.clone()]);
         save_session_with_context(
             &fs,
@@ -2323,7 +2421,7 @@ mod tests {
             fdx::SaveOperation::SaveAs,
             "20261103T101112".to_owned(),
         )
-        .with_opened_timestamp(Some("20261001T120000".to_owned()))
+        .with_session_open_timestamp("20261001T120000".to_owned())
         .with_test_lineage_ids(vec![collision.clone(); 16]);
         let result = save_session_with_context(
             &fs,
@@ -2357,6 +2455,7 @@ mod tests {
             fdx::SaveOperation::SaveAs,
             "20261103T101112".to_owned(),
         )
+        .with_session_open_timestamp("20261103T090807".to_owned())
         .with_test_lineage_entropy_failure();
 
         let result = save_session_with_context(
@@ -2379,10 +2478,14 @@ mod tests {
     }
 
     #[test]
-    fn first_new_document_save_as_uses_one_fixed_timestamp_for_documentref_and_initial_xref() {
+    fn first_new_document_save_as_uses_separate_session_and_save_timestamps() {
         let fs = MemFs::default();
         let project = Project::new().unwrap_or_else(|_| unreachable!());
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        let mut session = EditingSession::with_session_open_timestamp_for_test(
+            project,
+            "20261103T090807".to_owned(),
+        )
+        .unwrap_or_else(|_| unreachable!());
         let mut target = FdxSaveTarget::new_unsaved();
         let destination = PathBuf::from("/mem/lineage-new-project.fdx");
         let document_id = "b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned();
@@ -2391,6 +2494,7 @@ mod tests {
             fdx::SaveOperation::SaveAs,
             "20261103T101112".to_owned(),
         )
+        .with_session_open_timestamp("20261103T090807".to_owned())
         .with_test_lineage_ids(vec![document_id.clone(), xref_id.clone()]);
 
         save_session_with_context(
@@ -2408,7 +2512,7 @@ mod tests {
         let output = String::from_utf8(output)
             .unwrap_or_else(|_| unreachable!("writer emits UTF-8"));
         assert!(output.contains("<DocumentRef DateTime=\"20261103T101112\" id=\"b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa\">"));
-        assert!(output.contains("<XRef DateTime=\"20261103T101112\" id=\"17ebd8dd-7497-4e6d-99fd-a88fb7a2c620\"/>"));
+        assert!(output.contains("<XRef DateTime=\"20261103T090807\" id=\"17ebd8dd-7497-4e6d-99fd-a88fb7a2c620\"/>"));
     }
 
     #[cfg(unix)]

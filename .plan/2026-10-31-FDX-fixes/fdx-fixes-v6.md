@@ -1,13 +1,13 @@
 # FDX Fixes v6 — document lineage, ephemeral view state, and physical page presentation
 
-**Status:** Approved 2026-11-02; V6-WO-001.1–001.4 implementation and regression coverage authored 2026-11-03; coverage is unexecuted and user validation remains pending. All review and validation remain user-owned. No builds, tests, formatting, lint, manual verification, desktop checks, implementation checks, reviews, independent validators, or Final Draft interoperability checks were run while preparing or implementing 001.1–001.4.
+**Status:** Approved 2026-11-02; V6-WO-001.1–001.5 implementation and regression coverage authored 2026-11-03; coverage is unexecuted and user validation remains pending. All review and validation remain user-owned. No builds, tests, formatting, lint, manual verification, desktop checks, implementation checks, reviews, independent validators, or Final Draft interoperability checks were run while preparing or implementing these orders.
 
 ## Objective
 
 Add and manage the standard root-level DocumentRef, WindowState, and TextState blocks, then correct desktop 100% page presentation without changing cross-platform document geometry:
 
 1. Keep DocumentRef ID stable and make DocumentRef DateTime the current saved-document timestamp.
-2. On Save As, append a new XRef containing the DocumentRef timestamp captured when the file was opened, then update DocumentRef DateTime to the new save time.
+2. Capture session-open time independently of DocumentRef; on Save, initialize an empty XRef history only, and on Save As always append a session-open XRef. Every actual save independently updates DocumentRef DateTime to saving time.
 3. Read root WindowState/TextState once on Open, restore supported runtime values with safe defaults, and overwrite those root blocks from current state on Save.
 4. Keep core/PDF geometry stable in document points across operating systems. Apply OS logical-coordinate conversion and native display scale only in the desktop presentation layer.
 
@@ -16,7 +16,7 @@ The nested TitlePage TextState remains source-preserved and is not a screenplay-
 ## User decisions captured for v6
 
 - DocumentRef DateTime records when the persistent document was saved. Ordinary Save replaces it with the current save time.
-- Deserialization retains the DocumentRef DateTime that existed when the file was opened. Save As appends one new XRef with that opened timestamp and a fresh UUID, preserves every prior XRef, and then replaces DocumentRef DateTime with the current save time.
+- Session-open time is captured from the wall clock for imported and new sessions, independent of DocumentRef DateTime. Save initializes XRef history only when empty; Save As always appends one XRef with session-open time and a fresh UUID. Both operations preserve prior XRefs and update DocumentRef DateTime from a separate current saving-time capture.
 - DocumentRef ID remains stable across Save and Save As.
 - Root WindowState and TextState are disposable runtime view state. Restore them once on Open and overwrite them on Save; do not continuously synchronize them into semantic screenplay content or preserve their imported values as source-owned settings.
 - Use native display scaling on macOS and Windows. Do not use the former 2.333 fallback.
@@ -77,18 +77,11 @@ Additional observations:
 
 Not every serialization is a Save. The desktop health check calls [`write_v6()`](crates/scriptcraft-core/src/fdx.rs:500) from [`session_health()`](apps/scriptcraft/src/main.rs:563), and import validates through the writer. These direct calls must not update DocumentRef, append XRefs, or overwrite imported view state.
 
-### 2.3 The opened timestamp is session lineage state
+### 2.3 Session-open timestamp is independent lineage state — corrected by WO-001.5
 
-Reading DocumentRef DateTime again at Save As is insufficient after an earlier in-session Save, because that Save has already advanced the persistent timestamp. The deserialized value must be captured once and carried across save rebases until the next Open.
+The session-open timestamp is captured from the wall clock when an editing session starts, for imported and new documents alike. It is not the imported DocumentRef DateTime. The latter remains deserialized source metadata only. The session value is ephemeral, outside project content and history, and survives successful save rebases unchanged until a new session/reopen.
 
-The proposed ownership is:
-
-- [`FdxDocument`](crates/scriptcraft-core/src/fdx.rs:244) exposes the valid DocumentRef DateTime observed at deserialization.
-- [`EditingSession`](crates/scriptcraft-core/src/editing.rs:86) retains that optional opened timestamp as private per-session lineage state, outside undo/redo snapshots.
-- Existing session constructors derive the same value from imported preservation for headless callers; the desktop can also consume the reader's explicit projection.
-- [`prepare_saved_rebase()`](crates/scriptcraft-core/src/editing.rs:212) carries the original opened timestamp forward rather than replacing it with the newly saved DocumentRef DateTime.
-- A never-saved project has no opened timestamp. Its first Save As uses the current save time for both DocumentRef and the initial XRef. This is the required no-source fallback.
-- Repeated Save As operations in one opened session use the same originally deserialized timestamp with different fresh XRef IDs. Reopening establishes a new anchor from the then-current DocumentRef.
+Save updates DocumentRef DateTime from its independent saving-time capture. It appends an XRef with session-open time only when there are no direct-child XRefs; Save As always appends exactly one such XRef. Direct source-backed serialization remains lineage-neutral. The timestamps may coincide at FDX's one-second resolution; no monotonic increment is invented.
 
 ### 2.4 Identity checks must remain strict
 
@@ -98,7 +91,7 @@ The correct sequence is:
 
 1. Compare the live candidate's original non-paragraph identity graph with the original source under code 4.
 2. Clone preservation state for detached save reconciliation.
-3. Apply only the authorized DocumentRef timestamp update and, for Save As, one XRef addition.
+3. Apply only the authorized DocumentRef timestamp update and either the empty-history Save XRef initialization or one unconditional Save As XRef addition.
 4. Use the updated clone for expected identities/tree, managed reconciliation, serialization, and strict code 29/code 30 comparisons.
 5. Publish the re-read project only after filesystem success.
 
@@ -120,32 +113,26 @@ Before 001.4, [`status_bar.rs`](apps/scriptcraft/src/status_bar.rs:215) applied 
 
 ### 3.1 DocumentRef and XRef
 
-At deserialization:
-
-- read and validate the root DocumentRef DateTime using the exact timestamp shape and valid calendar/time fields;
-- retain that valid value as the session's opened timestamp;
-- preserve all existing XRefs in source order;
-- preserve DocumentRef ID verbatim, including imported non-UUID values.
+At editing-session creation, capture a valid local wall-clock session-open timestamp (UTC fallback if local offset discovery fails), independently of source DocumentRef DateTime. Preserve all existing XRefs in source order and DocumentRef ID verbatim, including imported non-UUID values.
 
 For ordinary Save:
 
-1. Capture one current save timestamp.
-2. Replace DocumentRef DateTime with that value.
-3. Preserve DocumentRef ID and every XRef, including all XRef IDs and DateTime values.
+1. Capture one current saving timestamp.
+2. If DocumentRef has no direct-child XRefs, append one with session-open time and a fresh UUID; otherwise leave the XRef history unchanged.
+3. Replace DocumentRef DateTime with the saving timestamp and preserve its ID.
 
 For Save As:
 
-1. Capture one current save timestamp.
-2. Select the XRef timestamp: the session's opened DocumentRef DateTime when present; otherwise the current pre-save DocumentRef DateTime when valid; otherwise the current save timestamp for a new/missing/malformed source.
-3. Append one direct child XRef after existing XRefs, with a fresh collision-checked UUID v4 and that selected timestamp.
-4. Replace DocumentRef DateTime with the current save timestamp.
-5. Preserve DocumentRef ID and all prior XRefs unchanged.
+1. Capture one current saving timestamp.
+2. Append one direct child XRef using the immutable session-open timestamp and a fresh collision-checked UUID v4, regardless of existing history.
+3. Replace DocumentRef DateTime with the saving timestamp.
+4. Preserve DocumentRef ID and all prior XRefs unchanged.
 
 For a missing DocumentRef, create one during save preparation with a fresh collision-checked UUID v4. New IDs use lowercase hyphenated UUID v4; existing IDs remain verbatim.
 
 Direct source-backed serialization does not change lineage. Failed Save/Save As publishes neither the new DocumentRef timestamp nor the candidate XRef into the live session or destination.
 
-**Agent-default clock contract:** capture local wall-clock time once per attempted save because FDX stores no zone. If local offset discovery is unavailable, use UTC rather than failing an otherwise valid save. Tests inject fixed timestamps and never depend on the real clock.
+**Agent-default clock contract:** capture session-open time at session construction and saving time when a transactional save context is constructed. FDX stores no zone; if local offset discovery is unavailable, use UTC. Test seams inject session-open and saving timestamps independently. Do not force them to differ when the actual values share one second.
 
 ### 3.2 Root WindowState
 
@@ -191,7 +178,7 @@ The candidate/re-read/conflict/atomic-publication sequence remains authoritative
 - failed Save As does not publish its XRef, DocumentRef timestamp, or view state;
 - failed Save does not publish its DocumentRef timestamp or view state;
 - destination, live session, path, baseline, and dirty state remain unchanged on failure;
-- successful Save rebases from actual saved bytes while preserving the original per-session opened timestamp;
+- successful Save rebases from actual saved bytes while preserving the session-open timestamp;
 - code 30 compares the expected tree already containing authorized changes and remains strict;
 - new UnsupportedConstruct save branches receive appended diagnostic numbers without renumbering existing codes.
 
@@ -199,7 +186,7 @@ The candidate/re-read/conflict/atomic-publication sequence remains authoritative
 
 ```mermaid
 flowchart LR
-    Open[Open FDX] --> Anchor[Capture DocumentRef open timestamp]
+    Open[Open FDX] --> Anchor[Capture session-open wall-clock time]
     Open --> View[Read root view state once]
     Open --> Project[Build semantic project]
     Anchor --> Session[Create editing session]
@@ -208,7 +195,7 @@ flowchart LR
     Restore --> Session
     Session --> Save[Capture current save time and view]
     Save --> Candidate[Build detached save candidate]
-    Candidate --> Lineage[Update DocumentRef and append XRef only for Save As]
+    Candidate --> Lineage[Update DocumentRef; initialize XRef on empty Save or append on Save As]
     Lineage --> Overwrite[Overwrite root view state]
     Overwrite --> Checks[Run strict codec and storage checks]
     Checks --> Publish[Publish and rebase only on success]
@@ -227,7 +214,7 @@ Dependencies: 001.2 and 001.3 build on 001.1's save-scoped candidate path and sh
 
 ### V6-WO-001.1 implementation record — 2026-11-03
 
-Implemented first and only this work order, on the initiative branch `dev/2026-11-03-fdx-v6-lineage-view-state`. The reader projects a valid opened DocumentRef DateTime; the editing session retains it across save rebases outside undo/redo. The transactional writer receives an explicit Save/Save As context with one timestamp captured before candidate preparation. Ordinary Save updates only DocumentRef DateTime; Save As appends one fresh-XRef identity with the original session anchor, or the specified pre-save/current-time fallback, then updates DocumentRef DateTime. New documents emit DocumentRef before Content; first Save As emits matching DocumentRef/XRef timestamps. Direct source-backed serialization remains non-mutating. The original code 4 graph gate precedes lineage changes, authorized identities/tree feed strict code 29/code 30 checks, and storage does not publish candidate session state until atomic publication succeeds.
+Historical implementation record for V6-WO-001.1, now superseded on timestamp source and empty-history Save behavior by approved V6-WO-001.5 below. It originally retained the imported DocumentRef DateTime as session anchor and appended XRefs only on Save As; those details are not the current contract. The original code 4 graph gate, authorized identity/tree reconciliation, strict code 29/code 30 checks, and atomic publication safeguards remain current.
 
 Implementation and authored coverage changed [`fdx.rs`](../../crates/scriptcraft-core/src/fdx.rs), [`editing.rs`](../../crates/scriptcraft-core/src/editing.rs), [`fdx_storage.rs`](../../crates/scriptcraft-core/src/fdx_storage.rs), [`Cargo.toml`](../../crates/scriptcraft-core/Cargo.toml), [`Cargo.lock`](../../Cargo.lock), and [`v6_wo0011_documentref_save_lineage.rs`](../../crates/scriptcraft-core/tests/v6_wo0011_documentref_save_lineage.rs). Durable semantics and appended diagnostics 35–38 are recorded in the Forge writing-loop requirement, product overview, and technical context. Regression coverage was authored, including deterministic unit seams, but not run. No validation/review artifact or user evidence has been produced; 001.1 awaits user validation. Work orders 001.2 and 001.3 are implemented as recorded below; 001.4 remains not started and was not implemented.
 
@@ -263,11 +250,11 @@ Authored-but-unexecuted coverage includes explicit macOS/Windows/unsupported pur
 
 User-owned validation only; repository policy forbids agent-run checks. On disposable FDX copies, the user may apply the applicable checks and scenarios:
 
-1. Open an existing file, Save ordinarily, and verify only DocumentRef DateTime advances; DocumentRef ID and all XRefs remain unchanged.
-2. Reopen, Save As, and verify the appended XRef contains the DocumentRef timestamp observed at Open plus a fresh UUID, while DocumentRef receives the new save time.
-3. Save more than once before Save As and confirm the XRef still uses the original opened timestamp rather than an intermediate save time.
-4. Repeat Save As in one session and confirm fresh IDs with the same session anchor; reopen and confirm a new anchor is established.
-5. Create a new document and Save As; verify DocumentRef and initial XRef use the current save time when no deserialized timestamp exists.
+1. Open a document with existing XRefs and Save ordinarily; verify DocumentRef DateTime advances while its ID and all XRefs remain unchanged.
+2. Save a document with no direct-child XRefs; verify exactly one XRef uses the session-open timestamp and DocumentRef receives the independent saving time. A later ordinary Save must append none.
+3. Save As with any existing history and verify exactly one new XRef with session-open timestamp and fresh UUID; DocumentRef receives saving time.
+4. Repeat Save As in one session and confirm fresh IDs with the same session-open timestamp; reopen and confirm a new session-open value is captured.
+5. Create a new document and Save As; verify DocumentRef saving time and XRef session-open time are independently sourced, allowing equality within the same second.
 6. Inject codec, conflict, and storage failures and confirm no lineage/view-state publication.
 7. Open reference copies, restore root view state once, change window/zoom/selection, Save, reopen, and verify current values return while TitlePage TextState remains unchanged.
 8. Exercise missing/malformed root state, non-ASCII and multi-paragraph selections, and invalid offsets without losing screenplay access.
@@ -304,8 +291,8 @@ All checks below are for the user to run. No authored test, build, formatter, li
 
 ### Disposable-copy FDX lifecycle and failure safety
 
-- [ ] Use disposable copies of representative reference documents. On ordinary Save, verify only DocumentRef DateTime advances; its ID and every prior XRef (IDs, timestamps, order, and unrelated attributes) remain unchanged.
-- [ ] On Save As, verify exactly one fresh XRef is appended with the DocumentRef timestamp captured at Open, and DocumentRef DateTime advances to the save time. Repeat Save before Save As, repeat Save As in one session, then reopen and verify the new session anchor. Also verify first Save As for a new document uses the specified current-time fallback.
+- [ ] Use disposable copies of representative reference documents. Ordinary Save with existing XRefs must only advance DocumentRef DateTime; Save with empty XRef history must initialize one XRef from session-open time, and a later Save must not append another.
+- [ ] On Save As, verify exactly one fresh XRef is appended with the session-open timestamp (not sourced from DocumentRef DateTime), and DocumentRef DateTime advances to the saving time. Repeat Save As in one session, then reopen and verify a new session-open value. Session-open and saving timestamps may coincide at one-second resolution.
 - [ ] Verify a missing DocumentRef is generated as specified, existing non-UUID DocumentRef IDs remain verbatim, and direct non-save serialization/health-check behavior does not refresh lineage.
 - [ ] Exercise codec, identity/source-tree, conflict, and storage failures where the user test seams permit. Confirm destination bytes, live lineage and view state, session anchor, path, baseline, selection, and dirty state are unchanged after failure; confirm successful publication alone installs the saved re-read state.
 
@@ -332,15 +319,120 @@ All checks below are for the user to run. No authored test, build, formatter, li
 
 ## 9. V6 implementation-state summary — validation still pending
 
-All four implementation work orders report complete in their execution records: [V6-WO-001.1](work-orders-v6/WO-001.1-documentref-save-lineage.md), [V6-WO-001.2](work-orders-v6/WO-001.2-window-state.md), [V6-WO-001.3](work-orders-v6/WO-001.3-text-state.md), and [V6-WO-001.4](work-orders-v6/WO-001.4-physical-page-presentation.md). “Complete” here means implementation and regression coverage were authored; it does not mean validated or closed.
+All five implementation work orders report implementation and authored coverage in their execution records: [V6-WO-001.1](work-orders-v6/WO-001.1-documentref-save-lineage.md), [V6-WO-001.2](work-orders-v6/WO-001.2-window-state.md), [V6-WO-001.3](work-orders-v6/WO-001.3-text-state.md), [V6-WO-001.4](work-orders-v6/WO-001.4-physical-page-presentation.md), and [V6-WO-001.5](work-orders-v6/WO-001.5-session-open-lineage-correction.md). The initial 001.1 anchor semantics are explicitly superseded by 001.5. “Implemented” means implementation and regression coverage were authored; it does not mean validated or closed.
 
-- **001.1 — DocumentRef/XRef lineage:** added opened-timestamp projection and session anchoring, save-scoped Save versus Save As input, current-save DocumentRef timestamps, append-only Save As XRefs, collision-checked IDs, and detached candidate reconciliation while retaining strict identity/source-tree checks and atomic publication.
+- **001.1/001.5 — DocumentRef/XRef lineage:** 001.5 supersedes the initial DocumentRef-derived session anchor. Sessions now capture independent session-open time; Save initializes XRef history only if empty, Save As always appends, and each actual save updates DocumentRef from saving time. Collision-checked IDs, detached candidate reconciliation, strict identity/source-tree checks, and atomic publication remain in place.
 - **001.2 — WindowState:** added bounded direct-root projection, one-shot best-effort desktop restore, latest logical geometry capture, and canonical root-block overwrite on actual Save/Save As without treating window geometry as screenplay state.
 - **001.3 — TextState:** added root-only Scaling/Selection projection, safe fallback and UTF-16 flat-offset/UTF-8 position mapping, one-shot editor restore, current view-state save overwrite, and TitlePage isolation. Zoom and caret/selection remain outside semantic content, dirty/history state, fixed layout, and exports.
 - **001.4 — physical presentation:** removed the 360-point baseline and 2.3/2.333 native-scale fallback; desktop presentation now uses effective paper width, platform logical conversion, user zoom, and native display scale once. Core layout, pagination, source mapping, and PDF geometry remain in OS-independent document points.
 
-Regression coverage was authored across the three focused core integration targets, core/app unit-test seams, and storage-failure cases. It includes lineage lifecycle and failure atomicity; root-only WindowState/TextState projection, insertion/replacement, fallback and TitlePage/opaque preservation; selection mapping and editor-state neutrality; macOS/Windows presentation conversions, native-scale handling, interactions, and layout/PDF invariance. **This authored coverage has not been executed and must not be described as passing.** No agent-run formatting, lint, build, tests, manual verification, desktop validation, implementation check, review, independent validator, or Final Draft check was performed; the checklist above is user-owned.
+Regression coverage was authored across the three focused core integration targets, core/app unit-test seams, and storage-failure cases. It includes corrected lineage lifecycle and failure atomicity; root-only WindowState/TextState projection, insertion/replacement, fallback and TitlePage/opaque preservation; selection mapping and editor-state neutrality; macOS/Windows presentation conversions, native-scale handling, interactions, and layout/PDF invariance. **This authored coverage has not been executed and must not be described as passing.** No agent-run formatting, lint, build, tests, manual verification, desktop validation, implementation check, review, independent validator, or Final Draft check was performed; the checklist above is user-owned.
 
 Durable behavior was recorded in [screenplay-writing-loop.md](../../.forge/requirements/features/screenplay-writing-loop.md), [product-overview.md](../../.forge/requirements/product-overview.md), and [technical-context.md](../../.forge/blueprints/technical-context.md), in addition to the v6 plan and four work-order execution records.
 
 At the pre-closeout Git inspection, [reference2.fdx](../../.reference/reference2.fdx) was a modified tracked file separate from the implementation/documentation set. Its provenance was not established in this closeout; it is included in the user-authorized all-changes commit. No validation result or Final Draft compatibility claim is inferred from that modification.
+
+## 10. Follow-up investigation — repeated XRef timestamps
+
+**Status:** Investigation and approved correction implemented as V6-WO-001.5. The pre-001.5 description below is historical diagnosis; the current contract and execution record follow.
+
+### Pre-001.5 implementation handoff (historical diagnosis)
+
+The current same-timestamp behavior has a deterministic source:
+
+1. [`EditingSession::with_policy_and_layout_inputs()`](../../crates/scriptcraft-core/src/editing.rs:113) calls [`opened_document_ref_datetime_from_project()`](../../crates/scriptcraft-core/src/fdx.rs:3512) and stores the imported DocumentRef DateTime in [`opened_document_ref_datetime`](../../crates/scriptcraft-core/src/editing.rs:90).
+2. [`save_session_with_codec_and_view_state()`](../../crates/scriptcraft-core/src/fdx_storage.rs:459) passes that stored value into [`SaveContext::with_opened_timestamp()`](../../crates/scriptcraft-core/src/fdx.rs:338) on every Save/Save As.
+3. [`reconcile_document_lineage()`](../../crates/scriptcraft-core/src/fdx.rs:995) prefers that value for a new XRef at [`fdx.rs`](../../crates/scriptcraft-core/src/fdx.rs:1094), then independently writes the current save timestamp to DocumentRef.
+4. [`prepare_saved_rebase()`](../../crates/scriptcraft-core/src/editing.rs:221) clones the session and does not replace the anchor, so every Save As in that session reuses the same value.
+5. [`make_new_document_nodes()`](../../crates/scriptcraft-core/src/fdx.rs:2292) writes the same save-context timestamp to both DocumentRef and a new-document XRef at [`fdx.rs`](../../crates/scriptcraft-core/src/fdx.rs:2307).
+
+The authored regressions currently encode the same behavior rather than merely failing to cover it:
+
+- [`repeated_save_as_uses_session_open_timestamp_until_reopen()`](../../crates/scriptcraft-core/tests/v6_wo0011_documentref_save_lineage.rs:147) expects two appended XRefs to have equal timestamps.
+- [`first_save_as_and_missing_or_malformed_documentref_use_current_save_timestamp()`](../../crates/scriptcraft-core/tests/v6_wo0011_documentref_save_lineage.rs:199) expects a new document's XRef and DocumentRef timestamps to match.
+
+The defect is therefore the timestamp source and first-save rules, not XML serialization. Existing XRefs are already retained by the detached source-tree reconciliation. No runtime reproduction, tests, builds, reviews, or other validation were run during this investigation.
+
+### Corrected terms
+
+- **Session-open time:** wall-clock time captured when a document is deserialized into an editing session or a new editing session starts. It is temporary session state, not the prior DocumentRef DateTime and not canonical document content.
+- **Saving time:** a separate wall-clock value captured for an actual Save/Save As serialization. It becomes DocumentRef DateTime while DocumentRef UUID remains stable.
+
+Session-open time remains constant for the life of that editing session, including across successful save rebases. Starting or reopening a session captures a new value. Save does not advance it, Save As does not advance it, and failed saves do not alter it.
+
+### Required operation matrix
+
+| Operation | Existing direct-child XRefs | XRef action | DocumentRef action |
+|---|---|---|---|
+| Save | None | Append one XRef using session-open time and a fresh UUID | Set DateTime to saving time; preserve UUID |
+| Save | One or more | Preserve all existing XRefs; do not use session-open time | Set DateTime to saving time; preserve UUID |
+| Save As | Any number, including none | Always append one XRef using session-open time and a fresh UUID | Set DateTime to saving time; preserve UUID |
+| Direct non-save source-backed serialization | Any number | No change | No change |
+
+The Save-with-no-XRefs rule applies both to a brand-new document and to an imported document whose DocumentRef has no XRef children. Once that first XRef exists, later ordinary Saves leave the history alone. Save As never needs the emptiness check because it always appends.
+
+### Example
+
+For a new session opened at C0:
+
+1. First Save at S1 emits XRef C0 and DocumentRef S1 because no XRef history exists.
+2. Second Save at S2 emits no additional XRef and writes DocumentRef S2.
+3. Save As at S3 appends XRef C0 and writes DocumentRef S3.
+4. Another Save As in the same session appends another XRef C0 with a different UUID. Reusing C0 is correct because the session has not reopened.
+5. Reopening at C4 and then Save As at S5 appends XRef C4 and writes DocumentRef S5.
+
+FDX timestamps have one-second resolution. Session-open and saving time can therefore be equal when operations occur in the same second. The correction must use the right clock sources; it must not fabricate a later timestamp or impose per-operation uniqueness that contradicts session-open semantics.
+
+## 11. Candidate V6-WO-001.5 — Session-open lineage correction
+
+- **Status:** Implemented; regression coverage authored but not executed; user validation pending
+- **Depends on:** V6-WO-001.1 implementation and the clarified contract above
+- **Validation:** User-owned; no agent-run checks or independent validators
+
+### Objective
+
+Replace the imported-DocumentRef anchor with a true session-open wall-clock timestamp, add the initial XRef on Save only when no history exists, always append session-open XRefs on Save As, and preserve the current independent DocumentRef saving-time update and strict transaction gates.
+
+### Implementation steps
+
+1. **Replace session-anchor ownership.** In [`editing.rs`](../../crates/scriptcraft-core/src/editing.rs:86), replace the imported DocumentRef-derived field with a clearly named session-open timestamp captured at session construction for both imported and new projects. Keep it outside Project, source preservation, undo/redo, dirty state, and canonical content. Preserve it unchanged through [`prepare_saved_rebase()`](../../crates/scriptcraft-core/src/editing.rs:221).
+2. **Separate clock roles.** Reuse the existing local-time/UTC-fallback clock behind a crate-level injectable seam. Capture session-open at session start and saving time when [`SaveContext::new()`](../../crates/scriptcraft-core/src/fdx.rs:309) is created for an actual save. Fixed-clock unit seams must prove they are independent inputs; no artificial one-second increment is added.
+3. **Remove the old source-derived anchor path.** Stop passing [`opened_document_ref_datetime_from_project()`](../../crates/scriptcraft-core/src/fdx.rs:3512) into save contexts. Remove or repurpose the obsolete reader field/helper so no caller can accidentally reintroduce DocumentRef-as-session-open behavior. Rename [`SaveContext.opened_timestamp`](../../crates/scriptcraft-core/src/fdx.rs:299) to make the session-open role explicit. Actual Save/Save As requires a valid session-open value; direct source-backed serialization does not.
+4. **Implement the initial-XRef Save rule.** Extend [`reconcile_document_lineage()`](../../crates/scriptcraft-core/src/fdx.rs:995) to inspect direct-child XRefs of the selected DocumentRef. For ordinary Save, append one session-open XRef only when that list is empty. For Save As, append one unconditionally. Preserve every existing XRef and keep the authorized identity-addition sequencing before code 29/code 30.
+5. **Correct new-document generation.** In [`make_new_document_nodes()`](../../crates/scriptcraft-core/src/fdx.rs:2292), write DocumentRef from saving time and the initial XRef from session-open time. A new actual Save and Save As both have empty history and therefore both emit one initial XRef; direct non-save generation does not acquire new lineage behavior.
+6. **Retain failure atomicity.** Build any initial or appended XRef only in the detached candidate. Do not mutate session-open state during Save. Codec, identity, conflict, or storage failure leaves the destination, live lineage, session-open timestamp, path, baseline, and dirty state unchanged.
+7. **Update the durable contract.** Amend [`screenplay-writing-loop.md`](../../.forge/requirements/features/screenplay-writing-loop.md), [`product-overview.md`](../../.forge/requirements/product-overview.md), [`technical-context.md`](../../.forge/blueprints/technical-context.md), and the 001.1 execution record to distinguish session-open from stored DocumentRef time and to record the Save-with-empty-history XRef rule. Preserve the earlier v6 text as historical planning while marking the corrected contract as current.
+8. **Record execution here.** Append implementation details, changed files, authored-but-unexecuted coverage, and user evidence to this v6 document and the candidate work order when implementation is authorized.
+
+### Regression coverage to author/update
+
+- New session at fixed C0 followed by Save at fixed S1 emits XRef C0 and DocumentRef S1 with distinct injected values and stable DocumentRef UUID.
+- Ordinary Save with no existing XRefs adds exactly one initial session-open XRef; the next ordinary Save adds none.
+- Ordinary Save with existing XRefs adds none and preserves every existing timestamp/UUID/attribute.
+- Save As with zero, one, or multiple existing XRefs always appends exactly one session-open XRef.
+- Repeated Save As in one session uses the same session-open timestamp with fresh UUIDs; constructing a new session at a later fixed time uses the new value.
+- Successful save rebases retain session-open; failed saves retain both session-open and the prior live tree.
+- New-document Save and Save As independently prove DocumentRef uses saving time and XRef uses session-open time rather than sharing one context value.
+- Imported missing/malformed DocumentRef DateTime does not become a session-open fallback; session-open still comes from the session clock.
+- Direct source-backed serialization remains lineage-neutral, and unrelated identity/tree corruption still fails the existing strict gates.
+- Existing WindowState, TextState, selection mapping, and physical-presentation behavior remains outside this correction.
+
+### Non-goals
+
+- No requirement that each XRef timestamp be unique within one session.
+- No monotonic timestamp fabrication or higher-precision FDX field.
+- No use of the prior DocumentRef DateTime as session-open time.
+- No changes to DocumentRef UUID stability, existing-XRef preservation, WindowState, TextState, or page scaling.
+- No agent-run validation or interoperability claim.
+
+### User-owned completion checks
+
+Run the focused lineage regressions and applicable workspace checks, then use new and imported disposable documents to confirm: first Save initializes an empty XRef history with session-open time; later Save leaves it alone; Save As always appends session-open history; DocumentRef receives each actual saving time; DocumentRef UUID and all prior XRefs remain stable; reopen starts a new session-open value; and failed operations publish neither timestamp nor lineage changes.
+
+### V6-WO-001.5 execution record — 2026-11-03
+
+Implemented the corrected lifecycle on `dev/2026-11-03-fdx-v6-lineage-view-state` without committing. [`EditingSession`](../../crates/scriptcraft-core/src/editing.rs:86) now captures a wall-clock session-open timestamp for every new session, independent of parsed [`FdxDocument.document_ref_datetime`](../../crates/scriptcraft-core/src/fdx.rs:253), and cloned save rebases retain it. A test-only constructor seam and save-context builder allow independent session-open and saving times.
+
+[`reconcile_document_lineage()`](../../crates/scriptcraft-core/src/fdx.rs:995) now appends on ordinary Save only when the selected DocumentRef has no direct-child XRef, and always appends on Save As. XRef DateTime comes from session-open state; DocumentRef DateTime comes from the save-context timestamp, preserving its ID. New-document transactional Save/Save As generation uses the same independent sources. Direct source-backed serialization and failed-save publication boundaries remain unchanged. The obsolete project-to-DocumentRef-session-anchor helper was removed, and the parsed FdxDocument property was renamed to clarify that it is source metadata.
+
+Authored-but-unexecuted regressions cover empty-history Save initialization and subsequent preservation, existing-history ordinary Save, unconditional repeated Save As appends, independent clocks, new-document Save As, UUID distinction, and failure atomicity. Updated requirements/blueprint text and marked the initial 001.1 timestamp source as superseded in [`WO-001.1`](work-orders-v6/WO-001.1-documentref-save-lineage.md); the approved contract is recorded in [`WO-001.5`](work-orders-v6/WO-001.5-session-open-lineage-correction.md). No tests, build, formatting, lint, manual checks, or interoperability validation were run. All validation remains user-owned.

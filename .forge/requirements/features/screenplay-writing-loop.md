@@ -298,20 +298,24 @@ project meaning; failures preserve the prior valid destination and unsaved state
   - **AC-WRITING-003.7:** A native FDX root DocumentRef is the durable current-save record. Preserve
     its existing ID verbatim across Save and Save As; every successful transactional Save and Save As
     writes one current local-wall-clock DateTime in the exact `YYYYMMDDTHHMMSS` shape (falling back
-    to UTC only when local offset discovery fails). At Open, capture a valid root DocumentRef DateTime
-    as private per-session lineage state; missing, malformed, or ambiguous values provide no typed
-    anchor while remaining source-preserved. Every Save As appends exactly one direct DocumentRef
-    child XRef with a fresh collision-checked lowercase UUID v4 and the session's captured timestamp;
-    when no session timestamp exists, use the valid pre-save DocumentRef timestamp, then the current
-    save timestamp. Ordinary Save appends no XRef. Existing XRefs and unrelated DocumentRef source
-    data remain unchanged. A missing DocumentRef is generated before Content with DateTime then id
-    attributes; a present DocumentRef retains its ID and source position while only its recognized
-    DateTime value is updated (or added without normalizing unrelated attributes). Direct
-    source-backed serialization has no lineage side effects. The authorized DocumentRef/XRef delta
-    is reconciled only in the detached save candidate after original code 4 graph comparison and
-    before strict code 29 identity and code 30 source-tree checks. Any preparation, codec, conflict,
-    or publication failure leaves destination, live lineage tree, opened-session anchor, path,
-    baseline, selection, and dirty state unchanged.
+    to UTC only when local offset discovery fails). Capture a separate session-open wall-clock time
+    when a document is deserialized into an editing session or a new session starts; this ephemeral
+    value is independent of DocumentRef DateTime, remains fixed across saves/rebases, and is outside
+    canonical content and undo history. On ordinary Save, append exactly one direct DocumentRef child
+    XRef with that session-open timestamp and a fresh collision-checked lowercase UUID v4 only when
+    there are no direct-child XRefs; otherwise preserve all XRefs and append none. Every Save As
+    appends exactly one such XRef regardless of existing history. On every successful Save or Save
+    As, update DocumentRef DateTime to the independently captured current saving time and preserve its
+    existing ID. Session-open and saving times may coincide at FDX's one-second resolution; do not
+    fabricate monotonic timestamps. Existing XRefs and unrelated DocumentRef source data remain
+    unchanged. A missing DocumentRef is generated before Content with DateTime then id attributes; a
+    present DocumentRef retains its ID and source position while only its recognized DateTime value is
+    updated (or added without normalizing unrelated attributes). Direct source-backed serialization
+    has no lineage side effects. The authorized DocumentRef/XRef delta is reconciled only in the
+    detached save candidate after original code 4 graph comparison and before strict code 29 identity
+    and code 30 source-tree checks. Any preparation, codec, conflict, or publication failure leaves
+    destination, live lineage tree, session-open timestamp, path, baseline, selection, and dirty state
+    unchanged.
   - **AC-WRITING-003.8:** Root WindowState is disposable native desktop view state, not screenplay
     semantics or session history. Open projects only one unambiguous direct FinalDraft/WindowState
     in the root element's expanded namespace; nested lookalikes are ignored. Left and Top accept
