@@ -62,8 +62,8 @@ fn typing_and_paste_keep_exact_case_for_every_shared_default_all_caps_role() {
         assert_eq!(element.text, "MiXeD", "canonical source for {role:?}");
         let line = line_for(editing.project(), 0);
         assert!(line.text_style.all_caps, "shared AllCaps default for {role:?}");
-        assert_eq!(line.text, "MiXeD", "layout canonical text for {role:?}");
-        assert_eq!(line.display_text, "MIXED", "display text for {role:?}");
+        assert_eq!(line.text.as_ref(), "MiXeD", "layout canonical text for {role:?}");
+        assert_eq!(line.display_text.as_ref(), "MIXED", "display text for {role:?}");
     }
 }
 
@@ -132,8 +132,8 @@ fn expanding_unicode_is_display_only_and_keeps_source_byte_mapping() {
         .unwrap_or_else(|_| unreachable!("typed Unicode must be retained"));
     assert_eq!(editing.selection().focus.offset, "straße".len());
     let line = line_for(editing.project(), 0);
-    assert_eq!(line.text, "straße");
-    assert_eq!(line.display_text, "STRASSE");
+    assert_eq!(line.text.as_ref(), "straße");
+    assert_eq!(line.display_text.as_ref(), "STRASSE");
     let expansion = line
         .display_source_map
         .iter()
@@ -155,8 +155,8 @@ fn new_document_save_and_reopen_keep_mixed_case_with_display_all_caps() {
         let reopened = round_trip(editing.project());
         assert_eq!(reopened.elements[0].text, "MiXeD Straße", "native source for {role:?}");
         let line = line_for(&reopened, 0);
-        assert_eq!(line.text, "MiXeD Straße", "reopened canonical line for {role:?}");
-        assert_eq!(line.display_text, "MIXED STRASSE", "reopened display line for {role:?}");
+        assert_eq!(line.text.as_ref(), "MiXeD Straße", "reopened canonical line for {role:?}");
+        assert_eq!(line.display_text.as_ref(), "MIXED STRASSE", "reopened display line for {role:?}");
     }
 }
 
@@ -178,8 +178,8 @@ fn imported_all_caps_and_mixed_case_source_survive_edit_save_and_reopen() {
     let reopened = round_trip(editing.project());
     assert_eq!(reopened.elements[0].text, "jOhN McKay");
     let line = line_for(&reopened, 0);
-    assert_eq!(line.text, "jOhN McKay");
-    assert_eq!(line.display_text, "JOHN MCKAY");
+    assert_eq!(line.text.as_ref(), "jOhN McKay");
+    assert_eq!(line.display_text.as_ref(), "JOHN MCKAY");
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn imported_fontspec_override_without_allcaps_displays_canonical_case() {
     assert_eq!(reopened.elements[0].text, "Int. Kitchen - Night");
     let line = line_for(&reopened, 0);
     assert!(!line.text_style.all_caps);
-    assert_eq!(line.display_text, "Int. Kitchen - Night");
+    assert_eq!(line.display_text.as_ref(), "Int. Kitchen - Night");
 }
 
 #[test]

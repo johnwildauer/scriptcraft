@@ -11,13 +11,20 @@ use crate::{
     validate_layout_inputs, LayoutInputs, ModelError, PrintVisibility, Project, Role,
     SourceLayoutSettings, StableId,
 };
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
+use std::time::Instant;
 
 pub const FONT_FAMILY: &str = "Courier-family fixed metrics (12 pt target)";
 pub const CHAR_WIDTH: u32 = 7;
 pub const LINE_HEIGHT: u32 = 12;
 pub const POINTS_PER_INCH: u32 = 72;
 const MAX_LINES_PER_ELEMENT: usize = 1_000_000;
+const MAX_CACHED_ELEMENT_WRAPS: usize = 4_096;
+const MAX_CACHED_ELEMENT_WRAP_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -51,12 +58,12 @@ pub struct LayoutLine {
     pub role: Role,
     pub element: usize,
     pub source: SourceRange,
-    pub text: String,
+    pub text: Arc<str>,
     /// Display-only text; canonical `text` and source byte ranges are untouched.
-    pub display_text: String,
+    pub display_text: Arc<str>,
     /// Source-character to display-character spans, relative to this line's
     /// display text and absolute within the canonical element text.
-    pub display_source_map: Vec<DisplaySourceSegment>,
+    pub display_source_map: Arc<[DisplaySourceSegment]>,
     pub text_style: EffectiveTextStyle,
     pub char_width: FixedPoint,
     /// Text extent after first-line indent and alignment.
@@ -69,7 +76,7 @@ pub struct LayoutLine {
     pub oversized: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayoutPurpose {
     Editor,
     Print,
@@ -88,7 +95,7 @@ impl LayoutLine {
     /// optional trailing choice is used only for an offset inside an expanded
     /// source scalar; normal editing offsets are always scalar boundaries.
     pub fn display_char_for_source(&self, source_offset: usize, trailing: bool) -> usize {
-        for segment in &self.display_source_map {
+        for segment in self.display_source_map.iter() {
             if source_offset <= segment.source_start {
                 return segment.display_start;
             }
@@ -110,7 +117,7 @@ impl LayoutLine {
     /// Boundaries inside a Unicode uppercase expansion deterministically map
     /// before the source scalar; the boundary after its final cell maps after.
     pub fn source_for_display_char(&self, display_char: usize) -> usize {
-        for segment in &self.display_source_map {
+        for segment in self.display_source_map.iter() {
             if display_char <= segment.display_start {
                 return segment.source_start;
             }
@@ -145,6 +152,37 @@ pub struct ScreenplayLayout {
     pub line_height: u32,
     pub purpose: LayoutPurpose,
     pub pages: Vec<LayoutPage>,
+    element_line_index: Vec<Vec<LineLocation>>,
+    body_line_index: Vec<BodyLineIndexEntry>,
+    body_line_y_order: Vec<usize>,
+    body_lines_by_element: Vec<Vec<usize>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineLocation {
+    page: usize,
+    line: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BodyLineIndexEntry {
+    location: LineLocation,
+    absolute_y: i64,
+    element: usize,
+    source: SourceRange,
+}
+
+/// Value-free work count for one indexed interaction query. It counts index
+/// entries actually inspected, including binary-search probes.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct InteractionQueryDiagnostics {
+    pub index_entries_examined: u64,
+}
+
+impl InteractionQueryDiagnostics {
+    fn examined(&mut self) {
+        self.index_entries_examined = self.index_entries_examined.saturating_add(1);
+    }
 }
 
 /// Session-owned immutable layout cache shared by desktop adapters and
@@ -157,6 +195,227 @@ pub struct LayoutCache {
     source_settings: Option<SourceLayoutSettings>,
     purpose: Option<LayoutPurpose>,
     layout: Option<Arc<ScreenplayLayout>>,
+    project_identity: Option<Arc<()>>,
+    element_wraps: ElementWrapCache,
+}
+
+/// Measurements from one layout build. These values intentionally contain no
+/// document-owned content and are returned separately from the layout so that
+/// diagnostics cannot affect layout equality or pagination output.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutBuildDiagnostics {
+    /// Complete Project validations performed by this layout request.
+    pub complete_project_validations: u64,
+    pub element_wraps_built: u64,
+    pub element_wraps_reused: u64,
+    pub element_wrap_nanos: u128,
+}
+
+impl LayoutBuildDiagnostics {
+    fn record_element_wrap(&mut self, started: Instant) {
+        self.element_wraps_built = self.element_wraps_built.saturating_add(1);
+        self.element_wrap_nanos = self
+            .element_wrap_nanos
+            .saturating_add(started.elapsed().as_nanos());
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ElementWrapContext {
+    element_id: crate::StableId,
+    role: Role,
+    purpose: LayoutPurpose,
+    title_page: bool,
+    paragraph: EffectiveParagraph,
+    text_style: EffectiveTextStyle,
+    char_width: FixedPoint,
+    max_chars: u32,
+}
+
+#[derive(Debug)]
+struct ElementWrapEntry {
+    context: ElementWrapContext,
+    canonical_text: Arc<str>,
+    lines: Arc<[WrappedLine]>,
+    last_used_generation: u64,
+    insertion_order: u64,
+    byte_cost: usize,
+}
+
+#[derive(Debug, Default)]
+struct ElementWrapCache {
+    buckets: HashMap<u64, Vec<ElementWrapEntry>>,
+    generation: u64,
+    next_order: u64,
+    entry_count: usize,
+    retained_bytes: usize,
+    #[cfg(test)]
+    forced_fingerprint: Option<u64>,
+}
+
+impl ElementWrapCache {
+    fn start_generation(&mut self) {
+        if self.generation == u64::MAX {
+            self.generation = 1;
+            for entry in self.buckets.values_mut().flatten() {
+                entry.last_used_generation = 0;
+            }
+        } else {
+            self.generation = self.generation.saturating_add(1).max(1);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buckets.clear();
+        self.generation = 0;
+        self.next_order = 0;
+        self.entry_count = 0;
+        self.retained_bytes = 0;
+    }
+
+    fn fingerprint(&self, context: &ElementWrapContext, text: &str) -> u64 {
+        #[cfg(test)]
+        if let Some(fingerprint) = self.forced_fingerprint {
+            return fingerprint;
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        context.hash(&mut hasher);
+        text.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn wrap(
+        &mut self,
+        element_id: &crate::StableId,
+        text: &str,
+        element: usize,
+        role: Role,
+        paragraph: EffectiveParagraph,
+        text_style: EffectiveTextStyle,
+        char_width: FixedPoint,
+        max_chars: u32,
+        purpose: LayoutPurpose,
+        title_page: bool,
+        diagnostics: Option<&mut LayoutBuildDiagnostics>,
+    ) -> Vec<WrappedLine> {
+        let context = ElementWrapContext {
+            element_id: element_id.clone(),
+            role,
+            purpose,
+            title_page,
+            paragraph,
+            text_style: text_style.clone(),
+            char_width,
+            max_chars,
+        };
+        let fingerprint = self.fingerprint(&context, text);
+        if let Some(entry) = self.buckets.get_mut(&fingerprint).and_then(|bucket| {
+            bucket
+                .iter_mut()
+                .find(|entry| entry.context == context && entry.canonical_text.as_ref() == text)
+        }) {
+            entry.last_used_generation = self.generation;
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.element_wraps_reused =
+                    diagnostics.element_wraps_reused.saturating_add(1);
+            }
+            return entry
+                .lines
+                .iter()
+                .cloned()
+                .map(|mut line| {
+                    line.element = element;
+                    line
+                })
+                .collect();
+        }
+
+        let started = diagnostics.as_ref().map(|_| Instant::now());
+        let lines = wrap_element(
+            text,
+            element,
+            role,
+            paragraph,
+            text_style,
+            char_width,
+            max_chars,
+        );
+        if let (Some(diagnostics), Some(started)) = (diagnostics, started) {
+            diagnostics.record_element_wrap(started);
+        }
+        let cached_lines = lines
+            .iter()
+            .cloned()
+            .map(|mut line| {
+                line.element = 0;
+                line
+            })
+            .collect::<Vec<_>>();
+        let byte_cost = text
+            .len()
+            .saturating_add(cached_lines.iter().fold(0usize, |total, line| {
+                total
+                    .saturating_add(line.text.len())
+                    .saturating_add(line.display_text.len())
+                    .saturating_add(
+                        line.display_source_map
+                            .len()
+                            .saturating_mul(std::mem::size_of::<DisplaySourceSegment>()),
+                    )
+            }));
+        if byte_cost > MAX_CACHED_ELEMENT_WRAP_BYTES {
+            return lines;
+        }
+        self.next_order = self.next_order.saturating_add(1);
+        self.buckets.entry(fingerprint).or_default().push(ElementWrapEntry {
+            context,
+            canonical_text: Arc::from(text),
+            lines: cached_lines.into(),
+            last_used_generation: self.generation,
+            insertion_order: self.next_order,
+            byte_cost,
+        });
+        self.entry_count = self.entry_count.saturating_add(1);
+        self.retained_bytes = self.retained_bytes.saturating_add(byte_cost);
+        lines
+    }
+
+    fn evict_if_needed(&mut self) {
+        while self.entry_count > MAX_CACHED_ELEMENT_WRAPS
+            || self.retained_bytes > MAX_CACHED_ELEMENT_WRAP_BYTES
+        {
+            let oldest = self
+                .buckets
+                .iter()
+                .flat_map(|(fingerprint, bucket)| {
+                    bucket.iter().enumerate().map(move |(index, entry)| {
+                        (
+                            entry.last_used_generation,
+                            entry.insertion_order,
+                            *fingerprint,
+                            index,
+                        )
+                    })
+                })
+                .min();
+            let Some((_, _, fingerprint, index)) = oldest else {
+                self.entry_count = 0;
+                break;
+            };
+            let (removed_bytes, remove_bucket) = if let Some(bucket) = self.buckets.get_mut(&fingerprint) {
+                let removed = bucket.remove(index);
+                let remove_bucket = bucket.is_empty();
+                (removed.byte_cost, remove_bucket)
+            } else {
+                (0, false)
+            };
+            if remove_bucket {
+                self.buckets.remove(&fingerprint);
+            }
+            self.entry_count = self.entry_count.saturating_sub(1);
+            self.retained_bytes = self.retained_bytes.saturating_sub(removed_bytes);
+        }
+    }
 }
 
 impl LayoutCache {
@@ -190,14 +449,96 @@ impl LayoutCache {
         inputs: &LayoutInputs,
         purpose: LayoutPurpose,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
-        let source_settings = project
+        self.get_or_build_with_optional_diagnostics(revision, project, inputs, purpose, None, false)
+    }
+
+    /// Diagnostic counterpart to the ordinary cache lookup. A cache hit
+    /// returns zero build measurements; a miss reports wrapping work separately
+    /// from validation, pagination, and cache lookup.
+    pub fn get_or_build_with_inputs_for_purpose_and_diagnostics(
+        &mut self,
+        revision: u64,
+        project: &Project,
+        inputs: &LayoutInputs,
+        purpose: LayoutPurpose,
+        diagnostics: &mut LayoutBuildDiagnostics,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        *diagnostics = LayoutBuildDiagnostics::default();
+        self.get_or_build_with_optional_diagnostics(
+            revision,
+            project,
+            inputs,
+            purpose,
+            Some(diagnostics),
+            false,
+        )
+    }
+
+    /// Builds from a live editing session whose complete baseline and every
+    /// published edit candidate are validated by the session boundary.
+    pub fn get_or_build_for_session_with_diagnostics(
+        &mut self,
+        revision: u64,
+        session: &crate::editing::EditingSession,
+        purpose: LayoutPurpose,
+        diagnostics: &mut LayoutBuildDiagnostics,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        *diagnostics = LayoutBuildDiagnostics::default();
+        self.get_or_build_with_optional_diagnostics(
+            revision,
+            session.project(),
+            session.layout_inputs(),
+            purpose,
+            Some(diagnostics),
+            true,
+        )
+    }
+
+    fn get_or_build_with_optional_diagnostics(
+        &mut self,
+        revision: u64,
+        project: &Project,
+        inputs: &LayoutInputs,
+        purpose: LayoutPurpose,
+        mut diagnostics: Option<&mut LayoutBuildDiagnostics>,
+        validated_session: bool,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.complete_project_validations = if validated_session { 0 } else { 1 };
+        }
+        if !validated_session {
+            project.validate()?;
+        }
+        let source_settings_ref = project
             .preservation
             .as_ref()
-            .map(|preservation| preservation.source_layout_settings.clone())
-            .unwrap_or_default();
+            .map(|preservation| &preservation.source_layout_settings);
+        let source_settings_match = match source_settings_ref {
+            Some(source) => self
+                .source_settings
+                .as_ref()
+                .is_some_and(|cached| cached == source),
+            None => self
+                .source_settings
+                .as_ref()
+                .is_some_and(|cached| cached == &SourceLayoutSettings::default()),
+        };
+        let same_document = self
+            .project_identity
+            .as_ref()
+            .is_some_and(|identity| Arc::ptr_eq(identity, project.layout_identity()));
+        if self.project_identity.is_some() && !same_document {
+            self.revision = None;
+            self.inputs = None;
+            self.source_settings = None;
+            self.purpose = None;
+            self.layout = None;
+            self.element_wraps.clear();
+        }
         if self.revision == Some(revision)
             && self.inputs.as_ref() == Some(inputs)
-            && self.source_settings.as_ref() == Some(&source_settings)
+            && source_settings_match
+            && same_document
             && self.purpose == Some(purpose)
         {
             return self
@@ -208,14 +549,26 @@ impl LayoutCache {
                 })
                 .map(|layout| (layout, true));
         }
-        let layout = Arc::new(ScreenplayLayout::build_with_inputs_for_purpose(
-            project, inputs, purpose,
-        )?);
+        let source_settings = source_settings_ref
+            .cloned()
+            .unwrap_or_default();
+        self.element_wraps.start_generation();
+        let layout = Arc::new(ScreenplayLayout::build_with_effective_inputs_for_purpose_internal(
+                project,
+                inputs,
+                &source_settings,
+                purpose,
+                diagnostics.as_deref_mut(),
+                Some(&mut self.element_wraps),
+                true,
+            )?);
+        self.element_wraps.evict_if_needed();
         self.revision = Some(revision);
         self.inputs = Some(inputs.clone());
         self.source_settings = Some(source_settings);
         self.purpose = Some(purpose);
         self.layout = Some(layout.clone());
+        self.project_identity = Some(project.layout_identity().clone());
         Ok((layout, false))
     }
 }
@@ -292,7 +645,51 @@ impl ScreenplayLayout {
         source_settings: &SourceLayoutSettings,
         purpose: LayoutPurpose,
     ) -> Result<Self, LayoutError> {
-        project.validate()?;
+        Self::build_with_effective_inputs_for_purpose_internal(
+            project,
+            inputs,
+            source_settings,
+            purpose,
+            None,
+            None,
+            false,
+        )
+    }
+
+    /// Builds the same deterministic layout while returning value-free work
+    /// measurements separately from the layout result.
+    pub fn build_with_effective_inputs_for_purpose_and_diagnostics(
+        project: &Project,
+        inputs: &LayoutInputs,
+        source_settings: &SourceLayoutSettings,
+        purpose: LayoutPurpose,
+        diagnostics: &mut LayoutBuildDiagnostics,
+    ) -> Result<Self, LayoutError> {
+        *diagnostics = LayoutBuildDiagnostics::default();
+        diagnostics.complete_project_validations = 1;
+        Self::build_with_effective_inputs_for_purpose_internal(
+            project,
+            inputs,
+            source_settings,
+            purpose,
+            Some(diagnostics),
+            None,
+            false,
+        )
+    }
+
+    fn build_with_effective_inputs_for_purpose_internal(
+        project: &Project,
+        inputs: &LayoutInputs,
+        source_settings: &SourceLayoutSettings,
+        purpose: LayoutPurpose,
+        mut diagnostics: Option<&mut LayoutBuildDiagnostics>,
+        mut wrap_cache: Option<&mut ElementWrapCache>,
+        validated_session: bool,
+    ) -> Result<Self, LayoutError> {
+        if !validated_session {
+            project.validate()?;
+        }
         validate_layout_inputs(inputs).map_err(|_| LayoutError {
             kind: LayoutErrorKind::InvalidProfile,
         })?;
@@ -307,6 +704,10 @@ impl ScreenplayLayout {
             line_height: inputs.line_advance,
             purpose,
             pages: Vec::new(),
+            element_line_index: Vec::new(),
+            body_line_index: Vec::new(),
+            body_line_y_order: Vec::new(),
+            body_lines_by_element: Vec::new(),
         };
         if !project.title_page.is_empty() {
             let mut page = output.new_page(true);
@@ -323,7 +724,10 @@ impl ScreenplayLayout {
                     char_width: FixedPoint::from_points(i64::from(output.inputs.char_width)),
                 };
                 let style = plain_title_style(inputs);
-                let lines = wrap_element(
+                let lines = wrap_for_layout(
+                    wrap_cache.as_deref_mut(),
+                    diagnostics.as_deref_mut(),
+                    &element.id,
                     &element.text,
                     index,
                     element.role,
@@ -331,6 +735,8 @@ impl ScreenplayLayout {
                     style,
                     FixedPoint::from_points(i64::from(output.char_width)),
                     output.inputs.chars_per_line,
+                    purpose,
+                    true,
                 );
                 for line in lines {
                     let laid_out = output.make_line(&page, line, true, page.next_line_y);
@@ -371,20 +777,26 @@ impl ScreenplayLayout {
                 project.legacy_json_state.is_some(),
                 &text_style,
             );
-            let lines = wrap_element(
+            let lines = wrap_for_layout(
+                wrap_cache.as_deref_mut(),
+                diagnostics.as_deref_mut(),
+                &element.id,
                 element.text.as_str(),
                 index,
                 element.role,
                 paragraph,
-                text_style,
+                text_style.clone(),
                 paragraph.char_width,
                 output.inputs.chars_per_line,
+                purpose,
+                false,
             );
             output.place_element(lines, element.role, paragraph);
         }
         if output.pages.is_empty() {
             output.pages.push(output.new_page(false));
         }
+        output.rebuild_interaction_indexes();
         Ok(output)
     }
 
@@ -437,6 +849,16 @@ impl ScreenplayLayout {
         x: FixedPoint,
         y: FixedPoint,
     ) -> Option<Caret> {
+        self.nearest_line_hit_test_fixed_with_diagnostics(page, x, y, &mut InteractionQueryDiagnostics::default())
+    }
+
+    pub fn nearest_line_hit_test_fixed_with_diagnostics(
+        &self,
+        page: usize,
+        x: FixedPoint,
+        y: FixedPoint,
+        diagnostics: &mut InteractionQueryDiagnostics,
+    ) -> Option<Caret> {
         if self.pages.get(page)?.title_page {
             return None;
         }
@@ -445,30 +867,77 @@ impl ScreenplayLayout {
             .ok()?
             .saturating_mul(page_height)
             .saturating_add(y.raw());
-        self.pages
-            .iter()
-            .enumerate()
-            .filter(|(_, candidate)| !candidate.title_page)
-            .flat_map(|(page_index, candidate)| {
-                candidate
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .map(move |(line_index, line)| {
-                        let line_y = i64::try_from(page_index)
-                            .unwrap_or(i64::MAX)
-                            .saturating_mul(page_height)
-                            .saturating_add(line.geometry.y.raw());
-                        let distance = pointer_y.saturating_sub(line_y).saturating_abs();
-                        (distance, page_index, line_index, line)
-                    })
-            })
-            .min_by_key(|(distance, page_index, line_index, _)| {
-                // Stable document order is the tie-breaker: earlier lines,
-                // then lower page indexes, win exact vertical ties.
-                (*distance, *page_index, *line_index)
-            })
-            .map(|(_, _, _, line)| self.caret_for_line(line, x))
+        let insertion = self.body_line_y_order.partition_point(|index| {
+            diagnostics.examined();
+            self.body_line_index[*index].absolute_y < pointer_y
+        });
+        let mut candidates: [Option<usize>; 2] = [None, None];
+        let mut candidate_count = 0;
+        for coordinate_index in [
+            insertion.checked_sub(1),
+            (insertion < self.body_line_y_order.len()).then_some(insertion),
+        ]
+            .into_iter()
+            .flatten()
+        {
+            let index = self.body_line_y_order[coordinate_index];
+            diagnostics.examined();
+            let y = self.body_line_index[index].absolute_y;
+            let first_coordinate = self.body_line_y_order[..coordinate_index].partition_point(|prior| {
+                diagnostics.examined();
+                self.body_line_index[*prior].absolute_y < y
+            });
+            let first = self.body_line_y_order[first_coordinate];
+            if !candidates[..candidate_count].iter().flatten().any(|candidate| {
+                diagnostics.examined();
+                self.body_line_index[*candidate].absolute_y == y
+            }) {
+                candidates[candidate_count] = Some(first);
+                candidate_count += 1;
+            }
+        }
+        let distance_key = |index: usize| {
+            let entry = self.body_line_index[index];
+            let distance = pointer_y
+                .saturating_sub(entry.absolute_y)
+                .saturating_abs();
+            (distance, entry.location.page, entry.location.line)
+        };
+        let mut best = None;
+        for index in candidates[..candidate_count].iter().flatten().copied() {
+            diagnostics.examined();
+            if best.map_or(true, |current| distance_key(index) < distance_key(current)) {
+                best = Some(index);
+            }
+        }
+        let best = best?;
+        diagnostics.examined();
+        let best_distance = pointer_y
+            .saturating_sub(self.body_line_index[best].absolute_y)
+            .saturating_abs();
+        // The legacy distance saturates at i64::MAX. If that makes all lines
+        // tie, document order still wins even though the geometrically nearest
+        // candidate was found by the ordered index.
+        if best_distance == i64::MAX {
+            diagnostics.examined();
+            let first = self.body_line_index.first()?;
+            let first_distance = pointer_y
+                .saturating_sub(first.absolute_y)
+                .saturating_abs();
+            if first_distance == i64::MAX {
+                diagnostics.examined();
+                return Some(self.caret_for_line(
+                    &self.pages[first.location.page].lines[first.location.line],
+                    x,
+                ));
+            }
+        }
+        diagnostics.examined();
+        let entry = self.body_line_index[best];
+        Some(self.caret_for_line(
+            &self.pages[entry.location.page].lines[entry.location.line],
+            x,
+        ))
     }
 
     fn caret_for_line(&self, line: &LayoutLine, x: FixedPoint) -> Caret {
@@ -486,30 +955,145 @@ impl ScreenplayLayout {
     }
 
     pub fn caret_geometry(&self, caret: Caret) -> Result<FixedRect, LayoutError> {
-        for page in &self.pages {
-            for line in &page.lines {
-                if line.element == caret.element
-                    && caret.offset >= line.source.start
-                    && caret.offset <= line.source.end
-                    && is_boundary_in_line(line, caret.offset)
-                {
-                    let columns = line.display_char_for_source(caret.offset, false);
-                    return Ok(FixedRect {
-                        x: FixedPoint::from_raw(
-                            line.geometry.x.raw().saturating_add(
-                                (columns as i64).saturating_mul(line.char_width.raw()),
-                            ),
+        self.caret_geometry_with_diagnostics(caret, &mut InteractionQueryDiagnostics::default())
+    }
+
+    pub fn caret_geometry_with_diagnostics(
+        &self,
+        caret: Caret,
+        diagnostics: &mut InteractionQueryDiagnostics,
+    ) -> Result<FixedRect, LayoutError> {
+        let Some(locations) = self.element_line_index.get(caret.element) else {
+            return Err(LayoutError { kind: LayoutErrorKind::InvalidPosition });
+        };
+        for location in locations {
+            diagnostics.examined();
+            let line = &self.pages[location.page].lines[location.line];
+            if caret.offset >= line.source.start
+                && caret.offset <= line.source.end
+                && is_boundary_in_line(line, caret.offset)
+            {
+                let columns = line.display_char_for_source(caret.offset, false);
+                return Ok(FixedRect {
+                    x: FixedPoint::from_raw(
+                        line.geometry.x.raw().saturating_add(
+                            (columns as i64).saturating_mul(line.char_width.raw()),
                         ),
-                        y: line.geometry.y,
-                        width: FixedPoint::from_points(1),
-                        height: line.geometry.height,
-                    });
-                }
+                    ),
+                    y: line.geometry.y,
+                    width: FixedPoint::from_points(1),
+                    height: line.geometry.height,
+                });
             }
         }
         Err(LayoutError {
             kind: LayoutErrorKind::InvalidPosition,
         })
+    }
+
+    /// First page owning this element/source range in the same page-and-line
+    /// order used by the former complete-layout owner scan.
+    pub fn page_for_position_with_diagnostics(
+        &self,
+        element: usize,
+        offset: usize,
+        diagnostics: &mut InteractionQueryDiagnostics,
+    ) -> Option<usize> {
+        self.page_for_position_in_range_with_diagnostics(
+            element,
+            offset,
+            None,
+            diagnostics,
+        )
+    }
+
+    pub fn page_for_position_in_range_with_diagnostics(
+        &self,
+        element: usize,
+        offset: usize,
+        page_range: Option<(usize, usize)>,
+        diagnostics: &mut InteractionQueryDiagnostics,
+    ) -> Option<usize> {
+        self.element_line_index.get(element)?.iter().find_map(|location| {
+            diagnostics.examined();
+            if page_range.is_some_and(|(first, last)| location.page < first || location.page > last) {
+                return None;
+            }
+            let line = &self.pages[location.page].lines[location.line];
+            (offset >= line.source.start && offset <= line.source.end).then_some(location.page)
+        })
+    }
+
+    /// Locates the current body line in document order for vertical movement.
+    /// Title-page lines are deliberately outside this navigation domain.
+    pub fn body_line_index_for_position_with_diagnostics(
+        &self,
+        element: usize,
+        offset: usize,
+        diagnostics: &mut InteractionQueryDiagnostics,
+    ) -> Option<usize> {
+        self.body_lines_by_element.get(element)?.iter().copied().find(|index| {
+            diagnostics.examined();
+            let entry = self.body_line_index[*index];
+            offset >= entry.source.start && offset <= entry.source.end
+        })
+    }
+
+    pub fn body_line(&self, index: usize) -> Option<&LayoutLine> {
+        let entry = self.body_line_index.get(index)?;
+        self.pages
+            .get(entry.location.page)?
+            .lines
+            .get(entry.location.line)
+    }
+
+    pub fn body_line_count(&self) -> usize {
+        self.body_line_index.len()
+    }
+
+    fn rebuild_interaction_indexes(&mut self) {
+        let max_element = self
+            .pages
+            .iter()
+            .flat_map(|page| page.lines.iter().map(|line| line.element))
+            .max();
+        let count = max_element.map_or(0, |element| element.saturating_add(1));
+        self.element_line_index = vec![Vec::new(); count];
+        self.body_line_index.clear();
+        self.body_line_y_order.clear();
+        self.body_lines_by_element = vec![Vec::new(); count];
+        let page_height = i64::from(self.inputs.paper_height)
+            .saturating_mul(FixedPoint::SCALE);
+        for (page_index, page) in self.pages.iter().enumerate() {
+            for (line_index, line) in page.lines.iter().enumerate() {
+                let location = LineLocation { page: page_index, line: line_index };
+                if let Some(element_lines) = self.element_line_index.get_mut(line.element) {
+                    element_lines.push(location);
+                }
+                if page.title_page {
+                    continue;
+                }
+                let absolute_y = i64::try_from(page_index)
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(page_height)
+                    .saturating_add(line.geometry.y.raw());
+                let index = self.body_line_index.len();
+                self.body_line_index.push(BodyLineIndexEntry {
+                    location,
+                    absolute_y,
+                    element: line.element,
+                    source: line.source,
+                });
+                if let Some(element_lines) = self.body_lines_by_element.get_mut(line.element) {
+                    element_lines.push(index);
+                }
+            }
+        }
+        self.body_line_y_order = (0..self.body_line_index.len()).collect();
+        self.body_line_y_order.sort_by_key(|index| {
+            let entry = self.body_line_index[*index];
+            (entry.absolute_y, entry.location.page, entry.location.line)
+        });
     }
 
     fn new_page(&self, title_page: bool) -> LayoutPage {
@@ -692,15 +1276,15 @@ impl ScreenplayLayout {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct WrappedLine {
     element: usize,
     role: Role,
     start: usize,
     end: usize,
-    text: String,
-    display_text: String,
-    display_source_map: Vec<DisplaySourceSegment>,
+    text: Arc<str>,
+    display_text: Arc<str>,
+    display_source_map: Arc<[DisplaySourceSegment]>,
     text_style: EffectiveTextStyle,
     char_width: FixedPoint,
     first_visual_line: bool,
@@ -708,7 +1292,7 @@ struct WrappedLine {
     oversized: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct EffectiveParagraph {
     left: FixedPoint,
     right: FixedPoint,
@@ -887,6 +1471,52 @@ fn is_boundary_in_line(line: &LayoutLine, offset: usize) -> bool {
     line.text.is_char_boundary(offset - line.source.start)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn wrap_for_layout(
+    cache: Option<&mut ElementWrapCache>,
+    diagnostics: Option<&mut LayoutBuildDiagnostics>,
+    element_id: &crate::StableId,
+    text: &str,
+    element: usize,
+    role: Role,
+    paragraph: EffectiveParagraph,
+    text_style: EffectiveTextStyle,
+    char_width: FixedPoint,
+    max_chars: u32,
+    purpose: LayoutPurpose,
+    title_page: bool,
+) -> Vec<WrappedLine> {
+    if let Some(cache) = cache {
+        return cache.wrap(
+            element_id,
+            text,
+            element,
+            role,
+            paragraph,
+            text_style,
+            char_width,
+            max_chars,
+            purpose,
+            title_page,
+            diagnostics,
+        );
+    }
+    let started = diagnostics.as_ref().map(|_| Instant::now());
+    let lines = wrap_element(
+        text,
+        element,
+        role,
+        paragraph,
+        text_style,
+        char_width,
+        max_chars,
+    );
+    if let (Some(diagnostics), Some(started)) = (diagnostics, started) {
+        diagnostics.record_element_wrap(started);
+    }
+    lines
+}
+
 fn wrap_element(
     text: &str,
     element: usize,
@@ -958,9 +1588,9 @@ fn wrap_element(
             role,
             start: 0,
             end: 0,
-            text: String::new(),
-            display_text: String::new(),
-            display_source_map: Vec::new(),
+            text: Arc::from(""),
+            display_text: Arc::from(""),
+            display_source_map: Arc::from([]),
             text_style,
             char_width,
             first_visual_line: true,
@@ -999,9 +1629,9 @@ fn wrap_segment(
             role,
             start: base,
             end: base,
-            text: String::new(),
-            display_text: String::new(),
-            display_source_map: Vec::new(),
+            text: Arc::from(""),
+            display_text: Arc::from(""),
+            display_source_map: Arc::from([]),
             text_style: text_style.clone(),
             char_width,
             first_visual_line: *first_visual_line,
@@ -1092,9 +1722,9 @@ fn wrap_segment(
             role,
             start: source_start,
             end: source_end,
-            text: text[first_cell.local_start..last_cell.local_end].to_owned(),
-            display_text,
-            display_source_map,
+            text: Arc::from(&text[first_cell.local_start..last_cell.local_end]),
+            display_text: Arc::from(display_text),
+            display_source_map: display_source_map.into(),
             text_style: text_style.clone(),
             char_width,
             first_visual_line: first_line,
@@ -1610,7 +2240,7 @@ mod tests {
         let layout = ScreenplayLayout::build(&imported.project).unwrap_or_else(|_| unreachable!());
         let first = &layout.pages[0].lines[0];
         let second = &layout.pages[0].lines[1];
-        assert_eq!(first.text, canonical);
+        assert_eq!(first.text.as_ref(), canonical);
         assert_eq!(first.source.start, 0);
         assert_eq!(first.source.end, 1);
         assert_eq!(first.paragraph_bounds.x.raw(), 6_336);
@@ -1764,12 +2394,12 @@ mod tests {
             .pages
             .iter()
             .flat_map(|page| page.lines.iter())
-            .any(|line| line.text == "abcd"));
+            .any(|line| line.text.as_ref() == "abcd"));
         assert!(layout
             .pages
             .iter()
             .flat_map(|page| page.lines.iter())
-            .any(|line| line.text == "efgh"));
+            .any(|line| line.text.as_ref() == "efgh"));
         assert!(layout.pages.iter().any(|page| {
             page.lines
                 .iter()
@@ -1933,8 +2563,8 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].element, 0);
         assert_eq!(lines[1].element, 4);
-        assert_eq!(lines[0].text, "visible before");
-        assert_eq!(lines[1].text, "visible after");
+        assert_eq!(lines[0].text.as_ref(), "visible before");
+        assert_eq!(lines[1].text.as_ref(), "visible after");
     }
 
     #[test]
@@ -1951,11 +2581,11 @@ mod tests {
             ScreenplayLayout::build_with_effective_inputs(&p, &LayoutInputs::default(), &settings)
                 .unwrap_or_else(|_| unreachable!());
         assert_eq!(layout.pages.len(), 2);
-        assert_eq!(layout.pages[0].lines[0].text, "before");
+        assert_eq!(layout.pages[0].lines[0].text.as_ref(), "before");
         assert!(layout.pages[1]
             .lines
             .iter()
-            .any(|line| line.text == "ACT TWO"));
+            .any(|line| line.text.as_ref() == "ACT TWO"));
         assert!(layout.pages[1].lines.iter().all(|line| line.element == 1));
     }
 
@@ -2060,6 +2690,218 @@ mod tests {
         assert!(layout.nearest_line_hit_test(1, 0, -10_000).is_some());
     }
 
+    fn linear_nearest_reference(
+        layout: &ScreenplayLayout,
+        page: usize,
+        x: FixedPoint,
+        y: FixedPoint,
+    ) -> Option<Caret> {
+        if layout.pages.get(page)?.title_page {
+            return None;
+        }
+        let page_height = i64::from(layout.inputs.paper_height).saturating_mul(FixedPoint::SCALE);
+        let pointer_y = i64::try_from(page)
+            .ok()?
+            .saturating_mul(page_height)
+            .saturating_add(y.raw());
+        layout.pages.iter().enumerate()
+            .filter(|(_, candidate)| !candidate.title_page)
+            .flat_map(|(page_index, candidate)| candidate.lines.iter().enumerate().map(move |(line_index, line)| {
+                let line_y = i64::try_from(page_index)
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(page_height)
+                    .saturating_add(line.geometry.y.raw());
+                let distance = pointer_y.saturating_sub(line_y).saturating_abs();
+                (distance, page_index, line_index, line)
+            }))
+            .min_by_key(|(distance, page_index, line_index, _)| (*distance, *page_index, *line_index))
+            .map(|(_, _, _, line)| layout.caret_for_line(line, x))
+    }
+
+    fn linear_caret_reference(layout: &ScreenplayLayout, caret: &Caret) -> Option<FixedRect> {
+        layout.pages.iter().flat_map(|page| page.lines.iter()).find(|line| {
+            line.element == caret.element
+                && caret.offset >= line.source.start
+                && caret.offset <= line.source.end
+                && is_boundary_in_line(line, caret.offset)
+        }).map(|line| {
+            let columns = line.display_char_for_source(caret.offset, false);
+            FixedRect {
+                x: FixedPoint::from_raw(line.geometry.x.raw().saturating_add(
+                    (columns as i64).saturating_mul(line.char_width.raw()),
+                )),
+                y: line.geometry.y,
+                width: FixedPoint::from_points(1),
+                height: line.geometry.height,
+            }
+        })
+    }
+
+    #[test]
+    fn indexed_interactions_match_linear_references_and_stay_structurally_bounded() {
+        let mut p = project(&[
+            (Role::Action, ""),
+            (Role::Character, "straße with a deliberately long cue"),
+            (Role::Dialogue, "café🙂 combining e\u{301} and more text"),
+            (Role::NewAct, "ACT TWO"),
+            (Role::Note, "last line"),
+        ]);
+        for (index, role) in Role::ALL.iter().copied().enumerate() {
+            p.elements.push(
+                ScreenplayElement::new(
+                    format!("role-{index}"),
+                    role,
+                    format!("{role:?} role café"),
+                )
+                .unwrap_or_else(|_| unreachable!()),
+            );
+        }
+        p.title_page.push(
+            ScreenplayElement::new("title", Role::Action, "Title expansion")
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        let inputs = LayoutInputs {
+            chars_per_line: 7,
+            lines_per_page: 3,
+            margin_left: 36,
+            margin_right: 36,
+            margin_top: 24,
+            margin_bottom: 24,
+            ..LayoutInputs::default()
+        };
+        let mut settings = SourceLayoutSettings::default();
+        let character = Role::ALL.iter().position(|role| *role == Role::Character)
+            .unwrap_or_else(|| unreachable!());
+        let new_act = Role::ALL.iter().position(|role| *role == Role::NewAct)
+            .unwrap_or_else(|| unreachable!());
+        settings.role_font_specs[character].all_caps = Some(true);
+        settings.role_starts_new_page[new_act] = Some(true);
+        let layout = ScreenplayLayout::build_with_effective_inputs(
+            &p,
+            &inputs,
+            &settings,
+        ).unwrap_or_else(|_| unreachable!());
+
+        let body_line_count = layout.body_line_count();
+        assert!(body_line_count > 8);
+        let log_bound = (usize::BITS - (body_line_count as u32).leading_zeros()) as u64 + 1;
+        let nearest_bound = 3 * log_bound + 8;
+        for page in 0..layout.pages.len() {
+            let page_layout = &layout.pages[page];
+            let mut y_values = vec![FixedPoint::from_points(-10_000), FixedPoint::from_points(10_000)];
+            y_values.extend(page_layout.lines.iter().map(|line| line.geometry.y));
+            for y in y_values {
+                let x = FixedPoint::from_points(-500);
+                let expected = linear_nearest_reference(&layout, page, x, y);
+                let mut diagnostics = InteractionQueryDiagnostics::default();
+                let actual = layout.nearest_line_hit_test_fixed_with_diagnostics(
+                    page,
+                    x,
+                    y,
+                    &mut diagnostics,
+                );
+                assert_eq!(actual, expected);
+                if !page_layout.title_page {
+                    assert!(diagnostics.index_entries_examined <= nearest_bound);
+                }
+            }
+        }
+
+        let expected_body_lines = layout.pages.iter()
+            .filter(|page| !page.title_page)
+            .flat_map(|page| page.lines.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(layout.body_line_count(), expected_body_lines.len());
+        for (index, expected_line) in expected_body_lines.iter().enumerate() {
+            let actual_line = layout.body_line(index).unwrap_or_else(|| unreachable!());
+            assert_eq!(actual_line, *expected_line);
+            for offset in [expected_line.source.start, expected_line.source.end] {
+                let reference = layout.pages.iter().enumerate().filter(|(_, page)| !page.title_page)
+                    .flat_map(|(page_index, page)| page.lines.iter().enumerate().map(move |(line_index, line)| (page_index, line_index, line)))
+                    .position(|(_, _, line)| line.element == expected_line.element
+                        && offset >= line.source.start && offset <= line.source.end);
+                let mut diagnostics = InteractionQueryDiagnostics::default();
+                let indexed = layout.body_line_index_for_position_with_diagnostics(
+                    expected_line.element,
+                    offset,
+                    &mut diagnostics,
+                );
+                assert_eq!(indexed, reference);
+                assert!(diagnostics.index_entries_examined <= layout.element_line_index[expected_line.element].len() as u64);
+            }
+        }
+
+        for element in 0..layout.element_line_index.len() {
+            for location in &layout.element_line_index[element] {
+                let line = &layout.pages[location.page].lines[location.line];
+                let offsets = line.text.char_indices()
+                    .map(|(byte, _)| line.source.start + byte)
+                    .chain(std::iter::once(line.source.end))
+                    .collect::<Vec<_>>();
+                for offset in offsets {
+                    let caret = Caret { element, offset };
+                    let mut diagnostics = InteractionQueryDiagnostics::default();
+                    let actual = layout.caret_geometry_with_diagnostics(
+                        caret.clone(),
+                        &mut diagnostics,
+                    ).ok();
+                    assert_eq!(actual, linear_caret_reference(&layout, &caret));
+                    assert!(diagnostics.index_entries_examined <= layout.element_line_index[element].len() as u64);
+
+                    let expected_page = layout.pages.iter().enumerate().find_map(|(page_index, page)| {
+                        page.lines.iter().any(|candidate| candidate.element == element
+                            && offset >= candidate.source.start && offset <= candidate.source.end)
+                            .then_some(page_index)
+                    });
+                    let mut owner_diagnostics = InteractionQueryDiagnostics::default();
+                    let actual_page = layout.page_for_position_with_diagnostics(
+                        element,
+                        offset,
+                        &mut owner_diagnostics,
+                    );
+                    assert_eq!(actual_page, expected_page);
+                    assert!(owner_diagnostics.index_entries_examined <= layout.element_line_index[element].len() as u64);
+                }
+            }
+        }
+        assert!(layout.pages.iter().any(|page| page.title_page));
+        assert!(layout.pages.iter().filter(|page| !page.title_page).count() > 1);
+    }
+
+    #[test]
+    fn cached_layout_indexes_survive_hits_and_rebuild_after_split_join_shapes() {
+        let mut p = project(&[(Role::Action, "first paragraph text")]);
+        let mut cache = LayoutCache::default();
+        let (first, cached) = cache.get_or_build(1, &p).unwrap_or_else(|_| unreachable!());
+        assert!(!cached);
+        let (hit, cached) = cache.get_or_build(1, &p).unwrap_or_else(|_| unreachable!());
+        assert!(cached);
+        assert!(Arc::ptr_eq(&first, &hit));
+        assert_eq!(hit.body_line_count(), first.body_line_count());
+
+        p.elements[0].text = "first".into();
+        p.elements.push(ScreenplayElement::new("split-right", Role::Action, "paragraph text")
+            .unwrap_or_else(|_| unreachable!()));
+        let (split, cached) = cache.get_or_build(2, &p).unwrap_or_else(|_| unreachable!());
+        assert!(!cached);
+        assert_eq!(*split, ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!()));
+        assert!(split.body_line_index_for_position_with_diagnostics(
+            1,
+            p.elements[1].text.len(),
+            &mut InteractionQueryDiagnostics::default(),
+        ).is_some());
+
+        p.elements[0].text = "first paragraph text".into();
+        p.elements.pop();
+        let (joined, cached) = cache.get_or_build(3, &p).unwrap_or_else(|_| unreachable!());
+        assert!(!cached);
+        assert_eq!(*joined, ScreenplayLayout::build(&p).unwrap_or_else(|_| unreachable!()));
+        assert_eq!(joined.body_line_count(), joined.pages.iter()
+            .filter(|page| !page.title_page)
+            .map(|page| page.lines.len())
+            .sum::<usize>());
+    }
+
     #[test]
     fn imported_fontspec_projects_supported_tokens_and_maps_unicode_allcaps() {
         let imported = crate::fdx::read_v6(
@@ -2076,11 +2918,11 @@ mod tests {
         let lines = layout.pages.iter().flat_map(|page| &page.lines).collect::<Vec<_>>();
         assert_eq!(canonical, "Stra\u{00df}e");
         assert_eq!(
-            lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>().join(""),
+            lines.iter().map(|line| line.text.as_ref()).collect::<Vec<_>>().join(""),
             canonical
         );
         assert_eq!(
-            lines.iter().map(|line| line.display_text.as_str()).collect::<Vec<_>>().join(""),
+            lines.iter().map(|line| line.display_text.as_ref()).collect::<Vec<_>>().join(""),
             "STRASSE"
         );
         let styled = lines[0];
@@ -2123,7 +2965,7 @@ mod tests {
         assert_eq!(
             lines
                 .iter()
-                .flat_map(|line| &line.display_source_map)
+                .flat_map(|line| line.display_source_map.iter())
                 .filter(|segment| segment.source_start == 4 && segment.source_end == 6)
                 .count(),
             1
@@ -2158,5 +3000,491 @@ mod tests {
         let ambiguous_line = &ambiguous_layout.pages[0].lines[0];
         assert_eq!(ambiguous_line.text_style.size, 12);
         assert!(!ambiguous_line.text_style.bold && !ambiguous_line.text_style.italic);
+    }
+
+    #[test]
+    fn session_layout_uses_validated_boundary_while_public_builders_validate_completely() {
+        let project = project(&[(Role::Action, "ordinary paragraph")]);
+        let session = crate::editing::EditingSession::new(project.clone())
+            .unwrap_or_else(|_| unreachable!());
+        let inputs = LayoutInputs::default();
+        let mut standalone_diagnostics = LayoutBuildDiagnostics::default();
+        let standalone = ScreenplayLayout::build_with_effective_inputs_for_purpose_and_diagnostics(
+            &project,
+            &inputs,
+            &SourceLayoutSettings::default(),
+            LayoutPurpose::Editor,
+            &mut standalone_diagnostics,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(standalone_diagnostics.complete_project_validations, 1);
+
+        let mut public_cache = LayoutCache::default();
+        let mut public_cache_diagnostics = LayoutBuildDiagnostics::default();
+        let (public_cached, _) = public_cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                session.revision(),
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut public_cache_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(public_cache_diagnostics.complete_project_validations, 1);
+        assert_eq!(public_cached.as_ref(), &standalone);
+
+        let mut session_cache = LayoutCache::default();
+        let mut session_diagnostics = LayoutBuildDiagnostics::default();
+        let (session_layout, _) = session_cache
+            .get_or_build_for_session_with_diagnostics(
+                session.revision(),
+                &session,
+                LayoutPurpose::Editor,
+                &mut session_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(session_diagnostics.complete_project_validations, 0);
+        assert_eq!(session_layout.as_ref(), &standalone);
+    }
+
+    #[test]
+    fn per_element_wrap_reuse_shares_immutable_geometry_and_matches_fresh_layouts() {
+        let imported = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><ParagraphSpec LeftIndent='0.88' RightIndent='7.50'/></ElementSettings><ElementSettings Type='Character'><FontSpec Size='16' Style='Bold+AllCaps'/></ElementSettings><ElementSettings Type='Note'><FontSpec Style='Italic+HiddenText'/></ElementSettings><Content><Paragraph Type='Scene Heading' id='heading'><Text>INT. ROOM - NIGHT</Text></Paragraph><Paragraph Type='Action' id='action'><Text>unchanged action content that wraps over several short lines</Text></Paragraph><Paragraph Type='Character' id='cue'><Text>stra\xc3\x9fe</Text></Paragraph><Paragraph Type='Dialogue' id='dialogue'><Text>short line</Text></Paragraph><Paragraph Type='Note' id='note'><Text>private note</Text></Paragraph><Paragraph Type='General' id='forced' StartsNewPage='Yes'><Text></Text></Paragraph></Content><TitlePage><Paragraph Type='General' id='title'><Text>TITLE PAGE</Text></Paragraph></TitlePage></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let mut session = crate::editing::EditingSession::new(imported.project)
+            .unwrap_or_else(|_| unreachable!());
+        let inputs = LayoutInputs {
+            chars_per_line: 8,
+            ..LayoutInputs::default()
+        };
+        let mut cache = LayoutCache::default();
+        let mut initial_diagnostics = LayoutBuildDiagnostics::default();
+        let (initial, initial_hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                session.revision(),
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut initial_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!initial_hit);
+        assert_eq!(initial_diagnostics.element_wraps_built, 7);
+        assert_eq!(initial_diagnostics.element_wraps_reused, 0);
+
+        let old_heading = initial
+            .pages
+            .iter()
+            .flat_map(|page| page.lines.iter())
+            .find(|line| line.role == Role::SceneHeading)
+            .unwrap_or_else(|| unreachable!());
+        let old_title = &initial.pages[0].lines[0];
+        session
+            .set_selection(crate::editing::Selection::caret(
+                crate::editing::Position {
+                    element: 1,
+                    offset: 0,
+                },
+            ))
+            .unwrap_or_else(|_| unreachable!());
+        session.insert("X").unwrap_or_else(|_| unreachable!());
+
+        let mut edited_diagnostics = LayoutBuildDiagnostics::default();
+        let (edited, edited_hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                session.revision(),
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut edited_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!edited_hit);
+        assert_eq!(edited_diagnostics.element_wraps_built, 1);
+        assert_eq!(edited_diagnostics.element_wraps_reused, 6);
+        let fresh = ScreenplayLayout::build_with_inputs_for_purpose(
+            session.project(),
+            &inputs,
+            LayoutPurpose::Editor,
+        )
+        .unwrap_or_else(|_| unreachable!());
+        assert_eq!(edited.as_ref(), &fresh);
+        let new_heading = edited
+            .pages
+            .iter()
+            .flat_map(|page| page.lines.iter())
+            .find(|line| line.role == Role::SceneHeading)
+            .unwrap_or_else(|| unreachable!());
+        assert!(Arc::ptr_eq(&old_heading.text, &new_heading.text));
+        assert!(Arc::ptr_eq(
+            &old_heading.display_source_map,
+            &new_heading.display_source_map
+        ));
+        assert!(Arc::ptr_eq(
+            &old_title.display_text,
+            &edited.pages[0].lines[0].display_text
+        ));
+
+        session.undo().unwrap_or_else(|_| unreachable!());
+        let mut undo_diagnostics = LayoutBuildDiagnostics::default();
+        let (undone, _) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                session.revision(),
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut undo_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(undo_diagnostics.element_wraps_built, 0);
+        assert_eq!(undo_diagnostics.element_wraps_reused, 7);
+        assert_eq!(
+            undone.as_ref(),
+            &ScreenplayLayout::build_with_inputs_for_purpose(
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+            )
+            .unwrap_or_else(|_| unreachable!())
+        );
+
+        session.redo().unwrap_or_else(|_| unreachable!());
+        let mut redo_diagnostics = LayoutBuildDiagnostics::default();
+        let (redone, _) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                session.revision(),
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut redo_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(redo_diagnostics.element_wraps_built, 0);
+        assert_eq!(redo_diagnostics.element_wraps_reused, 7);
+        assert_eq!(
+            redone.as_ref(),
+            &ScreenplayLayout::build_with_inputs_for_purpose(
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+            )
+            .unwrap_or_else(|_| unreachable!())
+        );
+
+        session
+            .set_selection(crate::editing::Selection::caret(
+                crate::editing::Position {
+                    element: 2,
+                    offset: 0,
+                },
+            ))
+            .unwrap_or_else(|_| unreachable!());
+        session
+            .change_role(Role::Dialogue)
+            .unwrap_or_else(|_| unreachable!());
+        let mut role_diagnostics = LayoutBuildDiagnostics::default();
+        let (role_changed, _) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                session.revision(),
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut role_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(role_diagnostics.element_wraps_built, 1);
+        assert_eq!(role_diagnostics.element_wraps_reused, 6);
+        assert_eq!(
+            role_changed.as_ref(),
+            &ScreenplayLayout::build_with_inputs_for_purpose(
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+            )
+            .unwrap_or_else(|_| unreachable!())
+        );
+
+        session
+            .set_selection(crate::editing::Selection::caret(
+                crate::editing::Position {
+                    element: 3,
+                    offset: 5,
+                },
+            ))
+            .unwrap_or_else(|_| unreachable!());
+        session.split().unwrap_or_else(|_| unreachable!());
+        let (split_layout, _) = cache
+            .get_or_build_with_inputs_for_purpose(
+                session.revision(),
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            split_layout.as_ref(),
+            &ScreenplayLayout::build_with_inputs_for_purpose(
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+            )
+            .unwrap_or_else(|_| unreachable!())
+        );
+        session
+            .set_selection(crate::editing::Selection::caret(
+                crate::editing::Position {
+                    element: 3,
+                    offset: 5,
+                },
+            ))
+            .unwrap_or_else(|_| unreachable!());
+        session
+            .join_with_next()
+            .unwrap_or_else(|_| unreachable!());
+        let (joined_layout, _) = cache
+            .get_or_build_with_inputs_for_purpose(
+                session.revision(),
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            joined_layout.as_ref(),
+            &ScreenplayLayout::build_with_inputs_for_purpose(
+                session.project(),
+                &inputs,
+                LayoutPurpose::Editor,
+            )
+            .unwrap_or_else(|_| unreachable!())
+        );
+
+        let mut print_diagnostics = LayoutBuildDiagnostics::default();
+        let (printed, _) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                session.revision(),
+                session.project(),
+                &inputs,
+                LayoutPurpose::Print,
+                &mut print_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            printed.as_ref(),
+            &ScreenplayLayout::build_with_inputs_for_purpose(
+                session.project(),
+                &inputs,
+                LayoutPurpose::Print,
+            )
+            .unwrap_or_else(|_| unreachable!())
+        );
+        assert!(printed
+            .pages
+            .iter()
+            .flat_map(|page| page.lines.iter())
+            .all(|line| line.role != Role::Note));
+    }
+
+    #[test]
+    fn wrap_fingerprint_collisions_verify_context_and_full_canonical_content() {
+        let mut p = project(&[(Role::Action, "same text"), (Role::Dialogue, "other text")]);
+        let inputs = LayoutInputs::default();
+        let mut cache = LayoutCache::default();
+        cache.element_wraps.forced_fingerprint = Some(0);
+        let mut initial_diagnostics = LayoutBuildDiagnostics::default();
+        let _ = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                1,
+                &p,
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut initial_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        p.elements[0].text = "different text".to_owned();
+        p.elements[0].runs.clear();
+        let mut collision_diagnostics = LayoutBuildDiagnostics::default();
+        let (cached, hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                2,
+                &p,
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut collision_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!hit);
+        assert_eq!(collision_diagnostics.element_wraps_built, 1);
+        assert_eq!(collision_diagnostics.element_wraps_reused, 1);
+        assert_eq!(
+            cached.as_ref(),
+            &ScreenplayLayout::build_with_inputs_for_purpose(
+                &p,
+                &inputs,
+                LayoutPurpose::Editor,
+            )
+            .unwrap_or_else(|_| unreachable!())
+        );
+    }
+
+    #[test]
+    fn source_and_runtime_layout_changes_rekey_only_effectively_changed_wraps() {
+        let imported = crate::fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Character'><FontSpec Style='AllCaps'/></ElementSettings><Content><Paragraph Type='Character' id='cue'><Text>stra\xc3\x9fe</Text></Paragraph><Paragraph Type='Action' id='action'><Text>unchanged action</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let mut project = imported.project;
+        let inputs = LayoutInputs::default();
+        let mut cache = LayoutCache::default();
+        let mut initial_diagnostics = LayoutBuildDiagnostics::default();
+        let _ = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                1,
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut initial_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+
+        let character_index = crate::formatting::role_index(Role::Character);
+        project
+            .preservation
+            .as_mut()
+            .unwrap_or_else(|| unreachable!())
+            .source_layout_settings
+            .role_font_specs[character_index]
+            .all_caps = Some(false);
+        let mut source_diagnostics = LayoutBuildDiagnostics::default();
+        let (source_changed, source_hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                2,
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut source_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!source_hit);
+        assert_eq!(source_diagnostics.element_wraps_built, 1);
+        assert_eq!(source_diagnostics.element_wraps_reused, 1);
+        assert_eq!(
+            source_changed.as_ref(),
+            &ScreenplayLayout::build_with_inputs_for_purpose(
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+            )
+            .unwrap_or_else(|_| unreachable!())
+        );
+
+        let tighter_inputs = LayoutInputs {
+            chars_per_line: inputs.chars_per_line.saturating_sub(1),
+            ..inputs.clone()
+        };
+        let mut runtime_diagnostics = LayoutBuildDiagnostics::default();
+        let (runtime_changed, runtime_hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                3,
+                &project,
+                &tighter_inputs,
+                LayoutPurpose::Editor,
+                &mut runtime_diagnostics,
+            )
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!runtime_hit);
+        assert_eq!(runtime_diagnostics.element_wraps_built, 2);
+        assert_eq!(runtime_diagnostics.element_wraps_reused, 0);
+        assert_eq!(
+            runtime_changed.as_ref(),
+            &ScreenplayLayout::build_with_inputs_for_purpose(
+                &project,
+                &tighter_inputs,
+                LayoutPurpose::Editor,
+            )
+            .unwrap_or_else(|_| unreachable!())
+        );
+    }
+
+    #[test]
+    fn wrap_cache_is_bounded_and_document_replacement_cannot_alias_revision() {
+        let paragraph = EffectiveParagraph {
+            left: FixedPoint::from_points(72),
+            right: FixedPoint::from_points(540),
+            first_indent: FixedPoint::default(),
+            alignment: ParagraphAlignment::Left,
+            space_before: FixedPoint::default(),
+            line_advance: FixedPoint::from_points(12),
+            char_width: FixedPoint::from_points(7),
+        };
+        let mut wraps = ElementWrapCache::default();
+        wraps.start_generation();
+        let style = plain_title_style(&LayoutInputs::default());
+        for index in 0..(MAX_CACHED_ELEMENT_WRAPS + 8) {
+            let id = crate::StableId::new(format!("cache-{index}"))
+                .unwrap_or_else(|_| unreachable!());
+            let text = format!("entry {index}");
+            let _ = wraps.wrap(
+                &id,
+                &text,
+                index,
+                Role::Action,
+                paragraph,
+                style.clone(),
+                paragraph.char_width,
+                72,
+                LayoutPurpose::Editor,
+                false,
+                None,
+            );
+            wraps.evict_if_needed();
+        }
+        assert!(wraps.entry_count <= MAX_CACHED_ELEMENT_WRAPS);
+        assert!(wraps.retained_bytes <= MAX_CACHED_ELEMENT_WRAP_BYTES);
+        let first_id = crate::StableId::new("cache-0")
+            .unwrap_or_else(|_| unreachable!());
+        let mut eviction_diagnostics = LayoutBuildDiagnostics::default();
+        let _ = wraps.wrap(
+            &first_id,
+            "entry 0",
+            0,
+            Role::Action,
+            paragraph,
+            style,
+            paragraph.char_width,
+            72,
+            LayoutPurpose::Editor,
+            false,
+            Some(&mut eviction_diagnostics),
+        );
+        assert_eq!(eviction_diagnostics.element_wraps_built, 1);
+        assert_eq!(eviction_diagnostics.element_wraps_reused, 0);
+        wraps.evict_if_needed();
+        assert!(wraps.entry_count <= MAX_CACHED_ELEMENT_WRAPS);
+
+        let mut cache = LayoutCache::default();
+        let inputs = LayoutInputs::default();
+        let first_project = project(&[(Role::Action, "first document")]);
+        let (first_layout, first_hit) = cache
+            .get_or_build_with_inputs(4, &first_project, &inputs)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!first_hit);
+        let mut replacement = project(&[(Role::Action, "replacement document")]);
+        // The new Project receives an independent layout identity even though
+        // the stable element ID and caller-supplied revision are both reused.
+        let (replacement_layout, replacement_hit) = cache
+            .get_or_build_with_inputs(4, &replacement, &inputs)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!replacement_hit);
+        assert_ne!(first_layout.as_ref(), replacement_layout.as_ref());
+        assert_eq!(replacement_layout.pages[0].lines[0].text.as_ref(), "replacement document");
+        replacement.elements[0].text = "edited replacement".to_owned();
+        let (edited_layout, edited_hit) = cache
+            .get_or_build_with_inputs(5, &replacement, &inputs)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(!edited_hit);
+        assert_eq!(edited_layout.pages[0].lines[0].text.as_ref(), "edited replacement");
     }
 }

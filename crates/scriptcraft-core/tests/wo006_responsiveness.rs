@@ -1,5 +1,5 @@
-//! Controlled WO-006 rendered-path benchmark. Run with `--nocapture` to
-//! retain bounded measurements; output contains dimensions and counters only.
+//! Core-only layout benchmark. Run with `--nocapture` to retain bounded layout
+//! measurements; this does not exercise the desktop render or paint path.
 
 use scriptcraft_core::layout::{LayoutCache, ScreenplayLayout};
 use scriptcraft_core::{LayoutInputs, Project, Role};
@@ -13,12 +13,8 @@ const PAGE_CASES: [usize; 6] = [1, 5, 15, 50, 120, 180];
 
 #[derive(Debug, Default, Clone, Copy)]
 struct Counters {
-    frames: u64,
-    events: u64,
     layout_builds: u64,
     layout_cache_hits: u64,
-    painted_pages: u64,
-    repaint_requests: u64,
 }
 
 #[derive(Debug)]
@@ -72,11 +68,7 @@ fn measure_uncached(project: &Project, inputs: &LayoutInputs) -> Measurement {
         black_box(layout);
         if iteration >= WARMUP {
             samples.push(started.elapsed().as_secs_f64() * 1_000.0);
-            counters.frames += 1;
-            counters.events += 1;
             counters.layout_builds += 1;
-            counters.painted_pages += pages as u64;
-            counters.repaint_requests += 1;
         }
     }
     Measurement {
@@ -108,12 +100,8 @@ fn measure_cached(project: &Project, inputs: &LayoutInputs, edit: Option<usize>)
         black_box(layout);
         if iteration >= WARMUP {
             samples.push(started.elapsed().as_secs_f64() * 1_000.0);
-            counters.frames += 1;
-            counters.events += u64::from(edit.is_some());
             counters.layout_builds += u64::from(!hit);
             counters.layout_cache_hits += u64::from(hit);
-            counters.painted_pages += pages as u64;
-            counters.repaint_requests += u64::from(edit.is_some());
         }
     }
     Measurement {
@@ -127,22 +115,18 @@ fn measure_cached(project: &Project, inputs: &LayoutInputs, edit: Option<usize>)
 fn print_measurement(pages: usize, edit: &str, measurement: &Measurement) {
     let c = measurement.counters;
     println!(
-        "pages={pages} edit={edit} layout_pages={} p50_ms={:.6} p95_ms={:.6} frames={} events={} layout_builds={} layout_cache_hits={} painted_pages={} repaint_requests={}",
+        "core-layout pages={pages} edit={edit} layout_pages={} p50_ms={:.6} p95_ms={:.6} layout_builds={} layout_cache_hits={}",
         measurement.pages,
         measurement.p50_ms,
         measurement.p95_ms,
-        c.frames,
-        c.events,
         c.layout_builds,
         c.layout_cache_hits,
-        c.painted_pages,
-        c.repaint_requests,
     );
 }
 
 #[test]
 fn controlled_long_document_benchmark_reports_wo006_oracle() {
-    println!("WO-006a benchmark: warmup={WARMUP} samples={SAMPLES} unit=ms");
+    println!("core-layout benchmark: warmup={WARMUP} samples={SAMPLES} unit=ms");
     for pages in PAGE_CASES {
         let (project, inputs) = fixture(pages);
         let positions = [("beginning", 0), ("middle", pages / 2), ("end", pages - 1)];
@@ -150,11 +134,7 @@ fn controlled_long_document_benchmark_reports_wo006_oracle() {
             let measurement = measure_cached(&project, &inputs, Some(element));
             print_measurement(pages, label, &measurement);
             assert_eq!(measurement.pages, pages);
-            assert_eq!(measurement.counters.frames, SAMPLES as u64);
-            assert_eq!(measurement.counters.events, SAMPLES as u64);
             assert_eq!(measurement.counters.layout_builds, SAMPLES as u64);
-            assert_eq!(measurement.counters.painted_pages, (pages * SAMPLES) as u64);
-            assert_eq!(measurement.counters.repaint_requests, SAMPLES as u64);
         }
     }
 
@@ -163,14 +143,18 @@ fn controlled_long_document_benchmark_reports_wo006_oracle() {
     let cached = measure_cached(&long, &inputs, None);
     print_measurement(180, "unchanged-cached", &cached);
     println!(
-        "unchanged-read-180-pages uncached_p95_ms={:.6} cached_p95_ms={:.6} reduction_pct={:.1}",
+        "unchanged-core-layout-read-180-pages uncached_p95_ms={:.6} cached_p95_ms={:.6} reduction_pct={:.1}",
         uncached.p95_ms,
         cached.p95_ms,
         (1.0 - cached.p95_ms / uncached.p95_ms) * 100.0
     );
+    assert_eq!(uncached.counters.layout_builds, SAMPLES as u64);
+    assert_eq!(uncached.counters.layout_cache_hits, 0);
     assert_eq!(cached.counters.layout_builds, 0);
     assert_eq!(cached.counters.layout_cache_hits, SAMPLES as u64);
-    assert!(cached.p95_ms < uncached.p95_ms);
+    // This benchmark covers layout construction/cache lookup only. Desktop
+    // pages-painted and text-layout submissions are measured by the app oracle.
+    // Timings are emitted as observations only; structural counters are the oracle.
 }
 
 #[test]

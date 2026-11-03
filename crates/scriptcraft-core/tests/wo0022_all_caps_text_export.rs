@@ -81,7 +81,7 @@ fn print_wrapping_hidden_omission_and_loss_report_remain_intact() {
         .pages
         .iter()
         .flat_map(|page| &page.lines)
-        .map(|line| line.display_text.clone())
+        .map(|line| line.display_text.to_string())
         .collect();
     assert!(expected_lines.len() > 1, "fixture must exercise print wrapping");
     assert!(layout

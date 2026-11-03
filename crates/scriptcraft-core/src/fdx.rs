@@ -12,8 +12,8 @@ use crate::preservation::{
     BoardEntity, BoardEntityKind, BoardGraph, DependencyConfidence, ForeignIdDomain,
     ForeignIdentity, ForeignReference, NamespaceBinding, PreservationError, PreservationState,
     PreservedAttribute, PreservedElement, PreservedNode, PreservedSection, ReferencePolicy,
-    SectionKind, SourceAnchor, SourceAnchorId, SourceEncoding, SourceName, SourceOwnership,
-    SourceSnapshot,
+    SectionKind, SharedBytes, SharedVec, SourceAnchor, SourceAnchorId, SourceEncoding,
+    SourceName, SourceOwnership, SourceSnapshot,
 };
 use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
 use crate::formatting::{formatting_for_role, formatting_in_native_order, role_index};
@@ -635,6 +635,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         elements: Vec::new(),
         preservation: None,
         legacy_json_state: None,
+        layout_identity: std::sync::Arc::new(()),
     };
     let mut source_layout_settings = read_source_layout_settings(root, root_namespace)?;
     let mut identities = Vec::new();
@@ -673,10 +674,10 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         local_name: "Document".to_owned(),
         qualified_name: None,
     };
-    let preservation = PreservationState {
+    let mut preservation = PreservationState {
         source: SourceSnapshot {
             format: SourceFormat::Fdx,
-            original_bytes: input.to_vec(),
+            original_bytes: SharedBytes::source(input.to_vec()),
             encoding: SourceEncoding::Utf8,
         },
         source_layout_settings,
@@ -684,13 +685,16 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
             name: document_name,
             kind: SectionKind::Other,
             ordinal: 0,
-            children: std::mem::take(&mut preserved_children),
-        }],
+            children: std::mem::take(&mut preserved_children).into(),
+        }].into(),
         anchors,
         identities,
         references: Vec::new(),
         board_graph,
+        managed_paragraph_index: None,
+        source_text_bytes: 0,
     };
+    preservation.rebuild_managed_paragraph_index();
     project.preservation = Some(preservation);
     project.validate().map_err(map_model_error)?;
     let text_state = raw_root_text_state(&root_for_text_state, &project);
@@ -1193,7 +1197,7 @@ fn new_lineage_element(
         ownership: SourceOwnership::Opaque,
         dependency_confidence: DependencyConfidence::Unknown,
         anchor: None,
-        children: Vec::new(),
+        children: SharedVec::default(),
     }
 }
 
@@ -1267,18 +1271,18 @@ fn append_xref_with_formatting(
     );
     document_ref
         .children
-        .insert(index, PreservedNode::Text("\n    ".to_owned()));
+        .insert(index, PreservedNode::Text("\n    ".into()));
     document_ref
         .children
         .insert(index + 1, PreservedNode::Element(xref));
     if has_following_node && !following_is_whitespace {
         document_ref
             .children
-            .insert(index + 2, PreservedNode::Text("\n    ".to_owned()));
+            .insert(index + 2, PreservedNode::Text("\n    ".into()));
     } else if !has_following_node {
         document_ref
             .children
-            .push(PreservedNode::Text("\n  ".to_owned()));
+            .push(PreservedNode::Text("\n  ".into()));
     }
     Ok(())
 }
@@ -1348,7 +1352,7 @@ fn normalize_sections(sections: &[PreservedSection]) -> Vec<PreservedSection> {
         .iter()
         .cloned()
         .map(|mut section| {
-            section.children = normalize_source_tree(&section.children);
+            section.children = normalize_source_tree(&section.children).into();
             section
         })
         .collect()
@@ -1783,7 +1787,7 @@ fn normalize_text_nodes(nodes: &[PreservedNode]) -> Vec<PreservedNode> {
         let normalized_node = match node {
             PreservedNode::Element(element) => {
                 let mut element = element.clone();
-                element.children = normalize_text_nodes(&element.children);
+                element.children = normalize_text_nodes(&element.children).into();
                 PreservedNode::Element(element)
             }
             other => other.clone(),
@@ -1849,21 +1853,21 @@ fn format_generated_element(
     for (index, child) in std::mem::take(&mut element.children).into_iter().enumerate() {
         if index == 0 {
             formatted.push(PreservedNode::Text(if root_children {
-                format!("\n\n{child_indent}")
+                format!("\n\n{child_indent}").into()
             } else {
-                format!("\n{child_indent}")
+                format!("\n{child_indent}").into()
             }));
         } else {
             formatted.push(PreservedNode::Text(if root_children {
-                format!("\n\n{child_indent}")
+                format!("\n\n{child_indent}").into()
             } else {
-                format!("\n{child_indent}")
+                format!("\n{child_indent}").into()
             }));
         }
         formatted.push(child);
     }
-    formatted.push(PreservedNode::Text(format!("\n{closing_indent}")));
-    element.children = formatted;
+    formatted.push(PreservedNode::Text(format!("\n{closing_indent}").into()));
+    element.children = formatted.into();
 }
 
 fn xml_space_preserve(element: &PreservedElement, inherited: bool) -> bool {
@@ -2010,9 +2014,9 @@ fn format_content_insertions(
             .find(|attribute| attribute.name.local_name.eq_ignore_ascii_case("id"))
             .is_some_and(|attribute| inserted_ids.contains(&attribute.value));
         if !saw_paragraph && is_inserted {
-            formatted.push(PreservedNode::Text("\n    ".to_owned()));
+            formatted.push(PreservedNode::Text("\n    ".into()));
         } else if saw_paragraph && (previous_was_inserted || is_inserted) {
-            formatted.push(PreservedNode::Text("\n    ".to_owned()));
+            formatted.push(PreservedNode::Text("\n    ".into()));
         } else {
             formatted.append(&mut pending_whitespace);
         }
@@ -2022,7 +2026,7 @@ fn format_content_insertions(
         previous_was_inserted = is_inserted;
     }
     if previous_was_inserted {
-        formatted.push(PreservedNode::Text("\n  ".to_owned()));
+        formatted.push(PreservedNode::Text("\n  ".into()));
     } else {
         formatted.append(&mut pending_whitespace);
     }
@@ -2277,7 +2281,7 @@ fn reconcile_managed_paragraph(
         if let Some(first) = text_element.children.first_mut() {
             match first {
                 PreservedNode::Text(value) | PreservedNode::CData(value) => {
-                    *value = run.text.clone();
+                    *value = run.text.clone().into();
                 }
                 _ => {
                     return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedFirstChild.error())
@@ -2294,7 +2298,7 @@ fn reconcile_managed_paragraph(
         } else if !run.text.is_empty() {
             text_element
                 .children
-                .push(PreservedNode::Text(run.text.clone()));
+                .push(PreservedNode::Text(run.text.clone().into()));
         }
     }
     Ok(())
@@ -2493,7 +2497,7 @@ fn reconcile_root_text_state(
     let needs_leading_space = insertion == 0
         || matches!(insertion.checked_sub(1).and_then(|index| root.children.get(index)), Some(PreservedNode::Element(_)));
     if needs_leading_space {
-        root.children.insert(insertion, PreservedNode::Text("\n\n  ".to_owned()));
+        root.children.insert(insertion, PreservedNode::Text("\n\n  ".into()));
         insertion += 1;
     }
     root.children.insert(insertion, PreservedNode::Element(canonical));
@@ -2501,7 +2505,7 @@ fn reconcile_root_text_state(
     if after == root.children.len()
         || matches!(root.children.get(after), Some(PreservedNode::Element(_)))
     {
-        root.children.insert(after, PreservedNode::Text("\n\n  ".to_owned()));
+        root.children.insert(after, PreservedNode::Text("\n\n  ".into()));
     }
     Ok(())
 }
@@ -2575,7 +2579,7 @@ fn reconcile_root_window_state(
         || matches!(insertion.checked_sub(1).and_then(|index| root.children.get(index)), Some(PreservedNode::Element(_)));
     if needs_leading_space {
         root.children
-            .insert(insertion, PreservedNode::Text("\n\n  ".to_owned()));
+            .insert(insertion, PreservedNode::Text("\n\n  ".into()));
         insertion += 1;
     }
     root.children
@@ -2585,7 +2589,7 @@ fn reconcile_root_window_state(
         || matches!(root.children.get(after), Some(PreservedNode::Element(_)))
     {
         root.children
-            .insert(after, PreservedNode::Text("\n\n  ".to_owned()));
+            .insert(after, PreservedNode::Text("\n\n  ".into()));
     }
     Ok(())
 }
@@ -2722,7 +2726,7 @@ fn new_paragraph(
             });
         }
         if !run.text.is_empty() {
-            text.children.push(PreservedNode::Text(run.text));
+            text.children.push(PreservedNode::Text(run.text.into()));
         }
         paragraph.children.push(PreservedNode::Element(text));
     }
@@ -2761,7 +2765,7 @@ fn preserved_element(name: &str, attributes: Vec<(&str, &str)>) -> PreservedElem
         ownership: SourceOwnership::Opaque,
         dependency_confidence: DependencyConfidence::Unknown,
         anchor: None,
-        children: Vec::new(),
+        children: SharedVec::default(),
     }
 }
 
@@ -3530,11 +3534,11 @@ fn raw_root_text_state(root: &RawElement, project: &Project) -> TextState {
 fn preserve_misc_node(node: RawNode) -> Result<PreservedNode, FdxError> {
     match node {
         RawNode::Element(element) => preserve_opaque_element(element),
-        RawNode::Text(text) => Ok(PreservedNode::Text(text)),
-        RawNode::CData(text) => Ok(PreservedNode::CData(text)),
-        RawNode::Comment(text) => Ok(PreservedNode::Comment(text)),
+        RawNode::Text(text) => Ok(PreservedNode::Text(text.into())),
+        RawNode::CData(text) => Ok(PreservedNode::CData(text.into())),
+        RawNode::Comment(text) => Ok(PreservedNode::Comment(text.into())),
         RawNode::ProcessingInstruction { target, data } => {
-            Ok(PreservedNode::ProcessingInstruction { target, data })
+            Ok(PreservedNode::ProcessingInstruction { target: target.into(), data: data.into() })
         }
     }
 }
@@ -3561,7 +3565,7 @@ fn preserve_opaque_element(element: RawElement) -> Result<PreservedNode, FdxErro
         ownership: SourceOwnership::Opaque,
         dependency_confidence: DependencyConfidence::Unknown,
         anchor: None,
-        children,
+        children: children.into(),
     }))
 }
 
@@ -3650,7 +3654,7 @@ fn preserve_node(
         ownership,
         dependency_confidence: DependencyConfidence::Unknown,
         anchor: anchor_id.clone(),
-        children,
+        children: children.into(),
     };
     if let (Some(semantic), Some(anchor_id)) = (managed, anchor_id) {
         if current_section == SectionKind::Content {
@@ -4691,8 +4695,8 @@ mod tests {
                 .unwrap_or_else(|_| unreachable!());
             assert_eq!(layout.pages.len(), 2);
             assert_eq!(layout.pages[0].lines.len(), 1);
-            assert_eq!(layout.pages[0].lines[0].text, "before");
-            assert_eq!(layout.pages[1].lines[0].text, "act");
+            assert_eq!(layout.pages[0].lines[0].text.as_ref(), "before");
+            assert_eq!(layout.pages[1].lines[0].text.as_ref(), "act");
             let preserved = result
                 .project
                 .preservation
@@ -4968,7 +4972,7 @@ mod tests {
             .lines
             .iter()
             .any(|line| line.role == Role::NewAct));
-        assert_eq!(before.pages[1].lines.last().map(|line| line.text.as_str()), Some("after"));
+        assert_eq!(before.pages[1].lines.last().map(|line| line.text.as_ref()), Some("after"));
     }
 
     #[test]
@@ -5410,7 +5414,7 @@ mod tests {
             },
             kind: SectionKind::Other,
             ordinal: 0,
-            children: vec![PreservedNode::Element(root)],
+            children: vec![PreservedNode::Element(root)].into(),
         };
         let difference = first_source_tree_difference(
             &[section(expected_root)],
@@ -5451,7 +5455,7 @@ mod tests {
                 },
                 kind: SectionKind::Other,
                 ordinal: 0,
-                children: vec![PreservedNode::Element(preserved_element("Root", Vec::new()))],
+                children: vec![PreservedNode::Element(preserved_element("Root", Vec::new()))].into(),
             }
         }
         fn diff(expected: &PreservedSection, actual: &PreservedSection) -> SourceTreeDifference {
@@ -5640,18 +5644,18 @@ mod tests {
         expected_root.children = vec![
             PreservedNode::Element(preserved_element("First", Vec::new())),
             PreservedNode::Element(preserved_element("Second", Vec::new())),
-        ];
+        ].into();
         actual_root.children = vec![
             PreservedNode::Element(preserved_element("Second", Vec::new())),
             PreservedNode::Element(preserved_element("First", Vec::new())),
-        ];
+        ].into();
         assert_category(expected, actual, "child.order");
 
         let mut expected = section();
         let mut actual = section();
         let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
         let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
-        expected_root.children.push(PreservedNode::Text(String::new()));
+        expected_root.children.push(PreservedNode::Text(String::new().into()));
         actual_root.children.push(PreservedNode::Text("   ".into()));
         let expected = normalize_sections(&[expected]);
         let actual = normalize_sections(&[actual]);

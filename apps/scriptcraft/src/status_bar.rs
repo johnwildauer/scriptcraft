@@ -754,11 +754,12 @@ pub(super) struct DiagnosticProjection<'a> {
     pub(super) layout_cache_hits: u64,
     pub(super) painted_pages: u64,
     pub(super) repaint_requests: u64,
+    pub(super) performance_summary: &'a str,
 }
 
 impl DiagnosticProjection<'_> {
     pub(super) fn safe_summary(self) -> String {
-        format!(
+        let summary = format!(
             "focus={} lock={} dispatch={} received-events={} dispatched-frames={} pointer-activations={} last-category={} performance-events={} layouts={} cache-hits={} painted-pages={} repaint-requests={}",
             self.focused,
             self.focus_lock,
@@ -776,7 +777,12 @@ impl DiagnosticProjection<'_> {
             self.layout_cache_hits,
             self.painted_pages,
             self.repaint_requests
-        )
+        );
+        if self.performance_summary.is_empty() {
+            summary
+        } else {
+            format!("{summary} {}", self.performance_summary)
+        }
     }
 }
 
@@ -2164,6 +2170,7 @@ mod tests {
             layout_cache_hits: 6,
             painted_pages: 4,
             repaint_requests: 1,
+            performance_summary: "",
         };
         let summary = diagnostics.safe_summary();
         assert!(summary.contains("last-category=key"));
@@ -2722,6 +2729,7 @@ mod tests {
             layout_cache_hits: 0,
             painted_pages: 0,
             repaint_requests: 0,
+            performance_summary: "",
         };
         let center = project_center("Save failed; document unchanged", Some("destination unchanged"));
 
@@ -2909,6 +2917,7 @@ mod tests {
                 layout_cache_hits: 0,
                 painted_pages: 0,
                 repaint_requests: 0,
+                performance_summary: "",
             };
             let (mut collapsed_output, _, mut collapsed_rect, _) = render_status_frame(
                 &context,
@@ -3044,6 +3053,7 @@ mod tests {
                     layout_cache_hits: u64::from(frame).saturating_mul(65_537),
                     painted_pages: u64::from(frame).saturating_mul(101),
                     repaint_requests: u64::from(frame).saturating_mul(17),
+                    performance_summary: "",
                 };
                 let page = VisiblePage::Available {
                     one_based: (frame as usize) * 3,
@@ -3098,6 +3108,7 @@ mod tests {
                     layout_cache_hits: 3_932_220,
                     painted_pages: 6_060,
                     repaint_requests: 1_020,
+                    performance_summary: "",
                 };
                 let overflow = open_status_overflow(
                     &context,
@@ -3193,6 +3204,7 @@ mod tests {
             layout_cache_hits: 0,
             painted_pages: 0,
             repaint_requests: 0,
+            performance_summary: "",
         };
         let mut zoom_percent = 137;
         let page = VisiblePage::Available {

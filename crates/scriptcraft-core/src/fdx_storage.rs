@@ -1831,7 +1831,8 @@ mod tests {
                     .unwrap_or_else(|| unreachable!())
                     .source
                     .original_bytes
-                    .clone()
+                    .as_slice()
+                    .to_vec()
             )
         );
         assert!(!session.dirty());

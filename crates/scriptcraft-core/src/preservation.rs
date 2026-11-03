@@ -11,6 +11,393 @@ use crate::{
 };
 use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+/// Value-free counters for immutable preservation snapshot sharing.
+///
+/// These process-wide counters report wrapper clones and copy-on-write
+/// detachments only. They never contain document-derived values.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CopyOnWriteDiagnostics {
+    pub shared_vector_clones: u64,
+    pub detached_vectors: u64,
+    pub shared_text_payload_clones: u64,
+    pub detached_text_payloads: u64,
+    pub shared_source_byte_clones: u64,
+    pub detached_source_byte_payloads: u64,
+    pub shared_image_payload_clones: u64,
+    pub detached_image_payloads: u64,
+}
+
+static SHARED_VECTOR_CLONES: AtomicU64 = AtomicU64::new(0);
+static DETACHED_VECTORS: AtomicU64 = AtomicU64::new(0);
+static SHARED_TEXT_PAYLOAD_CLONES: AtomicU64 = AtomicU64::new(0);
+static DETACHED_TEXT_PAYLOADS: AtomicU64 = AtomicU64::new(0);
+static SHARED_SOURCE_BYTE_CLONES: AtomicU64 = AtomicU64::new(0);
+static DETACHED_SOURCE_BYTE_PAYLOADS: AtomicU64 = AtomicU64::new(0);
+static SHARED_IMAGE_PAYLOAD_CLONES: AtomicU64 = AtomicU64::new(0);
+static DETACHED_IMAGE_PAYLOADS: AtomicU64 = AtomicU64::new(0);
+
+fn increment_counter(counter: &AtomicU64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(1))
+    });
+}
+
+fn add_counter(counter: &AtomicU64, amount: u64) {
+    if amount == 0 {
+        return;
+    }
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(amount))
+    });
+}
+
+/// Returns aggregate, value-free copy-on-write counters.
+pub fn copy_on_write_diagnostics() -> CopyOnWriteDiagnostics {
+    CopyOnWriteDiagnostics {
+        shared_vector_clones: SHARED_VECTOR_CLONES.load(Ordering::Relaxed),
+        detached_vectors: DETACHED_VECTORS.load(Ordering::Relaxed),
+        shared_text_payload_clones: SHARED_TEXT_PAYLOAD_CLONES.load(Ordering::Relaxed),
+        detached_text_payloads: DETACHED_TEXT_PAYLOADS.load(Ordering::Relaxed),
+        shared_source_byte_clones: SHARED_SOURCE_BYTE_CLONES.load(Ordering::Relaxed),
+        detached_source_byte_payloads: DETACHED_SOURCE_BYTE_PAYLOADS.load(Ordering::Relaxed),
+        shared_image_payload_clones: SHARED_IMAGE_PAYLOAD_CLONES.load(Ordering::Relaxed),
+        detached_image_payloads: DETACHED_IMAGE_PAYLOADS.load(Ordering::Relaxed),
+    }
+}
+
+/// Resets copy-on-write counters without touching any document or snapshot.
+pub fn reset_copy_on_write_diagnostics() {
+    SHARED_VECTOR_CLONES.store(0, Ordering::Relaxed);
+    DETACHED_VECTORS.store(0, Ordering::Relaxed);
+    SHARED_TEXT_PAYLOAD_CLONES.store(0, Ordering::Relaxed);
+    DETACHED_TEXT_PAYLOADS.store(0, Ordering::Relaxed);
+    SHARED_SOURCE_BYTE_CLONES.store(0, Ordering::Relaxed);
+    DETACHED_SOURCE_BYTE_PAYLOADS.store(0, Ordering::Relaxed);
+    SHARED_IMAGE_PAYLOAD_CLONES.store(0, Ordering::Relaxed);
+    DETACHED_IMAGE_PAYLOADS.store(0, Ordering::Relaxed);
+}
+
+/// Value-free structural counters for managed paragraph indexing.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ManagedParagraphIndexDiagnostics {
+    pub rebuilds: u64,
+    pub source_nodes_indexed: u64,
+    pub lookups: u64,
+    pub indexed_entries_examined: u64,
+    pub fallback_tree_nodes_examined: u64,
+}
+
+static MANAGED_INDEX_REBUILDS: AtomicU64 = AtomicU64::new(0);
+static MANAGED_INDEX_SOURCE_NODES: AtomicU64 = AtomicU64::new(0);
+static MANAGED_INDEX_LOOKUPS: AtomicU64 = AtomicU64::new(0);
+static MANAGED_INDEX_ENTRIES: AtomicU64 = AtomicU64::new(0);
+static MANAGED_INDEX_FALLBACK_NODES: AtomicU64 = AtomicU64::new(0);
+
+/// Returns process-wide managed-paragraph index work counts.
+pub fn managed_paragraph_index_diagnostics() -> ManagedParagraphIndexDiagnostics {
+    ManagedParagraphIndexDiagnostics {
+        rebuilds: MANAGED_INDEX_REBUILDS.load(Ordering::Relaxed),
+        source_nodes_indexed: MANAGED_INDEX_SOURCE_NODES.load(Ordering::Relaxed),
+        lookups: MANAGED_INDEX_LOOKUPS.load(Ordering::Relaxed),
+        indexed_entries_examined: MANAGED_INDEX_ENTRIES.load(Ordering::Relaxed),
+        fallback_tree_nodes_examined: MANAGED_INDEX_FALLBACK_NODES.load(Ordering::Relaxed),
+    }
+}
+
+/// Resets index diagnostics without changing preserved data or indexes.
+pub fn reset_managed_paragraph_index_diagnostics() {
+    MANAGED_INDEX_REBUILDS.store(0, Ordering::Relaxed);
+    MANAGED_INDEX_SOURCE_NODES.store(0, Ordering::Relaxed);
+    MANAGED_INDEX_LOOKUPS.store(0, Ordering::Relaxed);
+    MANAGED_INDEX_ENTRIES.store(0, Ordering::Relaxed);
+    MANAGED_INDEX_FALLBACK_NODES.store(0, Ordering::Relaxed);
+}
+
+/// A vector whose clones share immutable storage and detach on mutable access.
+/// Its vector-like API keeps the preservation tree's ordered semantic surface.
+#[derive(Debug)]
+pub struct SharedVec<T>(Arc<Vec<T>>);
+
+impl<T> SharedVec<T> {
+    pub fn new(values: Vec<T>) -> Self {
+        Self(Arc::new(values))
+    }
+
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl<T> Clone for SharedVec<T> {
+    fn clone(&self) -> Self {
+        increment_counter(&SHARED_VECTOR_CLONES);
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<T> Default for SharedVec<T> {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl<T> From<Vec<T>> for SharedVec<T> {
+    fn from(values: Vec<T>) -> Self {
+        Self::new(values)
+    }
+}
+
+impl<T> Deref for SharedVec<T> {
+    type Target = Vec<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: Clone> DerefMut for SharedVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        if Arc::strong_count(&self.0) > 1 {
+            increment_counter(&DETACHED_VECTORS);
+        }
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+impl<T: PartialEq> PartialEq for SharedVec<T> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || **self == **other
+    }
+}
+
+impl<T: Eq> Eq for SharedVec<T> {}
+
+impl<T> AsRef<[T]> for SharedVec<T> {
+    fn as_ref(&self) -> &[T] {
+        self.0.as_slice()
+    }
+}
+
+impl<T> FromIterator<T> for SharedVec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self::new(iter.into_iter().collect())
+    }
+}
+
+impl<T: Clone> IntoIterator for SharedVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match Arc::try_unwrap(self.0) {
+            Ok(values) => values.into_iter(),
+            Err(values) => values.as_ref().clone().into_iter(),
+        }
+    }
+}
+
+impl<'a, T> IntoIterator for &'a SharedVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T: Clone> IntoIterator for &'a mut SharedVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+/// An immutable UTF-8 payload shared by preserved text, CDATA, and comments.
+#[derive(Debug)]
+pub struct SharedText(Arc<String>);
+
+impl SharedText {
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Clone for SharedText {
+    fn clone(&self) -> Self {
+        increment_counter(&SHARED_TEXT_PAYLOAD_CLONES);
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl From<String> for SharedText {
+    fn from(value: String) -> Self {
+        Self(Arc::new(value))
+    }
+}
+
+impl From<&str> for SharedText {
+    fn from(value: &str) -> Self {
+        Self(Arc::new(value.to_owned()))
+    }
+}
+
+impl Deref for SharedText {
+    type Target = String;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for SharedText {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        if Arc::strong_count(&self.0) > 1 {
+            increment_counter(&DETACHED_TEXT_PAYLOADS);
+        }
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+impl PartialEq for SharedText {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || **self == **other
+    }
+}
+
+impl Eq for SharedText {}
+
+impl PartialEq<String> for SharedText {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<str> for SharedText {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for SharedText {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<SharedText> for String {
+    fn eq(&self, other: &SharedText) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl From<SharedText> for String {
+    fn from(value: SharedText) -> Self {
+        Arc::try_unwrap(value.0).unwrap_or_else(|shared| shared.as_ref().clone())
+    }
+}
+
+/// Immutable byte storage used for original source and opaque image payloads.
+#[derive(Debug)]
+pub struct SharedBytes {
+    bytes: Arc<Vec<u8>>,
+    image_payload: bool,
+}
+
+impl SharedBytes {
+    pub fn source(bytes: Vec<u8>) -> Self {
+        Self { bytes: Arc::new(bytes), image_payload: false }
+    }
+
+    pub fn image(bytes: Vec<u8>) -> Self {
+        Self { bytes: Arc::new(bytes), image_payload: true }
+    }
+
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.bytes, &other.bytes)
+    }
+}
+
+impl Default for SharedBytes {
+    fn default() -> Self {
+        Self::source(Vec::new())
+    }
+}
+
+impl Clone for SharedBytes {
+    fn clone(&self) -> Self {
+        if self.image_payload {
+            increment_counter(&SHARED_IMAGE_PAYLOAD_CLONES);
+        } else {
+            increment_counter(&SHARED_SOURCE_BYTE_CLONES);
+        }
+        Self { bytes: Arc::clone(&self.bytes), image_payload: self.image_payload }
+    }
+}
+
+impl From<Vec<u8>> for SharedBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::source(bytes)
+    }
+}
+
+impl Deref for SharedBytes {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl DerefMut for SharedBytes {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        if Arc::strong_count(&self.bytes) > 1 {
+            if self.image_payload {
+                increment_counter(&DETACHED_IMAGE_PAYLOADS);
+            } else {
+                increment_counter(&DETACHED_SOURCE_BYTE_PAYLOADS);
+            }
+        }
+        Arc::make_mut(&mut self.bytes)
+    }
+}
+
+impl PartialEq for SharedBytes {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.bytes, &other.bytes) || **self == **other
+    }
+}
+
+impl Eq for SharedBytes {}
+
+impl PartialEq<Vec<u8>> for SharedBytes {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        **self == *other
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for SharedBytes {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for SharedBytes {
+    fn eq(&self, other: &[u8; N]) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl PartialEq<SharedBytes> for Vec<u8> {
+    fn eq(&self, other: &SharedBytes) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
 
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_SOURCE_EVENTS: usize = 100_000;
@@ -101,16 +488,16 @@ pub struct PreservedElement {
     pub dependency_confidence: DependencyConfidence,
     pub anchor: Option<SourceAnchorId>,
     /// Ordered mixed content; do not flatten into a text projection.
-    pub children: Vec<PreservedNode>,
+    pub children: SharedVec<PreservedNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreservedNode {
     Element(PreservedElement),
-    Text(String),
-    CData(String),
-    Comment(String),
-    ProcessingInstruction { target: String, data: String },
+    Text(SharedText),
+    CData(SharedText),
+    Comment(SharedText),
+    ProcessingInstruction { target: SharedText, data: SharedText },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +513,7 @@ pub struct PreservedSection {
     pub kind: SectionKind,
     /// Original top-level order. Repeated/unknown sections are permitted.
     pub ordinal: u32,
-    pub children: Vec<PreservedNode>,
+    pub children: SharedVec<PreservedNode>,
 }
 
 /// Bytes are the untouched source snapshot, not proof that a future edited
@@ -135,7 +522,7 @@ pub struct PreservedSection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSnapshot {
     pub format: SourceFormat,
-    pub original_bytes: Vec<u8>,
+    pub original_bytes: SharedBytes,
     pub encoding: SourceEncoding,
 }
 
@@ -257,7 +644,7 @@ pub struct BoardEntity {
     pub kind: BoardEntityKind,
     pub source_order: u32,
     pub anchor: Option<SourceAnchorId>,
-    pub image_payload: Option<Vec<u8>>,
+    pub image_payload: Option<SharedBytes>,
     pub declared_image_length: Option<u64>,
     pub source_path: Option<String>,
 }
@@ -270,23 +657,249 @@ pub struct BoardGraph {
     pub references: Vec<ForeignReference>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PreservationState {
     pub source: SourceSnapshot,
     /// Ephemeral projection of recognized source layout settings for runtime
     /// behavior. The complete source values in `sections` and
     /// `source.original_bytes` remain authoritative for serialization.
     pub(crate) source_layout_settings: SourceLayoutSettings,
-    pub sections: Vec<PreservedSection>,
+    pub sections: SharedVec<PreservedSection>,
     pub anchors: Vec<SourceAnchor>,
     pub identities: Vec<ForeignIdentity>,
     pub references: Vec<ForeignReference>,
     pub board_graph: BoardGraph,
+    pub(crate) managed_paragraph_index: Option<BTreeMap<StableId, Vec<ManagedParagraphLocation>>>,
+    pub(crate) source_text_bytes: usize,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedParagraphLocation {
+    section_index: usize,
+    node_path: Vec<usize>,
+}
+
+impl PartialEq for PreservationState {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.source_layout_settings == other.source_layout_settings
+            && self.sections == other.sections
+            && self.anchors == other.anchors
+            && self.identities == other.identities
+            && self.references == other.references
+            && self.board_graph == other.board_graph
+    }
+}
+
+impl Eq for PreservationState {}
 
 impl PreservationState {
     pub fn source_layout_settings(&self) -> &SourceLayoutSettings {
         &self.source_layout_settings
+    }
+
+    /// Rebuilds the transient source-tree location map from the authoritative
+    /// ordered preservation tree. Call after any out-of-band structural update.
+    pub(crate) fn rebuild_managed_paragraph_index(&mut self) {
+        fn collect(
+            nodes: &[PreservedNode],
+            section_index: usize,
+            path: &mut Vec<usize>,
+            index: &mut BTreeMap<StableId, Vec<ManagedParagraphLocation>>,
+            visited: &mut u64,
+            text_bytes: &mut usize,
+        ) {
+            for (node_index, node) in nodes.iter().enumerate() {
+                *visited = visited.saturating_add(1);
+                let PreservedNode::Element(element) = node else {
+                    match node {
+                        PreservedNode::Text(text)
+                        | PreservedNode::CData(text)
+                        | PreservedNode::Comment(text) => {
+                            *text_bytes = text_bytes.saturating_add(text.len());
+                        }
+                        PreservedNode::ProcessingInstruction { data, .. } => {
+                            *text_bytes = text_bytes.saturating_add(data.len());
+                        }
+                        PreservedNode::Element(_) => {}
+                    }
+                    continue;
+                };
+                path.push(node_index);
+                if let SourceOwnership::Managed(id) = &element.ownership {
+                    index
+                        .entry(id.clone())
+                        .or_default()
+                        .push(ManagedParagraphLocation {
+                            section_index,
+                            node_path: path.clone(),
+                        });
+                }
+                collect(
+                    &element.children,
+                    section_index,
+                    path,
+                    index,
+                    visited,
+                    text_bytes,
+                );
+                path.pop();
+            }
+        }
+
+        let mut index = BTreeMap::new();
+        let mut visited = 0u64;
+        let mut text_bytes = 0usize;
+        for (section_index, section) in self.sections.iter().enumerate() {
+            collect(
+                &section.children,
+                section_index,
+                &mut Vec::new(),
+                &mut index,
+                &mut visited,
+                &mut text_bytes,
+            );
+        }
+        increment_counter(&MANAGED_INDEX_REBUILDS);
+        add_counter(&MANAGED_INDEX_SOURCE_NODES, visited);
+        self.managed_paragraph_index = Some(index);
+        self.source_text_bytes = text_bytes;
+    }
+
+    fn ensure_managed_paragraph_index(&mut self) {
+        if self.managed_paragraph_index.is_none() {
+            self.rebuild_managed_paragraph_index();
+        }
+    }
+
+    fn indexed_location(
+        &self,
+        id: &StableId,
+    ) -> Result<Option<&ManagedParagraphLocation>, PreservationError> {
+        increment_counter(&MANAGED_INDEX_LOOKUPS);
+        let Some(index) = &self.managed_paragraph_index else {
+            return Ok(None);
+        };
+        let locations = index.get(id).map(Vec::as_slice).unwrap_or_default();
+        add_counter(&MANAGED_INDEX_ENTRIES, locations.len() as u64);
+        match locations {
+            [] => Ok(None),
+            [location] => Ok(Some(location)),
+            _ => Err(PreservationError::ManagedAnchorAmbiguous),
+        }
+    }
+
+    fn managed_element_at(&self, location: &ManagedParagraphLocation) -> Option<&PreservedElement> {
+        element_at_path(
+            self.sections.get(location.section_index)?.children.as_ref(),
+            &location.node_path,
+        )
+    }
+
+    pub(crate) fn has_managed_paragraph_index(&self) -> bool {
+        self.managed_paragraph_index.is_some()
+    }
+
+    pub(crate) fn scoped_global_invariants_match(&self, baseline: &PreservationState) -> bool {
+        self.source == baseline.source
+            && self.source_layout_settings == baseline.source_layout_settings
+            && self.anchors == baseline.anchors
+            && self.identities == baseline.identities
+            && self.references == baseline.references
+            && self.board_graph == baseline.board_graph
+    }
+
+    pub(crate) fn set_validated_source_text_bytes(&mut self, byte_count: usize) {
+        self.source_text_bytes = byte_count;
+    }
+
+    /// Validates only a single managed paragraph against a complete valid
+    /// baseline. It refuses any topology or identity change, leaving those
+    /// cases for complete source-tree validation.
+    pub(crate) fn validate_scoped_managed_edit(
+        &self,
+        baseline: &PreservationState,
+        semantic: &ScreenplayElement,
+    ) -> Result<usize, PreservationError> {
+        let baseline_location = baseline
+            .indexed_location(&semantic.id)?
+            .cloned()
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let candidate_location = self
+            .indexed_location(&semantic.id)?
+            .cloned()
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        if baseline_location != candidate_location {
+            return Err(PreservationError::ManagedAnchorMissing);
+        }
+        if !same_sections_except_managed_location(
+            &baseline.sections,
+            &self.sections,
+            &candidate_location,
+        ) {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let before = baseline
+            .managed_element_at(&baseline_location)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let after = self
+            .managed_element_at(&candidate_location)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        if !matches!(&before.ownership, SourceOwnership::Managed(id) if id == &semantic.id)
+            || !matches!(&after.ownership, SourceOwnership::Managed(id) if id == &semantic.id)
+            || !is_plain_managed_paragraph(after)
+            || !same_managed_edit_shape(before, after, true)
+            || after.name.local_name != "Paragraph"
+        {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let role_name = fdx_role_name(semantic.role);
+        let role_attribute_count = after.attributes.iter().filter(|attribute| {
+            attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type"
+        }).count();
+        if after.source_type.as_deref() != Some(role_name)
+            || role_attribute_count != 1
+            || !after.attributes.iter().any(|attribute| {
+                attribute.name.namespace_uri.is_none()
+                    && attribute.name.local_name == "Type"
+                    && attribute.value == role_name
+            })
+        {
+            return Err(PreservationError::UnsupportedRoleMapping);
+        }
+        let mut source_projection = String::new();
+        for child in &after.children {
+            match child {
+                PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => {}
+                PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                    source_projection.push_str(text)
+                }
+                PreservedNode::Element(text_element) if is_text_element(text_element, after) => {
+                    for text_child in &text_element.children {
+                        match text_child {
+                            PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                                source_projection.push_str(text)
+                            }
+                            _ => return Err(PreservationError::UnsupportedTextMapping),
+                        }
+                    }
+                }
+                _ => return Err(PreservationError::UnsupportedTextMapping),
+            }
+        }
+        if source_projection != semantic.text {
+            return Err(PreservationError::ManagedTextMismatch);
+        }
+        let old_bytes = source_text_bytes_in_element(before);
+        let new_bytes = source_text_bytes_in_element(after);
+        let new_total = self
+            .source_text_bytes
+            .saturating_sub(old_bytes)
+            .saturating_add(new_bytes);
+        if new_total > MAX_SOURCE_TEXT_BYTES {
+            return Err(PreservationError::TextTooLarge);
+        }
+        Ok(new_total)
     }
 
     pub fn validate(&self) -> Result<(), PreservationError> {
@@ -555,9 +1168,15 @@ impl PreservationState {
     }
 
     pub(crate) fn has_managed_element(&self, id: &StableId) -> bool {
-        self.sections
-            .iter()
-            .any(|section| contains_managed_element(&section.children, id))
+        increment_counter(&MANAGED_INDEX_LOOKUPS);
+        if let Some(index) = &self.managed_paragraph_index {
+            let locations = index.get(id).map(Vec::as_slice).unwrap_or_default();
+            add_counter(&MANAGED_INDEX_ENTRIES, locations.len() as u64);
+            return !locations.is_empty();
+        }
+        self.sections.iter().any(|section| {
+            contains_managed_element_counted(&section.children, id)
+        })
     }
 
     pub(crate) fn has_direct_paragraph_formatting(&self, id: &StableId) -> bool {
@@ -571,7 +1190,15 @@ impl PreservationState {
             "Spacing",
             "StartsNewPage",
         ];
-        find_managed_element(&self.sections, id).is_some_and(|paragraph| {
+        let paragraph = match self.indexed_location(id) {
+            Ok(Some(location)) => self.managed_element_at(location),
+            Ok(None) if self.managed_paragraph_index.is_none() => {
+                find_managed_element_counted(&self.sections, id)
+            }
+            Err(_) => return true,
+            _ => None,
+        };
+        paragraph.is_some_and(|paragraph| {
             paragraph.attributes.iter().any(|attribute| {
                 attribute.name.namespace_uri.is_none()
                     && DIRECT_FIELDS.contains(&attribute.name.local_name.as_str())
@@ -628,7 +1255,7 @@ impl PreservationState {
         let source_segments = indexes
             .iter()
             .map(|index| match &element.children[*index] {
-                PreservedNode::Text(text) | PreservedNode::CData(text) => text.clone(),
+                PreservedNode::Text(text) | PreservedNode::CData(text) => text.to_string(),
                 _ => unreachable!(),
             })
             .collect::<Vec<_>>();
@@ -663,7 +1290,7 @@ impl PreservationState {
         let updated = replace_segments(&source_segments, start, end, inserted)?;
         for (index, text) in indexes.into_iter().zip(updated) {
             match &mut element.children[index] {
-                PreservedNode::Text(value) | PreservedNode::CData(value) => *value = text,
+                PreservedNode::Text(value) | PreservedNode::CData(value) => *value = text.into(),
                 _ => unreachable!(),
             }
         }
@@ -730,7 +1357,7 @@ impl PreservationState {
                         ownership: SourceOwnership::Opaque,
                         dependency_confidence: DependencyConfidence::Unknown,
                         anchor: None,
-                        children: vec![PreservedNode::Text(replacement.to_owned())],
+                        children: vec![PreservedNode::Text(replacement.to_owned().into())].into(),
                     }));
             }
             return Ok(());
@@ -779,9 +1406,9 @@ impl PreservationState {
                 match first {
                     PreservedNode::Text(text) | PreservedNode::CData(text) => {
                         *text = if run_index == 0 {
-                            replacement.to_owned()
+                            replacement.to_owned().into()
                         } else {
-                            String::new()
+                            String::new().into()
                         };
                     }
                     _ => return Err(PreservationError::UnsupportedTextMapping),
@@ -795,7 +1422,7 @@ impl PreservationState {
             } else if run_index == 0 {
                 text_element
                     .children
-                    .push(PreservedNode::Text(replacement.to_owned()));
+                    .push(PreservedNode::Text(replacement.to_owned().into()));
             }
         }
         Ok(())
@@ -845,6 +1472,7 @@ impl PreservationState {
         before: &[ScreenplayElement],
         after: &mut [ScreenplayElement],
     ) -> Result<(), PreservationError> {
+        self.ensure_managed_paragraph_index();
         let before_ids = before
             .iter()
             .map(|element| element.id.clone())
@@ -889,7 +1517,9 @@ impl PreservationState {
             }
             let provenance = self.insert_managed_paragraph(element, index, &ordered_ids)?;
             element.source_provenance = Some(provenance);
+            self.rebuild_managed_paragraph_index();
         }
+        self.rebuild_managed_paragraph_index();
         Ok(())
     }
 
@@ -932,7 +1562,7 @@ impl PreservationState {
             ownership: SourceOwnership::Managed(semantic.id.clone()),
             dependency_confidence: DependencyConfidence::Unknown,
             anchor: Some(anchor_id.clone()),
-            children: Vec::new(),
+            children: SharedVec::default(),
         };
         for run in text_runs {
             paragraph
@@ -952,7 +1582,7 @@ impl PreservationState {
                     ownership: SourceOwnership::Opaque,
                     dependency_confidence: DependencyConfidence::Unknown,
                     anchor: None,
-                    children: vec![PreservedNode::Text(run.text)],
+                    children: vec![PreservedNode::Text(run.text.into())].into(),
                 }));
         }
 
@@ -998,16 +1628,23 @@ impl PreservationState {
         id: &StableId,
         provenance: Option<&SourceProvenance>,
     ) -> Result<(), PreservationError> {
-        let target = find_managed_element(&self.sections, id)
+        let location = self
+            .indexed_location(id)?
+            .cloned()
             .ok_or(PreservationError::ManagedAnchorMissing)?;
-        if !is_plain_managed_paragraph(target) {
-            return Err(PreservationError::StructuralAttachmentConflict);
-        }
-        let foreign_id = paragraph_foreign_id(target);
-        if provenance.and_then(|item| item.foreign_id.as_deref()) != foreign_id {
+        let foreign_id = {
+            let target = self
+            .managed_element_at(&location)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+            if !is_plain_managed_paragraph(target) {
+                return Err(PreservationError::StructuralAttachmentConflict);
+            }
+            paragraph_foreign_id(target).map(str::to_owned)
+        };
+        if provenance.and_then(|item| item.foreign_id.as_deref()) != foreign_id.as_deref() {
             return Err(PreservationError::ManagedTextMismatch);
         }
-        if let Some(value) = foreign_id {
+        if let Some(value) = foreign_id.as_deref() {
             let referenced = self
                 .references
                 .iter()
@@ -1023,7 +1660,7 @@ impl PreservationState {
                 !(identity.domain == ForeignIdDomain::Paragraph && identity.value == value)
             });
         }
-        let removed = remove_managed_node_from_content(&mut self.sections, id);
+        let removed = remove_managed_at_location(&mut self.sections, &location);
         if !removed {
             return Err(PreservationError::ManagedAnchorMissing);
         }
@@ -1033,6 +1670,7 @@ impl PreservationState {
         self.anchors.retain(|anchor| {
             !matches!(&anchor.target, AnchorTarget::ProjectElement(target) if target == id)
         });
+        self.rebuild_managed_paragraph_index();
         Ok(())
     }
 
@@ -1086,7 +1724,7 @@ impl PreservationState {
         if !inserted && !runs.is_empty() {
             return Err(PreservationError::UnsupportedTextMapping);
         }
-        paragraph.children = rebuilt;
+        paragraph.children = rebuilt.into();
         Ok(())
     }
 
@@ -1142,15 +1780,17 @@ impl PreservationState {
         &mut self,
         id: &StableId,
     ) -> Result<&mut PreservedElement, PreservationError> {
-        let mut matches = Vec::new();
-        for section in &mut self.sections {
-            collect_managed_elements_mut(&mut section.children, id, &mut matches);
-        }
-        match matches.len() {
-            0 => Err(PreservationError::ManagedAnchorMissing),
-            1 => matches.pop().ok_or(PreservationError::ManagedAnchorMissing),
-            _ => Err(PreservationError::ManagedAnchorAmbiguous),
-        }
+        self.ensure_managed_paragraph_index();
+        let location = self
+            .indexed_location(id)?
+            .cloned()
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let section = self
+            .sections
+            .get_mut(location.section_index)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        element_at_path_mut(&mut section.children, &location.node_path)
+            .ok_or(PreservationError::ManagedAnchorMissing)
     }
 }
 
@@ -1306,12 +1946,13 @@ fn managed_child_index(nodes: &[PreservedNode], id: &StableId) -> Option<usize> 
     })
 }
 
-fn find_managed_element<'a>(
+fn find_managed_element_counted<'a>(
     sections: &'a [PreservedSection],
     id: &StableId,
 ) -> Option<&'a PreservedElement> {
     fn find<'a>(nodes: &'a [PreservedNode], id: &StableId) -> Option<&'a PreservedElement> {
         for node in nodes {
+            increment_counter(&MANAGED_INDEX_FALLBACK_NODES);
             if let PreservedNode::Element(element) = node {
                 if matches!(&element.ownership, SourceOwnership::Managed(target) if target == id) {
                     return Some(element);
@@ -1326,6 +1967,234 @@ fn find_managed_element<'a>(
     sections
         .iter()
         .find_map(|section| find(&section.children, id))
+}
+
+fn element_at_path<'a>(
+    nodes: &'a [PreservedNode],
+    path: &[usize],
+) -> Option<&'a PreservedElement> {
+    let (index, rest) = path.split_first()?;
+    let PreservedNode::Element(element) = nodes.get(*index)? else {
+        return None;
+    };
+    if rest.is_empty() {
+        Some(element)
+    } else {
+        element_at_path(&element.children, rest)
+    }
+}
+
+fn element_at_path_mut<'a>(
+    nodes: &'a mut [PreservedNode],
+    path: &[usize],
+) -> Option<&'a mut PreservedElement> {
+    let (index, rest) = path.split_first()?;
+    let PreservedNode::Element(element) = nodes.get_mut(*index)? else {
+        return None;
+    };
+    if rest.is_empty() {
+        Some(element)
+    } else {
+        element_at_path_mut(&mut element.children, rest)
+    }
+}
+
+fn same_sections_except_managed_location(
+    before: &[PreservedSection],
+    after: &[PreservedSection],
+    location: &ManagedParagraphLocation,
+) -> bool {
+    before.len() == after.len()
+        && before.iter().zip(after).enumerate().all(|(index, (left, right))| {
+            left.name == right.name
+                && left.kind == right.kind
+                && left.ordinal == right.ordinal
+                && if index == location.section_index {
+                    same_nodes_except_path(&left.children, &right.children, &location.node_path)
+                } else {
+                    left.children.shares_storage_with(&right.children)
+                }
+        })
+}
+
+fn same_nodes_except_path(
+    before: &[PreservedNode],
+    after: &[PreservedNode],
+    path: &[usize],
+) -> bool {
+    if before.len() != after.len() {
+        return false;
+    }
+    let Some((target_index, remaining_path)) = path.split_first() else {
+        return before == after;
+    };
+    if *target_index >= before.len() {
+        return false;
+    }
+    before
+        .iter()
+        .zip(after)
+        .enumerate()
+        .all(|(index, (left, right))| {
+            if index != *target_index {
+                return same_preserved_node_shallow(left, right);
+            }
+            if remaining_path.is_empty() {
+                return matches!((left, right), (PreservedNode::Element(_), PreservedNode::Element(_)));
+            }
+            match (left, right) {
+                (PreservedNode::Element(left), PreservedNode::Element(right)) => {
+                    left.name == right.name
+                        && left.attributes == right.attributes
+                        && left.namespace_bindings == right.namespace_bindings
+                        && left.source_type == right.source_type
+                        && left.ownership == right.ownership
+                        && left.dependency_confidence == right.dependency_confidence
+                        && left.anchor == right.anchor
+                        && same_nodes_except_path(
+                            &left.children,
+                            &right.children,
+                            remaining_path,
+                        )
+                }
+                _ => false,
+            }
+        })
+}
+
+fn same_preserved_node_shallow(before: &PreservedNode, after: &PreservedNode) -> bool {
+    match (before, after) {
+        (PreservedNode::Text(left), PreservedNode::Text(right))
+        | (PreservedNode::CData(left), PreservedNode::CData(right))
+        | (PreservedNode::Comment(left), PreservedNode::Comment(right)) => {
+            left.shares_storage_with(right)
+        }
+        (
+            PreservedNode::ProcessingInstruction {
+                target: left_target,
+                data: left_data,
+            },
+            PreservedNode::ProcessingInstruction {
+                target: right_target,
+                data: right_data,
+            },
+        ) => {
+            left_target.shares_storage_with(right_target)
+                && left_data.shares_storage_with(right_data)
+        }
+        (PreservedNode::Element(left), PreservedNode::Element(right)) => {
+            left.name == right.name
+                && left.attributes == right.attributes
+                && left.namespace_bindings == right.namespace_bindings
+                && left.source_type == right.source_type
+                && left.ownership == right.ownership
+                && left.dependency_confidence == right.dependency_confidence
+                && left.anchor == right.anchor
+                && left.children.shares_storage_with(&right.children)
+        }
+        _ => false,
+    }
+}
+
+fn same_managed_edit_shape(
+    before: &PreservedElement,
+    after: &PreservedElement,
+    managed_root: bool,
+) -> bool {
+    let same_attributes = before.attributes.len() == after.attributes.len()
+        && before.attributes.iter().zip(&after.attributes).all(|(left, right)| {
+            left.name == right.name
+                && (left.value == right.value
+                    || (managed_root
+                        && left.name.namespace_uri.is_none()
+                        && left.name.local_name == "Type"))
+        });
+    before.name == after.name
+        && before.namespace_bindings == after.namespace_bindings
+        && before.ownership == after.ownership
+        && before.dependency_confidence == after.dependency_confidence
+        && before.anchor == after.anchor
+        && (before.source_type == after.source_type || managed_root)
+        && same_attributes
+        && before.children.len() == after.children.len()
+        && before.children.iter().zip(&after.children).all(|(left, right)| match (left, right) {
+            (PreservedNode::Text(_), PreservedNode::Text(_))
+            | (PreservedNode::CData(_), PreservedNode::CData(_)) => true,
+            (PreservedNode::Comment(left), PreservedNode::Comment(right)) => left == right,
+            (
+                PreservedNode::ProcessingInstruction {
+                    target: left_target,
+                    data: left_data,
+                },
+                PreservedNode::ProcessingInstruction {
+                    target: right_target,
+                    data: right_data,
+                },
+            ) => left_target == right_target && left_data == right_data,
+            (PreservedNode::Element(left), PreservedNode::Element(right)) => {
+                same_managed_edit_shape(left, right, false)
+            }
+            _ => false,
+        })
+}
+
+fn source_text_bytes_in_element(element: &PreservedElement) -> usize {
+    let mut total = 0usize;
+    let mut stack = vec![element];
+    while let Some(current) = stack.pop() {
+        for child in &current.children {
+            match child {
+                PreservedNode::Element(nested) => stack.push(nested),
+                PreservedNode::Text(text)
+                | PreservedNode::CData(text)
+                | PreservedNode::Comment(text) => total = total.saturating_add(text.len()),
+                PreservedNode::ProcessingInstruction { data, .. } => {
+                    total = total.saturating_add(data.len())
+                }
+            }
+        }
+    }
+    total
+}
+
+fn remove_managed_at_location(
+    sections: &mut [PreservedSection],
+    location: &ManagedParagraphLocation,
+) -> bool {
+    let Some((&target_index, parent_path)) = location.node_path.split_last() else {
+        return false;
+    };
+    let Some(section) = sections.get_mut(location.section_index) else {
+        return false;
+    };
+    let parent_nodes = if parent_path.is_empty() {
+        &mut section.children
+    } else {
+        let Some(parent) = element_at_path_mut(&mut section.children, parent_path) else {
+            return false;
+        };
+        &mut parent.children
+    };
+    if target_index >= parent_nodes.len() {
+        return false;
+    }
+    parent_nodes.remove(target_index);
+    true
+}
+
+fn contains_managed_element_counted(nodes: &[PreservedNode], id: &StableId) -> bool {
+    for node in nodes {
+        increment_counter(&MANAGED_INDEX_FALLBACK_NODES);
+        let PreservedNode::Element(element) = node else {
+            continue;
+        };
+        if matches!(&element.ownership, SourceOwnership::Managed(target) if target == id)
+            || contains_managed_element_counted(&element.children, id)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_text_element(element: &PreservedElement, paragraph: &PreservedElement) -> bool {
@@ -1384,19 +2253,8 @@ fn text_element_for_run(template: &PreservedElement, run: &TextRun) -> Preserved
             value: attribute.value.clone(),
         })
         .collect();
-    element.children = vec![PreservedNode::Text(run.text.clone())];
+    element.children = vec![PreservedNode::Text(run.text.clone().into())].into();
     element
-}
-
-fn remove_managed_node_from_content(sections: &mut [PreservedSection], id: &StableId) -> bool {
-    let Some(children) = content_children_mut(sections) else {
-        return false;
-    };
-    let Some(index) = managed_child_index(children, id) else {
-        return false;
-    };
-    children.remove(index);
-    true
 }
 
 fn source_id_values(sections: &[PreservedSection]) -> BTreeSet<String> {
@@ -1452,16 +2310,6 @@ fn has_potential_reference(
         .any(|section| scan(&section.children, value, excluded_element))
 }
 
-fn contains_managed_element(nodes: &[PreservedNode], id: &StableId) -> bool {
-    nodes.iter().any(|node| match node {
-        PreservedNode::Element(element) => {
-            matches!(&element.ownership, SourceOwnership::Managed(target) if target == id)
-                || contains_managed_element(&element.children, id)
-        }
-        _ => false,
-    })
-}
-
 fn contains_attached_data(nodes: &[PreservedNode]) -> bool {
     nodes.iter().any(|node| match node {
         PreservedNode::Element(element) => {
@@ -1486,22 +2334,6 @@ fn contains_unknown_nested_data(paragraph: &PreservedElement) -> bool {
         PreservedNode::Text(text) | PreservedNode::CData(text) => !text.trim().is_empty(),
         _ => true,
     })
-}
-
-fn collect_managed_elements_mut<'a>(
-    nodes: &'a mut [PreservedNode],
-    id: &StableId,
-    matches: &mut Vec<&'a mut PreservedElement>,
-) {
-    for node in nodes {
-        if let PreservedNode::Element(element) = node {
-            if matches!(&element.ownership, SourceOwnership::Managed(target) if target == id) {
-                matches.push(element);
-            } else {
-                collect_managed_elements_mut(&mut element.children, id, matches);
-            }
-        }
-    }
 }
 
 fn replace_text_element_children(
@@ -1546,7 +2378,7 @@ fn replace_text_element_children(
                 ownership: SourceOwnership::Opaque,
                 dependency_confidence: DependencyConfidence::Unknown,
                 anchor: None,
-                children: Vec::new(),
+                children: SharedVec::default(),
             }));
         indexes.push(paragraph.children.len().saturating_sub(1));
     }
@@ -1653,7 +2485,7 @@ fn replace_text_element_content(
     if let Some(first) = element.children.first_mut() {
         match first {
             PreservedNode::Text(text) | PreservedNode::CData(text) => {
-                *text = replacement.to_owned();
+                *text = replacement.to_owned().into();
             }
             _ => return Err(PreservationError::UnsupportedTextMapping),
         }
@@ -1666,7 +2498,7 @@ fn replace_text_element_content(
     } else if !replacement.is_empty() {
         element
             .children
-            .push(PreservedNode::Text(replacement.to_owned()));
+            .push(PreservedNode::Text(replacement.to_owned().into()));
     }
     Ok(())
 }
@@ -1786,7 +2618,7 @@ mod tests {
     fn snapshot() -> SourceSnapshot {
         SourceSnapshot {
             format: SourceFormat::Fdx,
-            original_bytes: b"<Script/>".to_vec(),
+            original_bytes: SharedBytes::source(b"<Script/>".to_vec()),
             encoding: SourceEncoding::Utf8,
         }
     }
@@ -1799,6 +2631,7 @@ mod tests {
             elements: vec![element],
             preservation: Some(state),
             legacy_json_state: None,
+            layout_identity: std::sync::Arc::new(()),
         }
     }
 
@@ -1820,7 +2653,7 @@ mod tests {
             children: vec![
                 PreservedNode::Text("INT. ".into()),
                 PreservedNode::CData("ROOM".into()),
-            ],
+            ].into(),
         };
         PreservationState {
             source: snapshot(),
@@ -1829,8 +2662,8 @@ mod tests {
                 name: name("Content"),
                 kind: SectionKind::Content,
                 ordinal: 0,
-                children: vec![PreservedNode::Element(paragraph)],
-            }],
+                children: vec![PreservedNode::Element(paragraph)].into(),
+            }].into(),
             anchors: vec![SourceAnchor {
                 id: anchor,
                 target: AnchorTarget::ProjectElement(
@@ -1841,6 +2674,8 @@ mod tests {
             identities: Vec::new(),
             references: Vec::new(),
             board_graph: BoardGraph::default(),
+            managed_paragraph_index: None,
+            source_text_bytes: 0,
         }
     }
 
@@ -1854,6 +2689,157 @@ mod tests {
         assert_eq!(project, cloned);
         let serialized = project.to_json();
         assert_eq!(serialized, Err(crate::ModelError::UnsupportedJsonState));
+    }
+
+    #[test]
+    fn shared_storage_equality_keeps_deep_fallback_after_manual_restore() {
+        let saved = SharedVec::from(vec![1_u8, 2, 3]);
+        let mut candidate = saved.clone();
+        assert_eq!(saved, candidate);
+
+        candidate[1] = 9;
+        assert_ne!(saved, candidate);
+        candidate[1] = 2;
+
+        assert!(!saved.shares_storage_with(&candidate));
+        assert_eq!(saved, candidate);
+    }
+
+    #[test]
+    fn copy_on_write_text_edit_shares_source_and_unrelated_subtrees() {
+        let mut original = base_state();
+        original.sections[0].children.push(PreservedNode::Element(PreservedElement {
+            name: name("VendorPayload"),
+            attributes: Vec::new(),
+            namespace_bindings: Vec::new(),
+            source_type: None,
+            ownership: SourceOwnership::Opaque,
+            dependency_confidence: DependencyConfidence::Unknown,
+            anchor: None,
+            children: vec![PreservedNode::Comment("opaque retained comment".into())].into(),
+        }));
+        let mut candidate = original.clone();
+        let before_counters = copy_on_write_diagnostics();
+
+        {
+            assert!(original.source.original_bytes.shares_storage_with(&candidate.source.original_bytes));
+            assert!(original.sections.shares_storage_with(&candidate.sections));
+            assert!(original.sections[0].children.shares_storage_with(&candidate.sections[0].children));
+            let PreservedNode::Element(original_paragraph) = &original.sections[0].children[0] else {
+                unreachable!();
+            };
+            let PreservedNode::Element(candidate_paragraph) = &candidate.sections[0].children[0] else {
+                unreachable!();
+            };
+            assert!(original_paragraph.children.shares_storage_with(&candidate_paragraph.children));
+            let (PreservedNode::Text(original_text), PreservedNode::Text(candidate_text)) =
+                (&original_paragraph.children[0], &candidate_paragraph.children[0])
+            else {
+                unreachable!();
+            };
+            assert!(original_text.shares_storage_with(candidate_text));
+        }
+
+        let id = StableId::new("element").unwrap_or_else(|_| unreachable!());
+        candidate
+            .replace_managed_text(
+                &id,
+                "INT. ROOM",
+                0,
+                5,
+                "EXT.",
+                Some(&["INT. ".to_owned(), "ROOM".to_owned()]),
+            )
+            .unwrap_or_else(|_| unreachable!());
+
+        assert_eq!(original.source.original_bytes, b"<Script/>".to_vec());
+        assert!(original.source.original_bytes.shares_storage_with(&candidate.source.original_bytes));
+        assert_eq!(
+            match &original.sections[0].children[0] {
+                PreservedNode::Element(paragraph) => match &paragraph.children[0] {
+                    PreservedNode::Text(text) => text.as_str(),
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            },
+            "INT. "
+        );
+        let (PreservedNode::Element(original_vendor), PreservedNode::Element(candidate_vendor)) =
+            (&original.sections[0].children[1], &candidate.sections[0].children[1])
+        else {
+            unreachable!();
+        };
+        assert!(original_vendor.children.shares_storage_with(&candidate_vendor.children));
+        let PreservedNode::Element(original_paragraph) = &original.sections[0].children[0] else {
+            unreachable!();
+        };
+        let PreservedNode::Element(candidate_paragraph) = &candidate.sections[0].children[0] else {
+            unreachable!();
+        };
+        let (PreservedNode::CData(original_cdata), PreservedNode::CData(candidate_cdata)) =
+            (&original_paragraph.children[1], &candidate_paragraph.children[1])
+        else {
+            unreachable!();
+        };
+        assert!(original_cdata.shares_storage_with(candidate_cdata));
+        let after_counters = copy_on_write_diagnostics();
+        assert!(after_counters.shared_vector_clones > before_counters.shared_vector_clones);
+        assert!(after_counters.detached_vectors > before_counters.detached_vectors);
+        assert!(after_counters.shared_text_payload_clones > before_counters.shared_text_payload_clones);
+    }
+
+    #[test]
+    fn copy_on_write_source_and_image_payload_mutation_is_isolated() {
+        let mut original = base_state();
+        original.board_graph.entities.push(BoardEntity {
+            identity: ForeignIdentity::new(ForeignIdDomain::Image, "image-cow")
+                .unwrap_or_else(|_| unreachable!()),
+            kind: BoardEntityKind::Image,
+            source_order: 1,
+            anchor: None,
+            image_payload: Some(SharedBytes::image(vec![1, 2, 3, 4])),
+            declared_image_length: Some(4),
+            source_path: None,
+        });
+        let before_counters = copy_on_write_diagnostics();
+        let mut candidate = original.clone();
+        assert!(original.source.original_bytes.shares_storage_with(&candidate.source.original_bytes));
+        let original_image = original.board_graph.entities[0]
+            .image_payload.as_ref().unwrap_or_else(|| unreachable!());
+        let candidate_image = candidate.board_graph.entities[0]
+            .image_payload.as_ref().unwrap_or_else(|| unreachable!());
+        assert!(original_image.shares_storage_with(candidate_image));
+        let shared_counters = copy_on_write_diagnostics();
+        assert!(shared_counters.shared_source_byte_clones > before_counters.shared_source_byte_clones);
+        assert!(shared_counters.shared_image_payload_clones > before_counters.shared_image_payload_clones);
+
+        candidate.source.original_bytes[0] = b'X';
+        candidate.board_graph.entities[0]
+            .image_payload
+            .as_mut()
+            .unwrap_or_else(|| unreachable!())[0] = 9;
+
+        assert_eq!(original.source.original_bytes.as_slice(), b"<Script/>");
+        assert_eq!(candidate.source.original_bytes[0], b'X');
+        assert_eq!(
+            original.board_graph.entities[0]
+                .image_payload
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .as_slice(),
+            &[1, 2, 3, 4]
+        );
+        assert_eq!(
+            candidate.board_graph.entities[0]
+                .image_payload
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .as_slice(),
+            &[9, 2, 3, 4]
+        );
+        let detached_counters = copy_on_write_diagnostics();
+        assert!(detached_counters.detached_source_byte_payloads > shared_counters.detached_source_byte_payloads);
+        assert!(detached_counters.detached_image_payloads > shared_counters.detached_image_payloads);
     }
 
     #[test]
@@ -1889,7 +2875,7 @@ mod tests {
                 kind: BoardEntityKind::Image,
                 source_order: 3,
                 anchor: None,
-                image_payload: Some(vec![0, 1, 2]),
+                image_payload: Some(SharedBytes::image(vec![0, 1, 2])),
                 declared_image_length: Some(3),
                 source_path: Some("not-opened/local/path.png".into()),
             },
@@ -1964,8 +2950,8 @@ mod tests {
                 ownership: SourceOwnership::Opaque,
                 dependency_confidence: DependencyConfidence::Unknown,
                 anchor: None,
-                children: vec![PreservedNode::Text("opaque authored text".into())],
-            })],
+                children: vec![PreservedNode::Text("opaque authored text".into())].into(),
+            })].into(),
         }));
         state.anchors.push(SourceAnchor {
             id: attachment_anchor,
@@ -1978,7 +2964,7 @@ mod tests {
             kind: SectionKind::TitlePage,
             ordinal: 1,
             children: vec![
-                PreservedNode::Text(String::new()),
+                PreservedNode::Text(String::new().into()),
                 PreservedNode::Element(PreservedElement {
                     name: name("Paragraph"),
                     attributes: vec![PreservedAttribute {
@@ -1990,9 +2976,9 @@ mod tests {
                     ownership: SourceOwnership::Opaque,
                     dependency_confidence: DependencyConfidence::Unknown,
                     anchor: None,
-                    children: vec![PreservedNode::Text("A title".into())],
+                    children: vec![PreservedNode::Text("A title".into())].into(),
                 }),
-            ],
+            ].into(),
         });
 
         assert!(state.validate().is_ok());
@@ -2039,14 +3025,14 @@ mod tests {
                 ownership: SourceOwnership::Opaque,
                 dependency_confidence: DependencyConfidence::Unknown,
                 anchor: None,
-                children: vec![node],
+                children: vec![node].into(),
             });
         }
-        deep.sections[0].children = vec![node];
+        deep.sections[0].children = vec![node].into();
         assert_eq!(deep.validate(), Err(PreservationError::ExcessiveDepth));
 
         let mut oversized = base_state();
-        oversized.source.original_bytes = vec![0; MAX_SOURCE_BYTES + 1];
+        oversized.source.original_bytes = SharedBytes::source(vec![0; MAX_SOURCE_BYTES + 1]);
         assert_eq!(oversized.validate(), Err(PreservationError::SourceTooLarge));
     }
 }

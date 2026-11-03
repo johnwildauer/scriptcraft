@@ -17,6 +17,25 @@ pub mod scene_metadata;
 pub mod text_state;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectValidationDiagnostics {
+    pub complete_project_validations: u64,
+}
+
+static COMPLETE_PROJECT_VALIDATIONS: AtomicU64 = AtomicU64::new(0);
+
+pub fn project_validation_diagnostics() -> ProjectValidationDiagnostics {
+    ProjectValidationDiagnostics {
+        complete_project_validations: COMPLETE_PROJECT_VALIDATIONS.load(Ordering::Relaxed),
+    }
+}
+
+pub fn reset_project_validation_diagnostics() {
+    COMPLETE_PROJECT_VALIDATIONS.store(0, Ordering::Relaxed);
+}
 
 pub use formatting::{
     EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment, PrintVisibility,
@@ -468,6 +487,9 @@ pub struct Project {
     pub preservation: Option<preservation::PreservationState>,
     /// Transitional JSON-only source state; never consumed by the FDX codec.
     pub(crate) legacy_json_state: Option<LegacyJsonState>,
+    /// Clone-stable identity for cache invalidation across document replacement.
+    /// It is intentionally excluded from semantic equality and serialization.
+    pub(crate) layout_identity: Arc<()>,
 }
 
 impl Project {
@@ -483,9 +505,15 @@ impl Project {
             elements: vec![start],
             preservation: None,
             legacy_json_state: None,
+            layout_identity: Arc::new(()),
         })
     }
     pub fn validate(&self) -> Result<(), ModelError> {
+        let _ = COMPLETE_PROJECT_VALIDATIONS.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |value| Some(value.saturating_add(1)),
+        );
         if let Some(legacy) = &self.legacy_json_state {
             StableId::new(legacy.project_id.0.clone())?;
             if legacy.project_schema_version != CURRENT_SCHEMA_VERSION {
@@ -514,6 +542,66 @@ impl Project {
                 .map_err(ModelError::InvalidPreservationState)?;
         }
         Ok(())
+    }
+
+    /// Validates one ordinary-edit candidate element against a complete valid
+    /// baseline. `Ok(false)` means scope preconditions were not established and
+    /// the caller must perform complete validation.
+    pub(crate) fn validate_scoped_single_element_edit(
+        &mut self,
+        baseline: &Project,
+        element_index: usize,
+    ) -> Result<bool, ModelError> {
+        if self.elements.len() != baseline.elements.len()
+            || self.title_page.len() != baseline.title_page.len()
+            || self.legacy_json_state != baseline.legacy_json_state
+            || !Arc::ptr_eq(&self.layout_identity, &baseline.layout_identity)
+        {
+            return Ok(false);
+        }
+        let Some(before) = baseline.elements.get(element_index) else {
+            return Ok(false);
+        };
+        let Some(after) = self.elements.get(element_index) else {
+            return Ok(false);
+        };
+        if before.id != after.id {
+            return Ok(false);
+        }
+        if self.title_page != baseline.title_page
+            || self
+                .elements
+                .iter()
+                .zip(&baseline.elements)
+                .enumerate()
+                .any(|(index, (candidate, original))| {
+                    index != element_index && candidate != original
+                })
+        {
+            return Ok(false);
+        }
+        validate_element(after)?;
+        let updated_source_text_bytes = match (&self.preservation, &baseline.preservation) {
+            (Some(candidate), Some(valid_baseline)) => {
+                if !candidate.has_managed_paragraph_index()
+                    || !valid_baseline.has_managed_paragraph_index()
+                    || !candidate.scoped_global_invariants_match(valid_baseline)
+                {
+                    return Ok(false);
+                }
+                Some(candidate
+                    .validate_scoped_managed_edit(valid_baseline, after)
+                    .map_err(ModelError::InvalidPreservationState)?)
+            }
+            (None, None) => None,
+            _ => return Ok(false),
+        };
+        if let Some(byte_count) = updated_source_text_bytes {
+            if let Some(preservation) = self.preservation.as_mut() {
+                preservation.set_validated_source_text_bytes(byte_count);
+            }
+        }
+        Ok(true)
     }
     pub fn to_json(&self) -> Result<String, ModelError> {
         self.validate()?;
@@ -556,6 +644,10 @@ impl Project {
             .as_ref()
             .map(|legacy| legacy.layout_inputs.clone())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn layout_identity(&self) -> &Arc<()> {
+        &self.layout_identity
     }
 }
 
@@ -632,7 +724,7 @@ pub(crate) fn validate_layout_inputs(p: &LayoutInputs) -> Result<(), ModelError>
     }
     Ok(())
 }
-fn validate_element(e: &ScreenplayElement) -> Result<(), ModelError> {
+pub(crate) fn validate_element(e: &ScreenplayElement) -> Result<(), ModelError> {
     StableId::new(e.id.0.clone())?;
     if e.text.len() > MAX_TEXT_BYTES {
         return Err(ModelError::TextTooLong);
@@ -1098,6 +1190,7 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
         elements: decode_elements(obj(envelope, "elements")?)?,
         preservation: None,
         legacy_json_state: Some(legacy_json_state),
+        layout_identity: Arc::new(()),
     })
 }
 
@@ -1383,6 +1476,7 @@ mod tests {
             elements: vec![element],
             preservation: None,
             legacy_json_state: None,
+            layout_identity: Arc::new(()),
         }
         .validate()
         .is_ok());

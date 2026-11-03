@@ -68,7 +68,7 @@ fn pasted_newline_patterns_preserve_semantics_without_phantom_cr_lines() {
         crlf.pages[0]
             .lines
             .iter()
-            .map(|line| line.text.as_str())
+            .map(|line| line.text.as_ref())
             .collect::<Vec<_>>(),
         vec!["one", "two", "three"]
     );

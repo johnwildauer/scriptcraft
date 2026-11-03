@@ -5,6 +5,7 @@ use eframe::egui::{
     self, Color32, FontFamily, FontId, Key, RichText, Sense, Stroke, TextStyle, TextWrapMode, Vec2,
     WidgetText,
 };
+use egui::epaint::text::{Galley, LayoutJob};
 use scriptcraft_core::cast_list::CAST_LIST_REFRESH_INTERVAL;
 use scriptcraft_core::editing::{EditError, EditPolicy, EditingSession, Position, Selection};
 use scriptcraft_core::exports;
@@ -12,9 +13,13 @@ use scriptcraft_core::fdx::{self, FdxImportOutcome, FdxMigrationConsent, FdxVers
 use scriptcraft_core::fdx_storage::{
     self, FdxBaseline, FdxSaveMode, FdxSaveTarget, OpenedFdxSource, StdFdxStorageFileSystem,
 };
-use scriptcraft_core::layout::{Caret, LayoutCache, LayoutPurpose, ScreenplayLayout};
+use scriptcraft_core::layout::{
+    Caret, FixedRect, InteractionQueryDiagnostics, LayoutBuildDiagnostics, LayoutCache,
+    LayoutPurpose, ScreenplayLayout,
+};
 use scriptcraft_core::persistence::{FileSystem, StdFileSystem};
 use scriptcraft_core::{FixedPoint, Project, Role};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -31,9 +36,35 @@ use toolbar::{toolbar_chrome_color, toolbar_content_height};
 const EDITOR_SURFACE_ID: &str = "page-editor-surface";
 const CARET_WIDTH: f32 = 1.5;
 const PAGE_HORIZONTAL_PADDING: f32 = 16.0;
+const PAGE_VERTICAL_GAP: f32 = 12.0;
+const PAGE_PAINT_OVERSCAN: usize = 1;
+const FIXED_CELL_GALLEY_CACHE_ID: &str = "scriptcraft-fixed-cell-galley-cache-v1";
+const FIXED_CELL_GALLEY_CACHE_LIMIT: usize = 16_384;
 #[cfg(test)]
 const PRESENTATION_METRIC_TOLERANCE: f32 = 0.01;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
+fn viewport_paint_page_range(
+    page_rects: &[egui::Rect],
+    editor_clip: egui::Rect,
+) -> Option<(usize, usize)> {
+    let mut first_visible = None;
+    let mut last_visible = None;
+    for (page_index, page_rect) in page_rects.iter().enumerate() {
+        if page_rect.intersects(editor_clip) {
+            first_visible.get_or_insert(page_index);
+            last_visible = Some(page_index);
+        }
+    }
+    let first_visible = first_visible?;
+    let last_visible = last_visible?;
+    Some((
+        first_visible.saturating_sub(PAGE_PAINT_OVERSCAN),
+        last_visible
+            .saturating_add(PAGE_PAINT_OVERSCAN)
+            .min(page_rects.len().saturating_sub(1)),
+    ))
+}
 
 fn has_extension(path: &std::path::Path, expected: &str) -> bool {
     path.extension()
@@ -68,17 +99,259 @@ struct NativeInputDiagnostics {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct PerformanceDiagnostics {
+struct PerformanceMeasurements {
     frames: u64,
     events: u64,
     layout_builds: u64,
     layout_cache_hits: u64,
     painted_pages: u64,
     repaint_requests: u64,
+    pages_considered: u64,
+    pages_culled: u64,
+    lines_submitted: u64,
+    selection_spans_submitted: u64,
+    galleys_built: u64,
+    galleys_reused: u64,
+    element_wraps_built: u64,
+    element_wraps_reused: u64,
+    layout_identity_changes: u64,
+    caret_lookups: u64,
+    indexed_interaction_queries: u64,
+    linear_interaction_queries: u64,
+    interaction_index_entries_examined: u64,
+    derived_refresh_attempts: u64,
+    derived_refresh_completed: u64,
+    derived_refresh_skipped: u64,
+    derived_refresh_changed: u64,
+    derived_refresh_unchanged: u64,
+    derived_refresh_deferred: u64,
+    derived_project_candidate_clones: u64,
+    derived_scene_candidate_clones: u64,
+    derived_redundant_preservation_clones: u64,
     frame_nanos: u128,
     event_nanos: u128,
     layout_nanos: u128,
+    layout_lookup_nanos: u128,
+    element_wrap_nanos: u128,
     paint_nanos: u128,
+    caret_lookup_nanos: u128,
+    derived_refresh_nanos: u128,
+}
+
+impl PerformanceMeasurements {
+    fn delta_since(self, baseline: Self) -> Self {
+        Self {
+            frames: self.frames.saturating_sub(baseline.frames),
+            events: self.events.saturating_sub(baseline.events),
+            layout_builds: self.layout_builds.saturating_sub(baseline.layout_builds),
+            layout_cache_hits: self.layout_cache_hits.saturating_sub(baseline.layout_cache_hits),
+            painted_pages: self.painted_pages.saturating_sub(baseline.painted_pages),
+            repaint_requests: self.repaint_requests.saturating_sub(baseline.repaint_requests),
+            pages_considered: self.pages_considered.saturating_sub(baseline.pages_considered),
+            pages_culled: self.pages_culled.saturating_sub(baseline.pages_culled),
+            lines_submitted: self.lines_submitted.saturating_sub(baseline.lines_submitted),
+            selection_spans_submitted: self
+                .selection_spans_submitted
+                .saturating_sub(baseline.selection_spans_submitted),
+            galleys_built: self.galleys_built.saturating_sub(baseline.galleys_built),
+            galleys_reused: self.galleys_reused.saturating_sub(baseline.galleys_reused),
+            element_wraps_built: self
+                .element_wraps_built
+                .saturating_sub(baseline.element_wraps_built),
+            element_wraps_reused: self
+                .element_wraps_reused
+                .saturating_sub(baseline.element_wraps_reused),
+            layout_identity_changes: self
+                .layout_identity_changes
+                .saturating_sub(baseline.layout_identity_changes),
+            caret_lookups: self.caret_lookups.saturating_sub(baseline.caret_lookups),
+            indexed_interaction_queries: self
+                .indexed_interaction_queries
+                .saturating_sub(baseline.indexed_interaction_queries),
+            linear_interaction_queries: self
+                .linear_interaction_queries
+                .saturating_sub(baseline.linear_interaction_queries),
+            interaction_index_entries_examined: self
+                .interaction_index_entries_examined
+                .saturating_sub(baseline.interaction_index_entries_examined),
+            derived_refresh_attempts: self
+                .derived_refresh_attempts
+                .saturating_sub(baseline.derived_refresh_attempts),
+            derived_refresh_completed: self
+                .derived_refresh_completed
+                .saturating_sub(baseline.derived_refresh_completed),
+            derived_refresh_skipped: self
+                .derived_refresh_skipped
+                .saturating_sub(baseline.derived_refresh_skipped),
+            derived_refresh_changed: self
+                .derived_refresh_changed
+                .saturating_sub(baseline.derived_refresh_changed),
+            derived_refresh_unchanged: self
+                .derived_refresh_unchanged
+                .saturating_sub(baseline.derived_refresh_unchanged),
+            derived_refresh_deferred: self
+                .derived_refresh_deferred
+                .saturating_sub(baseline.derived_refresh_deferred),
+            derived_project_candidate_clones: self
+                .derived_project_candidate_clones
+                .saturating_sub(baseline.derived_project_candidate_clones),
+            derived_scene_candidate_clones: self
+                .derived_scene_candidate_clones
+                .saturating_sub(baseline.derived_scene_candidate_clones),
+            derived_redundant_preservation_clones: self
+                .derived_redundant_preservation_clones
+                .saturating_sub(baseline.derived_redundant_preservation_clones),
+            frame_nanos: self.frame_nanos.saturating_sub(baseline.frame_nanos),
+            event_nanos: self.event_nanos.saturating_sub(baseline.event_nanos),
+            layout_nanos: self.layout_nanos.saturating_sub(baseline.layout_nanos),
+            layout_lookup_nanos: self
+                .layout_lookup_nanos
+                .saturating_sub(baseline.layout_lookup_nanos),
+            element_wrap_nanos: self
+                .element_wrap_nanos
+                .saturating_sub(baseline.element_wrap_nanos),
+            paint_nanos: self.paint_nanos.saturating_sub(baseline.paint_nanos),
+            caret_lookup_nanos: self
+                .caret_lookup_nanos
+                .saturating_sub(baseline.caret_lookup_nanos),
+            derived_refresh_nanos: self
+                .derived_refresh_nanos
+                .saturating_sub(baseline.derived_refresh_nanos),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BenchmarkOperation {
+    General,
+    Scroll,
+    InsertStart,
+    InsertMiddle,
+    InsertEnd,
+    IdleDerivedRefresh,
+}
+
+impl BenchmarkOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Scroll => "scroll",
+            Self::InsertStart => "insert-start",
+            Self::InsertMiddle => "insert-middle",
+            Self::InsertEnd => "insert-end",
+            Self::IdleDerivedRefresh => "idle-derived-refresh",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PerformanceDiagnostics {
+    totals: PerformanceMeasurements,
+    benchmark_start: PerformanceMeasurements,
+    benchmark_operation: BenchmarkOperation,
+}
+
+fn add_performance_counter(counter: &mut u64, amount: u64) {
+    *counter = counter.saturating_add(amount);
+}
+
+fn add_performance_nanos(total: &mut u128, amount: u128) {
+    *total = total.saturating_add(amount);
+}
+
+impl Default for PerformanceDiagnostics {
+    fn default() -> Self {
+        Self {
+            totals: PerformanceMeasurements::default(),
+            benchmark_start: PerformanceMeasurements::default(),
+            benchmark_operation: BenchmarkOperation::General,
+        }
+    }
+}
+
+impl std::ops::Deref for PerformanceDiagnostics {
+    type Target = PerformanceMeasurements;
+
+    fn deref(&self) -> &Self::Target {
+        &self.totals
+    }
+}
+
+impl std::ops::DerefMut for PerformanceDiagnostics {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.totals
+    }
+}
+
+impl PerformanceDiagnostics {
+    fn reset_benchmark(&mut self, operation: BenchmarkOperation) {
+        self.benchmark_start = self.totals;
+        self.benchmark_operation = operation;
+    }
+
+    fn benchmark_delta(&self) -> PerformanceMeasurements {
+        self.totals.delta_since(self.benchmark_start)
+    }
+
+    fn safe_summary(&self) -> String {
+        let build_profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        let totals = self.totals;
+        let benchmark = self.benchmark_delta();
+        format!(
+            "profile={build_profile} operation={} frames={} events={} layouts={} cache-hits={} layout-identity-changes={} pages-considered={} pages-culled={} pages-painted={} lines={} selection-spans={} galleys-built={} galleys-reused={} wraps-built={} wraps-reused={} caret-lookups={} interaction-indexed={} interaction-linear={} interaction-index-entries={} derived-attempted={} derived-completed={} derived-skipped={} derived-changed={} derived-unchanged={} derived-deferred={} derived-project-candidates={} derived-scene-candidates={} derived-redundant-preservation-clones={} frame-ns={} event-ns={} layout-lookup-ns={} element-wrap-ns={} page-paint-ns={} caret-lookup-ns={} derived-refresh-ns={} benchmark-frames={} benchmark-layouts={} benchmark-pages-painted={} benchmark-wraps-built={} benchmark-linear-queries={} benchmark-indexed-queries={} benchmark-index-entries={}",
+            self.benchmark_operation.label(),
+            totals.frames,
+            totals.events,
+            totals.layout_builds,
+            totals.layout_cache_hits,
+            totals.layout_identity_changes,
+            totals.pages_considered,
+            totals.pages_culled,
+            totals.painted_pages,
+            totals.lines_submitted,
+            totals.selection_spans_submitted,
+            totals.galleys_built,
+            totals.galleys_reused,
+            totals.element_wraps_built,
+            totals.element_wraps_reused,
+            totals.caret_lookups,
+            totals.indexed_interaction_queries,
+            totals.linear_interaction_queries,
+            totals.interaction_index_entries_examined,
+            totals.derived_refresh_attempts,
+            totals.derived_refresh_completed,
+            totals.derived_refresh_skipped,
+            totals.derived_refresh_changed,
+            totals.derived_refresh_unchanged,
+            totals.derived_refresh_deferred,
+            totals.derived_project_candidate_clones,
+            totals.derived_scene_candidate_clones,
+            totals.derived_redundant_preservation_clones,
+            totals.frame_nanos,
+            totals.event_nanos,
+            totals.layout_lookup_nanos,
+            totals.element_wrap_nanos,
+            totals.paint_nanos,
+            totals.caret_lookup_nanos,
+            totals.derived_refresh_nanos,
+            benchmark.frames,
+            benchmark.layout_builds,
+            benchmark.painted_pages,
+            benchmark.element_wraps_built,
+            benchmark.linear_interaction_queries,
+            benchmark.indexed_interaction_queries,
+            benchmark.interaction_index_entries_examined
+        )
+    }
+
+    #[cfg(test)]
+    fn snapshot_for_test(&self) -> PerformanceMeasurements {
+        self.totals
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,12 +360,41 @@ enum RevealIntent {
     Conditional,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DerivedRefreshDisposition {
+    Changed,
+    Unchanged,
+    Deferred,
+    Failed,
+    SavePublished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DerivedRefreshWatermark {
+    revision: u64,
+    disposition: DerivedRefreshDisposition,
+}
+
+impl DerivedRefreshWatermark {
+    fn covers(self, revision: u64) -> bool {
+        self.revision == revision
+            && matches!(
+                self.disposition,
+                DerivedRefreshDisposition::Changed
+                    | DerivedRefreshDisposition::Unchanged
+                    | DerivedRefreshDisposition::Deferred
+                    | DerivedRefreshDisposition::SavePublished
+            )
+    }
+}
+
 struct ScriptCraftApp {
     session: EditingSession,
     focus_mode: focus_mode::FocusModeController,
     sprint_timer: sprint_timer::SprintTimer,
     timer_clock_origin: Instant,
     next_cast_list_refresh: Instant,
+    last_derived_refresh: Option<DerivedRefreshWatermark>,
     notification_sink: sprint_timer::NativeNotificationSink,
     notification_results: Receiver<(u64, NotificationResult)>,
     surface_focused: bool,
@@ -140,6 +442,7 @@ struct ScriptCraftApp {
     caret_blink_reset_time: f64,
     layout_cache: LayoutCache,
     performance: PerformanceDiagnostics,
+    last_layout_identity: Option<std::sync::Weak<ScreenplayLayout>>,
 }
 
 impl ScriptCraftApp {
@@ -154,6 +457,7 @@ impl ScriptCraftApp {
             sprint_timer: sprint_timer::SprintTimer::default(),
             timer_clock_origin: Instant::now(),
             next_cast_list_refresh: Instant::now() + CAST_LIST_REFRESH_INTERVAL,
+            last_derived_refresh: None,
             notification_sink,
             notification_results,
             surface_focused: false,
@@ -204,6 +508,7 @@ impl ScriptCraftApp {
             caret_blink_reset_time: 0.0,
             layout_cache: LayoutCache::default(),
             performance: PerformanceDiagnostics::default(),
+            last_layout_identity: None,
         })
     }
 
@@ -243,21 +548,110 @@ impl ScriptCraftApp {
     }
 
     fn refresh_cast_lists_on_schedule(&mut self, ctx: &egui::Context, now: Instant) {
+        let started = Instant::now();
         if now < self.next_cast_list_refresh {
+            self.performance.derived_refresh_skipped = self
+                .performance
+                .derived_refresh_skipped
+                .saturating_add(1);
+            self.performance.derived_refresh_nanos = self
+                .performance
+                .derived_refresh_nanos
+                .saturating_add(started.elapsed().as_nanos());
             ctx.request_repaint_after(self.next_cast_list_refresh.saturating_duration_since(now));
             return;
         }
 
+        if self
+            .last_derived_refresh
+            .is_some_and(|watermark| watermark.covers(self.session.revision()))
+        {
+            self.next_cast_list_refresh = now + CAST_LIST_REFRESH_INTERVAL;
+            self.performance.derived_refresh_skipped = self
+                .performance
+                .derived_refresh_skipped
+                .saturating_add(1);
+            self.performance.derived_refresh_nanos = self
+                .performance
+                .derived_refresh_nanos
+                .saturating_add(started.elapsed().as_nanos());
+            self.performance.repaint_requests = self.performance.repaint_requests.saturating_add(1);
+            ctx.request_repaint_after(CAST_LIST_REFRESH_INTERVAL);
+            return;
+        }
+
+        self.performance.derived_refresh_attempts = self
+            .performance
+            .derived_refresh_attempts
+            .saturating_add(1);
         self.next_cast_list_refresh = now + CAST_LIST_REFRESH_INTERVAL;
-        match self.session.refresh_cast_lists() {
-            Ok(true) => self.request_repaint(ctx),
-            Ok(false) => {}
+        let attempted_revision = self.session.revision();
+        self.last_derived_refresh = Some(DerivedRefreshWatermark {
+            revision: attempted_revision,
+            disposition: DerivedRefreshDisposition::Failed,
+        });
+        match self.session.refresh_cast_lists_with_outcome() {
+            Ok(outcome) => {
+                let disposition = if outcome.deferred {
+                    DerivedRefreshDisposition::Deferred
+                } else if outcome.changed {
+                    DerivedRefreshDisposition::Changed
+                } else {
+                    DerivedRefreshDisposition::Unchanged
+                };
+                self.last_derived_refresh = Some(DerivedRefreshWatermark {
+                    revision: self.session.revision(),
+                    disposition,
+                });
+                self.performance.derived_refresh_completed = self
+                    .performance
+                    .derived_refresh_completed
+                    .saturating_add(1);
+                if outcome.changed {
+                    self.performance.derived_refresh_changed = self
+                        .performance
+                        .derived_refresh_changed
+                        .saturating_add(1);
+                    self.request_repaint(ctx);
+                } else {
+                    self.performance.derived_refresh_unchanged = self
+                        .performance
+                        .derived_refresh_unchanged
+                        .saturating_add(1);
+                }
+                if outcome.deferred {
+                    self.performance.derived_refresh_deferred = self
+                        .performance
+                        .derived_refresh_deferred
+                        .saturating_add(1);
+                }
+                add_performance_counter(
+                    &mut self.performance.derived_project_candidate_clones,
+                    outcome.project_candidate_clones,
+                );
+                add_performance_counter(
+                    &mut self.performance.derived_scene_candidate_clones,
+                    outcome.scene_candidate_clones,
+                );
+                add_performance_counter(
+                    &mut self.performance.derived_redundant_preservation_clones,
+                    outcome.redundant_preservation_clones,
+                );
+            }
             Err(_) => {
+                self.performance.derived_refresh_deferred = self
+                    .performance
+                    .derived_refresh_deferred
+                    .saturating_add(1);
                 self.status =
                     "Cast-list refresh deferred because source data could not be updated safely."
                         .into();
             }
         }
+        self.performance.derived_refresh_nanos = self
+            .performance
+            .derived_refresh_nanos
+            .saturating_add(started.elapsed().as_nanos());
         self.performance.repaint_requests = self.performance.repaint_requests.saturating_add(1);
         ctx.request_repaint_after(CAST_LIST_REFRESH_INTERVAL);
     }
@@ -271,12 +665,17 @@ impl ScriptCraftApp {
     ) -> Result<std::sync::Arc<ScreenplayLayout>, scriptcraft_core::layout::LayoutError> {
         let revision = self.session.revision();
         let started = Instant::now();
-        let (layout, hit) = self.layout_cache.get_or_build_with_inputs_for_purpose(
+        let mut build_diagnostics = LayoutBuildDiagnostics::default();
+        let (layout, hit) = self.layout_cache.get_or_build_for_session_with_diagnostics(
             revision,
-            self.session.project(),
-            self.session.layout_inputs(),
+            &self.session,
             LayoutPurpose::Editor,
+            &mut build_diagnostics,
         )?;
+        add_performance_nanos(
+            &mut self.performance.layout_lookup_nanos,
+            started.elapsed().as_nanos(),
+        );
         if hit {
             self.performance.layout_cache_hits =
                 self.performance.layout_cache_hits.saturating_add(1);
@@ -286,7 +685,31 @@ impl ScriptCraftApp {
                 .performance
                 .layout_nanos
                 .saturating_add(started.elapsed().as_nanos());
+            self.performance.element_wraps_built = self
+                .performance
+                .element_wraps_built
+                .saturating_add(build_diagnostics.element_wraps_built);
+            self.performance.element_wraps_reused = self
+                .performance
+                .element_wraps_reused
+                .saturating_add(build_diagnostics.element_wraps_reused);
+            self.performance.element_wrap_nanos = self
+                .performance
+                .element_wrap_nanos
+                .saturating_add(build_diagnostics.element_wrap_nanos);
         }
+        let identity_changed = self.last_layout_identity.as_ref().is_some_and(|previous| {
+            previous
+                .upgrade()
+                .map_or(true, |previous| !std::sync::Arc::ptr_eq(&previous, &layout))
+        });
+        if identity_changed {
+            self.performance.layout_identity_changes = self
+                .performance
+                .layout_identity_changes
+                .saturating_add(1);
+        }
+        self.last_layout_identity = Some(std::sync::Arc::downgrade(&layout));
         Ok(layout)
     }
 
@@ -360,6 +783,14 @@ impl ScriptCraftApp {
             Ok(outcome) => {
                 self.native_path = target.path().map(PathBuf::from);
                 self.fdx_baseline = target.baseline().cloned();
+                // Save preflight always prepares the complete derived
+                // candidate. After publication/rebase, that revision is
+                // already current and must not be cloned again by the timer.
+                self.last_derived_refresh = Some(DerivedRefreshWatermark {
+                    revision: self.session.revision(),
+                    disposition: DerivedRefreshDisposition::SavePublished,
+                });
+                self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
                 self.layout_cache = LayoutCache::default();
                 self.page_geometry.invalidate();
                 self.rendered_revision = None;
@@ -515,6 +946,7 @@ impl ScriptCraftApp {
         self.fdx_baseline = baseline;
         self.pending_window_restore = window_state;
         self.pending_fdx_open = None;
+        self.last_derived_refresh = None;
         self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
         self.page_geometry.invalidate();
         self.layout_cache = LayoutCache::default();
@@ -629,7 +1061,7 @@ impl ScriptCraftApp {
     }
 
     fn caret_from_pointer(
-        &self,
+        &mut self,
         layout: &ScreenplayLayout,
         page: usize,
         page_rect: egui::Rect,
@@ -642,12 +1074,31 @@ impl ScriptCraftApp {
         let local_y = FixedPoint::from_points_f64(
             f64::from((pointer.y - page_rect.top()) / scale),
         )?;
-        layout
-            .nearest_line_hit_test_fixed(page, local_x, local_y)
+        let started = Instant::now();
+        self.performance.caret_lookups = self.performance.caret_lookups.saturating_add(1);
+        let mut query_diagnostics = InteractionQueryDiagnostics::default();
+        let result = layout
+            .nearest_line_hit_test_fixed_with_diagnostics(
+                page,
+                local_x,
+                local_y,
+                &mut query_diagnostics,
+            )
             .map(|caret| Position {
                 element: caret.element,
                 offset: caret.offset,
-            })
+            });
+        self.performance.indexed_interaction_queries =
+            self.performance.indexed_interaction_queries.saturating_add(1);
+        self.performance.interaction_index_entries_examined = self
+            .performance
+            .interaction_index_entries_examined
+            .saturating_add(query_diagnostics.index_entries_examined);
+        self.performance.caret_lookup_nanos = self
+            .performance
+            .caret_lookup_nanos
+            .saturating_add(started.elapsed().as_nanos());
+        result
     }
 
     fn pointer_body_page(
@@ -739,15 +1190,19 @@ impl ScriptCraftApp {
         ui: &mut egui::Ui,
         layout: &ScreenplayLayout,
         page_index: usize,
+        page_rect: egui::Rect,
         metrics: PresentationMetrics,
         editor_id: egui::Id,
-    ) -> egui::Rect {
-        let page_width = metrics.page_width;
+        caret_page_index: Option<usize>,
+        caret_geometry: Option<FixedRect>,
+    ) {
         let scale = metrics.scale;
         let paint_started = Instant::now();
         self.performance.painted_pages = self.performance.painted_pages.saturating_add(1);
-        let page_height = layout.inputs.paper_height as f32 * scale;
-        let page_rect = ui.allocate_space(Vec2::new(page_width, page_height)).1;
+        add_performance_counter(
+            &mut self.performance.lines_submitted,
+            layout.pages[page_index].lines.len() as u64,
+        );
         let painter = ui.painter_at(page_rect);
         let palette = self.page_palette;
         painter.rect_filled(page_rect, 2.0, palette.paper);
@@ -759,6 +1214,7 @@ impl ScriptCraftApp {
             let char_width = line.char_width.to_points_f32() * scale;
             let selection = self.selection_range(line.source.start, line.source.end, line.element);
             if let Some((from, to)) = selection {
+                add_performance_counter(&mut self.performance.selection_spans_submitted, 1);
                 let display_from = line.display_char_for_source(from, false);
                 let display_to = line.display_char_for_source(to, true);
                 let left =
@@ -775,6 +1231,7 @@ impl ScriptCraftApp {
             }
             paint_fixed_metric_text_with_selection(
                 &painter,
+                ui.ctx(),
                 egui::pos2(x, y),
                 &line.display_text,
                 renderer_font_for_style(
@@ -783,6 +1240,7 @@ impl ScriptCraftApp {
                     line.text_style.size as f32 * scale,
                 ),
                 char_width,
+                line.geometry.height.to_points_f32() * scale,
                 FixedMetricTextStyle {
                     color: if line.text_style.hidden_text {
                         palette.subdued_text
@@ -797,6 +1255,7 @@ impl ScriptCraftApp {
                         )
                     }),
                 },
+                &mut self.performance,
             );
             if line.text_style.underline {
                 let underline_y = y + line.geometry.height.to_points_f32() * scale * 0.88;
@@ -815,19 +1274,22 @@ impl ScriptCraftApp {
         }
 
         let selection = self.session.selection();
-        if selection.anchor == selection.focus && !layout.pages[page_index].title_page {
-            let caret = Caret {
-                element: selection.focus.element,
-                offset: selection.focus.offset,
-            };
-            let blink_id = editor_id.with((
-                "caret-blink",
-                self.session.revision(),
-                caret.element,
-                caret.offset,
-                self.caret_blink_focus_generation,
-            ));
-            if let Ok(rect) = layout.caret_geometry(caret.clone()) {
+        if caret_page_index == Some(page_index)
+            && selection.anchor == selection.focus
+            && !layout.pages[page_index].title_page
+        {
+            if let Some(rect) = caret_geometry {
+                let caret = Caret {
+                    element: selection.focus.element,
+                    offset: selection.focus.offset,
+                };
+                let blink_id = editor_id.with((
+                    "caret-blink",
+                    self.session.revision(),
+                    caret.element,
+                    caret.offset,
+                    self.caret_blink_focus_generation,
+                ));
                 let blink_active = self.surface_focused;
                 if caret_blink_visible(
                     ui.ctx(),
@@ -881,7 +1343,6 @@ impl ScriptCraftApp {
             .performance
             .paint_nanos
             .saturating_add(paint_started.elapsed().as_nanos());
-        page_rect
     }
 
     fn live_document_surface(&mut self, ui: &mut egui::Ui) {
@@ -904,6 +1365,7 @@ impl ScriptCraftApp {
         let scroll_outer_rect = ui.available_rect_before_wrap();
         let mut rendered_scale = 1.0;
         let reveal_intent = self.reveal_intent;
+        let selection = self.session.selection();
         let scroll_output = egui::ScrollArea::both()
             .id_salt("page-editor-scroll")
             .show(ui, |ui| {
@@ -925,8 +1387,11 @@ impl ScriptCraftApp {
                 rendered_scale = scale;
                 self.page_scale = Some(scale);
                 ui.set_min_width(geometry.content_width);
+                // Allocate every page row to preserve full scroll extent and source geometry;
+                // page painting is a separate viewport-bounded pass below.
+                let editor_clip = ui.clip_rect();
                 for page_index in 0..layout.pages.len() {
-                    let mut page_rect = None;
+                    add_performance_counter(&mut self.performance.pages_considered, 1);
                     ui.horizontal(|ui| {
                         // Explicit geometry owns all horizontal spacing; default
                         // row gaps would inflate measured scroll content.
@@ -936,47 +1401,136 @@ impl ScriptCraftApp {
                             horizontal_item_spacing = ui.spacing().item_spacing.x;
                         }
                         ui.add_space(geometry.leading_padding);
-                        page_rect =
-                            Some(self.paint_page(ui, &layout, page_index, metrics, editor_id));
+                        let page_height = layout.inputs.paper_height as f32 * scale;
+                        let page_rect = ui
+                            .allocate_space(Vec2::new(metrics.page_width, page_height))
+                            .1;
                         let trailing_padding = (geometry.content_width
                             - geometry.leading_padding
                             - metrics.page_width)
                             .max(0.0);
                         ui.add_space(trailing_padding);
+                        page_rects.push(page_rect);
                     });
-                    page_rects.push(page_rect.unwrap_or_else(|| {
-                        egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::ZERO)
-                    }));
-                    ui.add_space(12.0);
+                    ui.add_space(PAGE_VERTICAL_GAP);
                 }
+                let paint_range = viewport_paint_page_range(&page_rects, editor_clip);
+                let painted_in_range = paint_range.map_or(0, |(first, last)| {
+                    last.saturating_sub(first).saturating_add(1)
+                });
+                add_performance_counter(
+                    &mut self.performance.pages_culled,
+                    page_rects.len().saturating_sub(painted_in_range) as u64,
+                );
+                let caret_page_index = if reveal_intent == RevealIntent::Conditional {
+                    let mut query_diagnostics = InteractionQueryDiagnostics::default();
+                    let page = layout.page_for_position_in_range_with_diagnostics(
+                        selection.focus.element,
+                        selection.focus.offset,
+                        None,
+                        &mut query_diagnostics,
+                    );
+                    self.performance.indexed_interaction_queries = self
+                        .performance
+                        .indexed_interaction_queries
+                        .saturating_add(1);
+                    self.performance.interaction_index_entries_examined = self
+                        .performance
+                        .interaction_index_entries_examined
+                        .saturating_add(query_diagnostics.index_entries_examined);
+                    page
+                } else if selection.anchor == selection.focus {
+                    paint_range.and_then(|(first, last)| {
+                        let mut query_diagnostics = InteractionQueryDiagnostics::default();
+                        let page = layout.page_for_position_in_range_with_diagnostics(
+                            selection.focus.element,
+                            selection.focus.offset,
+                            Some((first, last)),
+                            &mut query_diagnostics,
+                        );
+                        self.performance.indexed_interaction_queries = self
+                            .performance
+                            .indexed_interaction_queries
+                            .saturating_add(1);
+                        self.performance.interaction_index_entries_examined = self
+                            .performance
+                            .interaction_index_entries_examined
+                            .saturating_add(query_diagnostics.index_entries_examined);
+                        page
+                    })
+                } else {
+                    None
+                };
+                let resolve_caret = caret_page_index.is_some_and(|page_index| {
+                    reveal_intent == RevealIntent::Conditional
+                        || (selection.anchor == selection.focus
+                            && !layout.pages[page_index].title_page)
+                });
+                let caret_geometry = if resolve_caret {
+                    let caret_started = Instant::now();
+                    self.performance.caret_lookups =
+                        self.performance.caret_lookups.saturating_add(1);
+                    let mut query_diagnostics = InteractionQueryDiagnostics::default();
+                    let result = layout
+                        .caret_geometry_with_diagnostics(
+                            Caret {
+                                element: selection.focus.element,
+                                offset: selection.focus.offset,
+                            },
+                            &mut query_diagnostics,
+                        )
+                        .ok();
+                    self.performance.indexed_interaction_queries = self
+                        .performance
+                        .indexed_interaction_queries
+                        .saturating_add(1);
+                    self.performance.interaction_index_entries_examined = self
+                        .performance
+                        .interaction_index_entries_examined
+                        .saturating_add(query_diagnostics.index_entries_examined);
+                    self.performance.caret_lookup_nanos = self
+                        .performance
+                        .caret_lookup_nanos
+                        .saturating_add(caret_started.elapsed().as_nanos());
+                    result
+                } else {
+                    None
+                };
+                let caret_paint_page_index = (selection.anchor == selection.focus)
+                    .then_some(caret_page_index)
+                    .flatten()
+                    .filter(|page_index| !layout.pages[*page_index].title_page);
                 if reveal_intent == RevealIntent::Conditional {
-                    let focus = self.session.selection().focus;
-                    if let Some(page_index) = layout.pages.iter().position(|page| {
-                        page.lines.iter().any(|line| {
-                            line.element == focus.element
-                                && focus.offset >= line.source.start
-                                && focus.offset <= line.source.end
-                        })
-                    }) {
-                        if let Ok(caret) = layout.caret_geometry(Caret {
-                            element: focus.element,
-                            offset: focus.offset,
-                        }) {
-                            let page_rect = page_rects[page_index];
-                            let caret_rect = egui::Rect::from_min_size(
-                                egui::pos2(
-                                    page_rect.left() + caret.x.to_points_f32() * scale,
-                                    page_rect.top() + caret.y.to_points_f32() * scale,
-                                ),
-                                Vec2::new(CARET_WIDTH, caret.height.to_points_f32() * scale),
-                            );
-                            let visible_clip = ui.clip_rect();
-                            if caret_needs_reveal(caret_rect, visible_clip) {
-                                // `None` asks egui for nearest/minimal scrolling;
-                                // centering would override the writer's viewport.
-                                ui.scroll_to_rect(caret_rect, None);
-                            }
+                    if let (Some(page_index), Some(caret)) =
+                        (caret_page_index, caret_geometry)
+                    {
+                        let page_rect = page_rects[page_index];
+                        let caret_rect = egui::Rect::from_min_size(
+                            egui::pos2(
+                                page_rect.left() + caret.x.to_points_f32() * scale,
+                                page_rect.top() + caret.y.to_points_f32() * scale,
+                            ),
+                            Vec2::new(CARET_WIDTH, caret.height.to_points_f32() * scale),
+                        );
+                        if caret_needs_reveal(caret_rect, editor_clip) {
+                            // `None` asks egui for nearest/minimal scrolling;
+                            // centering would override the writer's viewport.
+                            ui.scroll_to_rect(caret_rect, None);
                         }
+                    }
+                }
+                if let Some((first, last)) = paint_range {
+                    for page_index in first..=last {
+                        self.paint_page(
+                            ui,
+                            &layout,
+                            page_index,
+                            page_rects[page_index],
+                            metrics,
+                            editor_id,
+                            caret_paint_page_index,
+                            caret_geometry,
+                        );
                     }
                 }
             });
@@ -1276,16 +1830,26 @@ impl ScriptCraftApp {
         let layout = self
             .layout_for_render()
             .map_err(|_| EditError::InvalidElement)?;
-        let lines: Vec<_> = layout
-            .pages
-            .iter()
-            .flat_map(|page| page.lines.iter())
-            .collect();
-        let current_index = lines.iter().position(|line| {
-            line.element == current.element
-                && current.offset >= line.source.start
-                && current.offset <= line.source.end
-        });
+        let interaction_started = Instant::now();
+        self.performance.caret_lookups = self.performance.caret_lookups.saturating_add(1);
+        let mut query_diagnostics = InteractionQueryDiagnostics::default();
+        let current_index = layout.body_line_index_for_position_with_diagnostics(
+            current.element,
+            current.offset,
+            &mut query_diagnostics,
+        );
+        self.performance.indexed_interaction_queries = self
+            .performance
+            .indexed_interaction_queries
+            .saturating_add(1);
+        self.performance.interaction_index_entries_examined = self
+            .performance
+            .interaction_index_entries_examined
+            .saturating_add(query_diagnostics.index_entries_examined);
+        add_performance_nanos(
+            &mut self.performance.caret_lookup_nanos,
+            interaction_started.elapsed().as_nanos(),
+        );
         let Some(current_index) = current_index else {
             self.preferred_vertical_x = None;
             return self.session.set_selection(selection);
@@ -1293,11 +1857,14 @@ impl ScriptCraftApp {
         let target_index = if down {
             current_index
                 .checked_add(1)
-                .filter(|index| *index < lines.len())
+                .filter(|index| *index < layout.body_line_count())
         } else {
             current_index.checked_sub(1)
         };
-        let current_line = lines[current_index];
+        let Some(current_line) = layout.body_line(current_index) else {
+            self.preferred_vertical_x = None;
+            return self.session.set_selection(selection);
+        };
         let Some(target_index) = target_index else {
             self.preferred_vertical_x = None;
             let next = Position {
@@ -1323,7 +1890,10 @@ impl ScriptCraftApp {
                 + columns.saturating_mul(current_line.char_width.raw())
         });
         self.preferred_vertical_x = Some(goal);
-        let target_line = lines[target_index];
+        let Some(target_line) = layout.body_line(target_index) else {
+            self.preferred_vertical_x = None;
+            return self.session.set_selection(selection);
+        };
         let cell = target_line.char_width.raw().max(1);
         let columns = (goal
             .saturating_sub(target_line.geometry.x.raw())
@@ -1490,31 +2060,247 @@ struct FixedMetricTextStyle {
     selection: Option<(usize, usize)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FixedCellGalleyKey {
+    text: String,
+    font_family: FontFamily,
+    font_size_bits: u32,
+    char_width_bits: u32,
+    line_height_bits: u32,
+    color: Color32,
+    pixels_per_point_bits: u32,
+}
+
+impl FixedCellGalleyKey {
+    fn new(
+        text: &str,
+        font: &FontId,
+        char_width: f32,
+        line_height: f32,
+        color: Color32,
+        pixels_per_point: f32,
+    ) -> Self {
+        Self {
+            text: text.to_owned(),
+            font_family: font.family.clone(),
+            font_size_bits: font.size.to_bits(),
+            char_width_bits: char_width.to_bits(),
+            line_height_bits: line_height.to_bits(),
+            color,
+            pixels_per_point_bits: pixels_per_point.to_bits(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct FixedCellGalleyCache {
+    galleys: HashMap<FixedCellGalleyKey, std::sync::Arc<Galley>>,
+}
+
+impl FixedCellGalleyCache {
+    fn insert(&mut self, key: FixedCellGalleyKey, galley: std::sync::Arc<Galley>) {
+        if self.galleys.len() >= FIXED_CELL_GALLEY_CACHE_LIMIT {
+            // Keep retention bounded under repeated text edits and document replacement.
+            // Clearing is diagnostic-neutral: the next use is simply a fresh build.
+            self.galleys.clear();
+        }
+        self.galleys.insert(key, galley);
+    }
+}
+
 fn paint_fixed_metric_text_with_selection(
     painter: &egui::Painter,
+    ctx: &egui::Context,
     origin: egui::Pos2,
     text: &str,
     font: FontId,
     char_width: f32,
+    line_height: f32,
     style: FixedMetricTextStyle,
+    performance: &mut PerformanceDiagnostics,
 ) {
-    for (column, character) in text.chars().enumerate() {
-        let glyph_color = if style
-            .selection
-            .is_some_and(|(start, end)| column >= start && column < end)
-        {
+    if text.is_empty() {
+        return;
+    }
+
+    let char_count = text.chars().count();
+    let selection = style.selection.map(|(start, end)| {
+        (start.min(char_count), end.min(char_count))
+    });
+    let mut spans = Vec::with_capacity(3);
+    let mut span_start_byte = 0;
+    let mut span_start_column = 0;
+    let mut span_selected = selection.is_some_and(|(start, end)| start == 0 && end > 0);
+    for (column, (byte, _)) in text.char_indices().enumerate().skip(1) {
+        let selected = selection.is_some_and(|(start, end)| column >= start && column < end);
+        if selected != span_selected {
+            spans.push((span_start_byte..byte, span_start_column, span_selected));
+            span_start_byte = byte;
+            span_start_column = column;
+            span_selected = selected;
+        }
+    }
+    spans.push((span_start_byte..text.len(), span_start_column, span_selected));
+
+    for (byte_range, start_column, selected) in spans {
+        let span_text = &text[byte_range];
+        if span_text.is_empty() {
+            continue;
+        }
+        let color = if selected {
             style.selected_color
         } else {
             style.color
         };
-        painter.text(
-            egui::pos2(fixed_metric_x(origin.x, column, char_width), origin.y),
-            egui::Align2::LEFT_TOP,
-            character.to_string(),
-            font.clone(),
-            glyph_color,
+        let span_origin = egui::pos2(
+            fixed_metric_x(origin.x, start_column, char_width),
+            origin.y,
         );
+        let (galley, reused, fixed_geometry) = fixed_cell_span_galley(
+            painter,
+            ctx,
+            span_text,
+            &font,
+            char_width,
+            line_height,
+            color,
+        );
+        if reused {
+            performance.galleys_reused = performance.galleys_reused.saturating_add(1);
+        } else {
+            performance.galleys_built = performance.galleys_built.saturating_add(1);
+        }
+        if fixed_geometry {
+            painter.galley(span_origin, galley, color);
+        } else {
+            // Keep output geometry exact if a later epaint version changes its
+            // single-row glyph/mesh contract; this compatibility path is not used
+            // by the pinned 0.29 desktop implementation.
+            for (column, character) in span_text.chars().enumerate() {
+                painter.text(
+                    egui::pos2(
+                        fixed_metric_x(span_origin.x, column, char_width),
+                        span_origin.y,
+                    ),
+                    egui::Align2::LEFT_TOP,
+                    character.to_string(),
+                    font.clone(),
+                    color,
+                );
+            }
+        }
     }
+}
+
+fn fixed_cell_span_galley(
+    painter: &egui::Painter,
+    ctx: &egui::Context,
+    text: &str,
+    font: &FontId,
+    char_width: f32,
+    line_height: f32,
+    color: Color32,
+) -> (std::sync::Arc<Galley>, bool, bool) {
+    let pixels_per_point = ctx.pixels_per_point();
+    let key = FixedCellGalleyKey::new(
+        text,
+        font,
+        char_width,
+        line_height,
+        color,
+        pixels_per_point,
+    );
+    let cached = ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<FixedCellGalleyCache>(egui::Id::new(
+            FIXED_CELL_GALLEY_CACHE_ID,
+        ))
+        .galleys
+        .get(&key)
+        .cloned()
+    });
+    if let Some(galley) = cached {
+        return (galley, true, true);
+    }
+
+    let job = LayoutJob::simple_singleline(key.text.clone(), font.clone(), color);
+    let mut galley = painter.layout_job(job).as_ref().clone();
+    if !position_galley_in_fixed_cells(&mut galley, char_width) {
+        // The epaint 0.29 single-row galley contract is one glyph record per
+        // Unicode scalar and four mesh vertices per textured glyph. Preserve
+        // correctness if a future backend violates that contract by leaving its
+        // host layout untouched; the caller records the requested build.
+        return (std::sync::Arc::new(galley), false, false);
+    }
+    let galley = std::sync::Arc::new(galley);
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<FixedCellGalleyCache>(egui::Id::new(
+            FIXED_CELL_GALLEY_CACHE_ID,
+        ))
+        .insert(key, galley.clone());
+    });
+    (galley, false, true)
+}
+
+fn position_galley_in_fixed_cells(galley: &mut Galley, char_width: f32) -> bool {
+    if galley.rows.len() != 1 {
+        return false;
+    }
+    let char_count = galley.job.text.chars().count();
+    let row = &mut galley.rows[0];
+    if row.glyphs.len() != char_count {
+        return false;
+    }
+    let expected_vertex_count = row
+        .glyphs
+        .iter()
+        .filter(|glyph| !glyph.uv_rect.is_nothing())
+        .count()
+        .saturating_mul(4);
+    if row.visuals.glyph_vertex_range.len() != expected_vertex_count {
+        return false;
+    }
+
+    let pixels_per_point = galley.pixels_per_point;
+    let mut vertex_index = row.visuals.glyph_vertex_range.start;
+    let vertex_end = row.visuals.glyph_vertex_range.end;
+    for (column, glyph) in row.glyphs.iter_mut().enumerate() {
+        let fixed_x = column as f32 * char_width;
+        if !glyph.uv_rect.is_nothing() {
+            let Some(vertices) = row
+                .visuals
+                .mesh
+                .vertices
+                .get_mut(vertex_index..vertex_index.saturating_add(4))
+            else {
+                return false;
+            };
+            let round_to_pixel = |value: f32| (value * pixels_per_point).round() / pixels_per_point;
+            let left = fixed_x + round_to_pixel(glyph.uv_rect.offset.x);
+            let right = left + glyph.uv_rect.size.x;
+            vertices[0].pos.x = left;
+            vertices[1].pos.x = right;
+            vertices[2].pos.x = left;
+            vertices[3].pos.x = right;
+            vertex_index = vertex_index.saturating_add(4);
+        }
+        glyph.pos.x = fixed_x;
+        glyph.advance_width = char_width;
+    }
+    if vertex_index != vertex_end {
+        return false;
+    }
+
+    let fixed_width = char_count as f32 * char_width;
+    row.rect.min.x = 0.0;
+    row.rect.max.x = fixed_width;
+    row.visuals.mesh_bounds = row.visuals.mesh.calc_bounds();
+    galley.rect.min.x = 0.0;
+    galley.rect.max.x = fixed_width;
+    galley.mesh_bounds = galley
+        .rows
+        .iter()
+        .fold(egui::Rect::NOTHING, |bounds, row| bounds.union(row.visuals.mesh_bounds));
+    true
 }
 
 fn renderer_font(font_family: &str, font_size: f32) -> FontId {
@@ -1665,6 +2451,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egu
     let center = status_bar::project_center(&app.status, app.error.as_deref());
     let performance = app.performance;
     let input_diagnostics = &app.native_input_diagnostics;
+    let performance_summary = app.performance.safe_summary();
     let diagnostics = DiagnosticProjection {
         focused: input_diagnostics.focused,
         focus_lock: input_diagnostics.focus_lock_installed,
@@ -1678,6 +2465,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egu
         layout_cache_hits: performance.layout_cache_hits,
         painted_pages: performance.painted_pages,
         repaint_requests: performance.repaint_requests,
+        performance_summary: &performance_summary,
     };
     let status_panel = egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
         let was_timer_open = app.sprint_timer.popup_open;
@@ -1822,12 +2610,23 @@ impl eframe::App for ScriptCraftApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ScriptCraftApp::update(self, ctx);
+    }
+}
+
+impl ScriptCraftApp {
+    fn update(&mut self, ctx: &egui::Context) {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
         self.update_native_window_state(ctx);
         self.notification_sink.set_repaint_context(ctx);
         let migration_pending = self.pending_fdx_open.is_some();
         if !migration_pending {
+            // Route events using the editor-focus state established by the prior
+            // surface frame, then let this frame's layout and paint observe edits.
+            self.handle_surface_input(ctx);
+            // Scheduled derived work sees every accepted same-frame edit and
+            // never delays already-queued editor input on its deadline frame.
             self.refresh_cast_lists_on_schedule(ctx, Instant::now());
         }
         let timer_now = self.timer_now();
@@ -1842,9 +2641,6 @@ impl eframe::App for ScriptCraftApp {
         }
         self.schedule_sprint_timer_repaint(ctx, self.timer_now());
         self.schedule_focus_mode_repaint(ctx, self.timer_now());
-        if !migration_pending {
-            self.handle_surface_input(ctx);
-        }
         self.performance.frame_nanos = self
             .performance
             .frame_nanos
@@ -1981,6 +2777,1089 @@ mod tests {
         app.session
             .replace_with_saved(legacy_json_project())
             .unwrap_or_else(|_| unreachable!());
+    }
+
+    const RENDER_ORACLE_LINES_PER_BODY_PAGE: usize = 54;
+
+    fn render_oracle_fixture(body_pages: usize, include_title_page: bool) -> Project {
+        let mut source = String::from(
+            "<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Character'><FontSpec Size='12' Style='AllCaps'/></ElementSettings>",
+        );
+        if include_title_page {
+            source.push_str(
+                "<TitlePage><Paragraph Type='Action' id='oracle-title'><Text>SYNTHETIC TITLE PAGE</Text></Paragraph></TitlePage>",
+            );
+        }
+        source.push_str("<Content>");
+
+        for page in 0..body_pages {
+            let middle_role = match page % 3 {
+                0 => "Cast List",
+                1 => "Action",
+                _ => "Parenthetical",
+            };
+            let lower_role = if page % 3 == 1 {
+                "Parenthetical"
+            } else {
+                "Dialogue"
+            };
+            for (slot, (role, lines)) in [
+                ("Scene Heading", 12),
+                (middle_role, 14),
+                (lower_role, 14),
+                ("Character", 14),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = format!("oracle-{page}-{slot}");
+                let text = (0..lines)
+                    .map(|line| {
+                        if role == "Character" && line == 0 {
+                            format!("straße synthetic cue {page}")
+                        } else {
+                            format!("synthetic page {page} {role} line {line}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                source.push_str(&format!(
+                    "<Paragraph Type='{role}' id='{id}' Alignment='Left' SpaceBefore='0'>"
+                ));
+                if role == "Scene Heading" {
+                    source.push_str(
+                        "<SceneProperties Length='1/8' Page='1' Title=''><SceneArcBeats/></SceneProperties>",
+                    );
+                }
+                source.push_str(&format!("<Text>{text}</Text></Paragraph>"));
+            }
+            if page == 0 {
+                // Empty managed paragraphs are part of the fixture shape but
+                // contribute no visual lines or artificial page boundaries.
+                source.push_str(
+                    "<Paragraph Type='Action' id='oracle-empty' SpaceBefore='0'><Text/></Paragraph>",
+                );
+            }
+        }
+        source.push_str("</Content></FinalDraft>");
+        fdx::read_v6(source.as_bytes())
+            .unwrap_or_else(|_| unreachable!("deterministic render-oracle FDX fixture imports"))
+            .project
+    }
+
+    fn install_render_oracle_fixture(
+        app: &mut ScriptCraftApp,
+        body_pages: usize,
+        include_title_page: bool,
+    ) {
+        app.session
+            .replace_with_saved(render_oracle_fixture(body_pages, include_title_page))
+            .unwrap_or_else(|_| unreachable!("deterministic render-oracle fixture is a valid project"));
+        app.page_geometry.invalidate();
+        app.layout_cache = LayoutCache::default();
+        app.last_layout_identity = None;
+    }
+
+    fn expected_render_oracle_paint_counts(
+        app: &ScriptCraftApp,
+        root_clip: egui::Rect,
+    ) -> (u64, u64, u64) {
+        let range = viewport_paint_page_range(
+            &app.last_scroll_page_rects,
+            app.last_scroll_inner_rect.intersect(root_clip),
+        );
+        let painted = range.map_or(0, |(first, last)| last - first + 1) as u64;
+        let lines = painted.saturating_mul(RENDER_ORACLE_LINES_PER_BODY_PAGE as u64);
+        (
+            painted,
+            app.last_scroll_page_rects.len() as u64 - painted,
+            lines,
+        )
+    }
+
+    fn assert_full_page_rect_flow(
+        page_rects: &[egui::Rect],
+        page_width: f32,
+        page_height: f32,
+    ) {
+        assert!(!page_rects.is_empty());
+        let first = page_rects[0];
+        for (page_index, page_rect) in page_rects.iter().enumerate() {
+            let expected_top = first.top()
+                + page_index as f32 * (page_height + PAGE_VERTICAL_GAP);
+            assert!((page_rect.left() - first.left()).abs() < 0.01);
+            assert!((page_rect.top() - expected_top).abs() < 0.01);
+            assert!((page_rect.width() - page_width).abs() < 0.01);
+            assert!((page_rect.height() - page_height).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn viewport_page_paint_range_keeps_only_visible_pages_and_one_neighbor_each_side() {
+        let pages = (0..5)
+            .map(|index| {
+                egui::Rect::from_min_size(
+                    egui::pos2(20.0, index as f32 * 112.0),
+                    Vec2::new(80.0, 100.0),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            viewport_paint_page_range(
+                &pages,
+                egui::Rect::from_min_max(egui::pos2(30.0, 40.0), egui::pos2(90.0, 60.0)),
+            ),
+            Some((0, 1)),
+            "the first visible page gets only its following neighbor"
+        );
+        assert_eq!(
+            viewport_paint_page_range(
+                &pages,
+                egui::Rect::from_min_max(egui::pos2(30.0, 240.0), egui::pos2(90.0, 260.0)),
+            ),
+            Some((1, 3)),
+            "an interior viewport gets exactly one page of overscan per side"
+        );
+        assert_eq!(
+            viewport_paint_page_range(
+                &pages,
+                egui::Rect::from_min_max(egui::pos2(30.0, 490.0), egui::pos2(90.0, 510.0)),
+            ),
+            Some((3, 4)),
+            "the last visible page gets only its preceding neighbor"
+        );
+        assert_eq!(
+            viewport_paint_page_range(
+                &pages,
+                egui::Rect::from_min_max(egui::pos2(30.0, 95.0), egui::pos2(90.0, 120.0)),
+            ),
+            Some((0, 2)),
+            "partially intersecting pages remain visible before applying fixed overscan"
+        );
+        assert_eq!(
+            viewport_paint_page_range(
+                &pages,
+                egui::Rect::from_min_max(egui::pos2(120.0, 240.0), egui::pos2(150.0, 260.0)),
+            ),
+            None,
+            "a horizontally overflowed sheet outside the clip is not painted"
+        );
+    }
+
+    #[test]
+    fn desktop_page_culling_retains_title_geometry_and_skips_offscreen_ime_paint() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        const BODY_PAGES: usize = 6;
+        install_render_oracle_fixture(&mut app, BODY_PAGES, true);
+        let final_element = app.session.project().elements.len() - 2;
+        let final_offset = app.session.project().elements[final_element].text.len();
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: final_element,
+                offset: final_offset,
+            }))
+            .unwrap_or_else(|_| unreachable!("fixture caret is a UTF-8 boundary"));
+        app.ime_preedit = "OFFSCREEN-IME-SENTINEL".to_owned();
+        app.surface_focused = true;
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_200.0, 900.0));
+        app.performance.reset_benchmark(BenchmarkOperation::Scroll);
+        let output = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                focused: true,
+                ..Default::default()
+            },
+        );
+        let frame = app.performance.benchmark_delta();
+        let layout = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        assert!(layout.pages[0].title_page);
+        assert_eq!(app.last_scroll_page_rects.len(), BODY_PAGES + 1);
+        assert_eq!(app.last_scroll_page_rects.len(), layout.pages.len());
+        assert_full_page_rect_flow(
+            &app.last_scroll_page_rects,
+            app.last_scroll_page_rects[0].width(),
+            app.last_scroll_page_rects[0].height(),
+        );
+        assert_eq!(frame.pages_considered, layout.pages.len() as u64);
+        assert_eq!(frame.painted_pages + frame.pages_culled, frame.pages_considered);
+        assert!(frame.pages_culled > 0);
+        assert_eq!(frame.caret_lookups, 0);
+
+        let rendered_text = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text) => Some(text.galley.text()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!rendered_text
+            .iter()
+            .any(|text| text.contains("OFFSCREEN-IME-SENTINEL")));
+        assert!(matches!(
+            status_bar::select_visible_page(
+                &app.last_scroll_page_rects,
+                app.last_scroll_inner_rect.intersect(screen),
+            ),
+            status_bar::VisiblePage::Available { total, .. }
+                if total == layout.pages.len()
+        ));
+    }
+
+    #[test]
+    fn performance_diagnostic_counters_increment_and_saturate() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let element_count = app.session.project().elements.len() as u64;
+        let title_element_count = if app.session.project().title_page.is_empty() {
+            0
+        } else {
+            app.session.project().title_page.len() as u64
+        };
+
+        let first = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        assert_eq!(app.performance.layout_builds, 1);
+        assert_eq!(
+            app.performance.element_wraps_built,
+            element_count + title_element_count
+        );
+        let second = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(app.performance.layout_cache_hits, 1);
+        assert_eq!(
+            app.performance.element_wraps_built,
+            element_count + title_element_count
+        );
+
+        let mut counter = u64::MAX - 1;
+        add_performance_counter(&mut counter, 1);
+        assert_eq!(counter, u64::MAX);
+        add_performance_counter(&mut counter, 1);
+        assert_eq!(counter, u64::MAX);
+        let mut nanos = u128::MAX - 2;
+        add_performance_nanos(&mut nanos, 2);
+        assert_eq!(nanos, u128::MAX);
+        add_performance_nanos(&mut nanos, 1);
+        assert_eq!(nanos, u128::MAX);
+    }
+
+    #[test]
+    fn performance_benchmark_reset_is_diagnostic_only_and_captures_deltas() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let layout = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        let revision = app.session.revision();
+        let selection = app.session.selection();
+        let dirty = app.session.dirty();
+        let history = app.session.can_undo();
+        let totals_before = app.performance.snapshot_for_test();
+
+        app.performance.reset_benchmark(BenchmarkOperation::Scroll);
+        assert_eq!(app.performance.snapshot_for_test(), totals_before);
+        assert_eq!(app.performance.benchmark_delta(), PerformanceMeasurements::default());
+        assert_eq!(app.session.revision(), revision);
+        assert_eq!(app.session.selection(), selection);
+        assert_eq!(app.session.dirty(), dirty);
+        assert_eq!(app.session.can_undo(), history);
+
+        let cached = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        assert!(std::sync::Arc::ptr_eq(&layout, &cached));
+        let delta = app.performance.benchmark_delta();
+        assert_eq!(delta.layout_builds, 0);
+        assert_eq!(delta.layout_cache_hits, 1);
+        assert_eq!(delta.layout_identity_changes, 0);
+        assert_eq!(app.session.revision(), revision);
+        assert_eq!(app.session.selection(), selection);
+        assert_eq!(app.session.dirty(), dirty);
+        assert_eq!(app.session.can_undo(), history);
+    }
+
+    #[test]
+    fn performance_diagnostics_survive_document_replacement_without_source_data() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.performance.events = 9;
+        app.performance.pages_considered = 12;
+        app.performance.reset_benchmark(BenchmarkOperation::InsertMiddle);
+        let totals_before = app.performance.snapshot_for_test();
+        let replacement = Project::new().unwrap_or_else(|_| unreachable!());
+
+        app.activate_opened_project(
+            replacement,
+            std::path::Path::new("private-screenplay-source.fdx"),
+            None,
+            None,
+            None,
+            fdx::TextState::DEFAULT,
+        );
+
+        assert_eq!(app.performance.snapshot_for_test(), totals_before);
+        assert_eq!(app.performance.benchmark_delta(), PerformanceMeasurements::default());
+        let summary = app.performance.safe_summary();
+        assert!(summary.contains("operation=insert-middle"));
+        assert!(summary.contains("events=9"));
+        assert!(!summary.contains("private-screenplay-source.fdx"));
+    }
+
+    #[test]
+    fn derived_refresh_diagnostics_separate_idle_skip_from_attempt_outcome() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let context = test_context();
+        let now = Instant::now();
+
+        app.refresh_cast_lists_on_schedule(&context, now);
+        assert_eq!(app.performance.derived_refresh_attempts, 0);
+        assert_eq!(app.performance.derived_refresh_skipped, 1);
+        app.refresh_cast_lists_on_schedule(&context, now + CAST_LIST_REFRESH_INTERVAL);
+        assert_eq!(app.performance.derived_refresh_attempts, 1);
+        assert_eq!(app.performance.derived_refresh_completed, 1);
+        assert_eq!(app.performance.derived_refresh_unchanged, 1);
+        assert_eq!(app.performance.derived_refresh_skipped, 1);
+        assert_eq!(app.performance.derived_refresh_deferred, 0);
+        assert_eq!(app.performance.derived_project_candidate_clones, 1);
+        assert_eq!(app.performance.derived_scene_candidate_clones, 0);
+        assert_eq!(app.performance.derived_redundant_preservation_clones, 0);
+    }
+
+    #[test]
+    fn performance_projection_contains_only_safe_counters_and_labels() {
+        let mut performance = PerformanceDiagnostics::default();
+        performance.frames = 2;
+        performance.pages_considered = 7;
+        performance.painted_pages = 3;
+        performance.derived_refresh_changed = 2;
+        performance.derived_refresh_unchanged = 3;
+        performance.derived_refresh_deferred = 1;
+        performance.derived_project_candidate_clones = 4;
+        performance.derived_scene_candidate_clones = 5;
+        performance.derived_redundant_preservation_clones = 0;
+        performance.reset_benchmark(BenchmarkOperation::IdleDerivedRefresh);
+        performance.painted_pages = 4;
+        let summary = performance.safe_summary();
+        let projection = DiagnosticProjection {
+            focused: false,
+            focus_lock: false,
+            dispatch_enabled: false,
+            received_events: 0,
+            dispatched_frames: 0,
+            pointer_activations: 0,
+            last_event_category: "",
+            performance_events: 0,
+            layout_builds: 0,
+            layout_cache_hits: 0,
+            painted_pages: 0,
+            repaint_requests: 0,
+            performance_summary: &summary,
+        };
+        let projected = projection.safe_summary();
+        assert!(projected.contains("operation=idle-derived-refresh"));
+        assert!(projected.contains("benchmark-pages-painted=1"));
+        assert!(projected.contains("derived-changed=2"));
+        assert!(projected.contains("derived-unchanged=3"));
+        assert!(projected.contains("derived-deferred=1"));
+        assert!(projected.contains("derived-project-candidates=4"));
+        assert!(projected.contains("derived-scene-candidates=5"));
+        assert!(projected.contains("derived-redundant-preservation-clones=0"));
+        assert!(projected.contains("profile="));
+        assert!(!projected.contains("screenplay"));
+        assert!(!projected.contains("private-screenplay-source"));
+    }
+
+    #[test]
+    fn render_oracle_fixtures_have_known_dimensions_and_cached_equivalence() {
+        for (total_pages, body_pages, title_page) in [
+            (1, 1, false),
+            (15, 14, true),
+            (120, 119, true),
+            (180, 179, true),
+        ] {
+            let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+            install_render_oracle_fixture(&mut app, body_pages, title_page);
+            let empty_paragraph_count = if body_pages > 0 { 1 } else { 0 };
+            let title_element_count = if title_page { 1 } else { 0 };
+            let expected_elements = body_pages * 4 + empty_paragraph_count;
+            assert_eq!(app.session.project().elements.len(), expected_elements);
+            assert_eq!(app.session.project().title_page.len(), title_element_count);
+            assert!(app.session.project().preservation.is_some());
+
+            let cached = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+            assert_eq!(cached.pages.len(), total_pages);
+            assert_eq!(cached.pages.iter().filter(|page| page.title_page).count(), title_element_count);
+            assert!(cached.pages.iter().filter(|page| !page.title_page).all(|page| {
+                page.lines.len() == RENDER_ORACLE_LINES_PER_BODY_PAGE
+            }));
+            let expected_lines = body_pages * RENDER_ORACLE_LINES_PER_BODY_PAGE
+                + title_element_count;
+            assert_eq!(cached.pages.iter().map(|page| page.lines.len()).sum::<usize>(), expected_lines);
+            assert!(cached.pages.iter().flat_map(|page| &page.lines).any(|line| {
+                line.display_text.contains("STRASSE")
+            }));
+
+            let fresh = ScreenplayLayout::build_with_inputs_for_purpose(
+                app.session.project(),
+                app.session.layout_inputs(),
+                LayoutPurpose::Editor,
+            )
+            .unwrap_or_else(|_| unreachable!("fresh oracle layout uses the same effective inputs"));
+            assert_eq!(cached.as_ref(), &fresh);
+            let (reused, hit) = app
+                .layout_cache
+                .get_or_build_with_inputs_for_purpose(
+                    app.session.revision(),
+                    app.session.project(),
+                    app.session.layout_inputs(),
+                    LayoutPurpose::Editor,
+                )
+                .unwrap_or_else(|_| unreachable!("cached oracle layout remains available"));
+            assert!(hit);
+            assert!(std::sync::Arc::ptr_eq(&cached, &reused));
+        }
+    }
+
+    #[test]
+    fn desktop_render_oracle_measures_actual_scroll_input_zoom_and_refresh_work() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        const BODY_PAGES: usize = 15;
+        install_render_oracle_fixture(&mut app, BODY_PAGES, false);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_200.0, 900.0));
+        let page_count = BODY_PAGES;
+        let element_count = app.session.project().elements.len();
+
+        app.performance.reset_benchmark(BenchmarkOperation::Scroll);
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                focused: true,
+                ..Default::default()
+            },
+        );
+        let initial = app.performance.benchmark_delta();
+        let (initial_painted, initial_culled, initial_lines) =
+            expected_render_oracle_paint_counts(&app, screen);
+        assert_eq!(initial.layout_builds, 1);
+        assert_eq!(initial.pages_considered, page_count as u64);
+        assert_eq!(initial.painted_pages, initial_painted);
+        assert_eq!(initial.pages_culled, initial_culled);
+        assert_eq!(initial.lines_submitted, initial_lines);
+        assert!(initial.galleys_built > 0);
+        assert!(initial.galleys_built + initial.galleys_reused <= initial_lines * 3);
+        assert!(initial.pages_culled > 0);
+        assert_full_page_rect_flow(
+            &app.last_scroll_page_rects,
+            app.last_scroll_page_rects[0].width(),
+            app.last_scroll_page_rects[0].height(),
+        );
+        assert_eq!(initial.element_wraps_built, element_count as u64);
+
+        // A whole-layout cache hit still considers and allocates complete geometry,
+        // while page painting remains bounded to the visible range and its overscan.
+        app.performance.reset_benchmark(BenchmarkOperation::Scroll);
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                focused: true,
+                ..Default::default()
+            },
+        );
+        let idle = app.performance.benchmark_delta();
+        let (idle_painted, idle_culled, idle_lines) =
+            expected_render_oracle_paint_counts(&app, screen);
+        assert_eq!(idle.layout_builds, 0);
+        assert_eq!(idle.layout_cache_hits, 1);
+        assert_eq!(idle.layout_identity_changes, 0);
+        assert_eq!(idle.pages_considered, page_count as u64);
+        assert_eq!(idle.painted_pages, idle_painted);
+        assert_eq!(idle.pages_culled, idle_culled);
+        assert_eq!(idle.lines_submitted, idle_lines);
+        assert_eq!(idle.galleys_built, 0);
+        assert!(idle.galleys_reused > 0);
+        assert!(idle.galleys_reused <= idle_lines * 3);
+
+        let first_layout = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        let first_line = &first_layout.pages[0].lines[0];
+        let page_rect = app.last_scroll_page_rects[0];
+        let scale = app.page_scale.unwrap_or(1.0);
+        let first_line_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                page_rect.left() + first_line.geometry.x.to_points_f32() * scale,
+                page_rect.top() + first_line.geometry.y.to_points_f32() * scale,
+            ),
+            Vec2::new(
+                first_line.geometry.width.to_points_f32() * scale,
+                first_line.geometry.height.to_points_f32() * scale,
+            ),
+        );
+        app.performance.reset_benchmark(BenchmarkOperation::General);
+        for events in click_events(first_line_rect) {
+            let _ = render_editor_frame(
+                &context,
+                &mut app,
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+            );
+        }
+        let pointer = app.performance.benchmark_delta();
+        assert!(pointer.caret_lookups > 0);
+        assert!(pointer.indexed_interaction_queries > 0);
+        assert_eq!(pointer.linear_interaction_queries, 0);
+        assert!(pointer.interaction_index_entries_examined > 0);
+        assert!(app.session.selection().anchor.element < element_count);
+
+        let drag_start = first_line_rect.center();
+        let drag_end = drag_start + egui::vec2(first_line.char_width.to_points_f32() * scale * 4.0, 0.0);
+        let pointer_button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        app.performance.reset_benchmark(BenchmarkOperation::General);
+        for events in [
+            vec![
+                egui::Event::PointerMoved(drag_start),
+                pointer_button(drag_start, true),
+            ],
+            vec![egui::Event::PointerMoved(drag_end)],
+            vec![
+                egui::Event::PointerMoved(drag_end),
+                pointer_button(drag_end, false),
+            ],
+        ] {
+            let _ = render_editor_frame(
+                &context,
+                &mut app,
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+            );
+        }
+        assert_ne!(app.session.selection().anchor, app.session.selection().focus);
+        let drag = app.performance.benchmark_delta();
+        assert!(drag.indexed_interaction_queries >= 2);
+        assert_eq!(drag.linear_interaction_queries, 0);
+        assert!(drag.selection_spans_submitted > 0);
+
+        // Focused idle/caret-blink frames remain paint operations; the recorder
+        // measures work but intentionally makes no rasterization/timing claim.
+        for time in [0.1, 0.7] {
+            app.performance.reset_benchmark(BenchmarkOperation::General);
+            let _ = render_editor_frame(
+                &context,
+                &mut app,
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    time: Some(time),
+                    ..Default::default()
+                },
+            );
+            let blink = app.performance.benchmark_delta();
+            let (blink_painted, blink_culled, blink_lines) =
+                expected_render_oracle_paint_counts(&app, screen);
+            assert_eq!(blink.pages_considered, page_count as u64);
+            assert_eq!(blink.painted_pages, blink_painted);
+            assert_eq!(blink.pages_culled, blink_culled);
+            assert_eq!(blink.lines_submitted, blink_lines);
+        }
+
+        let first_viewport = app.page_geometry.visible_page(
+            app.performance.frames.saturating_add(1),
+            app.session.revision(),
+            screen,
+            app.page_scale.unwrap_or(1.0),
+            false,
+        );
+        assert!(matches!(
+            first_viewport,
+            status_bar::VisiblePage::Available { one_based: 1, total }
+                if total == page_count
+        ));
+        let mut previous_scroll_magnitude = 0.0_f32;
+        // The prior idle frame is the first-page viewport; these two scrolls
+        // exercise an interior viewport and then the document's far end.
+        for (scroll_index, delta_y) in [-4_500.0, -18_000.0].into_iter().enumerate() {
+            app.performance.frames = scroll_index as u64 + 1;
+            app.performance.reset_benchmark(BenchmarkOperation::Scroll);
+            let _ = render_editor_frame(
+                &context,
+                &mut app,
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    events: vec![
+                        egui::Event::PointerMoved(screen.center()),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, delta_y),
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+            );
+            let scroll = app.performance.benchmark_delta();
+            let (scroll_painted, scroll_culled, scroll_lines) =
+                expected_render_oracle_paint_counts(&app, screen);
+            assert_eq!(scroll.layout_builds, 0);
+            assert_eq!(scroll.pages_considered, page_count as u64);
+            assert_eq!(scroll.painted_pages, scroll_painted);
+            assert_eq!(scroll.pages_culled, scroll_culled);
+            assert_eq!(scroll.lines_submitted, scroll_lines);
+            assert!(scroll.galleys_built + scroll.galleys_reused > 0);
+            assert!(scroll.galleys_built + scroll.galleys_reused <= scroll_lines * 3);
+            assert_full_page_rect_flow(
+                &app.last_scroll_page_rects,
+                app.last_scroll_page_rects[0].width(),
+                app.last_scroll_page_rects[0].height(),
+            );
+            let scroll_magnitude = app.last_scroll_offset.y.abs();
+            assert!(scroll_magnitude > previous_scroll_magnitude);
+            previous_scroll_magnitude = scroll_magnitude;
+            let viewport_page = app.page_geometry.visible_page(
+                app.performance.frames.saturating_add(1),
+                app.session.revision(),
+                screen,
+                app.page_scale.unwrap_or(1.0),
+                false,
+            );
+            if scroll_index == 0 {
+                assert!(matches!(
+                    viewport_page,
+                    status_bar::VisiblePage::Available { one_based, total }
+                        if one_based > 1 && one_based < total
+                ));
+            } else {
+                assert!(matches!(
+                    viewport_page,
+                    status_bar::VisiblePage::Available { one_based, total }
+                        if one_based >= total.saturating_sub(1) && total == page_count
+                ));
+            }
+        }
+
+        // Exercise the desktop's actual event dispatcher at all three document
+        // positions. Each changed revision currently rebuilds every element wrap.
+        let insertion_points = [
+            (0, 0),
+            (BODY_PAGES * 2, app.session.project().elements[BODY_PAGES * 2].text.len() / 2),
+            (
+                app.session.project().elements.len() - 2,
+                app.session.project().elements[app.session.project().elements.len() - 2]
+                    .text
+                    .len(),
+            ),
+        ];
+        for (operation, (element, offset)) in [
+            BenchmarkOperation::InsertStart,
+            BenchmarkOperation::InsertMiddle,
+            BenchmarkOperation::InsertEnd,
+        ]
+        .into_iter()
+        .zip(insertion_points)
+        {
+            app.session
+                .set_selection(Selection::caret(Position { element, offset }))
+                .unwrap_or_else(|_| unreachable!("fixture insertion position is a UTF-8 boundary"));
+            app.performance.reset_benchmark(operation);
+            app.dispatch_surface_events(
+                &[egui::Event::Text("x".into())],
+                egui::Modifiers::default(),
+            );
+            let _ = render_editor_frame(
+                &context,
+                &mut app,
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    ..Default::default()
+                },
+            );
+            let edit = app.performance.benchmark_delta();
+            let (edit_painted, edit_culled, edit_lines) =
+                expected_render_oracle_paint_counts(&app, screen);
+            assert_eq!(edit.events, 1);
+            assert_eq!(edit.layout_builds, 1);
+            assert_eq!(edit.pages_considered, page_count as u64);
+            assert_eq!(edit.painted_pages, edit_painted);
+            assert_eq!(edit.pages_culled, edit_culled);
+            assert_eq!(edit.lines_submitted, edit_lines);
+            assert_eq!(edit.element_wraps_built, 1);
+            assert_eq!(edit.element_wraps_reused, element_count.saturating_sub(1) as u64);
+        }
+
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 2,
+                offset: 0,
+            }))
+            .unwrap_or_else(|_| unreachable!("fixture navigation position is valid"));
+        let focus = app.session.selection().focus;
+        app.performance.reset_benchmark(BenchmarkOperation::General);
+        app.dispatch_surface_events(
+            &[egui::Event::Key {
+                key: Key::ArrowDown,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            egui::Modifiers::default(),
+        );
+        assert_ne!(app.session.selection().focus, focus);
+        let navigation = app.performance.benchmark_delta();
+        assert_eq!(navigation.linear_interaction_queries, 0);
+        assert_eq!(navigation.indexed_interaction_queries, 1);
+        assert!(navigation.interaction_index_entries_examined > 0);
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                focused: true,
+                ..Default::default()
+            },
+        );
+
+        let original_scale = app.page_scale;
+        let zoom_screen =
+            egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_000.0, 900.0));
+        let mut zoom_input = egui::RawInput {
+            screen_rect: Some(zoom_screen),
+            focused: true,
+            events: vec![egui::Event::Zoom(1.75)],
+            ..Default::default()
+        };
+        eframe::App::raw_input_hook(&mut app, &context, &mut zoom_input);
+        assert!(zoom_input.events.is_empty());
+        let _ = render_editor_frame(&context, &mut app, zoom_input);
+        assert_eq!(app.zoom_percent, 175);
+        assert_ne!(app.page_scale, original_scale);
+        assert!(app.last_scroll_content_size.x > app.last_scroll_inner_rect.width());
+        assert_full_page_rect_flow(
+            &app.last_scroll_page_rects,
+            app.last_scroll_page_rects[0].width(),
+            app.last_scroll_page_rects[0].height(),
+        );
+
+        let last_element = app.session.project().elements.len() - 2;
+        let last_offset = app.session.project().elements[last_element].text.len();
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: last_element,
+                offset: last_offset,
+            }))
+            .unwrap_or_else(|_| unreachable!("last fixture position is a UTF-8 boundary"));
+        app.reveal_intent = RevealIntent::Conditional;
+        app.performance.reset_benchmark(BenchmarkOperation::Scroll);
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                focused: true,
+                ..Default::default()
+            },
+        );
+        let reveal = app.performance.benchmark_delta();
+        let (reveal_painted, reveal_culled, reveal_lines) =
+            expected_render_oracle_paint_counts(&app, screen);
+        assert_eq!(reveal.caret_lookups, 1);
+        assert_eq!(reveal.pages_considered, page_count as u64);
+        assert_eq!(reveal.painted_pages, reveal_painted);
+        assert_eq!(reveal.pages_culled, reveal_culled);
+        assert_eq!(reveal.lines_submitted, reveal_lines);
+
+        // Initial activation performs one derived pass. Later idle timer ticks
+        // at the same project revision skip the clone/reconciliation entry.
+        let refresh_context = test_context();
+        let mut idle_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let now = Instant::now();
+        idle_app.next_cast_list_refresh = now;
+        idle_app
+            .performance
+            .reset_benchmark(BenchmarkOperation::IdleDerivedRefresh);
+        idle_app.refresh_cast_lists_on_schedule(&refresh_context, now);
+        idle_app.refresh_cast_lists_on_schedule(
+            &refresh_context,
+            now + CAST_LIST_REFRESH_INTERVAL,
+        );
+        let refresh = idle_app.performance.benchmark_delta();
+        assert_eq!(refresh.derived_refresh_attempts, 1);
+        assert_eq!(refresh.derived_refresh_completed, 1);
+        assert_eq!(refresh.derived_refresh_changed, 0);
+        assert_eq!(refresh.derived_refresh_unchanged, 1);
+        assert_eq!(refresh.derived_refresh_skipped, 1);
+        assert_eq!(refresh.derived_refresh_deferred, 0);
+
+        let mut changed_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let mut changed_project = Project::new().unwrap_or_else(|_| unreachable!());
+        changed_project.elements = vec![
+            scriptcraft_core::ScreenplayElement::new(
+                "oracle-refresh-heading",
+                Role::SceneHeading,
+                "INT. SYNTHETIC ROOM",
+            )
+            .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new(
+                "oracle-refresh-cue",
+                Role::Character,
+                "ALEX",
+            )
+            .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new(
+                "oracle-refresh-cast",
+                Role::CastList,
+                "(STALE)",
+            )
+            .unwrap_or_else(|_| unreachable!()),
+        ];
+        changed_app
+            .session
+            .replace_with_saved(changed_project)
+            .unwrap_or_else(|_| unreachable!("synthetic refresh project is valid"));
+        let changed_at = Instant::now();
+        changed_app.next_cast_list_refresh = changed_at;
+        changed_app
+            .performance
+            .reset_benchmark(BenchmarkOperation::IdleDerivedRefresh);
+        changed_app.refresh_cast_lists_on_schedule(&refresh_context, changed_at);
+        assert_eq!(changed_app.session.project().elements[2].text, "(ALEX)");
+        let changed_refresh = changed_app.performance.benchmark_delta();
+        assert_eq!(changed_refresh.derived_refresh_attempts, 1);
+        assert_eq!(changed_refresh.derived_refresh_completed, 1);
+        assert_eq!(changed_refresh.derived_refresh_changed, 1);
+        assert_eq!(changed_refresh.derived_refresh_unchanged, 0);
+
+        // Galley counters now record actual line/span cache work. Indexed
+        // interaction queries remain a later-order baseline zero.
+        let baseline = app.performance.benchmark_delta();
+        assert_eq!(baseline.indexed_interaction_queries, 0);
+    }
+
+    #[test]
+    fn desktop_render_oracle_paints_accepted_update_input_in_the_same_frame_once() {
+        let context = test_context();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_200.0, 900.0));
+
+        let mut text_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        text_app.next_cast_list_refresh = Instant::now() + Duration::from_secs(3_600);
+        text_app.surface_focused = true;
+        text_app.performance.reset_benchmark(BenchmarkOperation::General);
+        let text_revision = text_app.session.revision();
+        let text_output = render_app_frame(
+            &context,
+            &mut text_app,
+            screen,
+            vec![
+                egui::Event::Text("RSWO003_TEXT_ONCE".into()),
+                egui::Event::Ime(egui::ImeEvent::Commit("RSWO003_TEXT_ONCE".into())),
+            ],
+            egui::Modifiers::default(),
+        );
+        assert_eq!(
+            text_app.session.project().elements[0].text,
+            "RSWO003_TEXT_ONCE"
+        );
+        assert_eq!(text_app.session.revision(), text_revision + 1);
+        assert_eq!(text_app.reveal_intent, RevealIntent::None);
+        assert_eq!(
+            rendered_text_compact(&text_output)
+                .matches("RSWO003_TEXT_ONCE")
+                .count(),
+            1
+        );
+        let text_frame = text_app.performance.benchmark_delta();
+        assert_eq!(text_frame.frames, 1);
+        assert_eq!(text_frame.events, 2);
+        assert_eq!(text_frame.layout_builds, 1);
+        assert!(text_frame.painted_pages > 0);
+        assert_eq!(text_app.native_input_diagnostics.dispatched_frames, 1);
+
+        let mut paste_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        paste_app.next_cast_list_refresh = Instant::now() + Duration::from_secs(3_600);
+        paste_app.surface_focused = true;
+        paste_app.performance.reset_benchmark(BenchmarkOperation::General);
+        let paste_output = render_app_frame(
+            &context,
+            &mut paste_app,
+            screen,
+            vec![egui::Event::Paste("RSWO003_PASTE_ONCE".into())],
+            egui::Modifiers::default(),
+        );
+        assert_eq!(
+            paste_app.session.project().elements[0].text,
+            "RSWO003_PASTE_ONCE"
+        );
+        assert_eq!(
+            rendered_text_compact(&paste_output)
+                .matches("RSWO003_PASTE_ONCE")
+                .count(),
+            1
+        );
+        let paste_frame = paste_app.performance.benchmark_delta();
+        assert_eq!(paste_frame.frames, 1);
+        assert_eq!(paste_frame.events, 1);
+        assert_eq!(paste_frame.layout_builds, 1);
+        assert!(paste_frame.painted_pages > 0);
+
+        let mut ime_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        ime_app.next_cast_list_refresh = Instant::now() + Duration::from_secs(3_600);
+        ime_app.surface_focused = true;
+        ime_app.performance.reset_benchmark(BenchmarkOperation::General);
+        let preedit_output = render_app_frame(
+            &context,
+            &mut ime_app,
+            screen,
+            vec![egui::Event::Ime(egui::ImeEvent::Preedit(
+                "RSWO003_IME_PREEDIT".into(),
+            ))],
+            egui::Modifiers::default(),
+        );
+        assert!(rendered_text_compact(&preedit_output).contains("RSWO003_IME_PREEDIT"));
+        assert!(ime_app.session.project().elements[0].text.is_empty());
+        assert!(ime_app.ime_active);
+        assert_eq!(ime_app.performance.benchmark_delta().events, 1);
+
+        ime_app.surface_focused = true;
+        ime_app
+            .performance
+            .reset_benchmark(BenchmarkOperation::General);
+        let ime_revision = ime_app.session.revision();
+        let ime_output = render_app_frame(
+            &context,
+            &mut ime_app,
+            screen,
+            vec![
+                egui::Event::Text("RSWO003_IME_COMMIT".into()),
+                egui::Event::Ime(egui::ImeEvent::Commit("RSWO003_IME_COMMIT".into())),
+            ],
+            egui::Modifiers::default(),
+        );
+        assert_eq!(
+            ime_app.session.project().elements[0].text,
+            "RSWO003_IME_COMMIT"
+        );
+        assert_eq!(ime_app.session.revision(), ime_revision + 1);
+        assert_eq!(
+            rendered_text_compact(&ime_output)
+                .matches("RSWO003_IME_COMMIT")
+                .count(),
+            1
+        );
+        assert!(ime_app.ime_preedit.is_empty());
+        assert!(!ime_app.ime_active);
+        let ime_frame = ime_app.performance.benchmark_delta();
+        assert_eq!(ime_frame.frames, 1);
+        assert_eq!(ime_frame.events, 2);
+        assert_eq!(ime_frame.layout_builds, 1);
+        assert!(ime_frame.painted_pages > 0);
+
+        let mut key_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        key_app.next_cast_list_refresh = Instant::now() + Duration::from_secs(3_600);
+        key_app
+            .session
+            .insert("RSWO003_KEY_ONCE")
+            .unwrap_or_else(|_| unreachable!());
+        key_app.surface_focused = true;
+        key_app.performance.reset_benchmark(BenchmarkOperation::General);
+        let key_revision = key_app.session.revision();
+        let key_output = render_app_frame(
+            &context,
+            &mut key_app,
+            screen,
+            vec![egui::Event::Key {
+                key: Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            egui::Modifiers::default(),
+        );
+        assert_eq!(key_app.session.revision(), key_revision + 1);
+        assert_eq!(key_app.session.project().elements.len(), 2);
+        assert_eq!(
+            rendered_text_compact(&key_output)
+                .matches("RSWO003_KEY_ONCE")
+                .count(),
+            1
+        );
+        let key_frame = key_app.performance.benchmark_delta();
+        assert_eq!(key_frame.frames, 1);
+        assert_eq!(key_frame.events, 1);
+        assert_eq!(key_frame.layout_builds, 1);
+        assert!(key_frame.painted_pages > 0);
+
+        let mut scroll_app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        scroll_app.next_cast_list_refresh = Instant::now() + Duration::from_secs(3_600);
+        scroll_app.surface_focused = true;
+        scroll_app.reveal_intent = RevealIntent::Conditional;
+        let scroll_revision = scroll_app.session.revision();
+        let _ = render_app_frame(
+            &context,
+            &mut scroll_app,
+            screen,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -120.0),
+                modifiers: egui::Modifiers::default(),
+            }],
+            egui::Modifiers::default(),
+        );
+        assert_eq!(scroll_app.session.revision(), scroll_revision);
+        assert_eq!(scroll_app.reveal_intent, RevealIntent::None);
+    }
+
+    #[test]
+    fn application_update_keeps_migration_modal_exclusive_of_editor_input() {
+        let root = std::env::temp_dir()
+            .join(format!("scriptcraft-rswo003-migration-{}", std::process::id()));
+        let path = root.join("older.fdx");
+        let source_bytes = staged_fdx_fixture("5");
+        let _ = std::fs::create_dir_all(&root);
+        let _ = std::fs::write(&path, &source_bytes);
+
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let original_project = app.session.project().clone();
+        let original_revision = app.session.revision();
+        app.open_staged_native_at(&path);
+        assert!(app.pending_fdx_open.is_some());
+        app.surface_focused = true;
+        app.performance.reset_benchmark(BenchmarkOperation::General);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_200.0, 900.0));
+
+        let output = render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            vec![egui::Event::Text("RSWO003_MODAL_MUST_NOT_EDIT".into())],
+            egui::Modifiers::default(),
+        );
+
+        assert!(app.pending_fdx_open.is_some());
+        assert_eq!(app.session.project(), &original_project);
+        assert_eq!(app.session.revision(), original_revision);
+        assert!(!rendered_text_compact(&output).contains("RSWO003_MODAL_MUST_NOT_EDIT"));
+        assert_eq!(app.performance.benchmark_delta().frames, 1);
+        assert_eq!(app.performance.benchmark_delta().events, 0);
+        assert_eq!(app.native_input_diagnostics.dispatched_frames, 0);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2182,6 +4061,166 @@ mod tests {
     }
 
     #[test]
+    fn due_refresh_observes_editor_input_dispatched_in_the_same_update() {
+        let context = test_context();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_200.0, 900.0));
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        project.elements = vec![
+            scriptcraft_core::ScreenplayElement::new("heading", Role::SceneHeading, "INT. ROOM")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cue", Role::Character, "AL")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cast", Role::CastList, "(OLD)")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        app.session
+            .replace_with_saved(project)
+            .unwrap_or_else(|_| unreachable!());
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 1,
+                offset: 2,
+            }))
+            .unwrap_or_else(|_| unreachable!("cue end is a valid caret"));
+        app.surface_focused = true;
+        app.next_cast_list_refresh = Instant::now();
+
+        let output = render_app_frame(
+            &context,
+            &mut app,
+            screen,
+            vec![egui::Event::Text("ICE".into())],
+            egui::Modifiers::default(),
+        );
+        assert_eq!(app.session.project().elements[1].text, "ALICE");
+        assert_eq!(app.session.project().elements[2].text, "(ALICE)");
+        assert!(rendered_text_compact(&output).contains("(ALICE)"));
+        assert_eq!(app.performance.derived_refresh_attempts, 1);
+        assert_eq!(app.performance.derived_refresh_changed, 1);
+    }
+
+    #[test]
+    fn derived_refresh_revision_gate_rearms_for_edits_history_and_replacement() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        project.elements = vec![
+            scriptcraft_core::ScreenplayElement::new("heading", Role::SceneHeading, "INT. ROOM")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cue", Role::Character, "ALEX")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cast", Role::CastList, "(stale)")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        app.session
+            .replace_with_saved(project)
+            .unwrap_or_else(|_| unreachable!());
+        let context = test_context();
+        let mut at = Instant::now();
+
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_eq!(app.session.project().elements[2].text, "(ALEX)");
+        assert_eq!(app.performance.derived_refresh_attempts, 1);
+        assert_eq!(app.performance.derived_refresh_changed, 1);
+        for _ in 0..4 {
+            at += CAST_LIST_REFRESH_INTERVAL;
+            app.refresh_cast_lists_on_schedule(&context, at);
+        }
+        assert_eq!(app.performance.derived_refresh_attempts, 1);
+        assert_eq!(app.performance.derived_refresh_skipped, 4);
+
+        app.session
+            .set_selection(Selection {
+                anchor: Position { element: 1, offset: 0 },
+                focus: Position { element: 1, offset: 4 },
+            })
+            .unwrap_or_else(|_| unreachable!("whole cue selection is valid"));
+        app.session
+            .insert("BOB")
+            .unwrap_or_else(|_| unreachable!("replacement cue is valid"));
+        at += CAST_LIST_REFRESH_INTERVAL;
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_eq!(app.session.project().elements[2].text, "(BOB)");
+        assert_eq!(app.performance.derived_refresh_attempts, 2);
+
+        app.session
+            .undo()
+            .unwrap_or_else(|_| unreachable!("the cue edit is undoable"));
+        at += CAST_LIST_REFRESH_INTERVAL;
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_eq!(app.performance.derived_refresh_attempts, 3);
+        app.session
+            .redo()
+            .unwrap_or_else(|_| unreachable!("the cue edit is redoable"));
+        at += CAST_LIST_REFRESH_INTERVAL;
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_eq!(app.performance.derived_refresh_attempts, 4);
+
+        // Replacements may restart at the same revision; activation explicitly
+        // invalidates the prior document's watermark rather than keying only on
+        // the revision number.
+        for label in ["replacement-one", "replacement-two"] {
+            let mut replacement = Project::new().unwrap_or_else(|_| unreachable!());
+            replacement.elements = vec![
+                scriptcraft_core::ScreenplayElement::new(
+                    format!("{label}-heading"),
+                    Role::SceneHeading,
+                    "INT. ROOM",
+                )
+                .unwrap_or_else(|_| unreachable!()),
+            ];
+            app.activate_opened_project(
+                replacement,
+                std::path::Path::new("synthetic-replacement.fdx"),
+                None,
+                None,
+                None,
+                fdx::TextState::DEFAULT,
+            );
+            at = app.next_cast_list_refresh;
+            app.refresh_cast_lists_on_schedule(&context, at);
+        }
+        assert_eq!(app.performance.derived_refresh_attempts, 6);
+    }
+
+    #[test]
+    fn successful_save_publishes_derived_candidate_before_a_pending_timer_tick() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        project.elements = vec![
+            scriptcraft_core::ScreenplayElement::new("heading", Role::SceneHeading, "INT. ROOM")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cue", Role::Character, "ALEX")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cast", Role::CastList, "(stale)")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        app.session
+            .replace_with_saved(project)
+            .unwrap_or_else(|_| unreachable!());
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "scriptcraft-wo008-save-{}-{unique}.fdx",
+            std::process::id()
+        ));
+
+        let revision_before_save = app.session.revision();
+        app.save_native_at(&path);
+        assert_eq!(app.session.project().elements[2].text, "(ALEX)");
+        assert_eq!(app.session.revision(), revision_before_save + 1);
+        assert!(!app.session.dirty());
+        let context = test_context();
+        let pending_tick = app.next_cast_list_refresh;
+        app.refresh_cast_lists_on_schedule(&context, pending_tick);
+        assert_eq!(app.performance.derived_refresh_attempts, 0);
+        assert_eq!(app.performance.derived_refresh_skipped, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn scheduled_refresh_does_not_report_deferred_unsupported_scene_as_an_error() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         let source = br#"<FinalDraft Version="6"><Content>
@@ -2202,11 +4241,29 @@ mod tests {
         app.refresh_cast_lists_on_schedule(&context, first_refresh);
         assert_eq!(app.session.project().elements[2].text, "(stale)");
         assert_eq!(app.status, "Existing status remains visible");
+        assert_eq!(app.performance.derived_refresh_deferred, 1);
 
         let second_refresh = app.next_cast_list_refresh;
         app.refresh_cast_lists_on_schedule(&context, second_refresh);
         assert_eq!(app.session.project().elements[2].text, "(stale)");
         assert_eq!(app.status, "Existing status remains visible");
+        assert_eq!(app.performance.derived_refresh_attempts, 1);
+        assert_eq!(app.performance.derived_refresh_deferred, 1);
+        assert_eq!(app.performance.derived_refresh_skipped, 1);
+
+        app.session
+            .set_selection(Selection {
+                anchor: Position { element: 1, offset: 0 },
+                focus: Position { element: 1, offset: 5 },
+            })
+            .unwrap_or_else(|_| unreachable!("imported cue range is valid"));
+        app.session
+            .insert("BOB")
+            .unwrap_or_else(|_| unreachable!("managed source text remains editable"));
+        let changed_revision_refresh = app.next_cast_list_refresh;
+        app.refresh_cast_lists_on_schedule(&context, changed_revision_refresh);
+        assert_eq!(app.performance.derived_refresh_attempts, 2);
+        assert_eq!(app.performance.derived_refresh_deferred, 2);
     }
 
     fn render_app_frame_with_fullscreen(
@@ -2217,7 +4274,6 @@ mod tests {
         modifiers: egui::Modifiers,
         fullscreen: Option<bool>,
     ) -> egui::FullOutput {
-        app.performance.frames = app.performance.frames.saturating_add(1);
         let mut input = egui::RawInput {
             screen_rect: Some(screen),
             focused: true,
@@ -2228,10 +4284,7 @@ mod tests {
         if let Some(viewport) = input.viewports.get_mut(&input.viewport_id) {
             viewport.fullscreen = fullscreen;
         }
-        context.run(input, |ctx| {
-            show_application_panels(app, ctx);
-            app.handle_surface_input(ctx);
-        })
+        context.run(input, |ctx| app.update(ctx))
     }
 
     fn click_events(rect: egui::Rect) -> [Vec<egui::Event>; 2] {
@@ -2258,6 +4311,20 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn rendered_text_compact(output: &egui::FullOutput) -> String {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text) => Some(text.galley.text()),
+                _ => None,
+            })
+            .fold(String::new(), |mut rendered, text| {
+                rendered.push_str(text);
+                rendered
+            })
     }
 
     fn rendered_text_center(output: &egui::FullOutput, needle: &str) -> Option<egui::Pos2> {
@@ -3814,6 +5881,10 @@ mod tests {
                 );
             }
         }
+        assert_eq!(app.performance.caret_lookups, 15);
+        assert_eq!(app.performance.linear_interaction_queries, 0);
+        assert!(app.performance.indexed_interaction_queries >= 15);
+        assert!(app.performance.interaction_index_entries_examined > 0);
     }
 
     #[test]
@@ -3944,6 +6015,7 @@ mod tests {
                         layout_cache_hits: 0,
                         painted_pages: 0,
                         repaint_requests: 0,
+                        performance_summary: "",
                     },
                     &mut zoom,
                 ));
@@ -4294,7 +6366,7 @@ mod tests {
 
     #[test]
     fn os_and_zoom_transforms_keep_pointer_hit_testing_on_the_same_source_position() {
-        let app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         let layout =
             ScreenplayLayout::build(app.session.project()).unwrap_or_else(|_| unreachable!());
         let line = &layout.pages[0].lines[0];
@@ -6109,7 +8181,7 @@ mod tests {
             },
         );
         let scale = app.page_scale.unwrap_or(1.0);
-        let mut glyphs = output
+        let mut text_galleys = output
             .shapes
             .iter()
             .filter_map(|clipped| match &clipped.shape {
@@ -6117,29 +8189,265 @@ mod tests {
                     if text.galley.job.sections[0].format.font_id.family
                         == FontFamily::Name(document_font::COURIER_PRIME_FAMILY.into()) =>
                 {
-                    Some((text.pos.x, text.galley.text().to_owned()))
+                    Some(text)
                 }
                 _ => None,
             })
             .collect::<Vec<_>>();
-        glyphs.sort_by(|left, right| left.0.total_cmp(&right.0));
+        assert_eq!(text_galleys.len(), 1, "the visible line is one galley span");
+        let text = text_galleys.pop().unwrap_or_else(|| unreachable!());
+        assert_eq!(text.galley.text(), line.display_text.as_ref());
+        assert_eq!(text.galley.rows.len(), 1);
+        let glyphs = &text.galley.rows[0].glyphs;
         assert_eq!(glyphs.len(), line.display_text.chars().count());
-        assert!(glyphs
-            .iter()
-            .all(|(_, character)| character.chars().count() == 1));
-        for pair in glyphs.windows(2) {
+        for (column, glyph) in glyphs.iter().enumerate() {
             assert!(
-                ((pair[1].0 - pair[0].0) - line.char_width.to_points_f32() * scale).abs() < 0.01
+                (glyph.pos.x - column as f32 * line.char_width.to_points_f32() * scale).abs()
+                    < PRESENTATION_METRIC_TOLERANCE
+            );
+            assert!(
+                (glyph.advance_width - line.char_width.to_points_f32() * scale).abs()
+                    < PRESENTATION_METRIC_TOLERANCE
             );
         }
         assert_eq!(line.source.end - line.source.start, line.text.len());
     }
 
     #[test]
+    fn fixed_cell_galleys_match_scalar_mesh_positions_for_unicode_faces_and_zoom() {
+        let context = test_context();
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("wo005-fixed-cell-equivalence"),
+            ));
+            let text = "Aé\u{301}🙂ß";
+            let color = Color32::from_rgb(32, 48, 64);
+            for scale in [0.75_f32, 1.0, 1.75] {
+                for (bold, italic) in [
+                    (false, false),
+                    (true, false),
+                    (false, true),
+                    (true, true),
+                ] {
+                    let font = renderer_font_for_style(bold, italic, 12.0 * scale);
+                    let cell_width = 7.0 * scale;
+                    let mut batched = painter
+                        .layout_job(LayoutJob::simple_singleline(
+                            text.to_owned(),
+                            font.clone(),
+                            color,
+                        ))
+                        .as_ref()
+                        .clone();
+                    assert!(position_galley_in_fixed_cells(&mut batched, cell_width));
+
+                    let row = &batched.rows[0];
+                    assert_eq!(row.glyphs.len(), text.chars().count());
+                    let mut expected_vertices = Vec::new();
+                    for (column, character) in text.chars().enumerate() {
+                        let fixed_x = column as f32 * cell_width;
+                        let glyph = &row.glyphs[column];
+                        assert_eq!(glyph.chr, character);
+                        assert!((glyph.pos.x - fixed_x).abs() < PRESENTATION_METRIC_TOLERANCE);
+                        assert!(
+                            (glyph.advance_width - cell_width).abs()
+                                < PRESENTATION_METRIC_TOLERANCE
+                        );
+                        let scalar_galley = painter.layout_job(LayoutJob::simple_singleline(
+                            character.to_string(),
+                            font.clone(),
+                            color,
+                        ));
+                        assert_eq!(scalar_galley.rows[0].glyphs[0].chr, character);
+                        expected_vertices.extend(scalar_galley.rows[0].visuals.mesh.vertices.iter().map(
+                            |vertex| (fixed_x + vertex.pos.x, vertex.pos.y),
+                        ));
+                    }
+                    let actual_vertices = &row.visuals.mesh.vertices;
+                    assert_eq!(actual_vertices.len(), expected_vertices.len());
+                    for (actual, (expected_x, expected_y)) in
+                        actual_vertices.iter().zip(expected_vertices)
+                    {
+                        assert!((actual.pos.x - expected_x).abs() < PRESENTATION_METRIC_TOLERANCE);
+                        assert!((actual.pos.y - expected_y).abs() < PRESENTATION_METRIC_TOLERANCE);
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn fixed_cell_galley_cache_reuses_exact_keys_and_invalidates_changed_inputs() {
+        let context = test_context();
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("wo005-galley-cache-key"),
+            ));
+            let font = renderer_font_for_style(false, false, 12.0);
+            let color = Color32::WHITE;
+            let first = fixed_cell_span_galley(&painter, ctx, "stable", &font, 7.0, 12.0, color);
+            assert!(!first.1 && first.2);
+            let same = fixed_cell_span_galley(&painter, ctx, "stable", &font, 7.0, 12.0, color);
+            assert!(same.1 && same.2);
+
+            for (text, font, width, height, changed_color) in [
+                ("changed", font.clone(), 7.0, 12.0, color),
+                ("stable", renderer_font_for_style(true, false, 12.0), 7.0, 12.0, color),
+                ("stable", font.clone(), 7.25, 12.0, color),
+                ("stable", font.clone(), 7.0, 12.25, color),
+                ("stable", font.clone(), 7.0, 12.0, Color32::LIGHT_BLUE),
+                (
+                    "stable",
+                    renderer_font_for_style(false, false, 13.0),
+                    7.58,
+                    13.0,
+                    color,
+                ),
+            ] {
+                let changed = fixed_cell_span_galley(
+                    &painter,
+                    ctx,
+                    text,
+                    &font,
+                    width,
+                    height,
+                    changed_color,
+                );
+                assert!(!changed.1 && changed.2);
+            }
+        });
+    }
+
+    #[test]
+    fn unicode_expansion_selection_is_batched_at_authoritative_display_boundaries() {
+        let context = test_context();
+        let imported = fdx::read_v6(
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Character'><FontSpec Size='12' Style='Bold+AllCaps'/></ElementSettings><Content><Paragraph Type='Character' id='unicode-cue'><Text>stra\xc3\x9fe</Text></Paragraph></Content></FinalDraft>",
+        )
+        .unwrap_or_else(|_| unreachable!());
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .replace_with_saved(imported.project)
+            .unwrap_or_else(|_| unreachable!());
+        app.page_palette = status_bar::PagePalette::for_theme(
+            status_bar::AppearanceMode::Day,
+            egui::Theme::Light,
+        );
+        let layout = app.layout_for_render().unwrap_or_else(|_| unreachable!());
+        let line = layout.pages[0]
+            .lines
+            .iter()
+            .find(|line| line.display_text.as_ref() == "STRASSE")
+            .unwrap_or_else(|| unreachable!());
+        let selected_start = line.display_char_for_source(4, false);
+        let selected_end = line.display_char_for_source(6, true);
+        assert_eq!((selected_start, selected_end), (4, 6));
+        app.session
+            .set_selection(Selection {
+                anchor: Position {
+                    element: line.element,
+                    offset: 4,
+                },
+                focus: Position {
+                    element: line.element,
+                    offset: 6,
+                },
+            })
+            .unwrap_or_else(|_| unreachable!("the source range around sharp-s is valid"));
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(800.0, 600.0));
+        app.performance.reset_benchmark(BenchmarkOperation::General);
+        let output = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+        );
+        let mut spans = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::epaint::Shape::Text(text)
+                    if text.galley.job.sections[0].format.font_id.family
+                        == FontFamily::Name("Courier Prime Bold".into())
+                        && ["STRA", "SS", "E"].contains(&text.galley.text()) =>
+                {
+                    Some((text.pos.x, text.galley.text().to_owned(), text.galley.job.sections[0].format.color))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        spans.sort_by(|left, right| left.0.total_cmp(&right.0));
+        assert_eq!(
+            spans.iter().map(|(_, text, _)| text.as_str()).collect::<Vec<_>>(),
+            ["STRA", "SS", "E"]
+        );
+        assert_eq!(spans[1].2, app.page_palette.selection_text);
+        assert_eq!(spans[0].2, app.page_palette.text);
+        assert_eq!(spans[2].2, app.page_palette.text);
+        assert!(app.performance.benchmark_delta().galleys_built >= 3);
+
+        app.performance.reset_benchmark(BenchmarkOperation::General);
+        app.session
+            .set_selection(Selection {
+                anchor: Position {
+                    element: line.element,
+                    offset: 0,
+                },
+                focus: Position {
+                    element: line.element,
+                    offset: 3,
+                },
+            })
+            .unwrap_or_else(|_| unreachable!("the ASCII source range is valid"));
+        let changed_selection = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+        );
+        assert!(changed_selection.shapes.iter().any(|clipped| matches!(
+            &clipped.shape,
+            egui::epaint::Shape::Text(text)
+                if text.galley.text() == "STR" && text.galley.job.sections[0].format.color == app.page_palette.selection_text
+        )));
+        assert!(app.performance.benchmark_delta().galleys_built > 0);
+
+        app.performance.reset_benchmark(BenchmarkOperation::General);
+        app.session
+            .set_selection(Selection {
+                anchor: Position {
+                    element: line.element,
+                    offset: 4,
+                },
+                focus: Position {
+                    element: line.element,
+                    offset: 6,
+                },
+            })
+            .unwrap_or_else(|_| unreachable!("the source range around sharp-s is valid"));
+        let _ = render_editor_frame(
+            &context,
+            &mut app,
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+        );
+        assert!(app.performance.benchmark_delta().galleys_reused > 0);
+    }
+
+    #[test]
     fn rendered_role_typography_allcaps_expansion_and_hidden_editor_treatment() {
         let context = test_context();
         let imported = fdx::read_v6(
-            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Scene Heading'><FontSpec Size='16' Style='Bold+Italic+AllCaps'/></ElementSettings><ElementSettings Type='Note'><FontSpec Style='Italic+HiddenText'/></ElementSettings><Content><Paragraph Type='Scene Heading' id='heading'><Text>Stra\xc3\x9fe</Text></Paragraph><Paragraph Type='Note' id='note'><Text>private</Text></Paragraph></Content></FinalDraft>",
+            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Scene Heading'><FontSpec Size='16' Style='Bold+Italic+AllCaps+Underline'/></ElementSettings><ElementSettings Type='Note'><FontSpec Style='Italic+HiddenText'/></ElementSettings><Content><Paragraph Type='Scene Heading' id='heading'><Text>Stra\xc3\x9fe</Text></Paragraph><Paragraph Type='Note' id='note'><Text>private</Text></Paragraph></Content></FinalDraft>",
         )
         .unwrap_or_else(|_| unreachable!());
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
@@ -6205,8 +8513,12 @@ mod tests {
         assert!(glyph_shapes.iter().any(|(_, _, text, font, color)| {
             font.family == FontFamily::Name("Courier Prime Italic".into())
                 && *color == app.page_palette.subdued_text
-                && text == "p"
+                && text == "private"
         }));
+        assert!(output.shapes.iter().any(|clipped| matches!(
+            &clipped.shape,
+            egui::epaint::Shape::LineSegment { .. }
+        )));
     }
 
     #[test]

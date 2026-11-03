@@ -6,6 +6,47 @@ use crate::{
     MAX_ELEMENTS, MAX_TEXT_BYTES,
 };
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Session edit-validation work counts. These are structural counters, not
+/// timings, and do not expose document values.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EditValidationDiagnostics {
+    pub scoped_candidate_attempts: u64,
+    pub scoped_candidate_accepts: u64,
+    pub full_candidate_validations: u64,
+    pub full_validation_fallbacks: u64,
+}
+
+static SCOPED_CANDIDATE_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+static SCOPED_CANDIDATE_ACCEPTS: AtomicU64 = AtomicU64::new(0);
+static FULL_CANDIDATE_VALIDATIONS: AtomicU64 = AtomicU64::new(0);
+static FULL_VALIDATION_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
+pub fn edit_validation_diagnostics() -> EditValidationDiagnostics {
+    EditValidationDiagnostics {
+        scoped_candidate_attempts: SCOPED_CANDIDATE_ATTEMPTS.load(Ordering::Relaxed),
+        scoped_candidate_accepts: SCOPED_CANDIDATE_ACCEPTS.load(Ordering::Relaxed),
+        full_candidate_validations: FULL_CANDIDATE_VALIDATIONS.load(Ordering::Relaxed),
+        full_validation_fallbacks: FULL_VALIDATION_FALLBACKS.load(Ordering::Relaxed),
+    }
+}
+
+pub fn reset_edit_validation_diagnostics() {
+    SCOPED_CANDIDATE_ATTEMPTS.store(0, Ordering::Relaxed);
+    SCOPED_CANDIDATE_ACCEPTS.store(0, Ordering::Relaxed);
+    FULL_CANDIDATE_VALIDATIONS.store(0, Ordering::Relaxed);
+    FULL_VALIDATION_FALLBACKS.store(0, Ordering::Relaxed);
+}
+
+fn validate_full_candidate(project: &Project) -> Result<(), ModelError> {
+    let _ = FULL_CANDIDATE_VALIDATIONS.fetch_update(
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+        |value| Some(value.saturating_add(1)),
+    );
+    project.validate()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
@@ -82,7 +123,7 @@ struct Snapshot {
     generated_parentheticals: BTreeSet<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct EditingSession {
     project: Project,
     /// Wall-clock time captured when this editing session begins. It is
@@ -98,6 +139,34 @@ pub struct EditingSession {
     redo: Vec<Snapshot>,
     generated_parentheticals: BTreeSet<String>,
     history_limit: usize,
+    validated_baseline: bool,
+    last_validation_was_scoped: bool,
+}
+
+impl PartialEq for EditingSession {
+    fn eq(&self, other: &Self) -> bool {
+        self.project == other.project
+            && self.session_open_timestamp == other.session_open_timestamp
+            && self.policy == other.policy
+            && self.layout_inputs == other.layout_inputs
+            && self.selection == other.selection
+            && self.dirty == other.dirty
+            && self.revision == other.revision
+            && self.clean_project == other.clean_project
+            && self.history == other.history
+            && self.redo == other.redo
+            && self.generated_parentheticals == other.generated_parentheticals
+            && self.history_limit == other.history_limit
+            && self.validated_baseline == other.validated_baseline
+    }
+}
+
+impl Eq for EditingSession {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MutationValidationScope {
+    Complete,
+    SingleParagraph,
 }
 
 impl EditingSession {
@@ -124,12 +193,15 @@ impl EditingSession {
     }
 
     fn with_policy_layout_and_session_timestamp(
-        project: Project,
+        mut project: Project,
         policy: EditPolicy,
         layout_inputs: LayoutInputs,
         session_open_timestamp: String,
     ) -> Result<Self, EditError> {
-        project.validate()?;
+        validate_full_candidate(&project)?;
+        if let Some(preservation) = project.preservation.as_mut() {
+            preservation.rebuild_managed_paragraph_index();
+        }
         validate_layout_inputs(&layout_inputs)?;
         let selection = Selection::caret(Position {
             element: 0,
@@ -149,6 +221,8 @@ impl EditingSession {
             redo: Vec::new(),
             generated_parentheticals: BTreeSet::new(),
             history_limit: 100,
+            validated_baseline: true,
+            last_validation_was_scoped: false,
         })
     }
 
@@ -209,10 +283,15 @@ impl EditingSession {
     pub const fn revision(&self) -> u64 {
         self.revision
     }
+    /// Reports whether the latest successful session mutation used the
+    /// preconditioned single-paragraph validator. This is diagnostic-only.
+    pub const fn last_edit_used_scoped_validation(&self) -> bool {
+        self.last_validation_was_scoped
+    }
 
     /// Revalidates the live semantic project and selection without mutating it.
     pub fn validate(&self) -> Result<(), EditError> {
-        self.project.validate()?;
+        validate_full_candidate(&self.project)?;
         validate_selection(&self.project, self.selection)
     }
 
@@ -225,14 +304,27 @@ impl EditingSession {
     /// Selection is unchanged; dirty state and revision follow the corrected
     /// project so cached layout and the clean baseline remain accurate.
     pub fn refresh_cast_lists(&mut self) -> Result<bool, EditError> {
-        let mut project = self.project.clone();
-        let changed = cast_list::correct_cast_lists(&mut project).map_err(EditError::CastList)?;
-        if changed {
+        self.refresh_cast_lists_with_outcome()
+            .map(|outcome| outcome.changed)
+    }
+
+    /// Refreshes derived data and reports safe-stop deferrals without exposing
+    /// document-owned identities or content to the caller.
+    pub fn refresh_cast_lists_with_outcome(
+        &mut self,
+    ) -> Result<crate::cast_list::CastListCorrection, EditError> {
+        let (mut project, outcome) =
+            cast_list::corrected_cast_list_candidate(&self.project).map_err(EditError::CastList)?;
+        if outcome.changed {
+            if let Some(preservation) = project.preservation.as_mut() {
+                preservation.rebuild_managed_paragraph_index();
+            }
             self.project = project;
             self.revision = self.revision.saturating_add(1);
             self.dirty = self.project != self.clean_project;
+            self.last_validation_was_scoped = false;
         }
-        Ok(changed)
+        Ok(outcome)
     }
 
     /// Builds corrected detached data for Save or Save As preflight. This does
@@ -244,8 +336,11 @@ impl EditingSession {
     /// Builds a detached session representing a successfully serialized and
     /// re-read project. This is prepared before storage publication; callers
     /// must install it only after the destination has been replaced.
-    pub(crate) fn prepare_saved_rebase(&self, project: Project) -> Result<Self, EditError> {
-        project.validate()?;
+    pub(crate) fn prepare_saved_rebase(&self, mut project: Project) -> Result<Self, EditError> {
+        validate_full_candidate(&project)?;
+        if let Some(preservation) = project.preservation.as_mut() {
+            preservation.rebuild_managed_paragraph_index();
+        }
         if project.elements.len() != self.project.elements.len() {
             return Err(EditError::InvalidSelection);
         }
@@ -270,6 +365,7 @@ impl EditingSession {
         rebased.selection = selection;
         rebased.generated_parentheticals = generated_parentheticals;
         rebased.dirty = false;
+        rebased.last_validation_was_scoped = false;
         // Saving changes the preservation baseline and therefore invalidates
         // render caches even when the visible semantic text did not change.
         rebased.revision = rebased.revision.saturating_add(1);
@@ -300,7 +396,7 @@ impl EditingSession {
     /// Mapped source runs and text leaves are transformed in the same candidate;
     /// unsafe inline intersections reject the whole operation.
     pub fn insert(&mut self, text: &str) -> Result<(), EditError> {
-        self.mutate(|project, selection, _generated, _policy| {
+        self.mutate(MutationValidationScope::SingleParagraph, |project, selection, _generated, _policy| {
             let (start, end) = selection.ordered();
             replace_range(project, start, end, text)?;
             Ok(Selection::caret(Position {
@@ -322,7 +418,7 @@ impl EditingSession {
     /// Deletes text or, when the selection spans paragraph boundaries, removes
     /// the selected source-anchored paragraphs transactionally.
     pub fn delete(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, generated, _policy| {
+        self.mutate(MutationValidationScope::SingleParagraph, |project, selection, generated, _policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 replace_range(project, start, end, "")?;
@@ -383,7 +479,7 @@ impl EditingSession {
     }
 
     pub fn backspace(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, _generated, _policy| {
+        self.mutate(MutationValidationScope::SingleParagraph, |project, selection, _generated, _policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 replace_range(project, start, end, "")?;
@@ -421,7 +517,7 @@ impl EditingSession {
     /// Splits a semantic paragraph while retaining the original foreign ID on
     /// the left side and allocating a fresh source identity for the right.
     pub fn split(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, _generated, _policy| {
+        self.mutate(MutationValidationScope::Complete, |project, selection, _generated, _policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 return Err(EditError::InvalidSelection);
@@ -431,7 +527,7 @@ impl EditingSession {
     }
 
     pub fn enter(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, generated, policy| {
+        self.mutate(MutationValidationScope::Complete, |project, selection, generated, policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 return Err(EditError::InvalidSelection);
@@ -504,7 +600,7 @@ impl EditingSession {
     /// Applies the explicit Tab policy. Unlisted roles are intentionally consumed
     /// without changing the project, selection, or history.
     pub fn tab(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, generated, policy| {
+        self.mutate(MutationValidationScope::Complete, |project, selection, generated, policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 return Ok(*selection);
@@ -604,7 +700,7 @@ impl EditingSession {
     /// opaque attachment or unsafe reference prevents the candidate from being
     /// published.
     pub fn join_with_next(&mut self) -> Result<(), EditError> {
-        self.mutate(|project, selection, _generated, _policy| {
+        self.mutate(MutationValidationScope::Complete, |project, selection, _generated, _policy| {
             let (start, end) = selection.ordered();
             if start != end || start.offset != project.elements[start.element].text.len() {
                 return Err(EditError::InvalidSelection);
@@ -621,7 +717,7 @@ impl EditingSession {
     /// Changes a known role and its exact mapped source Type attribute together.
     /// A role change that would invalidate attached scene data is rejected.
     pub fn change_role(&mut self, role: Role) -> Result<(), EditError> {
-        self.mutate(|project, selection, generated, policy| {
+        self.mutate(MutationValidationScope::SingleParagraph, |project, selection, generated, policy| {
             let (start, end) = selection.ordered();
             if start.element != end.element {
                 return Err(EditError::InvalidSelection);
@@ -666,6 +762,11 @@ impl EditingSession {
         // cannot be changed safely; retain that snapshot unchanged and let the
         // scheduled refresh/save preflight report the mapping limitation.
         let _ = cast_list::correct_cast_lists(&mut snapshot.project);
+        validate_full_candidate(&snapshot.project)?;
+        if let Some(preservation) = snapshot.project.preservation.as_mut() {
+            preservation.rebuild_managed_paragraph_index();
+        }
+        validate_selection(&snapshot.project, snapshot.selection)?;
         let current = Snapshot {
             project: self.project.clone(),
             selection: self.selection,
@@ -678,12 +779,19 @@ impl EditingSession {
         self.generated_parentheticals = snapshot.generated_parentheticals;
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
+        self.validated_baseline = true;
+        self.last_validation_was_scoped = false;
         Ok(())
     }
 
     pub fn redo(&mut self) -> Result<(), EditError> {
         let mut snapshot = self.redo.last().cloned().ok_or(EditError::EmptyHistory)?;
         let _ = cast_list::correct_cast_lists(&mut snapshot.project);
+        validate_full_candidate(&snapshot.project)?;
+        if let Some(preservation) = snapshot.project.preservation.as_mut() {
+            preservation.rebuild_managed_paragraph_index();
+        }
+        validate_selection(&snapshot.project, snapshot.selection)?;
         let current = Snapshot {
             project: self.project.clone(),
             selection: self.selection,
@@ -696,10 +804,16 @@ impl EditingSession {
         self.generated_parentheticals = snapshot.generated_parentheticals;
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
+        self.validated_baseline = true;
+        self.last_validation_was_scoped = false;
         Ok(())
     }
 
-    fn mutate<F>(&mut self, operation: F) -> Result<(), EditError>
+    fn mutate<F>(
+        &mut self,
+        requested_scope: MutationValidationScope,
+        operation: F,
+    ) -> Result<(), EditError>
     where
         F: FnOnce(
             &mut Project,
@@ -708,15 +822,16 @@ impl EditingSession {
             &EditPolicy,
         ) -> Result<Selection, EditError>,
     {
+        self.last_validation_was_scoped = false;
+        let (scope_start, scope_end) = self.selection.ordered();
+        let requested_element = (requested_scope == MutationValidationScope::SingleParagraph
+            && scope_start.element == scope_end.element)
+            .then(|| self.project.elements.get(scope_start.element).map(|element| element.id.clone()))
+            .flatten();
         let mut project = self.project.clone();
         let mut generated = self.generated_parentheticals.clone();
         let prior_generated = generated.clone();
         let selection = operation(&mut project, &self.selection, &mut generated, &self.policy)?;
-        if let Some(preservation) = project.preservation.as_mut() {
-            preservation
-                .reconcile_body_structure(&self.project.elements, &mut project.elements)
-                .map_err(EditError::Preservation)?;
-        }
         invalidate_changed_generated_parentheticals(
             &self.project,
             &project,
@@ -729,9 +844,58 @@ impl EditingSession {
                 .iter()
                 .any(|element| element.id.as_str() == id && element.role == Role::Parenthetical)
         });
-        project.validate()?;
-        validate_selection(&project, selection)?;
+        let scoped_preconditions = self.validated_baseline
+            && requested_element.as_ref().is_some_and(|id| {
+                project.elements.len() == self.project.elements.len()
+                    && project.elements.get(scope_start.element).is_some_and(|element| &element.id == id)
+                    && selection.anchor.element == scope_start.element
+                    && selection.focus.element == scope_start.element
+                    && project
+                        .preservation
+                        .as_ref()
+                        .map_or(true, |state| state.has_managed_paragraph_index())
+            });
+        let scoped_valid = if scoped_preconditions {
+            let _ = SCOPED_CANDIDATE_ATTEMPTS.fetch_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |value| Some(value.saturating_add(1)),
+            );
+            match project.validate_scoped_single_element_edit(&self.project, scope_start.element) {
+                Ok(true) if validate_selection(&project, selection).is_ok() => {
+                    let _ = SCOPED_CANDIDATE_ACCEPTS.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |value| Some(value.saturating_add(1)),
+                    );
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if !scoped_valid {
+            if requested_scope == MutationValidationScope::SingleParagraph {
+                let _ = FULL_VALIDATION_FALLBACKS.fetch_update(
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                    |value| Some(value.saturating_add(1)),
+                );
+            }
+            if let Some(preservation) = project.preservation.as_mut() {
+                preservation
+                    .reconcile_body_structure(&self.project.elements, &mut project.elements)
+                    .map_err(EditError::Preservation)?;
+            }
+            validate_full_candidate(&project)?;
+            if let Some(preservation) = project.preservation.as_mut() {
+                preservation.rebuild_managed_paragraph_index();
+            }
+            validate_selection(&project, selection)?;
+        }
         if project == self.project && selection == self.selection {
+            self.last_validation_was_scoped = scoped_valid;
             return Ok(());
         }
         self.push_history(Snapshot {
@@ -745,6 +909,8 @@ impl EditingSession {
         self.redo.clear();
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
+        self.validated_baseline = true;
+        self.last_validation_was_scoped = scoped_valid;
         Ok(())
     }
 
@@ -1330,7 +1496,7 @@ mod tests {
         DependencyConfidence, ForeignIdDomain, ForeignIdentity, ForeignReference, NamespaceBinding,
         PreservationState, PreservedAttribute, PreservedElement, PreservedNode, PreservedSection,
         ReferencePolicy, SectionKind, SourceAnchor, SourceAnchorId, SourceEncoding, SourceName,
-        SourceOwnership, SourceSnapshot,
+        SharedBytes, SourceOwnership, SourceSnapshot,
     };
     use crate::{Project, RunAttribute, SourceFormat, SourceProvenance, SourceSection};
 
@@ -1457,8 +1623,8 @@ mod tests {
                     ownership: SourceOwnership::Opaque,
                     dependency_confidence: DependencyConfidence::Unknown,
                     anchor: None,
-                    children: vec![PreservedNode::Text("authored beat".into())],
-                })],
+                    children: vec![PreservedNode::Text("authored beat".into())].into(),
+                })].into(),
             }));
             anchors.push(SourceAnchor {
                 id: attachment_anchor,
@@ -1478,12 +1644,12 @@ mod tests {
             ownership: SourceOwnership::Managed(element_id.clone()),
             dependency_confidence: DependencyConfidence::SomeReferencesMapped,
             anchor: Some(paragraph_anchor),
-            children,
+            children: children.into(),
         };
         project.preservation = Some(PreservationState {
             source: SourceSnapshot {
                 format: SourceFormat::Fdx,
-                original_bytes: b"<Script/>".to_vec(),
+                original_bytes: SharedBytes::source(b"<Script/>".to_vec()),
                 encoding: SourceEncoding::Utf8,
             },
             source_layout_settings: crate::SourceLayoutSettings::default(),
@@ -1491,12 +1657,14 @@ mod tests {
                 name: source_name("Content"),
                 kind: SectionKind::Content,
                 ordinal: 0,
-                children: vec![PreservedNode::Element(paragraph)],
-            }],
+                children: vec![PreservedNode::Element(paragraph)].into(),
+            }].into(),
             anchors,
             identities,
             references: Vec::new(),
             board_graph: BoardGraph::default(),
+            managed_paragraph_index: None,
+            source_text_bytes: 0,
         });
         project
     }
@@ -1513,7 +1681,7 @@ mod tests {
             .children
             .iter()
             .filter_map(|node| match node {
-                PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.clone()),
+                PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.to_string()),
                 PreservedNode::Element(_) => None,
                 PreservedNode::Comment(_) | PreservedNode::ProcessingInstruction { .. } => None,
             })
@@ -1774,6 +1942,16 @@ mod tests {
         );
         assert!(project.validate().is_ok());
         let mut session = EditingSession::new(project.clone()).unwrap_or_else(|_| unreachable!());
+        let original_preservation = project.preservation.as_ref().unwrap_or_else(|| unreachable!());
+        let initial_preservation = session
+            .project()
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+        assert!(original_preservation.source.original_bytes.shares_storage_with(
+            &initial_preservation.source.original_bytes
+        ));
+        assert!(original_preservation.sections.shares_storage_with(&initial_preservation.sections));
         set(&mut session, 0, 2);
         session
             .set_selection(Selection {
@@ -1795,9 +1973,40 @@ mod tests {
         assert_eq!(element.runs[1].text, "f");
         assert_eq!(element.runs[1].attributes, vec![run_b]);
         assert_eq!(text_children(session.project()), vec!["abZ", "f"]);
+        let edited_preservation = session
+            .project()
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+        assert!(original_preservation.source.original_bytes.shares_storage_with(
+            &edited_preservation.source.original_bytes
+        ));
+        let PreservedNode::Element(original_paragraph) =
+            &original_preservation.sections[0].children[0]
+        else {
+            unreachable!();
+        };
+        let PreservedNode::Element(edited_paragraph) =
+            &edited_preservation.sections[0].children[0]
+        else {
+            unreachable!();
+        };
+        let PreservedNode::Element(original_attachment) = &original_paragraph.children[2] else {
+            unreachable!();
+        };
+        let PreservedNode::Element(edited_attachment) = &edited_paragraph.children[2] else {
+            unreachable!();
+        };
+        assert!(original_attachment.children.shares_storage_with(&edited_attachment.children));
         assert!(session.dirty());
         assert_eq!(session.undo(), Ok(()));
         assert_eq!(session.project(), &project);
+        let undone_preservation = session
+            .project()
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+        assert!(original_preservation.sections.shares_storage_with(&undone_preservation.sections));
         assert!(!session.dirty());
         assert_eq!(session.redo(), Ok(()));
         assert_eq!(session.project().elements[0].text, "abZf");
@@ -1958,7 +2167,7 @@ mod tests {
                     ownership: SourceOwnership::Opaque,
                     dependency_confidence: DependencyConfidence::Unknown,
                     anchor: None,
-                    children: vec![PreservedNode::Text("unmodeled".into())],
+                    children: vec![PreservedNode::Text("unmodeled".into())].into(),
                 }),
                 PreservedNode::CData("def".into()),
             ],
@@ -2161,5 +2370,281 @@ mod tests {
             "abcdef"
         );
         assert!(session.validate().is_ok());
+    }
+
+    #[test]
+    fn ordinary_managed_text_and_role_edits_use_scoped_validation_and_match_full_validation() {
+        let project = preserved_project(
+            Role::Action,
+            "alpha",
+            Vec::new(),
+            vec![PreservedNode::Text("alpha".into())],
+            false,
+        );
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, 5);
+        let before = edit_validation_diagnostics();
+        assert_eq!(session.insert("!"), Ok(()));
+        assert!(session.last_edit_used_scoped_validation());
+        assert!(edit_validation_diagnostics().scoped_candidate_accepts
+            > before.scoped_candidate_accepts);
+        assert!(session.project().validate().is_ok());
+
+        let after_text = edit_validation_diagnostics();
+        assert_eq!(session.change_role(Role::Dialogue), Ok(()));
+        assert!(session.last_edit_used_scoped_validation());
+        assert!(edit_validation_diagnostics().scoped_candidate_accepts
+            > after_text.scoped_candidate_accepts);
+        assert!(session.project().validate().is_ok());
+    }
+
+    #[test]
+    fn scoped_validation_falls_back_when_non_target_body_or_title_page_changes() {
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        project.elements = vec![
+            ScreenplayElement::new("target", Role::Action, "before")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("other", Role::Action, "untouched")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        project.title_page = vec![ScreenplayElement::new("title", Role::General, "Title")
+            .unwrap_or_else(|_| unreachable!())];
+        let baseline = EditingSession::new(project)
+            .unwrap_or_else(|_| unreachable!())
+            .project
+            .clone();
+
+        let mut changed_neighbor = baseline.clone();
+        changed_neighbor.elements[0].text = "target edit".into();
+        changed_neighbor.elements[1].text = "unrelated change".into();
+        assert_eq!(
+            changed_neighbor.validate_scoped_single_element_edit(&baseline, 0),
+            Ok(false)
+        );
+
+        let mut changed_title = baseline.clone();
+        changed_title.elements[0].text = "target edit".into();
+        changed_title.title_page[0].text = "changed title".into();
+        assert_eq!(
+            changed_title.validate_scoped_single_element_edit(&baseline, 0),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn uncertain_source_topology_uses_full_validation_fallback_transactionally() {
+        let mut session = EditingSession::new(preserved_project(
+            Role::Action,
+            "",
+            Vec::new(),
+            Vec::new(),
+            false,
+        ))
+        .unwrap_or_else(|_| unreachable!());
+        let before = edit_validation_diagnostics();
+        assert_eq!(session.insert("created source run"), Ok(()));
+        assert!(!session.last_edit_used_scoped_validation());
+        assert!(edit_validation_diagnostics().full_validation_fallbacks
+            > before.full_validation_fallbacks);
+        assert_eq!(session.project().elements[0].text, "created source run");
+        assert!(session.project().validate().is_ok());
+    }
+
+    #[test]
+    fn structural_edits_and_history_restores_rebuild_managed_indexes() {
+        let project = preserved_project(
+            Role::Action,
+            "before after",
+            Vec::new(),
+            vec![PreservedNode::Element(PreservedElement {
+                name: source_name("Text"),
+                attributes: Vec::new(),
+                namespace_bindings: Vec::new(),
+                source_type: None,
+                ownership: SourceOwnership::Opaque,
+                dependency_confidence: DependencyConfidence::Unknown,
+                anchor: None,
+                children: vec![PreservedNode::Text("before after".into())].into(),
+            })],
+            false,
+        );
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, 6);
+        let before = crate::preservation::managed_paragraph_index_diagnostics();
+        assert_eq!(session.split(), Ok(()));
+        assert!(!session.last_edit_used_scoped_validation());
+        let right_id = session.project().elements[1].id.clone();
+        let state = session.project().preservation.as_ref().unwrap_or_else(|| unreachable!());
+        assert!(state.has_managed_element(&session.project().elements[0].id));
+        assert!(state.has_managed_element(&right_id));
+        assert!(session.project().validate().is_ok());
+
+        assert_eq!(session.undo(), Ok(()));
+        assert!(session.project().validate().is_ok());
+        assert_eq!(session.redo(), Ok(()));
+        assert!(session.project().validate().is_ok());
+        let left_end = session.project().elements[0].text.len();
+        set(&mut session, 0, left_end);
+        assert_eq!(session.join_with_next(), Ok(()));
+        let state = session.project().preservation.as_ref().unwrap_or_else(|| unreachable!());
+        assert!(state.has_managed_element(&session.project().elements[0].id));
+        assert!(!state.has_managed_element(&right_id));
+        assert!(session.project().validate().is_ok());
+        let rebased = session
+            .prepare_saved_rebase(session.project.clone())
+            .unwrap_or_else(|_| unreachable!());
+        assert!(rebased
+            .project()
+            .preservation
+            .as_ref()
+            .is_some_and(|state| state.has_managed_element(&rebased.project().elements[0].id)));
+        let mut replaced = session.clone();
+        replaced
+            .replace_with_saved(session.project.clone())
+            .unwrap_or_else(|_| unreachable!());
+        assert!(replaced.project().validate().is_ok());
+        assert!(crate::preservation::managed_paragraph_index_diagnostics().rebuilds
+            > before.rebuilds);
+    }
+
+    #[test]
+    fn scoped_validation_matches_full_rejection_and_untrusted_candidates_fall_back() {
+        let valid = EditingSession::new(preserved_project(
+            Role::Action,
+            "valid",
+            Vec::new(),
+            vec![PreservedNode::Text("valid".into())],
+            false,
+        ))
+        .unwrap_or_else(|_| unreachable!())
+        .project
+        .clone();
+
+        let mut overlong = valid.clone();
+        overlong.elements[0].text = "x".repeat(MAX_TEXT_BYTES.saturating_add(1));
+        let scoped = overlong.validate_scoped_single_element_edit(&valid, 0).map(|_| ());
+        let complete = overlong.validate();
+        assert_eq!(scoped, complete);
+
+        let mut stale_id = valid.clone();
+        stale_id.elements[0].id = crate::StableId::new("stale-element")
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            stale_id.validate_scoped_single_element_edit(&valid, 0),
+            Ok(false)
+        );
+        assert!(stale_id.validate().is_err());
+
+        let mut unrelated_source_change = valid.clone();
+        unrelated_source_change
+            .preservation
+            .as_mut()
+            .unwrap_or_else(|| unreachable!())
+            .sections[0]
+            .children
+            .push(PreservedNode::Comment("new opaque sibling".into()));
+        assert!(unrelated_source_change
+            .validate_scoped_single_element_edit(&valid, 0)
+            .is_err());
+        assert!(unrelated_source_change.validate().is_ok());
+
+        let mut duplicate_owner = valid.clone();
+        let state = duplicate_owner
+            .preservation
+            .as_mut()
+            .unwrap_or_else(|| unreachable!());
+        let duplicate = state.sections[0].children[0].clone();
+        state.sections[0].children.push(duplicate);
+        state.rebuild_managed_paragraph_index();
+        assert!(duplicate_owner
+            .validate_scoped_single_element_edit(&valid, 0)
+            .is_err());
+        assert!(duplicate_owner.validate().is_err());
+
+        let mut dangling_reference = valid.clone();
+        let state = dangling_reference
+            .preservation
+            .as_mut()
+            .unwrap_or_else(|| unreachable!());
+        state.references.push(ForeignReference {
+            source: ForeignIdentity::new(ForeignIdDomain::Paragraph, "unknown-source")
+                .unwrap_or_else(|_| unreachable!()),
+            target: ForeignIdentity::new(ForeignIdDomain::Board, "missing-board")
+                .unwrap_or_else(|_| unreachable!()),
+            policy: ReferencePolicy::RequiredInternal,
+        });
+        assert_eq!(
+            dangling_reference.validate_scoped_single_element_edit(&valid, 0),
+            Ok(false)
+        );
+        assert!(dangling_reference.validate().is_err());
+
+        let mut unrelated_invalid_baseline = valid.clone();
+        let state = unrelated_invalid_baseline
+            .preservation
+            .as_mut()
+            .unwrap_or_else(|| unreachable!());
+        state.references.push(ForeignReference {
+            source: ForeignIdentity::new(ForeignIdDomain::Paragraph, "baseline-source")
+                .unwrap_or_else(|_| unreachable!()),
+            target: ForeignIdentity::new(ForeignIdDomain::Board, "baseline-missing-target")
+                .unwrap_or_else(|_| unreachable!()),
+            policy: ReferencePolicy::RequiredInternal,
+        });
+        assert!(EditingSession::new(unrelated_invalid_baseline).is_err());
+
+        let mut invalid_utf8 = EditingSession::new(preserved_project(
+            Role::Action,
+            "a🙂b",
+            Vec::new(),
+            vec![PreservedNode::Text("a🙂b".into())],
+            false,
+        ))
+        .unwrap_or_else(|_| unreachable!());
+        let before_rejection = invalid_utf8.clone();
+        assert_eq!(
+            invalid_utf8.set_selection(Selection::caret(Position {
+                element: 0,
+                offset: 2,
+            })),
+            Err(EditError::InvalidUtf8Boundary)
+        );
+        assert_eq!(invalid_utf8, before_rejection);
+
+        let mut invalid_baseline = valid.clone();
+        invalid_baseline.elements[0].id = crate::StableId::new("invalid-baseline")
+            .unwrap_or_else(|_| unreachable!());
+        assert!(EditingSession::new(invalid_baseline).is_err());
+    }
+
+    #[test]
+    fn indexed_ordinary_edit_keeps_opaque_siblings_shared_and_unmodified() {
+        let mut project = preserved_project(
+            Role::Action,
+            "source",
+            Vec::new(),
+            vec![PreservedNode::Text("source".into())],
+            false,
+        );
+        let state = project.preservation.as_mut().unwrap_or_else(|| unreachable!());
+        state.sections[0]
+            .children
+            .push(PreservedNode::Comment("opaque sibling".into()));
+        state.rebuild_managed_paragraph_index();
+        let original_comment = match &state.sections[0].children[1] {
+            PreservedNode::Comment(comment) => comment.clone(),
+            _ => unreachable!(),
+        };
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        set(&mut session, 0, 6);
+        assert_eq!(session.insert("!"), Ok(()));
+        assert!(session.last_edit_used_scoped_validation());
+        let state = session.project().preservation.as_ref().unwrap_or_else(|| unreachable!());
+        let PreservedNode::Comment(comment) = &state.sections[0].children[1] else {
+            unreachable!();
+        };
+        assert!(original_comment.shares_storage_with(comment));
+        assert_eq!(comment.as_str(), "opaque sibling");
+        assert!(session.project().validate().is_ok());
     }
 }

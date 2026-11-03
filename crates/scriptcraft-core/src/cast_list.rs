@@ -17,6 +17,21 @@ pub enum CastListError {
     UnsupportedFormattedCastList,
 }
 
+/// Value-free summary of one derived cast/scene correction pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CastListCorrection {
+    /// Whether the candidate project differs from the input project.
+    pub changed: bool,
+    /// Whether any scene or formatted Cast List was safely left untouched.
+    pub deferred: bool,
+    /// Detached whole-project candidates created by this correction call.
+    pub project_candidate_clones: u64,
+    /// Managed-heading candidates cloned for scene-safe reconciliation.
+    pub scene_candidate_clones: u64,
+    /// Complete preservation-state clones beyond the top-level candidate.
+    pub redundant_preservation_clones: u64,
+}
+
 impl From<ModelError> for CastListError {
     fn from(error: ModelError) -> Self {
         Self::Model(error)
@@ -35,10 +50,39 @@ impl From<ModelError> for CastListError {
 /// Unsupported scene metadata and formatted Cast Lists are preserved while
 /// independent, safely representable derived updates continue.
 pub fn correct_cast_lists(project: &mut Project) -> Result<bool, CastListError> {
-    let original = project.clone();
+    correct_cast_lists_with_outcome(project).map(|outcome| outcome.changed)
+}
+
+/// Recomputes derived cast/scene data and reports whether bounded safe-stop
+/// behavior deferred any part of the correction. Deferred scene identity is
+/// intentionally not exposed by this value-free result.
+pub fn correct_cast_lists_with_outcome(
+    project: &mut Project,
+) -> Result<CastListCorrection, CastListError> {
+    let (candidate, outcome) = corrected_cast_list_candidate(project)?;
+    if outcome.changed {
+        *project = candidate;
+    }
+    Ok(outcome)
+}
+
+pub(crate) fn corrected_cast_list_candidate(
+    project: &Project,
+) -> Result<(Project, CastListCorrection), CastListError> {
     let mut candidate = project.clone();
-    let reconciliation = crate::scene_metadata::reconcile_project_with_outcome(&mut candidate)
+    let mut outcome = correct_cast_lists_candidate(&mut candidate)?;
+    outcome.project_candidate_clones = 1;
+    outcome.redundant_preservation_clones = 0;
+    Ok((candidate, outcome))
+}
+
+fn correct_cast_lists_candidate(
+    candidate: &mut Project,
+) -> Result<CastListCorrection, CastListError> {
+    let reconciliation = crate::scene_metadata::reconcile_project_candidate_with_outcome(candidate)
         .map_err(CastListError::SceneMetadata)?;
+    let mut deferred = !reconciliation.deferred_scenes.is_empty();
+    let mut changed = reconciliation.changed;
     let mut updates = Vec::new();
     let mut scene_start: Option<usize> = None;
 
@@ -83,25 +127,28 @@ pub fn correct_cast_lists(project: &mut Project) -> Result<bool, CastListError> 
     }
 
     for (element_index, replacement) in updates {
-        match replace_cast_list_text(&mut candidate, element_index, &replacement) {
-            Ok(()) | Err(CastListError::UnsupportedFormattedCastList) => {}
+        match replace_cast_list_text(candidate, element_index, &replacement) {
+            Ok(()) => changed = true,
+            Err(CastListError::UnsupportedFormattedCastList) => deferred = true,
             Err(error) => return Err(error),
         }
     }
-    candidate.validate()?;
-    let changed = candidate != original;
     if changed {
-        *project = candidate;
+        candidate.validate()?;
     }
-    Ok(changed)
+    Ok(CastListCorrection {
+        changed,
+        deferred,
+        project_candidate_clones: 0,
+        scene_candidate_clones: reconciliation.scene_candidates,
+        redundant_preservation_clones: reconciliation.preservation_state_clones,
+    })
 }
 
 /// Returns a corrected clone suitable for Save or Save As preflight.
 /// The caller owns publication and must do so only after successful storage.
 pub fn prepare_save_candidate(project: &Project) -> Result<Project, CastListError> {
-    let mut candidate = project.clone();
-    correct_cast_lists(&mut candidate)?;
-    Ok(candidate)
+    corrected_cast_list_candidate(project).map(|(candidate, _)| candidate)
 }
 
 fn scene_cast_text(names: &[String]) -> Result<String, CastListError> {
@@ -768,5 +815,186 @@ mod tests {
         let reopened = crate::fdx::read_v6(&emitted).unwrap_or_else(|_| unreachable!());
         assert_eq!(reopened.project.elements[2].text, "ALPHA");
         assert_eq!(reopened.project.elements[9].text, "(ALPHA)");
+    }
+
+    #[test]
+    fn wo009_refresh_uses_one_project_candidate_and_heading_scoped_scene_candidates() {
+        let project = imported_project_without_scene_metadata();
+        let original = project.clone();
+        let expected_scene_candidates = project
+            .elements
+            .iter()
+            .filter(|element| element.role == Role::SceneHeading)
+            .count() as u64;
+
+        let (candidate, outcome) =
+            corrected_cast_list_candidate(&project).unwrap_or_else(|_| unreachable!());
+
+        assert_eq!(project, original);
+        assert!(outcome.changed);
+        assert_eq!(outcome.project_candidate_clones, 1);
+        assert_eq!(outcome.scene_candidate_clones, expected_scene_candidates);
+        assert_eq!(outcome.redundant_preservation_clones, 0);
+        assert!(candidate.validate().is_ok());
+
+        let (_, unchanged) =
+            corrected_cast_list_candidate(&candidate).unwrap_or_else(|_| unreachable!());
+        assert!(!unchanged.changed);
+        assert_eq!(unchanged.project_candidate_clones, 1);
+        assert_eq!(unchanged.scene_candidate_clones, expected_scene_candidates);
+        assert_eq!(unchanged.redundant_preservation_clones, 0);
+    }
+
+    #[test]
+    fn wo010_derived_candidate_shares_original_bytes_and_untouched_preserved_subtree() {
+        fn find_managed<'a>(
+            sections: &'a [crate::preservation::PreservedSection],
+            id: &crate::StableId,
+        ) -> Option<&'a crate::preservation::PreservedElement> {
+            fn find_nodes<'a>(
+                nodes: &'a [crate::preservation::PreservedNode],
+                id: &crate::StableId,
+            ) -> Option<&'a crate::preservation::PreservedElement> {
+                for node in nodes {
+                    let crate::preservation::PreservedNode::Element(element) = node else {
+                        continue;
+                    };
+                    if matches!(&element.ownership, crate::preservation::SourceOwnership::Managed(owner) if owner == id) {
+                        return Some(element);
+                    }
+                    if let Some(found) = find_nodes(&element.children, id) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+
+            sections
+                .iter()
+                .find_map(|section| find_nodes(&section.children, id))
+        }
+
+        let source_project = project_with(vec![
+            element("wo010-heading", Role::SceneHeading, "INT. ROOM - DAY"),
+            element("wo010-character", Role::Character, "ALPHA"),
+            element("wo010-cast-list", Role::CastList, "(STALE)"),
+            element("wo010-unrelated", Role::Action, "UNRELATED SOURCE CONTENT"),
+        ]);
+        let serialized = crate::fdx::write_v6(&source_project).unwrap_or_else(|_| unreachable!());
+        let imported = crate::fdx::read_v6(&serialized)
+            .unwrap_or_else(|_| unreachable!())
+            .project;
+        let unrelated_id = imported
+            .elements
+            .iter()
+            .find(|element| element.text == "UNRELATED SOURCE CONTENT")
+            .map(|element| element.id.clone())
+            .unwrap_or_else(|| unreachable!());
+        let original_state = imported.preservation.as_ref().unwrap_or_else(|| unreachable!());
+        let before_unrelated = find_managed(&original_state.sections, &unrelated_id)
+            .unwrap_or_else(|| unreachable!());
+        let cast_list_index = imported
+            .elements
+            .iter()
+            .position(|element| element.role == Role::CastList)
+            .unwrap_or_else(|| unreachable!());
+        let (candidate, outcome) = corrected_cast_list_candidate(&imported)
+            .unwrap_or_else(|_| unreachable!());
+        let candidate_state = candidate.preservation.as_ref().unwrap_or_else(|| unreachable!());
+        let after_unrelated = find_managed(&candidate_state.sections, &unrelated_id)
+            .unwrap_or_else(|| unreachable!());
+
+        assert!(outcome.changed);
+        assert_eq!(candidate.elements[cast_list_index].text, "(ALPHA)");
+        assert!(original_state.source.original_bytes.shares_storage_with(
+            &candidate_state.source.original_bytes
+        ));
+        assert!(before_unrelated.children.shares_storage_with(&after_unrelated.children));
+        assert_eq!(
+            imported
+                .preservation
+                .as_ref()
+                .unwrap_or_else(|| unreachable!())
+                .source
+                .original_bytes,
+            serialized
+        );
+
+        let save_candidate = prepare_save_candidate(&imported).unwrap_or_else(|_| unreachable!());
+        let save_state = save_candidate.preservation.as_ref().unwrap_or_else(|| unreachable!());
+        let save_unrelated = find_managed(&save_state.sections, &unrelated_id)
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(save_candidate.elements[cast_list_index].text, "(ALPHA)");
+        assert!(original_state
+            .source
+            .original_bytes
+            .shares_storage_with(&save_state.source.original_bytes));
+        assert!(before_unrelated
+            .children
+            .shares_storage_with(&save_unrelated.children));
+        assert_eq!(
+            imported.elements[cast_list_index].text,
+            "(STALE)"
+        );
+    }
+
+    #[test]
+    fn wo009_preservation_free_noop_has_no_scene_candidates() {
+        let project = project_with(vec![
+            element("heading", Role::SceneHeading, "INT. ROOM"),
+            element("cue", Role::Character, "ALEX"),
+            element("cast", Role::CastList, "(ALEX)"),
+        ]);
+        let original = project.clone();
+
+        let (candidate, outcome) =
+            corrected_cast_list_candidate(&project).unwrap_or_else(|_| unreachable!());
+
+        assert_eq!(project, original);
+        assert_eq!(candidate, original);
+        assert!(!outcome.changed);
+        assert_eq!(outcome.project_candidate_clones, 1);
+        assert_eq!(outcome.scene_candidate_clones, 0);
+        assert_eq!(outcome.redundant_preservation_clones, 0);
+    }
+
+    #[test]
+    fn wo009_fatal_later_scene_failure_does_not_publish_earlier_candidate_work() {
+        fn make_second_cast_mapping_opaque(nodes: &mut [crate::preservation::PreservedNode], id: &crate::StableId) -> bool {
+            for node in nodes {
+                let crate::preservation::PreservedNode::Element(element) = node else {
+                    continue;
+                };
+                if matches!(&element.ownership, crate::preservation::SourceOwnership::Managed(target) if target == id) {
+                    element.ownership = crate::preservation::SourceOwnership::Opaque;
+                    return true;
+                }
+                if make_second_cast_mapping_opaque(&mut element.children, id) {
+                    return true;
+                }
+            }
+            false
+        }
+
+        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><Text>INT. ONE</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>ALPHA</Text></Paragraph><Paragraph Type="Cast List" id="l1"><Text>(stale one)</Text></Paragraph><Paragraph Type="Scene Heading" id="h2"><Text>EXT. TWO</Text></Paragraph><Paragraph Type="Character" id="c2"><Text>BETA</Text></Paragraph><Paragraph Type="Cast List" id="l2"><Text>(stale two)</Text></Paragraph></Content></FinalDraft>"#;
+        let mut project = crate::fdx::read_v6(source.as_bytes())
+            .unwrap_or_else(|_| unreachable!())
+            .project;
+        let second_cast_id = project
+            .elements
+            .iter()
+            .filter(|element| element.role == Role::CastList)
+            .nth(1)
+            .unwrap_or_else(|| unreachable!())
+            .id
+            .clone();
+        let state = project.preservation.as_mut().unwrap_or_else(|| unreachable!());
+        assert!(state.sections.iter_mut().any(|section| {
+            make_second_cast_mapping_opaque(&mut section.children, &second_cast_id)
+        }));
+        let original = project.clone();
+
+        assert!(correct_cast_lists_with_outcome(&mut project).is_err());
+        assert_eq!(project, original);
     }
 }

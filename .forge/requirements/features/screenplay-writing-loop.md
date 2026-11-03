@@ -134,6 +134,67 @@ viewport presentation. This does not promise exact layout fidelity for every FDX
     not alter role typography, visibility, title-page interpretation, or run formatting. Splitting
     shall not copy direct XML attributes to a new paragraph, and a join that would remove a paragraph
     carrying supported direct-format attributes shall stop transactionally rather than lose them.
+  - **AC-WRITING-002.9:** Desktop editing shall allocate and retain complete rendered page geometry
+    for scroll extent, visible-page status, pointer hit testing, selection, zoom, and conditional
+    caret reveal, while painting only pages intersecting the actual editor clip plus at most one
+    rendered page of fixed overscan before and after that visible range. Pages outside that paint
+    range shall not submit page fills, lines, selection, text, underlines, caret, or IME preedit.
+    Viewport culling shall not change fixed page dimensions, source mapping, page count, interaction
+    ownership, same-frame input scheduling, or the whole-layout object on scroll; it makes no timing
+    guarantee.
+  - **AC-WRITING-002.10:** Desktop text painting shall batch each visible nonempty screenplay line
+    into a galley, splitting only at effective text-color boundaries such as a selection span.
+    Every display scalar shall retain its deterministic fixed-cell x position from document layout
+    geometry, independent of host-font advances or kerning; bundled role faces, fallback glyphs,
+    selected/unselected colors, subdued hidden-text color, underline geometry, and presentation zoom
+    shall remain intact. The core layout's document-point pagination and caret/hit-test geometry
+    remain authoritative. Galleys shall preserve the line's display text and use the layout's
+    display/source map for selection boundaries, including Unicode casing expansions; canonical
+    UTF-8 text, source offsets, page rectangles, selection endpoints, and editing behavior shall not
+    change. Only painted pages may build or reuse galleys, and cache identity shall include all
+    display, font, fixed-cell, color, and scale inputs that affect the span. Diagnostics may report
+    only numeric galley build/reuse counts and other value-free categories; this requirement makes no
+    timing guarantee.
+  - **AC-WRITING-002.11:** A layout revision may reuse immutable per-element wrap values only when
+    stable element identity, complete canonical content, role, layout purpose, title/body context,
+    effective paragraph geometry, effective text style, and wrapping limits match. A fingerprint
+    shall not authorize reuse without collision-safe canonical-content verification. Reuse shall
+    preserve canonical/display text, Unicode display/source maps, deterministic document-point
+    geometry, and complete page output equivalent to a fresh layout for the same project and
+    effective inputs. Whole-document page placement and keep-with-next handling shall still run for
+    every layout revision, preserving explicit page starts, title pages, empty paragraphs, and
+    oversized elements. Retention shall be bounded and invalidated or rekeyed safely for changed
+    source/runtime inputs, purpose changes, document replacement, undo/redo, and structural edits.
+    Presentation scale/palette and egui font-atlas or context-local galley data shall not enter the
+    core wrap cache. Structural counters may report wraps built and reused; no timing improvement or
+    fully incremental pagination guarantee is implied.
+  - **AC-WRITING-002.12:** Derived interaction indexes over a complete layout shall preserve its
+    existing page/line geometry, source/display mapping, caret boundaries, selection behavior, and
+    deterministic document-order tie-breaking. Caret and owner-page lookup shall be restricted to
+    the requested element's placed lines; nearest body-line hit testing shall use ordered vertical
+    candidates; vertical movement shall address the current and adjacent body lines without
+    flattening the complete document line set. Title pages shall remain excluded from body
+    hit-testing and navigation. The indexes shall be rebuilt with each fresh complete layout and
+    reused only with that immutable layout, and shall not contain desktop presentation state.
+    Value-free diagnostics may report indexed query calls and index entries examined; no timing
+    improvement is promised.
+  - **AC-WRITING-002.13:** Ordinary single-paragraph text and role edits may use change-scoped
+    validation only when the editing session holds a complete-valid baseline, the selected semantic
+    identity and managed-source index entry are unique and unchanged, every non-target body element
+    and the full title page remain exactly equal to the baseline, the candidate remains
+    single-element and structurally unchanged, the affected semantic element and source projection
+    validate locally, every source-tree node outside the uniquely mapped paragraph remains equal
+    to that baseline, and global source identity/reference inputs remain equal to that baseline.
+    Any missing, stale, ambiguous, structurally changed, or otherwise unprovable precondition shall
+    use complete validation or reject the detached candidate; it shall never weaken validation.
+    Import/session creation, structural/global edits, undo/redo restoration, derived publication,
+    document replacement, explicit public validation, standalone layout builders, and native
+    Save/Save As retain complete validation. A layout requested from a live validated session may
+    trust that session boundary; arbitrary project/layout callers may not. Candidate publication,
+    UTF-8-safe selection, undo/redo, FDX opaque-data preservation, dirty/no-op semantics, and
+    save-failure safety remain transactional and unchanged. Structural counters may report index
+    rebuilds/lookups, scoped accepts, complete candidate validations, and safe fallbacks; no timing
+    guarantee or speed result is implied.
 
 ### Durable native project persistence
 
@@ -392,6 +453,21 @@ project meaning; failures preserve the prior valid destination and unsaved state
     correction. Refresh, undo/redo correction, and pending saves use the same per-scene deferral and
     remain transactional and deterministic. Genuine model, managed-source, identity, preservation,
     re-read, conflict, and storage failures remain fatal.
+  - **AC-WRITING-009.4:** Desktop derived Cast List and supported scene metadata refresh shall retain
+    the existing one-second maximum scheduling cadence when a relevant project revision is pending,
+    while due ticks for an already successfully attempted revision shall skip project cloning and
+    reconciliation. The first active-document refresh shall occur when required. Content edits,
+    undo/redo, successful derived publication, successful Save/Save As candidate publication, and
+    document replacement shall update or invalidate the scheduling watermark so work is neither
+    repeated for one unchanged revision nor left pending after a relevant change. Accepted editor
+    input already queued for the frame shall be dispatched before scheduled refresh; a pending FDX
+    migration modal shall continue to exclude both. Save/Save As shall prepare the complete current
+    derived candidate independently of timer state. Failed refreshes shall remain eligible for a
+    later cadence retry, while safe-stop deferrals shall not retry unchanged work indefinitely and
+    shall be reconsidered after a later relevant revision. Value-free diagnostics may distinguish
+    attempted, completed, skipped, changed, unchanged, and deferred outcomes. This scheduling
+    contract makes no timing guarantee and does not alter scene metadata, source preservation, save
+    safety, modal behavior, or interaction semantics.
 
 ### Secondary Fountain conversion
 

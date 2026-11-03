@@ -149,7 +149,9 @@ screenwriter.
   colored pages, or locked pages. Retaining unsupported imported data is distinct
   from providing these editing features.
 - Web support, multi-platform polish, pixel-perfect editor parity, font
-  databases, and unmeasured incremental pagination.
+  databases, and fully incremental suffix pagination. Bounded per-element wrap
+  reuse within whole-document page placement is a separate structural
+  optimization and does not require or claim unmeasured incremental pagination.
 
 ## Success outcomes
 

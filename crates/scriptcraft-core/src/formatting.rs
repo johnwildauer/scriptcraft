@@ -81,7 +81,7 @@ impl FixedPoint {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ParagraphAlignment {
     #[default]
     Left,
@@ -124,7 +124,7 @@ pub struct SourceFontSpec {
     pub color: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontFallback {
     CourierPrime,
 }
@@ -132,7 +132,7 @@ pub enum FontFallback {
 /// Effective application presentation for one semantic role. The declared FDX
 /// family and color are retained for diagnostics/source projection only; the
 /// renderer deliberately uses the documented fixed-cell Courier Prime fallback.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EffectiveTextStyle {
     pub declared_family: String,
     pub family: FontFallback,
