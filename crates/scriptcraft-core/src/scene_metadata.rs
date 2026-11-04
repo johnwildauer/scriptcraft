@@ -234,6 +234,116 @@ pub(crate) fn scene_arc_names(
     Ok(names)
 }
 
+/// Recognizes only the generated SceneProperties/SceneArcBeats shape that this
+/// module emits and reconciles. The heading's direct Text runs are validated as
+/// managed paragraph content; every other child must be formatting whitespace
+/// or the one generated container. Returned IDs are the nested arc Paragraphs
+/// whose complete subtrees are app-owned by the supported arc contract.
+pub(crate) fn recognized_generated_scene_heading_subtree(
+    heading: &PreservedElement,
+) -> Option<Vec<String>> {
+    if heading.name.local_name != "Paragraph" {
+        return None;
+    }
+    let namespace = heading.name.namespace_uri.clone();
+    let mut properties = None;
+    for (index, child) in heading.children.iter().enumerate() {
+        match child {
+            PreservedNode::Element(element) if element.name.local_name == "SceneProperties" => {
+                if element.name.namespace_uri != namespace || properties.replace(index).is_some() {
+                    return None;
+                }
+            }
+            PreservedNode::Element(element)
+                if element.name.local_name == "Text"
+                    && element.name.namespace_uri == namespace
+                    && element.children.iter().all(|node| {
+                        matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_))
+                    }) => {}
+            PreservedNode::Text(text) | PreservedNode::CData(text)
+                if text.chars().all(char::is_whitespace) => {}
+            _ => return None,
+        }
+    }
+    let properties_index = properties?;
+    let PreservedNode::Element(properties) = &heading.children[properties_index] else {
+        return None;
+    };
+    let generated = generated_scene_properties(&heading.name);
+    if !generated_scene_properties_attributes(properties, &generated) {
+        return None;
+    }
+    let generated_arcs = generated.children.iter().find_map(|node| match node {
+        PreservedNode::Element(element) if element.name.local_name == "SceneArcBeats" => {
+            Some(element)
+        }
+        _ => None,
+    })?;
+
+    let mut arcs = None;
+    for (index, child) in properties.children.iter().enumerate() {
+        match child {
+            PreservedNode::Element(element) if element.name.local_name == "SceneArcBeats" => {
+                if element.name.local_name != generated_arcs.name.local_name
+                    || element.name.namespace_uri != generated_arcs.name.namespace_uri
+                    || arcs.replace(index).is_some()
+                {
+                    return None;
+                }
+            }
+            PreservedNode::Text(text) | PreservedNode::CData(text)
+                if text.chars().all(char::is_whitespace) => {}
+            _ => return None,
+        }
+    }
+    let arcs_index = arcs?;
+    let PreservedNode::Element(arcs) = &properties.children[arcs_index] else {
+        return None;
+    };
+    if !arcs.attributes.is_empty() {
+        return None;
+    }
+
+    let mut association_keys = BTreeSet::new();
+    let mut paragraph_ids = BTreeSet::new();
+    let mut ids = Vec::new();
+    for child in &arcs.children {
+        match child {
+            PreservedNode::Element(beat) if beat.name.local_name == "CharacterArcBeat" => {
+                let (key, _, id) = recognized_beat(beat, &namespace)?;
+                if !association_keys.insert(key) || !paragraph_ids.insert(id.clone()) {
+                    return None;
+                }
+                ids.push(id);
+            }
+            PreservedNode::Text(text) | PreservedNode::CData(text)
+                if text.chars().all(char::is_whitespace) => {}
+            _ => return None,
+        }
+    }
+    Some(ids)
+}
+
+fn generated_scene_properties_attributes(
+    properties: &PreservedElement,
+    generated: &PreservedElement,
+) -> bool {
+    if properties.name.local_name != generated.name.local_name
+        || properties.name.namespace_uri != generated.name.namespace_uri
+        || properties.attributes.len() != generated.attributes.len()
+    {
+        return false;
+    }
+    generated.attributes.iter().all(|expected| {
+        let mut matching = properties.attributes.iter().filter(|attribute| {
+            attribute.name.namespace_uri == expected.name.namespace_uri
+                && attribute.name.local_name == expected.name.local_name
+        });
+        matching.next().is_some_and(|attribute| attribute.value == expected.value)
+            && matching.next().is_none()
+    })
+}
+
 /// Projects canonical Character cues into normalized association keys and
 /// uppercase names for generated and imported scene metadata.
 pub(crate) fn derived_character_projection(elements: &[ScreenplayElement]) -> Vec<(String, String)> {

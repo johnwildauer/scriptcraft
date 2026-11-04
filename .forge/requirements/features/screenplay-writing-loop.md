@@ -319,7 +319,15 @@ project meaning; failures preserve the prior valid destination and unsaved state
     the derived update, not an otherwise valid canonical native Save or Save As. Model/preservation
     validation, managed-source synchronization, required identity allocation, serialization/re-read
     comparison, conflict detection, and atomic publication remain strict and fatal on failure.
-    Existing Scene Heading split/join attachment safe-stops remain unchanged. Once a supported scene
+    An otherwise valid explicit cross-paragraph selection deletion may remove a Scene Heading with
+    its complete recognized generated SceneProperties/SceneArcBeats subtree only when the heading
+    and every supported nested arc Paragraph have unique registered identities with no known
+    references, foreign anchors, duplicate source definitions, or external source uses. This is a
+    deletion-only ownership rule: unknown/ambiguous children and unsafe identities still reject the
+    candidate, while backspace/join, split, and role transitions retain their existing attachment
+    safe-stops. Cast Lists, unrelated source nodes, and unsupported authored arc data are never
+    removed by this allowance. Existing Scene Heading split/join attachment safe-stops remain
+    unchanged. Once a supported scene
     candidate has been validated, its generated SceneProperties/SceneArcBeats element-only structure
     receives LF/two-space formatting at actual source-tree depth; deferred scene subtrees remain
     untouched. Effective xml:space preservation and mixed/opaque child contexts skip cosmetic
@@ -337,7 +345,9 @@ project meaning; failures preserve the prior valid destination and unsaved state
     been established, not as byte-for-byte determinism for first-time output.
     Ordinary text edits, role changes, scene-cast refresh, Save, Save As, and reopen retain
     established paragraph IDs. Splitting retains the original/left ID and allocates one ID for the
-    right paragraph; joining or deleting removes only the removed paragraph's ID. Undo/redo within
+    right paragraph; joining or deleting removes only the removed paragraph's ID, with a Scene
+    Heading's recognized generated arc Paragraph IDs removed only by the bounded, safe explicit
+    cross-paragraph selection-deletion rule in AC-WRITING-003.5. Undo/redo within
     the active session restores the exact identity state in its history snapshots. Content recreated
     after deletion receives a new allocation, but with no historical tombstone registry the
      allocator cannot guarantee uniqueness against every ID deleted in the past. Matching normalized
@@ -462,12 +472,18 @@ project meaning; failures preserve the prior valid destination and unsaved state
     repeated for one unchanged revision nor left pending after a relevant change. Accepted editor
     input already queued for the frame shall be dispatched before scheduled refresh; a pending FDX
     migration modal shall continue to exclude both. Save/Save As shall prepare the complete current
-    derived candidate independently of timer state. Failed refreshes shall remain eligible for a
-    later cadence retry, while safe-stop deferrals shall not retry unchanged work indefinitely and
-    shall be reconsidered after a later relevant revision. Value-free diagnostics may distinguish
-    attempted, completed, skipped, changed, unchanged, and deferred outcomes. This scheduling
-    contract makes no timing guarantee and does not alter scene metadata, source preservation, save
-    safety, modal behavior, or interaction semantics.
+    derived candidate independently of timer state. A fatal refresh failure shall retain its pending
+    scope and failure category, but suspend further timer/direct refresh attempts until a later
+    relevant invalidation reactivates that scope; unrelated edits and due ticks shall not retry it. A
+    relevant scoped invalidation may reactivate only intersecting failed scenes; a complete
+    invalidation may reactivate failed complete work. Fatal failures remain distinct from safe-stop
+    deferrals: deferred work remains pending but is not retried unchanged and is reconsidered after a
+    later relevant revision, while fatal correction, validation, preservation, re-read, conflict, and
+    storage failures are not reported as successful deferrals. Value-free diagnostics may distinguish
+    attempted, completed, skipped, changed, unchanged, deferred, and failed outcomes, including
+    pending/retryable/deferred/failed summaries. This scheduling contract makes no timing guarantee
+    and does not alter scene metadata, source preservation, save safety, modal behavior, or interaction
+    semantics.
 
 ### Secondary Fountain conversion
 

@@ -292,6 +292,10 @@ fn zoom_slider(
             .show_value(false)
             .text(label),
     );
+    #[cfg(test)]
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(egui::Id::new("test-status-zoom-slider-rect"), response.rect);
+    });
     if response.has_focus() {
         if ui.input(|input| input.key_pressed(egui::Key::Home)) {
             *zoom_percent = MIN_ZOOM_PERCENT;
@@ -300,6 +304,11 @@ fn zoom_slider(
         }
     }
     response
+}
+
+#[cfg(test)]
+pub(super) fn zoom_slider_rect_for_test(ctx: &egui::Context) -> Option<Rect> {
+    ctx.data(|data| data.get_temp(egui::Id::new("test-status-zoom-slider-rect")))
 }
 
 fn uses_compact_status_layout(available_width: f32) -> bool {
@@ -639,6 +648,9 @@ impl ViewportPageTracker {
 
         let viewport_center = snapshot.clip.center();
         let content_point = viewport_center + snapshot.scroll_offset;
+        // egui 0.29 lays out ScrollArea children from `inner_rect.min - offset`,
+        // so allocated rectangles move with the viewport. Normalize them into
+        // content coordinates before comparing with the offset-adjusted center.
         let (page_index, page_rect) = snapshot
             .page_rects
             .iter()
@@ -1786,7 +1798,9 @@ mod tests {
             12,
             viewport,
             2.0,
-            vec![rect(20.0, 40.0, 220.0, 340.0)],
+            // This is the actual viewport-relative allocation at offset
+            // (30, 60); translating it yields content rect (50, 100)-(200, 400).
+            vec![rect(20.0, 40.0, 170.0, 340.0)],
             clip,
             Vec2::new(30.0, 60.0),
         );
@@ -1795,7 +1809,40 @@ mod tests {
             tracker.capture_center_anchor(8, 12, viewport, 2.0),
             Some(ViewportCenterAnchor {
                 page_index: 0,
-                page_local_document_point: Vec2::new(90.0, 80.0),
+                page_local_document_point: Vec2::new(75.0, 80.0),
+                outside_page_offset_points: Vec2::new(30.0, 0.0),
+                viewport_center: Pos2::new(200.0, 200.0),
+            })
+        );
+    }
+
+    #[test]
+    fn viewport_center_anchor_selects_later_page_at_nonzero_scroll_offset() {
+        let viewport = rect(0.0, 0.0, 400.0, 400.0);
+        let clip = rect(0.0, 0.0, 400.0, 400.0);
+        let pages = [
+            rect(20.0, -310.0, 220.0, -10.0),
+            rect(20.0, 50.0, 220.0, 350.0),
+        ];
+        let mut tracker = ViewportPageTracker::default();
+        tracker.publish(
+            11,
+            15,
+            viewport,
+            2.0,
+            pages.to_vec(),
+            clip,
+            Vec2::new(0.0, 350.0),
+        );
+
+        // The allocated page rects are viewport-relative: adding the committed
+        // offset puts page 2 at y=400..700. The content center is (200, 550),
+        // independently placing it at (90, 75) in that page's document space.
+        assert_eq!(
+            tracker.capture_center_anchor(12, 15, viewport, 2.0),
+            Some(ViewportCenterAnchor {
+                page_index: 1,
+                page_local_document_point: Vec2::new(90.0, 75.0),
                 outside_page_offset_points: Vec2::ZERO,
                 viewport_center: Pos2::new(200.0, 200.0),
             })

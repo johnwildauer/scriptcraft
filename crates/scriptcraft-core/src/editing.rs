@@ -2,8 +2,8 @@
 
 use crate::{
     cast_list::{self, CastListError},
-    validate_layout_inputs, LayoutInputs, ModelError, Project, Role, ScreenplayElement, TextRun,
-    MAX_ELEMENTS, MAX_TEXT_BYTES,
+    validate_layout_inputs, LayoutInputs, ModelError, Project, Role, ScreenplayElement, StableId,
+    TextRun, MAX_ELEMENTS, MAX_TEXT_BYTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -658,7 +658,28 @@ impl EditingSession {
     /// Deletes text or, when the selection spans paragraph boundaries, removes
     /// the selected source-anchored paragraphs transactionally.
     pub fn delete(&mut self) -> Result<(), EditError> {
-        self.mutate(MutationValidationScope::SingleParagraph, |project, selection, generated, _policy| {
+        let (selection_start, selection_end) = self.selection.ordered();
+        let generated_scene_heading_deletions = if selection_start.element < selection_end.element {
+            self.project
+                .elements
+                .iter()
+                .enumerate()
+                .filter(|(index, element)| {
+                    *index > selection_start.element
+                        && *index <= selection_end.element
+                        && element.role == Role::SceneHeading
+                        && (*index < selection_end.element
+                            || selection_end.offset == element.text.len())
+                })
+                .map(|(_, element)| element.id.clone())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        self.mutate_with_scene_heading_deletions(
+            MutationValidationScope::SingleParagraph,
+            generated_scene_heading_deletions,
+            |project, selection, generated, _policy| {
             let (start, end) = selection.ordered();
             if start != end {
                 replace_range(project, start, end, "")?;
@@ -1070,6 +1091,23 @@ impl EditingSession {
             &EditPolicy,
         ) -> Result<Selection, EditError>,
     {
+        self.mutate_with_scene_heading_deletions(requested_scope, BTreeSet::new(), operation)
+    }
+
+    fn mutate_with_scene_heading_deletions<F>(
+        &mut self,
+        requested_scope: MutationValidationScope,
+        generated_scene_heading_deletions: BTreeSet<StableId>,
+        operation: F,
+    ) -> Result<(), EditError>
+    where
+        F: FnOnce(
+            &mut Project,
+            &Selection,
+            &mut BTreeSet<String>,
+            &EditPolicy,
+        ) -> Result<Selection, EditError>,
+    {
         self.last_validation_was_scoped = false;
         let (scope_start, scope_end) = self.selection.ordered();
         let requested_element = (requested_scope == MutationValidationScope::SingleParagraph
@@ -1138,7 +1176,11 @@ impl EditingSession {
             }
             if let Some(preservation) = project.preservation.as_mut() {
                 preservation
-                    .reconcile_body_structure(&self.project.elements, &mut project.elements)
+                    .reconcile_body_structure(
+                        &self.project.elements,
+                        &mut project.elements,
+                        &generated_scene_heading_deletions,
+                    )
                     .map_err(EditError::Preservation)?;
             }
             validate_full_candidate(&project)?;

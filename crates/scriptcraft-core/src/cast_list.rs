@@ -2,7 +2,7 @@
 
 use crate::preservation::PreservationError;
 use crate::scene_metadata::SceneMetadataError;
-use crate::{ModelError, Project, Role, MAX_TEXT_BYTES};
+use crate::{ModelError, Project, Role, TextRun, MAX_TEXT_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -386,6 +386,15 @@ fn replace_cast_list_text(
         for run in remaining {
             run.text.clear();
         }
+    } else {
+        // A newly inserted managed Cast List can have no semantic runs yet.
+        // Source replacement creates its first `<Text>` run, so publish the
+        // matching semantic run in the same candidate rather than leaving the
+        // next preflight to compare an empty projection with nonempty source.
+        element.runs.push(TextRun {
+            text: replacement.to_owned(),
+            attributes: Vec::new(),
+        });
     }
     Ok(())
 }

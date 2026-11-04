@@ -45,12 +45,28 @@ content. Duplicate, ambiguous, or unknown non-text arc structures remain
 preserved and defer only that scene's derived refresh; they do not prevent an
 otherwise valid canonical native Save or Save As, and independent supported
 scenes may still update.
+An explicit cross-paragraph selection deletion may remove a Scene Heading with
+its recognized generated SceneProperties/SceneArcBeats subtree only after the
+heading and all nested arc Paragraph identities pass unique-registration,
+reference, anchor, and external-source-use checks. This narrow deletion rule does
+not authorize removal of unknown or ambiguous attachments, Cast Lists, or
+unrelated source nodes, and does not relax backspace/join, split, or role-change
+safe-stops.
 Cast List presentation consumes uppercase synchronized scene-arc names with the
 existing alphabetical case-insensitive ordering. Lists in deferred scenes, and
 formatted lists that cannot be corrected without rewriting their runs, remain
 unchanged rather than blocking canonical saves. This bounded projection does
 not promise editing of other Final Draft beat-board structures or recalculation
 of scene page/length values.
+
+Desktop derived refresh is scheduled at no more than the existing one-second
+cadence for relevant pending work; unchanged successfully attempted revisions
+and irrelevant edits do not cause repeated reconciliation. A fatal refresh keeps
+its pending scope and error category but is suspended from retries until relevant
+invalidation, separately from nonfatal safe-stop deferral. Explicit Save/Save As
+prepares a complete derived candidate independently of timer suspension. Refresh
+diagnostics are value-free counts/categories, not screenplay content or evidence
+of user-perceived performance.
 
 The writing experience supports continuous editing and repeatable fixed-page
 preview from shared layout semantics for the same effective runtime layout

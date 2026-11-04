@@ -129,10 +129,18 @@ struct PerformanceMeasurements {
     derived_refresh_irrelevant_skips: u64,
     derived_scenes_requested: u64,
     derived_scenes_attempted: u64,
+    derived_scenes_changed: u64,
+    derived_scenes_unchanged: u64,
     derived_scenes_deferred: u64,
     derived_project_candidate_clones: u64,
     derived_scene_candidate_clones: u64,
     derived_redundant_preservation_clones: u64,
+    zoom_anchor_capture_successes: u64,
+    zoom_anchor_capture_misses: u64,
+    zoom_manual_scroll_cancellations: u64,
+    zoom_compensations_queued: u64,
+    zoom_geometry_published: u64,
+    zoom_anchor_consumed: u64,
     frame_nanos: u128,
     event_nanos: u128,
     layout_nanos: u128,
@@ -209,6 +217,12 @@ impl PerformanceMeasurements {
             derived_scenes_attempted: self
                 .derived_scenes_attempted
                 .saturating_sub(baseline.derived_scenes_attempted),
+            derived_scenes_changed: self
+                .derived_scenes_changed
+                .saturating_sub(baseline.derived_scenes_changed),
+            derived_scenes_unchanged: self
+                .derived_scenes_unchanged
+                .saturating_sub(baseline.derived_scenes_unchanged),
             derived_scenes_deferred: self
                 .derived_scenes_deferred
                 .saturating_sub(baseline.derived_scenes_deferred),
@@ -221,6 +235,24 @@ impl PerformanceMeasurements {
             derived_redundant_preservation_clones: self
                 .derived_redundant_preservation_clones
                 .saturating_sub(baseline.derived_redundant_preservation_clones),
+            zoom_anchor_capture_successes: self
+                .zoom_anchor_capture_successes
+                .saturating_sub(baseline.zoom_anchor_capture_successes),
+            zoom_anchor_capture_misses: self
+                .zoom_anchor_capture_misses
+                .saturating_sub(baseline.zoom_anchor_capture_misses),
+            zoom_manual_scroll_cancellations: self
+                .zoom_manual_scroll_cancellations
+                .saturating_sub(baseline.zoom_manual_scroll_cancellations),
+            zoom_compensations_queued: self
+                .zoom_compensations_queued
+                .saturating_sub(baseline.zoom_compensations_queued),
+            zoom_geometry_published: self
+                .zoom_geometry_published
+                .saturating_sub(baseline.zoom_geometry_published),
+            zoom_anchor_consumed: self
+                .zoom_anchor_consumed
+                .saturating_sub(baseline.zoom_anchor_consumed),
             frame_nanos: self.frame_nanos.saturating_sub(baseline.frame_nanos),
             event_nanos: self.event_nanos.saturating_sub(baseline.event_nanos),
             layout_nanos: self.layout_nanos.saturating_sub(baseline.layout_nanos),
@@ -322,7 +354,7 @@ impl PerformanceDiagnostics {
         let totals = self.totals;
         let benchmark = self.benchmark_delta();
         format!(
-            "profile={build_profile} operation={} frames={} events={} layouts={} cache-hits={} layout-identity-changes={} pages-considered={} pages-culled={} pages-painted={} lines={} selection-spans={} galleys-built={} galleys-reused={} wraps-built={} wraps-reused={} caret-lookups={} interaction-indexed={} interaction-linear={} interaction-index-entries={} derived-attempted={} derived-completed={} derived-skipped={} derived-irrelevant-skips={} derived-changed={} derived-unchanged={} derived-deferred={} derived-failed={} derived-scenes-requested={} derived-scenes-attempted={} derived-scenes-deferred={} derived-project-candidates={} derived-scene-candidates={} derived-redundant-preservation-clones={} frame-ns={} event-ns={} layout-lookup-ns={} element-wrap-ns={} page-paint-ns={} caret-lookup-ns={} derived-refresh-ns={} benchmark-frames={} benchmark-layouts={} benchmark-pages-painted={} benchmark-wraps-built={} benchmark-linear-queries={} benchmark-indexed-queries={} benchmark-index-entries={}",
+            "profile={build_profile} operation={} frames={} events={} layouts={} cache-hits={} layout-identity-changes={} pages-considered={} pages-culled={} pages-painted={} lines={} selection-spans={} galleys-built={} galleys-reused={} wraps-built={} wraps-reused={} caret-lookups={} interaction-indexed={} interaction-linear={} interaction-index-entries={} derived-attempted={} derived-completed={} derived-skipped={} derived-irrelevant-skips={} derived-changed={} derived-unchanged={} derived-deferred={} derived-failed={} derived-scenes-requested={} derived-scenes-attempted={} derived-scenes-changed={} derived-scenes-unchanged={} derived-scenes-deferred={} derived-project-candidates={} derived-scene-candidates={} derived-redundant-preservation-clones={} zoom-anchor-capture-success={} zoom-anchor-capture-miss={} zoom-scroll-canceled={} zoom-compensation-queued={} zoom-geometry-published={} zoom-anchor-consumed={} frame-ns={} event-ns={} layout-lookup-ns={} element-wrap-ns={} page-paint-ns={} caret-lookup-ns={} derived-refresh-ns={} benchmark-frames={} benchmark-layouts={} benchmark-pages-painted={} benchmark-wraps-built={} benchmark-linear-queries={} benchmark-indexed-queries={} benchmark-index-entries={}",
             self.benchmark_operation.label(),
             totals.frames,
             totals.events,
@@ -352,10 +384,18 @@ impl PerformanceDiagnostics {
             totals.derived_refresh_failed,
             totals.derived_scenes_requested,
             totals.derived_scenes_attempted,
+            totals.derived_scenes_changed,
+            totals.derived_scenes_unchanged,
             totals.derived_scenes_deferred,
             totals.derived_project_candidate_clones,
             totals.derived_scene_candidate_clones,
             totals.derived_redundant_preservation_clones,
+            totals.zoom_anchor_capture_successes,
+            totals.zoom_anchor_capture_misses,
+            totals.zoom_manual_scroll_cancellations,
+            totals.zoom_compensations_queued,
+            totals.zoom_geometry_published,
+            totals.zoom_anchor_consumed,
             totals.frame_nanos,
             totals.event_nanos,
             totals.layout_lookup_nanos,
@@ -432,6 +472,8 @@ struct ScriptCraftApp {
     #[cfg(test)]
     last_scroll_page_rects: Vec<egui::Rect>,
     #[cfg(test)]
+    last_painted_page_rects: Vec<(usize, egui::Rect)>,
+    #[cfg(test)]
     focus_mode_status_item_rect: Option<egui::Rect>,
     #[cfg(test)]
     status_panel_rect: Option<egui::Rect>,
@@ -503,6 +545,8 @@ impl ScriptCraftApp {
             last_scroll_horizontal_item_spacing: 0.0,
             #[cfg(test)]
             last_scroll_page_rects: Vec::new(),
+            #[cfg(test)]
+            last_painted_page_rects: Vec::new(),
             #[cfg(test)]
             focus_mode_status_item_rect: None,
             #[cfg(test)]
@@ -625,6 +669,14 @@ impl ScriptCraftApp {
                     outcome.attempted_scenes,
                 );
                 add_performance_counter(
+                    &mut self.performance.derived_scenes_changed,
+                    outcome.changed_scenes,
+                );
+                add_performance_counter(
+                    &mut self.performance.derived_scenes_unchanged,
+                    outcome.unchanged_scenes,
+                );
+                add_performance_counter(
                     &mut self.performance.derived_scenes_deferred,
                     outcome.deferred_scenes,
                 );
@@ -665,12 +717,21 @@ impl ScriptCraftApp {
 
     fn capture_pending_zoom_anchor(&mut self, ctx: &egui::Context) {
         if self.pending_zoom_anchor.is_none() {
-            self.pending_zoom_anchor = self.page_geometry.capture_center_anchor(
+            let anchor = self.page_geometry.capture_center_anchor(
                 self.performance.frames,
                 self.session.revision(),
                 ctx.screen_rect(),
                 self.page_scale.unwrap_or(f32::NAN),
             );
+            if anchor.is_some() {
+                add_performance_counter(
+                    &mut self.performance.zoom_anchor_capture_successes,
+                    1,
+                );
+            } else {
+                add_performance_counter(&mut self.performance.zoom_anchor_capture_misses, 1);
+            }
+            self.pending_zoom_anchor = anchor;
         }
     }
 
@@ -1216,6 +1277,8 @@ impl ScriptCraftApp {
     ) {
         let scale = metrics.scale;
         let paint_started = Instant::now();
+        #[cfg(test)]
+        self.last_painted_page_rects.push((page_index, page_rect));
         self.performance.painted_pages = self.performance.painted_pages.saturating_add(1);
         add_performance_counter(
             &mut self.performance.lines_submitted,
@@ -1376,19 +1439,40 @@ impl ScriptCraftApp {
         };
         self.rendered_revision = Some(self.session.revision());
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
+        let scroll_outer_rect = ui.available_rect_before_wrap();
         let mut page_rects = Vec::with_capacity(layout.pages.len());
         #[cfg(test)]
         let mut horizontal_item_spacing = 0.0;
-        #[cfg(test)]
-        let scroll_outer_rect = ui.available_rect_before_wrap();
         let mut rendered_scale = 1.0;
         let reveal_intent = self.reveal_intent;
         let pending_zoom_anchor = self.pending_zoom_anchor;
-        let mut zoom_compensation_queued = false;
+        #[cfg(test)]
+        self.last_painted_page_rects.clear();
+        let zoom_compensation_offset = pending_zoom_anchor.and_then(|anchor| {
+            prepaint_zoom_scroll_offset(
+                anchor,
+                layout.pages.len(),
+                layout.inputs.paper_width as f32,
+                layout.inputs.paper_height as f32,
+                layout.inputs.font_size as f32,
+                self.zoom_percent,
+                scroll_outer_rect,
+                ui.spacing().item_spacing.y,
+            )
+        });
+        let zoom_compensation_queued = zoom_compensation_offset.is_some();
+        if zoom_compensation_queued {
+            add_performance_counter(
+                &mut self.performance.zoom_compensations_queued,
+                1,
+            );
+        }
         let selection = self.session.selection();
-        let scroll_output = egui::ScrollArea::both()
-            .id_salt("page-editor-scroll")
-            .show(ui, |ui| {
+        let mut scroll_area = egui::ScrollArea::both().id_salt("page-editor-scroll");
+        if let Some(offset) = zoom_compensation_offset {
+            scroll_area = scroll_area.scroll_offset(offset);
+        }
+        let scroll_output = scroll_area.show(ui, |ui| {
                 // ScrollArea's child max rect is the actual inner viewport after
                 // reserved scrollbar width and parent clipping have been applied.
                 let viewport_width = ui.available_width().max(0.0);
@@ -1433,18 +1517,6 @@ impl ScriptCraftApp {
                         page_rects.push(page_rect);
                     });
                     ui.add_space(PAGE_VERTICAL_GAP);
-                }
-                if let Some(target) = pending_zoom_anchor
-                    .and_then(|anchor| viewport_center_anchor_target(anchor, &page_rects, scale))
-                {
-                    // `scroll_to_rect` applies one centered request in both axes.
-                    // The page-local coordinate scales with the page; the separately
-                    // represented gap/edge displacement and page-row padding do not.
-                    ui.scroll_to_rect(
-                        egui::Rect::from_center_size(target, Vec2::splat(0.1)),
-                        Some(egui::Align::Center),
-                    );
-                    zoom_compensation_queued = true;
                 }
                 let paint_range = viewport_paint_page_range(&page_rects, editor_clip);
                 let painted_in_range = paint_range.map_or(0, |(first, last)| {
@@ -1567,14 +1639,16 @@ impl ScriptCraftApp {
                 }
             });
         let scale = rendered_scale;
+        let published_scroll_offset = scroll_output.state.offset;
+        let published_page_rects = page_rects.clone();
         #[cfg(test)]
         {
-            self.last_scroll_offset = scroll_output.state.offset;
+            self.last_scroll_offset = published_scroll_offset;
             self.last_scroll_outer_rect = scroll_outer_rect;
             self.last_scroll_inner_rect = scroll_output.inner_rect;
             self.last_scroll_content_size = scroll_output.content_size;
             self.last_scroll_horizontal_item_spacing = horizontal_item_spacing;
-            self.last_scroll_page_rects.clone_from(&page_rects);
+            self.last_scroll_page_rects.clone_from(&published_page_rects);
         }
         if !zoom_compensation_queued {
             self.reveal_intent = RevealIntent::None;
@@ -1582,15 +1656,16 @@ impl ScriptCraftApp {
 
         let actual_clip = scroll_output.inner_rect.intersect(ui.clip_rect());
         let geometry_count_matches = page_rects.len() == layout.pages.len();
+        let zoom_anchor_was_pending = pending_zoom_anchor.is_some();
         let needs_repaint = if geometry_count_matches {
             self.page_geometry.publish(
                 self.performance.frames,
                 self.session.revision(),
                 ui.ctx().screen_rect(),
                 scale,
-                page_rects.clone(),
+                published_page_rects,
                 actual_clip,
-                scroll_output.state.offset,
+                published_scroll_offset,
             )
         } else {
             self.page_geometry.invalidate();
@@ -1599,6 +1674,10 @@ impl ScriptCraftApp {
         if geometry_count_matches {
             // The request is consumed only after the scaled page geometry has
             // been published. Invalid/missing anchors simply preserve old behavior.
+            if zoom_anchor_was_pending {
+                add_performance_counter(&mut self.performance.zoom_geometry_published, 1);
+                add_performance_counter(&mut self.performance.zoom_anchor_consumed, 1);
+            }
             self.pending_zoom_anchor = None;
         }
         if needs_repaint {
@@ -1784,6 +1863,12 @@ impl ScriptCraftApp {
         if ctx.input(|input| input.raw_scroll_delta != Vec2::ZERO) {
             // Explicit user scrolling wins over a not-yet-applied zoom request.
             // It must not be pulled back to the old viewport center afterward.
+            if self.pending_zoom_anchor.is_some() {
+                add_performance_counter(
+                    &mut self.performance.zoom_manual_scroll_cancellations,
+                    1,
+                );
+            }
             self.pending_zoom_anchor = None;
             self.reveal_intent = RevealIntent::None;
         }
@@ -2078,6 +2163,55 @@ fn page_scroll_geometry(viewport_width: f32, page_width: f32) -> PageScrollGeome
         leading_padding: ((content_width - page_width) / 2.0).max(0.0),
         horizontal_overflow: buffered_page_width > viewport_width,
     }
+}
+
+fn prepaint_zoom_scroll_offset(
+    anchor: ViewportCenterAnchor,
+    page_count: usize,
+    paper_width: f32,
+    paper_height: f32,
+    base_font_size: f32,
+    zoom_percent: u16,
+    outer_rect: egui::Rect,
+    vertical_item_spacing: f32,
+) -> Option<Vec2> {
+    if anchor.page_index >= page_count || page_count == 0 {
+        return None;
+    }
+    // egui's overlay scrollbars do not consume the ScrollArea inner viewport.
+    // Keep planning dimensions identical to the rect that will paint this frame.
+    let inner_size = outer_rect.size().max(Vec2::ZERO);
+    let metrics = presentation_metrics_at_zoom(
+        inner_size.x,
+        paper_width,
+        base_font_size,
+        zoom_percent,
+    );
+    let geometry = page_scroll_geometry(inner_size.x, metrics.page_width);
+    let page_height = paper_height * metrics.scale;
+    // `live_document_surface` allocates each page row and then a 12-point
+    // spacer in egui's top-down layout. The layout also applies its vertical
+    // item spacing between rows, which is part of both the page stride and
+    // the committed scroll extent (the first page itself starts at outer.min).
+    let page_stride = page_height + PAGE_VERTICAL_GAP + vertical_item_spacing;
+    let content_size = Vec2::new(
+        geometry.content_width,
+        page_count as f32 * page_stride,
+    );
+    let page_top = anchor.page_index as f32 * page_stride;
+    let content_target = outer_rect.min
+        + Vec2::new(geometry.leading_padding, page_top)
+        + anchor.page_local_document_point * metrics.scale
+        + anchor.outside_page_offset_points;
+    let viewport_center = outer_rect.min + inner_size * 0.5;
+    let requested_offset = content_target - viewport_center;
+    let max_offset = (content_size - inner_size).max(Vec2::ZERO);
+    (requested_offset.x.is_finite() && requested_offset.y.is_finite()).then(|| {
+        Vec2::new(
+            requested_offset.x.clamp(0.0, max_offset.x),
+            requested_offset.y.clamp(0.0, max_offset.y),
+        )
+    })
 }
 
 fn viewport_center_anchor_target(
@@ -3229,6 +3363,8 @@ mod tests {
         performance.derived_refresh_irrelevant_skips = 2;
         performance.derived_scenes_requested = 8;
         performance.derived_scenes_attempted = 6;
+        performance.derived_scenes_changed = 4;
+        performance.derived_scenes_unchanged = 2;
         performance.derived_scenes_deferred = 1;
         performance.derived_project_candidate_clones = 4;
         performance.derived_scene_candidate_clones = 5;
@@ -3260,6 +3396,8 @@ mod tests {
         assert!(projected.contains("derived-irrelevant-skips=2"));
         assert!(projected.contains("derived-scenes-requested=8"));
         assert!(projected.contains("derived-scenes-attempted=6"));
+        assert!(projected.contains("derived-scenes-changed=4"));
+        assert!(projected.contains("derived-scenes-unchanged=2"));
         assert!(projected.contains("derived-scenes-deferred=1"));
         assert!(projected.contains("derived-project-candidates=4"));
         assert!(projected.contains("derived-scene-candidates=5"));
@@ -4382,6 +4520,190 @@ mod tests {
     }
 
     #[test]
+    fn v3_wo001_imported_repeated_refresh_records_each_scheduler_outcome() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content>
+<Paragraph Type="Scene Heading" ID="heading"><Text>INT. ROOM - DAY</Text></Paragraph>
+<Paragraph Type="Character" ID="alice"><Text>ALICE</Text></Paragraph>
+<Paragraph Type="Character" ID="bob"><Text>BOB</Text></Paragraph>
+<Paragraph Type="Cast List" ID="cast"><Text>(OLD</Text><Text>)</Text></Paragraph>
+</Content></FinalDraft>"#;
+        let project = fdx::read_v6(source)
+            .unwrap_or_else(|_| unreachable!("imported repeated-refresh fixture is valid"))
+            .project;
+        app.session
+            .replace_with_saved(project)
+            .unwrap_or_else(|_| unreachable!("imported repeated-refresh fixture forms a session"));
+        let context = test_context();
+        let mut at = Instant::now();
+        app.next_cast_list_refresh = at;
+
+        fn assert_pending_affected(app: &ScriptCraftApp) {
+            let pending = app.session.pending_derived_work_summary();
+            assert!(pending.pending && !pending.complete && pending.retryable);
+            assert_eq!(pending.affected_scene_count, 1);
+            assert_eq!(pending.deferred_scene_count, 0);
+            assert_eq!(pending.failed_complete, false);
+            assert_eq!(pending.failed_scene_count, 0);
+        }
+
+        fn assert_clear(app: &ScriptCraftApp) {
+            assert_eq!(
+                app.session.pending_derived_work_summary(),
+                scriptcraft_core::editing::DerivedWorkSummary::default()
+            );
+        }
+
+        fn assert_outcome_delta(
+            app: &ScriptCraftApp,
+            before: PerformanceMeasurements,
+            requested: u64,
+            attempted: u64,
+            changed: u64,
+            unchanged: u64,
+            deferred: u64,
+            failed: u64,
+            refresh_attempts: u64,
+        ) {
+            let delta = app.performance.delta_since(before);
+            assert_eq!(
+                (
+                    delta.derived_scenes_requested,
+                    delta.derived_scenes_attempted,
+                    delta.derived_scenes_changed,
+                    delta.derived_scenes_unchanged,
+                    delta.derived_scenes_deferred,
+                    delta.derived_refresh_failed,
+                    delta.derived_refresh_attempts,
+                ),
+                (
+                    requested,
+                    attempted,
+                    changed,
+                    unchanged,
+                    deferred,
+                    failed,
+                    refresh_attempts,
+                )
+            );
+        }
+
+        // The imported session's first pass is Complete; every later pass below
+        // must follow a real Character edit and affected-scene invalidation.
+        let initial = app.session.pending_derived_work_summary();
+        assert!(initial.pending && initial.complete && initial.retryable);
+        let before = app.performance.snapshot_for_test();
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_clear(&app);
+        assert_eq!(app.session.project().elements[3].text, "(ALICE, BOB)");
+        assert_eq!(app.session.project().elements[3].runs[0].text, "(ALICE, BOB)");
+        assert_eq!(app.session.project().elements[3].runs[1].text, "");
+        assert_outcome_delta(&app, before, 1, 1, 1, 0, 0, 0, 1);
+
+        // A due timer with no invalidation records the nonretryable/irrelevant
+        // skip without requesting or attempting any scene.
+        at += CAST_LIST_REFRESH_INTERVAL;
+        let before = app.performance.snapshot_for_test();
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_clear(&app);
+        assert_outcome_delta(&app, before, 0, 0, 0, 0, 0, 0, 0);
+
+        fn replace_text(app: &mut ScriptCraftApp, element: usize, replacement: &str) {
+            let length = app.session.project().elements[element].text.len();
+            app.session
+                .set_selection(Selection {
+                    anchor: Position { element, offset: 0 },
+                    focus: Position { element, offset: length },
+                })
+                .unwrap_or_else(|_| unreachable!("selected imported Character text is valid"));
+            app.session
+                .insert(replacement)
+                .unwrap_or_else(|_| unreachable!("imported Character replacement is valid"));
+        }
+
+        // Case-only spelling change invalidates the scene but leaves its
+        // canonical Cast List and arc projection unchanged.
+        replace_text(&mut app, 2, "bob");
+        assert_pending_affected(&app);
+        at += CAST_LIST_REFRESH_INTERVAL;
+        let before = app.performance.snapshot_for_test();
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_clear(&app);
+        assert_eq!(app.session.project().elements[3].text, "(ALICE, BOB)");
+        assert_outcome_delta(&app, before, 1, 1, 0, 1, 0, 0, 1);
+
+        replace_text(&mut app, 1, "ALISON");
+        assert_pending_affected(&app);
+        at += CAST_LIST_REFRESH_INTERVAL;
+        let before = app.performance.snapshot_for_test();
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_clear(&app);
+        assert_eq!(app.session.project().elements[3].text, "(ALISON, BOB)");
+        assert_eq!(app.session.project().elements[3].runs[0].text, "(ALISON, BOB)");
+        assert_eq!(app.session.project().elements[3].runs[1].text, "");
+        assert_outcome_delta(&app, before, 1, 1, 1, 0, 0, 0, 1);
+
+        // Removing the renamed cue's text removes its derived name while
+        // preserving the imported Character paragraph as an editable cue.
+        let length = app.session.project().elements[1].text.len();
+        app.session
+            .set_selection(Selection {
+                anchor: Position { element: 1, offset: 0 },
+                focus: Position { element: 1, offset: length },
+            })
+            .unwrap_or_else(|_| unreachable!("selected imported Character text is valid"));
+        app.session
+            .delete()
+            .unwrap_or_else(|_| unreachable!("selected Character text can be removed"));
+        assert_pending_affected(&app);
+        at += CAST_LIST_REFRESH_INTERVAL;
+        let before = app.performance.snapshot_for_test();
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_clear(&app);
+        assert_eq!(app.session.project().elements[1].text, "");
+        assert_eq!(app.session.project().elements[3].text, "(BOB)");
+        assert_outcome_delta(&app, before, 1, 1, 1, 0, 0, 0, 1);
+
+        // Adding a cue name to that same blank imported Character exercises a
+        // third completed affected-scene refresh in the same editing session.
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 1,
+                offset: 0,
+            }))
+            .unwrap_or_else(|_| unreachable!("blank imported Character caret is valid"));
+        app.session
+            .insert("CAROL")
+            .unwrap_or_else(|_| unreachable!("new Character cue text is valid"));
+        assert_pending_affected(&app);
+        at += CAST_LIST_REFRESH_INTERVAL;
+        let before = app.performance.snapshot_for_test();
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_clear(&app);
+        assert_eq!(app.session.project().elements[3].text, "(BOB, CAROL)");
+        assert_eq!(app.session.project().elements[3].runs[0].text, "(BOB, CAROL)");
+        assert_eq!(app.session.project().elements[3].runs[1].text, "");
+        assert_outcome_delta(&app, before, 1, 1, 1, 0, 0, 0, 1);
+
+        let serialized = fdx::write_v6(app.session.project())
+            .unwrap_or_else(|_| unreachable!("repeatedly refreshed imported scene serializes"));
+        let serialized = String::from_utf8(serialized)
+            .unwrap_or_else(|_| unreachable!("native FDX output is UTF-8"));
+        assert!(serialized.contains("<CharacterArcBeat Name=\"BOB\">"));
+        assert!(serialized.contains("<CharacterArcBeat Name=\"CAROL\">"));
+        let summary = app.performance.safe_summary();
+        assert!(summary.contains("derived-scenes-requested=5"));
+        assert!(summary.contains("derived-scenes-attempted=5"));
+        assert!(summary.contains("derived-scenes-changed=4"));
+        assert!(summary.contains("derived-scenes-unchanged=1"));
+        assert!(summary.contains("derived-scenes-deferred=0"));
+        assert!(summary.contains("derived-failed=0"));
+        assert!(!summary.contains("ALICE"));
+        assert!(!summary.contains("CAROL"));
+        assert!(!summary.contains("INT. ROOM"));
+    }
+
+    #[test]
     fn successful_save_publishes_derived_candidate_before_a_pending_timer_tick() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         let mut project = Project::new().unwrap_or_else(|_| unreachable!());
@@ -4444,6 +4766,12 @@ mod tests {
         assert_eq!(app.session.project().elements[2].text, "(stale)");
         assert_eq!(app.status, "Existing status remains visible");
         assert_eq!(app.performance.derived_refresh_deferred, 1);
+        assert_eq!(app.performance.derived_scenes_requested, 1);
+        assert_eq!(app.performance.derived_scenes_attempted, 1);
+        assert_eq!(app.performance.derived_scenes_changed, 0);
+        assert_eq!(app.performance.derived_scenes_unchanged, 0);
+        assert_eq!(app.performance.derived_scenes_deferred, 1);
+        assert_eq!(app.performance.derived_refresh_failed, 0);
 
         // An unrelated Action revision must not retry a scene that is already
         // deferred; the core summary distinguishes pending from retryable work.
@@ -4460,6 +4788,12 @@ mod tests {
         assert_eq!(app.performance.derived_refresh_attempts, 1);
         assert_eq!(app.performance.derived_refresh_deferred, 1);
         assert_eq!(app.performance.derived_refresh_skipped, 1);
+        assert_eq!(app.performance.derived_scenes_requested, 1);
+        assert_eq!(app.performance.derived_scenes_attempted, 1);
+        assert_eq!(app.performance.derived_scenes_changed, 0);
+        assert_eq!(app.performance.derived_scenes_unchanged, 0);
+        assert_eq!(app.performance.derived_scenes_deferred, 1);
+        assert_eq!(app.performance.derived_refresh_failed, 0);
 
         app.session
             .set_selection(Selection {
@@ -4474,6 +4808,12 @@ mod tests {
         app.refresh_cast_lists_on_schedule(&context, changed_revision_refresh);
         assert_eq!(app.performance.derived_refresh_attempts, 2);
         assert_eq!(app.performance.derived_refresh_deferred, 2);
+        assert_eq!(app.performance.derived_scenes_requested, 2);
+        assert_eq!(app.performance.derived_scenes_attempted, 2);
+        assert_eq!(app.performance.derived_scenes_changed, 0);
+        assert_eq!(app.performance.derived_scenes_unchanged, 0);
+        assert_eq!(app.performance.derived_scenes_deferred, 2);
+        assert_eq!(app.performance.derived_refresh_failed, 0);
     }
 
     #[test]
@@ -4519,6 +4859,11 @@ mod tests {
         assert_eq!(app.performance.derived_refresh_attempts, 1);
         assert_eq!(app.performance.derived_refresh_failed, 1);
         assert_eq!(app.performance.derived_refresh_deferred, 0);
+        assert_eq!(app.performance.derived_scenes_requested, 0);
+        assert_eq!(app.performance.derived_scenes_attempted, 0);
+        assert_eq!(app.performance.derived_scenes_changed, 0);
+        assert_eq!(app.performance.derived_scenes_unchanged, 0);
+        assert_eq!(app.performance.derived_scenes_deferred, 0);
         assert!(app.status.contains("refresh failed and is suspended"));
         assert!(app.status.contains("failure category:"));
 
@@ -4529,6 +4874,11 @@ mod tests {
         }
         assert_eq!(app.performance.derived_refresh_attempts, 1);
         assert_eq!(app.performance.derived_refresh_failed, 1);
+        assert_eq!(app.performance.derived_scenes_requested, 0);
+        assert_eq!(app.performance.derived_scenes_attempted, 0);
+        assert_eq!(app.performance.derived_scenes_changed, 0);
+        assert_eq!(app.performance.derived_scenes_unchanged, 0);
+        assert_eq!(app.performance.derived_scenes_deferred, 0);
 
         // An unrelated Action edit does not wake a complete correction that
         // failed; a relevant Character edit permits exactly one new attempt.
@@ -4545,6 +4895,11 @@ mod tests {
         app.refresh_cast_lists_on_schedule(&context, at);
         assert_eq!(app.performance.derived_refresh_attempts, 1);
         assert!(!app.session.pending_derived_work_summary().retryable);
+        assert_eq!(app.performance.derived_scenes_requested, 0);
+        assert_eq!(app.performance.derived_scenes_attempted, 0);
+        assert_eq!(app.performance.derived_scenes_changed, 0);
+        assert_eq!(app.performance.derived_scenes_unchanged, 0);
+        assert_eq!(app.performance.derived_scenes_deferred, 0);
 
         app.session
             .set_selection(Selection::caret(Position {
@@ -4560,11 +4915,21 @@ mod tests {
         assert_eq!(app.performance.derived_refresh_attempts, 2);
         assert_eq!(app.performance.derived_refresh_failed, 2);
         assert!(!app.session.pending_derived_work_summary().retryable);
+        assert_eq!(app.performance.derived_scenes_requested, 0);
+        assert_eq!(app.performance.derived_scenes_attempted, 0);
+        assert_eq!(app.performance.derived_scenes_changed, 0);
+        assert_eq!(app.performance.derived_scenes_unchanged, 0);
+        assert_eq!(app.performance.derived_scenes_deferred, 0);
 
         at += CAST_LIST_REFRESH_INTERVAL;
         app.refresh_cast_lists_on_schedule(&context, at);
         assert_eq!(app.performance.derived_refresh_attempts, 2);
         assert_eq!(app.performance.derived_refresh_failed, 2);
+        assert_eq!(app.performance.derived_scenes_requested, 0);
+        assert_eq!(app.performance.derived_scenes_attempted, 0);
+        assert_eq!(app.performance.derived_scenes_changed, 0);
+        assert_eq!(app.performance.derived_scenes_unchanged, 0);
+        assert_eq!(app.performance.derived_scenes_deferred, 0);
     }
 
     fn render_app_frame_with_fullscreen(
@@ -5255,6 +5620,196 @@ mod tests {
         })
     }
 
+    fn render_full_application_frame(
+        context: &egui::Context,
+        app: &mut ScriptCraftApp,
+        mut input: egui::RawInput,
+    ) -> egui::FullOutput {
+        eframe::App::raw_input_hook(app, context, &mut input);
+        context.run(input, |context| app.update(context))
+    }
+
+    fn zoom_lifecycle_input(screen: egui::Rect, events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(screen),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn independent_published_zoom_anchor(app: &ScriptCraftApp) -> ViewportCenterAnchor {
+        let scale = app.page_scale.unwrap_or(f32::NAN);
+        assert!(scale.is_finite() && scale > 0.0);
+        assert!(!app.last_scroll_page_rects.is_empty());
+        let viewport_center = app.last_scroll_inner_rect.center();
+        let content_point = viewport_center + app.last_scroll_offset;
+        // egui 0.29.1 sets the ScrollArea child max-rect origin to
+        // `inner_rect.min - state.offset`, while the viewport clip stays in
+        // viewport/screen coordinates. Independently normalize those allocated
+        // rectangles with the committed offset; page selection/local geometry
+        // below intentionally does not call production capture.
+        let content_page_rects = app
+            .last_scroll_page_rects
+            .iter()
+            .map(|rect| rect.translate(app.last_scroll_offset))
+            .collect::<Vec<_>>();
+        let distance_squared = |rect: egui::Rect| {
+            let dx = if content_point.x < rect.left() {
+                rect.left() - content_point.x
+            } else if content_point.x > rect.right() {
+                content_point.x - rect.right()
+            } else {
+                0.0
+            };
+            let dy = if content_point.y < rect.top() {
+                rect.top() - content_point.y
+            } else if content_point.y > rect.bottom() {
+                content_point.y - rect.bottom()
+            } else {
+                0.0
+            };
+            dx * dx + dy * dy
+        };
+        let (page_index, page_rect) = content_page_rects
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, rect)| rect.contains(content_point))
+            .or_else(|| {
+                content_page_rects
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .min_by(|(_, left), (_, right)| {
+                        distance_squared(*left).total_cmp(&distance_squared(*right))
+                    })
+            })
+            .unwrap_or_else(|| unreachable!("published geometry has a page"));
+        let bounded = egui::pos2(
+            content_point.x.clamp(page_rect.left(), page_rect.right()),
+            content_point.y.clamp(page_rect.top(), page_rect.bottom()),
+        );
+        ViewportCenterAnchor {
+            page_index,
+            page_local_document_point: (bounded - page_rect.min) / scale,
+            outside_page_offset_points: content_point - bounded,
+            viewport_center,
+        }
+    }
+
+    fn assert_zoom_anchor_preserved(
+        old_anchor: ViewportCenterAnchor,
+        new_anchor: ViewportCenterAnchor,
+        app: &ScriptCraftApp,
+    ) -> Result<(), String> {
+        let max_offset = Vec2::new(
+            (app.last_scroll_content_size.x - app.last_scroll_inner_rect.width()).max(0.0),
+            (app.last_scroll_content_size.y - app.last_scroll_inner_rect.height()).max(0.0),
+        );
+        let page = app.last_scroll_page_rects
+            .get(old_anchor.page_index)
+            .unwrap_or_else(|| unreachable!("the original page remains in published geometry"));
+        let scale = app.page_scale.unwrap_or(f32::NAN);
+        let page_origin = page.min + app.last_scroll_offset;
+        let scaled_local_point = old_anchor.page_local_document_point * scale;
+        let requested_offset = page_origin
+            + scaled_local_point
+            + old_anchor.outside_page_offset_points
+            - old_anchor.viewport_center;
+        let recipe_offset = Vec2::new(
+            requested_offset.x.clamp(0.0, max_offset.x),
+            requested_offset.y.clamp(0.0, max_offset.y),
+        );
+        if (app.last_scroll_offset.x - recipe_offset.x).abs() >= 0.75
+            || (app.last_scroll_offset.y - recipe_offset.y).abs() >= 0.75
+        {
+            return Err(format!(
+                "prepaint offset recipe mismatch: actual={:?}, recipe={recipe_offset:?}, old={old_anchor:?}, new={new_anchor:?}, page_origin={page_origin:?}, allocated_page_rect={page:?}, content_page_rect={:?}, first_allocated_page_rect={:?}, clip={:?}, outer={:?}, inner={:?}, content_size={:?}, scale={scale}, max={max_offset:?}",
+                app.last_scroll_offset,
+                page.translate(app.last_scroll_offset),
+                app.last_scroll_page_rects.first(),
+                app.last_scroll_inner_rect,
+                app.last_scroll_outer_rect,
+                app.last_scroll_inner_rect,
+                app.last_scroll_content_size,
+            ));
+        }
+        let x_clamped = max_offset.x > 1.0
+            && (app.last_scroll_offset.x <= 0.5
+                || app.last_scroll_offset.x >= max_offset.x - 0.5);
+        let y_clamped = max_offset.y > 1.0
+            && (app.last_scroll_offset.y <= 0.5
+                || app.last_scroll_offset.y >= max_offset.y - 0.5);
+        if !y_clamped && new_anchor.page_index != old_anchor.page_index {
+            return Err(format!(
+                "page identity changed without vertical extent clamping: old={old_anchor:?}, new={new_anchor:?}, offset={:?}, max={max_offset:?}, zoom={}%, scale={:?}, target={:?}, lifecycle=(capture_ok={}, capture_miss={}, canceled={}, queued={}, published={}, consumed={})",
+                app.last_scroll_offset,
+                app.zoom_percent,
+                app.page_scale,
+                app.page_scale.and_then(|scale| viewport_center_anchor_target(
+                    old_anchor,
+                    &app.last_scroll_page_rects,
+                    scale,
+                )),
+                app.performance.zoom_anchor_capture_successes,
+                app.performance.zoom_anchor_capture_misses,
+                app.performance.zoom_manual_scroll_cancellations,
+                app.performance.zoom_compensations_queued,
+                app.performance.zoom_geometry_published,
+                app.performance.zoom_anchor_consumed,
+            ));
+        }
+        for (axis, old, new, clamped) in [
+            (
+                "horizontal page-local point",
+                old_anchor.page_local_document_point.x,
+                new_anchor.page_local_document_point.x,
+                x_clamped,
+            ),
+            (
+                "vertical page-local point",
+                old_anchor.page_local_document_point.y,
+                new_anchor.page_local_document_point.y,
+                y_clamped,
+            ),
+            (
+                "horizontal outside-page displacement",
+                old_anchor.outside_page_offset_points.x,
+                new_anchor.outside_page_offset_points.x,
+                x_clamped,
+            ),
+            (
+                "vertical outside-page displacement",
+                old_anchor.outside_page_offset_points.y,
+                new_anchor.outside_page_offset_points.y,
+                y_clamped,
+            ),
+        ] {
+            if !clamped && (new - old).abs() >= 0.75 {
+                return Err(format!(
+                    "{axis} changed without demonstrated scroll-extent clamping: old={old}, new={new}, offset={:?}, max={max_offset:?}, outer={:?}, inner={:?}, content={:?}, anchor={old_anchor:?}->{new_anchor:?}",
+                    app.last_scroll_offset,
+                    app.last_scroll_outer_rect,
+                    app.last_scroll_inner_rect,
+                    app.last_scroll_content_size,
+                ));
+            }
+        }
+        if app.last_scroll_offset.x < 0.0
+            || app.last_scroll_offset.x > max_offset.x + 0.5
+            || app.last_scroll_offset.y < 0.0
+            || app.last_scroll_offset.y > max_offset.y + 0.5
+        {
+            return Err(format!(
+                "scroll offset exceeded its extents: offset={:?}, max={max_offset:?}",
+                app.last_scroll_offset,
+            ));
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn new_document_has_no_legacy_json_metadata_and_diagnostics_exclude_script_text() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
@@ -5335,6 +5890,20 @@ mod tests {
             app.session.project().title_page[0].text,
             "VISIBLE TITLE PAGE CONTENT"
         );
+    }
+
+    fn assert_painted_geometry_matches_published(app: &ScriptCraftApp) {
+        assert!(
+            !app.last_painted_page_rects.is_empty(),
+            "zoom frame should paint at least one page"
+        );
+        for (page_index, painted_rect) in &app.last_painted_page_rects {
+            assert_eq!(
+                Some(painted_rect),
+                app.last_scroll_page_rects.get(*page_index),
+                "painted page geometry must be the geometry published for that same frame"
+            );
+        }
     }
 
     #[test]
@@ -6413,6 +6982,334 @@ mod tests {
         assert!(viewport_center_anchor_target(anchor, &[page], f32::NAN).is_none());
     }
 
+    fn zoom_oracle_fixture(
+        context: &egui::Context,
+        screen: egui::Rect,
+    ) -> (ScriptCraftApp, ViewportCenterAnchor) {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert(&"zoom lifecycle fixture\n".repeat(1_600))
+            .unwrap_or_else(|_| unreachable!());
+        let _ = render_full_application_frame(
+            context,
+            &mut app,
+            zoom_lifecycle_input(screen, Vec::new()),
+        );
+        let _ = render_full_application_frame(
+            context,
+            &mut app,
+            zoom_lifecycle_input(
+                screen,
+                vec![
+                    egui::Event::PointerMoved(screen.center()),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -3_500.0),
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+            ),
+        );
+        // egui animates wheel-driven scrolling. Let the target and any
+        // smoothed wheel delta settle before treating the published geometry
+        // as the deterministic starting state for zoom.
+        for _ in 0..60 {
+            let _ = render_full_application_frame(
+                context,
+                &mut app,
+                zoom_lifecycle_input(screen, Vec::new()),
+            );
+        }
+        let anchor = independent_published_zoom_anchor(&app);
+        assert!(
+            app.last_scroll_offset.y > 1_000.0
+                && anchor.page_index > 1
+                && anchor.page_index + 2 < app.last_scroll_page_rects.len(),
+            "fixture must begin at a genuine deep nonzero offset with the viewport center on an interior page: {anchor:?}; offset={:?}, content={:?}, inner={:?}, pages={}, first_page_rects={:?}",
+            app.last_scroll_offset,
+            app.last_scroll_content_size,
+            app.last_scroll_inner_rect,
+            app.last_scroll_page_rects.len(),
+            app.last_scroll_page_rects.iter().take(3).collect::<Vec<_>>(),
+        );
+        (app, anchor)
+    }
+
+    #[test]
+    fn wo006_full_application_zoom_inputs_preserve_settled_anchor_and_report_lifecycle() {
+        // A tall viewport plus a settled wheel-driven offset puts the actual
+        // viewport center deep in the document on an interior page.
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_280.0, 1_800.0));
+
+        // Repeated native pinch events are coalesced by the real raw-input hook
+        // before one complete app update and one published/consumed correction.
+        let context = test_context();
+        let (mut app, old_anchor) = zoom_oracle_fixture(&context, screen);
+        let mut anchor_failures = Vec::new();
+        let scroll_before = app.last_scroll_offset;
+        let mut pinch_input = zoom_lifecycle_input(
+            screen,
+            vec![
+                egui::Event::PointerMoved(screen.center()),
+                egui::Event::Zoom(1.4),
+                egui::Event::Zoom(1.4),
+                egui::Event::Zoom(1.4),
+            ],
+        );
+        let _ = render_full_application_frame(&context, &mut app, pinch_input.clone());
+        pinch_input.events.clear();
+        let corrected_offset = app.last_scroll_offset;
+        let _ = render_full_application_frame(&context, &mut app, pinch_input);
+        assert_painted_geometry_matches_published(&app);
+        let new_anchor = independent_published_zoom_anchor(&app);
+        if let Err(failure) = assert_zoom_anchor_preserved(old_anchor, new_anchor, &app) {
+            anchor_failures.push(format!("native pinch-in: {failure}"));
+        }
+        assert_ne!(app.last_scroll_offset, scroll_before);
+        assert_eq!(app.pending_zoom_anchor, None);
+        assert_eq!(app.performance.zoom_anchor_capture_successes, 1);
+        assert_eq!(app.performance.zoom_anchor_capture_misses, 0);
+        assert_eq!(app.performance.zoom_manual_scroll_cancellations, 0);
+        assert_eq!(app.performance.zoom_compensations_queued, 1);
+        assert_eq!(app.performance.zoom_geometry_published, 1);
+        assert_eq!(app.performance.zoom_anchor_consumed, 1);
+        assert!((app.last_scroll_offset.x - corrected_offset.x).abs() < 0.5);
+        assert!((app.last_scroll_offset.y - corrected_offset.y).abs() < 0.5);
+
+        // A reverse pinch from the same deep position must preserve the newly
+        // settled content point and consume exactly one additional request.
+        let old_anchor = independent_published_zoom_anchor(&app);
+        let queued_before = app.performance.zoom_compensations_queued;
+        let published_before = app.performance.zoom_geometry_published;
+        let consumed_before = app.performance.zoom_anchor_consumed;
+        let zoom_before = app.zoom_percent;
+        let _ = render_full_application_frame(
+            &context,
+            &mut app,
+            zoom_lifecycle_input(
+                screen,
+                vec![
+                    egui::Event::PointerMoved(screen.center()),
+                    egui::Event::Zoom(0.72),
+                ],
+            ),
+        );
+        assert!(app.zoom_percent < zoom_before, "reverse pinch decreases zoom");
+        assert_eq!(app.pending_zoom_anchor, None);
+        assert_eq!(app.performance.zoom_compensations_queued, queued_before + 1);
+        assert_eq!(app.performance.zoom_geometry_published, published_before + 1);
+        assert_eq!(app.performance.zoom_anchor_consumed, consumed_before + 1);
+        assert_painted_geometry_matches_published(&app);
+        if let Err(failure) = assert_zoom_anchor_preserved(
+            old_anchor,
+            independent_published_zoom_anchor(&app),
+            &app,
+        ) {
+            anchor_failures.push(format!("native pinch-out: {failure}"));
+        }
+
+        // Treat each native pinch update as its own painted frame. The center
+        // anchor and the exact rectangles submitted to painting must already
+        // agree with the committed offset in every intermediate frame.
+        let context = test_context();
+        let (mut app, _) = zoom_oracle_fixture(&context, screen);
+        for (frame, factor) in [1.08, 1.08, 1.08, 0.92, 0.92, 0.92].into_iter().enumerate() {
+            let old_anchor = independent_published_zoom_anchor(&app);
+            let queued_before = app.performance.zoom_compensations_queued;
+            let published_before = app.performance.zoom_geometry_published;
+            let consumed_before = app.performance.zoom_anchor_consumed;
+            let zoom_before = app.zoom_percent;
+            let _ = render_full_application_frame(
+                &context,
+                &mut app,
+                zoom_lifecycle_input(
+                    screen,
+                    vec![
+                        egui::Event::PointerMoved(screen.center()),
+                        egui::Event::Zoom(factor),
+                    ],
+                ),
+            );
+            if factor > 1.0 {
+                assert!(app.zoom_percent > zoom_before, "continuous pinch frame {frame} advances zoom");
+            } else {
+                assert!(app.zoom_percent < zoom_before, "continuous reverse pinch frame {frame} reduces zoom");
+            }
+            assert_eq!(app.pending_zoom_anchor, None, "frame {frame} consumes exactly its request");
+            assert_eq!(app.performance.zoom_compensations_queued, queued_before + 1);
+            assert_eq!(app.performance.zoom_geometry_published, published_before + 1);
+            assert_eq!(app.performance.zoom_anchor_consumed, consumed_before + 1);
+            assert_painted_geometry_matches_published(&app);
+            let new_anchor = independent_published_zoom_anchor(&app);
+            if let Err(failure) = assert_zoom_anchor_preserved(old_anchor, new_anchor, &app) {
+                anchor_failures.push(format!("continuous pinch frame {frame}: {failure}"));
+            }
+        }
+
+        // The status slider's actual rendered rectangle drives pointer input;
+        // its change is processed in show_application_panels during app.update.
+        let context = test_context();
+        context.enable_accesskit();
+        // The inline status planner needs a wide right region for the actual
+        // slider; the narrower native-pinch viewport intentionally overflows it.
+        let status_screen =
+            egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_920.0, 1_800.0));
+        let (mut app, old_anchor) = zoom_oracle_fixture(&context, status_screen);
+        let slider = status_bar::zoom_slider_rect_for_test(&context)
+            .unwrap_or_else(|| unreachable!("the inline status zoom slider was rendered"));
+        let click = slider.center();
+        let _ = render_full_application_frame(
+            &context,
+            &mut app,
+            zoom_lifecycle_input(
+                status_screen,
+                vec![
+                    egui::Event::PointerMoved(click),
+                    egui::Event::PointerButton {
+                        pos: click,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+            ),
+        );
+        assert!(app.zoom_percent > 100, "the status slider must change zoom");
+        assert_painted_geometry_matches_published(&app);
+        let _ = render_full_application_frame(
+            &context,
+            &mut app,
+            zoom_lifecycle_input(
+                status_screen,
+                vec![
+                    egui::Event::PointerMoved(click),
+                    egui::Event::PointerButton {
+                        pos: click,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+            ),
+        );
+        let corrected_offset = app.last_scroll_offset;
+        assert_painted_geometry_matches_published(&app);
+        let new_anchor = independent_published_zoom_anchor(&app);
+        if let Err(failure) = assert_zoom_anchor_preserved(old_anchor, new_anchor, &app) {
+            anchor_failures.push(format!("status slider increase: {failure}"));
+        }
+        assert_eq!(app.performance.zoom_anchor_capture_successes, 1);
+        assert_eq!(app.performance.zoom_anchor_capture_misses, 0);
+        assert_eq!(app.performance.zoom_manual_scroll_cancellations, 0);
+        assert_eq!(app.performance.zoom_compensations_queued, 1);
+        assert_eq!(app.performance.zoom_geometry_published, 1);
+        assert_eq!(app.performance.zoom_anchor_consumed, 1);
+        assert!((app.last_scroll_offset.x - corrected_offset.x).abs() < 0.5);
+        assert!((app.last_scroll_offset.y - corrected_offset.y).abs() < 0.5);
+
+        // Use the actual slider again from this deep position to zoom back down.
+        let old_anchor = independent_published_zoom_anchor(&app);
+        let zoom_before = app.zoom_percent;
+        let slider = status_bar::zoom_slider_rect_for_test(&context)
+            .unwrap_or_else(|| unreachable!("the inline status zoom slider remains rendered"));
+        let lower_click = egui::pos2(slider.left() + slider.width() * 0.08, slider.center().y);
+        let _ = render_full_application_frame(
+            &context,
+            &mut app,
+            zoom_lifecycle_input(
+                status_screen,
+                vec![
+                    egui::Event::PointerMoved(lower_click),
+                    egui::Event::PointerButton {
+                        pos: lower_click,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+            ),
+        );
+        assert!(app.zoom_percent < zoom_before, "the status slider must also decrease zoom");
+        assert_painted_geometry_matches_published(&app);
+        let _ = render_full_application_frame(
+            &context,
+            &mut app,
+            zoom_lifecycle_input(
+                status_screen,
+                vec![
+                    egui::Event::PointerMoved(lower_click),
+                    egui::Event::PointerButton {
+                        pos: lower_click,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+            ),
+        );
+        assert_painted_geometry_matches_published(&app);
+        if let Err(failure) = assert_zoom_anchor_preserved(
+            old_anchor,
+            independent_published_zoom_anchor(&app),
+            &app,
+        ) {
+            anchor_failures.push(format!("status slider decrease: {failure}"));
+        }
+
+        // Same-frame pinch plus raw scroll captures first, then proves the real
+        // input dispatcher cancels that pending request before surface paint.
+        let context = test_context();
+        let (mut app, _) = zoom_oracle_fixture(&context, screen);
+        let _ = render_full_application_frame(
+            &context,
+            &mut app,
+            zoom_lifecycle_input(
+                screen,
+                vec![
+                    egui::Event::PointerMoved(screen.center()),
+                    egui::Event::Zoom(1.2),
+                    egui::Event::Zoom(1.2),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -180.0),
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+            ),
+        );
+        assert_eq!(app.pending_zoom_anchor, None);
+        assert_eq!(app.performance.zoom_anchor_capture_successes, 1);
+        assert_eq!(app.performance.zoom_anchor_capture_misses, 0);
+        assert_eq!(app.performance.zoom_manual_scroll_cancellations, 1);
+        assert_eq!(app.performance.zoom_compensations_queued, 0);
+        assert_eq!(app.performance.zoom_geometry_published, 0);
+        assert_eq!(app.performance.zoom_anchor_consumed, 0);
+        assert!(
+            anchor_failures.is_empty(),
+            "deep-scroll independent anchor checks failed after exercising all lifecycle paths:\n{}",
+            anchor_failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn wo006_zoom_lifecycle_diagnostics_count_capture_miss_without_exposing_values() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+
+        app.capture_pending_zoom_anchor(&context);
+
+        assert_eq!(app.pending_zoom_anchor, None);
+        assert_eq!(app.performance.zoom_anchor_capture_successes, 0);
+        assert_eq!(app.performance.zoom_anchor_capture_misses, 1);
+        assert_eq!(app.performance.zoom_manual_scroll_cancellations, 0);
+        assert_eq!(app.performance.zoom_compensations_queued, 0);
+        assert_eq!(app.performance.zoom_geometry_published, 0);
+        assert_eq!(app.performance.zoom_anchor_consumed, 0);
+        let summary = app.performance.safe_summary();
+        assert!(summary.contains("zoom-anchor-capture-miss=1"));
+        assert!(!summary.contains("zoom-anchor="));
+    }
+
     #[test]
     fn wo0012_desktop_zoom_keeps_the_viewport_anchor_once_or_clamps_at_an_edge() {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(480.0, 520.0));
@@ -6448,6 +7345,19 @@ mod tests {
                         ..Default::default()
                     },
                 );
+                // Finish egui's smoothed wheel target before capturing the
+                // edge/middle anchor; otherwise pending horizontal wheel
+                // motion can continue during the one-shot zoom lifecycle.
+                for _ in 0..60 {
+                    let _ = render_editor_frame(
+                        &context,
+                        &mut app,
+                        egui::RawInput {
+                            screen_rect: Some(screen),
+                            ..Default::default()
+                        },
+                    );
+                }
 
                 let old_scale = app.page_scale.unwrap_or(f32::NAN);
                 let old_anchor = app
@@ -6489,8 +7399,22 @@ mod tests {
                         ..Default::default()
                     },
                 );
-                assert!((app.last_scroll_offset.x - corrected_offset.x).abs() < 0.5);
-                assert!((app.last_scroll_offset.y - corrected_offset.y).abs() < 0.5);
+                assert!(
+                    (app.last_scroll_offset.x - corrected_offset.x).abs() < 0.5,
+                    "{position} zoom at {target_zoom}% replayed horizontal correction: corrected={corrected_offset:?}, settled={:?}, outer={:?}, inner={:?}, content={:?}",
+                    app.last_scroll_offset,
+                    app.last_scroll_outer_rect,
+                    app.last_scroll_inner_rect,
+                    app.last_scroll_content_size,
+                );
+                assert!(
+                    (app.last_scroll_offset.y - corrected_offset.y).abs() < 0.5,
+                    "{position} zoom at {target_zoom}% replayed vertical correction: corrected={corrected_offset:?}, settled={:?}, outer={:?}, inner={:?}, content={:?}",
+                    app.last_scroll_offset,
+                    app.last_scroll_outer_rect,
+                    app.last_scroll_inner_rect,
+                    app.last_scroll_content_size,
+                );
                 let new_anchor = app
                     .page_geometry
                     .capture_center_anchor(
@@ -6509,6 +7433,10 @@ mod tests {
                 let y_clamped = app.last_scroll_offset.y <= 0.5
                     || app.last_scroll_offset.y >= max_offset.y - 0.5;
                 assert!(
+                    y_clamped || new_anchor.page_index == old_anchor.page_index,
+                    "{position} zoom at {target_zoom}% should preserve page identity unless vertically clamped: old={old_anchor:?}, new={new_anchor:?}"
+                );
+                assert!(
                     (new_anchor.page_local_document_point.x
                         - old_anchor.page_local_document_point.x)
                         .abs()
@@ -6523,6 +7451,22 @@ mod tests {
                         < 0.75
                         || y_clamped,
                     "{position} zoom at {target_zoom}% should preserve vertical anchor unless clamped"
+                );
+                assert!(
+                    (new_anchor.outside_page_offset_points.x
+                        - old_anchor.outside_page_offset_points.x)
+                        .abs()
+                        < 0.75
+                        || x_clamped,
+                    "{position} zoom at {target_zoom}% should preserve horizontal outside-page displacement unless clamped"
+                );
+                assert!(
+                    (new_anchor.outside_page_offset_points.y
+                        - old_anchor.outside_page_offset_points.y)
+                        .abs()
+                        < 0.75
+                        || y_clamped,
+                    "{position} zoom at {target_zoom}% should preserve vertical outside-page displacement unless clamped"
                 );
                 assert!(app.last_scroll_offset.x >= 0.0 && app.last_scroll_offset.x <= max_offset.x + 0.5);
                 assert!(app.last_scroll_offset.y >= 0.0 && app.last_scroll_offset.y <= max_offset.y + 0.5);

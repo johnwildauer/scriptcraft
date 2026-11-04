@@ -749,6 +749,7 @@ pub(crate) struct ManagedParagraphLocation {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SourceIdentityUseIndex {
     paragraph_identity_counts: BTreeMap<String, usize>,
+    paragraph_source_identity_counts: BTreeMap<String, usize>,
     referenced_paragraph_ids: BTreeSet<String>,
     anchored_paragraph_ids: BTreeSet<String>,
     externally_used_paragraph_ids: BTreeSet<String>,
@@ -926,6 +927,14 @@ impl SourceIdentityUseIndex {
                         });
                         let unique_id = unqualified_ids.next().map(|attribute| attribute.value.as_str())
                             .filter(|_| unqualified_ids.next().is_none());
+                        if element.name.local_name == "Paragraph" {
+                            if let Some(value) = unique_id {
+                                *index
+                                    .paragraph_source_identity_counts
+                                    .entry(value.to_owned())
+                                    .or_default() += 1;
+                            }
+                        }
                         for attribute in &element.attributes {
                             if attribute.name.namespace_uri.is_none()
                                 && attribute.name.local_name.eq_ignore_ascii_case("id")
@@ -1073,6 +1082,12 @@ impl PreservationState {
         self.source_identity_use_index
             .as_ref()
             .is_some_and(|index| index.paragraph_is_safely_removable(id))
+    }
+
+    pub(crate) fn paragraph_identity_has_unique_source_definition(&self, id: &str) -> bool {
+        self.source_identity_use_index.as_ref().is_some_and(|index| {
+            index.paragraph_source_identity_counts.get(id) == Some(&1)
+        })
     }
 
     pub(crate) fn indexed_source_id_values(&self) -> BTreeSet<String> {
@@ -1840,6 +1855,7 @@ impl PreservationState {
         &mut self,
         before: &[ScreenplayElement],
         after: &mut [ScreenplayElement],
+        generated_scene_heading_deletions: &BTreeSet<StableId>,
     ) -> Result<(), PreservationError> {
         self.ensure_managed_paragraph_index();
         self.ensure_source_identity_use_index();
@@ -1858,9 +1874,30 @@ impl PreservationState {
             return Ok(());
         }
 
+        // Generated heading deletion is authorized only by explicit selection
+        // deletion. Validate every selected heading subtree and every identity
+        // it owns against the unmodified candidate before removing any source.
+        for element in before {
+            if !after_ids.contains(&element.id)
+                && element.role == Role::SceneHeading
+                && self.has_managed_element(&element.id)
+                && generated_scene_heading_deletions.contains(&element.id)
+            {
+                self.preflight_generated_scene_heading_removal(
+                    &element.id,
+                    element.source_provenance.as_ref(),
+                )?;
+            }
+        }
+
         for element in before {
             if !after_ids.contains(&element.id) && self.has_managed_element(&element.id) {
-                self.remove_managed_paragraph(&element.id, element.source_provenance.as_ref())?;
+                self.remove_managed_paragraph(
+                    &element.id,
+                    element.source_provenance.as_ref(),
+                    element.role,
+                    generated_scene_heading_deletions.contains(&element.id),
+                )?;
             }
         }
 
@@ -1890,6 +1927,48 @@ impl PreservationState {
             self.rebuild_managed_paragraph_index();
         }
         self.rebuild_managed_paragraph_index();
+        Ok(())
+    }
+
+    fn preflight_generated_scene_heading_removal(
+        &mut self,
+        id: &StableId,
+        provenance: Option<&SourceProvenance>,
+    ) -> Result<(), PreservationError> {
+        let location = self
+            .indexed_location(id)?
+            .cloned()
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let target = self
+            .managed_element_at(&location)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let nested_ids = crate::scene_metadata::recognized_generated_scene_heading_subtree(target)
+            .ok_or(PreservationError::StructuralAttachmentConflict)?;
+        let heading_id = paragraph_foreign_id(target)
+            .map(str::to_owned)
+            .ok_or(PreservationError::StructuralAttachmentConflict)?;
+        if provenance.and_then(|item| item.foreign_id.as_deref()) != Some(heading_id.as_str()) {
+            return Err(PreservationError::ManagedTextMismatchAt(
+                ManagedTextMismatchSite::ParagraphRemoval,
+            ));
+        }
+        let mut identities = BTreeSet::new();
+        identities.insert(heading_id);
+        for nested_id in nested_ids {
+            if !identities.insert(nested_id) {
+                return Err(PreservationError::StructuralAttachmentConflict);
+            }
+        }
+        self.ensure_source_identity_use_index();
+        if identities
+            .iter()
+            .any(|value| {
+                !self.paragraph_identity_safely_removable(value)
+                    || !self.paragraph_identity_has_unique_source_definition(value)
+            })
+        {
+            return Err(PreservationError::PotentialReferenceConflict);
+        }
         Ok(())
     }
 
@@ -1998,24 +2077,57 @@ impl PreservationState {
         &mut self,
         id: &StableId,
         provenance: Option<&SourceProvenance>,
+        role: Role,
+        allow_generated_scene_heading_deletion: bool,
     ) -> Result<(), PreservationError> {
         let location = self
             .indexed_location(id)?
             .cloned()
             .ok_or(PreservationError::ManagedAnchorMissing)?;
-        let foreign_id = {
+        let (foreign_id, nested_paragraph_ids, is_generated_scene_heading) = {
             let target = self
-            .managed_element_at(&location)
-            .ok_or(PreservationError::ManagedAnchorMissing)?;
-            if !is_plain_managed_paragraph(target) {
+                .managed_element_at(&location)
+                .ok_or(PreservationError::ManagedAnchorMissing)?;
+            if is_plain_managed_paragraph(target) {
+                (paragraph_foreign_id(target).map(str::to_owned), Vec::new(), false)
+            } else if role == Role::SceneHeading && allow_generated_scene_heading_deletion {
+                let nested = crate::scene_metadata::recognized_generated_scene_heading_subtree(
+                    target,
+                )
+                .ok_or(PreservationError::StructuralAttachmentConflict)?;
+                (paragraph_foreign_id(target).map(str::to_owned), nested, true)
+            } else {
                 return Err(PreservationError::StructuralAttachmentConflict);
             }
-            paragraph_foreign_id(target).map(str::to_owned)
         };
+        if is_generated_scene_heading && foreign_id.is_none() {
+            return Err(PreservationError::StructuralAttachmentConflict);
+        }
         if provenance.and_then(|item| item.foreign_id.as_deref()) != foreign_id.as_deref() {
             return Err(PreservationError::ManagedTextMismatchAt(
                 ManagedTextMismatchSite::ParagraphRemoval,
             ));
+        }
+        let mut removed_foreign_ids = BTreeSet::new();
+        if let Some(value) = foreign_id.as_deref() {
+            removed_foreign_ids.insert(value.to_owned());
+        }
+        for nested_id in nested_paragraph_ids {
+            if !removed_foreign_ids.insert(nested_id) {
+                return Err(PreservationError::StructuralAttachmentConflict);
+            }
+        }
+        if is_generated_scene_heading && !removed_foreign_ids.is_empty() {
+            self.ensure_source_identity_use_index();
+            if removed_foreign_ids
+                .iter()
+                .any(|value| {
+                    !self.paragraph_identity_safely_removable(value)
+                        || !self.paragraph_identity_has_unique_source_definition(value)
+                })
+            {
+                return Err(PreservationError::PotentialReferenceConflict);
+            }
         }
         if let Some(value) = foreign_id.as_deref() {
             let referenced = self
@@ -2029,14 +2141,18 @@ impl PreservationState {
             if referenced || has_potential_reference(&self.sections, value, id) {
                 return Err(PreservationError::PotentialReferenceConflict);
             }
-            self.identities.retain(|identity| {
-                !(identity.domain == ForeignIdDomain::Paragraph && identity.value == value)
-            });
+            if referenced || has_potential_reference(&self.sections, value, id) {
+                return Err(PreservationError::PotentialReferenceConflict);
+            }
         }
         let removed = remove_managed_at_location(&mut self.sections, &location);
         if !removed {
             return Err(PreservationError::ManagedAnchorMissing);
         }
+        self.identities.retain(|identity| {
+            !(identity.domain == ForeignIdDomain::Paragraph
+                && removed_foreign_ids.contains(&identity.value))
+        });
         self.source_layout_settings
             .direct_paragraph_overrides
             .remove(id);
@@ -2160,12 +2276,35 @@ impl PreservationState {
             .indexed_location(id)?
             .cloned()
             .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let indexed_target_matches = self
+            .sections
+            .get(location.section_index)
+            .and_then(|section| element_at_path(&section.children, &location.node_path))
+            .is_some_and(|element| {
+                matches!(&element.ownership, SourceOwnership::Managed(target) if target == id)
+            });
+        let location = if indexed_target_matches {
+            location
+        } else {
+            // Structural source reconciliation can invalidate a cached path.
+            // Never let a stale location apply a text edit to a different
+            // managed paragraph; rebuild from the authoritative tree and
+            // resolve the requested identity again before returning it.
+            self.rebuild_managed_paragraph_index();
+            self.indexed_location(id)?
+                .cloned()
+                .ok_or(PreservationError::ManagedAnchorMissing)?
+        };
         let section = self
             .sections
             .get_mut(location.section_index)
             .ok_or(PreservationError::ManagedAnchorMissing)?;
-        element_at_path_mut(&mut section.children, &location.node_path)
-            .ok_or(PreservationError::ManagedAnchorMissing)
+        let element = element_at_path_mut(&mut section.children, &location.node_path)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        if !matches!(&element.ownership, SourceOwnership::Managed(target) if target == id) {
+            return Err(PreservationError::ManagedAnchorMissing);
+        }
+        Ok(element)
     }
 }
 
@@ -2991,7 +3130,12 @@ fn direct_text_child_indexes(element: &PreservedElement) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(index, node)| {
-            matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_)).then_some(index)
+            // Whitespace-only direct text around generated scene containers is
+            // element-only XML formatting, not part of the screenplay text
+            // projection. Keep those nodes in place, but do not compare or edit
+            // them as semantic text runs.
+            matches!(node, PreservedNode::Text(text) | PreservedNode::CData(text) if !text.trim().is_empty())
+                .then_some(index)
         })
         .collect()
 }
@@ -3220,7 +3364,7 @@ mod tests {
             foreign_role: None,
         };
         let removal_error = paragraph_removal
-            .remove_managed_paragraph(&id, Some(&provenance))
+            .remove_managed_paragraph(&id, Some(&provenance), Role::Action, false)
             .expect_err("mismatched provenance must reject removal");
         assert_eq!(
             removal_error,
