@@ -9,7 +9,7 @@ research notes or implementation observations as product mandates.
 - **Status:** `complete` — initialization reviews and historical baseline evidence are linked; review warnings remain follow-ups.
 - **Path type:** `existing`
 - **Initialized on:** `2026-10-25`
-- **Last revised:** `2026-10-31`
+- **Last revised:** `2026-11-04`
 - **Record owner:** `Forge initialization agent`
 
 ## Project intake
@@ -92,6 +92,24 @@ fresh results for a later checkout.
 - **Build/package:** `cargo build --workspace` and `cargo check --workspace` — passed in the historical foundation validation dated 2026-10-25.
 - **Run/manual verification:** `cargo run -p scriptcraft` — the historical foundation validation dated 2026-10-25 recorded headless output `scriptcraft foundation ready`; this is not a current run result or a visible-window check.
 - **Historical evidence:** [`screenplay MVP foundation validation`](initiatives/2026-10-25-screenplay-mvp/validations/validation-WO-001.md) records those command outcomes and its warnings. No command result is represented as freshly verified by this manifest revision.
+
+### Current initiative evidence — 2026-11-04
+
+For the bounded build-cleanup initiative, the user explicitly authorized coding
+agents to run formatting, compilation, build, Clippy, and test commands. This is
+an initiative-specific exception to the repository-wide no-agent-check policy,
+not a blanket revocation of that policy for later initiatives.
+
+The final agent-run inventory passed `cargo fmt --all -- --check`,
+`cargo check --workspace`, `cargo build --workspace`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and
+`cargo test --workspace`. The workspace test result is four passed and zero
+failed. Under explicit user direction, the historical work-order suite was
+classified obsolete by default and replaced by four consolidated headless
+acceptance scenarios in [`core_acceptance.rs`](../crates/scriptcraft-core/tests/core_acceptance.rs:1).
+The retired suite's failures were not repaired and are not represented as
+resolved product defects. Exact initial/final outcomes and consolidation
+boundaries are recorded in the [`build-hygiene report`](../.plan/2026-11-04-build-cleanup/build-hygiene-report.md).
 
 ### Gates and intervention
 

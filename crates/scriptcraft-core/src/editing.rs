@@ -107,11 +107,9 @@ impl PendingDerivedInvalidation {
 }
 
 fn validate_full_candidate(project: &Project) -> Result<(), ModelError> {
-    let _ = FULL_CANDIDATE_VALIDATIONS.fetch_update(
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-        |value| Some(value.saturating_add(1)),
-    );
+    let _ = FULL_CANDIDATE_VALIDATIONS.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(1))
+    });
     project.validate()
 }
 
@@ -345,20 +343,6 @@ impl EditingSession {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_session_open_timestamp_for_test(
-        project: Project,
-        session_open_timestamp: String,
-    ) -> Result<Self, EditError> {
-        let layout_inputs = project.session_layout_inputs();
-        Self::with_policy_layout_and_session_timestamp(
-            project,
-            EditPolicy::default(),
-            layout_inputs,
-            session_open_timestamp,
-        )
-    }
-
     pub fn with_history_limit(project: Project, history_limit: usize) -> Result<Self, EditError> {
         let mut session = Self::new(project)?;
         session.history_limit = history_limit;
@@ -414,26 +398,18 @@ impl EditingSession {
                 summary.retryable = !self.failed_derived_complete;
             }
             PendingDerivedInvalidation::Scenes(scenes) => {
-                summary.deferred_scene_count = scenes
-                    .intersection(&self.deferred_derived_scenes)
-                    .count();
-                summary.failed_scene_count = scenes
-                    .intersection(&self.failed_derived_scenes)
-                    .count();
+                summary.deferred_scene_count =
+                    scenes.intersection(&self.deferred_derived_scenes).count();
+                summary.failed_scene_count =
+                    scenes.intersection(&self.failed_derived_scenes).count();
                 summary.retryable = scenes
                     .difference(&self.deferred_derived_scenes)
-                    .filter(|scene| !self.failed_derived_scenes.contains(*scene))
-                    .next()
+                    .find(|scene| !self.failed_derived_scenes.contains(*scene))
                     .is_some();
             }
             PendingDerivedInvalidation::None => {}
         }
         summary
-    }
-
-    /// Internal scope handoff for the next core correction order.
-    pub(crate) fn pending_derived_invalidation(&self) -> &PendingDerivedInvalidation {
-        &self.pending_derived_invalidation
     }
 
     /// Completes only work actually reconciled by a successful correction.
@@ -455,8 +431,7 @@ impl EditingSession {
             self.failed_derived_scenes.clear();
             return;
         }
-        if let PendingDerivedInvalidation::Scenes(pending) =
-            &mut self.pending_derived_invalidation
+        if let PendingDerivedInvalidation::Scenes(pending) = &mut self.pending_derived_invalidation
         {
             pending.retain(|scene| !completed_scenes.contains(scene));
             if pending.is_empty() {
@@ -465,8 +440,7 @@ impl EditingSession {
         }
         self.failed_derived_scenes
             .retain(|scene| !completed_scenes.contains(scene));
-        if let PendingDerivedInvalidation::Scenes(pending) =
-            &mut self.pending_derived_invalidation
+        if let PendingDerivedInvalidation::Scenes(pending) = &mut self.pending_derived_invalidation
         {
             pending.extend(deferred_scenes.iter().cloned());
         }
@@ -528,10 +502,8 @@ impl EditingSession {
             }
         };
         let (mut project, outcome, deferred_scenes, completed_scenes) =
-            match cast_list::corrected_cast_list_candidate_with_scope(
-                &self.project,
-                scope.as_ref(),
-            ) {
+            match cast_list::corrected_cast_list_candidate_with_scope(&self.project, scope.as_ref())
+            {
                 Ok(candidate) => candidate,
                 Err(error) => {
                     if complete_refresh {
@@ -553,11 +525,7 @@ impl EditingSession {
             self.dirty = self.project != self.clean_project;
             self.last_validation_was_scoped = false;
         }
-        self.complete_derived_invalidation(
-            &completed_scenes,
-            &deferred_scenes,
-            complete_refresh,
-        );
+        self.complete_derived_invalidation(&completed_scenes, &deferred_scenes, complete_refresh);
         Ok(outcome)
     }
 
@@ -636,14 +604,17 @@ impl EditingSession {
     /// Mapped source runs and text leaves are transformed in the same candidate;
     /// unsafe inline intersections reject the whole operation.
     pub fn insert(&mut self, text: &str) -> Result<(), EditError> {
-        self.mutate(MutationValidationScope::SingleParagraph, |project, selection, _generated, _policy| {
-            let (start, end) = selection.ordered();
-            replace_range(project, start, end, text)?;
-            Ok(Selection::caret(Position {
-                element: start.element,
-                offset: start.offset + text.len(),
-            }))
-        })
+        self.mutate(
+            MutationValidationScope::SingleParagraph,
+            |project, selection, _generated, _policy| {
+                let (start, end) = selection.ordered();
+                replace_range(project, start, end, text)?;
+                Ok(Selection::caret(Position {
+                    element: start.element,
+                    offset: start.offset + text.len(),
+                }))
+            },
+        )
     }
 
     /// Inserts clipboard text as one transactional semantic edit.
@@ -680,337 +651,363 @@ impl EditingSession {
             MutationValidationScope::SingleParagraph,
             generated_scene_heading_deletions,
             |project, selection, generated, _policy| {
-            let (start, end) = selection.ordered();
-            if start != end {
-                replace_range(project, start, end, "")?;
-                return Ok(Selection::caret(start));
-            }
-            let item = project
-                .elements
-                .get(start.element)
-                .ok_or(EditError::InvalidElement)?;
-            if item.role == Role::Parenthetical
-                && is_delimiter_only_parenthetical(item.text.as_str())
-            {
-                let item_text_len = item.text.len();
-                let id = item.id.as_str().to_owned();
-                generated.remove(&id);
-                if start.element == 0 || project.elements.len() == 1 {
-                    replace_range(
-                        project,
-                        Position {
-                            element: 0,
-                            offset: 0,
-                        },
-                        Position {
-                            element: 0,
-                            offset: item_text_len,
-                        },
-                        "",
-                    )?;
-                    update_preserved_role(project, 0, Role::Parenthetical, Role::Dialogue)?;
-                    project.elements[0].role = Role::Dialogue;
-                    return Ok(Selection::caret(Position {
-                        element: 0,
-                        offset: 0,
-                    }));
+                let (start, end) = selection.ordered();
+                if start != end {
+                    replace_range(project, start, end, "")?;
+                    return Ok(Selection::caret(start));
                 }
-                let previous = start.element.saturating_sub(1);
-                let offset = project.elements[previous].text.len();
-                project.elements.remove(start.element);
-                return Ok(Selection::caret(Position {
-                    element: previous,
-                    offset,
-                }));
-            }
-            if start.offset < item.text.len() {
-                let next = next_boundary(&item.text, start.offset);
-                replace_range(
-                    project,
-                    start,
-                    Position {
-                        offset: next,
-                        ..start
-                    },
-                    "",
-                )?;
-            }
-            Ok(Selection::caret(start))
-        })
-    }
-
-    pub fn backspace(&mut self) -> Result<(), EditError> {
-        self.mutate(MutationValidationScope::SingleParagraph, |project, selection, _generated, _policy| {
-            let (start, end) = selection.ordered();
-            if start != end {
-                replace_range(project, start, end, "")?;
-                return Ok(Selection::caret(start));
-            }
-            if start.offset > 0 {
                 let item = project
                     .elements
                     .get(start.element)
                     .ok_or(EditError::InvalidElement)?;
-                let previous = previous_boundary(&item.text, start.offset);
-                let from = Position {
-                    offset: previous,
-                    ..start
-                };
-                replace_range(project, from, start, "")?;
-                return Ok(Selection::caret(from));
-            }
-            if start.element > 0 {
-                let previous = project
-                    .elements
-                    .get(start.element - 1)
-                    .ok_or(EditError::InvalidElement)?;
-                let offset = previous.text.len();
-                join_at(project, start.element - 1)?;
-                return Ok(Selection::caret(Position {
-                    element: start.element - 1,
-                    offset,
-                }));
-            }
-            Ok(Selection::caret(start))
-        })
+                if item.role == Role::Parenthetical
+                    && is_delimiter_only_parenthetical(item.text.as_str())
+                {
+                    let item_text_len = item.text.len();
+                    let id = item.id.as_str().to_owned();
+                    generated.remove(&id);
+                    if start.element == 0 || project.elements.len() == 1 {
+                        replace_range(
+                            project,
+                            Position {
+                                element: 0,
+                                offset: 0,
+                            },
+                            Position {
+                                element: 0,
+                                offset: item_text_len,
+                            },
+                            "",
+                        )?;
+                        update_preserved_role(project, 0, Role::Parenthetical, Role::Dialogue)?;
+                        project.elements[0].role = Role::Dialogue;
+                        return Ok(Selection::caret(Position {
+                            element: 0,
+                            offset: 0,
+                        }));
+                    }
+                    let previous = start.element.saturating_sub(1);
+                    let offset = project.elements[previous].text.len();
+                    project.elements.remove(start.element);
+                    return Ok(Selection::caret(Position {
+                        element: previous,
+                        offset,
+                    }));
+                }
+                if start.offset < item.text.len() {
+                    let next = next_boundary(&item.text, start.offset);
+                    replace_range(
+                        project,
+                        start,
+                        Position {
+                            offset: next,
+                            ..start
+                        },
+                        "",
+                    )?;
+                }
+                Ok(Selection::caret(start))
+            },
+        )
+    }
+
+    pub fn backspace(&mut self) -> Result<(), EditError> {
+        self.mutate(
+            MutationValidationScope::SingleParagraph,
+            |project, selection, _generated, _policy| {
+                let (start, end) = selection.ordered();
+                if start != end {
+                    replace_range(project, start, end, "")?;
+                    return Ok(Selection::caret(start));
+                }
+                if start.offset > 0 {
+                    let item = project
+                        .elements
+                        .get(start.element)
+                        .ok_or(EditError::InvalidElement)?;
+                    let previous = previous_boundary(&item.text, start.offset);
+                    let from = Position {
+                        offset: previous,
+                        ..start
+                    };
+                    replace_range(project, from, start, "")?;
+                    return Ok(Selection::caret(from));
+                }
+                if start.element > 0 {
+                    let previous = project
+                        .elements
+                        .get(start.element - 1)
+                        .ok_or(EditError::InvalidElement)?;
+                    let offset = previous.text.len();
+                    join_at(project, start.element - 1)?;
+                    return Ok(Selection::caret(Position {
+                        element: start.element - 1,
+                        offset,
+                    }));
+                }
+                Ok(Selection::caret(start))
+            },
+        )
     }
 
     /// Splits a semantic paragraph while retaining the original foreign ID on
     /// the left side and allocating a fresh source identity for the right.
     pub fn split(&mut self) -> Result<(), EditError> {
-        self.mutate(MutationValidationScope::Complete, |project, selection, _generated, _policy| {
-            let (start, end) = selection.ordered();
-            if start != end {
-                return Err(EditError::InvalidSelection);
-            }
-            split_at(project, start, project.elements[start.element].role)
-        })
+        self.mutate(
+            MutationValidationScope::Complete,
+            |project, selection, _generated, _policy| {
+                let (start, end) = selection.ordered();
+                if start != end {
+                    return Err(EditError::InvalidSelection);
+                }
+                split_at(project, start, project.elements[start.element].role)
+            },
+        )
     }
 
     pub fn enter(&mut self) -> Result<(), EditError> {
-        self.mutate(MutationValidationScope::Complete, |project, selection, generated, policy| {
-            let (start, end) = selection.ordered();
-            if start != end {
-                return Err(EditError::InvalidSelection);
-            }
-            let item = project
-                .elements
-                .get(start.element)
-                .ok_or(EditError::InvalidElement)?;
-            if strict_boundary_rejects(
-                project,
-                policy,
-                start.element,
-                item.role,
-                item.text.len(),
-                start.offset,
-            ) {
-                return Ok(*selection);
-            }
-            let item_role = item.role;
-            let item_text = item.text.clone();
-            let mut position = start;
-            if item_role == Role::Parenthetical {
-                if position.offset == 0 && item_text.starts_with('(') {
-                    let id = split_id(project)?;
-                    let new = ScreenplayElement::new(
-                        id.clone(),
-                        Role::Parenthetical,
-                        if policy.auto_parenthetical { "()" } else { "" },
-                    )?;
-                    project.elements.insert(position.element, new);
-                    if policy.auto_parenthetical {
-                        generated.insert(id);
-                        return Ok(Selection::caret(Position {
-                            element: position.element,
-                            offset: 1,
-                        }));
-                    }
-                    return Ok(Selection::caret(Position {
-                        element: position.element,
-                        offset: 0,
-                    }));
+        self.mutate(
+            MutationValidationScope::Complete,
+            |project, selection, generated, policy| {
+                let (start, end) = selection.ordered();
+                if start != end {
+                    return Err(EditError::InvalidSelection);
                 }
-                if empty_parenthetical_at(item_text.as_str(), position.offset)
-                    && generated.contains(project.elements[position.element].id.as_str())
-                {
-                    project.elements[position.element].text.clear();
-                    position.offset = 0;
-                    generated.remove(project.elements[position.element].id.as_str());
-                } else if let Some(boundary) =
-                    parenthetical_repair_boundary(item_text.as_str(), position.offset)
-                {
-                    project.elements[position.element].text =
-                        repair_parenthetical(item_text.as_str());
-                    position.offset = boundary;
-                    return insert_dialogue_below(project, position.element);
-                } else if !item_text.is_empty() {
+                let item = project
+                    .elements
+                    .get(start.element)
+                    .ok_or(EditError::InvalidElement)?;
+                if strict_boundary_rejects(
+                    project,
+                    policy,
+                    start.element,
+                    item.role,
+                    item.text.len(),
+                    start.offset,
+                ) {
                     return Ok(*selection);
                 }
-            }
-            let role = project.elements[position.element].role;
-            let next_role = if role == Role::Dialogue && position.offset < item_text.len() {
-                Role::Dialogue
-            } else {
-                enter_transition(role).ok_or(EditError::UnsupportedTransition { from: role })?
-            };
-            split_at(project, position, next_role)
-        })
+                let item_role = item.role;
+                let item_text = item.text.clone();
+                let mut position = start;
+                if item_role == Role::Parenthetical {
+                    if position.offset == 0 && item_text.starts_with('(') {
+                        let id = split_id(project)?;
+                        let new = ScreenplayElement::new(
+                            id.clone(),
+                            Role::Parenthetical,
+                            if policy.auto_parenthetical { "()" } else { "" },
+                        )?;
+                        project.elements.insert(position.element, new);
+                        if policy.auto_parenthetical {
+                            generated.insert(id);
+                            return Ok(Selection::caret(Position {
+                                element: position.element,
+                                offset: 1,
+                            }));
+                        }
+                        return Ok(Selection::caret(Position {
+                            element: position.element,
+                            offset: 0,
+                        }));
+                    }
+                    if empty_parenthetical_at(item_text.as_str(), position.offset)
+                        && generated.contains(project.elements[position.element].id.as_str())
+                    {
+                        project.elements[position.element].text.clear();
+                        position.offset = 0;
+                        generated.remove(project.elements[position.element].id.as_str());
+                    } else if let Some(boundary) =
+                        parenthetical_repair_boundary(item_text.as_str(), position.offset)
+                    {
+                        project.elements[position.element].text =
+                            repair_parenthetical(item_text.as_str());
+                        position.offset = boundary;
+                        return insert_dialogue_below(project, position.element);
+                    } else if !item_text.is_empty() {
+                        return Ok(*selection);
+                    }
+                }
+                let role = project.elements[position.element].role;
+                let next_role = if role == Role::Dialogue && position.offset < item_text.len() {
+                    Role::Dialogue
+                } else {
+                    enter_transition(role).ok_or(EditError::UnsupportedTransition { from: role })?
+                };
+                split_at(project, position, next_role)
+            },
+        )
     }
 
     /// Applies the explicit Tab policy. Unlisted roles are intentionally consumed
     /// without changing the project, selection, or history.
     pub fn tab(&mut self) -> Result<(), EditError> {
-        self.mutate(MutationValidationScope::Complete, |project, selection, generated, policy| {
-            let (start, end) = selection.ordered();
-            if start != end {
-                return Ok(*selection);
-            }
-            let item = project
-                .elements
-                .get(start.element)
-                .ok_or(EditError::InvalidElement)?;
-            if strict_boundary_rejects(
-                project,
-                policy,
-                start.element,
-                item.role,
-                item.text.len(),
-                start.offset,
-            ) {
-                return Ok(*selection);
-            }
-            let item_role = item.role;
-            let item_text = item.text.clone();
-            let mut position = start;
-            if policy.auto_parenthetical && item_role == Role::Parenthetical {
-                if is_delimiter_only_parenthetical(item_text.as_str()) {
-                    replace_range(
-                        project,
-                        Position {
-                            element: position.element,
-                            offset: 0,
-                        },
-                        Position {
-                            element: position.element,
-                            offset: item_text.len(),
-                        },
-                        "",
-                    )?;
-                    update_preserved_role(project, position.element, item_role, Role::Dialogue)?;
-                    project.elements[position.element].role = Role::Dialogue;
-                    generated.remove(project.elements[position.element].id.as_str());
-                    position.offset = 0;
-                    return Ok(Selection::caret(position));
-                }
-                if empty_parenthetical_at(item_text.as_str(), position.offset)
-                    && generated.contains(project.elements[position.element].id.as_str())
-                {
-                    project.elements[position.element].text.clear();
-                    position.offset = 0;
-                    generated.remove(project.elements[position.element].id.as_str());
-                } else if let Some(boundary) =
-                    parenthetical_repair_boundary(item_text.as_str(), position.offset)
-                {
-                    project.elements[position.element].text =
-                        repair_parenthetical(item_text.as_str());
-                    position.offset = boundary;
-                    return insert_dialogue_below(project, position.element);
-                } else if !item_text.is_empty() {
+        self.mutate(
+            MutationValidationScope::Complete,
+            |project, selection, generated, policy| {
+                let (start, end) = selection.ordered();
+                if start != end {
                     return Ok(*selection);
                 }
-            }
-            let element = &project.elements[position.element];
-            let element_role = element.role;
-            let element_is_empty = element.text.is_empty();
-            let next_role = tab_transition(element_role, element_is_empty);
-            if let Some(role) = next_role {
-                if element_role != role {
-                    update_preserved_role(project, position.element, element_role, role)?;
-                    project.elements[position.element].role = role;
+                let item = project
+                    .elements
+                    .get(start.element)
+                    .ok_or(EditError::InvalidElement)?;
+                if strict_boundary_rejects(
+                    project,
+                    policy,
+                    start.element,
+                    item.role,
+                    item.text.len(),
+                    start.offset,
+                ) {
+                    return Ok(*selection);
                 }
-                if policy.auto_parenthetical
-                    && role == Role::Parenthetical
-                    && project.elements[position.element].text.is_empty()
-                {
-                    replace_range(
-                        project,
-                        Position {
-                            element: position.element,
-                            offset: 0,
-                        },
-                        Position {
-                            element: position.element,
-                            offset: 0,
-                        },
-                        "()",
-                    )?;
-                    generated.insert(project.elements[position.element].id.as_str().to_owned());
-                    return Ok(Selection::caret(Position {
-                        element: position.element,
-                        offset: 1,
-                    }));
+                let item_role = item.role;
+                let item_text = item.text.clone();
+                let mut position = start;
+                if policy.auto_parenthetical && item_role == Role::Parenthetical {
+                    if is_delimiter_only_parenthetical(item_text.as_str()) {
+                        replace_range(
+                            project,
+                            Position {
+                                element: position.element,
+                                offset: 0,
+                            },
+                            Position {
+                                element: position.element,
+                                offset: item_text.len(),
+                            },
+                            "",
+                        )?;
+                        update_preserved_role(
+                            project,
+                            position.element,
+                            item_role,
+                            Role::Dialogue,
+                        )?;
+                        project.elements[position.element].role = Role::Dialogue;
+                        generated.remove(project.elements[position.element].id.as_str());
+                        position.offset = 0;
+                        return Ok(Selection::caret(position));
+                    }
+                    if empty_parenthetical_at(item_text.as_str(), position.offset)
+                        && generated.contains(project.elements[position.element].id.as_str())
+                    {
+                        project.elements[position.element].text.clear();
+                        position.offset = 0;
+                        generated.remove(project.elements[position.element].id.as_str());
+                    } else if let Some(boundary) =
+                        parenthetical_repair_boundary(item_text.as_str(), position.offset)
+                    {
+                        project.elements[position.element].text =
+                            repair_parenthetical(item_text.as_str());
+                        position.offset = boundary;
+                        return insert_dialogue_below(project, position.element);
+                    } else if !item_text.is_empty() {
+                        return Ok(*selection);
+                    }
                 }
-                return Ok(Selection::caret(position));
-            }
-            Ok(Selection::caret(position))
-        })
+                let element = &project.elements[position.element];
+                let element_role = element.role;
+                let element_is_empty = element.text.is_empty();
+                let next_role = tab_transition(element_role, element_is_empty);
+                if let Some(role) = next_role {
+                    if element_role != role {
+                        update_preserved_role(project, position.element, element_role, role)?;
+                        project.elements[position.element].role = role;
+                    }
+                    if policy.auto_parenthetical
+                        && role == Role::Parenthetical
+                        && project.elements[position.element].text.is_empty()
+                    {
+                        replace_range(
+                            project,
+                            Position {
+                                element: position.element,
+                                offset: 0,
+                            },
+                            Position {
+                                element: position.element,
+                                offset: 0,
+                            },
+                            "()",
+                        )?;
+                        generated.insert(project.elements[position.element].id.as_str().to_owned());
+                        return Ok(Selection::caret(Position {
+                            element: position.element,
+                            offset: 1,
+                        }));
+                    }
+                    return Ok(Selection::caret(position));
+                }
+                Ok(Selection::caret(position))
+            },
+        )
     }
 
     /// Joins adjacent paragraphs while retaining the left source identity. Any
     /// opaque attachment or unsafe reference prevents the candidate from being
     /// published.
     pub fn join_with_next(&mut self) -> Result<(), EditError> {
-        self.mutate(MutationValidationScope::Complete, |project, selection, _generated, _policy| {
-            let (start, end) = selection.ordered();
-            if start != end || start.offset != project.elements[start.element].text.len() {
-                return Err(EditError::InvalidSelection);
-            }
-            let offset = project.elements[start.element].text.len();
-            join_at(project, start.element)?;
-            Ok(Selection::caret(Position {
-                element: start.element,
-                offset,
-            }))
-        })
+        self.mutate(
+            MutationValidationScope::Complete,
+            |project, selection, _generated, _policy| {
+                let (start, end) = selection.ordered();
+                if start != end || start.offset != project.elements[start.element].text.len() {
+                    return Err(EditError::InvalidSelection);
+                }
+                let offset = project.elements[start.element].text.len();
+                join_at(project, start.element)?;
+                Ok(Selection::caret(Position {
+                    element: start.element,
+                    offset,
+                }))
+            },
+        )
     }
 
     /// Changes a known role and its exact mapped source Type attribute together.
     /// A role change that would invalidate attached scene data is rejected.
     pub fn change_role(&mut self, role: Role) -> Result<(), EditError> {
-        self.mutate(MutationValidationScope::SingleParagraph, |project, selection, generated, policy| {
-            let (start, end) = selection.ordered();
-            if start.element != end.element {
-                return Err(EditError::InvalidSelection);
-            }
-            let old_role = project.elements[start.element].role;
-            if old_role != role {
-                update_preserved_role(project, start.element, old_role, role)?;
-            }
-            project.elements[start.element].role = role;
-            if role != Role::Parenthetical {
-                generated.remove(project.elements[start.element].id.as_str());
-            } else if policy.auto_parenthetical && project.elements[start.element].text.is_empty() {
-                replace_range(
-                    project,
-                    Position {
+        self.mutate(
+            MutationValidationScope::SingleParagraph,
+            |project, selection, generated, policy| {
+                let (start, end) = selection.ordered();
+                if start.element != end.element {
+                    return Err(EditError::InvalidSelection);
+                }
+                let old_role = project.elements[start.element].role;
+                if old_role != role {
+                    update_preserved_role(project, start.element, old_role, role)?;
+                }
+                project.elements[start.element].role = role;
+                if role != Role::Parenthetical {
+                    generated.remove(project.elements[start.element].id.as_str());
+                } else if policy.auto_parenthetical
+                    && project.elements[start.element].text.is_empty()
+                {
+                    replace_range(
+                        project,
+                        Position {
+                            element: start.element,
+                            offset: 0,
+                        },
+                        Position {
+                            element: start.element,
+                            offset: 0,
+                        },
+                        "()",
+                    )?;
+                    generated.insert(project.elements[start.element].id.as_str().to_owned());
+                    return Ok(Selection::caret(Position {
                         element: start.element,
-                        offset: 0,
-                    },
-                    Position {
-                        element: start.element,
-                        offset: 0,
-                    },
-                    "()",
-                )?;
-                generated.insert(project.elements[start.element].id.as_str().to_owned());
-                return Ok(Selection::caret(Position {
-                    element: start.element,
-                    offset: 1,
-                }));
-            }
-            Ok(*selection)
-        })
+                        offset: 1,
+                    }));
+                }
+                Ok(*selection)
+            },
+        )
     }
 
     pub fn undo(&mut self) -> Result<(), EditError> {
@@ -1112,7 +1109,12 @@ impl EditingSession {
         let (scope_start, scope_end) = self.selection.ordered();
         let requested_element = (requested_scope == MutationValidationScope::SingleParagraph
             && scope_start.element == scope_end.element)
-            .then(|| self.project.elements.get(scope_start.element).map(|element| element.id.clone()))
+            .then(|| {
+                self.project
+                    .elements
+                    .get(scope_start.element)
+                    .map(|element| element.id.clone())
+            })
             .flatten();
         let mut project = self.project.clone();
         let mut generated = self.generated_parentheticals.clone();
@@ -1138,23 +1140,26 @@ impl EditingSession {
         let scoped_preconditions = self.validated_baseline
             && requested_element.as_ref().is_some_and(|id| {
                 project.elements.len() == self.project.elements.len()
-                    && project.elements.get(scope_start.element).is_some_and(|element| &element.id == id)
+                    && project
+                        .elements
+                        .get(scope_start.element)
+                        .is_some_and(|element| &element.id == id)
                     && selection.anchor.element == scope_start.element
                     && selection.focus.element == scope_start.element
                     && project
                         .preservation
                         .as_ref()
-                        .map_or(true, |state| state.has_managed_paragraph_index())
+                        .is_none_or(|state| state.has_managed_paragraph_index())
             });
         let scoped_valid = if scoped_preconditions {
-            let _ = SCOPED_CANDIDATE_ATTEMPTS.fetch_update(
+            let _ = SCOPED_CANDIDATE_ATTEMPTS.try_update(
                 Ordering::Relaxed,
                 Ordering::Relaxed,
                 |value| Some(value.saturating_add(1)),
             );
             match project.validate_scoped_single_element_edit(&self.project, scope_start.element) {
                 Ok(true) if validate_selection(&project, selection).is_ok() => {
-                    let _ = SCOPED_CANDIDATE_ACCEPTS.fetch_update(
+                    let _ = SCOPED_CANDIDATE_ACCEPTS.try_update(
                         Ordering::Relaxed,
                         Ordering::Relaxed,
                         |value| Some(value.saturating_add(1)),
@@ -1168,7 +1173,7 @@ impl EditingSession {
         };
         if !scoped_valid {
             if requested_scope == MutationValidationScope::SingleParagraph {
-                let _ = FULL_VALIDATION_FALLBACKS.fetch_update(
+                let _ = FULL_VALIDATION_FALLBACKS.try_update(
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                     |value| Some(value.saturating_add(1)),
@@ -1265,7 +1270,10 @@ fn classify_derived_invalidation(before: &Project, after: &Project) -> PendingDe
         .filter(|element| element.role == Role::SceneHeading)
         .map(|element| element.id.as_str())
         .collect::<Vec<_>>();
-    let before_heading_set = before_heading_order.iter().copied().collect::<BTreeSet<_>>();
+    let before_heading_set = before_heading_order
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
     let after_heading_set = after_heading_order.iter().copied().collect::<BTreeSet<_>>();
 
     // Existing scene boundaries changing relative order cannot be assigned a
@@ -1334,9 +1342,9 @@ fn classify_derived_invalidation(before: &Project, after: &Project) -> PendingDe
     }
 }
 
-fn unique_elements_by_id<'a>(
-    elements: &'a [ScreenplayElement],
-) -> Option<BTreeMap<String, &'a ScreenplayElement>> {
+fn unique_elements_by_id(
+    elements: &[ScreenplayElement],
+) -> Option<BTreeMap<String, &ScreenplayElement>> {
     let mut by_id = BTreeMap::new();
     for element in elements {
         if by_id
@@ -1823,11 +1831,7 @@ fn insert_dialogue_below(project: &mut Project, element: usize) -> Result<Select
     }))
 }
 
-fn split_at(
-    project: &mut Project,
-    position: Position,
-    role: Role,
-) -> Result<Selection, EditError> {
+fn split_at(project: &mut Project, position: Position, role: Role) -> Result<Selection, EditError> {
     if project.elements.len() >= MAX_ELEMENTS {
         return Err(EditError::TooManyElements);
     }
@@ -1919,7 +1923,11 @@ pub fn transition(role: Role) -> Option<Role> {
 }
 
 pub fn enter_transition(role: Role) -> Option<Role> {
-    role_for_native_behavior_target(crate::formatting::formatting_for_role(role).behavior.return_key)
+    role_for_native_behavior_target(
+        crate::formatting::formatting_for_role(role)
+            .behavior
+            .return_key,
+    )
 }
 
 /// Returns the shared native TabKey application default, with the established
@@ -1928,7 +1936,11 @@ pub fn tab_transition(role: Role, current_text_is_empty: bool) -> Option<Role> {
     if role == Role::Character && !current_text_is_empty {
         return None;
     }
-    role_for_native_behavior_target(crate::formatting::formatting_for_role(role).behavior.tab_key)
+    role_for_native_behavior_target(
+        crate::formatting::formatting_for_role(role)
+            .behavior
+            .tab_key,
+    )
 }
 
 fn role_for_native_behavior_target(target: &str) -> Option<Role> {
@@ -1936,1837 +1948,4 @@ fn role_for_native_behavior_target(target: &str) -> Option<Role> {
         .iter()
         .find(|formatting| formatting.fdx_label == target)
         .map(|formatting| formatting.role)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::preservation::{
-        AnchorRelation, AnchorTarget, BoardEntity, BoardEntityKind, BoardGraph,
-        DependencyConfidence, ForeignIdDomain, ForeignIdentity, ForeignReference, NamespaceBinding,
-        PreservationState, PreservedAttribute, PreservedElement, PreservedNode, PreservedSection,
-        ReferencePolicy, SectionKind, SourceAnchor, SourceAnchorId, SourceEncoding, SourceName,
-        SharedBytes, SourceOwnership, SourceSnapshot,
-    };
-    use crate::{Project, RunAttribute, SourceFormat, SourceProvenance, SourceSection};
-
-    #[test]
-    fn edit_errors_expose_only_managed_mismatch_site_and_safe_refresh_class() {
-        use crate::cast_list::CastListError;
-        use crate::preservation::{ManagedTextMismatchSite, PreservationError};
-        use crate::scene_metadata::SceneMetadataError;
-
-        let mismatch = EditError::Model(ModelError::InvalidPreservationState(
-            PreservationError::ManagedTextMismatchAt(
-                ManagedTextMismatchSite::ScopedEditValidation,
-            ),
-        ));
-        assert_eq!(
-            mismatch.managed_text_mismatch_diagnostic(),
-            Some("scoped-edit-validation"),
-        );
-        assert_eq!(
-            EditError::CastList(CastListError::SceneMetadata(
-                SceneMetadataError::UnsupportedSceneMetadata,
-            ))
-            .scheduled_refresh_failure_category(),
-            "scene reconciliation",
-        );
-        assert_eq!(
-            EditError::CastList(CastListError::Preservation(
-                PreservationError::UnsupportedTextMapping,
-            ))
-            .scheduled_refresh_failure_category(),
-            "Cast List source mapping",
-        );
-        assert_eq!(
-            EditError::CastList(CastListError::Model(ModelError::InvalidRunProjection))
-                .scheduled_refresh_failure_category(),
-            "model validation",
-        );
-        assert_eq!(
-            EditError::CastList(CastListError::UnsupportedFormattedCastList)
-                .scheduled_refresh_failure_category(),
-            "formatted Cast List mapping",
-        );
-    }
-
-    fn session(text: &str, role: Role) -> EditingSession {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        project.elements[0].role = role;
-        project.elements[0].text = text.into();
-        EditingSession::new(project).unwrap_or_else(|_| unreachable!())
-    }
-    fn set(session: &mut EditingSession, element: usize, offset: usize) {
-        session
-            .set_selection(Selection::caret(Position { element, offset }))
-            .unwrap_or_else(|_| unreachable!());
-    }
-
-    fn relevance_session() -> EditingSession {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        project.elements = vec![
-            ScreenplayElement::new("scene-a", Role::SceneHeading, "INT. ONE")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("action-a", Role::Action, "Action")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cue-a", Role::Character, "ALPHA")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("scene-b", Role::SceneHeading, "EXT. TWO")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cue-b", Role::Character, "BETA")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("action-b", Role::Action, "More action")
-                .unwrap_or_else(|_| unreachable!()),
-        ];
-        EditingSession::new(project).unwrap_or_else(|_| unreachable!())
-    }
-
-    fn clear_pending_derived(session: &mut EditingSession) {
-        session.pending_derived_invalidation = PendingDerivedInvalidation::None;
-        session.deferred_derived_scenes.clear();
-        session.failed_derived_complete = false;
-        session.failed_derived_scenes.clear();
-    }
-
-    fn scoped_cast_session() -> EditingSession {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        project.elements = vec![
-            ScreenplayElement::new("scene-a", Role::SceneHeading, "INT. ONE")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cue-a", Role::Character, "ALPHA")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cast-a", Role::CastList, "(stale A)")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("scene-b", Role::SceneHeading, "EXT. TWO")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cue-b", Role::Character, "BETA")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cast-b", Role::CastList, "(stale B)")
-                .unwrap_or_else(|_| unreachable!()),
-        ];
-        EditingSession::new(project).unwrap_or_else(|_| unreachable!())
-    }
-
-    #[test]
-    fn derived_relevance_starts_complete_and_summary_discloses_no_identities() {
-        let session = relevance_session();
-        assert_eq!(
-            session.pending_derived_work_summary(),
-            DerivedWorkSummary {
-                pending: true,
-                complete: true,
-                affected_scene_count: 0,
-                retryable: true,
-                deferred_scene_count: 0,
-                failed_complete: false,
-                failed_scene_count: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn non_character_text_is_irrelevant_and_character_text_scopes_to_its_scene() {
-        let mut session = relevance_session();
-        clear_pending_derived(&mut session);
-
-        set(&mut session, 1, "Action".len());
-        session.insert(" continues").unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
-
-        set(&mut session, 2, "ALPHA".len());
-        session.insert(" TWO").unwrap_or_else(|_| unreachable!());
-        assert_eq!(
-            session.pending_derived_invalidation(),
-            &PendingDerivedInvalidation::Scenes(BTreeSet::from(["scene-a".to_owned()]))
-        );
-        assert_eq!(session.pending_derived_work_summary().affected_scene_count, 1);
-    }
-
-    #[test]
-    fn character_role_transitions_and_heading_edits_mark_their_owners() {
-        let mut session = relevance_session();
-        clear_pending_derived(&mut session);
-
-        set(&mut session, 1, 0);
-        session.change_role(Role::Character).unwrap_or_else(|_| unreachable!());
-        assert_eq!(
-            session.pending_derived_invalidation(),
-            &PendingDerivedInvalidation::Scenes(BTreeSet::from(["scene-a".to_owned()]))
-        );
-
-        clear_pending_derived(&mut session);
-        set(&mut session, 1, 0);
-        session.change_role(Role::Action).unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.pending_derived_work_summary().affected_scene_count, 1);
-
-        clear_pending_derived(&mut session);
-        set(&mut session, 3, "EXT. TWO".len());
-        session.insert(" - NIGHT").unwrap_or_else(|_| unreachable!());
-        assert_eq!(
-            session.pending_derived_invalidation(),
-            &PendingDerivedInvalidation::Scenes(BTreeSet::from(["scene-b".to_owned()]))
-        );
-    }
-
-    #[test]
-    fn independent_relevant_edits_union_scene_scopes() {
-        let mut session = relevance_session();
-        clear_pending_derived(&mut session);
-        set(&mut session, 2, "ALPHA".len());
-        session.insert(" X").unwrap_or_else(|_| unreachable!());
-        set(&mut session, 4, "BETA".len());
-        session.insert(" Y").unwrap_or_else(|_| unreachable!());
-        assert_eq!(
-            session.pending_derived_invalidation(),
-            &PendingDerivedInvalidation::Scenes(BTreeSet::from([
-                "scene-a".to_owned(),
-                "scene-b".to_owned(),
-            ]))
-        );
-    }
-
-    #[test]
-    fn structural_relevance_matrix_classifies_roles_and_scene_topology() {
-        fn element(id: &str, role: Role, text: &str) -> ScreenplayElement {
-            ScreenplayElement::new(id, role, text).unwrap_or_else(|_| unreachable!())
-        }
-        fn project(elements: Vec<ScreenplayElement>) -> Project {
-            let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-            project.elements = elements;
-            project
-        }
-        fn scenes(ids: &[&str]) -> PendingDerivedInvalidation {
-            PendingDerivedInvalidation::Scenes(
-                ids.iter().map(|id| (*id).to_owned()).collect(),
-            )
-        }
-
-        let before = relevance_session().project().clone();
-        let base = before.elements.clone();
-
-        // Purely structural Action changes leave every ordered Character
-        // projection untouched; this includes same-scene split/join shapes.
-        let mut action_insert = base.clone();
-        action_insert.insert(2, element("action-new", Role::Action, "new action"));
-        assert_eq!(
-            classify_derived_invalidation(&before, &project(action_insert)),
-            PendingDerivedInvalidation::None,
-        );
-        let mut action_delete = base.clone();
-        action_delete.remove(1);
-        assert_eq!(
-            classify_derived_invalidation(&before, &project(action_delete)),
-            PendingDerivedInvalidation::None,
-        );
-
-        let mut cue_insert = base.clone();
-        cue_insert.insert(2, element("cue-new", Role::Character, "GAMMA"));
-        assert_eq!(
-            classify_derived_invalidation(&before, &project(cue_insert)),
-            scenes(&["scene-a"]),
-        );
-        let mut cue_delete = base.clone();
-        cue_delete.remove(2);
-        assert_eq!(
-            classify_derived_invalidation(&before, &project(cue_delete)),
-            scenes(&["scene-a"]),
-        );
-
-        let mut heading_insert = base.clone();
-        heading_insert.insert(
-            2,
-            element("scene-new", Role::SceneHeading, "INT. NEW ROOM"),
-        );
-        assert_eq!(
-            classify_derived_invalidation(&before, &project(heading_insert)),
-            scenes(&["scene-a", "scene-new"]),
-        );
-        let mut heading_remove = base.clone();
-        heading_remove.remove(3);
-        assert_eq!(
-            classify_derived_invalidation(&before, &project(heading_remove)),
-            scenes(&["scene-a"]),
-        );
-
-        let mut action_to_character = base.clone();
-        action_to_character[1].role = Role::Character;
-        assert_eq!(
-            classify_derived_invalidation(&before, &project(action_to_character)),
-            scenes(&["scene-a"]),
-        );
-        let mut character_to_action = base.clone();
-        character_to_action[2].role = Role::Action;
-        assert_eq!(
-            classify_derived_invalidation(&before, &project(character_to_action)),
-            scenes(&["scene-a"]),
-        );
-
-        // A join across a heading transfers the following cue into the
-        // surviving scene; deletion of its old heading ID is not schedulable.
-        let cross_scene_before = project(vec![
-            element("scene-a", Role::SceneHeading, "INT. ONE"),
-            element("action-a", Role::Action, "Action"),
-            element("scene-b", Role::SceneHeading, "EXT. TWO"),
-            element("cue-b", Role::Character, "BETA"),
-        ]);
-        let cross_scene_after = project(vec![
-            element("scene-a", Role::SceneHeading, "INT. ONE"),
-            element("action-a", Role::Action, "Action EXT. TWO"),
-            element("cue-b", Role::Character, "BETA"),
-        ]);
-        assert_eq!(
-            classify_derived_invalidation(&cross_scene_before, &cross_scene_after),
-            scenes(&["scene-a"]),
-        );
-
-        let mut ambiguous_identity = base.clone();
-        ambiguous_identity.push(element("cue-a", Role::Action, "duplicate identity"));
-        assert_eq!(
-            classify_derived_invalidation(&before, &project(ambiguous_identity)),
-            PendingDerivedInvalidation::Complete,
-        );
-        let mut ambiguous_owner = base;
-        ambiguous_owner.remove(0);
-        assert_eq!(
-            classify_derived_invalidation(&before, &project(ambiguous_owner)),
-            PendingDerivedInvalidation::Complete,
-        );
-
-        // Undo/redo retain their established conservative complete scope.
-        let mut history = relevance_session();
-        clear_pending_derived(&mut history);
-        set(&mut history, 2, "ALPHA".len());
-        history.insert(" X").unwrap_or_else(|_| unreachable!());
-        clear_pending_derived(&mut history);
-        history.undo().unwrap_or_else(|_| unreachable!());
-        assert!(history.pending_derived_work_summary().complete);
-        clear_pending_derived(&mut history);
-        history.redo().unwrap_or_else(|_| unreachable!());
-        assert!(history.pending_derived_work_summary().complete);
-    }
-
-    #[test]
-    fn irrelevant_structural_edits_do_not_reactivate_failed_or_deferred_work() {
-        let mut failed_complete = relevance_session();
-        clear_pending_derived(&mut failed_complete);
-        failed_complete.pending_derived_invalidation = PendingDerivedInvalidation::Complete;
-        failed_complete.failed_derived_complete = true;
-        set(&mut failed_complete, 1, "Action".len());
-        failed_complete.split().unwrap_or_else(|_| unreachable!());
-        let failed = failed_complete.pending_derived_work_summary();
-        assert!(failed.pending && failed.complete && failed.failed_complete);
-        assert!(!failed.retryable);
-
-        let mut deferred_scene = relevance_session();
-        clear_pending_derived(&mut deferred_scene);
-        deferred_scene.pending_derived_invalidation = PendingDerivedInvalidation::Scenes(
-            BTreeSet::from(["scene-a".to_owned()]),
-        );
-        deferred_scene.deferred_derived_scenes.insert("scene-a".to_owned());
-        set(&mut deferred_scene, 1, "Action".len());
-        deferred_scene.split().unwrap_or_else(|_| unreachable!());
-        let deferred = deferred_scene.pending_derived_work_summary();
-        assert!(deferred.pending && !deferred.complete);
-        assert_eq!(deferred.deferred_scene_count, 1);
-        assert!(!deferred.retryable);
-    }
-
-    #[test]
-    fn scoped_completion_cannot_consume_complete_work_and_clears_only_finished_scenes() {
-        let mut session = relevance_session();
-        session.complete_derived_invalidation(&BTreeSet::new(), &BTreeSet::new(), false);
-        assert_eq!(session.pending_derived_work_summary().complete, true);
-        session.complete_derived_invalidation(&BTreeSet::new(), &BTreeSet::new(), true);
-        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
-
-        clear_pending_derived(&mut session);
-        set(&mut session, 2, "ALPHA".len());
-        session.insert(" X").unwrap_or_else(|_| unreachable!());
-        set(&mut session, 4, "BETA".len());
-        session.insert(" Y").unwrap_or_else(|_| unreachable!());
-        session.complete_derived_invalidation(
-            &BTreeSet::from(["scene-a".to_owned()]),
-            &BTreeSet::new(),
-            false,
-        );
-        assert_eq!(
-            session.pending_derived_invalidation(),
-            &PendingDerivedInvalidation::Scenes(BTreeSet::from(["scene-b".to_owned()]))
-        );
-        session.complete_derived_invalidation(
-            &BTreeSet::from(["scene-b".to_owned()]),
-            &BTreeSet::new(),
-            false,
-        );
-        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
-    }
-
-    #[test]
-    fn initial_complete_refresh_and_single_scene_refresh_report_value_free_counts() {
-        let mut session = scoped_cast_session();
-        let initial = session
-            .refresh_cast_lists_with_outcome()
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(initial.requested_scenes, 2);
-        assert_eq!(initial.attempted_scenes, 2);
-        assert_eq!(initial.changed_scenes, 2);
-        assert_eq!(session.project().elements[2].text, "(ALPHA)");
-        assert_eq!(session.project().elements[5].text, "(BETA)");
-        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
-
-        set(&mut session, 1, "ALPHA".len());
-        session.insert(" X").unwrap_or_else(|_| unreachable!());
-        let scoped = session
-            .refresh_cast_lists_with_outcome()
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(scoped.requested_scenes, 1);
-        assert_eq!(scoped.attempted_scenes, 1);
-        assert_eq!(scoped.changed_scenes, 1);
-        assert_eq!(scoped.deferred_scenes, 0);
-        assert_eq!(session.project().elements[2].text, "(ALPHA X)");
-        assert_eq!(session.project().elements[5].text, "(BETA)");
-
-        session.undo().unwrap_or_else(|_| unreachable!());
-        assert!(session.pending_derived_work_summary().complete);
-        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.project().elements[2].text, "(ALPHA)");
-        session.redo().unwrap_or_else(|_| unreachable!());
-        assert!(session.pending_derived_work_summary().complete);
-        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.project().elements[2].text, "(ALPHA X)");
-    }
-
-    #[test]
-    fn multiple_affected_scenes_are_reconciled_without_touching_other_scene_content() {
-        let mut session = scoped_cast_session();
-        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
-        let unrelated_before = session.project().elements[3..].to_vec();
-        set(&mut session, 1, "ALPHA".len());
-        session.insert(" TWO").unwrap_or_else(|_| unreachable!());
-        set(&mut session, 4, "BETA".len());
-        session.insert(" TWO").unwrap_or_else(|_| unreachable!());
-
-        let outcome = session
-            .refresh_cast_lists_with_outcome()
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(outcome.requested_scenes, 2);
-        assert_eq!(outcome.attempted_scenes, 2);
-        assert_eq!(session.project().elements[2].text, "(ALPHA TWO)");
-        assert_eq!(session.project().elements[3..], unrelated_before);
-    }
-
-    #[test]
-    fn role_transitions_and_character_removal_reproject_the_owning_scene() {
-        let mut session = scoped_cast_session();
-        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
-
-        set(&mut session, 1, "ALPHA".len());
-        session
-            .change_role(Role::Action)
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.pending_derived_work_summary().affected_scene_count, 1);
-        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.project().elements[2].text, "()");
-
-        set(&mut session, 1, "ALPHA".len());
-        session
-            .change_role(Role::Character)
-            .unwrap_or_else(|_| unreachable!());
-        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.project().elements[2].text, "(ALPHA)");
-
-        set(&mut session, 1, "ALPHA".len());
-        session
-            .set_selection(Selection {
-                anchor: Position { element: 1, offset: 0 },
-                focus: Position { element: 1, offset: "ALPHA".len() },
-            })
-            .unwrap_or_else(|_| unreachable!());
-        session.delete().unwrap_or_else(|_| unreachable!());
-        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.project().elements[2].text, "()");
-    }
-
-    #[test]
-    fn deferred_scene_waits_for_its_own_relevant_revision_and_remains_pending() {
-        let mut session = scoped_cast_session();
-        session.project.elements[2].runs[0].attributes.push(RunAttribute {
-            name: "Bold".to_owned(),
-            value: "true".to_owned(),
-        });
-        let initial = session
-            .refresh_cast_lists_with_outcome()
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(initial.deferred_scenes, 1);
-        assert_eq!(session.pending_derived_invalidation(), &PendingDerivedInvalidation::Scenes(
-            BTreeSet::from(["scene-a".to_owned()])
-        ));
-        let deferred_summary = session.pending_derived_work_summary();
-        assert!(deferred_summary.pending);
-        assert!(!deferred_summary.retryable);
-        assert_eq!(deferred_summary.affected_scene_count, 1);
-        assert_eq!(deferred_summary.deferred_scene_count, 1);
-        assert_eq!(session.project().elements[5].text, "(BETA)");
-
-        set(&mut session, 4, "BETA".len());
-        session.insert(" unrelated").unwrap_or_else(|_| unreachable!());
-        let skipped = session
-            .refresh_cast_lists_with_outcome()
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(skipped.attempted_scenes, 0);
-        assert_eq!(session.pending_derived_work_summary().affected_scene_count, 1);
-
-        set(&mut session, 1, "ALPHA".len());
-        session.insert(" changed").unwrap_or_else(|_| unreachable!());
-        let retried = session
-            .refresh_cast_lists_with_outcome()
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(retried.requested_scenes, 1);
-        assert_eq!(retried.attempted_scenes, 1);
-        assert_eq!(retried.deferred_scenes, 1);
-    }
-
-    #[test]
-    fn scoped_refresh_and_explicit_save_candidate_keep_complete_save_preparation() {
-        let mut session = scoped_cast_session();
-        session.pending_derived_invalidation = PendingDerivedInvalidation::Scenes(
-            BTreeSet::from(["scene-a".to_owned()]),
-        );
-        session.project.elements[2].text = "(stale A)".to_owned();
-        session.project.elements[5].text = "(stale B)".to_owned();
-
-        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.project().elements[2].text, "(ALPHA)");
-        assert_eq!(session.project().elements[5].text, "(stale B)");
-        let save_candidate = session
-            .prepare_cast_list_save_candidate()
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(save_candidate.elements[2].text, "(ALPHA)");
-        assert_eq!(save_candidate.elements[5].text, "(BETA)");
-        assert_eq!(session.project().elements[5].text, "(stale B)");
-    }
-
-    #[test]
-    fn fatal_later_scoped_scene_keeps_prior_candidate_and_pending_scope_unpublished() {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        let oversized_name = "N".repeat(MAX_TEXT_BYTES / 2);
-        project.elements = vec![
-            ScreenplayElement::new("scene-a", Role::SceneHeading, "INT. ONE")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cue-a", Role::Character, "ALPHA")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cast-a", Role::CastList, "(stale A)")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("scene-b", Role::SceneHeading, "EXT. TWO")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cue-b1", Role::Character, &oversized_name)
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cue-b2", Role::Character, &format!("M{}", oversized_name))
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cast-b", Role::CastList, "(stale B)")
-                .unwrap_or_else(|_| unreachable!()),
-        ];
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        let requested = BTreeSet::from(["scene-a".to_owned(), "scene-b".to_owned()]);
-        session.pending_derived_invalidation =
-            PendingDerivedInvalidation::Scenes(requested.clone());
-        let original = session.project().clone();
-
-        assert!(session.refresh_cast_lists_with_outcome().is_err());
-        assert_eq!(session.project(), &original);
-        assert_eq!(session.pending_derived_invalidation(), &PendingDerivedInvalidation::Scenes(requested));
-        let failed = session.pending_derived_work_summary();
-        assert!(failed.pending);
-        assert!(!failed.complete);
-        assert!(!failed.retryable);
-        assert_eq!(failed.failed_scene_count, 2);
-
-        // A relevant edit wakes only its own scene; the other failed scope stays
-        // pending and suspended after the newly eligible scene succeeds.
-        set(&mut session, 1, "ALPHA".len());
-        session.insert(" X").unwrap_or_else(|_| unreachable!());
-        assert!(session.pending_derived_work_summary().retryable);
-        let retried = session
-            .refresh_cast_lists_with_outcome()
-            .unwrap_or_else(|_| unreachable!("the newly invalidated scene can be corrected"));
-        assert_eq!(retried.attempted_scenes, 1);
-        let still_failed = session.pending_derived_work_summary();
-        assert!(still_failed.pending);
-        assert!(!still_failed.retryable);
-        assert_eq!(still_failed.failed_scene_count, 1);
-    }
-
-    #[test]
-    fn failed_complete_refresh_suspends_until_relevant_invalidation_and_save_still_prepares() {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        let oversized_name = "N".repeat(MAX_TEXT_BYTES / 2);
-        project.elements = vec![
-            ScreenplayElement::new("scene-a", Role::SceneHeading, "INT. ONE")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("action-a", Role::Action, "Action")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cue-a1", Role::Character, &oversized_name)
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cue-a2", Role::Character, &format!("M{oversized_name}"))
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cast-a", Role::CastList, "(stale)")
-                .unwrap_or_else(|_| unreachable!()),
-        ];
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        let original = session.project().clone();
-        let revision = session.revision();
-
-        assert!(session.refresh_cast_lists_with_outcome().is_err());
-        let failed = session.pending_derived_work_summary();
-        assert!(failed.pending);
-        assert!(failed.complete);
-        assert!(!failed.retryable);
-        assert!(failed.failed_complete);
-        assert_eq!(session.project(), &original);
-        assert_eq!(session.revision(), revision);
-        assert!(!session.dirty());
-        assert!(!session.can_undo());
-
-        // Explicit save preparation still executes the complete candidate path,
-        // but cannot publish or consume the failed live-session invalidation.
-        assert!(session.prepare_cast_list_save_candidate().is_err());
-        assert_eq!(session.project(), &original);
-        assert!(session.pending_derived_work_summary().failed_complete);
-
-        // Direct callers cannot bypass suspension; due timer calls receive a
-        // no-work outcome until the failed complete scope is invalidated.
-        let suspended = session
-            .refresh_cast_lists_with_outcome()
-            .unwrap_or_else(|_| unreachable!("suspended work is not retried"));
-        assert_eq!(suspended.attempted_scenes, 0);
-        assert!(session.pending_derived_work_summary().failed_complete);
-
-        set(&mut session, 1, "Action".len());
-        session.insert(" continues").unwrap_or_else(|_| unreachable!());
-        assert!(!session.pending_derived_work_summary().retryable);
-
-        // A character edit is relevant, so the complete pending work may get
-        // one fresh attempt. The repeated failure is suspended again.
-        set(&mut session, 2, oversized_name.len());
-        session.insert(" X").unwrap_or_else(|_| unreachable!());
-        let reactivated = session.pending_derived_work_summary();
-        assert!(reactivated.pending && reactivated.complete && reactivated.retryable);
-        assert!(session.refresh_cast_lists_with_outcome().is_err());
-        let suspended_again = session.pending_derived_work_summary();
-        assert!(suspended_again.pending && suspended_again.failed_complete);
-        assert!(!suspended_again.retryable);
-    }
-
-    #[test]
-    fn suspended_complete_timer_state_does_not_block_complete_save_candidate() {
-        let mut session = scoped_cast_session();
-        session.pending_derived_invalidation = PendingDerivedInvalidation::Complete;
-        session.failed_derived_complete = true;
-        let live_project = session.project().clone();
-
-        let save_candidate = session
-            .prepare_cast_list_save_candidate()
-            .unwrap_or_else(|_| unreachable!("complete save correction remains available"));
-        assert_eq!(save_candidate.elements[2].text, "(ALPHA)");
-        assert_eq!(save_candidate.elements[5].text, "(BETA)");
-        assert_eq!(session.project(), &live_project);
-        let summary = session.pending_derived_work_summary();
-        assert!(summary.pending && summary.complete && summary.failed_complete);
-        assert!(!summary.retryable);
-    }
-
-    #[test]
-    fn replacement_requires_complete_refresh_but_saved_rebase_is_already_current() {
-        let mut session = relevance_session();
-        clear_pending_derived(&mut session);
-        let project = session
-            .prepare_cast_list_save_candidate()
-            .unwrap_or_else(|_| unreachable!());
-        let rebased = session
-            .prepare_saved_rebase(project.clone())
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(rebased.pending_derived_work_summary(), DerivedWorkSummary::default());
-
-        session
-            .replace_with_saved(project)
-            .unwrap_or_else(|_| unreachable!());
-        assert!(session.pending_derived_work_summary().complete);
-    }
-
-    #[test]
-    fn no_op_and_failed_edits_leave_pending_scope_unchanged() {
-        let mut session = relevance_session();
-        clear_pending_derived(&mut session);
-        let original_project = session.project().clone();
-        let original_revision = session.revision();
-        set(&mut session, 1, "Action".len());
-        session.insert("").unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
-
-        assert_eq!(session.insert(&"x".repeat(MAX_TEXT_BYTES + 1)), Err(EditError::TextTooLong));
-        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
-        assert_eq!(session.project(), &original_project);
-        assert_eq!(session.revision(), original_revision);
-    }
-
-    #[test]
-    fn explicit_save_candidate_preparation_is_independent_of_pending_scope() {
-        let mut session = relevance_session();
-        clear_pending_derived(&mut session);
-        let before = session.project().clone();
-        let candidate = session
-            .prepare_cast_list_save_candidate()
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(candidate, before);
-        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
-    }
-
-    #[test]
-    fn session_open_timestamp_is_ephemeral_and_survives_saved_replacements() {
-        let project = Project::new().unwrap_or_else(|_| unreachable!());
-        let session_open_timestamp = "20261103T090807".to_owned();
-        let mut session = EditingSession::with_session_open_timestamp_for_test(
-            project.clone(),
-            session_open_timestamp.clone(),
-        )
-        .unwrap_or_else(|_| unreachable!());
-
-        let rebased = session
-            .prepare_saved_rebase(project.clone())
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(rebased.session_open_timestamp(), session_open_timestamp);
-        session
-            .replace_with_saved(project)
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.session_open_timestamp(), session_open_timestamp);
-    }
-
-    #[test]
-    fn runtime_layout_inputs_are_validated_transient_and_outside_edit_history() {
-        let mut session = session("start", Role::Action);
-        let project = session.project().clone();
-        let revision = session.revision();
-        let inputs = LayoutInputs {
-            paper_width: 700,
-            line_advance: 15,
-            ..LayoutInputs::default()
-        };
-
-        session
-            .set_layout_inputs(inputs.clone())
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.layout_inputs(), &inputs);
-        assert_eq!(session.project(), &project);
-        assert_eq!(session.revision(), revision);
-        assert!(!session.dirty());
-
-        let mut invalid = inputs.clone();
-        invalid.char_width = 0;
-        assert_eq!(
-            session.set_layout_inputs(invalid),
-            Err(EditError::Model(ModelError::InvalidNumber))
-        );
-        assert_eq!(session.layout_inputs(), &inputs);
-
-        session.insert("!").unwrap_or_else(|_| unreachable!());
-        session.undo().unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.layout_inputs(), &inputs);
-        assert_eq!(session.project(), &project);
-        assert!(!session.dirty());
-    }
-
-    fn source_name(local_name: &str) -> SourceName {
-        SourceName {
-            namespace_uri: None,
-            local_name: local_name.into(),
-            qualified_name: None,
-        }
-    }
-
-    fn preserved_project(
-        role: Role,
-        text: &str,
-        runs: Vec<TextRun>,
-        source_children: Vec<PreservedNode>,
-        nested_scene_attachment: bool,
-    ) -> Project {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        let element_id = project.elements[0].id.clone();
-        project.elements[0].role = role;
-        project.elements[0].text = text.into();
-        project.elements[0].runs = runs;
-        project.elements[0].source_provenance = Some(SourceProvenance {
-            format: SourceFormat::Fdx,
-            section: SourceSection::Content,
-            ordinal: 0,
-            foreign_id: Some("foreign-paragraph".into()),
-            foreign_role: Some(fdx_role_name(role).into()),
-        });
-        let paragraph_anchor =
-            SourceAnchorId::new("anchor-paragraph").unwrap_or_else(|_| unreachable!());
-        let mut children = source_children;
-        let mut anchors = vec![SourceAnchor {
-            id: paragraph_anchor.clone(),
-            target: AnchorTarget::ProjectElement(element_id.clone()),
-            relation: AnchorRelation::Represents,
-        }];
-        let mut identities = Vec::new();
-        if nested_scene_attachment {
-            let scene = ForeignIdentity::new(ForeignIdDomain::Scene, "scene-1")
-                .unwrap_or_else(|_| unreachable!());
-            let attachment_anchor =
-                SourceAnchorId::new("anchor-scene-attachment").unwrap_or_else(|_| unreachable!());
-            children.push(PreservedNode::Element(PreservedElement {
-                name: source_name("SceneProperties"),
-                attributes: Vec::new(),
-                namespace_bindings: Vec::new(),
-                source_type: None,
-                ownership: SourceOwnership::Attached(scene.clone()),
-                dependency_confidence: DependencyConfidence::Unknown,
-                anchor: Some(attachment_anchor.clone()),
-                children: vec![PreservedNode::Element(PreservedElement {
-                    name: source_name("Beat"),
-                    attributes: Vec::new(),
-                    namespace_bindings: Vec::new(),
-                    source_type: None,
-                    ownership: SourceOwnership::Opaque,
-                    dependency_confidence: DependencyConfidence::Unknown,
-                    anchor: None,
-                    children: vec![PreservedNode::Text("authored beat".into())].into(),
-                })].into(),
-            }));
-            anchors.push(SourceAnchor {
-                id: attachment_anchor,
-                target: AnchorTarget::Foreign(scene.clone()),
-                relation: AnchorRelation::Attached,
-            });
-            identities.push(scene);
-        }
-        let paragraph = PreservedElement {
-            name: source_name("Paragraph"),
-            attributes: vec![PreservedAttribute {
-                name: source_name("Type"),
-                value: fdx_role_name(role).into(),
-            }],
-            namespace_bindings: Vec::<NamespaceBinding>::new(),
-            source_type: Some(fdx_role_name(role).into()),
-            ownership: SourceOwnership::Managed(element_id.clone()),
-            dependency_confidence: DependencyConfidence::SomeReferencesMapped,
-            anchor: Some(paragraph_anchor),
-            children: children.into(),
-        };
-        project.preservation = Some(PreservationState {
-            source: SourceSnapshot {
-                format: SourceFormat::Fdx,
-                original_bytes: SharedBytes::source(b"<Script/>".to_vec()),
-                encoding: SourceEncoding::Utf8,
-            },
-            source_layout_settings: crate::SourceLayoutSettings::default(),
-            sections: vec![PreservedSection {
-                name: source_name("Content"),
-                kind: SectionKind::Content,
-                ordinal: 0,
-                children: vec![PreservedNode::Element(paragraph)].into(),
-            }].into(),
-            anchors,
-            identities,
-            references: Vec::new(),
-            board_graph: BoardGraph::default(),
-            managed_paragraph_index: None,
-            source_identity_use_index: None,
-            source_text_bytes: 0,
-        });
-        project
-    }
-
-    fn text_children(project: &Project) -> Vec<String> {
-        let state = project
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!());
-        let PreservedNode::Element(paragraph) = &state.sections[0].children[0] else {
-            unreachable!();
-        };
-        paragraph
-            .children
-            .iter()
-            .filter_map(|node| match node {
-                PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.to_string()),
-                PreservedNode::Element(_) => None,
-                PreservedNode::Comment(_) | PreservedNode::ProcessingInstruction { .. } => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn unicode_boundaries_and_backspace_are_safe() {
-        let mut s = session("a🙂b", Role::Action);
-        set(&mut s, 0, 5);
-        assert_eq!(s.backspace(), Ok(()));
-        assert_eq!(s.project().elements[0].text, "ab");
-        let mut unicode = session("a🙂b", Role::Action);
-        assert_eq!(
-            unicode.set_selection(Selection::caret(Position {
-                element: 0,
-                offset: 2
-            })),
-            Err(EditError::InvalidUtf8Boundary)
-        );
-    }
-
-    #[test]
-    fn enter_uses_explicit_role_transition_and_is_undoable() {
-        let mut s = session("slug", Role::Character);
-        set(&mut s, 0, 4);
-        assert_eq!(s.enter(), Ok(()));
-        assert_eq!(s.project().elements[1].role, Role::Dialogue);
-        assert_eq!(s.undo(), Ok(()));
-        assert_eq!(s.project().elements.len(), 1);
-        assert_eq!(s.redo(), Ok(()));
-        assert_eq!(s.project().elements[1].text, "");
-    }
-
-    #[test]
-    fn legacy_enter_matrix_covers_every_role() {
-        let expected = [
-            (Role::SceneHeading, Role::Action),
-            (Role::Action, Role::Action),
-            (Role::Character, Role::Dialogue),
-            (Role::Dialogue, Role::Action),
-            (Role::Parenthetical, Role::Dialogue),
-            (Role::Transition, Role::SceneHeading),
-            (Role::Note, Role::Summary),
-        ];
-        for (from, to) in expected {
-            let mut s = session("text", from);
-            let offset = s.project().elements[0].text.len();
-            set(&mut s, 0, offset);
-            s.enter().unwrap_or_else(|_| unreachable!());
-            assert_eq!(s.project().elements[1].role, to);
-        }
-    }
-
-    #[test]
-    fn repeated_paragraph_splits_keep_ids_bounded_and_model_valid() {
-        let mut s = session("paragraph", Role::Action);
-        for _ in 0..64 {
-            let element = s.project().elements.len().saturating_sub(1);
-            let offset = s.project().elements[element].text.len();
-            set(&mut s, element, offset);
-            s.enter().unwrap_or_else(|_| unreachable!());
-            assert!(s.validate().is_ok());
-            assert_eq!(s.project().to_json(), Err(ModelError::UnsupportedJsonState));
-        }
-        assert_eq!(s.project().elements.len(), 65);
-        assert!(s
-            .project()
-            .elements
-            .iter()
-            .all(|element| element.id.as_str().len() <= 128));
-    }
-
-    #[test]
-    fn allocated_split_ids_avoid_project_and_title_page_ids() {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        project.elements[0].text = "abcd".into();
-        project.title_page.push(
-            ScreenplayElement::new("element-2", Role::Action, "title")
-                .unwrap_or_else(|_| unreachable!()),
-        );
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 0, 2);
-        assert_eq!(session.split(), Ok(()));
-        assert_eq!(session.project().elements[1].id.as_str(), "element-3");
-        assert!(session.validate().is_ok());
-    }
-
-    #[test]
-    fn added_roles_enter_using_the_shared_default_matrix() {
-        let expected = [
-            (Role::NewAct, Role::SceneHeading),
-            (Role::EndOfAct, Role::NewAct),
-            (Role::CastList, Role::Action),
-            (Role::General, Role::General),
-            (Role::Shot, Role::Action),
-            (Role::Sequence, Role::SceneHeading),
-            (Role::Outline1, Role::Summary),
-            (Role::Outline2, Role::Summary),
-            (Role::Outline3, Role::Summary),
-            (Role::Summary, Role::Summary),
-        ];
-        for (role, target) in expected {
-            assert_eq!(enter_transition(role), Some(target));
-            let mut session = session("unchanged", role);
-            let offset = session.project().elements[0].text.len();
-            set(&mut session, 0, offset);
-            session.enter().unwrap_or_else(|_| unreachable!());
-            assert_eq!(session.project().elements[1].role, target);
-            assert_eq!(session.project().elements[0].role, role);
-        }
-    }
-
-    #[test]
-    fn added_roles_tab_using_the_shared_default_matrix() {
-        let expected = [
-            (Role::NewAct, Role::SceneHeading),
-            (Role::EndOfAct, Role::NewAct),
-            (Role::CastList, Role::Action),
-            (Role::General, Role::General),
-            (Role::Shot, Role::Action),
-            (Role::Sequence, Role::SceneHeading),
-            (Role::Outline1, Role::Outline2),
-            (Role::Outline2, Role::Outline3),
-            (Role::Outline3, Role::Note),
-            (Role::Summary, Role::Outline1),
-        ];
-        for (role, target) in expected {
-            assert_eq!(tab_transition(role, false), Some(target));
-            let mut session = session("preserve this role", role);
-            let before = session.clone();
-            session.tab().unwrap_or_else(|_| unreachable!());
-            if role == target {
-                assert_eq!(session, before);
-                assert!(!session.can_undo());
-            } else {
-                assert_eq!(session.project().elements[0].role, target);
-                assert!(session.can_undo());
-            }
-        }
-    }
-
-    #[test]
-    fn tab_matrix_is_undoable_and_special_cases_are_consumed_noops() {
-        let expected = [
-            (Role::SceneHeading, Role::Action, "text"),
-            (Role::Action, Role::Character, "text"),
-            (Role::Character, Role::Transition, ""),
-            (Role::Transition, Role::SceneHeading, "text"),
-            (Role::Dialogue, Role::Parenthetical, "text"),
-            (Role::Parenthetical, Role::Dialogue, "text"),
-        ];
-        for (from, to, text) in expected {
-            let mut s = session(text, from);
-            if from == Role::Parenthetical {
-                s.set_policy(EditPolicy {
-                    auto_parenthetical: false,
-                    ..s.policy()
-                });
-            }
-            let offset = s.project().elements[0].text.len();
-            set(&mut s, 0, offset);
-            s.tab().unwrap_or_else(|_| unreachable!());
-            assert_eq!(s.project().elements[0].role, to);
-            assert!(s.undo().is_ok());
-            assert_eq!(s.project().elements[0].role, from);
-        }
-
-        let mut nonblank = session("BOB", Role::Character);
-        let before = nonblank.clone();
-        nonblank.tab().unwrap_or_else(|_| unreachable!());
-        assert_eq!(nonblank, before);
-        assert!(!nonblank.can_undo());
-
-        let mut general = session("general", Role::General);
-        let before = general.clone();
-        general.tab().unwrap_or_else(|_| unreachable!());
-        assert_eq!(general, before);
-        assert!(!general.can_undo());
-    }
-
-    #[test]
-    fn cross_element_backspace_joins_without_losing_text() {
-        let mut s = session("one", Role::Action);
-        set(&mut s, 0, 3);
-        assert_eq!(s.split(), Ok(()));
-        assert_eq!(s.project().elements[1].text, "");
-        set(&mut s, 1, 0);
-        assert_eq!(s.backspace(), Ok(()));
-        assert_eq!(s.project().elements.len(), 1);
-        assert_eq!(s.project().elements[0].text, "one");
-    }
-
-    #[test]
-    fn failed_edit_rolls_back_project_selection_history_and_dirty() {
-        let mut s = session("🙂", Role::Action);
-        let before = s.clone();
-        assert_eq!(
-            s.set_selection(Selection::caret(Position {
-                element: 0,
-                offset: 1
-            })),
-            Err(EditError::InvalidUtf8Boundary)
-        );
-        assert_eq!(s, before);
-        assert_eq!(
-            s.insert(&"x".repeat(MAX_TEXT_BYTES + 1)),
-            Err(EditError::TextTooLong)
-        );
-        assert_eq!(s, before);
-    }
-
-    #[test]
-    fn dirty_and_revision_follow_successful_edits_and_history() {
-        let mut s = session("a", Role::Action);
-        assert!(!s.dirty());
-        assert_eq!(s.revision(), 0);
-        set(&mut s, 0, 1);
-        assert_eq!(s.insert("b"), Ok(()));
-        assert!(s.dirty());
-        assert_eq!(s.revision(), 1);
-        assert_eq!(s.undo(), Ok(()));
-        assert!(!s.dirty());
-        assert_eq!(s.revision(), 2);
-        assert_eq!(s.redo(), Ok(()));
-        assert!(s.dirty());
-        assert_eq!(s.revision(), 3);
-    }
-
-    #[test]
-    fn text_edit_keeps_runs_and_source_children_transactional_through_history() {
-        let run_a = RunAttribute {
-            name: "Style".into(),
-            value: "Bold".into(),
-        };
-        let run_b = RunAttribute {
-            name: "Style".into(),
-            value: "Italic".into(),
-        };
-        let project = preserved_project(
-            Role::Action,
-            "abcdef",
-            vec![
-                TextRun {
-                    text: "abc".into(),
-                    attributes: vec![run_a.clone()],
-                },
-                TextRun {
-                    text: "def".into(),
-                    attributes: vec![run_b.clone()],
-                },
-            ],
-            vec![
-                PreservedNode::Text("abc".into()),
-                PreservedNode::CData("def".into()),
-            ],
-            true,
-        );
-        assert!(project.validate().is_ok());
-        let mut session = EditingSession::new(project.clone()).unwrap_or_else(|_| unreachable!());
-        let original_preservation = project.preservation.as_ref().unwrap_or_else(|| unreachable!());
-        let initial_preservation = session
-            .project()
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!());
-        assert!(original_preservation.source.original_bytes.shares_storage_with(
-            &initial_preservation.source.original_bytes
-        ));
-        assert!(original_preservation.sections.shares_storage_with(&initial_preservation.sections));
-        set(&mut session, 0, 2);
-        session
-            .set_selection(Selection {
-                anchor: Position {
-                    element: 0,
-                    offset: 2,
-                },
-                focus: Position {
-                    element: 0,
-                    offset: 5,
-                },
-            })
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(session.insert("Z"), Ok(()));
-        let element = &session.project().elements[0];
-        assert_eq!(element.text, "abZf");
-        assert_eq!(element.runs[0].text, "abZ");
-        assert_eq!(element.runs[0].attributes, vec![run_a]);
-        assert_eq!(element.runs[1].text, "f");
-        assert_eq!(element.runs[1].attributes, vec![run_b]);
-        assert_eq!(text_children(session.project()), vec!["abZ", "f"]);
-        let edited_preservation = session
-            .project()
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!());
-        assert!(original_preservation.source.original_bytes.shares_storage_with(
-            &edited_preservation.source.original_bytes
-        ));
-        let PreservedNode::Element(original_paragraph) =
-            &original_preservation.sections[0].children[0]
-        else {
-            unreachable!();
-        };
-        let PreservedNode::Element(edited_paragraph) =
-            &edited_preservation.sections[0].children[0]
-        else {
-            unreachable!();
-        };
-        let PreservedNode::Element(original_attachment) = &original_paragraph.children[2] else {
-            unreachable!();
-        };
-        let PreservedNode::Element(edited_attachment) = &edited_paragraph.children[2] else {
-            unreachable!();
-        };
-        assert!(original_attachment.children.shares_storage_with(&edited_attachment.children));
-        assert!(session.dirty());
-        assert_eq!(session.undo(), Ok(()));
-        assert_eq!(session.project(), &project);
-        let undone_preservation = session
-            .project()
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!());
-        assert!(original_preservation.sections.shares_storage_with(&undone_preservation.sections));
-        assert!(!session.dirty());
-        assert_eq!(session.redo(), Ok(()));
-        assert_eq!(session.project().elements[0].text, "abZf");
-        assert_eq!(text_children(session.project()), vec!["abZ", "f"]);
-    }
-
-    #[test]
-    fn text_mapping_mismatch_fails_without_changing_any_session_state() {
-        let mut project = preserved_project(
-            Role::Action,
-            "actual",
-            Vec::new(),
-            vec![PreservedNode::Text("different".into())],
-            false,
-        );
-        project.elements[0]
-            .source_provenance
-            .as_mut()
-            .unwrap_or_else(|| unreachable!())
-            .foreign_role = Some(Role::Action.as_str().into());
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 0, 2);
-        let before = session.clone();
-        assert_eq!(
-            session.insert("X"),
-            Err(EditError::Preservation(
-                crate::preservation::PreservationError::ManagedTextMismatch
-            ))
-        );
-        assert_eq!(session, before);
-        assert!(!session.dirty());
-        assert!(!session.can_undo());
-    }
-
-    #[test]
-    fn deleting_or_splitting_an_anchored_scene_with_authored_data_safe_stops() {
-        let project = preserved_project(
-            Role::SceneHeading,
-            "INT. ROOM",
-            Vec::new(),
-            vec![PreservedNode::Text("INT. ROOM".into())],
-            true,
-        );
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 0, 4);
-        let before = session.clone();
-        assert_eq!(
-            session.split(),
-            Err(EditError::Preservation(
-                crate::preservation::PreservationError::StructuralAttachmentConflict
-            ))
-        );
-        assert_eq!(session, before);
-        assert!(!session.can_undo());
-    }
-
-    #[test]
-    fn removing_an_anchored_scene_by_join_rolls_back_with_its_authored_attachment() {
-        let mut project = preserved_project(
-            Role::SceneHeading,
-            "INT. ROOM",
-            Vec::new(),
-            vec![PreservedNode::Text("INT. ROOM".into())],
-            true,
-        );
-        project.elements.push(
-            ScreenplayElement::new("next", Role::Action, "action")
-                .unwrap_or_else(|_| unreachable!()),
-        );
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 1, 0);
-        let before = session.clone();
-        assert_eq!(
-            session.backspace(),
-            Err(EditError::Preservation(
-                crate::preservation::PreservationError::StructuralAttachmentConflict
-            ))
-        );
-        assert_eq!(session, before);
-        assert!(!session.dirty());
-        assert!(!session.can_undo());
-    }
-
-    #[test]
-    fn role_change_updates_only_the_mapped_type_and_is_undoable() {
-        let project = preserved_project(
-            Role::Dialogue,
-            "hello",
-            Vec::new(),
-            vec![PreservedNode::Text("hello".into())],
-            true,
-        );
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 0, 0);
-        assert_eq!(session.change_role(Role::Action), Ok(()));
-        let PreservedNode::Element(paragraph) = &session
-            .project()
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!())
-            .sections[0]
-            .children[0]
-        else {
-            unreachable!();
-        };
-        assert_eq!(paragraph.source_type.as_deref(), Some("Action"));
-        assert_eq!(paragraph.attributes[0].value, "Action");
-        assert_eq!(
-            session.project().elements[0]
-                .source_provenance
-                .as_ref()
-                .unwrap_or_else(|| unreachable!())
-                .foreign_role
-                .as_deref(),
-            Some("Action")
-        );
-        assert_eq!(session.undo(), Ok(()));
-        assert_eq!(session.project().elements[0].role, Role::Dialogue);
-        assert_eq!(
-            session
-                .project()
-                .preservation
-                .as_ref()
-                .unwrap_or_else(|| unreachable!())
-                .sections[0]
-                .children[0],
-            {
-                let original = preserved_project(
-                    Role::Dialogue,
-                    "hello",
-                    Vec::new(),
-                    vec![PreservedNode::Text("hello".into())],
-                    true,
-                );
-                original
-                    .preservation
-                    .unwrap_or_else(|| unreachable!())
-                    .sections[0]
-                    .children[0]
-                    .clone()
-            }
-        );
-    }
-
-    #[test]
-    fn opaque_inline_intersections_stop_but_boundary_insertions_keep_order() {
-        let project = preserved_project(
-            Role::Action,
-            "abcdef",
-            Vec::new(),
-            vec![
-                PreservedNode::Text("abc".into()),
-                PreservedNode::Element(PreservedElement {
-                    name: source_name("OpaqueInline"),
-                    attributes: Vec::new(),
-                    namespace_bindings: Vec::new(),
-                    source_type: None,
-                    ownership: SourceOwnership::Opaque,
-                    dependency_confidence: DependencyConfidence::Unknown,
-                    anchor: None,
-                    children: vec![PreservedNode::Text("unmodeled".into())].into(),
-                }),
-                PreservedNode::CData("def".into()),
-            ],
-            false,
-        );
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        session
-            .set_selection(Selection {
-                anchor: Position {
-                    element: 0,
-                    offset: 2,
-                },
-                focus: Position {
-                    element: 0,
-                    offset: 4,
-                },
-            })
-            .unwrap_or_else(|_| unreachable!());
-        let before = session.clone();
-        assert_eq!(
-            session.insert("X"),
-            Err(EditError::Preservation(
-                crate::preservation::PreservationError::UnsupportedTextMapping
-            ))
-        );
-        assert_eq!(session, before);
-
-        set(&mut session, 0, 3);
-        assert_eq!(session.insert("X"), Ok(()));
-        assert_eq!(session.project().elements[0].text, "abcXdef");
-        assert_eq!(text_children(session.project()), vec!["abc", "Xdef"]);
-        let PreservedNode::Element(paragraph) = &session
-            .project()
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!())
-            .sections[0]
-            .children[0]
-        else {
-            unreachable!();
-        };
-        assert!(matches!(paragraph.children[1], PreservedNode::Element(_)));
-    }
-
-    #[test]
-    fn scene_heading_role_change_with_nested_scene_data_safe_stops() {
-        let project = preserved_project(
-            Role::SceneHeading,
-            "INT. ROOM",
-            Vec::new(),
-            vec![PreservedNode::Text("INT. ROOM".into())],
-            true,
-        );
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 0, 0);
-        let before = session.clone();
-        assert_eq!(
-            session.change_role(Role::Action),
-            Err(EditError::Preservation(
-                crate::preservation::PreservationError::StructuralAttachmentConflict
-            ))
-        );
-        assert_eq!(session, before);
-        assert!(!session.can_undo());
-    }
-
-    #[test]
-    fn mixed_case_role_change_preserves_source_and_run_text_exactly() {
-        let project = preserved_project(
-            Role::SceneHeading,
-            "straße",
-            vec![TextRun {
-                text: "straße".into(),
-                attributes: vec![RunAttribute {
-                    name: "Style".into(),
-                    value: "Bold".into(),
-                }],
-            }],
-            vec![PreservedNode::Text("straße".into())],
-            false,
-        );
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 0, "straße".len());
-        assert_eq!(session.change_role(Role::SceneHeading), Ok(()));
-        assert_eq!(session.project().elements[0].text, "straße");
-        assert_eq!(session.project().elements[0].runs[0].text, "straße");
-        assert_eq!(text_children(session.project()), vec!["straße"]);
-        assert_eq!(session.selection().focus.offset, "straße".len());
-        assert!(session.validate().is_ok());
-    }
-
-    #[test]
-    fn ordinary_script_edits_leave_board_graph_and_cross_domain_links_untouched() {
-        let mut project = preserved_project(
-            Role::Action,
-            "action",
-            Vec::new(),
-            vec![PreservedNode::Text("action".into())],
-            false,
-        );
-        let state = project
-            .preservation
-            .as_mut()
-            .unwrap_or_else(|| unreachable!());
-        let script_paragraph = ForeignIdentity::new(ForeignIdDomain::Paragraph, "para-foreign")
-            .unwrap_or_else(|_| unreachable!());
-        let list_item = ForeignIdentity::new(ForeignIdDomain::ListItem, "list-1")
-            .unwrap_or_else(|_| unreachable!());
-        let board = ForeignIdentity::new(ForeignIdDomain::Board, "board-1")
-            .unwrap_or_else(|_| unreachable!());
-        state.identities.push(script_paragraph.clone());
-        state.board_graph.entities = vec![
-            BoardEntity {
-                identity: list_item.clone(),
-                kind: BoardEntityKind::ListItem,
-                source_order: 1,
-                anchor: None,
-                image_payload: None,
-                declared_image_length: None,
-                source_path: None,
-            },
-            BoardEntity {
-                identity: board.clone(),
-                kind: BoardEntityKind::DisplayBoard,
-                source_order: 2,
-                anchor: None,
-                image_payload: None,
-                declared_image_length: None,
-                source_path: None,
-            },
-        ];
-        state.board_graph.references.push(ForeignReference {
-            source: board,
-            target: list_item,
-            policy: ReferencePolicy::RequiredInternal,
-        });
-        state.references.push(ForeignReference {
-            source: script_paragraph,
-            target: ForeignIdentity::new(ForeignIdDomain::Board, "orphanable-board-link")
-                .unwrap_or_else(|_| unreachable!()),
-            policy: ReferencePolicy::CrossDomainMayOrphan,
-        });
-        assert!(project.validate().is_ok());
-        let state = project
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!());
-        let board_graph = state.board_graph.clone();
-        let references = state.references.clone();
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 0, 6);
-        assert_eq!(session.insert(" "), Ok(()));
-        let state = session
-            .project()
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!());
-        assert_eq!(state.board_graph, board_graph);
-        assert_eq!(state.references, references);
-        assert!(session.validate().is_ok());
-    }
-
-    #[test]
-    fn non_preserved_split_and_join_keep_rich_runs_consistent() {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        project.elements[0].role = Role::Action;
-        project.elements[0].text = "abcdef".into();
-        project.elements[0].runs = vec![
-            TextRun {
-                text: "abc".into(),
-                attributes: vec![RunAttribute {
-                    name: "Style".into(),
-                    value: "Bold".into(),
-                }],
-            },
-            TextRun {
-                text: "def".into(),
-                attributes: vec![RunAttribute {
-                    name: "Style".into(),
-                    value: "Italic".into(),
-                }],
-            },
-        ];
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 0, 4);
-        assert_eq!(session.split(), Ok(()));
-        assert_eq!(session.project().elements[0].runs[0].text, "abc");
-        assert_eq!(session.project().elements[0].runs[1].text, "d");
-        assert_eq!(session.project().elements[1].runs[0].text, "ef");
-        assert_eq!(session.join_with_next(), Err(EditError::InvalidSelection));
-        set(&mut session, 0, 4);
-        assert_eq!(session.join_with_next(), Ok(()));
-        assert_eq!(session.project().elements[0].text, "abcdef");
-        assert_eq!(
-            session.project().elements[0]
-                .runs
-                .iter()
-                .map(|run| run.text.as_str())
-                .collect::<String>(),
-            "abcdef"
-        );
-        assert!(session.validate().is_ok());
-    }
-
-    #[test]
-    fn ordinary_managed_text_and_role_edits_use_scoped_validation_and_match_full_validation() {
-        let project = preserved_project(
-            Role::Action,
-            "alpha",
-            Vec::new(),
-            vec![PreservedNode::Text("alpha".into())],
-            false,
-        );
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 0, 5);
-        let before = edit_validation_diagnostics();
-        assert_eq!(session.insert("!"), Ok(()));
-        assert!(session.last_edit_used_scoped_validation());
-        assert!(edit_validation_diagnostics().scoped_candidate_accepts
-            > before.scoped_candidate_accepts);
-        assert!(session.project().validate().is_ok());
-
-        let after_text = edit_validation_diagnostics();
-        assert_eq!(session.change_role(Role::Dialogue), Ok(()));
-        assert!(session.last_edit_used_scoped_validation());
-        assert!(edit_validation_diagnostics().scoped_candidate_accepts
-            > after_text.scoped_candidate_accepts);
-        assert!(session.project().validate().is_ok());
-    }
-
-    #[test]
-    fn scoped_validation_falls_back_when_non_target_body_or_title_page_changes() {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        project.elements = vec![
-            ScreenplayElement::new("target", Role::Action, "before")
-                .unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("other", Role::Action, "untouched")
-                .unwrap_or_else(|_| unreachable!()),
-        ];
-        project.title_page = vec![ScreenplayElement::new("title", Role::General, "Title")
-            .unwrap_or_else(|_| unreachable!())];
-        let baseline = EditingSession::new(project)
-            .unwrap_or_else(|_| unreachable!())
-            .project
-            .clone();
-
-        let mut changed_neighbor = baseline.clone();
-        changed_neighbor.elements[0].text = "target edit".into();
-        changed_neighbor.elements[1].text = "unrelated change".into();
-        assert_eq!(
-            changed_neighbor.validate_scoped_single_element_edit(&baseline, 0),
-            Ok(false)
-        );
-
-        let mut changed_title = baseline.clone();
-        changed_title.elements[0].text = "target edit".into();
-        changed_title.title_page[0].text = "changed title".into();
-        assert_eq!(
-            changed_title.validate_scoped_single_element_edit(&baseline, 0),
-            Ok(false)
-        );
-    }
-
-    #[test]
-    fn uncertain_source_topology_uses_full_validation_fallback_transactionally() {
-        let mut session = EditingSession::new(preserved_project(
-            Role::Action,
-            "",
-            Vec::new(),
-            Vec::new(),
-            false,
-        ))
-        .unwrap_or_else(|_| unreachable!());
-        let before = edit_validation_diagnostics();
-        assert_eq!(session.insert("created source run"), Ok(()));
-        assert!(!session.last_edit_used_scoped_validation());
-        assert!(edit_validation_diagnostics().full_validation_fallbacks
-            > before.full_validation_fallbacks);
-        assert_eq!(session.project().elements[0].text, "created source run");
-        assert!(session.project().validate().is_ok());
-    }
-
-    #[test]
-    fn structural_edits_and_history_restores_rebuild_managed_and_source_use_indexes() {
-        let project = preserved_project(
-            Role::Action,
-            "before after",
-            Vec::new(),
-            vec![PreservedNode::Element(PreservedElement {
-                name: source_name("Text"),
-                attributes: Vec::new(),
-                namespace_bindings: Vec::new(),
-                source_type: None,
-                ownership: SourceOwnership::Opaque,
-                dependency_confidence: DependencyConfidence::Unknown,
-                anchor: None,
-                children: vec![PreservedNode::Text("before after".into())].into(),
-            })],
-            false,
-        );
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 0, 6);
-        let before = crate::preservation::managed_paragraph_index_diagnostics();
-        assert_eq!(session.split(), Ok(()));
-        assert!(!session.last_edit_used_scoped_validation());
-        let right_id = session.project().elements[1].id.clone();
-        let state = session.project().preservation.as_ref().unwrap_or_else(|| unreachable!());
-        assert!(state.has_source_identity_use_index());
-        assert!(state.has_managed_element(&session.project().elements[0].id));
-        assert!(state.has_managed_element(&right_id));
-        assert!(session.project().validate().is_ok());
-
-        assert_eq!(session.undo(), Ok(()));
-        assert!(session.project().preservation.as_ref()
-            .is_some_and(|state| state.has_source_identity_use_index()));
-        assert!(session.project().validate().is_ok());
-        assert_eq!(session.redo(), Ok(()));
-        assert!(session.project().preservation.as_ref()
-            .is_some_and(|state| state.has_source_identity_use_index()));
-        assert!(session.project().validate().is_ok());
-        let left_end = session.project().elements[0].text.len();
-        set(&mut session, 0, left_end);
-        assert_eq!(session.join_with_next(), Ok(()));
-        let state = session.project().preservation.as_ref().unwrap_or_else(|| unreachable!());
-        assert!(state.has_source_identity_use_index());
-        assert!(state.has_managed_element(&session.project().elements[0].id));
-        assert!(!state.has_managed_element(&right_id));
-        assert!(session.project().validate().is_ok());
-        let rebased = session
-            .prepare_saved_rebase(session.project.clone())
-            .unwrap_or_else(|_| unreachable!());
-        assert!(rebased
-            .project()
-            .preservation
-            .as_ref()
-            .is_some_and(|state| {
-                state.has_managed_element(&rebased.project().elements[0].id)
-                    && state.has_source_identity_use_index()
-            }));
-        let mut replaced = session.clone();
-        replaced
-            .replace_with_saved(session.project.clone())
-            .unwrap_or_else(|_| unreachable!());
-        assert!(replaced.project().validate().is_ok());
-        assert!(replaced.project().preservation.as_ref()
-            .is_some_and(|state| state.has_source_identity_use_index()));
-        assert!(crate::preservation::managed_paragraph_index_diagnostics().rebuilds
-            > before.rebuilds);
-    }
-
-    #[test]
-    fn scoped_validation_matches_full_rejection_and_untrusted_candidates_fall_back() {
-        let valid = EditingSession::new(preserved_project(
-            Role::Action,
-            "valid",
-            Vec::new(),
-            vec![PreservedNode::Text("valid".into())],
-            false,
-        ))
-        .unwrap_or_else(|_| unreachable!())
-        .project
-        .clone();
-
-        let mut overlong = valid.clone();
-        overlong.elements[0].text = "x".repeat(MAX_TEXT_BYTES.saturating_add(1));
-        let scoped = overlong.validate_scoped_single_element_edit(&valid, 0).map(|_| ());
-        let complete = overlong.validate();
-        assert_eq!(scoped, complete);
-
-        let mut stale_id = valid.clone();
-        stale_id.elements[0].id = crate::StableId::new("stale-element")
-            .unwrap_or_else(|_| unreachable!());
-        assert_eq!(
-            stale_id.validate_scoped_single_element_edit(&valid, 0),
-            Ok(false)
-        );
-        assert!(stale_id.validate().is_err());
-
-        let mut unrelated_source_change = valid.clone();
-        unrelated_source_change
-            .preservation
-            .as_mut()
-            .unwrap_or_else(|| unreachable!())
-            .sections[0]
-            .children
-            .push(PreservedNode::Comment("new opaque sibling".into()));
-        assert!(unrelated_source_change
-            .validate_scoped_single_element_edit(&valid, 0)
-            .is_err());
-        assert!(unrelated_source_change.validate().is_ok());
-
-        let mut duplicate_owner = valid.clone();
-        let state = duplicate_owner
-            .preservation
-            .as_mut()
-            .unwrap_or_else(|| unreachable!());
-        let duplicate = state.sections[0].children[0].clone();
-        state.sections[0].children.push(duplicate);
-        state.rebuild_managed_paragraph_index();
-        assert!(duplicate_owner
-            .validate_scoped_single_element_edit(&valid, 0)
-            .is_err());
-        assert!(duplicate_owner.validate().is_err());
-
-        let mut dangling_reference = valid.clone();
-        let state = dangling_reference
-            .preservation
-            .as_mut()
-            .unwrap_or_else(|| unreachable!());
-        state.references.push(ForeignReference {
-            source: ForeignIdentity::new(ForeignIdDomain::Paragraph, "unknown-source")
-                .unwrap_or_else(|_| unreachable!()),
-            target: ForeignIdentity::new(ForeignIdDomain::Board, "missing-board")
-                .unwrap_or_else(|_| unreachable!()),
-            policy: ReferencePolicy::RequiredInternal,
-        });
-        assert_eq!(
-            dangling_reference.validate_scoped_single_element_edit(&valid, 0),
-            Ok(false)
-        );
-        assert!(dangling_reference.validate().is_err());
-
-        let mut unrelated_invalid_baseline = valid.clone();
-        let state = unrelated_invalid_baseline
-            .preservation
-            .as_mut()
-            .unwrap_or_else(|| unreachable!());
-        state.references.push(ForeignReference {
-            source: ForeignIdentity::new(ForeignIdDomain::Paragraph, "baseline-source")
-                .unwrap_or_else(|_| unreachable!()),
-            target: ForeignIdentity::new(ForeignIdDomain::Board, "baseline-missing-target")
-                .unwrap_or_else(|_| unreachable!()),
-            policy: ReferencePolicy::RequiredInternal,
-        });
-        assert!(EditingSession::new(unrelated_invalid_baseline).is_err());
-
-        let mut invalid_utf8 = EditingSession::new(preserved_project(
-            Role::Action,
-            "a🙂b",
-            Vec::new(),
-            vec![PreservedNode::Text("a🙂b".into())],
-            false,
-        ))
-        .unwrap_or_else(|_| unreachable!());
-        let before_rejection = invalid_utf8.clone();
-        assert_eq!(
-            invalid_utf8.set_selection(Selection::caret(Position {
-                element: 0,
-                offset: 2,
-            })),
-            Err(EditError::InvalidUtf8Boundary)
-        );
-        assert_eq!(invalid_utf8, before_rejection);
-
-        let mut invalid_baseline = valid.clone();
-        invalid_baseline.elements[0].id = crate::StableId::new("invalid-baseline")
-            .unwrap_or_else(|_| unreachable!());
-        assert!(EditingSession::new(invalid_baseline).is_err());
-    }
-
-    #[test]
-    fn indexed_ordinary_edit_keeps_opaque_siblings_shared_and_unmodified() {
-        let mut project = preserved_project(
-            Role::Action,
-            "source",
-            Vec::new(),
-            vec![PreservedNode::Text("source".into())],
-            false,
-        );
-        let state = project.preservation.as_mut().unwrap_or_else(|| unreachable!());
-        state.sections[0]
-            .children
-            .push(PreservedNode::Comment("opaque sibling".into()));
-        state.rebuild_managed_paragraph_index();
-        let original_comment = match &state.sections[0].children[1] {
-            PreservedNode::Comment(comment) => comment.clone(),
-            _ => unreachable!(),
-        };
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        set(&mut session, 0, 6);
-        assert_eq!(session.insert("!"), Ok(()));
-        assert!(session.last_edit_used_scoped_validation());
-        let state = session.project().preservation.as_ref().unwrap_or_else(|| unreachable!());
-        let PreservedNode::Comment(comment) = &state.sections[0].children[1] else {
-            unreachable!();
-        };
-        assert!(original_comment.shares_storage_with(comment));
-        assert_eq!(comment.as_str(), "opaque sibling");
-        assert!(session.project().validate().is_ok());
-    }
 }

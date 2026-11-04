@@ -8,17 +8,17 @@
 //! authoritative for source settings. These APIs do not claim Final Draft
 //! interoperability.
 
+use crate::formatting::{formatting_for_role, formatting_in_native_order, role_index};
+use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
 use crate::preservation::{
     BoardEntity, BoardEntityKind, BoardGraph, DependencyConfidence, ForeignIdDomain,
     ForeignIdentity, ForeignReference, NamespaceBinding, PreservationError, PreservationState,
     PreservedAttribute, PreservedElement, PreservedNode, PreservedSection, ReferencePolicy,
-    SectionKind, SharedBytes, SharedVec, SourceAnchor, SourceAnchorId, SourceEncoding,
-    SourceName, SourceOwnership, SourceSnapshot,
+    SectionKind, SharedBytes, SharedVec, SourceAnchor, SourceAnchorId, SourceEncoding, SourceName,
+    SourceOwnership, SourceSnapshot,
 };
-use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
-use crate::formatting::{formatting_for_role, formatting_in_native_order, role_index};
-use crate::text_state::{self};
 pub use crate::text_state::TextState;
+use crate::text_state::{self};
 use crate::{
     ModelError, PrintVisibility, Project, Role, RunAttribute, ScreenplayElement, SourceFormat,
     SourceLayoutSettings, SourceProvenance, SourceSection, TextRun,
@@ -43,8 +43,7 @@ const FDX_ROOT: &str = "FinalDraft";
 const FDX_VERSION: &str = "6";
 const XML_DECLARATION_WITHOUT_TRAILING_LF: &str =
     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>";
-const XML_DECLARATION: &str =
-    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n";
+const XML_DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?>\n";
 
 /// Bounded, privacy-safe reader failures. Variants intentionally carry no source
 /// text, identifiers, file paths, or image payloads.
@@ -175,6 +174,9 @@ pub(crate) enum SaveDiagnosticCode {
     WriteOutputRereadPropagation = 25,
     WriteSemanticRereadMismatch = 26,
     WriteOutputPreservationMissing = 27,
+    // Reserved diagnostic slot; candidate-preservation failure currently maps to
+    // the output-preservation check, but this identifier must not be recycled.
+    #[allow(dead_code)]
     WriteCandidatePreservationMissing = 28,
     WriteIdentitySetMismatch = 29,
     WriteNormalizedSourceTreeMismatch = 30,
@@ -280,7 +282,12 @@ impl WindowState {
     };
 
     pub fn new(left: i32, top: i32, width: i32, height: i32) -> Option<Self> {
-        (width > 0 && height > 0).then_some(Self { left, top, width, height })
+        (width > 0 && height > 0).then_some(Self {
+            left,
+            top,
+            width,
+            height,
+        })
     }
 }
 
@@ -300,10 +307,6 @@ pub(crate) struct SaveContext {
     pub(crate) session_open_timestamp: Option<String>,
     pub(crate) window_state: WindowState,
     pub(crate) text_state: TextState,
-    injected_lineage_ids: Vec<String>,
-    next_injected_lineage_id: usize,
-    #[cfg(test)]
-    fail_lineage_entropy: bool,
 }
 
 impl SaveContext {
@@ -314,25 +317,6 @@ impl SaveContext {
             session_open_timestamp: None,
             window_state: WindowState::DEFAULT,
             text_state: TextState::DEFAULT,
-            injected_lineage_ids: Vec::new(),
-            next_injected_lineage_id: 0,
-            #[cfg(test)]
-            fail_lineage_entropy: false,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_timestamp(operation: SaveOperation, timestamp: String) -> Self {
-        Self {
-            operation,
-            timestamp,
-            session_open_timestamp: None,
-            window_state: WindowState::DEFAULT,
-            text_state: TextState::DEFAULT,
-            injected_lineage_ids: Vec::new(),
-            next_injected_lineage_id: 0,
-            #[cfg(test)]
-            fail_lineage_entropy: false,
         }
     }
 
@@ -351,42 +335,15 @@ impl SaveContext {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_test_lineage_ids(mut self, ids: Vec<String>) -> Self {
-        self.injected_lineage_ids = ids;
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_test_lineage_entropy_failure(mut self) -> Self {
-        self.fail_lineage_entropy = true;
-        self
-    }
-
-    fn allocate_lineage_id(
-        &mut self,
-        reserved: &mut BTreeSet<String>,
-    ) -> Result<String, FdxError> {
+    fn allocate_lineage_id(&mut self, reserved: &mut BTreeSet<String>) -> Result<String, FdxError> {
         const MAX_ATTEMPTS: usize = 16;
         for _ in 0..MAX_ATTEMPTS {
-            let candidate = if let Some(candidate) = self
-                .injected_lineage_ids
-                .get(self.next_injected_lineage_id)
-            {
-                self.next_injected_lineage_id += 1;
-                candidate.clone()
-            } else {
-                #[cfg(test)]
-                if self.fail_lineage_entropy {
-                    return Err(SaveDiagnosticCode::LineageIdentityEntropyUnavailable.error());
-                }
-                let mut bytes = [0; 16];
-                getrandom::fill(&mut bytes)
-                    .map_err(|_| SaveDiagnosticCode::LineageIdentityEntropyUnavailable.error())?;
-                bytes[6] = (bytes[6] & 0x0f) | 0x40;
-                bytes[8] = (bytes[8] & 0x3f) | 0x80;
-                uuid::Uuid::from_bytes(bytes).hyphenated().to_string()
-            };
+            let mut bytes = [0; 16];
+            getrandom::fill(&mut bytes)
+                .map_err(|_| SaveDiagnosticCode::LineageIdentityEntropyUnavailable.error())?;
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            let candidate = uuid::Uuid::from_bytes(bytes).hyphenated().to_string();
             if is_lowercase_uuid_v4(&candidate) && reserved.insert(candidate.clone()) {
                 return Ok(candidate);
             }
@@ -426,12 +383,7 @@ pub(crate) fn valid_document_ref_datetime(value: &str) -> bool {
     ) else {
         return false;
     };
-    if year == 0
-        || !(1..=12).contains(&month)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
+    if year == 0 || !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 {
         return false;
     }
     let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
@@ -686,7 +638,8 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
             kind: SectionKind::Other,
             ordinal: 0,
             children: std::mem::take(&mut preserved_children).into(),
-        }].into(),
+        }]
+        .into(),
         anchors,
         identities,
         references: Vec::new(),
@@ -734,11 +687,15 @@ pub(crate) fn write_v6_for_save(
     write_v6_with_context(project, context).map_err(|failure| failure.error)
 }
 
+// WriterFailure intentionally carries bounded structural/identity differences
+// to the save-diagnostics boundary; boxing it would churn the internal protocol.
+#[allow(clippy::result_large_err)]
 fn write_v6_with_diagnostics(project: &Project) -> Result<Vec<u8>, WriterFailure> {
     let mut context = SaveContext::new(SaveOperation::DirectSerialization);
     write_v6_with_context(project, &mut context)
 }
 
+#[allow(clippy::result_large_err)]
 fn write_v6_with_context(
     project: &Project,
     context: &mut SaveContext,
@@ -753,13 +710,11 @@ fn write_v6_with_context(
         &mut structural_difference,
         &mut identity_difference,
     )
-    .map_err(|error| {
-        WriterFailure {
-            error,
-            stage,
-            structural_difference,
-            identity_difference,
-        }
+    .map_err(|error| WriterFailure {
+        error,
+        stage,
+        structural_difference,
+        identity_difference,
     })
 }
 
@@ -778,7 +733,7 @@ fn write_v6_inner(
         && context
             .session_open_timestamp
             .as_deref()
-            .map_or(true, |timestamp| !valid_document_ref_datetime(timestamp))
+            .is_none_or(|timestamp| !valid_document_ref_datetime(timestamp))
     {
         return Err(FdxError::InvalidValue);
     }
@@ -826,7 +781,7 @@ fn write_v6_inner(
                 context,
             )?);
             reconcile_root_window_state(&mut sections, context.window_state)?;
-            reconcile_root_text_state(&mut sections, &project, context.text_state)?;
+            reconcile_root_text_state(&mut sections, project, context.text_state)?;
         }
         *stage = WriterStage::ManagedSourceReconciliation;
         reconcile_project_elements(&mut sections, project)?;
@@ -836,10 +791,8 @@ fn write_v6_inner(
             .filter(|identity| identity.domain == ForeignIdDomain::Paragraph)
             .map(|identity| identity.value.clone())
             .collect::<BTreeSet<_>>();
-        let inserted_paragraph_ids = collect_inserted_managed_paragraph_ids(
-            &sections,
-            &original_paragraph_ids,
-        );
+        let inserted_paragraph_ids =
+            collect_inserted_managed_paragraph_ids(&sections, &original_paragraph_ids);
         format_inserted_paragraph_whitespace(&mut sections, &inserted_paragraph_ids);
         let expected_sections = sections.clone();
         let nodes = sections
@@ -894,10 +847,8 @@ fn write_v6_inner(
         let actual_identity_set = identity_set(&actual_state.identities);
         let expected_identity_set = identity_set(&expected_identities);
         if actual_identity_set != expected_identity_set {
-            *identity_difference = first_identity_set_difference(
-                &expected_identity_set,
-                &actual_identity_set,
-            );
+            *identity_difference =
+                first_identity_set_difference(&expected_identity_set, &actual_identity_set);
             return Err(SaveDiagnosticCode::WriteIdentitySetMismatch.error());
         }
         let actual_sections = &actual_state.sections;
@@ -905,8 +856,9 @@ fn write_v6_inner(
             *stage = WriterStage::SourceTreeComparison;
             let expected = normalize_sections(&expected_sections);
             let actual = normalize_sections(actual_sections);
-            let difference = first_source_tree_difference(&expected, &actual)
-                .expect("unequal normalized source trees must have a structural difference");
+            let Some(difference) = first_source_tree_difference(&expected, &actual) else {
+                return Err(SaveDiagnosticCode::WriteNormalizedSourceTreeMismatch.error());
+            };
             let public_detail = difference.public_detail();
             *structural_difference = Some(difference);
             return Err(FdxError::SaveDiagnosticSourceTreeMismatch(public_detail));
@@ -946,11 +898,14 @@ fn first_identity_set_difference(
             unexpected: false,
         });
     }
-    actual.difference(expected).next().map(|identity| IdentitySetDifference {
-        domain: identity_domain_summary(&identity.domain),
-        missing: false,
-        unexpected: true,
-    })
+    actual
+        .difference(expected)
+        .next()
+        .map(|identity| IdentitySetDifference {
+            domain: identity_domain_summary(&identity.domain),
+            missing: false,
+            unexpected: true,
+        })
 }
 
 fn identity_domain_summary(domain: &ForeignIdDomain) -> IdentityDomainSummary {
@@ -1058,10 +1013,10 @@ fn reconcile_document_lineage(
         index
     } else {
         let document_ref_id = context.allocate_lineage_id(&mut reserved)?;
-        additions.push(ForeignIdentity::new(
-            ForeignIdDomain::Document,
-            document_ref_id.clone(),
-        ).map_err(map_preservation_error)?);
+        additions.push(
+            ForeignIdentity::new(ForeignIdDomain::Document, document_ref_id.clone())
+                .map_err(map_preservation_error)?,
+        );
         let document_ref = new_lineage_element(
             &root.name,
             "DocumentRef",
@@ -1073,11 +1028,13 @@ fn reconcile_document_lineage(
         let content_index = root
             .children
             .iter()
-            .position(|node| matches!(node,
-                PreservedNode::Element(element)
-                    if element.name.local_name == "Content"
-                        && element.name.namespace_uri == root.name.namespace_uri
-            ))
+            .position(|node| {
+                matches!(node,
+                    PreservedNode::Element(element)
+                        if element.name.local_name == "Content"
+                            && element.name.namespace_uri == root.name.namespace_uri
+                )
+            })
             .ok_or(FdxError::MissingContent)?;
         root.children
             .insert(content_index, PreservedNode::Element(document_ref));
@@ -1125,11 +1082,13 @@ fn reconcile_document_lineage(
         );
     }
 
-    let has_direct_xref = document_ref.children.iter().any(|node| matches!(node,
-        PreservedNode::Element(element)
-            if element.name.local_name == "XRef"
-                && element.name.namespace_uri == document_ref.name.namespace_uri
-    ));
+    let has_direct_xref = document_ref.children.iter().any(|node| {
+        matches!(node,
+            PreservedNode::Element(element)
+                if element.name.local_name == "XRef"
+                    && element.name.namespace_uri == document_ref.name.namespace_uri
+        )
+    });
     let should_append_xref = match context.operation {
         SaveOperation::DirectSerialization => false,
         SaveOperation::Save => !has_direct_xref,
@@ -1158,11 +1117,16 @@ fn collect_preserved_id_attributes(nodes: &[PreservedNode], values: &mut BTreeSe
         let PreservedNode::Element(element) = node else {
             continue;
         };
-        values.extend(element.attributes.iter().filter_map(|attribute| {
-            (attribute.name.namespace_uri.is_none()
-                && attribute.name.local_name.eq_ignore_ascii_case("id"))
-                .then(|| attribute.value.clone())
-        }));
+        values.extend(
+            element
+                .attributes
+                .iter()
+                .filter(|&attribute| {
+                    attribute.name.namespace_uri.is_none()
+                        && attribute.name.local_name.eq_ignore_ascii_case("id")
+                })
+                .map(|attribute| attribute.value.clone()),
+        );
         collect_preserved_id_attributes(&element.children, values);
     }
 }
@@ -1227,19 +1191,18 @@ fn append_lineage_xref(
     else {
         return Err(SaveDiagnosticCode::LineageAmbiguousDocumentRef.error());
     };
-    let document_ref_preserves_space = document_ref
-        .attributes
-        .iter()
-        .any(|attribute| {
-            attribute.name.namespace_uri.as_deref() == Some("http://www.w3.org/XML/1998/namespace")
-                && attribute.name.local_name == "space"
-                && attribute.value == "preserve"
-        });
+    let document_ref_preserves_space = document_ref.attributes.iter().any(|attribute| {
+        attribute.name.namespace_uri.as_deref() == Some("http://www.w3.org/XML/1998/namespace")
+            && attribute.name.local_name == "space"
+            && attribute.value == "preserve"
+    });
     if root_preserves_space || document_ref_preserves_space {
         return append_xref_without_formatting(document_ref, xref);
     }
     let format_safe = document_ref.children.iter().all(|node| match node {
-        PreservedNode::Element(element) => element.name.namespace_uri == document_ref.name.namespace_uri,
+        PreservedNode::Element(element) => {
+            element.name.namespace_uri == document_ref.name.namespace_uri
+        }
         PreservedNode::Text(text) => text.chars().all(char::is_whitespace),
         _ => false,
     });
@@ -1407,7 +1370,10 @@ impl SourceTreeDifference {
         }
         let expected = self.expected_detail.as_deref().unwrap_or("absent");
         let actual = self.actual_detail.as_deref().unwrap_or("absent");
-        let detail = format!("path={path}; field={}; expected={expected}; actual={actual}", self.field);
+        let detail = format!(
+            "path={path}; field={}; expected={expected}; actual={actual}",
+            self.field
+        );
         if detail.len() <= MAX_DETAIL_BYTES {
             detail
         } else {
@@ -1445,17 +1411,19 @@ fn safe_xml_name(name: &str) -> String {
             safe.push_str("...");
             break;
         }
-        safe.push(if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
-            character
-        } else {
-            '_'
-        });
+        safe.push(
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
+                character
+            } else {
+                '_'
+            },
+        );
     }
     safe
 }
 
 fn safe_name_detail(value: Option<&str>) -> Option<String> {
-    value.map(|value| safe_xml_name(value))
+    value.map(safe_xml_name)
 }
 
 fn source_name_difference(
@@ -1472,15 +1440,43 @@ fn source_name_difference(
     if expected.namespace_uri != actual.namespace_uri {
         return Some((
             "element.namespace",
-            Some(if expected.namespace_uri.is_some() { "present" } else { "absent" }.into()),
-            Some(if actual.namespace_uri.is_some() { "present" } else { "absent" }.into()),
+            Some(
+                if expected.namespace_uri.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                }
+                .into(),
+            ),
+            Some(
+                if actual.namespace_uri.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                }
+                .into(),
+            ),
         ));
     }
     if expected.qualified_name != actual.qualified_name {
         return Some((
             "element.qualified-name",
-            Some(if expected.qualified_name.is_some() { "present" } else { "absent" }.into()),
-            Some(if actual.qualified_name.is_some() { "present" } else { "absent" }.into()),
+            Some(
+                if expected.qualified_name.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                }
+                .into(),
+            ),
+            Some(
+                if actual.qualified_name.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                }
+                .into(),
+            ),
         ));
     }
     None
@@ -1495,7 +1491,11 @@ fn ownership_category(ownership: &SourceOwnership) -> &'static str {
 }
 
 fn anchor_category(anchor: &Option<SourceAnchorId>) -> &'static str {
-    if anchor.is_some() { "present" } else { "absent" }
+    if anchor.is_some() {
+        "present"
+    } else {
+        "absent"
+    }
 }
 
 fn text_classification(text: &str) -> String {
@@ -1573,34 +1573,80 @@ fn first_source_tree_difference(
         let expected_section = expected.get(section_index);
         let actual_section = actual.get(section_index);
         let Some(expected_section) = expected_section else {
-            return Some(difference(vec![section_index], "section.presence", None,
-                actual_section.map(|section| format!("kind={:?},ordinal={}", section.kind, section.ordinal)),
-                None, actual_section.and_then(|section| section.children.first()).map(structural_node_summary)));
+            return Some(difference(
+                vec![section_index],
+                "section.presence",
+                None,
+                actual_section
+                    .map(|section| format!("kind={:?},ordinal={}", section.kind, section.ordinal)),
+                None,
+                actual_section
+                    .and_then(|section| section.children.first())
+                    .map(structural_node_summary),
+            ));
         };
         let Some(actual_section) = actual_section else {
-            return Some(difference(vec![section_index], "section.presence",
-                Some(format!("kind={:?},ordinal={}", expected_section.kind, expected_section.ordinal)), None,
-                expected_section.children.first().map(structural_node_summary), None));
+            return Some(difference(
+                vec![section_index],
+                "section.presence",
+                Some(format!(
+                    "kind={:?},ordinal={}",
+                    expected_section.kind, expected_section.ordinal
+                )),
+                None,
+                expected_section
+                    .children
+                    .first()
+                    .map(structural_node_summary),
+                None,
+            ));
         };
         let section_path = vec![section_index];
-        if let Some((field, left, right)) = source_name_difference(&expected_section.name, &actual_section.name) {
+        if let Some((field, left, right)) =
+            source_name_difference(&expected_section.name, &actual_section.name)
+        {
             let field = match field {
                 "element.local-name" => "section.local-name",
                 "element.namespace" => "section.namespace",
                 _ => "section.qualified-name",
             };
-            return Some(difference(section_path, field, left, right,
-                expected_section.children.first().map(structural_node_summary), actual_section.children.first().map(structural_node_summary)));
+            return Some(difference(
+                section_path,
+                field,
+                left,
+                right,
+                expected_section
+                    .children
+                    .first()
+                    .map(structural_node_summary),
+                actual_section.children.first().map(structural_node_summary),
+            ));
         }
         if expected_section.kind != actual_section.kind {
-            return Some(difference(section_path, "section.kind", Some(format!("{:?}", expected_section.kind)),
-                Some(format!("{:?}", actual_section.kind)), expected_section.children.first().map(structural_node_summary),
-                actual_section.children.first().map(structural_node_summary)));
+            return Some(difference(
+                section_path,
+                "section.kind",
+                Some(format!("{:?}", expected_section.kind)),
+                Some(format!("{:?}", actual_section.kind)),
+                expected_section
+                    .children
+                    .first()
+                    .map(structural_node_summary),
+                actual_section.children.first().map(structural_node_summary),
+            ));
         }
         if expected_section.ordinal != actual_section.ordinal {
-            return Some(difference(section_path, "section.ordinal", Some(expected_section.ordinal.to_string()),
-                Some(actual_section.ordinal.to_string()), expected_section.children.first().map(structural_node_summary),
-                actual_section.children.first().map(structural_node_summary)));
+            return Some(difference(
+                section_path,
+                "section.ordinal",
+                Some(expected_section.ordinal.to_string()),
+                Some(actual_section.ordinal.to_string()),
+                expected_section
+                    .children
+                    .first()
+                    .map(structural_node_summary),
+                actual_section.children.first().map(structural_node_summary),
+            ));
         }
         if let Some(difference) = first_node_sequence_difference(
             &expected_section.children,
@@ -1627,14 +1673,26 @@ fn first_node_sequence_difference(
         let (Some(expected_node), Some(actual_node)) = (expected_node, actual_node) else {
             let expected_detail = expected_node.map_or_else(
                 || format!("absent;sibling-count={}", expected.len()),
-                |node| format!("{};sibling-count={}", node_description(node), expected.len()),
+                |node| {
+                    format!(
+                        "{};sibling-count={}",
+                        node_description(node),
+                        expected.len()
+                    )
+                },
             );
             let actual_detail = actual_node.map_or_else(
                 || format!("absent;sibling-count={}", actual.len()),
                 |node| format!("{};sibling-count={}", node_description(node), actual.len()),
             );
-            return Some(difference(child_path, "child.presence", Some(expected_detail),
-                Some(actual_detail), expected_node.map(structural_node_summary), actual_node.map(structural_node_summary)));
+            return Some(difference(
+                child_path,
+                "child.presence",
+                Some(expected_detail),
+                Some(actual_detail),
+                expected_node.map(structural_node_summary),
+                actual_node.map(structural_node_summary),
+            ));
         };
         if expected_node != actual_node
             && (actual[child_index + 1..].contains(expected_node)
@@ -1653,64 +1711,165 @@ fn first_node_sequence_difference(
             (PreservedNode::Element(expected_element), PreservedNode::Element(actual_element)) => {
                 let expected_summary = Some(structural_node_summary(expected_node));
                 let actual_summary = Some(structural_node_summary(actual_node));
-                if let Some((field, left, right)) = source_name_difference(&expected_element.name, &actual_element.name) {
-                    return Some(difference(child_path, field, left, right, expected_summary, actual_summary));
+                if let Some((field, left, right)) =
+                    source_name_difference(&expected_element.name, &actual_element.name)
+                {
+                    return Some(difference(
+                        child_path,
+                        field,
+                        left,
+                        right,
+                        expected_summary,
+                        actual_summary,
+                    ));
                 }
-                let common_attributes = expected_element.attributes.len().min(actual_element.attributes.len());
+                let common_attributes = expected_element
+                    .attributes
+                    .len()
+                    .min(actual_element.attributes.len());
                 for attribute_index in 0..common_attributes {
                     let left = &expected_element.attributes[attribute_index];
                     let right = &actual_element.attributes[attribute_index];
                     if left.name != right.name {
-                        return Some(difference(child_path, "attribute.name-or-order",
-                            safe_name_detail(Some(&left.name.local_name)), safe_name_detail(Some(&right.name.local_name)),
-                            expected_summary, actual_summary));
+                        return Some(difference(
+                            child_path,
+                            "attribute.name-or-order",
+                            safe_name_detail(Some(&left.name.local_name)),
+                            safe_name_detail(Some(&right.name.local_name)),
+                            expected_summary,
+                            actual_summary,
+                        ));
                     }
                     if left.value != right.value {
-                        return Some(difference(child_path, "attribute.value", safe_name_detail(Some(&left.name.local_name)),
-                            safe_name_detail(Some(&right.name.local_name)), expected_summary, actual_summary));
+                        return Some(difference(
+                            child_path,
+                            "attribute.value",
+                            safe_name_detail(Some(&left.name.local_name)),
+                            safe_name_detail(Some(&right.name.local_name)),
+                            expected_summary,
+                            actual_summary,
+                        ));
                     }
                 }
                 if expected_element.attributes.len() != actual_element.attributes.len() {
-                    let left = expected_element.attributes.get(common_attributes).map(|attribute| safe_xml_name(&attribute.name.local_name));
-                    let right = actual_element.attributes.get(common_attributes).map(|attribute| safe_xml_name(&attribute.name.local_name));
-                    return Some(difference(child_path, "attribute.count-or-presence", left, right, expected_summary, actual_summary));
+                    let left = expected_element
+                        .attributes
+                        .get(common_attributes)
+                        .map(|attribute| safe_xml_name(&attribute.name.local_name));
+                    let right = actual_element
+                        .attributes
+                        .get(common_attributes)
+                        .map(|attribute| safe_xml_name(&attribute.name.local_name));
+                    return Some(difference(
+                        child_path,
+                        "attribute.count-or-presence",
+                        left,
+                        right,
+                        expected_summary,
+                        actual_summary,
+                    ));
                 }
-                let common_bindings = expected_element.namespace_bindings.len().min(actual_element.namespace_bindings.len());
+                let common_bindings = expected_element
+                    .namespace_bindings
+                    .len()
+                    .min(actual_element.namespace_bindings.len());
                 for binding_index in 0..common_bindings {
                     let left = &expected_element.namespace_bindings[binding_index];
                     let right = &actual_element.namespace_bindings[binding_index];
                     if left.prefix != right.prefix {
-                        return Some(difference(child_path, "namespace-binding.prefix-or-order",
-                            Some(if left.prefix.is_empty() { "default".into() } else { safe_xml_name(&left.prefix) }),
-                            Some(if right.prefix.is_empty() { "default".into() } else { safe_xml_name(&right.prefix) }),
-                            expected_summary, actual_summary));
+                        return Some(difference(
+                            child_path,
+                            "namespace-binding.prefix-or-order",
+                            Some(if left.prefix.is_empty() {
+                                "default".into()
+                            } else {
+                                safe_xml_name(&left.prefix)
+                            }),
+                            Some(if right.prefix.is_empty() {
+                                "default".into()
+                            } else {
+                                safe_xml_name(&right.prefix)
+                            }),
+                            expected_summary,
+                            actual_summary,
+                        ));
                     }
                     if left.namespace_uri != right.namespace_uri {
-                        return Some(difference(child_path, "namespace-binding.namespace",
-                            Some("present".into()), Some("present".into()), expected_summary, actual_summary));
+                        return Some(difference(
+                            child_path,
+                            "namespace-binding.namespace",
+                            Some("present".into()),
+                            Some("present".into()),
+                            expected_summary,
+                            actual_summary,
+                        ));
                     }
                 }
-                if expected_element.namespace_bindings.len() != actual_element.namespace_bindings.len() {
-                    return Some(difference(child_path, "namespace-binding.count-or-presence",
-                        expected_element.namespace_bindings.get(common_bindings).map(|binding| safe_xml_name(&binding.prefix)),
-                        actual_element.namespace_bindings.get(common_bindings).map(|binding| safe_xml_name(&binding.prefix)),
-                        expected_summary, actual_summary));
+                if expected_element.namespace_bindings.len()
+                    != actual_element.namespace_bindings.len()
+                {
+                    return Some(difference(
+                        child_path,
+                        "namespace-binding.count-or-presence",
+                        expected_element
+                            .namespace_bindings
+                            .get(common_bindings)
+                            .map(|binding| safe_xml_name(&binding.prefix)),
+                        actual_element
+                            .namespace_bindings
+                            .get(common_bindings)
+                            .map(|binding| safe_xml_name(&binding.prefix)),
+                        expected_summary,
+                        actual_summary,
+                    ));
                 }
                 if expected_element.source_type != actual_element.source_type {
-                    return Some(difference(child_path, "source-type", Some(if expected_element.source_type.is_some() { "present".into() } else { "absent".into() }),
-                        Some(if actual_element.source_type.is_some() { "present".into() } else { "absent".into() }), expected_summary, actual_summary));
+                    return Some(difference(
+                        child_path,
+                        "source-type",
+                        Some(if expected_element.source_type.is_some() {
+                            "present".into()
+                        } else {
+                            "absent".into()
+                        }),
+                        Some(if actual_element.source_type.is_some() {
+                            "present".into()
+                        } else {
+                            "absent".into()
+                        }),
+                        expected_summary,
+                        actual_summary,
+                    ));
                 }
                 if expected_element.ownership != actual_element.ownership {
-                    return Some(difference(child_path, "ownership", Some(ownership_category(&expected_element.ownership).into()),
-                        Some(ownership_category(&actual_element.ownership).into()), expected_summary, actual_summary));
+                    return Some(difference(
+                        child_path,
+                        "ownership",
+                        Some(ownership_category(&expected_element.ownership).into()),
+                        Some(ownership_category(&actual_element.ownership).into()),
+                        expected_summary,
+                        actual_summary,
+                    ));
                 }
                 if expected_element.dependency_confidence != actual_element.dependency_confidence {
-                    return Some(difference(child_path, "dependency-confidence", Some(format!("{:?}", expected_element.dependency_confidence)),
-                        Some(format!("{:?}", actual_element.dependency_confidence)), expected_summary, actual_summary));
+                    return Some(difference(
+                        child_path,
+                        "dependency-confidence",
+                        Some(format!("{:?}", expected_element.dependency_confidence)),
+                        Some(format!("{:?}", actual_element.dependency_confidence)),
+                        expected_summary,
+                        actual_summary,
+                    ));
                 }
                 if expected_element.anchor != actual_element.anchor {
-                    return Some(difference(child_path, "anchor", Some(anchor_category(&expected_element.anchor).into()),
-                        Some(anchor_category(&actual_element.anchor).into()), expected_summary, actual_summary));
+                    return Some(difference(
+                        child_path,
+                        "anchor",
+                        Some(anchor_category(&expected_element.anchor).into()),
+                        Some(anchor_category(&actual_element.anchor).into()),
+                        expected_summary,
+                        actual_summary,
+                    ));
                 }
                 if let Some(difference) = first_node_sequence_difference(
                     &expected_element.children,
@@ -1720,20 +1879,41 @@ fn first_node_sequence_difference(
                     return Some(difference);
                 }
             }
-            (PreservedNode::Text(expected_text), PreservedNode::Text(actual_text)) if expected_text == actual_text => {}
+            (PreservedNode::Text(expected_text), PreservedNode::Text(actual_text))
+                if expected_text == actual_text => {}
             (PreservedNode::Text(expected_text), PreservedNode::Text(actual_text)) => {
-                return Some(difference(child_path, "text.content", Some(text_classification(expected_text)),
-                    Some(text_classification(actual_text)), Some(structural_node_summary(expected_node)), Some(structural_node_summary(actual_node))));
+                return Some(difference(
+                    child_path,
+                    "text.content",
+                    Some(text_classification(expected_text)),
+                    Some(text_classification(actual_text)),
+                    Some(structural_node_summary(expected_node)),
+                    Some(structural_node_summary(actual_node)),
+                ));
             }
-            (PreservedNode::CData(expected_text), PreservedNode::CData(actual_text)) if expected_text == actual_text => {}
+            (PreservedNode::CData(expected_text), PreservedNode::CData(actual_text))
+                if expected_text == actual_text => {}
             (PreservedNode::CData(expected_text), PreservedNode::CData(actual_text)) => {
-                return Some(difference(child_path, "cdata.content", Some(text_classification(expected_text)),
-                    Some(text_classification(actual_text)), Some(structural_node_summary(expected_node)), Some(structural_node_summary(actual_node))));
+                return Some(difference(
+                    child_path,
+                    "cdata.content",
+                    Some(text_classification(expected_text)),
+                    Some(text_classification(actual_text)),
+                    Some(structural_node_summary(expected_node)),
+                    Some(structural_node_summary(actual_node)),
+                ));
             }
-            (PreservedNode::Comment(expected_text), PreservedNode::Comment(actual_text)) if expected_text == actual_text => {}
+            (PreservedNode::Comment(expected_text), PreservedNode::Comment(actual_text))
+                if expected_text == actual_text => {}
             (PreservedNode::Comment(expected_text), PreservedNode::Comment(actual_text)) => {
-                return Some(difference(child_path, "comment.content", Some(text_classification(expected_text)),
-                    Some(text_classification(actual_text)), Some(structural_node_summary(expected_node)), Some(structural_node_summary(actual_node))));
+                return Some(difference(
+                    child_path,
+                    "comment.content",
+                    Some(text_classification(expected_text)),
+                    Some(text_classification(actual_text)),
+                    Some(structural_node_summary(expected_node)),
+                    Some(structural_node_summary(actual_node)),
+                ));
             }
             (
                 PreservedNode::ProcessingInstruction {
@@ -1745,19 +1925,47 @@ fn first_node_sequence_difference(
                     data: actual_data,
                 },
             ) if expected_target == actual_target && expected_data == actual_data => {}
-            (PreservedNode::ProcessingInstruction { target: expected_target, data: expected_data },
-             PreservedNode::ProcessingInstruction { target: actual_target, data: actual_data }) => {
+            (
+                PreservedNode::ProcessingInstruction {
+                    target: expected_target,
+                    data: expected_data,
+                },
+                PreservedNode::ProcessingInstruction {
+                    target: actual_target,
+                    data: actual_data,
+                },
+            ) => {
                 let (field, left, right) = if expected_target != actual_target {
-                    ("processing-instruction.target", Some("present".into()), Some("present".into()))
+                    (
+                        "processing-instruction.target",
+                        Some("present".into()),
+                        Some("present".into()),
+                    )
                 } else {
-                    ("processing-instruction.data", Some(text_classification(expected_data)), Some(text_classification(actual_data)))
+                    (
+                        "processing-instruction.data",
+                        Some(text_classification(expected_data)),
+                        Some(text_classification(actual_data)),
+                    )
                 };
-                return Some(difference(child_path, field, left, right, Some(structural_node_summary(expected_node)),
-                    Some(structural_node_summary(actual_node))));
+                return Some(difference(
+                    child_path,
+                    field,
+                    left,
+                    right,
+                    Some(structural_node_summary(expected_node)),
+                    Some(structural_node_summary(actual_node)),
+                ));
             }
             _ => {
-                return Some(difference(child_path, "node.kind-or-order", Some(node_description(expected_node)),
-                    Some(node_description(actual_node)), Some(structural_node_summary(expected_node)), Some(structural_node_summary(actual_node))));
+                return Some(difference(
+                    child_path,
+                    "node.kind-or-order",
+                    Some(node_description(expected_node)),
+                    Some(node_description(actual_node)),
+                    Some(structural_node_summary(expected_node)),
+                    Some(structural_node_summary(actual_node)),
+                ));
             }
         }
     }
@@ -1851,20 +2059,12 @@ fn format_generated_element(
     let child_indent = "  ".repeat(depth.saturating_add(1));
     let closing_indent = "  ".repeat(depth);
     let mut formatted = Vec::with_capacity(element.children.len().saturating_mul(2) + 1);
-    for (index, child) in std::mem::take(&mut element.children).into_iter().enumerate() {
-        if index == 0 {
-            formatted.push(PreservedNode::Text(if root_children {
-                format!("\n\n{child_indent}").into()
-            } else {
-                format!("\n{child_indent}").into()
-            }));
+    for child in std::mem::take(&mut element.children) {
+        formatted.push(PreservedNode::Text(if root_children {
+            format!("\n\n{child_indent}").into()
         } else {
-            formatted.push(PreservedNode::Text(if root_children {
-                format!("\n\n{child_indent}").into()
-            } else {
-                format!("\n{child_indent}").into()
-            }));
-        }
+            format!("\n{child_indent}").into()
+        }));
         formatted.push(child);
     }
     formatted.push(PreservedNode::Text(format!("\n{closing_indent}").into()));
@@ -1892,7 +2092,11 @@ fn collect_inserted_managed_paragraph_ids(
     sections: &[PreservedSection],
     original_ids: &BTreeSet<String>,
 ) -> BTreeSet<String> {
-    fn visit(nodes: &[PreservedNode], original_ids: &BTreeSet<String>, found: &mut BTreeSet<String>) {
+    fn visit(
+        nodes: &[PreservedNode],
+        original_ids: &BTreeSet<String>,
+        found: &mut BTreeSet<String>,
+    ) {
         for node in nodes {
             let PreservedNode::Element(element) = node else {
                 continue;
@@ -1951,11 +2155,7 @@ fn format_inserted_paragraph_whitespace(
                             format_content_insertions(&mut content.children, inserted_ids);
                         }
                     }
-                    visit(
-                        std::slice::from_mut(child),
-                        root_preserve,
-                        inserted_ids,
-                    );
+                    visit(std::slice::from_mut(child), root_preserve, inserted_ids);
                 }
             } else {
                 visit(&mut root.children, root_preserve, inserted_ids);
@@ -1968,10 +2168,7 @@ fn format_inserted_paragraph_whitespace(
     }
 }
 
-fn format_content_insertions(
-    children: &mut Vec<PreservedNode>,
-    inserted_ids: &BTreeSet<String>,
-) {
+fn format_content_insertions(children: &mut Vec<PreservedNode>, inserted_ids: &BTreeSet<String>) {
     // Only the unambiguous element-only Content shape is eligible. Comments,
     // PIs, CDATA, non-whitespace text and non-Paragraph children make the
     // context mixed/opaque, so source order and all whitespace remain intact.
@@ -1984,9 +2181,9 @@ fn format_content_insertions(
     }
     let has_inserted = children.iter().any(|child| match child {
         PreservedNode::Element(element) if element.name.local_name == "Paragraph" => element
-                .attributes
-                .iter()
-                .find(|attribute| attribute.name.local_name.eq_ignore_ascii_case("id"))
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name.local_name.eq_ignore_ascii_case("id"))
             .is_some_and(|attribute| inserted_ids.contains(&attribute.value)),
         _ => false,
     });
@@ -2014,9 +2211,7 @@ fn format_content_insertions(
             .iter()
             .find(|attribute| attribute.name.local_name.eq_ignore_ascii_case("id"))
             .is_some_and(|attribute| inserted_ids.contains(&attribute.value));
-        if !saw_paragraph && is_inserted {
-            formatted.push(PreservedNode::Text("\n    ".into()));
-        } else if saw_paragraph && (previous_was_inserted || is_inserted) {
+        if is_inserted || (saw_paragraph && previous_was_inserted) {
             formatted.push(PreservedNode::Text("\n    ".into()));
         } else {
             formatted.append(&mut pending_whitespace);
@@ -2146,7 +2341,10 @@ fn reconcile_node(
         .copied()
         .ok_or_else(|| SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error())?;
         reconcile_managed_paragraph(element, semantic).map_err(|error| {
-            save_diagnostic_at(error, SaveDiagnosticCode::ReconcileManagedParagraphPropagation)
+            save_diagnostic_at(
+                error,
+                SaveDiagnosticCode::ReconcileManagedParagraphPropagation,
+            )
         })?;
         return Ok(());
     }
@@ -2212,7 +2410,9 @@ fn reconcile_managed_paragraph(
                         return Err(SaveDiagnosticCode::ReconcileParagraphCdataInEmptyText.error())
                     }
                     _ => {
-                        return Err(SaveDiagnosticCode::ReconcileParagraphUnsupportedEmptyChild.error())
+                        return Err(
+                            SaveDiagnosticCode::ReconcileParagraphUnsupportedEmptyChild.error()
+                        )
                     }
                 }
             }
@@ -2284,15 +2484,15 @@ fn reconcile_managed_paragraph(
                 PreservedNode::Text(value) | PreservedNode::CData(value) => {
                     *value = run.text.clone().into();
                 }
-                _ => {
-                    return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedFirstChild.error())
-                }
+                _ => return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedFirstChild.error()),
             }
             for child in text_element.children.iter_mut().skip(1) {
                 match child {
                     PreservedNode::Text(value) | PreservedNode::CData(value) => value.clear(),
                     _ => {
-                        return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedLaterChild.error())
+                        return Err(
+                            SaveDiagnosticCode::ReconcileParagraphUnexpectedLaterChild.error()
+                        )
                     }
                 }
             }
@@ -2315,14 +2515,20 @@ fn make_new_document_nodes(
     );
     let mut lineage_ids = BTreeSet::new();
     let document_ref_id = context.allocate_lineage_id(&mut lineage_ids)?;
-    let xref_id = if matches!(context.operation, SaveOperation::Save | SaveOperation::SaveAs) {
+    let xref_id = if matches!(
+        context.operation,
+        SaveOperation::Save | SaveOperation::SaveAs
+    ) {
         Some(context.allocate_lineage_id(&mut lineage_ids)?)
     } else {
         None
     };
     let mut document_ref = preserved_element(
         "DocumentRef",
-        vec![("DateTime", context.timestamp.as_str()), ("id", &document_ref_id)],
+        vec![
+            ("DateTime", context.timestamp.as_str()),
+            ("id", &document_ref_id),
+        ],
     );
     if let Some(xref_id) = xref_id {
         let xref_datetime = match context.operation {
@@ -2332,15 +2538,16 @@ fn make_new_document_nodes(
                 .as_deref()
                 .ok_or(FdxError::InvalidValue)?,
         };
-        document_ref.children.push(PreservedNode::Element(preserved_element(
-            "XRef",
-            vec![("DateTime", xref_datetime), ("id", &xref_id)],
-        )));
+        document_ref
+            .children
+            .push(PreservedNode::Element(preserved_element(
+                "XRef",
+                vec![("DateTime", xref_datetime), ("id", &xref_id)],
+            )));
     }
-    root.children
-        .push(PreservedNode::Element(document_ref));
+    root.children.push(PreservedNode::Element(document_ref));
     let mut content = preserved_element("Content", Vec::new());
-    let mut paragraph_ids = ParagraphIdAllocator::new(lineage_ids.into_iter());
+    let mut paragraph_ids = ParagraphIdAllocator::new(lineage_ids);
     for (index, element) in project.elements.iter().enumerate() {
         let mut paragraph = new_paragraph(element, &mut paragraph_ids)?;
         if element.role == Role::SceneHeading {
@@ -2382,15 +2589,17 @@ fn make_new_document_nodes(
         content.children.push(paragraph);
     }
     root.children.push(PreservedNode::Element(content));
-    root.children.push(PreservedNode::Element(window_state_element(
-        &root.name,
-        context.window_state,
-    )));
-    root.children.push(PreservedNode::Element(text_state_element(
-        &root.name,
-        project,
-        context.text_state,
-    )?));
+    root.children
+        .push(PreservedNode::Element(window_state_element(
+            &root.name,
+            context.window_state,
+        )));
+    root.children
+        .push(PreservedNode::Element(text_state_element(
+            &root.name,
+            project,
+            context.text_state,
+        )?));
     for formatting in formatting_in_native_order() {
         root.children
             .push(PreservedNode::Element(new_element_settings(formatting)));
@@ -2432,10 +2641,13 @@ fn text_state_element(
         parent,
         "TextState",
         vec![
-            ("Scaling".to_owned(), state.scaling.clamp(
-                text_state::MIN_TEXT_SCALING,
-                text_state::MAX_TEXT_SCALING,
-            ).to_string()),
+            (
+                "Scaling".to_owned(),
+                state
+                    .scaling
+                    .clamp(text_state::MIN_TEXT_SCALING, text_state::MAX_TEXT_SCALING)
+                    .to_string(),
+            ),
             ("Selection".to_owned(), format!("{start},{end}")),
             ("ShowInvisibles".to_owned(), "No".to_owned()),
         ],
@@ -2447,7 +2659,9 @@ fn reconcile_root_text_state(
     project: &Project,
     state: TextState,
 ) -> Result<(), FdxError> {
-    let mut roots = sections.iter_mut().flat_map(|section| &mut section.children)
+    let mut roots = sections
+        .iter_mut()
+        .flat_map(|section| &mut section.children)
         .filter_map(|node| match node {
             PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => Some(element),
             _ => None,
@@ -2456,12 +2670,20 @@ fn reconcile_root_text_state(
     if roots.next().is_some() {
         return Err(FdxError::InvalidRoot);
     }
-    let indices = root.children.iter().enumerate().filter_map(|(index, node)| match node {
-        PreservedNode::Element(element)
-            if element.name.local_name == "TextState"
-                && element.name.namespace_uri == root.name.namespace_uri => Some(index),
-        _ => None,
-    }).collect::<Vec<_>>();
+    let indices = root
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| match node {
+            PreservedNode::Element(element)
+                if element.name.local_name == "TextState"
+                    && element.name.namespace_uri == root.name.namespace_uri =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let canonical = text_state_element(&root.name, project, state)?;
     if let Some(first) = indices.first().copied() {
         root.children[first] = PreservedNode::Element(canonical);
@@ -2471,22 +2693,29 @@ fn reconcile_root_text_state(
         return Ok(());
     }
 
-    let window = root.children.iter().position(|node| matches!(node,
-        PreservedNode::Element(element)
-            if element.name.local_name == "WindowState"
-                && element.name.namespace_uri == root.name.namespace_uri
-    ));
-    let page_layout = root.children.iter().position(|node| matches!(node,
-        PreservedNode::Element(element)
-            if element.name.local_name == "PageLayout"
-                && element.name.namespace_uri == root.name.namespace_uri
-    ));
-    let settings = root.children.iter().position(|node| matches!(node,
-        PreservedNode::Element(element)
-            if element.name.local_name == "ElementSettings"
-                && element.name.namespace_uri == root.name.namespace_uri
-    ));
-    let mut insertion = window.map(|index| index + 1)
+    let window = root.children.iter().position(|node| {
+        matches!(node,
+            PreservedNode::Element(element)
+                if element.name.local_name == "WindowState"
+                    && element.name.namespace_uri == root.name.namespace_uri
+        )
+    });
+    let page_layout = root.children.iter().position(|node| {
+        matches!(node,
+            PreservedNode::Element(element)
+                if element.name.local_name == "PageLayout"
+                    && element.name.namespace_uri == root.name.namespace_uri
+        )
+    });
+    let settings = root.children.iter().position(|node| {
+        matches!(node,
+            PreservedNode::Element(element)
+                if element.name.local_name == "ElementSettings"
+                    && element.name.namespace_uri == root.name.namespace_uri
+        )
+    });
+    let mut insertion = window
+        .map(|index| index + 1)
         .or_else(|| page_layout.map(|index| index + 1))
         .or(settings)
         .unwrap_or(root.children.len());
@@ -2496,17 +2725,25 @@ fn reconcile_root_text_state(
         insertion += 1;
     }
     let needs_leading_space = insertion == 0
-        || matches!(insertion.checked_sub(1).and_then(|index| root.children.get(index)), Some(PreservedNode::Element(_)));
+        || matches!(
+            insertion
+                .checked_sub(1)
+                .and_then(|index| root.children.get(index)),
+            Some(PreservedNode::Element(_))
+        );
     if needs_leading_space {
-        root.children.insert(insertion, PreservedNode::Text("\n\n  ".into()));
+        root.children
+            .insert(insertion, PreservedNode::Text("\n\n  ".into()));
         insertion += 1;
     }
-    root.children.insert(insertion, PreservedNode::Element(canonical));
+    root.children
+        .insert(insertion, PreservedNode::Element(canonical));
     let after = insertion + 1;
     if after == root.children.len()
         || matches!(root.children.get(after), Some(PreservedNode::Element(_)))
     {
-        root.children.insert(after, PreservedNode::Text("\n\n  ".into()));
+        root.children
+            .insert(after, PreservedNode::Text("\n\n  ".into()));
     }
     Ok(())
 }
@@ -2549,17 +2786,24 @@ fn reconcile_root_window_state(
         return Ok(());
     }
 
-    let page_layout = root.children.iter().position(|node| matches!(node,
-        PreservedNode::Element(element)
-            if element.name.local_name == "PageLayout"
-                && element.name.namespace_uri == root.name.namespace_uri
-    ));
-    let settings = root.children.iter().position(|node| matches!(node,
-        PreservedNode::Element(element)
-            if element.name.local_name == "ElementSettings"
-                && element.name.namespace_uri == root.name.namespace_uri
-    ));
-    let anchor = page_layout.map(|index| index + 1).or(settings).unwrap_or(root.children.len());
+    let page_layout = root.children.iter().position(|node| {
+        matches!(node,
+            PreservedNode::Element(element)
+                if element.name.local_name == "PageLayout"
+                    && element.name.namespace_uri == root.name.namespace_uri
+        )
+    });
+    let settings = root.children.iter().position(|node| {
+        matches!(node,
+            PreservedNode::Element(element)
+                if element.name.local_name == "ElementSettings"
+                    && element.name.namespace_uri == root.name.namespace_uri
+        )
+    });
+    let anchor = page_layout
+        .map(|index| index + 1)
+        .or(settings)
+        .unwrap_or(root.children.len());
     // Keep existing inter-element whitespace on the leading side; where the
     // source is compact, add only the generated block's local separator.
     let mut insertion = anchor;
@@ -2577,7 +2821,12 @@ fn reconcile_root_window_state(
         }
     }
     let needs_leading_space = insertion == 0
-        || matches!(insertion.checked_sub(1).and_then(|index| root.children.get(index)), Some(PreservedNode::Element(_)));
+        || matches!(
+            insertion
+                .checked_sub(1)
+                .and_then(|index| root.children.get(index)),
+            Some(PreservedNode::Element(_))
+        );
     if needs_leading_space {
         root.children
             .insert(insertion, PreservedNode::Text("\n\n  ".into()));
@@ -2595,15 +2844,13 @@ fn reconcile_root_window_state(
     Ok(())
 }
 
-fn new_element_settings(
-    formatting: &crate::formatting::RoleFormatting,
-) -> PreservedElement {
-    let mut settings = preserved_element(
-        "ElementSettings",
-        vec![("Type", formatting.fdx_label)],
-    );
+fn new_element_settings(formatting: &crate::formatting::RoleFormatting) -> PreservedElement {
+    let mut settings = preserved_element("ElementSettings", vec![("Type", formatting.fdx_label)]);
     let font = formatting.font;
-    let mut font_attributes = vec![("AdornmentStyle".to_owned(), font.adornment_style.to_string())];
+    let mut font_attributes = vec![(
+        "AdornmentStyle".to_owned(),
+        font.adornment_style.to_string(),
+    )];
     if let Some(color) = font.color {
         font_attributes.push(("Color".to_owned(), color.to_owned()));
     }
@@ -2635,7 +2882,12 @@ fn new_element_settings(
                 ("Spacing".to_owned(), paragraph.spacing.to_string()),
                 (
                     "StartsNewPage".to_owned(),
-                    if paragraph.starts_new_page { "Yes" } else { "No" }.to_owned(),
+                    if paragraph.starts_new_page {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                    .to_owned(),
                 ),
                 ("Type".to_owned(), formatting.fdx_label.to_owned()),
             ],
@@ -2655,18 +2907,23 @@ fn new_element_settings(
             ],
         )));
 
-    settings.children.push(PreservedNode::Element(
-        preserved_element_owned(
+    settings
+        .children
+        .push(PreservedNode::Element(preserved_element_owned(
             "Outline",
             vec![
                 (
                     "CanHide".to_owned(),
-                    if formatting.outline.can_hide { "Yes" } else { "No" }.to_owned(),
+                    if formatting.outline.can_hide {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                    .to_owned(),
                 ),
                 ("Level".to_owned(), formatting.outline.level.to_string()),
             ],
-        ),
-    ));
+        )));
     settings
 }
 
@@ -3478,7 +3735,10 @@ fn raw_root_window_state(root: &RawElement) -> Option<WindowState> {
     let mut parsed = BTreeMap::new();
     for attribute in &window.attributes {
         if attribute.name.namespace_uri.is_none()
-            && matches!(attribute.name.local_name.as_str(), "Left" | "Top" | "Width" | "Height")
+            && matches!(
+                attribute.name.local_name.as_str(),
+                "Left" | "Top" | "Width" | "Height"
+            )
             && parsed
                 .insert(attribute.name.local_name.as_str(), attribute.value.as_str())
                 .is_some()
@@ -3498,10 +3758,14 @@ fn raw_root_window_state(root: &RawElement) -> Option<WindowState> {
 fn raw_root_text_state(root: &RawElement, project: &Project) -> TextState {
     let namespace = root.name.namespace_uri.as_deref();
     let mut blocks = root.children.iter().filter_map(|node| match node {
-        RawNode::Element(element) if is_fdx_element(element, "TextState", namespace) => Some(element),
+        RawNode::Element(element) if is_fdx_element(element, "TextState", namespace) => {
+            Some(element)
+        }
         _ => None,
     });
-    let Some(block) = blocks.next() else { return TextState::DEFAULT };
+    let Some(block) = blocks.next() else {
+        return TextState::DEFAULT;
+    };
     if blocks.next().is_some() {
         return TextState::DEFAULT;
     }
@@ -3510,26 +3774,38 @@ fn raw_root_text_state(root: &RawElement, project: &Project) -> TextState {
     let mut scaling_ambiguous = false;
     let mut selection_ambiguous = false;
     for attribute in &block.attributes {
-        if attribute.name.namespace_uri.is_some() { continue; }
+        if attribute.name.namespace_uri.is_some() {
+            continue;
+        }
         match attribute.name.local_name.as_str() {
             "Scaling" => {
-                if scaling.replace(attribute.value.as_str()).is_some() { scaling_ambiguous = true; }
+                if scaling.replace(attribute.value.as_str()).is_some() {
+                    scaling_ambiguous = true;
+                }
             }
-            "Selection" => {
-                if selection.replace(attribute.value.as_str()).is_some() { selection_ambiguous = true; }
+            "Selection" if selection.replace(attribute.value.as_str()).is_some() => {
+                selection_ambiguous = true;
             }
             _ => {}
         }
     }
-    let scale = if scaling_ambiguous { 100 } else {
-        scaling.and_then(|value| value.parse::<u64>().ok())
+    let scale = if scaling_ambiguous {
+        100
+    } else {
+        scaling
+            .and_then(|value| value.parse::<u64>().ok())
             .and_then(TextState::normalized_scaling)
             .unwrap_or(100)
     };
-    let mapped = if selection_ambiguous { None } else {
+    let mapped = if selection_ambiguous {
+        None
+    } else {
         selection.and_then(|value| text_state::parse_flat_selection(project, value))
     };
-    TextState { scaling: scale, selection: mapped.unwrap_or(TextState::DEFAULT.selection) }
+    TextState {
+        scaling: scale,
+        selection: mapped.unwrap_or(TextState::DEFAULT.selection),
+    }
 }
 
 fn preserve_misc_node(node: RawNode) -> Result<PreservedNode, FdxError> {
@@ -3539,7 +3815,10 @@ fn preserve_misc_node(node: RawNode) -> Result<PreservedNode, FdxError> {
         RawNode::CData(text) => Ok(PreservedNode::CData(text.into())),
         RawNode::Comment(text) => Ok(PreservedNode::Comment(text.into())),
         RawNode::ProcessingInstruction { target, data } => {
-            Ok(PreservedNode::ProcessingInstruction { target: target.into(), data: data.into() })
+            Ok(PreservedNode::ProcessingInstruction {
+                target: target.into(),
+                data: data.into(),
+            })
         }
     }
 }
@@ -3690,12 +3969,12 @@ fn direct_paragraph_overrides(
         "Left" => Some(crate::ParagraphAlignment::Left),
         _ => None,
     });
-    paragraph.first_indent = attribute(element, "FirstIndent")
-        .and_then(|value| bounded_inches(value, true));
-    paragraph.left_indent = attribute(element, "LeftIndent")
-        .and_then(|value| bounded_inches(value, false));
-    paragraph.right_indent = attribute(element, "RightIndent")
-        .and_then(|value| bounded_inches(value, false));
+    paragraph.first_indent =
+        attribute(element, "FirstIndent").and_then(|value| bounded_inches(value, true));
+    paragraph.left_indent =
+        attribute(element, "LeftIndent").and_then(|value| bounded_inches(value, false));
+    paragraph.right_indent =
+        attribute(element, "RightIndent").and_then(|value| bounded_inches(value, false));
     paragraph.leading_regular = (attribute(element, "Leading") == Some("Regular")).then_some(true);
     paragraph.space_before = attribute(element, "SpaceBefore")
         .and_then(crate::FixedPoint::parse_points)
@@ -3820,28 +4099,28 @@ fn read_source_layout_settings(
         // Duplicate FontSpec children are ambiguous as a whole. Leave every
         // projected font field at its role default without modifying source.
         if let [font] = font_specs.as_slice() {
-            let mut projection = crate::formatting::SourceFontSpec::default();
-            projection.family = attribute(font, "Font")
-                .filter(|value| !value.is_empty() && value.len() <= 128)
-                .map(str::to_owned);
-            projection.size = attribute(font, "Size").and_then(parse_bounded_font_size);
-            projection.color = attribute(font, "Color")
-                .filter(|value| value.len() <= 128)
-                .map(str::to_owned);
-            if let Some(style) = attribute(font, "Style") {
-                let tokens = style.split('+').collect::<BTreeSet<_>>();
-                projection.bold = Some(tokens.contains("Bold"));
-                projection.italic = Some(tokens.contains("Italic"));
-                projection.underline = Some(tokens.contains("Underline"));
-                projection.all_caps = Some(tokens.contains("AllCaps"));
-                projection.hidden_text = Some(tokens.contains("HiddenText"));
-                settings.role_print_visibility[role_index(role)] = Some(
-                    if projection.hidden_text == Some(true) {
-                        PrintVisibility::Hidden
-                    } else {
-                        PrintVisibility::Visible
-                    },
-                );
+            let style =
+                attribute(font, "Style").map(|style| style.split('+').collect::<BTreeSet<_>>());
+            let projection = crate::formatting::SourceFontSpec {
+                family: attribute(font, "Font")
+                    .filter(|value| !value.is_empty() && value.len() <= 128)
+                    .map(str::to_owned),
+                size: attribute(font, "Size").and_then(parse_bounded_font_size),
+                color: attribute(font, "Color")
+                    .filter(|value| value.len() <= 128)
+                    .map(str::to_owned),
+                bold: style.as_ref().map(|tokens| tokens.contains("Bold")),
+                italic: style.as_ref().map(|tokens| tokens.contains("Italic")),
+                underline: style.as_ref().map(|tokens| tokens.contains("Underline")),
+                all_caps: style.as_ref().map(|tokens| tokens.contains("AllCaps")),
+                hidden_text: style.as_ref().map(|tokens| tokens.contains("HiddenText")),
+            };
+            if let Some(hidden_text) = projection.hidden_text {
+                settings.role_print_visibility[role_index(role)] = Some(if hidden_text {
+                    PrintVisibility::Hidden
+                } else {
+                    PrintVisibility::Visible
+                });
             }
             settings.role_font_specs[role_index(role)] = projection;
         }
@@ -3866,31 +4145,31 @@ fn read_source_layout_settings(
         };
         // A conflicting child Type makes the entire specification ambiguous;
         // the preserved XML remains untouched and shared role defaults apply.
-        if attribute(paragraph, "Type").is_some_and(|paragraph_role| paragraph_role != source_role) {
+        if attribute(paragraph, "Type").is_some_and(|paragraph_role| paragraph_role != source_role)
+        {
             continue;
         }
 
         let index = role_index(role);
-        let mut projection = crate::SourceParagraphSpec::default();
-        projection.alignment = attribute(paragraph, "Alignment").map(|alignment| match alignment {
-            "Right" => crate::ParagraphAlignment::Right,
-            "Center" => crate::ParagraphAlignment::Center,
-            "Left" => crate::ParagraphAlignment::Left,
-            _ => crate::ParagraphAlignment::Left,
-        });
-        projection.first_indent = attribute(paragraph, "FirstIndent")
-            .and_then(|value| bounded_inches(value, true));
-        projection.left_indent = attribute(paragraph, "LeftIndent")
-            .and_then(|value| bounded_inches(value, false));
-        projection.right_indent = attribute(paragraph, "RightIndent")
-            .and_then(|value| bounded_inches(value, false));
-        projection.leading_regular =
-            (attribute(paragraph, "Leading") == Some("Regular")).then_some(true);
-        projection.space_before = attribute(paragraph, "SpaceBefore")
-            .and_then(crate::FixedPoint::parse_points)
-            .filter(|value| (0..=79_200).contains(&value.raw()));
-        projection.spacing_single =
-            (attribute(paragraph, "Spacing") == Some("1")).then_some(true);
+        let projection = crate::SourceParagraphSpec {
+            alignment: attribute(paragraph, "Alignment").map(|alignment| match alignment {
+                "Right" => crate::ParagraphAlignment::Right,
+                "Center" => crate::ParagraphAlignment::Center,
+                "Left" => crate::ParagraphAlignment::Left,
+                _ => crate::ParagraphAlignment::Left,
+            }),
+            first_indent: attribute(paragraph, "FirstIndent")
+                .and_then(|value| bounded_inches(value, true)),
+            left_indent: attribute(paragraph, "LeftIndent")
+                .and_then(|value| bounded_inches(value, false)),
+            right_indent: attribute(paragraph, "RightIndent")
+                .and_then(|value| bounded_inches(value, false)),
+            leading_regular: (attribute(paragraph, "Leading") == Some("Regular")).then_some(true),
+            space_before: attribute(paragraph, "SpaceBefore")
+                .and_then(crate::FixedPoint::parse_points)
+                .filter(|value| (0..=79_200).contains(&value.raw())),
+            spacing_single: (attribute(paragraph, "Spacing") == Some("1")).then_some(true),
+        };
         settings.role_paragraph_specs[index] = projection;
         if let Some(starts_new_page) = attribute(paragraph, "StartsNewPage") {
             settings.role_starts_new_page[index] = match starts_new_page {
@@ -4060,7 +4339,10 @@ fn collect_identities(
         .map(|(_, identity, _, _)| identity.clone())
         .collect::<BTreeSet<_>>();
     let mut references = Vec::new();
-    walk_elements(root, &mut |element, nearest_board, _in_title_page, _depth| {
+    walk_elements(root, &mut |element,
+                              nearest_board,
+                              _in_title_page,
+                              _depth| {
         let board = if element.name.local_name == "DisplayBoard" {
             identity_attribute(element)
                 .map(|value| ForeignIdentity::new(ForeignIdDomain::Board, value.to_owned()))
@@ -4288,9 +4570,7 @@ fn map_preservation_error(error: PreservationError) -> FdxError {
             FdxError::Preservation(PreservationErrorKind::ResourceLimit)
         }
         Error::DuplicateIdentity => FdxError::AmbiguousIdentity,
-        Error::ParagraphIdentityEntropyUnavailable => {
-            FdxError::ParagraphIdentityEntropyUnavailable
-        }
+        Error::ParagraphIdentityEntropyUnavailable => FdxError::ParagraphIdentityEntropyUnavailable,
         Error::ParagraphIdentityCollisionLimit => FdxError::ParagraphIdentityCollisionLimit,
         Error::DanglingReference | Error::MissingReferenceSource | Error::ImageLengthMismatch => {
             FdxError::DanglingReference
@@ -4304,1498 +4584,5 @@ fn map_preservation_error(error: PreservationError) -> FdxError {
             FdxError::Preservation(PreservationErrorKind::InvalidAnchor)
         }
         _ => FdxError::Preservation(PreservationErrorKind::InvalidState),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SYNTHETIC: &[u8] = include_bytes!(
-        "../../../.forge/initiatives/2026-10-31-document-model-refactor/evidence/wo001-preservation-shapes-synthetic.xml"
-    );
-
-    #[test]
-    fn reads_directed_roles_runs_and_source_order() {
-        let result = read_v6(SYNTHETIC);
-        assert!(result.is_ok());
-        let project = match result {
-            Ok(result) => result.project,
-            Err(_) => return,
-        };
-        assert_eq!(project.elements.len(), 17);
-        assert_eq!(project.elements[0].role, Role::SceneHeading);
-        assert_eq!(project.elements[3].text, "synthetic dialogue");
-        assert_eq!(project.elements[3].runs.len(), 2);
-        assert_eq!(project.elements[3].runs[0].text, "synthetic ");
-        assert_eq!(project.elements[3].runs[1].text, "dialogue");
-        assert_eq!(project.elements[3].runs[0].attributes[0].value, "Bold");
-        assert_eq!(project.elements[16].role, Role::Summary);
-    }
-
-    #[test]
-    fn retains_namespace_unknown_type_title_and_original_bytes() {
-        let mut input = SYNTHETIC.to_vec();
-        let insertion = b"  <TitlePage><Paragraph><Text>untouched</Text></Paragraph></TitlePage>\n";
-        let marker = b"  <Content>";
-        let index = input
-            .windows(marker.len())
-            .position(|window| window == marker)
-            .unwrap_or(0);
-        input.splice(index..index, insertion.iter().copied());
-        let result = read_v6(&input);
-        assert!(result.is_ok());
-        if let Ok(result) = result {
-            assert_eq!(
-                result
-                    .project
-                    .preservation
-                    .as_ref()
-                    .map(|state| state.source.original_bytes.as_slice()),
-                Some(input.as_slice())
-            );
-            assert_eq!(result.project.title_page.len(), 0);
-            let state = result.project.preservation.as_ref();
-            assert!(state.is_some_and(|state| state.board_graph.entities.len() == 3));
-        }
-    }
-
-    #[test]
-    fn rejects_dtd_entities_and_non_v6_without_exposing_input() {
-        let doctype = b"<!DOCTYPE FinalDraft [<!ENTITY secret 'hidden'>]><FinalDraft DocumentType='Script' Version='6'><Content/></FinalDraft>";
-        assert_eq!(read_v6(doctype), Err(FdxError::ForbiddenDoctype));
-        let version = b"<FinalDraft DocumentType='Script' Version='7'><Content/></FinalDraft>";
-        assert_eq!(read_v6(version), Err(FdxError::UnsupportedVersion));
-        let entity = b"<FinalDraft DocumentType='Script' Version='6'><Content>&secret;</Content></FinalDraft>";
-        assert_eq!(read_v6(entity), Err(FdxError::UnsupportedEntity));
-    }
-
-    #[test]
-    fn preflight_distinguishes_versions_and_invalid_declarations() {
-        let root = |version: &str| {
-            format!("<FinalDraft DocumentType='Script' Version='{version}'><Content/></FinalDraft>")
-        };
-        assert_eq!(
-            preflight_version(root("6").as_bytes()),
-            Ok(FdxVersionStatus::Version6)
-        );
-        assert_eq!(
-            preflight_version(root("0006").as_bytes()),
-            Ok(FdxVersionStatus::Version6)
-        );
-        let leading_zero_version = root("0006");
-        let leading_zero_document_result = read_v6(leading_zero_version.as_bytes());
-        assert!(leading_zero_document_result.is_ok());
-        let Ok(leading_zero_document) = leading_zero_document_result else {
-            return;
-        };
-        let canonicalized_result = write_v6(&leading_zero_document.project);
-        assert!(canonicalized_result.is_ok());
-        let Ok(canonicalized) = canonicalized_result else {
-            return;
-        };
-        assert!(
-            std::str::from_utf8(&canonicalized).is_ok_and(|text| text.contains("Version=\"6\""))
-        );
-        assert_eq!(
-            preflight_version(root("5").as_bytes()),
-            Ok(FdxVersionStatus::ExplicitNon6 {
-                declared: "5".to_owned(),
-                direction: FdxVersionDirection::Older,
-            })
-        );
-        assert_eq!(
-            preflight_version(root("7").as_bytes()),
-            Ok(FdxVersionStatus::ExplicitNon6 {
-                declared: "7".to_owned(),
-                direction: FdxVersionDirection::Newer,
-            })
-        );
-        assert_eq!(
-            preflight_version(b"<FinalDraft DocumentType='Script'><Content/></FinalDraft>"),
-            Ok(FdxVersionStatus::Missing)
-        );
-        assert_eq!(
-            preflight_version(root("unknown").as_bytes()),
-            Ok(FdxVersionStatus::Malformed)
-        );
-        assert_eq!(
-            preflight_version(
-                b"<FinalDraft DocumentType='Script' Version='5' Version='6'><Content/></FinalDraft>"
-            ),
-            Ok(FdxVersionStatus::Duplicate)
-        );
-        assert_eq!(
-            read_v6(b"<FinalDraft DocumentType='Script'><Content/></FinalDraft>"),
-            Err(FdxError::MissingVersion)
-        );
-        assert_eq!(
-            read_v6(root("latest").as_bytes()),
-            Err(FdxError::InvalidVersion)
-        );
-        assert_eq!(
-            read_v6(
-                b"<FinalDraft DocumentType='Script' Version='5' Version='6'><Content/></FinalDraft>"
-            ),
-            Err(FdxError::DuplicateVersion)
-        );
-        assert_eq!(
-            preflight_version(b"<FinalDraft DocumentType='Script' Version='6'><Content>"),
-            Err(FdxError::MalformedXml)
-        );
-    }
-
-    #[test]
-    fn older_import_requires_consent_and_converts_only_title_and_content_atomically() {
-        let input = b"<FinalDraft DocumentType='Script' Version='5'><DocumentRef/><TitlePage><Paragraph Type='Old Title Type'><Text>synthetic title</Text></Paragraph></TitlePage><Content><Paragraph Type='Old Body Type' id='old-1'><Text>synthetic old role</Text></Paragraph><Paragraph Type='Action' id='old-2'><Text>known role</Text></Paragraph></Content><DisplayBoards><DisplayBoard ID='board-1'/></DisplayBoards></FinalDraft>";
-        let original = input.to_vec();
-        let cancelled_input =
-            b"<FinalDraft DocumentType='Script' Version='5'><TitlePage/></FinalDraft>";
-        assert_eq!(
-            import_fdx(cancelled_input, FdxMigrationConsent::Cancel),
-            Ok(FdxImportOutcome::Cancelled {
-                declared_version: "5".to_owned(),
-            })
-        );
-        assert_eq!(
-            cancelled_input,
-            b"<FinalDraft DocumentType='Script' Version='5'><TitlePage/></FinalDraft>"
-        );
-        assert_eq!(input, original.as_slice());
-
-        let outcome = import_fdx(input, FdxMigrationConsent::Continue);
-        assert!(matches!(&outcome, Ok(FdxImportOutcome::Candidate(_))));
-        let Ok(FdxImportOutcome::Candidate(candidate)) = outcome else {
-            return;
-        };
-        assert_eq!(
-            candidate.migration,
-            Some(FdxMigrationKind::OlderLossy {
-                declared: "5".to_owned(),
-            })
-        );
-        assert_eq!(candidate.document.project.elements.len(), 2);
-        assert_eq!(candidate.document.project.elements[0].role, Role::General);
-        assert_eq!(
-            candidate.document.project.elements[0].text,
-            "synthetic old role"
-        );
-        assert_eq!(candidate.document.project.elements[1].role, Role::Action);
-        assert_eq!(candidate.document.project.title_page.len(), 1);
-        assert_eq!(candidate.document.project.title_page[0].role, Role::General);
-        assert_eq!(input, original.as_slice());
-
-        let emitted_result = write_v6(&candidate.document.project);
-        assert!(emitted_result.is_ok());
-        let Ok(emitted) = emitted_result else {
-            return;
-        };
-        let emitted_root_result = parse_document(&emitted);
-        assert!(emitted_root_result.is_ok());
-        let Ok(emitted_root) = emitted_root_result else {
-            return;
-        };
-        let root_result = emitted_root.iter().find_map(|node| match node {
-            RawNode::Element(root) => Some(root),
-            _ => None,
-        });
-        assert!(root_result.is_some());
-        let Some(root) = root_result else { return };
-        assert_eq!(attribute(root, "Version"), Some("6"));
-        let sections = root
-            .children
-            .iter()
-            .filter_map(|node| match node {
-                RawNode::Element(element) => Some(element.name.local_name.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(sections
-            .iter()
-            .all(|name| *name == "TitlePage" || *name == "Content"));
-        assert!(!sections
-            .iter()
-            .any(|name| *name == "DocumentRef" || *name == "DisplayBoards"));
-    }
-
-    #[test]
-    fn older_import_rejects_missing_content_and_unconvertible_paragraphs() {
-        let missing_content =
-            b"<FinalDraft DocumentType='Script' Version='5'><TitlePage/></FinalDraft>";
-        assert_eq!(
-            import_fdx(missing_content, FdxMigrationConsent::Continue),
-            Err(FdxError::MissingContent)
-        );
-        let unconvertible = b"<FinalDraft DocumentType='Script' Version='5'><Content><Paragraph Type='Action'><Text><Unknown/></Text></Paragraph></Content></FinalDraft>";
-        assert_eq!(
-            import_fdx(unconvertible, FdxMigrationConsent::Continue),
-            Err(FdxError::UnsupportedConstruct)
-        );
-        let non_paragraph_content = b"<FinalDraft DocumentType='Script' Version='5'><Content><UnknownElement/></Content></FinalDraft>";
-        assert_eq!(
-            import_fdx(non_paragraph_content, FdxMigrationConsent::Continue),
-            Err(FdxError::UnsupportedConstruct)
-        );
-    }
-
-    #[test]
-    fn newer_import_is_explicitly_best_effort_and_preserves_unknown_sections() {
-        let input = b"<FinalDraft DocumentType='Script' Version='7'><Content><Paragraph Type='Action' id='p1'><Text>newer text</Text></Paragraph></Content><FutureSection><Data value='opaque'/></FutureSection></FinalDraft>";
-        let outcome = import_fdx(input, FdxMigrationConsent::Continue);
-        assert!(matches!(&outcome, Ok(FdxImportOutcome::Candidate(_))));
-        let Ok(FdxImportOutcome::Candidate(candidate)) = outcome else {
-            return;
-        };
-        assert_eq!(
-            candidate.migration,
-            Some(FdxMigrationKind::NewerBestEffort {
-                declared: "7".to_owned(),
-            })
-        );
-        assert_eq!(candidate.document.project.elements[0].text, "newer text");
-        let emitted_result = write_v6(&candidate.document.project);
-        assert!(emitted_result.is_ok());
-        let Ok(emitted) = emitted_result else { return };
-        assert!(std::str::from_utf8(&emitted).is_ok_and(|text| text.contains("FutureSection")));
-        assert!(std::str::from_utf8(&emitted).is_ok_and(|text| text.contains("Version=\"6\"")));
-    }
-
-    #[test]
-    fn rejects_duplicate_ids_and_invalid_utf8() {
-        let duplicate = b"<FinalDraft DocumentType='Script' Version='6'><Content><Paragraph Type='Action' id='same'><Text>a</Text></Paragraph><Paragraph Type='Action' id='same'><Text>b</Text></Paragraph></Content></FinalDraft>";
-        assert_eq!(read_v6(duplicate), Err(FdxError::AmbiguousIdentity));
-        assert_eq!(read_v6(&[0xff, 0xfe]), Err(FdxError::InvalidEncoding));
-        let mixed_case_duplicate = b"<FinalDraft DocumentType='Script' Version='6'><Content><Paragraph Type='Action' id='one' ID='two'><Text>x</Text></Paragraph></Content></FinalDraft>";
-        assert_eq!(
-            read_v6(mixed_case_duplicate),
-            Err(FdxError::AmbiguousIdentity)
-        );
-    }
-
-    #[test]
-    fn rejects_configured_depth_and_byte_limits() {
-        let oversized = vec![b' '; MAX_SOURCE_BYTES + 1];
-        assert_eq!(read_v6(&oversized), Err(FdxError::SourceTooLarge));
-        let mut nested = String::from("<FinalDraft DocumentType='Script' Version='6'><Content>");
-        nested.push_str(&"<x>".repeat(MAX_SOURCE_DEPTH + 1));
-        nested.push_str(&"</x>".repeat(MAX_SOURCE_DEPTH + 1));
-        nested.push_str("</Content></FinalDraft>");
-        assert_eq!(read_v6(nested.as_bytes()), Err(FdxError::ResourceLimit));
-
-        let mut at_depth = String::from("<FinalDraft DocumentType='Script' Version='6'><Content>");
-        at_depth.push_str(&"<x/>".repeat(MAX_SOURCE_DEPTH - 2));
-        at_depth.push_str("</Content></FinalDraft>");
-        assert!(read_v6(at_depth.as_bytes()).is_ok());
-    }
-
-    #[test]
-    fn enforces_event_attribute_text_and_image_budgets() {
-        let mut exact_events =
-            String::from("<FinalDraft DocumentType='Script' Version='6'><Content>");
-        exact_events.push_str(&"<x/>".repeat(MAX_SOURCE_EVENTS - 5));
-        exact_events.push_str("</Content></FinalDraft>");
-        assert!(read_v6(exact_events.as_bytes()).is_ok());
-        let insertion = exact_events
-            .find("</Content>")
-            .unwrap_or(exact_events.len());
-        exact_events.insert_str(insertion, "<x/>");
-        assert_eq!(
-            read_v6(exact_events.as_bytes()),
-            Err(FdxError::ResourceLimit)
-        );
-
-        let attributes = (0..MAX_ATTRIBUTES_PER_ELEMENT)
-            .map(|index| format!(" a{index}='v'"))
-            .collect::<String>();
-        let allowed = format!(
-            "<FinalDraft DocumentType='Script' Version='6'><Content><x{attributes}/></Content></FinalDraft>"
-        );
-        assert!(read_v6(allowed.as_bytes()).is_ok());
-        let rejected = format!(
-            "<FinalDraft DocumentType='Script' Version='6'><Content><x{attributes} extra='v'/></Content></FinalDraft>"
-        );
-        assert_eq!(read_v6(rejected.as_bytes()), Err(FdxError::ResourceLimit));
-
-        let attribute_value = "v".repeat(MAX_SOURCE_NAME_OR_VALUE_BYTES + 1);
-        let oversized_field = format!(
-            "<FinalDraft DocumentType='Script' Version='6'><Content><x value='{attribute_value}'/></Content></FinalDraft>"
-        );
-        assert_eq!(
-            read_v6(oversized_field.as_bytes()),
-            Err(FdxError::ResourceLimit)
-        );
-
-        let many_attributes = (0..MAX_ATTRIBUTES_PER_ELEMENT)
-            .map(|index| format!(" a{index}='v'"))
-            .collect::<String>();
-        let under_aggregate_attribute_limit = format!(
-            "<FinalDraft DocumentType='Script' Version='6'><Content>{}</Content></FinalDraft>",
-            format!("<x{many_attributes}/>")
-                .repeat(MAX_SOURCE_EVENTS / (MAX_ATTRIBUTES_PER_ELEMENT + 1))
-        );
-        assert!(read_v6(under_aggregate_attribute_limit.as_bytes()).is_ok());
-        let over_aggregate_attribute_limit = format!(
-            "<FinalDraft DocumentType='Script' Version='6'><Content>{}</Content></FinalDraft>",
-            format!("<x{many_attributes}/>")
-                .repeat(MAX_SOURCE_EVENTS / (MAX_ATTRIBUTES_PER_ELEMENT + 1) + 1)
-        );
-        assert_eq!(
-            read_v6(over_aggregate_attribute_limit.as_bytes()),
-            Err(FdxError::ResourceLimit)
-        );
-
-        let exact_text = format!(
-            "<FinalDraft DocumentType='Script' Version='6'><Content>{}</Content></FinalDraft>",
-            "x".repeat(MAX_SOURCE_TEXT_BYTES)
-        );
-        assert!(read_v6(exact_text.as_bytes()).is_ok());
-        let over_text = format!(
-            "<FinalDraft DocumentType='Script' Version='6'><Content>{}</Content></FinalDraft>",
-            "x".repeat(MAX_SOURCE_TEXT_BYTES + 1)
-        );
-        assert_eq!(read_v6(over_text.as_bytes()), Err(FdxError::ResourceLimit));
-
-        let per_image_limit = (MAX_IMAGE_BYTES * 4).div_ceil(3);
-        let over_image = format!(
-            "<FinalDraft DocumentType='Script' Version='6'><Content/><Images><Image ID='img'>{}</Image></Images></FinalDraft>",
-            "A".repeat(per_image_limit + 1)
-        );
-        assert_eq!(read_v6(over_image.as_bytes()), Err(FdxError::ResourceLimit));
-    }
-
-    #[test]
-    fn known_role_projection_does_not_coerce_unknown_types() {
-        let xml = b"<FinalDraft DocumentType='Script' Version='6'><Content><Paragraph Type='Vendor Role' id='x'><Text>source-owned</Text></Paragraph><Paragraph Type='Action' id='y'><Text>Caf\xc3\xa9 \xf0\x9f\x99\x82 &amp; B</Text></Paragraph></Content></FinalDraft>";
-        let result = read_v6(xml);
-        assert!(result.is_ok());
-        if let Ok(result) = result {
-            assert_eq!(result.project.elements.len(), 1);
-            assert_eq!(result.project.elements[0].text, "Café 🙂 & B");
-            assert_eq!(result.project.elements[0].role, Role::Action);
-        }
-    }
-
-    #[test]
-    fn imports_explicit_hidden_and_page_start_role_settings() {
-        let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Note'><FontSpec Style='Italic+HiddenText'/></ElementSettings><ElementSettings Type='New Act'><ParagraphSpec Type='New Act' StartsNewPage='Yes'/></ElementSettings><Content><Paragraph Type='Action' id='before'><Text>before</Text></Paragraph><Paragraph Type='Note' id='note'><Text>hidden</Text></Paragraph><Paragraph Type='New Act' id='act'><Text>act</Text></Paragraph></Content></FinalDraft>";
-        let result = read_v6(xml);
-        assert!(result.is_ok());
-        if let Ok(result) = result {
-            let settings = &result
-                .project
-                .preservation
-                .as_ref()
-                .unwrap_or_else(|| unreachable!())
-                .source_layout_settings;
-            assert_eq!(
-                settings.print_visibility(Role::Note),
-                PrintVisibility::Hidden
-            );
-            assert!(settings.starts_new_page(Role::NewAct));
-            let layout = crate::layout::ScreenplayLayout::build(&result.project)
-                .unwrap_or_else(|_| unreachable!());
-            assert_eq!(layout.pages.len(), 2);
-            assert_eq!(layout.pages[0].lines.len(), 1);
-            assert_eq!(layout.pages[0].lines[0].text.as_ref(), "before");
-            assert_eq!(layout.pages[1].lines[0].text.as_ref(), "act");
-            let preserved = result
-                .project
-                .preservation
-                .as_ref()
-                .unwrap_or_else(|| unreachable!());
-            assert_eq!(preserved.source.original_bytes, xml);
-            let written = write_v6(&result.project).unwrap_or_else(|_| unreachable!());
-            let written = String::from_utf8(written).unwrap_or_else(|_| unreachable!());
-            assert!(written.contains("Style=\"Italic+HiddenText\""));
-            assert!(written.contains("StartsNewPage=\"Yes\""));
-        }
-    }
-
-    #[test]
-    fn imported_paragraph_fields_project_independently_and_keep_source_authoritative() {
-        let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><ParagraphSpec Type='Action' Alignment='Diagonal' FirstIndent='-0.10' LeftIndent='0.88' RightIndent='7.50' Leading='Future' SpaceBefore='14.25' Spacing='2' StartsNewPage='Maybe'/></ElementSettings><ElementSettings Type='Parenthetical'><ParagraphSpec Type='Dialogue' Alignment='Right' LeftIndent='3.00' RightIndent='5.50' StartsNewPage='Yes'/></ElementSettings><Content><Paragraph Type='Action' id='a'><Text>one</Text></Paragraph></Content></FinalDraft>";
-        let project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
-        let settings = project
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!())
-            .source_layout_settings();
-        let action = settings.paragraph_spec(Role::Action);
-        assert_eq!(action.alignment, Some(crate::ParagraphAlignment::Left));
-        assert_eq!(action.first_indent.map(crate::FixedPoint::raw), Some(-720));
-        assert_eq!(action.left_indent.map(crate::FixedPoint::raw), Some(6_336));
-        assert_eq!(action.right_indent.map(crate::FixedPoint::raw), Some(54_000));
-        assert_eq!(action.leading_regular, None);
-        assert_eq!(action.space_before.map(crate::FixedPoint::raw), Some(1_425));
-        assert_eq!(action.spacing_single, None);
-        assert!(!settings.starts_new_page(Role::Action));
-
-        // The conflicting child Type excludes the full ParagraphSpec projection.
-        assert_eq!(
-            settings.paragraph_spec(Role::Parenthetical),
-            crate::SourceParagraphSpec::default()
-        );
-        assert!(!settings.starts_new_page(Role::Parenthetical));
-
-        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let saved = String::from_utf8(bytes).unwrap_or_else(|_| unreachable!());
-        assert!(saved.contains("Alignment=\"Diagonal\""));
-        assert!(saved.contains("Leading=\"Future\""));
-        assert!(saved.contains("StartsNewPage=\"Maybe\""));
-        assert!(saved.contains("Type=\"Dialogue\" Alignment=\"Right\""));
-    }
-
-    #[test]
-    fn duplicate_role_paragraph_specs_remain_structural_errors() {
-        let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action'><ParagraphSpec Type='Action'/><ParagraphSpec Type='Action'/></ElementSettings><Content><Paragraph Type='Action' id='a'><Text>one</Text></Paragraph></Content></FinalDraft>";
-        assert!(matches!(read_v6(xml), Err(FdxError::DuplicateSection)));
-    }
-
-    #[test]
-    fn source_settings_remain_authoritative_when_runtime_projection_changes() {
-        let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Note'><FontSpec Style='Italic+HiddenText'/></ElementSettings><Content><Paragraph Type='Note' id='source-note'><Text>synthetic hidden note</Text></Paragraph></Content></FinalDraft>";
-        let mut project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
-        let state = project
-            .preservation
-            .as_mut()
-            .unwrap_or_else(|| unreachable!());
-        state.source_layout_settings = SourceLayoutSettings::default();
-
-        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let output = std::str::from_utf8(&bytes).unwrap_or("");
-        assert!(output.contains("Style=\"Italic+HiddenText\""));
-        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
-        let settings = reopened
-            .project
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!())
-            .source_layout_settings();
-        assert_eq!(
-            settings.print_visibility(Role::Note),
-            PrintVisibility::Hidden
-        );
-    }
-
-    #[test]
-    fn new_native_documents_emit_complete_ordered_role_defaults() {
-        let project = Project::new().unwrap_or_else(|_| unreachable!());
-        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let document = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
-        let state = document
-            .project
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!());
-        let root = state.sections[0]
-            .children
-            .iter()
-            .find_map(|node| match node {
-                PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => {
-                    Some(element)
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| unreachable!());
-        let settings = root
-            .children
-            .iter()
-            .filter_map(|node| match node {
-                PreservedNode::Element(element)
-                    if element.name.local_name == "ElementSettings" =>
-                {
-                    Some(element)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(settings.len(), 17);
-        for (setting, formatting) in settings.iter().zip(formatting_in_native_order()) {
-            assert_eq!(attribute_preserved(setting, "Type"), Some(formatting.fdx_label));
-            let children = setting
-                .children
-                .iter()
-                .filter_map(|node| match node {
-                    PreservedNode::Element(element) => Some(element),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                children
-                    .iter()
-                    .map(|element| element.name.local_name.as_str())
-                    .collect::<Vec<_>>(),
-                ["FontSpec", "ParagraphSpec", "Behavior", "Outline"]
-            );
-            assert_eq!(attribute_preserved(&children[1], "Type"), Some(formatting.fdx_label));
-        }
-
-        let new_act = settings
-            .iter()
-            .find(|setting| attribute_preserved(setting, "Type") == Some("New Act"))
-            .unwrap_or_else(|| unreachable!());
-        let new_act_paragraph = new_act.children.iter().find_map(|node| match node {
-            PreservedNode::Element(element) if element.name.local_name == "ParagraphSpec" => {
-                Some(element)
-            }
-            _ => None,
-        });
-        assert_eq!(
-            new_act_paragraph.and_then(|element| attribute_preserved(element, "StartsNewPage")),
-            Some("Yes")
-        );
-        let summary = settings
-            .iter()
-            .find(|setting| attribute_preserved(setting, "Type") == Some("Summary"))
-            .unwrap_or_else(|| unreachable!());
-        let summary_font = summary.children.iter().find_map(|node| match node {
-            PreservedNode::Element(element) if element.name.local_name == "FontSpec" => {
-                Some(element)
-            }
-            _ => None,
-        });
-        assert_eq!(
-            summary_font.and_then(|element| attribute_preserved(element, "Color")),
-            Some("#87878F8FE0E0")
-        );
-
-        let blank_reference = read_v6(include_bytes!("../../../.reference/reference.fdx"))
-            .unwrap_or_else(|_| unreachable!());
-        let populated_reference = read_v6(include_bytes!("../../../.reference/reference2.fdx"))
-            .unwrap_or_else(|_| unreachable!());
-        let blank_root = preserved_root(&blank_reference.project);
-        let populated_root = preserved_root(&populated_reference.project);
-        assert_eq!(element_settings_shape(root), element_settings_shape(blank_root));
-        assert_eq!(
-            element_settings_shape(root),
-            element_settings_shape(populated_root)
-        );
-    }
-
-    #[test]
-    fn reference_declaration_and_generated_section_order_survive_reopened_saves() {
-        for include_title_page in [false, true] {
-            let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-            if include_title_page {
-                project.title_page.push(
-                    ScreenplayElement::new("title-element", Role::Action, "Title")
-                        .unwrap_or_else(|_| unreachable!()),
-                );
-            }
-
-            let mut expected_order = vec!["Content".to_owned()];
-            expected_order.extend((0..17).map(|_| "ElementSettings".to_owned()));
-            if include_title_page {
-                expected_order.push("TitlePage".to_owned());
-            }
-
-            for _ in 0..3 {
-                let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-                let output = std::str::from_utf8(&bytes).unwrap_or("");
-                assert!(output.starts_with(XML_DECLARATION));
-                assert_eq!(output.matches("<?xml").count(), 1);
-
-                let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
-                assert_eq!(
-                    top_level_element_names(preserved_root(&reopened.project)),
-                    expected_order
-                );
-                project = reopened.project;
-            }
-        }
-    }
-
-    #[test]
-    fn imported_top_level_source_order_is_not_canonicalized() {
-        let source = b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\" ?><FinalDraft DocumentType=\"Script\" Version=\"6\"><VendorBefore/><ElementSettings Type=\"Action\"/><Content/><VendorAfter/></FinalDraft>";
-        let project = read_v6(source)
-            .unwrap_or_else(|_| unreachable!())
-            .project;
-
-        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let output = std::str::from_utf8(&bytes).unwrap_or("");
-        assert!(output.starts_with(XML_DECLARATION_WITHOUT_TRAILING_LF));
-        assert_eq!(output.matches("<?xml").count(), 1);
-        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
-        assert_eq!(
-            top_level_element_names(preserved_root(&reopened.project)),
-            vec![
-                "VendorBefore".to_owned(),
-                "ElementSettings".to_owned(),
-                "Content".to_owned(),
-                "VendorAfter".to_owned(),
-            ]
-        );
-    }
-
-    #[test]
-    fn new_document_layout_defaults_match_after_native_save_and_reopen() {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        project.elements = [
-            ("action", Role::Action, "before"),
-            ("note", Role::Note, "private note"),
-            ("summary", Role::Summary, "private summary"),
-            ("outline", Role::Outline1, "private outline"),
-            ("act", Role::NewAct, "ACT TWO"),
-            ("after", Role::Action, "after"),
-        ]
-        .into_iter()
-        .map(|(id, role, text)| {
-            ScreenplayElement::new(id, role, text).unwrap_or_else(|_| unreachable!())
-        })
-        .collect();
-
-        let before = crate::layout::ScreenplayLayout::build(&project)
-            .unwrap_or_else(|_| unreachable!());
-        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
-        let after = crate::layout::ScreenplayLayout::build(&reopened.project)
-            .unwrap_or_else(|_| unreachable!());
-
-        let rendered_projection = |layout: &crate::layout::ScreenplayLayout| {
-            layout
-                .pages
-                .iter()
-                .map(|page| {
-                    page.lines
-                        .iter()
-                        .map(|line| (line.element, line.role, line.text.clone()))
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(rendered_projection(&before), rendered_projection(&after));
-        assert_eq!(before.pages.len(), 2);
-        assert_eq!(before.pages[0].lines.len(), 1);
-        assert_eq!(before.pages[0].lines[0].role, Role::Action);
-        assert!(before.pages[1]
-            .lines
-            .iter()
-            .any(|line| line.role == Role::NewAct));
-        assert_eq!(before.pages[1].lines.last().map(|line| line.text.as_ref()), Some("after"));
-    }
-
-    #[test]
-    fn imported_custom_element_settings_are_not_filled_or_rewritten() {
-        let xml = b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Action' VendorSetting='keep'><FontSpec Style='' VendorFontFlag='custom'/><ParagraphSpec StartsNewPage='Yes' VendorParagraphFlag='custom'/></ElementSettings><Content><Paragraph Type='Action' id='source-action'><Text>source action</Text></Paragraph></Content><VendorSection Marker='untouched'/></FinalDraft>";
-        let project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
-        let output = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let output = std::str::from_utf8(&output).unwrap_or("");
-        assert_eq!(output.matches("<ElementSettings ").count(), 1);
-        assert!(output.contains("Type=\"Action\" VendorSetting=\"keep\""));
-        assert!(output.contains("VendorFontFlag=\"custom\""));
-        assert!(output.contains("StartsNewPage=\"Yes\" VendorParagraphFlag=\"custom\""));
-        assert!(output.contains("<VendorSection Marker=\"untouched\"/>"));
-    }
-
-    fn attribute_preserved<'a>(element: &'a PreservedElement, name: &str) -> Option<&'a str> {
-        element
-            .attributes
-            .iter()
-            .find(|attribute| {
-                attribute.name.namespace_uri.is_none() && attribute.name.local_name == name
-            })
-            .map(|attribute| attribute.value.as_str())
-    }
-
-    fn preserved_root(project: &Project) -> &PreservedElement {
-        project
-            .preservation
-            .as_ref()
-            .and_then(|state| state.sections.first())
-            .and_then(|section| {
-                section.children.iter().find_map(|node| match node {
-                    PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => {
-                        Some(element)
-                    }
-                    _ => None,
-                })
-            })
-            .unwrap_or_else(|| unreachable!())
-    }
-
-    fn top_level_element_names(root: &PreservedElement) -> Vec<String> {
-        root.children
-            .iter()
-            .filter_map(|node| match node {
-                PreservedNode::Element(element) => Some(element.name.local_name.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn element_settings_shape(
-        root: &PreservedElement,
-    ) -> Vec<Vec<(String, Vec<(String, String)>)>> {
-        root.children
-            .iter()
-            .filter_map(|node| match node {
-                PreservedNode::Element(element)
-                    if element.name.local_name == "ElementSettings" =>
-                {
-                    Some(element)
-                }
-                _ => None,
-            })
-            .map(|setting| {
-                std::iter::once(setting)
-                    .chain(setting.children.iter().filter_map(|node| match node {
-                        PreservedNode::Element(element) => Some(element),
-                        _ => None,
-                    }))
-                    .map(|element| {
-                        (
-                            element.name.local_name.clone(),
-                            element
-                                .attributes
-                                .iter()
-                                .map(|attribute| {
-                                    (
-                                        attribute.name.local_name.clone(),
-                                        attribute.value.clone(),
-                                    )
-                                })
-                                .collect(),
-                        )
-                    })
-                    .collect()
-            })
-            .collect()
-    }
-
-    #[test]
-    fn retains_and_validates_internal_board_item_and_image_links() {
-        let xml = b"<FinalDraft DocumentType='Script' Version='6'><Content/><ListItems><ListItem ID='item-1'/></ListItems><DisplayBoards><DisplayBoard ID='board-1'><Item id='item-1'/><Picture id='image-1'/></DisplayBoard></DisplayBoards><Images><Image ID='image-1' Length='0'/></Images></FinalDraft>";
-        let result = read_v6(xml);
-        assert!(result.is_ok());
-        if let Ok(result) = result {
-            let graph = result
-                .project
-                .preservation
-                .as_ref()
-                .map(|state| &state.board_graph);
-            assert!(graph.is_some_and(|graph| graph.entities.len() == 3));
-            assert!(graph.is_some_and(|graph| graph.references.len() == 2));
-        }
-        let dangling = b"<FinalDraft DocumentType='Script' Version='6'><Content/><DisplayBoards><DisplayBoard ID='board-1'><Item id='missing'/></DisplayBoard></DisplayBoards></FinalDraft>";
-        assert_eq!(read_v6(dangling), Err(FdxError::DanglingReference));
-    }
-
-    #[test]
-    fn writes_all_evidenced_roles_with_escaped_unicode_and_runs() {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        project.elements.clear();
-        for (index, role) in Role::ALL.into_iter().enumerate() {
-            let text = if index == 0 {
-                "INT. CAFÉ & <ROOM> 🙂".to_owned()
-            } else {
-                format!("role-{index}")
-            };
-            let attributes = if index == 0 {
-                vec![RunAttribute {
-                    name: "Style".into(),
-                    value: "Bold+Italic".into(),
-                }]
-            } else {
-                Vec::new()
-            };
-            let element = ScreenplayElement::with_runs(
-                format!("element-{index}"),
-                role,
-                vec![TextRun { text, attributes }],
-                None,
-            )
-            .unwrap_or_else(|_| unreachable!());
-            project.elements.push(element);
-        }
-        project.title_page.push(
-            ScreenplayElement::new("title-element", Role::Action, "Title & Subtitle")
-                .unwrap_or_else(|_| unreachable!()),
-        );
-
-        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let xml = std::str::from_utf8(&bytes).unwrap_or("");
-        assert!(xml.contains("CAFÉ &amp; &lt;ROOM&gt; 🙂"));
-        assert!(xml.contains("Style=\"Bold+Italic\""));
-        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
-        assert!(same_semantic_elements(
-            &project.elements,
-            &reopened.project.elements
-        ));
-        assert!(same_semantic_elements(
-            &project.title_page,
-            &reopened.project.title_page
-        ));
-        assert_eq!(
-            reopened
-                .project
-                .elements
-                .iter()
-                .map(|element| element.role)
-                .collect::<Vec<_>>(),
-            Role::ALL
-        );
-    }
-
-    #[test]
-    fn reconciles_managed_edits_and_retains_opaque_namespaced_source() {
-        let mut project = read_v6(SYNTHETIC)
-            .unwrap_or_else(|_| unreachable!())
-            .project;
-        let original = project
-            .preservation
-            .as_ref()
-            .map(|state| state.source.original_bytes.clone())
-            .unwrap_or_default();
-        project.elements[3].runs[0].text = "edited < & unicode 🙂".into();
-        project.elements[3].text = project.elements[3]
-            .runs
-            .iter()
-            .map(|run| run.text.as_str())
-            .collect();
-
-        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        assert_ne!(bytes, original);
-        assert!(std::str::from_utf8(&bytes)
-            .unwrap_or("")
-            .contains("edited &lt; &amp; unicode 🙂"));
-        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
-        assert_eq!(
-            reopened.project.elements[3].text,
-            "edited < & unicode 🙂dialogue"
-        );
-        let original_state = project.preservation.as_ref();
-        let reopened_state = reopened.project.preservation.as_ref();
-        assert!(original_state.is_some_and(|state| {
-            reopened_state.is_some_and(|reopened| {
-                state.board_graph == reopened.board_graph
-                    && state.identities == reopened.identities
-                    && state.references == reopened.references
-                    && state.source.original_bytes == original
-            })
-        }));
-        assert!(bytes
-            .windows(b"<test:Opaque".len())
-            .any(|window| window == b"<test:Opaque"));
-        assert!(bytes
-            .windows(b"test:flag=\"keep\"".len())
-            .any(|window| window == b"test:flag=\"keep\""));
-    }
-
-    #[test]
-    fn retains_synthetic_image_payload_and_board_links_when_writing() {
-        let xml = b"<FinalDraft DocumentType='Script' Version='6'><Content><Paragraph Type='Action' id='p1'><Text>preserve me</Text></Paragraph></Content><SmartType><Suggestion>synthetic</Suggestion></SmartType><ListItems><ListItem ID='item-1'/></ListItems><DisplayBoards><DisplayBoard ID='board-1'><Item id='item-1'/><Picture id='image-1'/></DisplayBoard></DisplayBoards><Images><Image ID='image-1' Length='5'>AAECAwQ=</Image></Images></FinalDraft>";
-        let project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
-        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
-        let graph = reopened
-            .project
-            .preservation
-            .as_ref()
-            .map(|state| &state.board_graph);
-        assert!(graph.is_some_and(|graph| {
-            graph.entities.len() == 3
-                && graph.references.len() == 2
-                && graph.entities.iter().any(|entity| {
-                    entity.kind == BoardEntityKind::Image
-                        && entity.declared_image_length == Some(5)
-                        && entity.image_payload.is_none()
-                })
-        }));
-        assert!(std::str::from_utf8(&bytes)
-            .unwrap_or("")
-            .contains("<SmartType>"));
-        assert!(std::str::from_utf8(&bytes)
-            .unwrap_or("")
-            .contains("AAECAwQ="));
-    }
-
-    #[test]
-    fn preserves_ordered_title_page_formatting_and_header_footer() {
-        let xml = b"<FinalDraft DocumentType='Script' Version='6'><Content><Paragraph Type='Scene Heading' id='body-1'><Text>INT. ROOM</Text></Paragraph></Content><TitlePage><HeaderAndFooter><Header>synthetic header</Header></HeaderAndFooter><Paragraph Type='Action' id='title-1' Alignment='Center'><Text Style='Underline+AllCaps'>TITLE</Text></Paragraph><Paragraph><Text>unmapped title line</Text></Paragraph></TitlePage></FinalDraft>";
-        let project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
-        assert_eq!(project.title_page.len(), 1);
-        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
-        assert_eq!(reopened.project.title_page[0].text, "TITLE");
-        assert_eq!(
-            reopened.project.title_page[0].runs[0].attributes[0].value,
-            "Underline+AllCaps"
-        );
-        let output = std::str::from_utf8(&bytes).unwrap_or("");
-        assert!(output.contains("synthetic header"));
-        assert!(output.contains("unmapped title line"));
-        assert!(output.contains("Alignment=\"Center\""));
-    }
-
-    #[test]
-    fn retains_foreign_metadata_without_project_metadata_projection() {
-        let xml = b"<FinalDraft DocumentType='Script' Version='6' VendorRoot='keep'><DocumentRef Date='2026-10-31' XRef='foreign-ref'/><Content><Paragraph Type='Action' id='p1'><Text>body</Text></Paragraph></Content><VendorMetadata key='opaque'>foreign title and date</VendorMetadata></FinalDraft>";
-        let project = read_v6(xml).unwrap_or_else(|_| unreachable!()).project;
-        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let output = std::str::from_utf8(&bytes).unwrap_or("");
-        assert!(output.contains("VendorRoot=\"keep\""));
-        assert!(output.contains("Date=\"2026-10-31\""));
-        assert!(output.contains("XRef=\"foreign-ref\""));
-        assert!(output.contains("foreign title and date"));
-    }
-
-    #[test]
-    fn serializes_legacy_adapter_content_without_persisting_retired_app_state() {
-        let legacy_json = include_str!("../tests/fixtures/legacy_project.json")
-            .replace("\"margin_top\":72", "\"margin_top\":73");
-        let project = Project::from_json(&legacy_json).unwrap_or_else(|_| unreachable!());
-        let bytes = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let output = std::str::from_utf8(&bytes).unwrap_or("");
-        assert!(output.contains("Version=\"6\""));
-        let generated = read_v6(&bytes)
-            .ok()
-            .and_then(|document| {
-                document.project.preservation.and_then(|state| {
-                    state
-                        .identities
-                        .into_iter()
-                        .find(|identity| identity.domain == ForeignIdDomain::Paragraph)
-                        .map(|identity| identity.value)
-                })
-            })
-            .unwrap_or_default();
-        let parsed = uuid::Uuid::parse_str(&generated).ok();
-        assert_eq!(generated.len(), 36);
-        assert_eq!(
-            parsed.as_ref().and_then(|value| value.get_version()),
-            Some(uuid::Version::Random)
-        );
-        assert_eq!(
-            parsed.as_ref().map(|value| value.get_variant()),
-            Some(uuid::Variant::RFC4122)
-        );
-        assert_eq!(
-            parsed.map(|value| value.hyphenated().to_string()).as_deref(),
-            Some(generated.as_str())
-        );
-        assert!(!output.contains(project.elements[0].id.as_str()));
-        assert!(!output.contains("legacy-project-1"));
-        assert!(!output.contains("Legacy title"));
-        assert!(!output.contains("Legacy author"));
-        assert!(!output.contains("contact@example.invalid"));
-        assert!(!output.contains("2026-10-31T00:00:00Z"));
-        assert!(!output.contains("margin_top"));
-        assert!(!output.contains("Courier Prime"));
-        assert!(!output.contains("uppercase_cues"));
-        assert!(!output.contains("auto_parenthetical"));
-        assert!(!output.contains("strict_transition_boundaries"));
-        assert!(!output.contains("ScriptCraft"));
-        let reopened = read_v6(&bytes).unwrap_or_else(|_| unreachable!());
-        assert_eq!(reopened.project.elements[0].text, project.elements[0].text);
-        assert_eq!(reopened.project.elements[0].role, project.elements[0].role);
-        assert!(reopened.project.legacy_json_state.is_none());
-    }
-
-    #[test]
-    fn rejects_unsafe_source_reconciliation() {
-        let mut inserted = read_v6(SYNTHETIC)
-            .unwrap_or_else(|_| unreachable!())
-            .project;
-        inserted.elements.push(
-            ScreenplayElement::new("unanchored-new", Role::Action, "new")
-                .unwrap_or_else(|_| unreachable!()),
-        );
-        assert_eq!(
-            write_v6(&inserted),
-            Err(SaveDiagnosticCode::ReconcileProjectManagedOrderMismatch.error())
-        );
-
-        let mut invalid_text = Project::new().unwrap_or_else(|_| unreachable!());
-        invalid_text.elements[0].text = "bad\u{1}".into();
-        assert_eq!(write_v6(&invalid_text), Err(FdxError::InvalidValue));
-    }
-
-    #[test]
-    fn v4_wo003_codes_are_unique_stable_and_prefix_the_underlying_error() {
-        let codes = [
-            (SaveDiagnosticCode::WriteSourceFormat, 1),
-            (SaveDiagnosticCode::WriteOriginalRereadPropagation, 2),
-            (SaveDiagnosticCode::WriteOriginalPreservationMissing, 3),
-            (SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch, 4),
-            (SaveDiagnosticCode::ReconcileProjectManagedOrderMismatch, 5),
-            (SaveDiagnosticCode::ReconcileNodeDuplicateManagedIdentity, 6),
-            (SaveDiagnosticCode::ReconcileNodeManagedOutsideSection, 7),
-            (SaveDiagnosticCode::ReconcileNodeSemanticElementMissing, 8),
-            (SaveDiagnosticCode::ReconcileProjectNodePropagation, 9),
-            (SaveDiagnosticCode::ReconcileParagraphRoleMismatch, 10),
-            (SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch, 11),
-            (SaveDiagnosticCode::ReconcileParagraphEmptyRunsMismatch, 12),
-            (SaveDiagnosticCode::ReconcileParagraphCdataInEmptyText, 13),
-            (SaveDiagnosticCode::ReconcileParagraphUnsupportedEmptyChild, 14),
-            (SaveDiagnosticCode::ReconcileParagraphUnexpectedEmptyText, 15),
-            (SaveDiagnosticCode::ReconcileParagraphRunCountMismatch, 16),
-            (SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch, 17),
-            (SaveDiagnosticCode::ReconcileParagraphUnexpectedFirstChild, 18),
-            (SaveDiagnosticCode::ReconcileParagraphUnexpectedLaterChild, 19),
-            (SaveDiagnosticCode::NewDocumentHeadingNodeMismatch, 20),
-            (SaveDiagnosticCode::NewDocumentScenePropertiesUnsupported, 21),
-            (SaveDiagnosticCode::NewParagraphEmptyRunsMismatch, 22),
-            (SaveDiagnosticCode::NewParagraphNamespacedRunAttribute, 23),
-            (SaveDiagnosticCode::WriteElementNamespacePrefixMissing, 24),
-            (SaveDiagnosticCode::WriteOutputRereadPropagation, 25),
-            (SaveDiagnosticCode::WriteSemanticRereadMismatch, 26),
-            (SaveDiagnosticCode::WriteOutputPreservationMissing, 27),
-            (SaveDiagnosticCode::WriteCandidatePreservationMissing, 28),
-            (SaveDiagnosticCode::WriteIdentitySetMismatch, 29),
-            (SaveDiagnosticCode::WriteNormalizedSourceTreeMismatch, 30),
-            (SaveDiagnosticCode::StorageRereadPropagation, 31),
-            (SaveDiagnosticCode::StorageSemanticProjectionMismatch, 32),
-            (SaveDiagnosticCode::ReconcileProjectChildPropagation, 33),
-            (SaveDiagnosticCode::ReconcileManagedParagraphPropagation, 34),
-        ];
-        for (code, expected_number) in &codes {
-            assert_eq!(code.number(), *expected_number);
-        }
-        let numbers = codes
-            .iter()
-            .map(|(code, _)| code.number())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(numbers.len(), codes.len());
-        assert_eq!(numbers, (1..=34).collect());
-        assert_eq!(
-            SaveDiagnosticCode::NewParagraphNamespacedRunAttribute.error().to_string(),
-            "23: FDX contains a construct that cannot be projected safely"
-        );
-        assert_eq!(
-            SaveDiagnosticCode::StorageSemanticProjectionMismatch.number(),
-            32
-        );
-    }
-
-    #[test]
-    fn v4_wo003_writer_failure_exposes_private_stage_and_numeric_prefix() {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        project.elements[0].text = "safe text".to_owned();
-        project.elements[0].runs = vec![TextRun {
-            text: "safe text".to_owned(),
-            attributes: vec![RunAttribute {
-                name: "vendor:style".to_owned(),
-                value: "private value is never included in the diagnostic".to_owned(),
-            }],
-        }];
-
-        let failure = match write_v6_with_diagnostics(&project) {
-            Ok(_) => unreachable!("namespaced generated run attributes are unsupported"),
-            Err(failure) => failure,
-        };
-        assert_eq!(failure.stage, WriterStage::NewDocumentGeneration);
-        assert_eq!(
-            failure.error,
-            SaveDiagnosticCode::NewParagraphNamespacedRunAttribute.error()
-        );
-        assert!(failure.error.to_string().starts_with("23:"));
-        assert!(failure.structural_difference.is_none());
-        assert!(failure.identity_difference.is_none());
-    }
-
-    #[test]
-    fn v4_wo003_structural_difference_is_ordered_and_value_free() {
-        let mut expected_root = preserved_element("Root", Vec::new());
-        expected_root.children.push(PreservedNode::Element(preserved_element(
-            "ExpectedChild",
-            Vec::new(),
-        )));
-        let mut actual_root = preserved_element("Root", Vec::new());
-        actual_root.children.push(PreservedNode::Element(preserved_element(
-            "ActualChild",
-            Vec::new(),
-        )));
-        let section = |root| PreservedSection {
-            name: SourceName {
-                namespace_uri: None,
-                local_name: "Section".to_owned(),
-                qualified_name: Some("Section".to_owned()),
-            },
-            kind: SectionKind::Other,
-            ordinal: 0,
-            children: vec![PreservedNode::Element(root)].into(),
-        };
-        let difference = first_source_tree_difference(
-            &[section(expected_root)],
-            &[section(actual_root)],
-        )
-        .unwrap_or_else(|| unreachable!("different expanded element names have a first difference"));
-
-        assert_eq!(difference.node_path, vec![0, 0, 0]);
-        assert_eq!(difference.field, "element.local-name");
-        assert_eq!(
-            difference.expected.as_ref().map(|summary| summary.kind),
-            Some(StructuralNodeKind::Element)
-        );
-        assert_eq!(
-            difference.expected.as_ref().and_then(|summary| summary.local_name.as_deref()),
-            Some("ExpectedChild")
-        );
-        assert_eq!(
-            difference.actual.as_ref().and_then(|summary| summary.local_name.as_deref()),
-            Some("ActualChild")
-        );
-        assert_eq!(
-            difference.expected.as_ref().map(|summary| summary.attribute_count),
-            Some(0)
-        );
-        assert!(difference.public_detail().contains("expected=ExpectedChild"));
-        assert!(difference.public_detail().contains("field=element.local-name"));
-    }
-
-    #[test]
-    fn v5_wo001_classifies_internal_xml_and_text_difference_fields() {
-        fn section() -> PreservedSection {
-            PreservedSection {
-                name: SourceName {
-                    namespace_uri: None,
-                    local_name: "Section".into(),
-                    qualified_name: Some("Section".into()),
-                },
-                kind: SectionKind::Other,
-                ordinal: 0,
-                children: vec![PreservedNode::Element(preserved_element("Root", Vec::new()))].into(),
-            }
-        }
-        fn diff(expected: &PreservedSection, actual: &PreservedSection) -> SourceTreeDifference {
-            first_source_tree_difference(std::slice::from_ref(expected), std::slice::from_ref(actual))
-                .unwrap_or_else(|| unreachable!("deliberately unequal trees have a categorized difference"))
-        }
-        fn assert_category(expected: PreservedSection, actual: PreservedSection, field: &str) {
-            let result = diff(&expected, &actual);
-            assert_eq!(result.field, field);
-            let detail = result.public_detail();
-            assert!(detail.starts_with("path=section[0]"));
-            assert!(detail.len() <= 240);
-            assert!(!detail.contains("secret"));
-            assert!(!detail.contains("uuid"));
-        }
-
-        let expected = section();
-        let mut actual = expected.clone();
-        actual.name.local_name = "OtherSection".into();
-        assert_category(expected, actual, "section.local-name");
-
-        let expected = section();
-        let mut actual = expected.clone();
-        actual.kind = SectionKind::Content;
-        assert_category(expected, actual, "section.kind");
-
-        let expected = section();
-        let mut actual = expected.clone();
-        actual.ordinal = 1;
-        assert_category(expected, actual, "section.ordinal");
-
-        let expected = section();
-        let mut actual = expected.clone();
-        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
-        root.name.namespace_uri = Some("urn:private-namespace".into());
-        assert_category(expected, actual, "element.namespace");
-
-        let expected = section();
-        let mut actual = expected.clone();
-        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
-        root.name.qualified_name = Some("prefix:Root".into());
-        assert_category(expected, actual, "element.qualified-name");
-
-        let expected = section();
-        let mut actual = expected.clone();
-        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
-        root.attributes.push(PreservedAttribute {
-            name: SourceName { namespace_uri: None, local_name: "id".into(), qualified_name: Some("id".into()) },
-            value: "uuid-secret".into(),
-        });
-        assert_category(expected, actual, "attribute.count-or-presence");
-
-        let mut expected = section();
-        let mut actual = section();
-        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
-        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
-        expected_root.attributes.push(PreservedAttribute {
-            name: SourceName { namespace_uri: None, local_name: "id".into(), qualified_name: Some("id".into()) },
-            value: "uuid-secret-one".into(),
-        });
-        actual_root.attributes.push(PreservedAttribute {
-            name: SourceName { namespace_uri: None, local_name: "id".into(), qualified_name: Some("id".into()) },
-            value: "uuid-secret-two".into(),
-        });
-        assert_category(expected, actual, "attribute.value");
-
-        let mut expected = section();
-        let mut actual = section();
-        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
-        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
-        for root in [expected_root, actual_root] {
-            root.attributes = vec![
-                PreservedAttribute {
-                    name: SourceName { namespace_uri: None, local_name: "id".into(), qualified_name: Some("id".into()) },
-                    value: "first-secret".into(),
-                },
-                PreservedAttribute {
-                    name: SourceName { namespace_uri: None, local_name: "Length".into(), qualified_name: Some("Length".into()) },
-                    value: "second-secret".into(),
-                },
-            ];
-        }
-        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
-        actual_root.attributes.swap(0, 1);
-        assert_category(expected, actual, "attribute.name-or-order");
-
-        let mut expected = section();
-        let mut actual = section();
-        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
-        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
-        expected_root.attributes.push(PreservedAttribute {
-            name: SourceName { namespace_uri: None, local_name: "id".into(), qualified_name: Some("id".into()) },
-            value: "secret-one".into(),
-        });
-        actual_root.attributes.push(PreservedAttribute {
-            name: SourceName { namespace_uri: None, local_name: "other".into(), qualified_name: Some("other".into()) },
-            value: "secret-two".into(),
-        });
-        assert_category(expected, actual, "attribute.name-or-order");
-
-        let expected = section();
-        let mut actual = expected.clone();
-        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
-        root.namespace_bindings.push(NamespaceBinding { prefix: "p".into(), namespace_uri: "urn:secret".into() });
-        assert_category(expected, actual, "namespace-binding.count-or-presence");
-
-        let mut expected = section();
-        let mut actual = section();
-        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
-        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
-        expected_root.namespace_bindings.push(NamespaceBinding { prefix: "p".into(), namespace_uri: "urn:one".into() });
-        actual_root.namespace_bindings.push(NamespaceBinding { prefix: "p".into(), namespace_uri: "urn:two".into() });
-        assert_category(expected, actual, "namespace-binding.namespace");
-
-        let mut expected = section();
-        let mut actual = section();
-        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
-        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
-        expected_root.namespace_bindings.push(NamespaceBinding { prefix: "p".into(), namespace_uri: "urn:same".into() });
-        actual_root.namespace_bindings.push(NamespaceBinding { prefix: "q".into(), namespace_uri: "urn:same".into() });
-        assert_category(expected, actual, "namespace-binding.prefix-or-order");
-
-        let expected = section();
-        let mut actual = expected.clone();
-        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
-        root.source_type = Some("secret-source-type".into());
-        assert_category(expected, actual, "source-type");
-
-        let expected = section();
-        let mut actual = expected.clone();
-        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
-        root.ownership = SourceOwnership::Attached(ForeignIdentity {
-            domain: ForeignIdDomain::Paragraph,
-            value: "uuid-secret".into(),
-        });
-        assert_category(expected, actual, "ownership");
-
-        let expected = section();
-        let mut actual = expected.clone();
-        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
-        root.dependency_confidence = DependencyConfidence::SomeReferencesMapped;
-        assert_category(expected, actual, "dependency-confidence");
-
-        let expected = section();
-        let mut actual = expected.clone();
-        let PreservedNode::Element(root) = &mut actual.children[0] else { unreachable!() };
-        root.anchor = Some(SourceAnchorId::new("anchor-secret").unwrap_or_else(|_| unreachable!()));
-        assert_category(expected, actual, "anchor");
-
-        for (left, right, field) in [
-            (PreservedNode::Text("secret-left".into()), PreservedNode::Text("secret-right".into()), "text.content"),
-            (PreservedNode::CData("secret-left".into()), PreservedNode::CData("secret-right".into()), "cdata.content"),
-            (PreservedNode::Comment("secret-left".into()), PreservedNode::Comment("secret-right".into()), "comment.content"),
-            (PreservedNode::ProcessingInstruction { target: "left".into(), data: "secret".into() },
-             PreservedNode::ProcessingInstruction { target: "right".into(), data: "secret".into() }, "processing-instruction.target"),
-            (PreservedNode::ProcessingInstruction { target: "target".into(), data: "secret-left".into() },
-             PreservedNode::ProcessingInstruction { target: "target".into(), data: "secret-right".into() }, "processing-instruction.data"),
-        ] {
-            let mut expected = section();
-            let mut actual = section();
-            let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
-            let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
-            expected_root.children.push(left);
-            actual_root.children.push(right);
-            assert_category(expected, actual, field);
-        }
-
-        let mut expected = section();
-        let mut actual = section();
-        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
-        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
-        expected_root.children.push(PreservedNode::Text("secret".into()));
-        actual_root.children.push(PreservedNode::CData("secret".into()));
-        assert_category(expected, actual, "node.kind-or-order");
-
-        let mut expected = section();
-        let actual = section();
-        let PreservedNode::Element(root) = &mut expected.children[0] else { unreachable!() };
-        root.children.push(PreservedNode::Text("secret".into()));
-        assert_category(expected, actual, "child.presence");
-
-        let mut expected = section();
-        let mut actual = section();
-        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
-        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
-        expected_root.children = vec![
-            PreservedNode::Element(preserved_element("First", Vec::new())),
-            PreservedNode::Element(preserved_element("Second", Vec::new())),
-        ].into();
-        actual_root.children = vec![
-            PreservedNode::Element(preserved_element("Second", Vec::new())),
-            PreservedNode::Element(preserved_element("First", Vec::new())),
-        ].into();
-        assert_category(expected, actual, "child.order");
-
-        let mut expected = section();
-        let mut actual = section();
-        let PreservedNode::Element(expected_root) = &mut expected.children[0] else { unreachable!() };
-        let PreservedNode::Element(actual_root) = &mut actual.children[0] else { unreachable!() };
-        expected_root.children.push(PreservedNode::Text(String::new().into()));
-        actual_root.children.push(PreservedNode::Text("   ".into()));
-        let expected = normalize_sections(&[expected]);
-        let actual = normalize_sections(&[actual]);
-        let whitespace_difference = first_source_tree_difference(&expected, &actual)
-            .unwrap_or_else(|| unreachable!("normalized empty and whitespace-only text differ"));
-        assert_eq!(whitespace_difference.field, "child.presence");
-        assert!(whitespace_difference.public_detail().contains("length=3,whitespace-only"));
-        assert!(!whitespace_difference.public_detail().contains("   "));
-
-        let equal = section();
-        assert!(first_source_tree_difference(&[equal.clone()], &[equal]).is_none());
-    }
-
-    #[test]
-    fn v4_wo003_identity_difference_reports_only_domain_and_direction() {
-        let required = ForeignIdentity {
-            domain: ForeignIdDomain::Paragraph,
-            value: "sensitive-id".to_owned(),
-        };
-        let expected = BTreeSet::from([required]);
-        let actual = BTreeSet::new();
-        assert_eq!(
-            first_identity_set_difference(&expected, &actual),
-            Some(IdentitySetDifference {
-                domain: IdentityDomainSummary::Paragraph,
-                missing: true,
-                unexpected: false,
-            })
-        );
-    }
-
-    #[test]
-    fn v6_wo0011_documentref_datetime_validation_checks_shape_and_calendar() {
-        for valid in [
-            "20261001T120000",
-            "20000229T000000",
-            "20261231T235959",
-        ] {
-            assert!(valid_document_ref_datetime(valid));
-        }
-        for invalid in [
-            "20260229T120000",
-            "20261301T120000",
-            "20261131T120000",
-            "20261001T240000",
-            "20261001T126000",
-            "20261001T120060",
-            "00000101T000000",
-            "20261001T12000",
-            "20261001T120000Z",
-            "2026-10-01T120000",
-        ] {
-            assert!(!valid_document_ref_datetime(invalid));
-        }
-    }
-
-    #[test]
-    fn v6_wo0011_original_identity_gate_precedes_authorized_lineage_additions() {
-        let source = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef DateTime="20261001T120000" id="document-original"/><Content><Paragraph Type="Action" id="p1"><Text>identity gate</Text></Paragraph></Content></FinalDraft>"#;
-        let mut project = read_v6(source)
-            .unwrap_or_else(|_| unreachable!("lineage identity fixture is valid"))
-            .project;
-        project
-            .preservation
-            .as_mut()
-            .unwrap_or_else(|| unreachable!("imported FDX has preservation"))
-            .identities
-            .push(
-                ForeignIdentity::new(ForeignIdDomain::Other("Injected".to_owned()), "unrelated")
-                    .unwrap_or_else(|_| unreachable!("injected identity is valid")),
-            );
-        let mut context = SaveContext::with_timestamp(
-            SaveOperation::SaveAs,
-            "20261103T101112".to_owned(),
-        )
-        .with_session_open_timestamp("20261103T090807".to_owned())
-        .with_test_lineage_ids(vec!["b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned()]);
-
-        assert_eq!(
-            write_v6_for_save(&project, &mut context),
-            Err(FdxError::SaveDiagnosticUnsupportedConstruct(4))
-        );
-    }
-
-    #[test]
-    fn v6_wo0011_ambiguous_documentref_structures_refuse_lineage_selection() {
-        let duplicate_refs = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef DateTime="20261001T120000" id="document-1"/><DocumentRef DateTime="20261002T120000" id="document-2"/><Content><Paragraph Type="Action" id="p1"><Text>ambiguity</Text></Paragraph></Content></FinalDraft>"#;
-        let project = read_v6(duplicate_refs)
-            .unwrap_or_else(|_| unreachable!("distinct DocumentRef identities are readable"))
-            .project;
-        let mut context = SaveContext::with_timestamp(
-            SaveOperation::Save,
-            "20261103T101112".to_owned(),
-        )
-        .with_session_open_timestamp("20261103T090807".to_owned());
-        assert_eq!(
-            write_v6_for_save(&project, &mut context),
-            Err(FdxError::SaveDiagnosticUnsupportedConstruct(35))
-        );
-
-        let single_ref = br#"<FinalDraft DocumentType="Script" Version="6"><DocumentRef DateTime="20261001T120000" id="document-1"/><Content><Paragraph Type="Action" id="p1"><Text>ambiguity</Text></Paragraph></Content></FinalDraft>"#;
-        let mut project = read_v6(single_ref)
-            .unwrap_or_else(|_| unreachable!("single DocumentRef fixture is valid"))
-            .project;
-        let state = project
-            .preservation
-            .as_mut()
-            .unwrap_or_else(|| unreachable!("imported FDX has preservation"));
-        let document_ref = state
-            .sections
-            .iter_mut()
-            .flat_map(|section| &mut section.children)
-            .find_map(|node| match node {
-                PreservedNode::Element(root) if root.name.local_name == FDX_ROOT => {
-                    root.children.iter_mut().find_map(|child| match child {
-                        PreservedNode::Element(element)
-                            if element.name.local_name == "DocumentRef" => Some(element),
-                        _ => None,
-                    })
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| unreachable!("DocumentRef is in the retained root"));
-        document_ref.attributes.push(PreservedAttribute {
-            name: plain_source_name("DateTime"),
-            value: "20261002T120000".to_owned(),
-        });
-        let mut context = SaveContext::with_timestamp(
-            SaveOperation::SaveAs,
-            "20261103T101112".to_owned(),
-        )
-        .with_session_open_timestamp("20261103T090807".to_owned())
-        .with_test_lineage_ids(vec!["b8e1f570-3e16-4a90-8d6a-7e7f0d0a51aa".to_owned()]);
-        let error = write_v6_for_save(&project, &mut context)
-            .err()
-            .unwrap_or_else(|| unreachable!("duplicate DateTime must stop lineage editing"));
-        assert_eq!(error, FdxError::SaveDiagnosticUnsupportedConstruct(36));
-        let message = error.to_string();
-        assert!(!message.contains("20261001T120000"));
-        assert!(!message.contains("20261002T120000"));
     }
 }

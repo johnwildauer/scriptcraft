@@ -53,11 +53,8 @@ pub fn export_text_with_layout_inputs(
     project: &Project,
     inputs: &LayoutInputs,
 ) -> Result<TextExport, ExportError> {
-    let layout = ScreenplayLayout::build_with_inputs_for_purpose(
-        project,
-        inputs,
-        LayoutPurpose::Print,
-    )?;
+    let layout =
+        ScreenplayLayout::build_with_inputs_for_purpose(project, inputs, LayoutPurpose::Print)?;
     let loss = LossReport::for_project(project);
     let mut text = String::new();
     text.push_str("# ScriptCraft plain-text export\n# ");
@@ -86,11 +83,8 @@ pub fn export_pdf_with_layout_inputs(
     project: &Project,
     inputs: &LayoutInputs,
 ) -> Result<Vec<u8>, ExportError> {
-    let layout = ScreenplayLayout::build_with_inputs_for_purpose(
-        project,
-        inputs,
-        LayoutPurpose::Print,
-    )?;
+    let layout =
+        ScreenplayLayout::build_with_inputs_for_purpose(project, inputs, LayoutPurpose::Print)?;
     let mut objects = Vec::<Vec<u8>>::new();
     objects.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
     let page_count = layout.pages.len();
@@ -109,7 +103,8 @@ pub fn export_pdf_with_layout_inputs(
         "Courier-Oblique",
         "Courier-BoldOblique",
     ] {
-        objects.push(format!("<< /Type /Font /Subtype /Type1 /BaseFont /{font_name} >>").into_bytes());
+        objects
+            .push(format!("<< /Type /Font /Subtype /Type1 /BaseFont /{font_name} >>").into_bytes());
     }
     for page in &layout.pages {
         let content = page_content(page, layout.inputs.paper_height);
@@ -190,9 +185,8 @@ fn page_content(page: &crate::layout::LayoutPage, paper_height: u32) -> Vec<u8> 
         }
         output.push_str(") Tj\nET\n");
         if line.text_style.underline && line.geometry.width.raw() > 0 {
-            let underline_y = FixedPoint::from_raw(
-                y.saturating_add((i64::from(font_size) * 12).div_euclid(100)),
-            );
+            let underline_y =
+                FixedPoint::from_raw(y.saturating_add((i64::from(font_size) * 12).div_euclid(100)));
             let right = FixedPoint::from_raw(x.raw().saturating_add(line.geometry.width.raw()));
             output.push_str(&format!(
                 "q 0.6 w {} {} m {} {} l S Q\n",
@@ -213,188 +207,14 @@ fn pdf_fixed_cell_scale(char_width: FixedPoint, font_size: u8) -> String {
         .saturating_mul(100_000)
         .saturating_add(denominator / 2)
         .div_euclid(denominator);
-    format!("{}.{:03}", scaled_thousandths / 1_000, scaled_thousandths % 1_000)
+    format!(
+        "{}.{:03}",
+        scaled_thousandths / 1_000,
+        scaled_thousandths % 1_000
+    )
 }
 
 #[allow(dead_code)]
 fn role_name(role: Role) -> &'static str {
     role.as_str()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::editing::EditingSession;
-    use crate::layout::LINE_HEIGHT;
-
-    fn project() -> Project {
-        let mut project = Project::from_json(include_str!("../tests/fixtures/legacy_project.json"))
-            .unwrap_or_else(|_| unreachable!());
-        project.elements = vec![
-            crate::ScreenplayElement::new("heading", Role::SceneHeading, "INT. ROOM - DAY")
-                .unwrap_or_else(|_| unreachable!()),
-            crate::ScreenplayElement::new("dialogue", Role::Dialogue, "Hello (世界)")
-                .unwrap_or_else(|_| unreachable!()),
-        ];
-        project
-    }
-
-    #[test]
-    fn text_export_reports_all_loss_categories_and_is_deterministic() {
-        let project = project();
-        let first = export_text(&project).unwrap_or_else(|_| unreachable!());
-        let second = export_text(&project).unwrap_or_else(|_| unreachable!());
-        assert_eq!(first, second);
-        assert_eq!(first.loss.roles_lost, 2);
-        assert_eq!(first.loss.ids_lost, 2);
-        assert!(first.loss.page_layout_lost);
-        assert!(first.text.contains("LOSSY EXPORT"));
-        assert!(first.text.contains("roles"));
-    }
-
-    #[test]
-    fn print_exports_omit_hidden_roles_and_plain_text_uses_display_casing() {
-        let imported = crate::fdx::read_v6(
-            b"<FinalDraft DocumentType='Script' Version='6'><ElementSettings Type='Note'><FontSpec Style='HiddenText'/></ElementSettings><Content><Paragraph Type='Scene Heading' id='heading'><Text>MiXeD title</Text></Paragraph><Paragraph Type='Note' id='note'><Text>private note</Text></Paragraph></Content></FinalDraft>",
-        )
-        .unwrap_or_else(|_| unreachable!());
-        let text = export_text(&imported.project).unwrap_or_else(|_| unreachable!());
-        assert!(text.text.contains("MIXED TITLE"));
-        assert!(!text.text.contains("private note"));
-        assert!(!text.text.contains("MiXeD title"));
-
-        let pdf = export_pdf(&imported.project).unwrap_or_else(|_| unreachable!());
-        let pdf = String::from_utf8_lossy(&pdf);
-        assert!(pdf.contains("MIXED TITLE"));
-        assert!(!pdf.contains("private note"));
-    }
-
-    #[test]
-    fn pdf_applies_role_style_resources_size_and_separate_underline_geometry() {
-        let imported = crate::fdx::read_v6(
-            b"<FinalDraft DocumentType='Script' Version='6'><Content><Paragraph Type='New Act' id='act'><Text>New Act</Text></Paragraph></Content></FinalDraft>",
-        )
-        .unwrap_or_else(|_| unreachable!());
-        let pdf = export_pdf(&imported.project).unwrap_or_else(|_| unreachable!());
-        let pdf = String::from_utf8_lossy(&pdf);
-        assert!(pdf.contains("BT /F2 12 Tf"));
-        assert!(pdf.contains("NEW ACT"));
-        assert!(pdf.contains("q 0.6 w"));
-        assert!(pdf.contains("/F4 6 0 R"));
-    }
-
-    #[test]
-    fn pdf_has_signature_deterministic_pages_and_basic_content() {
-        let project = project();
-        let first = export_pdf(&project).unwrap_or_else(|_| unreachable!());
-        let second = export_pdf(&project).unwrap_or_else(|_| unreachable!());
-        assert_eq!(first, second);
-        assert!(first.starts_with(b"%PDF-1.4"));
-        assert!(first.ends_with(b"%%EOF\n"));
-        assert!(String::from_utf8_lossy(&first).contains("/Count 1"));
-        assert!(String::from_utf8_lossy(&first).contains("INT. ROOM - DAY"));
-        let output = String::from_utf8_lossy(&first);
-        assert!(output.contains("/BaseFont /Courier"));
-        assert!(output.contains("/BaseFont /Courier-Bold"));
-        assert!(output.contains("/BaseFont /Courier-Oblique"));
-        assert!(output.contains("/BaseFont /Courier-BoldOblique"));
-    }
-
-    #[test]
-    fn pdf_declares_the_deterministic_standard_courier_style_subset() {
-        let project = project();
-        let inputs = LayoutInputs {
-            font_family: "Courier Prime".into(),
-            ..LayoutInputs::default()
-        };
-        let pdf =
-            export_pdf_with_layout_inputs(&project, &inputs).unwrap_or_else(|_| unreachable!());
-        let pdf = String::from_utf8_lossy(&pdf);
-        assert!(pdf.contains("/BaseFont /Courier"));
-        assert!(pdf.contains("/BaseFont /Courier-Bold"));
-        assert!(pdf.contains("/BaseFont /Courier-Oblique"));
-        assert!(pdf.contains("/BaseFont /Courier-BoldOblique"));
-    }
-
-    #[test]
-    fn pdf_line_transforms_preserve_layout_positions_and_spacing() {
-        let mut project = project();
-        let inputs = LayoutInputs {
-            font_size: 11,
-            ..LayoutInputs::default()
-        };
-        project.elements.push(
-            crate::ScreenplayElement::new("action", Role::Action, "Second line")
-                .unwrap_or_else(|_| unreachable!()),
-        );
-        let layout = ScreenplayLayout::build_with_inputs(&project, &inputs)
-            .unwrap_or_else(|_| unreachable!());
-        let page = &layout.pages[0];
-        let content_bytes = page_content(page, layout.inputs.paper_height);
-        let content = String::from_utf8_lossy(&content_bytes);
-        assert!(content.contains("BT /F1 12 Tf"));
-        assert!(content.contains(" Tz\n"));
-        let transforms: Vec<(String, String)> = content
-            .lines()
-            .filter_map(|line| {
-                let values = line
-                    .strip_suffix(" Tm")?
-                    .split_whitespace()
-                    .collect::<Vec<_>>();
-                if values.len() == 6 && values[0] == "1" && values[1] == "0" {
-                    Some((values[4].to_owned(), values[5].to_owned()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(transforms.len(), page.lines.len());
-        for (line, (x, y)) in page.lines.iter().zip(&transforms) {
-            assert_eq!(x, &line.geometry.x.decimal_string());
-            assert_eq!(
-                y,
-                &FixedPoint::from_raw(
-                    FixedPoint::from_points(i64::from(layout.inputs.paper_height)).raw()
-                        - line.geometry.y.raw()
-                        - line.geometry.height.raw()
-                )
-                .decimal_string()
-            );
-        }
-        let first_y = FixedPoint::parse_points(&transforms[0].1)
-            .unwrap_or_default()
-            .raw();
-        let second_y = FixedPoint::parse_points(&transforms[1].1)
-            .unwrap_or_default()
-            .raw();
-        assert_eq!(first_y - second_y, i64::from(LINE_HEIGHT) * FixedPoint::SCALE);
-    }
-
-    #[test]
-    fn pdf_emits_fractional_role_coordinates_from_shared_fixed_geometry() {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        project.elements = vec![
-            crate::ScreenplayElement::new("transition", Role::Transition, "CUT")
-                .unwrap_or_else(|_| unreachable!()),
-        ];
-        let layout = ScreenplayLayout::build(&project).unwrap_or_else(|_| unreachable!());
-        let line = &layout.pages[0].lines[0];
-        assert_eq!(line.geometry.x.decimal_string(), "490.2");
-        let pdf = export_pdf(&project).unwrap_or_else(|_| unreachable!());
-        assert!(String::from_utf8_lossy(&pdf).contains("1 0 0 1 490.2 708 Tm"));
-    }
-
-    #[test]
-    fn failed_export_isolated_from_session_state() {
-        let project = project();
-        let session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        let before = session.clone();
-        let inputs = LayoutInputs {
-            paper_width: 1,
-            ..LayoutInputs::default()
-        };
-        assert!(export_pdf_with_layout_inputs(session.project(), &inputs).is_err());
-        assert!(export_text_with_layout_inputs(session.project(), &inputs).is_err());
-        assert_eq!(session, before);
-    }
 }

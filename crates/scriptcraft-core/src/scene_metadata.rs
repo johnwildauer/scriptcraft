@@ -1,10 +1,10 @@
 //! Preservation-safe derived SceneProperties and scene-cast arc projection.
 
-use crate::preservation::{
-    ForeignIdDomain, ForeignIdentity, PreservedAttribute, PreservedElement,
-    PreservedNode, PreservationError, PreservationState, SourceName, SourceOwnership,
-};
 use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
+use crate::preservation::{
+    ForeignIdDomain, ForeignIdentity, PreservationError, PreservationState, PreservedAttribute,
+    PreservedElement, PreservedNode, SourceName, SourceOwnership,
+};
 use crate::{ModelError, Project, Role, ScreenplayElement, StableId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,33 +32,6 @@ impl From<ModelError> for SceneMetadataError {
     }
 }
 
-/// Refreshes supported scene properties and their derived character-arc
-/// projection in a detached preservation candidate. Unsupported scenes are
-/// independently deferred without publishing partial changes to their subtree.
-pub(crate) fn reconcile_project(project: &mut Project) -> Result<bool, SceneMetadataError> {
-    reconcile_project_with_outcome(project).map(|outcome| outcome.changed)
-}
-
-pub(crate) fn reconcile_project_with_outcome(
-    project: &mut Project,
-) -> Result<ReconcileOutcome, SceneMetadataError> {
-    let mut candidate = project.clone();
-    let outcome = reconcile_project_candidate_with_outcome(&mut candidate)?;
-    if outcome.changed {
-        candidate.validate()?;
-        *project = candidate;
-    }
-    Ok(outcome)
-}
-
-/// Reconciles an already detached project candidate. The caller owns atomic
-/// publication; unsupported scenes are independently discarded at heading scope.
-pub(crate) fn reconcile_project_candidate_with_outcome(
-    project: &mut Project,
-) -> Result<ReconcileOutcome, SceneMetadataError> {
-    reconcile_project_candidate_with_scope(project, None)
-}
-
 pub(crate) fn reconcile_project_candidate_with_scope(
     project: &mut Project,
     requested_scenes: Option<&BTreeSet<String>>,
@@ -77,7 +50,12 @@ pub(crate) fn reconcile_project_candidate_with_scope(
     state.ensure_source_identity_use_index();
     let removable = safe_paragraph_removals(state);
     let mut reserved_ids = state.indexed_source_id_values();
-    reserved_ids.extend(state.identities.iter().map(|identity| identity.value.clone()));
+    reserved_ids.extend(
+        state
+            .identities
+            .iter()
+            .map(|identity| identity.value.clone()),
+    );
     reserved_ids.extend(
         state
             .board_graph
@@ -86,10 +64,16 @@ pub(crate) fn reconcile_project_candidate_with_scope(
             .map(|entity| entity.identity.value.clone()),
     );
     reserved_ids.extend(state.references.iter().flat_map(|reference| {
-        [reference.source.value.clone(), reference.target.value.clone()]
+        [
+            reference.source.value.clone(),
+            reference.target.value.clone(),
+        ]
     }));
     reserved_ids.extend(state.board_graph.references.iter().flat_map(|reference| {
-        [reference.source.value.clone(), reference.target.value.clone()]
+        [
+            reference.source.value.clone(),
+            reference.target.value.clone(),
+        ]
     }));
     let mut paragraph_ids = ParagraphIdAllocator::new(reserved_ids);
     let known_paragraph_ids = state
@@ -197,14 +181,16 @@ pub(crate) fn scene_arc_names(
     let properties = properties
         .next()
         .ok_or(SceneMetadataError::UnsupportedSceneMetadata)?;
-    if properties.name.namespace_uri != namespace || properties.children.iter().any(|node| {
-        !matches!(node,
+    if properties.name.namespace_uri != namespace
+        || properties.children.iter().any(|node| {
+            !matches!(node,
             PreservedNode::Element(element)
                 if element.name.local_name == "SceneArcBeats"
                     && element.name.namespace_uri == namespace)
-            && !matches!(node,
+                && !matches!(node,
                 PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty())
-    }) {
+        })
+    {
         return Err(SceneMetadataError::UnsupportedSceneMetadata);
     }
     let mut arcs = properties.children.iter().filter_map(|node| match node {
@@ -339,14 +325,18 @@ fn generated_scene_properties_attributes(
             attribute.name.namespace_uri == expected.name.namespace_uri
                 && attribute.name.local_name == expected.name.local_name
         });
-        matching.next().is_some_and(|attribute| attribute.value == expected.value)
+        matching
+            .next()
+            .is_some_and(|attribute| attribute.value == expected.value)
             && matching.next().is_none()
     })
 }
 
 /// Projects canonical Character cues into normalized association keys and
 /// uppercase names for generated and imported scene metadata.
-pub(crate) fn derived_character_projection(elements: &[ScreenplayElement]) -> Vec<(String, String)> {
+pub(crate) fn derived_character_projection(
+    elements: &[ScreenplayElement],
+) -> Vec<(String, String)> {
     let mut seen = BTreeSet::new();
     let mut projection = Vec::new();
     for element in elements {
@@ -363,24 +353,21 @@ pub(crate) fn derived_character_projection(elements: &[ScreenplayElement]) -> Ve
     projection
 }
 
-pub(crate) fn scene_casts(
-    elements: &[ScreenplayElement],
-) -> Vec<(StableId, Vec<(String, String)>)> {
-    scene_casts_with_scope(elements, None)
-}
+type SceneProjection = (StableId, Vec<(String, String)>);
+type ActiveSceneProjection = (StableId, Vec<(String, String)>, BTreeSet<String>);
 
 fn scene_casts_with_scope(
     elements: &[ScreenplayElement],
     requested_scenes: Option<&BTreeSet<String>>,
-) -> Vec<(StableId, Vec<(String, String)>)> {
+) -> Vec<SceneProjection> {
     let mut scenes = Vec::new();
-    let mut active: Option<(StableId, Vec<(String, String)>, BTreeSet<String>)> = None;
+    let mut active: Option<ActiveSceneProjection> = None;
     for element in elements {
         if element.role == Role::SceneHeading {
             if let Some((heading, projection, _)) = active.take() {
                 scenes.push((heading, projection));
             }
-            if requested_scenes.map_or(true, |requested| requested.contains(element.id.as_str())) {
+            if requested_scenes.is_none_or(|requested| requested.contains(element.id.as_str())) {
                 active = Some((element.id.clone(), Vec::new(), BTreeSet::new()));
             }
         } else if element.role == Role::Character {
@@ -501,8 +488,7 @@ fn reconcile_heading(
                 let Some((key, _, id)) = recognized_beat(beat, &namespace) else {
                     return Err(SceneMetadataError::UnsupportedSceneMetadata);
                 };
-                if !seen.insert(key.clone()) || !known_paragraph_ids.contains(&id)
-                {
+                if !seen.insert(key.clone()) || !known_paragraph_ids.contains(&id) {
                     return Err(SceneMetadataError::UnsupportedSceneMetadata);
                 }
                 existing.push((key, id));
@@ -616,8 +602,11 @@ fn effective_xml_space_preserve(element: &PreservedElement, inherited: bool) -> 
 /// containing CharacterArcBeat gets element-only indentation.
 fn format_supported_scene_properties(heading: &mut PreservedElement, heading_depth: usize) {
     let namespace = heading.name.namespace_uri.clone();
-    let mut properties_indexes = heading.children.iter().enumerate().filter_map(|(index, node)| {
-        match node {
+    let mut properties_indexes = heading
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| match node {
             PreservedNode::Element(element)
                 if element.name.local_name == "SceneProperties"
                     && element.name.namespace_uri == namespace =>
@@ -625,8 +614,7 @@ fn format_supported_scene_properties(heading: &mut PreservedElement, heading_dep
                 Some(index)
             }
             _ => None,
-        }
-    });
+        });
     let Some(properties_index) = properties_indexes.next() else {
         return;
     };
@@ -763,16 +751,16 @@ fn format_scene_properties_sibling_gaps(
     let mut formatted = Vec::with_capacity(heading.children.len().saturating_add(2));
     let mut pending_whitespace = Vec::new();
     let mut previous_was_properties = false;
-    let mut saw_child = false;
-    for (index, child) in std::mem::take(&mut heading.children).into_iter().enumerate() {
+    for (index, child) in std::mem::take(&mut heading.children)
+        .into_iter()
+        .enumerate()
+    {
         if matches!(&child, PreservedNode::Text(text) if text.chars().all(char::is_whitespace)) {
             pending_whitespace.push(child);
             continue;
         }
         let is_properties = index == properties_index;
-        if !saw_child && is_properties {
-            formatted.push(PreservedNode::Text(child_indent.clone().into()));
-        } else if previous_was_properties || is_properties {
+        if previous_was_properties || is_properties {
             formatted.push(PreservedNode::Text(child_indent.clone().into()));
         } else {
             formatted.append(&mut pending_whitespace);
@@ -780,7 +768,6 @@ fn format_scene_properties_sibling_gaps(
         pending_whitespace.clear();
         formatted.push(child);
         previous_was_properties = is_properties;
-        saw_child = true;
     }
     if previous_was_properties {
         formatted.push(PreservedNode::Text(closing_indent.into()));
@@ -813,9 +800,7 @@ fn new_character_arc(
     name: &str,
     paragraph_ids: &mut ParagraphIdAllocator,
 ) -> Result<PreservedElement, SceneMetadataError> {
-    let id = paragraph_ids
-        .allocate()
-        .map_err(map_paragraph_id_error)?;
+    let id = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
     Ok(character_arc_element(name, id, None))
 }
 
@@ -868,7 +853,10 @@ fn character_arc_element(name: &str, id: String, parent: Option<&SourceName>) ->
     beat
 }
 
-fn recognized_beat(beat: &PreservedElement, parent_namespace: &Option<String>) -> Option<(String, String, String)> {
+fn recognized_beat(
+    beat: &PreservedElement,
+    parent_namespace: &Option<String>,
+) -> Option<(String, String, String)> {
     if beat.name.namespace_uri != *parent_namespace || beat.attributes.len() != 1 {
         return None;
     }
@@ -899,10 +887,9 @@ fn recognized_beat(beat: &PreservedElement, parent_namespace: &Option<String>) -
     for attribute in &paragraph.attributes {
         if attribute.name.namespace_uri.is_none()
             && attribute.name.local_name.eq_ignore_ascii_case("id")
+            && id.replace(attribute.value.clone()).is_some()
         {
-            if id.replace(attribute.value.clone()).is_some() {
-                return None;
-            }
+            return None;
         }
     }
     let id = id?;
@@ -976,15 +963,6 @@ fn character_association_key(name: &str) -> Option<String> {
     projected_character_name(name).map(|(key, _)| key)
 }
 
-fn id_value(element: &PreservedElement) -> Option<&str> {
-    let mut ids = element.attributes.iter().filter(|attribute| {
-        attribute.name.namespace_uri.is_none()
-            && attribute.name.local_name.eq_ignore_ascii_case("id")
-    });
-    let value = ids.next()?.value.as_str();
-    ids.next().is_none().then_some(value)
-}
-
 fn set_attribute(element: &mut PreservedElement, name: &str, value: &str) {
     if let Some(attribute) = element.attributes.iter_mut().find(|attribute| {
         attribute.name.namespace_uri.is_none() && attribute.name.local_name == name
@@ -993,16 +971,13 @@ fn set_attribute(element: &mut PreservedElement, name: &str, value: &str) {
     }
 }
 
-fn namespaced_element(parent: &PreservedElement, local: &str, _attrs: Vec<(&str, &str)>) -> PreservedElement {
-    namespaced_element_from_name(&parent.name, local)
-}
-
 fn namespaced_element_from_name(parent: &SourceName, local: &str) -> PreservedElement {
     let prefix = parent
         .qualified_name
         .as_deref()
         .and_then(|name| name.split_once(':').map(|(prefix, _)| prefix));
-    let qualified_name = prefix.map_or_else(|| local.to_owned(), |prefix| format!("{prefix}:{local}"));
+    let qualified_name =
+        prefix.map_or_else(|| local.to_owned(), |prefix| format!("{prefix}:{local}"));
     PreservedElement {
         name: SourceName {
             namespace_uri: parent.namespace_uri.clone(),
@@ -1028,347 +1003,28 @@ fn element(name: &str, attrs: Vec<(&str, &str)>) -> PreservedElement {
         },
         name,
     );
-    element.attributes = attrs.into_iter().map(|(key, value)| attribute(key, value)).collect();
+    element.attributes = attrs
+        .into_iter()
+        .map(|(key, value)| attribute(key, value))
+        .collect();
     element
 }
 
 fn attribute(name: &str, value: &str) -> PreservedAttribute {
+    let (namespace_uri, local_name) = if name == "xml:space" {
+        (
+            Some("http://www.w3.org/XML/1998/namespace".to_owned()),
+            "space",
+        )
+    } else {
+        (None, name)
+    };
     PreservedAttribute {
         name: SourceName {
-            namespace_uri: None,
-            local_name: name.to_owned(),
+            namespace_uri,
+            local_name: local_name.to_owned(),
             qualified_name: Some(name.to_owned()),
         },
         value: value.to_owned(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::editing::{EditingSession, Position, Selection};
-    use crate::fdx::{read_v6, write_v6};
-
-    fn wrap_managed_heading(nodes: &mut [PreservedNode], id: &StableId) -> bool {
-        for node in nodes {
-            let PreservedNode::Element(source_element) = node else {
-                continue;
-            };
-            if matches!(&source_element.ownership, SourceOwnership::Managed(target) if target == id) {
-                let original = std::mem::replace(
-                    node,
-                    PreservedNode::Text(String::new().into()),
-                );
-                let mut wrapper = element("ContextWrapper", vec![("xml:space", "preserve")]);
-                wrapper.children.push(original);
-                *node = PreservedNode::Element(wrapper);
-                return true;
-            }
-            if wrap_managed_heading(&mut source_element.children, id) {
-                return true;
-            }
-        }
-        false
-    }
-
-    #[test]
-    fn wo0032_indexed_heading_context_preserves_depth_and_inherited_xml_space() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>ALPHA</Text></Paragraph></Content></FinalDraft>"#;
-        let mut project = read_v6(source.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        let heading_id = project.elements[0].id.clone();
-        let state = project.preservation.as_mut().unwrap_or_else(|| unreachable!());
-        let before_depth = state
-            .managed_element_context(&heading_id)
-            .unwrap_or_else(|_| unreachable!())
-            .unwrap_or_else(|| unreachable!())
-            .0;
-        assert!(wrap_managed_heading(&mut state.sections[0].children, &heading_id));
-        state.rebuild_indexes();
-
-        crate::preservation::reset_managed_paragraph_index_diagnostics();
-        let indexed_heading = state
-            .managed_element(&heading_id)
-            .unwrap_or_else(|_| unreachable!())
-            .unwrap_or_else(|| unreachable!());
-        assert_eq!(indexed_heading.name.local_name, "Paragraph");
-        assert_eq!(
-            state
-                .managed_element_context(&heading_id)
-                .unwrap_or_else(|_| unreachable!()),
-            Some((before_depth + 1, true))
-        );
-        let diagnostics = crate::preservation::managed_paragraph_index_diagnostics();
-        assert_eq!(diagnostics.lookups, 2);
-        assert_eq!(diagnostics.fallback_tree_nodes_examined, 0);
-    }
-
-    #[test]
-    fn wo0032_duplicate_heading_ownership_remains_ambiguous_in_indexed_queries() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><Text>INT. ROOM</Text></Paragraph></Content></FinalDraft>"#;
-        let mut project = read_v6(source.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        let heading_id = project.elements[0].id.clone();
-        let state = project.preservation.as_mut().unwrap_or_else(|| unreachable!());
-        let duplicate = state
-            .managed_element(&heading_id)
-            .unwrap_or_else(|_| unreachable!())
-            .unwrap_or_else(|| unreachable!())
-            .clone();
-        state.sections[0].children.push(PreservedNode::Element(duplicate));
-        state.rebuild_indexes();
-
-        assert_eq!(
-            state.managed_element(&heading_id),
-            Err(PreservationError::ManagedAnchorAmbiguous)
-        );
-        assert_eq!(
-            state.managed_element_context(&heading_id),
-            Err(PreservationError::ManagedAnchorAmbiguous)
-        );
-    }
-
-    #[test]
-    fn wo0032_scoped_refresh_uses_indexed_heading_probes_and_rebuilds_once() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><Text>INT. ONE</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>ALPHA</Text></Paragraph><Paragraph Type="Scene Heading" id="h2"><Text>EXT. TWO</Text></Paragraph><Paragraph Type="Character" id="c2"><Text>BETA</Text></Paragraph></Content></FinalDraft>"#;
-        let mut project = read_v6(source.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        assert!(reconcile_project(&mut project).unwrap_or(false));
-        project.elements[1].text = "GAMMA".to_owned();
-        let requested = [project.elements[0].id.as_str().to_owned()].into_iter().collect();
-        let mut candidate = project.clone();
-        crate::preservation::reset_managed_paragraph_index_diagnostics();
-
-        let outcome = reconcile_project_candidate_with_scope(&mut candidate, Some(&requested))
-            .unwrap_or_default();
-
-        assert!(outcome.changed);
-        assert_eq!(outcome.scene_candidates, 1);
-        let diagnostics = crate::preservation::managed_paragraph_index_diagnostics();
-        assert!(diagnostics.lookups >= 3);
-        assert_eq!(diagnostics.fallback_tree_nodes_examined, 0);
-        assert_eq!(diagnostics.rebuilds, 1);
-        assert!(diagnostics.source_nodes_indexed > 0);
-    }
-
-    #[test]
-    fn new_document_scene_metadata_is_created_and_round_trips() {
-        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
-        project.elements = vec![
-            ScreenplayElement::new("heading", Role::SceneHeading, "INT. ROOM").unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cue-1", Role::Character, "  Zoë\u{00a0}").unwrap_or_else(|_| unreachable!()),
-            ScreenplayElement::new("cue-2", Role::Character, "zoë").unwrap_or_else(|_| unreachable!()),
-        ];
-        let output = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let text = String::from_utf8(output).unwrap_or_else(|_| unreachable!());
-        assert!(text.contains("<SceneProperties Length=\"1/8\" Page=\"1\" Title=\"\">"));
-        assert!(text.contains("<CharacterArcBeat Name=\"ZOË\">"));
-        assert!(text.contains("<SceneArcBeats>"));
-        assert!(text.find("<SceneProperties ").unwrap_or(usize::MAX) < text.find("<Text>INT. ROOM</Text>").unwrap_or(0));
-        assert!(text.contains("Alignment=\"Left\" FirstIndent=\"0.00\" Leading=\"Regular\""));
-        let reopened = read_v6(text.as_bytes()).unwrap_or_else(|_| unreachable!());
-        let state = reopened.project.preservation.as_ref().unwrap_or_else(|| unreachable!());
-        assert!(state.identities.iter().any(|identity| {
-            identity.domain == ForeignIdDomain::Paragraph
-                && uuid::Uuid::parse_str(&identity.value)
-                    .is_ok_and(|value| value.get_version() == Some(uuid::Version::Random))
-        }));
-    }
-
-    #[test]
-    fn imported_scenes_are_independent_and_store_projected_uppercase_names() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><Text>INT. ONE</Text></Paragraph><Paragraph Type="Character" id="c1"><Text> Zoë </Text></Paragraph><Paragraph Type="Character" id="c2"><Text>zoë</Text></Paragraph><Paragraph Type="Scene Heading" id="h2"><Text>EXT. TWO</Text></Paragraph><Paragraph Type="Character" id="c3"><Text>JO</Text></Paragraph></Content></FinalDraft>"#;
-        let mut project = read_v6(source.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        assert!(reconcile_project(&mut project).unwrap_or(false));
-        let output = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let text = String::from_utf8(output).unwrap_or_else(|_| unreachable!());
-        assert_eq!(text.matches("<SceneProperties ").count(), 2);
-        assert_eq!(text.matches("<CharacterArcBeat Name=\"ZOË\">").count(), 1);
-        assert_eq!(text.matches("<CharacterArcBeat Name=\"JO\">").count(), 1);
-        assert!(text.contains("<Text> Zoë </Text>"));
-    }
-
-    #[test]
-    fn imported_scene_metadata_adds_and_matches_case_insensitively() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>Alpha (V.O.)</Text></Paragraph><Paragraph Type="Character" id="c2"><Text>Beta</Text></Paragraph></Content></FinalDraft>"#;
-        let mut project = read_v6(source.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        assert!(reconcile_project(&mut project).unwrap_or(false));
-        let output = String::from_utf8(write_v6(&project).unwrap_or_else(|_| unreachable!()))
-            .unwrap_or_else(|_| unreachable!());
-        assert!(output.contains("<CharacterArcBeat Name=\"ALPHA\">"));
-        assert!(output.contains("<CharacterArcBeat Name=\"BETA\">"));
-        assert!(output.contains("<Text>Alpha (V.O.)</Text>"));
-    }
-
-    #[test]
-    fn supported_scene_properties_regenerate_but_matching_arc_identity_is_retained() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><SceneProperties Length="3/8" Page="7" Title="kept" Vendor="removed"><VendorGeneratedField>removed</VendorGeneratedField><SceneArcBeats><CharacterArcBeat Name="ALPHA"><Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="0.00" OutlineLevel="0" RightIndent="1.39" SpaceBefore="0" Spacing="1" StartsNewPage="No" id="authored-arc-id"/></CharacterArcBeat></SceneArcBeats></SceneProperties><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>ALPHA</Text></Paragraph></Content></FinalDraft>"#;
-        let mut project = read_v6(source.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        assert!(reconcile_project(&mut project).unwrap_or(false));
-        let output = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let text = String::from_utf8(output).unwrap_or_else(|_| unreachable!());
-        assert!(text.contains("Length=\"1/8\" Page=\"1\" Title=\"\""));
-        assert!(!text.contains("Vendor=\"removed\""));
-        assert!(!text.contains("VendorGeneratedField"));
-        assert!(text.contains("id=\"authored-arc-id\""));
-    }
-
-    #[test]
-    fn app_owned_reconciliation_removes_stale_arc_after_reopen() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>ALPHA</Text></Paragraph></Content></FinalDraft>"#;
-        let mut imported = read_v6(source.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        assert!(reconcile_project(&mut imported).unwrap_or(false));
-        let saved = write_v6(&imported).unwrap_or_else(|_| unreachable!());
-        let mut project = read_v6(&saved).unwrap_or_else(|_| unreachable!()).project;
-        project.elements[1].text = "BETA".to_owned();
-        assert!(reconcile_project(&mut project).unwrap_or(false));
-        let output = write_v6(&project).unwrap_or_else(|_| unreachable!());
-        let text = String::from_utf8(output).unwrap_or_else(|_| unreachable!());
-        assert!(!text.contains("Name=\"ALPHA\""));
-        assert!(text.contains("Name=\"BETA\""));
-    }
-
-    #[test]
-    fn possible_source_reference_defers_only_the_unsafe_scene() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><SceneProperties><SceneArcBeats><CharacterArcBeat Name="ALPHA"><Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="0.00" OutlineLevel="0" RightIndent="1.39" SpaceBefore="0" Spacing="1" StartsNewPage="No" id="arc-p"/></CharacterArcBeat></SceneArcBeats></SceneProperties><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>ALPHA</Text></Paragraph></Content></FinalDraft>"#;
-        let mut project = read_v6(source.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        let state = project.preservation.as_mut().unwrap_or_else(|| unreachable!());
-        let PreservedNode::Element(document) = &mut state.sections[0].children[0] else {
-            unreachable!();
-        };
-        let content = document.children.iter_mut().find_map(|node| match node {
-            PreservedNode::Element(element) if element.name.local_name == "Content" => Some(element),
-            _ => None,
-        }).unwrap_or_else(|| unreachable!());
-        let mut vendor = element("VendorLink", Vec::new());
-        vendor.attributes.push(attribute("Ref", "arc-p"));
-        content.children.push(PreservedNode::Element(vendor));
-        project.elements[1].text = "BETA".to_owned();
-        let original = project.clone();
-        let heading_id = project.elements[0].id.as_str().to_owned();
-        let outcome = reconcile_project_with_outcome(&mut project).unwrap_or_default();
-        assert!(outcome.deferred_scenes.contains(&heading_id));
-        assert_eq!(project, original);
-    }
-
-    #[test]
-    fn wo009_deferred_heading_keeps_its_subtree_while_other_scene_publishes() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><SceneProperties><SceneArcBeats><CharacterArcBeat Name="ALPHA"><Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="0.00" OutlineLevel="0" RightIndent="1.39" SpaceBefore="0" Spacing="1" StartsNewPage="No" id="arc-p"/></CharacterArcBeat></SceneArcBeats></SceneProperties><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>ALPHA</Text></Paragraph><Paragraph Type="Scene Heading" id="h2"><Text>EXT. STREET</Text></Paragraph><Paragraph Type="Character" id="c2"><Text>BETA</Text></Paragraph></Content></FinalDraft>"#;
-        let mut project = read_v6(source.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        let state = project.preservation.as_mut().unwrap_or_else(|| unreachable!());
-        let PreservedNode::Element(document) = &mut state.sections[0].children[0] else {
-            unreachable!();
-        };
-        let content = document
-            .children
-            .iter_mut()
-            .find_map(|node| match node {
-                PreservedNode::Element(element) if element.name.local_name == "Content" => {
-                    Some(element)
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| unreachable!());
-        let mut vendor = element("VendorLink", Vec::new());
-        vendor.attributes.push(attribute("Ref", "arc-p"));
-        content.children.push(PreservedNode::Element(vendor));
-        project.elements[1].text = "BETA".to_owned();
-        project.elements[3].text = "GAMMA".to_owned();
-        let first_heading_id = project.elements[0].id.clone();
-        let second_heading_id = project.elements[2].id.clone();
-        let first_subtree = project
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!())
-            .managed_element(&first_heading_id)
-            .unwrap_or_else(|_| unreachable!())
-            .unwrap_or_else(|| unreachable!())
-            .clone();
-
-        let outcome = reconcile_project_with_outcome(&mut project).unwrap_or_default();
-
-        assert!(outcome.changed);
-        assert_eq!(outcome.scene_candidates, 2);
-        assert_eq!(outcome.preservation_state_clones, 0);
-        assert!(outcome
-            .deferred_scenes
-            .contains(first_heading_id.as_str()));
-        let state = project.preservation.as_ref().unwrap_or_else(|| unreachable!());
-        assert_eq!(
-            state
-                .managed_element(&first_heading_id)
-                .unwrap_or_else(|_| unreachable!()),
-            Some(&first_subtree)
-        );
-        assert_eq!(
-            scene_arc_names(&project, &second_heading_id).unwrap_or_default(),
-            vec!["GAMMA".to_owned()]
-        );
-    }
-
-    #[test]
-    fn refresh_and_history_reconcile_scene_arc_projection() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>ALPHA</Text></Paragraph></Content></FinalDraft>"#;
-        let project = read_v6(source.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
-        session
-            .set_selection(Selection::caret(Position {
-                element: 1,
-                offset: 5,
-            }))
-            .unwrap_or_else(|_| unreachable!());
-        session.insert("X").unwrap_or_else(|_| unreachable!());
-        assert!(session.refresh_cast_lists().unwrap_or(false));
-        let preservation = session
-            .project()
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!());
-        assert!(session
-            .project()
-            .elements
-            .iter()
-            .all(|element| preservation.has_managed_element(&element.id)));
-        let output = write_v6(session.project()).unwrap_or_else(|_| unreachable!());
-        assert!(String::from_utf8(output).unwrap_or_else(|_| unreachable!()).contains("Name=\"ALPHAX\""));
-
-        session.undo().unwrap_or_else(|_| unreachable!());
-        let preservation = session
-            .project()
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!());
-        assert!(session
-            .project()
-            .elements
-            .iter()
-            .all(|element| preservation.has_managed_element(&element.id)));
-        let output = write_v6(session.project()).unwrap_or_else(|_| unreachable!());
-        assert!(String::from_utf8(output).unwrap_or_else(|_| unreachable!()).contains("Name=\"ALPHA\""));
-        session.redo().unwrap_or_else(|_| unreachable!());
-        let preservation = session
-            .project()
-            .preservation
-            .as_ref()
-            .unwrap_or_else(|| unreachable!());
-        assert!(session
-            .project()
-            .elements
-            .iter()
-            .all(|element| preservation.has_managed_element(&element.id)));
-        let output = write_v6(session.project()).unwrap_or_else(|_| unreachable!());
-        assert!(String::from_utf8(output).unwrap_or_else(|_| unreachable!()).contains("Name=\"ALPHAX\""));
-    }
-
-    #[test]
-    fn unsupported_non_text_arc_child_defers_scene_without_mutation() {
-        let source = r#"<FinalDraft Version="6"><Content><Paragraph Type="Scene Heading" id="h1"><SceneProperties Length="3/8" Page="7" Title="kept"><SceneArcBeats><CharacterArcBeat Name="OLD"><Paragraph Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="0.00" OutlineLevel="0" RightIndent="1.39" SpaceBefore="0" Spacing="1" StartsNewPage="No" id="arc-p"/></CharacterArcBeat></SceneArcBeats></SceneProperties><Text>INT. ROOM</Text></Paragraph><Paragraph Type="Character" id="c1"><Text>NEW</Text></Paragraph></Content></FinalDraft>"#;
-        let authored = source.replace(
-            "id=\"arc-p\"/>",
-            "id=\"arc-p\"><DynamicLabel Type=\"unsupported\"/></Paragraph>",
-        );
-        let mut project = read_v6(authored.as_bytes()).unwrap_or_else(|_| unreachable!()).project;
-        let original = project.clone();
-        let heading_id = project.elements[0].id.as_str().to_owned();
-        let outcome = reconcile_project_with_outcome(&mut project).unwrap_or_default();
-        assert!(outcome.deferred_scenes.contains(&heading_id));
-        assert_eq!(project, original);
     }
 }

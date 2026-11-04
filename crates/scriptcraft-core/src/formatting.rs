@@ -52,13 +52,14 @@ impl FixedPoint {
         let fraction = magnitude % Self::SCALE as u64;
         if fraction == 0 {
             format!("{}{whole}", if negative { "-" } else { "" })
-        } else if fraction % 10 == 0 {
-            format!("{}{whole}.{}", if negative { "-" } else { "" }, fraction / 10)
-        } else {
+        } else if fraction.is_multiple_of(10) {
             format!(
-                "{}{whole}.{fraction:02}",
-                if negative { "-" } else { "" }
+                "{}{whole}.{}",
+                if negative { "-" } else { "" },
+                fraction / 10
             )
+        } else {
+            format!("{}{whole}.{fraction:02}", if negative { "-" } else { "" })
         }
     }
 
@@ -438,13 +439,7 @@ pub const ROLE_FORMATTING_DEFAULTS: [RoleFormatting; ROLE_FORMATTING_COUNT] = [
         "Summary",
         font(ARIAL, 12, HIDDEN, Some(SOURCE_COLOR)),
         paragraph("Left", "0.00", "0.88", "7.50", 12, false),
-        behavior(
-            "Outline Body",
-            "Summary",
-            "Ctrl+0",
-            "Outline 1",
-            "Shift+0",
-        ),
+        behavior("Outline Body", "Summary", "Ctrl+0", "Outline 1", "Shift+0"),
         true,
         0,
     ),
@@ -574,9 +569,7 @@ impl SourceLayoutSettings {
             size: source.size.unwrap_or(default.size),
             bold: source.bold.unwrap_or_else(|| default_has("Bold")),
             italic: source.italic.unwrap_or_else(|| default_has("Italic")),
-            underline: source
-                .underline
-                .unwrap_or_else(|| default_has("Underline")),
+            underline: source.underline.unwrap_or_else(|| default_has("Underline")),
             all_caps: source.all_caps.unwrap_or_else(|| default_has("AllCaps")),
             hidden_text: self.print_visibility(role) == PrintVisibility::Hidden,
             source_color: source
@@ -592,84 +585,4 @@ pub(crate) fn role_index(role: Role) -> usize {
         .iter()
         .position(|candidate| *candidate == role)
         .unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn native_defaults_are_complete_and_in_native_role_order() {
-        let expected = [
-            (Role::General, "General"),
-            (Role::SceneHeading, "Scene Heading"),
-            (Role::Action, "Action"),
-            (Role::Character, "Character"),
-            (Role::Parenthetical, "Parenthetical"),
-            (Role::Dialogue, "Dialogue"),
-            (Role::Transition, "Transition"),
-            (Role::Shot, "Shot"),
-            (Role::CastList, "Cast List"),
-            (Role::NewAct, "New Act"),
-            (Role::Sequence, "Sequence"),
-            (Role::EndOfAct, "End of Act"),
-            (Role::Summary, "Summary"),
-            (Role::Outline1, "Outline 1"),
-            (Role::Outline2, "Outline 2"),
-            (Role::Outline3, "Outline 3"),
-            (Role::Note, "Note"),
-        ];
-        assert_eq!(ROLE_FORMATTING_DEFAULTS.len(), Role::ALL.len());
-        for (formatting, (role, label)) in ROLE_FORMATTING_DEFAULTS.iter().zip(expected) {
-            assert_eq!(formatting.role, role);
-            assert_eq!(formatting.fdx_label, label);
-        }
-        assert_eq!(formatting_for_role(Role::Parenthetical).paragraph.first_indent, "-0.10");
-        assert_eq!(formatting_for_role(Role::Transition).paragraph.alignment, "Right");
-        assert!(formatting_for_role(Role::NewAct).paragraph.starts_new_page);
-        assert_eq!(formatting_for_role(Role::Outline1).font.size, 16);
-        assert_eq!(formatting_for_role(Role::Note).font.style_tokens, ITALIC_HIDDEN);
-    }
-
-    #[test]
-    fn recognized_runtime_defaults_are_shared_by_role_and_source_fallback() {
-        let settings = SourceLayoutSettings::default();
-        for role in Role::ALL {
-            assert_eq!(
-                settings.print_visibility(role),
-                if formatting_for_role(role)
-                    .font
-                    .style_tokens
-                    .contains(&"HiddenText")
-                {
-                    PrintVisibility::Hidden
-                } else {
-                    PrintVisibility::Visible
-                }
-            );
-            assert_eq!(
-                settings.starts_new_page(role),
-                formatting_for_role(role).paragraph.starts_new_page
-            );
-        }
-    }
-
-    #[test]
-    fn fixed_point_decimal_conversion_keeps_fractional_and_signed_geometry() {
-        assert_eq!(FixedPoint::parse_inches("0.88").map(FixedPoint::raw), Some(6_336));
-        assert_eq!(FixedPoint::parse_inches("7.10").map(FixedPoint::raw), Some(51_120));
-        assert_eq!(FixedPoint::parse_inches("-0.10").map(FixedPoint::raw), Some(-720));
-        assert_eq!(
-            FixedPoint::parse_inches("0.88").map(FixedPoint::decimal_string),
-            Some("63.36".into())
-        );
-        assert_eq!(
-            FixedPoint::parse_inches("-0.10").map(FixedPoint::decimal_string),
-            Some("-7.2".into())
-        );
-        assert_eq!(FixedPoint::parse_points("12.25").map(FixedPoint::raw), Some(1_225));
-        assert_eq!(FixedPoint::parse_inches("1e2"), None);
-        assert_eq!(FixedPoint::parse_inches("NaN"), None);
-        assert_eq!(FixedPoint::parse_inches("999999999999999999999"), None);
-    }
 }

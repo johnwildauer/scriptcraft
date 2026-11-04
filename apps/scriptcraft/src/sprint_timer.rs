@@ -83,14 +83,6 @@ pub(super) struct SprintTimer {
     pub(super) popup_rect: egui::Rect,
     pub(super) popup_anchor: egui::Rect,
     pub(super) just_opened: bool,
-    #[cfg(test)]
-    pub(super) status_item_rect: Option<egui::Rect>,
-    #[cfg(test)]
-    pub(super) minutes_input_rect: Option<egui::Rect>,
-    #[cfg(test)]
-    pub(super) primary_button_rect: Option<egui::Rect>,
-    #[cfg(test)]
-    pub(super) end_button_rect: Option<egui::Rect>,
 }
 
 impl Default for SprintTimer {
@@ -106,14 +98,6 @@ impl Default for SprintTimer {
             popup_rect: egui::Rect::NOTHING,
             popup_anchor: egui::Rect::NOTHING,
             just_opened: false,
-            #[cfg(test)]
-            status_item_rect: None,
-            #[cfg(test)]
-            minutes_input_rect: None,
-            #[cfg(test)]
-            primary_button_rect: None,
-            #[cfg(test)]
-            end_button_rect: None,
         }
     }
 }
@@ -242,18 +226,6 @@ impl SprintTimer {
                 minutes,
             }
         })
-    }
-
-    #[cfg(test)]
-    pub(super) fn reconcile_with_sink(
-        &mut self,
-        now: Duration,
-        sink: &mut dyn NotificationSink,
-    ) -> Option<CompletionNotification> {
-        let notification = self.reconcile(now)?;
-        let result = sink.request(notification);
-        self.apply_notification_result(notification.generation, result);
-        Some(notification)
     }
 
     pub(super) fn apply_notification_result(
@@ -555,10 +527,6 @@ pub(super) fn show_popup(
                                         .desired_width(88.0)
                                         .hint_text("25"),
                                 );
-                                #[cfg(test)]
-                                {
-                                    timer.minutes_input_rect = Some(response.rect);
-                                }
                                 response.widget_info(|| {
                                     WidgetInfo::labeled(
                                         WidgetType::TextEdit,
@@ -618,10 +586,6 @@ pub(super) fn show_popup(
                 ui.horizontal(|ui| {
                     let primary_label = timer.primary_label();
                     let primary = ui.button(primary_label);
-                    #[cfg(test)]
-                    {
-                        timer.primary_button_rect = Some(primary.rect);
-                    }
                     if primary.clicked() {
                         match (timer.mode, primary_label) {
                             (TimerMode::Countdown, "Start Sprint") => {
@@ -653,10 +617,6 @@ pub(super) fn show_popup(
                         }
                     }
                     let end = ui.add_enabled(timer.end_enabled(), egui::Button::new("End Sprint"));
-                    #[cfg(test)]
-                    {
-                        timer.end_button_rect = Some(end.rect);
-                    }
                     end.widget_info(|| {
                         WidgetInfo::labeled(
                             WidgetType::Button,
@@ -753,264 +713,5 @@ impl NotificationSink for NativeNotificationSink {
             let _ = notice;
             NotificationResult::Unavailable
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Default)]
-    struct RecordingSink {
-        requests: Vec<CompletionNotification>,
-        result: NotificationResult,
-    }
-
-    impl NotificationSink for RecordingSink {
-        fn request(&mut self, notice: CompletionNotification) -> NotificationResult {
-            self.requests.push(notice);
-            self.result.clone()
-        }
-    }
-
-    fn start(minutes: &str) -> SprintTimer {
-        let mut timer = SprintTimer::default();
-        timer.set_minutes_input(minutes.to_owned());
-        timer
-    }
-
-    #[test]
-    fn wo003_countdown_validates_input_and_preserves_invalid_text() {
-        let mut timer = SprintTimer::default();
-        assert_eq!(timer.minutes_input, "25");
-        for invalid in ["", "0", "1441", "999999999999999999999999999999999999"] {
-            timer.set_minutes_input(invalid.to_owned());
-            timer.start_countdown(Duration::ZERO);
-            assert!(timer.is_idle());
-            assert_eq!(timer.minutes_input, invalid);
-            assert!(timer.validation_error.is_some());
-        }
-        timer.set_minutes_input("1".to_owned());
-        timer.start_countdown(Duration::ZERO);
-        assert!(timer.is_running_or_paused());
-        timer.end(Duration::from_secs(2));
-        assert_eq!(timer.minutes_input, "1");
-        timer.set_minutes_input("1440".to_owned());
-        timer.start_countdown(Duration::ZERO);
-        assert!(timer.is_running_or_paused());
-    }
-
-    #[test]
-    fn wo003_digit_filter_keeps_empty_and_removes_signs_and_decimal_separators() {
-        let mut timer = SprintTimer::default();
-        timer.set_minutes_input("-1.5".to_owned());
-        assert_eq!(timer.minutes_input, "15");
-        timer.set_minutes_input("１２٣".to_owned());
-        assert_eq!(timer.minutes_input, "");
-        timer.set_minutes_input("00025".to_owned());
-        assert_eq!(timer.minutes_input, "00025");
-        timer.start_countdown(Duration::ZERO);
-        assert!(timer.is_running_or_paused());
-        timer.end(Duration::from_secs(1));
-        assert_eq!(timer.minutes_input, "00025");
-    }
-
-    #[test]
-    fn wo003_countdown_uses_ceiling_seconds_pause_resume_and_exact_end_restore() {
-        let mut timer = start("00025");
-        timer.start_countdown(Duration::ZERO);
-        assert_eq!(timer.countdown_display(Duration::from_millis(1)), "25:00");
-        assert_eq!(timer.countdown_display(Duration::from_secs(1)), "24:59");
-        timer.pause(Duration::from_secs(10));
-        let frozen = timer.remaining(Duration::from_secs(10));
-        timer.pause(Duration::from_secs(90));
-        assert_eq!(timer.remaining(Duration::from_secs(90)), frozen);
-        timer.resume(Duration::from_secs(100));
-        timer.end(Duration::from_secs(101));
-        assert_eq!(timer.minutes_input, "00025");
-        assert!(timer.is_idle());
-    }
-
-    #[test]
-    fn wo003_early_end_restores_captured_text_from_running_and_paused_states() {
-        let mut running = start("00025");
-        running.start_countdown(Duration::ZERO);
-        running.end(Duration::from_secs(2));
-        assert!(running.is_idle());
-        assert_eq!(running.minutes_input, "00025");
-
-        let mut paused = start("00025");
-        paused.start_countdown(Duration::ZERO);
-        paused.pause(Duration::from_secs(2));
-        paused.end(Duration::from_secs(10_000));
-        assert!(paused.is_idle());
-        assert_eq!(paused.minutes_input, "00025");
-    }
-
-    #[test]
-    fn wo003_completion_is_once_per_generation_and_stale_results_are_ignored() {
-        let mut timer = start("1");
-        let mut sink = RecordingSink {
-            result: NotificationResult::Pending,
-            ..Default::default()
-        };
-        timer.start_countdown(Duration::ZERO);
-        let notification = timer
-            .reconcile_with_sink(Duration::from_secs(60), &mut sink)
-            .unwrap_or_else(|| unreachable!());
-        assert_eq!(
-            timer.completed_message().as_deref(),
-            Some("Great Work! You completed a 1 Minute Sprint")
-        );
-        assert_eq!(timer.primary_label(), "Reset");
-        assert!(!timer.end_enabled());
-        assert_eq!(sink.requests.len(), 1);
-        assert!(timer
-            .reconcile_with_sink(Duration::from_secs(600), &mut sink)
-            .is_none());
-        timer.reset();
-        assert_eq!(timer.minutes_input, "25");
-        assert!(
-            !timer.apply_notification_result(notification.generation, NotificationResult::Accepted)
-        );
-
-        timer.set_minutes_input("2".to_owned());
-        timer.start_countdown(Duration::from_secs(700));
-        let second = timer
-            .reconcile_with_sink(Duration::from_secs(820), &mut sink)
-            .unwrap_or_else(|| unreachable!());
-        assert_ne!(notification.generation, second.generation);
-        assert_eq!(sink.requests.len(), 2);
-        assert_eq!(
-            timer.completed_message().as_deref(),
-            Some("Great Work! You completed a 2 Minutes Sprint")
-        );
-    }
-
-    #[test]
-    fn wo003_expiry_precedes_pause_end_and_reentrant_actions() {
-        let mut timer = start("1");
-        timer.start_countdown(Duration::ZERO);
-        assert!(timer.pause(Duration::from_secs(60)).is_some());
-        assert!(timer.is_completed());
-        assert!(timer.end(Duration::from_secs(60)).is_none());
-        assert!(timer.is_completed());
-        assert!(timer.start_countdown(Duration::from_secs(60)).is_none());
-        assert_eq!(timer.primary_label(), "Reset");
-    }
-
-    #[test]
-    fn wo003_stopwatch_saturates_formats_long_hours_and_resumes_from_accumulation() {
-        let mut timer = SprintTimer::default();
-        timer.select_mode(TimerMode::Stopwatch);
-        assert_eq!(timer.stopwatch_display(Duration::ZERO), "00:00:00");
-        timer.start_stopwatch(Duration::ZERO);
-        assert_eq!(
-            timer.stopwatch_display(Duration::from_secs(3_600)),
-            "01:00:00"
-        );
-        timer.pause(Duration::from_secs(3_600));
-        assert_eq!(
-            timer.stopwatch_display(Duration::from_secs(3_600 + 99 * 3_600)),
-            "01:00:00"
-        );
-        timer.resume(Duration::from_secs(1_000_000));
-        assert_eq!(
-            timer.stopwatch_display(Duration::from_secs(1_000_000 + 99 * 3_600)),
-            "100:00:00"
-        );
-        timer.end(Duration::from_secs(u64::MAX));
-        assert_eq!(
-            timer.stopwatch_display(Duration::from_secs(u64::MAX)),
-            "00:00:00"
-        );
-        assert!(timer.is_idle());
-    }
-
-    #[test]
-    fn wo003_mode_switching_is_idle_only_and_closing_respects_lifetime_rules() {
-        let mut timer = SprintTimer::default();
-        timer.set_minutes_input("42".to_owned());
-        assert!(timer.select_mode(TimerMode::Stopwatch));
-        assert_eq!(timer.mode, TimerMode::Stopwatch);
-        assert_eq!(timer.minutes_input, "25");
-        timer.start_stopwatch(Duration::ZERO);
-        assert!(!timer.mode_switch_enabled());
-        assert!(!timer.select_mode(TimerMode::Countdown));
-        timer.close_popup();
-        assert!(timer.is_running_or_paused());
-        timer.pause(Duration::from_secs(10));
-        timer.close_popup();
-        assert!(timer.is_running_or_paused());
-        timer.end(Duration::from_secs(10));
-        timer.close_popup();
-        assert!(timer.is_idle());
-        assert!(timer.select_mode(TimerMode::Countdown));
-        timer.set_minutes_input("4".to_owned());
-        timer.start_countdown(Duration::ZERO);
-        timer.reconcile(Duration::from_secs(240));
-        assert!(timer.is_completed());
-        assert!(!timer.mode_switch_enabled());
-        timer.close_popup();
-        assert_eq!(timer.mode, TimerMode::Countdown);
-        assert_eq!(timer.minutes_input, "25");
-        assert!(timer.is_idle());
-    }
-
-    #[test]
-    fn wo003_repaint_delays_are_bounded_and_stop_when_not_running() {
-        let mut timer = start("1");
-        assert!(timer.next_repaint_delay(Duration::ZERO).is_none());
-        timer.start_countdown(Duration::ZERO);
-        let delay = timer
-            .next_repaint_delay(Duration::from_millis(1))
-            .unwrap_or_default();
-        assert!(delay > Duration::ZERO && delay <= MAX_REPAINT_DELAY);
-        timer.pause(Duration::from_secs(2));
-        assert!(timer.next_repaint_delay(Duration::from_secs(2)).is_none());
-        timer.resume(Duration::from_secs(3));
-        assert!(timer.next_repaint_delay(Duration::from_secs(3)).is_some());
-        timer.end(Duration::from_secs(4));
-        assert!(timer.next_repaint_delay(Duration::from_secs(4)).is_none());
-    }
-
-    #[test]
-    fn wo003_deadline_and_resume_arithmetic_reject_overflow_without_panicking() {
-        let mut timer = start("1");
-        timer.start_countdown(Duration::MAX);
-        assert!(timer.is_idle());
-        assert!(timer.validation_error.is_some());
-
-        timer.start_countdown(Duration::ZERO);
-        timer.pause(Duration::from_secs(1));
-        timer.resume(Duration::MAX);
-        assert!(matches!(timer.state, TimerState::CountdownPaused { .. }));
-        assert!(timer.validation_error.is_some());
-
-        let mut stopwatch = SprintTimer::default();
-        stopwatch.select_mode(TimerMode::Stopwatch);
-        stopwatch.start_stopwatch(Duration::MAX);
-        assert_eq!(stopwatch.stopwatch_display(Duration::MAX), "00:00:00");
-        assert!(stopwatch.next_repaint_delay(Duration::MAX).is_some());
-    }
-
-    #[test]
-    fn wo003_notification_failure_keeps_completion_and_reset_available() {
-        let mut timer = start("1");
-        let mut sink = RecordingSink {
-            result: NotificationResult::Unavailable,
-            ..Default::default()
-        };
-        timer.start_countdown(Duration::ZERO);
-        timer.reconcile_with_sink(Duration::from_secs(60), &mut sink);
-        assert_eq!(
-            timer.notification_feedback,
-            Some(NotificationFeedback::Unavailable)
-        );
-        assert!(timer.completed_message().is_some());
-        assert_eq!(timer.primary_label(), "Reset");
-        timer.reset();
-        assert!(timer.is_idle());
-        assert_eq!(timer.minutes_input, "25");
     }
 }
