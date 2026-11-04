@@ -692,6 +692,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         references: Vec::new(),
         board_graph,
         managed_paragraph_index: None,
+        source_identity_use_index: None,
         source_text_bytes: 0,
     };
     preservation.rebuild_managed_paragraph_index();

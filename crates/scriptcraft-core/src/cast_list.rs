@@ -3,7 +3,7 @@
 use crate::preservation::PreservationError;
 use crate::scene_metadata::SceneMetadataError;
 use crate::{ModelError, Project, Role, MAX_TEXT_BYTES};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 /// The desktop refresh cadence for derived scene cast lists.
@@ -24,6 +24,16 @@ pub struct CastListCorrection {
     pub changed: bool,
     /// Whether any scene or formatted Cast List was safely left untouched.
     pub deferred: bool,
+    /// Number of scenes in the requested complete or affected-scene scope.
+    pub requested_scenes: u64,
+    /// Requested scenes whose projection/managed-heading scope was visited.
+    pub attempted_scenes: u64,
+    /// Attempted scenes with at least one derived value changed.
+    pub changed_scenes: u64,
+    /// Attempted scenes with no derived value changed and no deferral.
+    pub unchanged_scenes: u64,
+    /// Requested scenes safely left pending for a later relevant revision.
+    pub deferred_scenes: u64,
     /// Detached whole-project candidates created by this correction call.
     pub project_candidate_clones: u64,
     /// Managed-heading candidates cloned for scene-safe reconciliation.
@@ -69,22 +79,78 @@ pub fn correct_cast_lists_with_outcome(
 pub(crate) fn corrected_cast_list_candidate(
     project: &Project,
 ) -> Result<(Project, CastListCorrection), CastListError> {
+    corrected_cast_list_candidate_with_scope(project, None)
+        .map(|(candidate, outcome, _, _)| (candidate, outcome))
+}
+
+pub(crate) fn corrected_cast_list_candidate_for_scenes(
+    project: &Project,
+    requested_scenes: &BTreeSet<String>,
+) -> Result<(Project, CastListCorrection, BTreeSet<String>, BTreeSet<String>), CastListError> {
+    corrected_cast_list_candidate_with_scope(project, Some(requested_scenes))
+}
+
+pub(crate) fn corrected_cast_list_candidate_with_scope(
+    project: &Project,
+    requested_scenes: Option<&BTreeSet<String>>,
+) -> Result<(Project, CastListCorrection, BTreeSet<String>, BTreeSet<String>), CastListError> {
     let mut candidate = project.clone();
-    let mut outcome = correct_cast_lists_candidate(&mut candidate)?;
+    let (mut outcome, deferred_scenes, completed_scenes) =
+        correct_cast_lists_candidate(&mut candidate, requested_scenes)?;
     outcome.project_candidate_clones = 1;
     outcome.redundant_preservation_clones = 0;
-    Ok((candidate, outcome))
+    Ok((candidate, outcome, deferred_scenes, completed_scenes))
 }
 
 fn correct_cast_lists_candidate(
     candidate: &mut Project,
-) -> Result<CastListCorrection, CastListError> {
-    let reconciliation = crate::scene_metadata::reconcile_project_candidate_with_outcome(candidate)
-        .map_err(CastListError::SceneMetadata)?;
-    let mut deferred = !reconciliation.deferred_scenes.is_empty();
+    requested_scenes: Option<&BTreeSet<String>>,
+) -> Result<(CastListCorrection, BTreeSet<String>, BTreeSet<String>), CastListError> {
+    let all_scenes = candidate
+        .elements
+        .iter()
+        .filter(|element| element.role == Role::SceneHeading)
+        .map(|element| element.id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let scope = requested_scenes.cloned().unwrap_or_else(|| all_scenes.clone());
+    let mut source_deferred_scenes = BTreeSet::new();
+    let mut scene_start: Option<usize> = None;
+    for index in 0..=candidate.elements.len() {
+        let is_heading = candidate
+            .elements
+            .get(index)
+            .is_some_and(|element| element.role == Role::SceneHeading);
+        if is_heading || index == candidate.elements.len() {
+            if let Some(start) = scene_start {
+                let scene = &candidate.elements[start + 1..index];
+                let heading_id = &candidate.elements[start].id;
+                if scope.contains(heading_id.as_str())
+                    && scene_needs_cast_list_update(scene)?
+                    && !cast_list_source_is_replaceable(candidate, scene)?
+                {
+                    source_deferred_scenes.insert(heading_id.as_str().to_owned());
+                }
+            }
+            scene_start = is_heading.then_some(index);
+        }
+    }
+    let reconciliation_scope = scope
+        .difference(&source_deferred_scenes)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let reconciliation = crate::scene_metadata::reconcile_project_candidate_with_scope(
+        candidate,
+        Some(&reconciliation_scope),
+    )
+    .map_err(CastListError::SceneMetadata)?;
+    let mut deferred_scenes = source_deferred_scenes;
+    deferred_scenes.extend(reconciliation.deferred_scenes.iter().cloned());
+    deferred_scenes.extend(scope.difference(&all_scenes).cloned());
     let mut changed = reconciliation.changed;
+    let mut changed_scenes = reconciliation.changed_scenes.clone();
     let mut updates = Vec::new();
     let mut scene_start: Option<usize> = None;
+    let mut attempted_scenes = BTreeSet::new();
 
     for index in 0..=candidate.elements.len() {
         let is_heading = candidate
@@ -94,15 +160,17 @@ fn correct_cast_lists_candidate(
         if is_heading || index == candidate.elements.len() {
             if let Some(start) = scene_start {
                 let scene = &candidate.elements[start + 1..index];
-                if scene.iter().any(|element| element.role == Role::CastList) {
-                    let heading_id = &candidate.elements[start].id;
-                    if reconciliation
-                        .deferred_scenes
-                        .contains(heading_id.as_str())
-                    {
+                let heading_id = &candidate.elements[start].id;
+                if scope.contains(heading_id.as_str()) {
+                    attempted_scenes.insert(heading_id.as_str().to_owned());
+                    if deferred_scenes.contains(heading_id.as_str()) {
                         scene_start = is_heading.then_some(index);
                         continue;
                     }
+                }
+                if scope.contains(heading_id.as_str())
+                    && scene.iter().any(|element| element.role == Role::CastList)
+                {
                     let names = if candidate.preservation.is_some() {
                         crate::scene_metadata::scene_arc_names(&candidate, heading_id)
                             .map_err(CastListError::SceneMetadata)?
@@ -117,7 +185,7 @@ fn correct_cast_lists_candidate(
                         if candidate.elements[element_index].role == Role::CastList
                             && candidate.elements[element_index].text != cast
                         {
-                            updates.push((element_index, cast.clone()));
+                            updates.push((heading_id.as_str().to_owned(), element_index, cast.clone()));
                         }
                     }
                 }
@@ -126,23 +194,105 @@ fn correct_cast_lists_candidate(
         }
     }
 
-    for (element_index, replacement) in updates {
+    for (heading_id, element_index, replacement) in updates {
         match replace_cast_list_text(candidate, element_index, &replacement) {
-            Ok(()) => changed = true,
-            Err(CastListError::UnsupportedFormattedCastList) => deferred = true,
+            Ok(()) => {
+                changed = true;
+                changed_scenes.insert(heading_id);
+            }
+            Err(CastListError::UnsupportedFormattedCastList) => {
+                deferred_scenes.insert(heading_id);
+            }
             Err(error) => return Err(error),
         }
     }
+    attempted_scenes.extend(reconciliation.deferred_scenes.iter().cloned());
     if changed {
         candidate.validate()?;
     }
-    Ok(CastListCorrection {
+    let completed_scenes = attempted_scenes
+        .difference(&deferred_scenes)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let unchanged_scenes = attempted_scenes
+        .difference(&changed_scenes)
+        .filter(|scene| !deferred_scenes.contains(*scene))
+        .count();
+    let outcome = CastListCorrection {
         changed,
-        deferred,
+        deferred: !deferred_scenes.is_empty(),
+        requested_scenes: scope.len() as u64,
+        attempted_scenes: attempted_scenes.len() as u64,
+        changed_scenes: changed_scenes.len() as u64,
+        unchanged_scenes: unchanged_scenes as u64,
+        deferred_scenes: deferred_scenes.len() as u64,
         project_candidate_clones: 0,
         scene_candidate_clones: reconciliation.scene_candidates,
         redundant_preservation_clones: reconciliation.preservation_state_clones,
-    })
+    };
+    Ok((outcome, deferred_scenes, completed_scenes))
+}
+
+fn scene_needs_cast_list_update(
+    scene: &[crate::ScreenplayElement],
+) -> Result<bool, CastListError> {
+    if !scene.iter().any(|element| element.role == Role::CastList) {
+        return Ok(false);
+    }
+    let names = crate::scene_metadata::derived_character_projection(scene)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect::<Vec<_>>();
+    let replacement = scene_cast_text(&names)?;
+    Ok(scene
+        .iter()
+        .any(|element| element.role == Role::CastList && element.text != replacement))
+}
+
+fn cast_list_source_is_replaceable(
+    project: &Project,
+    scene: &[crate::ScreenplayElement],
+) -> Result<bool, CastListError> {
+    let names = crate::scene_metadata::derived_character_projection(scene)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect::<Vec<_>>();
+    let replacement = scene_cast_text(&names)?;
+    let mut supported = true;
+    for element in scene.iter().filter(|element| element.role == Role::CastList) {
+        if element.text == replacement {
+            continue;
+        }
+        if element.runs.iter().any(|run| !run.attributes.is_empty()) {
+            supported = false;
+            continue;
+        }
+        if let Some(preservation) = &project.preservation {
+            if preservation.has_managed_element(&element.id) {
+                let expected_runs = element
+                    .runs
+                    .iter()
+                    .map(|run| run.text.clone())
+                    .collect::<Vec<_>>();
+                match preservation
+                    .validate_managed_text_elements_replacement(&element.id, &expected_runs)
+                {
+                    Ok(()) => {}
+                    Err(PreservationError::UnsupportedTextMapping) => supported = false,
+                    Err(error) => return Err(CastListError::Preservation(error)),
+                }
+            } else if element.source_provenance.is_some() {
+                return Err(CastListError::Preservation(
+                    PreservationError::ManagedAnchorMissing,
+                ));
+            }
+        } else if element.source_provenance.is_some() {
+            return Err(CastListError::Preservation(
+                PreservationError::ManagedAnchorMissing,
+            ));
+        }
+    }
+    Ok(supported)
 }
 
 /// Returns a corrected clone suitable for Save or Save As preflight.
@@ -692,6 +842,126 @@ mod tests {
 
         assert!(!correct_cast_lists(&mut project).unwrap_or(true));
         assert_eq!(project, original);
+    }
+
+    #[test]
+    fn imported_multirun_cast_list_refresh_preserves_runs_arcs_and_save_projection() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content>
+<Paragraph Type="Scene Heading" ID="heading"><Text>INT. ROOM - DAY</Text></Paragraph>
+<Paragraph Type="Character" ID="cue"><Text>ALICE</Text></Paragraph>
+<Paragraph Type="Cast List" ID="cast"><Text>(OLD</Text><Text>)</Text></Paragraph>
+</Content></FinalDraft>"#;
+        let project = crate::fdx::read_v6(source)
+            .unwrap_or_else(|_| unreachable!("plain imported multi-run Cast List imports"))
+            .project;
+        let mut project = project;
+        assert!(correct_cast_lists(&mut project).unwrap_or(false));
+        assert_eq!(project.elements[2].text, "(ALICE)");
+        assert_eq!(project.elements[2].runs[0].text, "(ALICE)");
+        assert_eq!(project.elements[2].runs[1].text, "");
+
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        session
+            .set_selection(Selection::caret(Position {
+                element: 1,
+                offset: "ALICE".len(),
+            }))
+            .unwrap_or_else(|_| unreachable!("imported Character caret is valid"));
+        session
+            .insert("X")
+            .unwrap_or_else(|_| unreachable!("imported Character remains editable"));
+        assert!(session.refresh_cast_lists().unwrap_or(false));
+        assert_eq!(session.project().elements[2].text, "(ALICEX)");
+        assert_eq!(session.project().elements[2].runs[0].text, "(ALICEX)");
+        assert_eq!(session.project().elements[2].runs[1].text, "");
+        let heading = &session.project().elements[0];
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(session.project(), &heading.id)
+                .unwrap_or_else(|_| unreachable!()),
+            vec!["ALICEX".to_owned()]
+        );
+
+        let candidate = session
+            .prepare_cast_list_save_candidate()
+            .unwrap_or_else(|_| unreachable!("complete save preparation accepts corrected source"));
+        let emitted = crate::fdx::write_v6(&candidate)
+            .unwrap_or_else(|_| unreachable!("corrected imported FDX serializes"));
+        let reopened = crate::fdx::read_v6(&emitted)
+            .unwrap_or_else(|_| unreachable!("corrected imported FDX reopens"))
+            .project;
+        assert_eq!(reopened.elements[2].text, "(ALICEX)");
+        assert_eq!(reopened.elements[2].runs[0].text, "(ALICEX)");
+        assert_eq!(reopened.elements[2].runs[1].text, "");
+        let heading = &reopened.elements[0];
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(&reopened, &heading.id)
+                .unwrap_or_else(|_| unreachable!()),
+            vec!["ALICEX".to_owned()]
+        );
+    }
+
+    #[test]
+    fn imported_empty_cast_list_is_rebuilt_and_round_trips() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content>
+<Paragraph Type="Scene Heading" ID="heading"><Text>INT. ROOM - DAY</Text></Paragraph>
+<Paragraph Type="Character" ID="cue"><Text>ADA</Text></Paragraph>
+<Paragraph Type="Cast List" ID="cast"><Text/></Paragraph>
+</Content></FinalDraft>"#;
+        let mut project = crate::fdx::read_v6(source)
+            .unwrap_or_else(|_| unreachable!("imported empty Cast List fixture imports"))
+            .project;
+
+        assert!(correct_cast_lists(&mut project).unwrap_or(false));
+        assert_eq!(project.elements[2].text, "(ADA)");
+        let emitted = crate::fdx::write_v6(&project)
+            .unwrap_or_else(|_| unreachable!("rebuilt empty Cast List serializes"));
+        let reopened = crate::fdx::read_v6(&emitted)
+            .unwrap_or_else(|_| unreachable!("rebuilt empty Cast List reopens"))
+            .project;
+        assert_eq!(reopened.elements[2].text, "(ADA)");
+    }
+
+    #[test]
+    fn unsupported_imported_cast_source_defers_whole_scene_but_updates_independent_scene() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content>
+<Paragraph Type="Scene Heading" ID="unsupported-heading"><Text>INT. OPAQUE - DAY</Text></Paragraph>
+<Paragraph Type="Character" ID="unsupported-cue"><Text>ALPHA</Text></Paragraph>
+<Paragraph Type="Cast List" ID="unsupported-cast"><Text>(STALE)</Text><VendorPayload>retain</VendorPayload></Paragraph>
+<Paragraph Type="Scene Heading" ID="supported-heading"><Text>EXT. STREET - DAY</Text></Paragraph>
+<Paragraph Type="Character" ID="supported-cue"><Text>BETA</Text></Paragraph>
+<Paragraph Type="Cast List" ID="supported-cast"><Text>(STALE)</Text></Paragraph>
+</Content></FinalDraft>"#;
+        let mut project = crate::fdx::read_v6(source)
+            .unwrap_or_else(|_| unreachable!("imported opaque Cast List fixture imports"))
+            .project;
+
+        let outcome = correct_cast_lists_with_outcome(&mut project)
+            .unwrap_or_else(|_| unreachable!("unsupported Cast List mapping safely defers"));
+        assert!(outcome.changed);
+        assert!(outcome.deferred);
+        assert_eq!(outcome.deferred_scenes, 1);
+        assert_eq!(project.elements[2].text, "(STALE)");
+        assert_eq!(project.elements[5].text, "(BETA)");
+        assert!(crate::scene_metadata::scene_arc_names(&project, &project.elements[0].id).is_err());
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(&project, &project.elements[3].id)
+                .unwrap_or_else(|_| unreachable!("independent supported scene reconciles")),
+            vec!["BETA".to_owned()]
+        );
+
+        let emitted = crate::fdx::write_v6(&project)
+            .unwrap_or_else(|_| unreachable!("deferred plus corrected scenes serialize"));
+        let reopened = crate::fdx::read_v6(&emitted)
+            .unwrap_or_else(|_| unreachable!("deferred plus corrected scenes reopen"))
+            .project;
+        assert_eq!(reopened.elements[2].text, "(STALE)");
+        assert_eq!(reopened.elements[5].text, "(BETA)");
+        assert!(crate::scene_metadata::scene_arc_names(&reopened, &reopened.elements[0].id).is_err());
+        assert_eq!(
+            crate::scene_metadata::scene_arc_names(&reopened, &reopened.elements[3].id)
+                .unwrap_or_else(|_| unreachable!()),
+            vec!["BETA".to_owned()]
+        );
     }
 
     #[test]

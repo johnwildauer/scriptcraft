@@ -5,7 +5,7 @@ use crate::{
     validate_layout_inputs, LayoutInputs, ModelError, Project, Role, ScreenplayElement, TextRun,
     MAX_ELEMENTS, MAX_TEXT_BYTES,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Session edit-validation work counts. These are structural counters, not
@@ -37,6 +37,73 @@ pub fn reset_edit_validation_diagnostics() {
     SCOPED_CANDIDATE_ACCEPTS.store(0, Ordering::Relaxed);
     FULL_CANDIDATE_VALIDATIONS.store(0, Ordering::Relaxed);
     FULL_VALIDATION_FALLBACKS.store(0, Ordering::Relaxed);
+}
+
+/// Value-free view of session-owned derived invalidation for scheduler policy.
+/// Scene identities remain internal to the core handoff.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DerivedWorkSummary {
+    /// Whether any derived invalidation remains, including safely deferred scenes.
+    pub pending: bool,
+    pub complete: bool,
+    pub affected_scene_count: usize,
+    /// Whether the scheduler can make progress now. Deferred-only work waits for
+    /// a later relevant edit instead of being retried on every timer tick.
+    pub retryable: bool,
+    /// Number of affected scenes currently held by safe-stop deferral.
+    pub deferred_scene_count: usize,
+    /// Whether a complete refresh failed and is suspended pending invalidation.
+    pub failed_complete: bool,
+    /// Number of affected scenes whose correction failed and is suspended.
+    pub failed_scene_count: usize,
+}
+
+/// Pending derived work. Scene-heading identities are deliberately not exposed
+/// through the public summary or diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingDerivedInvalidation {
+    None,
+    Scenes(BTreeSet<String>),
+    Complete,
+}
+
+impl PendingDerivedInvalidation {
+    fn summary(&self) -> DerivedWorkSummary {
+        match self {
+            Self::None => DerivedWorkSummary::default(),
+            Self::Scenes(scenes) => DerivedWorkSummary {
+                pending: !scenes.is_empty(),
+                complete: false,
+                affected_scene_count: scenes.len(),
+                retryable: !scenes.is_empty(),
+                deferred_scene_count: 0,
+                failed_complete: false,
+                failed_scene_count: 0,
+            },
+            Self::Complete => DerivedWorkSummary {
+                pending: true,
+                complete: true,
+                affected_scene_count: 0,
+                retryable: true,
+                deferred_scene_count: 0,
+                failed_complete: false,
+                failed_scene_count: 0,
+            },
+        }
+    }
+
+    fn merge(&mut self, newer: Self) {
+        match (self, newer) {
+            (current @ Self::Complete, _) => *current = Self::Complete,
+            (current, Self::Complete) => *current = Self::Complete,
+            (Self::None, Self::None) => {}
+            (current @ Self::None, Self::Scenes(scenes)) => {
+                *current = Self::Scenes(scenes);
+            }
+            (Self::Scenes(_), Self::None) => {}
+            (Self::Scenes(current), Self::Scenes(scenes)) => current.extend(scenes),
+        }
+    }
 }
 
 fn validate_full_candidate(project: &Project) -> Result<(), ModelError> {
@@ -108,6 +175,46 @@ pub enum EditError {
     Model(ModelError),
 }
 
+impl EditError {
+    /// Returns only the bounded call-site label for a managed-text mismatch.
+    pub fn managed_text_mismatch_diagnostic(&self) -> Option<&'static str> {
+        use crate::preservation::{ManagedTextMismatchSite, PreservationError};
+
+        let site = match self {
+            Self::Preservation(PreservationError::ManagedTextMismatchAt(site)) => Some(*site),
+            Self::Model(ModelError::InvalidPreservationState(
+                PreservationError::ManagedTextMismatchAt(site),
+            )) => Some(*site),
+            Self::CastList(CastListError::Preservation(
+                PreservationError::ManagedTextMismatchAt(site),
+            )) => Some(*site),
+            Self::CastList(CastListError::Model(ModelError::InvalidPreservationState(
+                PreservationError::ManagedTextMismatchAt(site),
+            ))) => Some(*site),
+            Self::CastList(CastListError::SceneMetadata(
+                crate::scene_metadata::SceneMetadataError::Preservation(
+                    PreservationError::ManagedTextMismatchAt(site),
+                ),
+            )) => Some(*site),
+            _ => None,
+        };
+        site.map(ManagedTextMismatchSite::diagnostic_name)
+    }
+
+    /// Converts scheduled derived-refresh failures to a bounded category.
+    pub fn scheduled_refresh_failure_category(&self) -> &'static str {
+        match self {
+            Self::CastList(CastListError::SceneMetadata(_)) => "scene reconciliation",
+            Self::CastList(CastListError::Preservation(_)) => "Cast List source mapping",
+            Self::CastList(CastListError::Model(_)) => "model validation",
+            Self::CastList(CastListError::UnsupportedFormattedCastList) => {
+                "formatted Cast List mapping"
+            }
+            _ => "other safe refresh failure",
+        }
+    }
+}
+
 impl From<ModelError> for EditError {
     fn from(error: ModelError) -> Self {
         Self::Model(error)
@@ -141,6 +248,10 @@ pub struct EditingSession {
     history_limit: usize,
     validated_baseline: bool,
     last_validation_was_scoped: bool,
+    pending_derived_invalidation: PendingDerivedInvalidation,
+    deferred_derived_scenes: BTreeSet<String>,
+    failed_derived_complete: bool,
+    failed_derived_scenes: BTreeSet<String>,
 }
 
 impl PartialEq for EditingSession {
@@ -158,6 +269,10 @@ impl PartialEq for EditingSession {
             && self.generated_parentheticals == other.generated_parentheticals
             && self.history_limit == other.history_limit
             && self.validated_baseline == other.validated_baseline
+            && self.pending_derived_invalidation == other.pending_derived_invalidation
+            && self.deferred_derived_scenes == other.deferred_derived_scenes
+            && self.failed_derived_complete == other.failed_derived_complete
+            && self.failed_derived_scenes == other.failed_derived_scenes
     }
 }
 
@@ -223,6 +338,10 @@ impl EditingSession {
             history_limit: 100,
             validated_baseline: true,
             last_validation_was_scoped: false,
+            pending_derived_invalidation: PendingDerivedInvalidation::Complete,
+            deferred_derived_scenes: BTreeSet::new(),
+            failed_derived_complete: false,
+            failed_derived_scenes: BTreeSet::new(),
         })
     }
 
@@ -283,6 +402,79 @@ impl EditingSession {
     pub const fn revision(&self) -> u64 {
         self.revision
     }
+    /// Returns value-free derived-work state without disclosing document or
+    /// scene identities. A complete refresh reports zero individually affected
+    /// scenes because its scope is the whole document. Deferred-only work stays
+    /// pending but is not retryable until a later relevant invalidation.
+    pub fn pending_derived_work_summary(&self) -> DerivedWorkSummary {
+        let mut summary = self.pending_derived_invalidation.summary();
+        match &self.pending_derived_invalidation {
+            PendingDerivedInvalidation::Complete => {
+                summary.failed_complete = self.failed_derived_complete;
+                summary.retryable = !self.failed_derived_complete;
+            }
+            PendingDerivedInvalidation::Scenes(scenes) => {
+                summary.deferred_scene_count = scenes
+                    .intersection(&self.deferred_derived_scenes)
+                    .count();
+                summary.failed_scene_count = scenes
+                    .intersection(&self.failed_derived_scenes)
+                    .count();
+                summary.retryable = scenes
+                    .difference(&self.deferred_derived_scenes)
+                    .filter(|scene| !self.failed_derived_scenes.contains(*scene))
+                    .next()
+                    .is_some();
+            }
+            PendingDerivedInvalidation::None => {}
+        }
+        summary
+    }
+
+    /// Internal scope handoff for the next core correction order.
+    pub(crate) fn pending_derived_invalidation(&self) -> &PendingDerivedInvalidation {
+        &self.pending_derived_invalidation
+    }
+
+    /// Completes only work actually reconciled by a successful correction.
+    /// Scoped completion cannot consume a pending complete refresh.
+    pub(crate) fn complete_derived_invalidation(
+        &mut self,
+        completed_scenes: &BTreeSet<String>,
+        deferred_scenes: &BTreeSet<String>,
+        complete_refresh: bool,
+    ) {
+        if complete_refresh {
+            self.pending_derived_invalidation = if deferred_scenes.is_empty() {
+                PendingDerivedInvalidation::None
+            } else {
+                PendingDerivedInvalidation::Scenes(deferred_scenes.clone())
+            };
+            self.deferred_derived_scenes = deferred_scenes.clone();
+            self.failed_derived_complete = false;
+            self.failed_derived_scenes.clear();
+            return;
+        }
+        if let PendingDerivedInvalidation::Scenes(pending) =
+            &mut self.pending_derived_invalidation
+        {
+            pending.retain(|scene| !completed_scenes.contains(scene));
+            if pending.is_empty() {
+                self.pending_derived_invalidation = PendingDerivedInvalidation::None;
+            }
+        }
+        self.failed_derived_scenes
+            .retain(|scene| !completed_scenes.contains(scene));
+        if let PendingDerivedInvalidation::Scenes(pending) =
+            &mut self.pending_derived_invalidation
+        {
+            pending.extend(deferred_scenes.iter().cloned());
+        }
+        self.deferred_derived_scenes
+            .retain(|scene| !completed_scenes.contains(scene));
+        self.deferred_derived_scenes
+            .extend(deferred_scenes.iter().cloned());
+    }
     /// Reports whether the latest successful session mutation used the
     /// preconditioned single-paragraph validator. This is diagnostic-only.
     pub const fn last_edit_used_scoped_validation(&self) -> bool {
@@ -313,17 +505,59 @@ impl EditingSession {
     pub fn refresh_cast_lists_with_outcome(
         &mut self,
     ) -> Result<crate::cast_list::CastListCorrection, EditError> {
-        let (mut project, outcome) =
-            cast_list::corrected_cast_list_candidate(&self.project).map_err(EditError::CastList)?;
+        let (scope, complete_refresh) = match &self.pending_derived_invalidation {
+            PendingDerivedInvalidation::None => {
+                return Ok(crate::cast_list::CastListCorrection::default());
+            }
+            PendingDerivedInvalidation::Complete => {
+                if self.failed_derived_complete {
+                    return Ok(crate::cast_list::CastListCorrection::default());
+                }
+                (None, true)
+            }
+            PendingDerivedInvalidation::Scenes(scenes) => {
+                let retryable = scenes
+                    .difference(&self.deferred_derived_scenes)
+                    .filter(|scene| !self.failed_derived_scenes.contains(*scene))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if retryable.is_empty() {
+                    return Ok(crate::cast_list::CastListCorrection::default());
+                }
+                (Some(retryable), false)
+            }
+        };
+        let (mut project, outcome, deferred_scenes, completed_scenes) =
+            match cast_list::corrected_cast_list_candidate_with_scope(
+                &self.project,
+                scope.as_ref(),
+            ) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    if complete_refresh {
+                        self.failed_derived_complete = true;
+                    } else if let Some(attempted_scenes) = scope {
+                        self.failed_derived_scenes.extend(attempted_scenes);
+                    }
+                    return Err(EditError::CastList(error));
+                }
+            };
         if outcome.changed {
             if let Some(preservation) = project.preservation.as_mut() {
-                preservation.rebuild_managed_paragraph_index();
+                if !preservation.has_source_identity_use_index() {
+                    preservation.rebuild_managed_paragraph_index();
+                }
             }
             self.project = project;
             self.revision = self.revision.saturating_add(1);
             self.dirty = self.project != self.clean_project;
             self.last_validation_was_scoped = false;
         }
+        self.complete_derived_invalidation(
+            &completed_scenes,
+            &deferred_scenes,
+            complete_refresh,
+        );
         Ok(outcome)
     }
 
@@ -366,6 +600,12 @@ impl EditingSession {
         rebased.generated_parentheticals = generated_parentheticals;
         rebased.dirty = false;
         rebased.last_validation_was_scoped = false;
+        // The detached save candidate has already passed complete derived
+        // preparation; do not schedule a duplicate timer pass after publish.
+        rebased.pending_derived_invalidation = PendingDerivedInvalidation::None;
+        rebased.deferred_derived_scenes.clear();
+        rebased.failed_derived_complete = false;
+        rebased.failed_derived_scenes.clear();
         // Saving changes the preservation baseline and therefore invalidates
         // render caches even when the visible semantic text did not change.
         rebased.revision = rebased.revision.saturating_add(1);
@@ -781,6 +1021,10 @@ impl EditingSession {
         self.dirty = self.project != self.clean_project;
         self.validated_baseline = true;
         self.last_validation_was_scoped = false;
+        self.pending_derived_invalidation = PendingDerivedInvalidation::Complete;
+        self.deferred_derived_scenes.clear();
+        self.failed_derived_complete = false;
+        self.failed_derived_scenes.clear();
         Ok(())
     }
 
@@ -806,6 +1050,10 @@ impl EditingSession {
         self.dirty = self.project != self.clean_project;
         self.validated_baseline = true;
         self.last_validation_was_scoped = false;
+        self.pending_derived_invalidation = PendingDerivedInvalidation::Complete;
+        self.deferred_derived_scenes.clear();
+        self.failed_derived_complete = false;
+        self.failed_derived_scenes.clear();
         Ok(())
     }
 
@@ -832,6 +1080,11 @@ impl EditingSession {
         let mut generated = self.generated_parentheticals.clone();
         let prior_generated = generated.clone();
         let selection = operation(&mut project, &self.selection, &mut generated, &self.policy)?;
+        if let Some(preservation) = project.preservation.as_mut() {
+            if !preservation.has_source_identity_use_index() {
+                preservation.rebuild_managed_paragraph_index();
+            }
+        }
         invalidate_changed_generated_parentheticals(
             &self.project,
             &project,
@@ -890,13 +1143,33 @@ impl EditingSession {
             }
             validate_full_candidate(&project)?;
             if let Some(preservation) = project.preservation.as_mut() {
-                preservation.rebuild_managed_paragraph_index();
+                if !preservation.has_source_identity_use_index() {
+                    preservation.rebuild_managed_paragraph_index();
+                }
             }
             validate_selection(&project, selection)?;
         }
         if project == self.project && selection == self.selection {
             self.last_validation_was_scoped = scoped_valid;
             return Ok(());
+        }
+        let derived_invalidation = classify_derived_invalidation(&self.project, &project);
+        match &derived_invalidation {
+            PendingDerivedInvalidation::Scenes(scenes) => {
+                self.deferred_derived_scenes
+                    .retain(|scene| !scenes.contains(scene));
+                self.failed_derived_scenes
+                    .retain(|scene| !scenes.contains(scene));
+                // A new relevant scoped invalidation permits the previously
+                // failed complete candidate to be attempted again.
+                self.failed_derived_complete = false;
+            }
+            PendingDerivedInvalidation::Complete => {
+                self.deferred_derived_scenes.clear();
+                self.failed_derived_complete = false;
+                self.failed_derived_scenes.clear();
+            }
+            PendingDerivedInvalidation::None => {}
         }
         self.push_history(Snapshot {
             project: self.project.clone(),
@@ -911,6 +1184,8 @@ impl EditingSession {
         self.dirty = self.project != self.clean_project;
         self.validated_baseline = true;
         self.last_validation_was_scoped = scoped_valid;
+        self.pending_derived_invalidation
+            .merge(derived_invalidation);
         Ok(())
     }
 
@@ -923,6 +1198,139 @@ impl EditingSession {
             self.history.remove(0);
         }
     }
+}
+
+fn classify_derived_invalidation(before: &Project, after: &Project) -> PendingDerivedInvalidation {
+    // Structural edits are matched by stable identity, not by position. A
+    // duplicate identity makes the before/after correspondence ambiguous, so
+    // retain the safe complete fallback rather than guessing at ownership.
+    let Some(before_by_id) = unique_elements_by_id(&before.elements) else {
+        return PendingDerivedInvalidation::Complete;
+    };
+    let Some(after_by_id) = unique_elements_by_id(&after.elements) else {
+        return PendingDerivedInvalidation::Complete;
+    };
+
+    let before_heading_order = before
+        .elements
+        .iter()
+        .filter(|element| element.role == Role::SceneHeading)
+        .map(|element| element.id.as_str())
+        .collect::<Vec<_>>();
+    let after_heading_order = after
+        .elements
+        .iter()
+        .filter(|element| element.role == Role::SceneHeading)
+        .map(|element| element.id.as_str())
+        .collect::<Vec<_>>();
+    let before_heading_set = before_heading_order.iter().copied().collect::<BTreeSet<_>>();
+    let after_heading_set = after_heading_order.iter().copied().collect::<BTreeSet<_>>();
+
+    // Existing scene boundaries changing relative order cannot be assigned a
+    // reliable local split/join mapping. Insertions and removals remain
+    // classifiable through each Character cue's before/after owner.
+    let before_common_heading_order = before_heading_order
+        .iter()
+        .copied()
+        .filter(|id| after_heading_set.contains(id))
+        .collect::<Vec<_>>();
+    let after_common_heading_order = after_heading_order
+        .iter()
+        .copied()
+        .filter(|id| before_heading_set.contains(id))
+        .collect::<Vec<_>>();
+    if before_common_heading_order != after_common_heading_order {
+        return PendingDerivedInvalidation::Complete;
+    }
+
+    // The ordered Character identity/text projection is exactly the input
+    // whose changes can affect a scene's generated cast and arc data. Building
+    // it on both sides also catches cue insertion/deletion, role transitions,
+    // cue reorder, and ownership transfer caused by heading topology edits.
+    let Some(before_character_inputs) = character_projection_inputs(&before.elements) else {
+        return PendingDerivedInvalidation::Complete;
+    };
+    let Some(after_character_inputs) = character_projection_inputs(&after.elements) else {
+        return PendingDerivedInvalidation::Complete;
+    };
+
+    let mut affected = after_heading_set
+        .difference(&before_heading_set)
+        .map(|heading| (*heading).to_owned())
+        .collect::<BTreeSet<_>>();
+    let owners = before_character_inputs
+        .keys()
+        .chain(after_character_inputs.keys())
+        .collect::<BTreeSet<_>>();
+    for owner in owners {
+        if before_character_inputs.get(owner) != after_character_inputs.get(owner)
+            && after_heading_set.contains(owner.as_str())
+        {
+            affected.insert(owner.clone());
+        }
+    }
+
+    // Preserve the established single-element behavior for heading text
+    // changes. Newly-created/role-transitioned headings are already included
+    // above; removed headings cannot be refreshed because they are no longer
+    // live scene owners.
+    for (id, old) in &before_by_id {
+        if let Some(new) = after_by_id.get(id) {
+            if old.role == Role::SceneHeading
+                && new.role == Role::SceneHeading
+                && old.text != new.text
+            {
+                affected.insert(id.clone());
+            }
+        }
+    }
+
+    if affected.is_empty() {
+        PendingDerivedInvalidation::None
+    } else {
+        PendingDerivedInvalidation::Scenes(affected)
+    }
+}
+
+fn unique_elements_by_id<'a>(
+    elements: &'a [ScreenplayElement],
+) -> Option<BTreeMap<String, &'a ScreenplayElement>> {
+    let mut by_id = BTreeMap::new();
+    for element in elements {
+        if by_id
+            .insert(element.id.as_str().to_owned(), element)
+            .is_some()
+        {
+            return None;
+        }
+    }
+    Some(by_id)
+}
+
+fn character_projection_inputs(
+    elements: &[ScreenplayElement],
+) -> Option<BTreeMap<String, Vec<(String, String)>>> {
+    let mut by_scene = BTreeMap::<String, Vec<(String, String)>>::new();
+    for (index, element) in elements.iter().enumerate() {
+        if element.role != Role::Character {
+            continue;
+        }
+        let owner = owning_scene_id(elements, index)?;
+        by_scene
+            .entry(owner)
+            .or_default()
+            .push((element.id.as_str().to_owned(), element.text.clone()));
+    }
+    Some(by_scene)
+}
+
+fn owning_scene_id(elements: &[ScreenplayElement], element_index: usize) -> Option<String> {
+    elements
+        .get(..=element_index)?
+        .iter()
+        .rev()
+        .find(|element| element.role == Role::SceneHeading)
+        .map(|heading| heading.id.as_str().to_owned())
 }
 
 fn map_selection_to_project(
@@ -1500,6 +1908,47 @@ mod tests {
     };
     use crate::{Project, RunAttribute, SourceFormat, SourceProvenance, SourceSection};
 
+    #[test]
+    fn edit_errors_expose_only_managed_mismatch_site_and_safe_refresh_class() {
+        use crate::cast_list::CastListError;
+        use crate::preservation::{ManagedTextMismatchSite, PreservationError};
+        use crate::scene_metadata::SceneMetadataError;
+
+        let mismatch = EditError::Model(ModelError::InvalidPreservationState(
+            PreservationError::ManagedTextMismatchAt(
+                ManagedTextMismatchSite::ScopedEditValidation,
+            ),
+        ));
+        assert_eq!(
+            mismatch.managed_text_mismatch_diagnostic(),
+            Some("scoped-edit-validation"),
+        );
+        assert_eq!(
+            EditError::CastList(CastListError::SceneMetadata(
+                SceneMetadataError::UnsupportedSceneMetadata,
+            ))
+            .scheduled_refresh_failure_category(),
+            "scene reconciliation",
+        );
+        assert_eq!(
+            EditError::CastList(CastListError::Preservation(
+                PreservationError::UnsupportedTextMapping,
+            ))
+            .scheduled_refresh_failure_category(),
+            "Cast List source mapping",
+        );
+        assert_eq!(
+            EditError::CastList(CastListError::Model(ModelError::InvalidRunProjection))
+                .scheduled_refresh_failure_category(),
+            "model validation",
+        );
+        assert_eq!(
+            EditError::CastList(CastListError::UnsupportedFormattedCastList)
+                .scheduled_refresh_failure_category(),
+            "formatted Cast List mapping",
+        );
+    }
+
     fn session(text: &str, role: Role) -> EditingSession {
         let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements[0].role = role;
@@ -1510,6 +1959,625 @@ mod tests {
         session
             .set_selection(Selection::caret(Position { element, offset }))
             .unwrap_or_else(|_| unreachable!());
+    }
+
+    fn relevance_session() -> EditingSession {
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        project.elements = vec![
+            ScreenplayElement::new("scene-a", Role::SceneHeading, "INT. ONE")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("action-a", Role::Action, "Action")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cue-a", Role::Character, "ALPHA")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("scene-b", Role::SceneHeading, "EXT. TWO")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cue-b", Role::Character, "BETA")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("action-b", Role::Action, "More action")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        EditingSession::new(project).unwrap_or_else(|_| unreachable!())
+    }
+
+    fn clear_pending_derived(session: &mut EditingSession) {
+        session.pending_derived_invalidation = PendingDerivedInvalidation::None;
+        session.deferred_derived_scenes.clear();
+        session.failed_derived_complete = false;
+        session.failed_derived_scenes.clear();
+    }
+
+    fn scoped_cast_session() -> EditingSession {
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        project.elements = vec![
+            ScreenplayElement::new("scene-a", Role::SceneHeading, "INT. ONE")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cue-a", Role::Character, "ALPHA")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cast-a", Role::CastList, "(stale A)")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("scene-b", Role::SceneHeading, "EXT. TWO")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cue-b", Role::Character, "BETA")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cast-b", Role::CastList, "(stale B)")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        EditingSession::new(project).unwrap_or_else(|_| unreachable!())
+    }
+
+    #[test]
+    fn derived_relevance_starts_complete_and_summary_discloses_no_identities() {
+        let session = relevance_session();
+        assert_eq!(
+            session.pending_derived_work_summary(),
+            DerivedWorkSummary {
+                pending: true,
+                complete: true,
+                affected_scene_count: 0,
+                retryable: true,
+                deferred_scene_count: 0,
+                failed_complete: false,
+                failed_scene_count: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn non_character_text_is_irrelevant_and_character_text_scopes_to_its_scene() {
+        let mut session = relevance_session();
+        clear_pending_derived(&mut session);
+
+        set(&mut session, 1, "Action".len());
+        session.insert(" continues").unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
+
+        set(&mut session, 2, "ALPHA".len());
+        session.insert(" TWO").unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            session.pending_derived_invalidation(),
+            &PendingDerivedInvalidation::Scenes(BTreeSet::from(["scene-a".to_owned()]))
+        );
+        assert_eq!(session.pending_derived_work_summary().affected_scene_count, 1);
+    }
+
+    #[test]
+    fn character_role_transitions_and_heading_edits_mark_their_owners() {
+        let mut session = relevance_session();
+        clear_pending_derived(&mut session);
+
+        set(&mut session, 1, 0);
+        session.change_role(Role::Character).unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            session.pending_derived_invalidation(),
+            &PendingDerivedInvalidation::Scenes(BTreeSet::from(["scene-a".to_owned()]))
+        );
+
+        clear_pending_derived(&mut session);
+        set(&mut session, 1, 0);
+        session.change_role(Role::Action).unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.pending_derived_work_summary().affected_scene_count, 1);
+
+        clear_pending_derived(&mut session);
+        set(&mut session, 3, "EXT. TWO".len());
+        session.insert(" - NIGHT").unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            session.pending_derived_invalidation(),
+            &PendingDerivedInvalidation::Scenes(BTreeSet::from(["scene-b".to_owned()]))
+        );
+    }
+
+    #[test]
+    fn independent_relevant_edits_union_scene_scopes() {
+        let mut session = relevance_session();
+        clear_pending_derived(&mut session);
+        set(&mut session, 2, "ALPHA".len());
+        session.insert(" X").unwrap_or_else(|_| unreachable!());
+        set(&mut session, 4, "BETA".len());
+        session.insert(" Y").unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            session.pending_derived_invalidation(),
+            &PendingDerivedInvalidation::Scenes(BTreeSet::from([
+                "scene-a".to_owned(),
+                "scene-b".to_owned(),
+            ]))
+        );
+    }
+
+    #[test]
+    fn structural_relevance_matrix_classifies_roles_and_scene_topology() {
+        fn element(id: &str, role: Role, text: &str) -> ScreenplayElement {
+            ScreenplayElement::new(id, role, text).unwrap_or_else(|_| unreachable!())
+        }
+        fn project(elements: Vec<ScreenplayElement>) -> Project {
+            let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+            project.elements = elements;
+            project
+        }
+        fn scenes(ids: &[&str]) -> PendingDerivedInvalidation {
+            PendingDerivedInvalidation::Scenes(
+                ids.iter().map(|id| (*id).to_owned()).collect(),
+            )
+        }
+
+        let before = relevance_session().project().clone();
+        let base = before.elements.clone();
+
+        // Purely structural Action changes leave every ordered Character
+        // projection untouched; this includes same-scene split/join shapes.
+        let mut action_insert = base.clone();
+        action_insert.insert(2, element("action-new", Role::Action, "new action"));
+        assert_eq!(
+            classify_derived_invalidation(&before, &project(action_insert)),
+            PendingDerivedInvalidation::None,
+        );
+        let mut action_delete = base.clone();
+        action_delete.remove(1);
+        assert_eq!(
+            classify_derived_invalidation(&before, &project(action_delete)),
+            PendingDerivedInvalidation::None,
+        );
+
+        let mut cue_insert = base.clone();
+        cue_insert.insert(2, element("cue-new", Role::Character, "GAMMA"));
+        assert_eq!(
+            classify_derived_invalidation(&before, &project(cue_insert)),
+            scenes(&["scene-a"]),
+        );
+        let mut cue_delete = base.clone();
+        cue_delete.remove(2);
+        assert_eq!(
+            classify_derived_invalidation(&before, &project(cue_delete)),
+            scenes(&["scene-a"]),
+        );
+
+        let mut heading_insert = base.clone();
+        heading_insert.insert(
+            2,
+            element("scene-new", Role::SceneHeading, "INT. NEW ROOM"),
+        );
+        assert_eq!(
+            classify_derived_invalidation(&before, &project(heading_insert)),
+            scenes(&["scene-a", "scene-new"]),
+        );
+        let mut heading_remove = base.clone();
+        heading_remove.remove(3);
+        assert_eq!(
+            classify_derived_invalidation(&before, &project(heading_remove)),
+            scenes(&["scene-a"]),
+        );
+
+        let mut action_to_character = base.clone();
+        action_to_character[1].role = Role::Character;
+        assert_eq!(
+            classify_derived_invalidation(&before, &project(action_to_character)),
+            scenes(&["scene-a"]),
+        );
+        let mut character_to_action = base.clone();
+        character_to_action[2].role = Role::Action;
+        assert_eq!(
+            classify_derived_invalidation(&before, &project(character_to_action)),
+            scenes(&["scene-a"]),
+        );
+
+        // A join across a heading transfers the following cue into the
+        // surviving scene; deletion of its old heading ID is not schedulable.
+        let cross_scene_before = project(vec![
+            element("scene-a", Role::SceneHeading, "INT. ONE"),
+            element("action-a", Role::Action, "Action"),
+            element("scene-b", Role::SceneHeading, "EXT. TWO"),
+            element("cue-b", Role::Character, "BETA"),
+        ]);
+        let cross_scene_after = project(vec![
+            element("scene-a", Role::SceneHeading, "INT. ONE"),
+            element("action-a", Role::Action, "Action EXT. TWO"),
+            element("cue-b", Role::Character, "BETA"),
+        ]);
+        assert_eq!(
+            classify_derived_invalidation(&cross_scene_before, &cross_scene_after),
+            scenes(&["scene-a"]),
+        );
+
+        let mut ambiguous_identity = base.clone();
+        ambiguous_identity.push(element("cue-a", Role::Action, "duplicate identity"));
+        assert_eq!(
+            classify_derived_invalidation(&before, &project(ambiguous_identity)),
+            PendingDerivedInvalidation::Complete,
+        );
+        let mut ambiguous_owner = base;
+        ambiguous_owner.remove(0);
+        assert_eq!(
+            classify_derived_invalidation(&before, &project(ambiguous_owner)),
+            PendingDerivedInvalidation::Complete,
+        );
+
+        // Undo/redo retain their established conservative complete scope.
+        let mut history = relevance_session();
+        clear_pending_derived(&mut history);
+        set(&mut history, 2, "ALPHA".len());
+        history.insert(" X").unwrap_or_else(|_| unreachable!());
+        clear_pending_derived(&mut history);
+        history.undo().unwrap_or_else(|_| unreachable!());
+        assert!(history.pending_derived_work_summary().complete);
+        clear_pending_derived(&mut history);
+        history.redo().unwrap_or_else(|_| unreachable!());
+        assert!(history.pending_derived_work_summary().complete);
+    }
+
+    #[test]
+    fn irrelevant_structural_edits_do_not_reactivate_failed_or_deferred_work() {
+        let mut failed_complete = relevance_session();
+        clear_pending_derived(&mut failed_complete);
+        failed_complete.pending_derived_invalidation = PendingDerivedInvalidation::Complete;
+        failed_complete.failed_derived_complete = true;
+        set(&mut failed_complete, 1, "Action".len());
+        failed_complete.split().unwrap_or_else(|_| unreachable!());
+        let failed = failed_complete.pending_derived_work_summary();
+        assert!(failed.pending && failed.complete && failed.failed_complete);
+        assert!(!failed.retryable);
+
+        let mut deferred_scene = relevance_session();
+        clear_pending_derived(&mut deferred_scene);
+        deferred_scene.pending_derived_invalidation = PendingDerivedInvalidation::Scenes(
+            BTreeSet::from(["scene-a".to_owned()]),
+        );
+        deferred_scene.deferred_derived_scenes.insert("scene-a".to_owned());
+        set(&mut deferred_scene, 1, "Action".len());
+        deferred_scene.split().unwrap_or_else(|_| unreachable!());
+        let deferred = deferred_scene.pending_derived_work_summary();
+        assert!(deferred.pending && !deferred.complete);
+        assert_eq!(deferred.deferred_scene_count, 1);
+        assert!(!deferred.retryable);
+    }
+
+    #[test]
+    fn scoped_completion_cannot_consume_complete_work_and_clears_only_finished_scenes() {
+        let mut session = relevance_session();
+        session.complete_derived_invalidation(&BTreeSet::new(), &BTreeSet::new(), false);
+        assert_eq!(session.pending_derived_work_summary().complete, true);
+        session.complete_derived_invalidation(&BTreeSet::new(), &BTreeSet::new(), true);
+        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
+
+        clear_pending_derived(&mut session);
+        set(&mut session, 2, "ALPHA".len());
+        session.insert(" X").unwrap_or_else(|_| unreachable!());
+        set(&mut session, 4, "BETA".len());
+        session.insert(" Y").unwrap_or_else(|_| unreachable!());
+        session.complete_derived_invalidation(
+            &BTreeSet::from(["scene-a".to_owned()]),
+            &BTreeSet::new(),
+            false,
+        );
+        assert_eq!(
+            session.pending_derived_invalidation(),
+            &PendingDerivedInvalidation::Scenes(BTreeSet::from(["scene-b".to_owned()]))
+        );
+        session.complete_derived_invalidation(
+            &BTreeSet::from(["scene-b".to_owned()]),
+            &BTreeSet::new(),
+            false,
+        );
+        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
+    }
+
+    #[test]
+    fn initial_complete_refresh_and_single_scene_refresh_report_value_free_counts() {
+        let mut session = scoped_cast_session();
+        let initial = session
+            .refresh_cast_lists_with_outcome()
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(initial.requested_scenes, 2);
+        assert_eq!(initial.attempted_scenes, 2);
+        assert_eq!(initial.changed_scenes, 2);
+        assert_eq!(session.project().elements[2].text, "(ALPHA)");
+        assert_eq!(session.project().elements[5].text, "(BETA)");
+        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
+
+        set(&mut session, 1, "ALPHA".len());
+        session.insert(" X").unwrap_or_else(|_| unreachable!());
+        let scoped = session
+            .refresh_cast_lists_with_outcome()
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(scoped.requested_scenes, 1);
+        assert_eq!(scoped.attempted_scenes, 1);
+        assert_eq!(scoped.changed_scenes, 1);
+        assert_eq!(scoped.deferred_scenes, 0);
+        assert_eq!(session.project().elements[2].text, "(ALPHA X)");
+        assert_eq!(session.project().elements[5].text, "(BETA)");
+
+        session.undo().unwrap_or_else(|_| unreachable!());
+        assert!(session.pending_derived_work_summary().complete);
+        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.project().elements[2].text, "(ALPHA)");
+        session.redo().unwrap_or_else(|_| unreachable!());
+        assert!(session.pending_derived_work_summary().complete);
+        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.project().elements[2].text, "(ALPHA X)");
+    }
+
+    #[test]
+    fn multiple_affected_scenes_are_reconciled_without_touching_other_scene_content() {
+        let mut session = scoped_cast_session();
+        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
+        let unrelated_before = session.project().elements[3..].to_vec();
+        set(&mut session, 1, "ALPHA".len());
+        session.insert(" TWO").unwrap_or_else(|_| unreachable!());
+        set(&mut session, 4, "BETA".len());
+        session.insert(" TWO").unwrap_or_else(|_| unreachable!());
+
+        let outcome = session
+            .refresh_cast_lists_with_outcome()
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(outcome.requested_scenes, 2);
+        assert_eq!(outcome.attempted_scenes, 2);
+        assert_eq!(session.project().elements[2].text, "(ALPHA TWO)");
+        assert_eq!(session.project().elements[3..], unrelated_before);
+    }
+
+    #[test]
+    fn role_transitions_and_character_removal_reproject_the_owning_scene() {
+        let mut session = scoped_cast_session();
+        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
+
+        set(&mut session, 1, "ALPHA".len());
+        session
+            .change_role(Role::Action)
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.pending_derived_work_summary().affected_scene_count, 1);
+        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.project().elements[2].text, "()");
+
+        set(&mut session, 1, "ALPHA".len());
+        session
+            .change_role(Role::Character)
+            .unwrap_or_else(|_| unreachable!());
+        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.project().elements[2].text, "(ALPHA)");
+
+        set(&mut session, 1, "ALPHA".len());
+        session
+            .set_selection(Selection {
+                anchor: Position { element: 1, offset: 0 },
+                focus: Position { element: 1, offset: "ALPHA".len() },
+            })
+            .unwrap_or_else(|_| unreachable!());
+        session.delete().unwrap_or_else(|_| unreachable!());
+        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.project().elements[2].text, "()");
+    }
+
+    #[test]
+    fn deferred_scene_waits_for_its_own_relevant_revision_and_remains_pending() {
+        let mut session = scoped_cast_session();
+        session.project.elements[2].runs[0].attributes.push(RunAttribute {
+            name: "Bold".to_owned(),
+            value: "true".to_owned(),
+        });
+        let initial = session
+            .refresh_cast_lists_with_outcome()
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(initial.deferred_scenes, 1);
+        assert_eq!(session.pending_derived_invalidation(), &PendingDerivedInvalidation::Scenes(
+            BTreeSet::from(["scene-a".to_owned()])
+        ));
+        let deferred_summary = session.pending_derived_work_summary();
+        assert!(deferred_summary.pending);
+        assert!(!deferred_summary.retryable);
+        assert_eq!(deferred_summary.affected_scene_count, 1);
+        assert_eq!(deferred_summary.deferred_scene_count, 1);
+        assert_eq!(session.project().elements[5].text, "(BETA)");
+
+        set(&mut session, 4, "BETA".len());
+        session.insert(" unrelated").unwrap_or_else(|_| unreachable!());
+        let skipped = session
+            .refresh_cast_lists_with_outcome()
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(skipped.attempted_scenes, 0);
+        assert_eq!(session.pending_derived_work_summary().affected_scene_count, 1);
+
+        set(&mut session, 1, "ALPHA".len());
+        session.insert(" changed").unwrap_or_else(|_| unreachable!());
+        let retried = session
+            .refresh_cast_lists_with_outcome()
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(retried.requested_scenes, 1);
+        assert_eq!(retried.attempted_scenes, 1);
+        assert_eq!(retried.deferred_scenes, 1);
+    }
+
+    #[test]
+    fn scoped_refresh_and_explicit_save_candidate_keep_complete_save_preparation() {
+        let mut session = scoped_cast_session();
+        session.pending_derived_invalidation = PendingDerivedInvalidation::Scenes(
+            BTreeSet::from(["scene-a".to_owned()]),
+        );
+        session.project.elements[2].text = "(stale A)".to_owned();
+        session.project.elements[5].text = "(stale B)".to_owned();
+
+        session.refresh_cast_lists().unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.project().elements[2].text, "(ALPHA)");
+        assert_eq!(session.project().elements[5].text, "(stale B)");
+        let save_candidate = session
+            .prepare_cast_list_save_candidate()
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(save_candidate.elements[2].text, "(ALPHA)");
+        assert_eq!(save_candidate.elements[5].text, "(BETA)");
+        assert_eq!(session.project().elements[5].text, "(stale B)");
+    }
+
+    #[test]
+    fn fatal_later_scoped_scene_keeps_prior_candidate_and_pending_scope_unpublished() {
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        let oversized_name = "N".repeat(MAX_TEXT_BYTES / 2);
+        project.elements = vec![
+            ScreenplayElement::new("scene-a", Role::SceneHeading, "INT. ONE")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cue-a", Role::Character, "ALPHA")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cast-a", Role::CastList, "(stale A)")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("scene-b", Role::SceneHeading, "EXT. TWO")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cue-b1", Role::Character, &oversized_name)
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cue-b2", Role::Character, &format!("M{}", oversized_name))
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cast-b", Role::CastList, "(stale B)")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        let requested = BTreeSet::from(["scene-a".to_owned(), "scene-b".to_owned()]);
+        session.pending_derived_invalidation =
+            PendingDerivedInvalidation::Scenes(requested.clone());
+        let original = session.project().clone();
+
+        assert!(session.refresh_cast_lists_with_outcome().is_err());
+        assert_eq!(session.project(), &original);
+        assert_eq!(session.pending_derived_invalidation(), &PendingDerivedInvalidation::Scenes(requested));
+        let failed = session.pending_derived_work_summary();
+        assert!(failed.pending);
+        assert!(!failed.complete);
+        assert!(!failed.retryable);
+        assert_eq!(failed.failed_scene_count, 2);
+
+        // A relevant edit wakes only its own scene; the other failed scope stays
+        // pending and suspended after the newly eligible scene succeeds.
+        set(&mut session, 1, "ALPHA".len());
+        session.insert(" X").unwrap_or_else(|_| unreachable!());
+        assert!(session.pending_derived_work_summary().retryable);
+        let retried = session
+            .refresh_cast_lists_with_outcome()
+            .unwrap_or_else(|_| unreachable!("the newly invalidated scene can be corrected"));
+        assert_eq!(retried.attempted_scenes, 1);
+        let still_failed = session.pending_derived_work_summary();
+        assert!(still_failed.pending);
+        assert!(!still_failed.retryable);
+        assert_eq!(still_failed.failed_scene_count, 1);
+    }
+
+    #[test]
+    fn failed_complete_refresh_suspends_until_relevant_invalidation_and_save_still_prepares() {
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        let oversized_name = "N".repeat(MAX_TEXT_BYTES / 2);
+        project.elements = vec![
+            ScreenplayElement::new("scene-a", Role::SceneHeading, "INT. ONE")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("action-a", Role::Action, "Action")
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cue-a1", Role::Character, &oversized_name)
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cue-a2", Role::Character, &format!("M{oversized_name}"))
+                .unwrap_or_else(|_| unreachable!()),
+            ScreenplayElement::new("cast-a", Role::CastList, "(stale)")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        let mut session = EditingSession::new(project).unwrap_or_else(|_| unreachable!());
+        let original = session.project().clone();
+        let revision = session.revision();
+
+        assert!(session.refresh_cast_lists_with_outcome().is_err());
+        let failed = session.pending_derived_work_summary();
+        assert!(failed.pending);
+        assert!(failed.complete);
+        assert!(!failed.retryable);
+        assert!(failed.failed_complete);
+        assert_eq!(session.project(), &original);
+        assert_eq!(session.revision(), revision);
+        assert!(!session.dirty());
+        assert!(!session.can_undo());
+
+        // Explicit save preparation still executes the complete candidate path,
+        // but cannot publish or consume the failed live-session invalidation.
+        assert!(session.prepare_cast_list_save_candidate().is_err());
+        assert_eq!(session.project(), &original);
+        assert!(session.pending_derived_work_summary().failed_complete);
+
+        // Direct callers cannot bypass suspension; due timer calls receive a
+        // no-work outcome until the failed complete scope is invalidated.
+        let suspended = session
+            .refresh_cast_lists_with_outcome()
+            .unwrap_or_else(|_| unreachable!("suspended work is not retried"));
+        assert_eq!(suspended.attempted_scenes, 0);
+        assert!(session.pending_derived_work_summary().failed_complete);
+
+        set(&mut session, 1, "Action".len());
+        session.insert(" continues").unwrap_or_else(|_| unreachable!());
+        assert!(!session.pending_derived_work_summary().retryable);
+
+        // A character edit is relevant, so the complete pending work may get
+        // one fresh attempt. The repeated failure is suspended again.
+        set(&mut session, 2, oversized_name.len());
+        session.insert(" X").unwrap_or_else(|_| unreachable!());
+        let reactivated = session.pending_derived_work_summary();
+        assert!(reactivated.pending && reactivated.complete && reactivated.retryable);
+        assert!(session.refresh_cast_lists_with_outcome().is_err());
+        let suspended_again = session.pending_derived_work_summary();
+        assert!(suspended_again.pending && suspended_again.failed_complete);
+        assert!(!suspended_again.retryable);
+    }
+
+    #[test]
+    fn suspended_complete_timer_state_does_not_block_complete_save_candidate() {
+        let mut session = scoped_cast_session();
+        session.pending_derived_invalidation = PendingDerivedInvalidation::Complete;
+        session.failed_derived_complete = true;
+        let live_project = session.project().clone();
+
+        let save_candidate = session
+            .prepare_cast_list_save_candidate()
+            .unwrap_or_else(|_| unreachable!("complete save correction remains available"));
+        assert_eq!(save_candidate.elements[2].text, "(ALPHA)");
+        assert_eq!(save_candidate.elements[5].text, "(BETA)");
+        assert_eq!(session.project(), &live_project);
+        let summary = session.pending_derived_work_summary();
+        assert!(summary.pending && summary.complete && summary.failed_complete);
+        assert!(!summary.retryable);
+    }
+
+    #[test]
+    fn replacement_requires_complete_refresh_but_saved_rebase_is_already_current() {
+        let mut session = relevance_session();
+        clear_pending_derived(&mut session);
+        let project = session
+            .prepare_cast_list_save_candidate()
+            .unwrap_or_else(|_| unreachable!());
+        let rebased = session
+            .prepare_saved_rebase(project.clone())
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(rebased.pending_derived_work_summary(), DerivedWorkSummary::default());
+
+        session
+            .replace_with_saved(project)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(session.pending_derived_work_summary().complete);
+    }
+
+    #[test]
+    fn no_op_and_failed_edits_leave_pending_scope_unchanged() {
+        let mut session = relevance_session();
+        clear_pending_derived(&mut session);
+        let original_project = session.project().clone();
+        let original_revision = session.revision();
+        set(&mut session, 1, "Action".len());
+        session.insert("").unwrap_or_else(|_| unreachable!());
+        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
+
+        assert_eq!(session.insert(&"x".repeat(MAX_TEXT_BYTES + 1)), Err(EditError::TextTooLong));
+        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
+        assert_eq!(session.project(), &original_project);
+        assert_eq!(session.revision(), original_revision);
+    }
+
+    #[test]
+    fn explicit_save_candidate_preparation_is_independent_of_pending_scope() {
+        let mut session = relevance_session();
+        clear_pending_derived(&mut session);
+        let before = session.project().clone();
+        let candidate = session
+            .prepare_cast_list_save_candidate()
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(candidate, before);
+        assert_eq!(session.pending_derived_work_summary(), DerivedWorkSummary::default());
     }
 
     #[test]
@@ -1664,6 +2732,7 @@ mod tests {
             references: Vec::new(),
             board_graph: BoardGraph::default(),
             managed_paragraph_index: None,
+            source_identity_use_index: None,
             source_text_bytes: 0,
         });
         project
@@ -2451,7 +3520,7 @@ mod tests {
     }
 
     #[test]
-    fn structural_edits_and_history_restores_rebuild_managed_indexes() {
+    fn structural_edits_and_history_restores_rebuild_managed_and_source_use_indexes() {
         let project = preserved_project(
             Role::Action,
             "before after",
@@ -2475,18 +3544,24 @@ mod tests {
         assert!(!session.last_edit_used_scoped_validation());
         let right_id = session.project().elements[1].id.clone();
         let state = session.project().preservation.as_ref().unwrap_or_else(|| unreachable!());
+        assert!(state.has_source_identity_use_index());
         assert!(state.has_managed_element(&session.project().elements[0].id));
         assert!(state.has_managed_element(&right_id));
         assert!(session.project().validate().is_ok());
 
         assert_eq!(session.undo(), Ok(()));
+        assert!(session.project().preservation.as_ref()
+            .is_some_and(|state| state.has_source_identity_use_index()));
         assert!(session.project().validate().is_ok());
         assert_eq!(session.redo(), Ok(()));
+        assert!(session.project().preservation.as_ref()
+            .is_some_and(|state| state.has_source_identity_use_index()));
         assert!(session.project().validate().is_ok());
         let left_end = session.project().elements[0].text.len();
         set(&mut session, 0, left_end);
         assert_eq!(session.join_with_next(), Ok(()));
         let state = session.project().preservation.as_ref().unwrap_or_else(|| unreachable!());
+        assert!(state.has_source_identity_use_index());
         assert!(state.has_managed_element(&session.project().elements[0].id));
         assert!(!state.has_managed_element(&right_id));
         assert!(session.project().validate().is_ok());
@@ -2497,12 +3572,17 @@ mod tests {
             .project()
             .preservation
             .as_ref()
-            .is_some_and(|state| state.has_managed_element(&rebased.project().elements[0].id)));
+            .is_some_and(|state| {
+                state.has_managed_element(&rebased.project().elements[0].id)
+                    && state.has_source_identity_use_index()
+            }));
         let mut replaced = session.clone();
         replaced
             .replace_with_saved(session.project.clone())
             .unwrap_or_else(|_| unreachable!());
         assert!(replaced.project().validate().is_ok());
+        assert!(replaced.project().preservation.as_ref()
+            .is_some_and(|state| state.has_source_identity_use_index()));
         assert!(crate::preservation::managed_paragraph_index_diagnostics().rebuilds
             > before.rebuilds);
     }

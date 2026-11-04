@@ -30,7 +30,7 @@ mod sprint_timer;
 mod status_bar;
 mod toolbar;
 use sprint_timer::{NotificationResult, NotificationSink};
-use status_bar::{DiagnosticProjection, ViewportPageTracker};
+use status_bar::{DiagnosticProjection, ViewportCenterAnchor, ViewportPageTracker};
 use toolbar::{toolbar_chrome_color, toolbar_content_height};
 
 const EDITOR_SURFACE_ID: &str = "page-editor-surface";
@@ -125,6 +125,11 @@ struct PerformanceMeasurements {
     derived_refresh_changed: u64,
     derived_refresh_unchanged: u64,
     derived_refresh_deferred: u64,
+    derived_refresh_failed: u64,
+    derived_refresh_irrelevant_skips: u64,
+    derived_scenes_requested: u64,
+    derived_scenes_attempted: u64,
+    derived_scenes_deferred: u64,
     derived_project_candidate_clones: u64,
     derived_scene_candidate_clones: u64,
     derived_redundant_preservation_clones: u64,
@@ -192,6 +197,21 @@ impl PerformanceMeasurements {
             derived_refresh_deferred: self
                 .derived_refresh_deferred
                 .saturating_sub(baseline.derived_refresh_deferred),
+            derived_refresh_failed: self
+                .derived_refresh_failed
+                .saturating_sub(baseline.derived_refresh_failed),
+            derived_refresh_irrelevant_skips: self
+                .derived_refresh_irrelevant_skips
+                .saturating_sub(baseline.derived_refresh_irrelevant_skips),
+            derived_scenes_requested: self
+                .derived_scenes_requested
+                .saturating_sub(baseline.derived_scenes_requested),
+            derived_scenes_attempted: self
+                .derived_scenes_attempted
+                .saturating_sub(baseline.derived_scenes_attempted),
+            derived_scenes_deferred: self
+                .derived_scenes_deferred
+                .saturating_sub(baseline.derived_scenes_deferred),
             derived_project_candidate_clones: self
                 .derived_project_candidate_clones
                 .saturating_sub(baseline.derived_project_candidate_clones),
@@ -302,7 +322,7 @@ impl PerformanceDiagnostics {
         let totals = self.totals;
         let benchmark = self.benchmark_delta();
         format!(
-            "profile={build_profile} operation={} frames={} events={} layouts={} cache-hits={} layout-identity-changes={} pages-considered={} pages-culled={} pages-painted={} lines={} selection-spans={} galleys-built={} galleys-reused={} wraps-built={} wraps-reused={} caret-lookups={} interaction-indexed={} interaction-linear={} interaction-index-entries={} derived-attempted={} derived-completed={} derived-skipped={} derived-changed={} derived-unchanged={} derived-deferred={} derived-project-candidates={} derived-scene-candidates={} derived-redundant-preservation-clones={} frame-ns={} event-ns={} layout-lookup-ns={} element-wrap-ns={} page-paint-ns={} caret-lookup-ns={} derived-refresh-ns={} benchmark-frames={} benchmark-layouts={} benchmark-pages-painted={} benchmark-wraps-built={} benchmark-linear-queries={} benchmark-indexed-queries={} benchmark-index-entries={}",
+            "profile={build_profile} operation={} frames={} events={} layouts={} cache-hits={} layout-identity-changes={} pages-considered={} pages-culled={} pages-painted={} lines={} selection-spans={} galleys-built={} galleys-reused={} wraps-built={} wraps-reused={} caret-lookups={} interaction-indexed={} interaction-linear={} interaction-index-entries={} derived-attempted={} derived-completed={} derived-skipped={} derived-irrelevant-skips={} derived-changed={} derived-unchanged={} derived-deferred={} derived-failed={} derived-scenes-requested={} derived-scenes-attempted={} derived-scenes-deferred={} derived-project-candidates={} derived-scene-candidates={} derived-redundant-preservation-clones={} frame-ns={} event-ns={} layout-lookup-ns={} element-wrap-ns={} page-paint-ns={} caret-lookup-ns={} derived-refresh-ns={} benchmark-frames={} benchmark-layouts={} benchmark-pages-painted={} benchmark-wraps-built={} benchmark-linear-queries={} benchmark-indexed-queries={} benchmark-index-entries={}",
             self.benchmark_operation.label(),
             totals.frames,
             totals.events,
@@ -325,9 +345,14 @@ impl PerformanceDiagnostics {
             totals.derived_refresh_attempts,
             totals.derived_refresh_completed,
             totals.derived_refresh_skipped,
+            totals.derived_refresh_irrelevant_skips,
             totals.derived_refresh_changed,
             totals.derived_refresh_unchanged,
             totals.derived_refresh_deferred,
+            totals.derived_refresh_failed,
+            totals.derived_scenes_requested,
+            totals.derived_scenes_attempted,
+            totals.derived_scenes_deferred,
             totals.derived_project_candidate_clones,
             totals.derived_scene_candidate_clones,
             totals.derived_redundant_preservation_clones,
@@ -360,41 +385,12 @@ enum RevealIntent {
     Conditional,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DerivedRefreshDisposition {
-    Changed,
-    Unchanged,
-    Deferred,
-    Failed,
-    SavePublished,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DerivedRefreshWatermark {
-    revision: u64,
-    disposition: DerivedRefreshDisposition,
-}
-
-impl DerivedRefreshWatermark {
-    fn covers(self, revision: u64) -> bool {
-        self.revision == revision
-            && matches!(
-                self.disposition,
-                DerivedRefreshDisposition::Changed
-                    | DerivedRefreshDisposition::Unchanged
-                    | DerivedRefreshDisposition::Deferred
-                    | DerivedRefreshDisposition::SavePublished
-            )
-    }
-}
-
 struct ScriptCraftApp {
     session: EditingSession,
     focus_mode: focus_mode::FocusModeController,
     sprint_timer: sprint_timer::SprintTimer,
     timer_clock_origin: Instant,
     next_cast_list_refresh: Instant,
-    last_derived_refresh: Option<DerivedRefreshWatermark>,
     notification_sink: sprint_timer::NativeNotificationSink,
     notification_results: Receiver<(u64, NotificationResult)>,
     surface_focused: bool,
@@ -415,6 +411,7 @@ struct ScriptCraftApp {
     reveal_intent: RevealIntent,
     preferred_vertical_x: Option<i64>,
     page_geometry: ViewportPageTracker,
+    pending_zoom_anchor: Option<ViewportCenterAnchor>,
     page_scale: Option<f32>,
     effective_pixels_per_point: Option<f32>,
     zoom_percent: u16,
@@ -445,6 +442,12 @@ struct ScriptCraftApp {
     last_layout_identity: Option<std::sync::Weak<ScreenplayLayout>>,
 }
 
+fn scheduled_refresh_failure_status(category: &'static str) -> String {
+    format!(
+        "Cast-list refresh failed and is suspended until relevant document changes (failure category: {category})."
+    )
+}
+
 impl ScriptCraftApp {
     fn new() -> Result<Self, String> {
         let project = Project::new().map_err(|error| format!("new project failed: {error:?}"))?;
@@ -457,7 +460,6 @@ impl ScriptCraftApp {
             sprint_timer: sprint_timer::SprintTimer::default(),
             timer_clock_origin: Instant::now(),
             next_cast_list_refresh: Instant::now() + CAST_LIST_REFRESH_INTERVAL,
-            last_derived_refresh: None,
             notification_sink,
             notification_results,
             surface_focused: false,
@@ -478,6 +480,7 @@ impl ScriptCraftApp {
             reveal_intent: RevealIntent::None,
             preferred_vertical_x: None,
             page_geometry: ViewportPageTracker::default(),
+            pending_zoom_anchor: None,
             page_scale: None,
             effective_pixels_per_point: None,
             zoom_percent: 100,
@@ -562,15 +565,19 @@ impl ScriptCraftApp {
             return;
         }
 
-        if self
-            .last_derived_refresh
-            .is_some_and(|watermark| watermark.covers(self.session.revision()))
-        {
+        let pending = self.session.pending_derived_work_summary();
+        if !pending.retryable {
             self.next_cast_list_refresh = now + CAST_LIST_REFRESH_INTERVAL;
             self.performance.derived_refresh_skipped = self
                 .performance
                 .derived_refresh_skipped
                 .saturating_add(1);
+            if !pending.pending {
+                self.performance.derived_refresh_irrelevant_skips = self
+                    .performance
+                    .derived_refresh_irrelevant_skips
+                    .saturating_add(1);
+            }
             self.performance.derived_refresh_nanos = self
                 .performance
                 .derived_refresh_nanos
@@ -585,24 +592,8 @@ impl ScriptCraftApp {
             .derived_refresh_attempts
             .saturating_add(1);
         self.next_cast_list_refresh = now + CAST_LIST_REFRESH_INTERVAL;
-        let attempted_revision = self.session.revision();
-        self.last_derived_refresh = Some(DerivedRefreshWatermark {
-            revision: attempted_revision,
-            disposition: DerivedRefreshDisposition::Failed,
-        });
         match self.session.refresh_cast_lists_with_outcome() {
             Ok(outcome) => {
-                let disposition = if outcome.deferred {
-                    DerivedRefreshDisposition::Deferred
-                } else if outcome.changed {
-                    DerivedRefreshDisposition::Changed
-                } else {
-                    DerivedRefreshDisposition::Unchanged
-                };
-                self.last_derived_refresh = Some(DerivedRefreshWatermark {
-                    revision: self.session.revision(),
-                    disposition,
-                });
                 self.performance.derived_refresh_completed = self
                     .performance
                     .derived_refresh_completed
@@ -626,6 +617,18 @@ impl ScriptCraftApp {
                         .saturating_add(1);
                 }
                 add_performance_counter(
+                    &mut self.performance.derived_scenes_requested,
+                    outcome.requested_scenes,
+                );
+                add_performance_counter(
+                    &mut self.performance.derived_scenes_attempted,
+                    outcome.attempted_scenes,
+                );
+                add_performance_counter(
+                    &mut self.performance.derived_scenes_deferred,
+                    outcome.deferred_scenes,
+                );
+                add_performance_counter(
                     &mut self.performance.derived_project_candidate_clones,
                     outcome.project_candidate_clones,
                 );
@@ -638,14 +641,14 @@ impl ScriptCraftApp {
                     outcome.redundant_preservation_clones,
                 );
             }
-            Err(_) => {
-                self.performance.derived_refresh_deferred = self
+            Err(error) => {
+                self.performance.derived_refresh_failed = self
                     .performance
-                    .derived_refresh_deferred
+                    .derived_refresh_failed
                     .saturating_add(1);
-                self.status =
-                    "Cast-list refresh deferred because source data could not be updated safely."
-                        .into();
+                self.status = scheduled_refresh_failure_status(
+                    error.scheduled_refresh_failure_category(),
+                );
             }
         }
         self.performance.derived_refresh_nanos = self
@@ -658,6 +661,17 @@ impl ScriptCraftApp {
 
     fn sync_pinch_zoom_from_controls(&mut self) {
         self.pinch_zoom_percent = f64::from(self.zoom_percent);
+    }
+
+    fn capture_pending_zoom_anchor(&mut self, ctx: &egui::Context) {
+        if self.pending_zoom_anchor.is_none() {
+            self.pending_zoom_anchor = self.page_geometry.capture_center_anchor(
+                self.performance.frames,
+                self.session.revision(),
+                ctx.screen_rect(),
+                self.page_scale.unwrap_or(f32::NAN),
+            );
+        }
     }
 
     fn layout_for_render(
@@ -783,13 +797,9 @@ impl ScriptCraftApp {
             Ok(outcome) => {
                 self.native_path = target.path().map(PathBuf::from);
                 self.fdx_baseline = target.baseline().cloned();
-                // Save preflight always prepares the complete derived
-                // candidate. After publication/rebase, that revision is
-                // already current and must not be cloned again by the timer.
-                self.last_derived_refresh = Some(DerivedRefreshWatermark {
-                    revision: self.session.revision(),
-                    disposition: DerivedRefreshDisposition::SavePublished,
-                });
+                // Save preflight always prepares and publishes complete derived
+                // data. The session's pending-work state, not a revision marker,
+                // keeps the timer from repeating that work.
                 self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
                 self.layout_cache = LayoutCache::default();
                 self.page_geometry.invalidate();
@@ -942,11 +952,11 @@ impl ScriptCraftApp {
             scriptcraft_core::text_state::MAX_TEXT_SCALING,
         );
         self.sync_pinch_zoom_from_controls();
+        self.pending_zoom_anchor = None;
         self.native_path = Some(path.to_owned());
         self.fdx_baseline = baseline;
         self.pending_window_restore = window_state;
         self.pending_fdx_open = None;
-        self.last_derived_refresh = None;
         self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
         self.page_geometry.invalidate();
         self.layout_cache = LayoutCache::default();
@@ -1017,6 +1027,14 @@ impl ScriptCraftApp {
         self.status = format!("Operation failed; document unchanged ({detail}); {health}");
     }
 
+    fn show_edit_error(&mut self, error: EditError) {
+        let detail = match error.managed_text_mismatch_diagnostic() {
+            Some(category) => format!("ManagedTextMismatch ({category})"),
+            None => format!("{error:?}"),
+        };
+        self.show_error(detail);
+    }
+
     fn session_health(&self) -> String {
         let validation = match self.session.validate() {
             Ok(()) => "session valid".to_owned(),
@@ -1056,7 +1074,7 @@ impl ScriptCraftApp {
                 self.rendered_revision = None;
                 self.reveal_intent = reveal_intent;
             }
-            Err(error) => self.show_error(error),
+            Err(error) => self.show_edit_error(error),
         }
     }
 
@@ -1365,6 +1383,8 @@ impl ScriptCraftApp {
         let scroll_outer_rect = ui.available_rect_before_wrap();
         let mut rendered_scale = 1.0;
         let reveal_intent = self.reveal_intent;
+        let pending_zoom_anchor = self.pending_zoom_anchor;
+        let mut zoom_compensation_queued = false;
         let selection = self.session.selection();
         let scroll_output = egui::ScrollArea::both()
             .id_salt("page-editor-scroll")
@@ -1413,6 +1433,18 @@ impl ScriptCraftApp {
                         page_rects.push(page_rect);
                     });
                     ui.add_space(PAGE_VERTICAL_GAP);
+                }
+                if let Some(target) = pending_zoom_anchor
+                    .and_then(|anchor| viewport_center_anchor_target(anchor, &page_rects, scale))
+                {
+                    // `scroll_to_rect` applies one centered request in both axes.
+                    // The page-local coordinate scales with the page; the separately
+                    // represented gap/edge displacement and page-row padding do not.
+                    ui.scroll_to_rect(
+                        egui::Rect::from_center_size(target, Vec2::splat(0.1)),
+                        Some(egui::Align::Center),
+                    );
+                    zoom_compensation_queued = true;
                 }
                 let paint_range = viewport_paint_page_range(&page_rects, editor_clip);
                 let painted_in_range = paint_range.map_or(0, |(first, last)| {
@@ -1500,7 +1532,7 @@ impl ScriptCraftApp {
                     .then_some(caret_page_index)
                     .flatten()
                     .filter(|page_index| !layout.pages[*page_index].title_page);
-                if reveal_intent == RevealIntent::Conditional {
+                if reveal_intent == RevealIntent::Conditional && !zoom_compensation_queued {
                     if let (Some(page_index), Some(caret)) =
                         (caret_page_index, caret_geometry)
                     {
@@ -1544,7 +1576,9 @@ impl ScriptCraftApp {
             self.last_scroll_horizontal_item_spacing = horizontal_item_spacing;
             self.last_scroll_page_rects.clone_from(&page_rects);
         }
-        self.reveal_intent = RevealIntent::None;
+        if !zoom_compensation_queued {
+            self.reveal_intent = RevealIntent::None;
+        }
 
         let actual_clip = scroll_output.inner_rect.intersect(ui.clip_rect());
         let geometry_count_matches = page_rects.len() == layout.pages.len();
@@ -1556,11 +1590,17 @@ impl ScriptCraftApp {
                 scale,
                 page_rects.clone(),
                 actual_clip,
+                scroll_output.state.offset,
             )
         } else {
             self.page_geometry.invalidate();
             true
         };
+        if geometry_count_matches {
+            // The request is consumed only after the scaled page geometry has
+            // been published. Invalid/missing anchors simply preserve old behavior.
+            self.pending_zoom_anchor = None;
+        }
         if needs_repaint {
             self.request_repaint(ui.ctx());
         }
@@ -1741,11 +1781,14 @@ impl ScriptCraftApp {
 
     fn handle_surface_input(&mut self, ctx: &egui::Context) {
         self.native_input_diagnostics.dispatch_enabled = self.surface_focused;
+        if ctx.input(|input| input.raw_scroll_delta != Vec2::ZERO) {
+            // Explicit user scrolling wins over a not-yet-applied zoom request.
+            // It must not be pulled back to the old viewport center afterward.
+            self.pending_zoom_anchor = None;
+            self.reveal_intent = RevealIntent::None;
+        }
         if !self.surface_focused {
             return;
-        }
-        if ctx.input(|input| input.raw_scroll_delta != Vec2::ZERO) {
-            self.reveal_intent = RevealIntent::None;
         }
         self.native_input_diagnostics.dispatched_frames = self
             .native_input_diagnostics
@@ -2035,6 +2078,33 @@ fn page_scroll_geometry(viewport_width: f32, page_width: f32) -> PageScrollGeome
         leading_padding: ((content_width - page_width) / 2.0).max(0.0),
         horizontal_overflow: buffered_page_width > viewport_width,
     }
+}
+
+fn viewport_center_anchor_target(
+    anchor: ViewportCenterAnchor,
+    page_rects: &[egui::Rect],
+    scale: f32,
+) -> Option<egui::Pos2> {
+    let page_rect = *page_rects.get(anchor.page_index)?;
+    let local = anchor.page_local_document_point;
+    let outside = anchor.outside_page_offset_points;
+    if !scale.is_finite()
+        || scale <= 0.0
+        || !page_rect.min.x.is_finite()
+        || !page_rect.min.y.is_finite()
+        || !page_rect.width().is_finite()
+        || !page_rect.height().is_finite()
+        || page_rect.width() <= 0.0
+        || page_rect.height() <= 0.0
+        || !local.x.is_finite()
+        || !local.y.is_finite()
+        || !outside.x.is_finite()
+        || !outside.y.is_finite()
+    {
+        return None;
+    }
+    let target = page_rect.min + local * scale + outside;
+    (target.x.is_finite() && target.y.is_finite()).then_some(target)
 }
 
 #[cfg(test)]
@@ -2451,7 +2521,18 @@ fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egu
     let center = status_bar::project_center(&app.status, app.error.as_deref());
     let performance = app.performance;
     let input_diagnostics = &app.native_input_diagnostics;
-    let performance_summary = app.performance.safe_summary();
+    let derived_work = app.session.pending_derived_work_summary();
+    let performance_summary = format!(
+        "{} derived-pending={} derived-pending-complete={} derived-pending-scenes={} derived-retryable={} derived-pending-deferred-scenes={} derived-failed-complete={} derived-failed-scenes={}",
+        app.performance.safe_summary(),
+        derived_work.pending,
+        derived_work.complete,
+        derived_work.affected_scene_count,
+        derived_work.retryable,
+        derived_work.deferred_scene_count,
+        derived_work.failed_complete,
+        derived_work.failed_scene_count,
+    );
     let diagnostics = DiagnosticProjection {
         focused: input_diagnostics.focused,
         focus_lock: input_diagnostics.focus_lock_installed,
@@ -2504,6 +2585,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egu
             // Pointer/keyboard slider and exact preset edits become the new
             // continuous pinch baseline, keeping both control paths in sync
             // without changing document/session state.
+            app.capture_pending_zoom_anchor(ctx);
             app.sync_pinch_zoom_from_controls();
             app.page_geometry.invalidate();
             app.page_scale = None;
@@ -2593,8 +2675,12 @@ impl eframe::App for ScriptCraftApp {
                 if let Some(next) =
                     status_bar::zoom_after_native_factor(self.pinch_zoom_percent, *factor)
                 {
+                    let next_zoom = status_bar::normalized_zoom_percent(next);
+                    if next_zoom != self.zoom_percent {
+                        self.capture_pending_zoom_anchor(ctx);
+                    }
                     self.pinch_zoom_percent = next;
-                    self.zoom_percent = status_bar::normalized_zoom_percent(next);
+                    self.zoom_percent = next_zoom;
                 }
             }
         }
@@ -2764,6 +2850,14 @@ mod tests {
         let context = egui::Context::default();
         document_font::install(&context);
         context
+    }
+
+    #[test]
+    fn scheduled_refresh_status_appends_only_the_bounded_failure_category() {
+        assert_eq!(
+            scheduled_refresh_failure_status("scene reconciliation"),
+            "Cast-list refresh failed and is suspended until relevant document changes (failure category: scene reconciliation)."
+        );
     }
 
     fn legacy_json_project() -> Project {
@@ -3132,6 +3226,10 @@ mod tests {
         performance.derived_refresh_changed = 2;
         performance.derived_refresh_unchanged = 3;
         performance.derived_refresh_deferred = 1;
+        performance.derived_refresh_irrelevant_skips = 2;
+        performance.derived_scenes_requested = 8;
+        performance.derived_scenes_attempted = 6;
+        performance.derived_scenes_deferred = 1;
         performance.derived_project_candidate_clones = 4;
         performance.derived_scene_candidate_clones = 5;
         performance.derived_redundant_preservation_clones = 0;
@@ -3159,6 +3257,10 @@ mod tests {
         assert!(projected.contains("derived-changed=2"));
         assert!(projected.contains("derived-unchanged=3"));
         assert!(projected.contains("derived-deferred=1"));
+        assert!(projected.contains("derived-irrelevant-skips=2"));
+        assert!(projected.contains("derived-scenes-requested=8"));
+        assert!(projected.contains("derived-scenes-attempted=6"));
+        assert!(projected.contains("derived-scenes-deferred=1"));
         assert!(projected.contains("derived-project-candidates=4"));
         assert!(projected.contains("derived-scene-candidates=5"));
         assert!(projected.contains("derived-redundant-preservation-clones=0"));
@@ -4101,7 +4203,7 @@ mod tests {
     }
 
     #[test]
-    fn derived_refresh_revision_gate_rearms_for_edits_history_and_replacement() {
+    fn derived_refresh_pending_gate_tracks_relevant_edits_history_and_replacement() {
         let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
         let mut project = Project::new().unwrap_or_else(|_| unreachable!());
         project.elements = vec![
@@ -4117,6 +4219,7 @@ mod tests {
             .unwrap_or_else(|_| unreachable!());
         let context = test_context();
         let mut at = Instant::now();
+        app.next_cast_list_refresh = at;
 
         app.refresh_cast_lists_on_schedule(&context, at);
         assert_eq!(app.session.project().elements[2].text, "(ALEX)");
@@ -4156,9 +4259,8 @@ mod tests {
         app.refresh_cast_lists_on_schedule(&context, at);
         assert_eq!(app.performance.derived_refresh_attempts, 4);
 
-        // Replacements may restart at the same revision; activation explicitly
-        // invalidates the prior document's watermark rather than keying only on
-        // the revision number.
+        // Activation constructs a fresh session with complete derived work,
+        // independent of the previous document's revision or refresh history.
         for label in ["replacement-one", "replacement-two"] {
             let mut replacement = Project::new().unwrap_or_else(|_| unreachable!());
             replacement.elements = vec![
@@ -4181,6 +4283,102 @@ mod tests {
             app.refresh_cast_lists_on_schedule(&context, at);
         }
         assert_eq!(app.performance.derived_refresh_attempts, 6);
+    }
+
+    #[test]
+    fn desktop_scheduler_oracle_skips_non_cast_edits_and_scopes_character_work() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        project.elements = vec![
+            scriptcraft_core::ScreenplayElement::new("scene-a", Role::SceneHeading, "INT. ONE")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cue-a", Role::Character, "ALEX")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cast-a", Role::CastList, "(STALE A)")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("action-a", Role::Action, "Action")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("dialogue-a", Role::Dialogue, "Dialogue")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("scene-b", Role::SceneHeading, "EXT. TWO")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cue-b", Role::Character, "BOB")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cast-b", Role::CastList, "(STALE B)")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        app.session
+            .replace_with_saved(project)
+            .unwrap_or_else(|_| unreachable!("two-scene scheduler fixture is valid"));
+        let context = test_context();
+        let mut at = Instant::now();
+        app.next_cast_list_refresh = at;
+
+        // Activation's initial complete refresh is preserved and requests both scenes.
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_eq!(app.session.project().elements[2].text, "(ALEX)");
+        assert_eq!(app.session.project().elements[7].text, "(BOB)");
+        assert_eq!(app.performance.derived_scenes_requested, 2);
+        assert_eq!(app.performance.derived_scenes_attempted, 2);
+
+        let candidate_clones = app.performance.derived_project_candidate_clones;
+        for (element, suffix) in [(3, " more"), (4, " more")] {
+            let offset = app.session.project().elements[element].text.len();
+            app.session
+                .set_selection(Selection::caret(Position {
+                    element,
+                    offset,
+                }))
+                .unwrap_or_else(|_| unreachable!("non-cast insertion caret is valid"));
+            app.session
+                .insert(suffix)
+                .unwrap_or_else(|_| unreachable!("non-cast insertion is valid"));
+            at += CAST_LIST_REFRESH_INTERVAL;
+            app.refresh_cast_lists_on_schedule(&context, at);
+            assert_eq!(app.performance.derived_refresh_attempts, 1);
+            assert_eq!(app.performance.derived_project_candidate_clones, candidate_clones);
+        }
+        assert_eq!(app.performance.derived_refresh_irrelevant_skips, 2);
+
+        // Splitting an Action creates a new structural Action element. The
+        // desktop timer must skip it rather than scheduling a complete pass.
+        let elements_before_split = app.session.project().elements.len();
+        let action_end = app.session.project().elements[3].text.len();
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 3,
+                offset: action_end,
+            }))
+            .unwrap_or_else(|_| unreachable!("Action split caret is valid"));
+        app.session
+            .split()
+            .unwrap_or_else(|_| unreachable!("Action split is valid"));
+        assert_eq!(app.session.project().elements.len(), elements_before_split + 1);
+        assert!(!app.session.pending_derived_work_summary().complete);
+        at += CAST_LIST_REFRESH_INTERVAL;
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_eq!(app.performance.derived_refresh_attempts, 1);
+        assert_eq!(app.performance.derived_project_candidate_clones, candidate_clones);
+        assert_eq!(app.performance.derived_refresh_irrelevant_skips, 3);
+
+        let cue_end = app.session.project().elements[1].text.len();
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 1,
+                offset: cue_end,
+            }))
+            .unwrap_or_else(|_| unreachable!("character-cue insertion caret is valid"));
+        app.session
+            .insert(" ONE")
+            .unwrap_or_else(|_| unreachable!("character-cue insertion is valid"));
+        at += CAST_LIST_REFRESH_INTERVAL;
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_eq!(app.session.project().elements[2].text, "(ALEX ONE)");
+        assert_eq!(app.session.project().elements[7].text, "(BOB)");
+        assert_eq!(app.performance.derived_refresh_attempts, 2);
+        assert_eq!(app.performance.derived_scenes_requested, 3);
+        assert_eq!(app.performance.derived_scenes_attempted, 3);
+        assert_eq!(app.performance.derived_scenes_deferred, 0);
     }
 
     #[test]
@@ -4212,6 +4410,10 @@ mod tests {
         assert_eq!(app.session.project().elements[2].text, "(ALEX)");
         assert_eq!(app.session.revision(), revision_before_save + 1);
         assert!(!app.session.dirty());
+        assert_eq!(
+            app.session.pending_derived_work_summary(),
+            scriptcraft_core::editing::DerivedWorkSummary::default()
+        );
         let context = test_context();
         let pending_tick = app.next_cast_list_refresh;
         app.refresh_cast_lists_on_schedule(&context, pending_tick);
@@ -4243,9 +4445,17 @@ mod tests {
         assert_eq!(app.status, "Existing status remains visible");
         assert_eq!(app.performance.derived_refresh_deferred, 1);
 
+        // An unrelated Action revision must not retry a scene that is already
+        // deferred; the core summary distinguishes pending from retryable work.
+        app.session
+            .set_selection(Selection::caret(Position { element: 2, offset: 0 }))
+            .unwrap_or_else(|_| unreachable!("cast-list start is a valid caret"));
+        app.session
+            .change_role(Role::Action)
+            .unwrap_or_else(|_| unreachable!("cast list can be changed to Action"));
         let second_refresh = app.next_cast_list_refresh;
         app.refresh_cast_lists_on_schedule(&context, second_refresh);
-        assert_eq!(app.session.project().elements[2].text, "(stale)");
+        assert_eq!(app.session.project().elements[2].role, Role::Action);
         assert_eq!(app.status, "Existing status remains visible");
         assert_eq!(app.performance.derived_refresh_attempts, 1);
         assert_eq!(app.performance.derived_refresh_deferred, 1);
@@ -4264,6 +4474,97 @@ mod tests {
         app.refresh_cast_lists_on_schedule(&context, changed_revision_refresh);
         assert_eq!(app.performance.derived_refresh_attempts, 2);
         assert_eq!(app.performance.derived_refresh_deferred, 2);
+    }
+
+    #[test]
+    fn failed_complete_refresh_stays_pending_without_retrying_until_relevant_edit() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let mut project = Project::new().unwrap_or_else(|_| unreachable!());
+        let oversized_name = "N".repeat(scriptcraft_core::MAX_TEXT_BYTES / 2);
+        project.elements = vec![
+            scriptcraft_core::ScreenplayElement::new(
+                "scene-a",
+                Role::SceneHeading,
+                "INT. ONE",
+            )
+            .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("action-a", Role::Action, "Action")
+                .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new(
+                "cue-a1",
+                Role::Character,
+                &oversized_name,
+            )
+            .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new(
+                "cue-a2",
+                Role::Character,
+                &format!("M{oversized_name}"),
+            )
+            .unwrap_or_else(|_| unreachable!()),
+            scriptcraft_core::ScreenplayElement::new("cast-a", Role::CastList, "(stale)")
+                .unwrap_or_else(|_| unreachable!()),
+        ];
+        app.session
+            .replace_with_saved(project)
+            .unwrap_or_else(|_| unreachable!("oversized source fixture remains valid"));
+        let context = test_context();
+        let mut at = Instant::now();
+        app.next_cast_list_refresh = at;
+
+        app.refresh_cast_lists_on_schedule(&context, at);
+        let failed = app.session.pending_derived_work_summary();
+        assert!(failed.pending && failed.complete && failed.failed_complete);
+        assert!(!failed.retryable);
+        assert_eq!(app.performance.derived_refresh_attempts, 1);
+        assert_eq!(app.performance.derived_refresh_failed, 1);
+        assert_eq!(app.performance.derived_refresh_deferred, 0);
+        assert!(app.status.contains("refresh failed and is suspended"));
+        assert!(app.status.contains("failure category:"));
+
+        // Multiple due timer ticks while suspended produce skips, not attempts.
+        for _ in 0..3 {
+            at += CAST_LIST_REFRESH_INTERVAL;
+            app.refresh_cast_lists_on_schedule(&context, at);
+        }
+        assert_eq!(app.performance.derived_refresh_attempts, 1);
+        assert_eq!(app.performance.derived_refresh_failed, 1);
+
+        // An unrelated Action edit does not wake a complete correction that
+        // failed; a relevant Character edit permits exactly one new attempt.
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 1,
+                offset: "Action".len(),
+            }))
+            .unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert(" continues")
+            .unwrap_or_else(|_| unreachable!());
+        at += CAST_LIST_REFRESH_INTERVAL;
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_eq!(app.performance.derived_refresh_attempts, 1);
+        assert!(!app.session.pending_derived_work_summary().retryable);
+
+        app.session
+            .set_selection(Selection::caret(Position {
+                element: 2,
+                offset: oversized_name.len(),
+            }))
+            .unwrap_or_else(|_| unreachable!());
+        app.session
+            .insert(" X")
+            .unwrap_or_else(|_| unreachable!());
+        at += CAST_LIST_REFRESH_INTERVAL;
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_eq!(app.performance.derived_refresh_attempts, 2);
+        assert_eq!(app.performance.derived_refresh_failed, 2);
+        assert!(!app.session.pending_derived_work_summary().retryable);
+
+        at += CAST_LIST_REFRESH_INTERVAL;
+        app.refresh_cast_lists_on_schedule(&context, at);
+        assert_eq!(app.performance.derived_refresh_attempts, 2);
+        assert_eq!(app.performance.derived_refresh_failed, 2);
     }
 
     fn render_app_frame_with_fullscreen(
@@ -5255,7 +5556,7 @@ mod tests {
         app.page_scale = Some(1.0);
         assert!(app
             .page_geometry
-            .publish(1, app.session.revision(), viewport, 1.0, pages, clip,));
+            .publish(1, app.session.revision(), viewport, 1.0, pages, clip, Vec2::ZERO,));
         viewport
     }
 
@@ -5542,7 +5843,7 @@ mod tests {
             egui::Pos2::ZERO,
             Vec2::new(300.0, 500.0),
         )];
-        assert!(tracker.publish(1, 4, viewport, 1.0, pages, clip));
+        assert!(tracker.publish(1, 4, viewport, 1.0, pages, clip, Vec2::ZERO));
         assert_eq!(
             tracker.visible_page(2, 4, viewport, 1.0, true),
             status_bar::VisiblePage::Unavailable
@@ -6073,6 +6374,188 @@ mod tests {
             app.pinch_zoom_percent,
             f64::from(status_bar::MIN_ZOOM_PERCENT)
         );
+    }
+
+    #[test]
+    fn repeated_zoom_requests_retain_the_first_pending_viewport_anchor() {
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        let first = ViewportCenterAnchor {
+            page_index: 2,
+            page_local_document_point: Vec2::new(41.0, 73.0),
+            outside_page_offset_points: Vec2::ZERO,
+            viewport_center: egui::pos2(320.0, 240.0),
+        };
+        app.pending_zoom_anchor = Some(first);
+
+        // Later zoom requests retain the original point until the scaled geometry is published.
+        app.capture_pending_zoom_anchor(&test_context());
+
+        assert_eq!(app.pending_zoom_anchor, Some(first));
+    }
+
+    #[test]
+    fn wo0012_anchor_target_scales_only_the_page_local_point() {
+        let anchor = ViewportCenterAnchor {
+            page_index: 0,
+            page_local_document_point: Vec2::new(20.0, 30.0),
+            outside_page_offset_points: Vec2::new(5.0, 12.0),
+            viewport_center: egui::pos2(250.0, 180.0),
+        };
+        let page = egui::Rect::from_min_size(egui::pos2(16.0, 40.0), Vec2::new(500.0, 700.0));
+
+        let target = viewport_center_anchor_target(anchor, &[page], 2.0)
+            .unwrap_or_else(|| unreachable!("valid page geometry resolves"));
+
+        // The 16-point leading padding comes from the allocated page rect, and
+        // the gap/edge displacement remains constant while page-local geometry scales.
+        assert_eq!(target, egui::pos2(61.0, 112.0));
+        assert!(viewport_center_anchor_target(anchor, &[], 2.0).is_none());
+        assert!(viewport_center_anchor_target(anchor, &[page], f32::NAN).is_none());
+    }
+
+    #[test]
+    fn wo0012_desktop_zoom_keeps_the_viewport_anchor_once_or_clamps_at_an_edge() {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(480.0, 520.0));
+        for (position, wheel_y) in [("beginning", 100_000.0), ("middle", -3_500.0), ("end", -100_000.0)] {
+            for target_zoom in [status_bar::MIN_ZOOM_PERCENT, status_bar::MAX_ZOOM_PERCENT] {
+                let context = test_context();
+                let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+                app.performance.frames = 1;
+                app.session
+                    .insert(&"scroll compensation fixture\n".repeat(600))
+                    .unwrap_or_else(|_| unreachable!());
+                let _ = render_editor_frame(
+                    &context,
+                    &mut app,
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                );
+                let _ = render_editor_frame(
+                    &context,
+                    &mut app,
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        events: vec![
+                            egui::Event::PointerMoved(screen.center()),
+                            egui::Event::MouseWheel {
+                                unit: egui::MouseWheelUnit::Point,
+                                delta: egui::vec2(-2_000.0, wheel_y),
+                                modifiers: egui::Modifiers::default(),
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                );
+
+                let old_scale = app.page_scale.unwrap_or(f32::NAN);
+                let old_anchor = app
+                    .page_geometry
+                    .capture_center_anchor(
+                        app.performance.frames,
+                        app.session.revision(),
+                        context.screen_rect(),
+                        old_scale,
+                    )
+                    .unwrap_or_else(|| unreachable!("the preceding frame published geometry"));
+                let revision_before_zoom = app.session.revision();
+                let selection_before_zoom = app.session.selection();
+                app.capture_pending_zoom_anchor(&context);
+                app.zoom_percent = target_zoom;
+                app.sync_pinch_zoom_from_controls();
+                app.page_geometry.invalidate();
+                app.page_scale = None;
+
+                let _ = render_editor_frame(
+                    &context,
+                    &mut app,
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                );
+                assert!(app.pending_zoom_anchor.is_none());
+                assert_eq!(app.session.revision(), revision_before_zoom);
+                assert_eq!(app.session.selection(), selection_before_zoom);
+                let corrected_offset = app.last_scroll_offset;
+
+                // The next frame must not replay the one-shot correction.
+                let _ = render_editor_frame(
+                    &context,
+                    &mut app,
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        ..Default::default()
+                    },
+                );
+                assert!((app.last_scroll_offset.x - corrected_offset.x).abs() < 0.5);
+                assert!((app.last_scroll_offset.y - corrected_offset.y).abs() < 0.5);
+                let new_anchor = app
+                    .page_geometry
+                    .capture_center_anchor(
+                        app.performance.frames,
+                        app.session.revision(),
+                        context.screen_rect(),
+                        app.page_scale.unwrap_or(f32::NAN),
+                    )
+                    .unwrap_or_else(|| unreachable!("the settled frame published geometry"));
+                let max_offset = Vec2::new(
+                    (app.last_scroll_content_size.x - app.last_scroll_inner_rect.width()).max(0.0),
+                    (app.last_scroll_content_size.y - app.last_scroll_inner_rect.height()).max(0.0),
+                );
+                let x_clamped = app.last_scroll_offset.x <= 0.5
+                    || app.last_scroll_offset.x >= max_offset.x - 0.5;
+                let y_clamped = app.last_scroll_offset.y <= 0.5
+                    || app.last_scroll_offset.y >= max_offset.y - 0.5;
+                assert!(
+                    (new_anchor.page_local_document_point.x
+                        - old_anchor.page_local_document_point.x)
+                        .abs()
+                        < 0.75
+                        || x_clamped,
+                    "{position} zoom at {target_zoom}% should preserve horizontal anchor unless clamped"
+                );
+                assert!(
+                    (new_anchor.page_local_document_point.y
+                        - old_anchor.page_local_document_point.y)
+                        .abs()
+                        < 0.75
+                        || y_clamped,
+                    "{position} zoom at {target_zoom}% should preserve vertical anchor unless clamped"
+                );
+                assert!(app.last_scroll_offset.x >= 0.0 && app.last_scroll_offset.x <= max_offset.x + 0.5);
+                assert!(app.last_scroll_offset.y >= 0.0 && app.last_scroll_offset.y <= max_offset.y + 0.5);
+            }
+        }
+    }
+
+    #[test]
+    fn manual_scroll_cancels_pending_zoom_compensation() {
+        let context = test_context();
+        let mut app = ScriptCraftApp::new().unwrap_or_else(|_| unreachable!());
+        app.pending_zoom_anchor = Some(ViewportCenterAnchor {
+            page_index: 0,
+            page_local_document_point: Vec2::new(10.0, 10.0),
+            outside_page_offset_points: Vec2::ZERO,
+            viewport_center: egui::Pos2::ZERO,
+        });
+        app.reveal_intent = RevealIntent::Conditional;
+
+        let _ = context.run(
+            egui::RawInput {
+                events: vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -120.0),
+                    modifiers: egui::Modifiers::default(),
+                }],
+                ..Default::default()
+            },
+            |_| app.handle_surface_input(&context),
+        );
+
+        assert!(app.pending_zoom_anchor.is_none());
+        assert_eq!(app.reveal_intent, RevealIntent::None);
     }
 
     #[test]

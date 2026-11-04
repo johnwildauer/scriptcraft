@@ -117,6 +117,38 @@ pub fn reset_managed_paragraph_index_diagnostics() {
     MANAGED_INDEX_FALLBACK_NODES.store(0, Ordering::Relaxed);
 }
 
+/// Value-free structural counters for the transient source identity-use index.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SourceIdentityUseIndexDiagnostics {
+    pub rebuilds: u64,
+    pub source_nodes_indexed: u64,
+    pub identity_queries: u64,
+    pub reserved_id_queries: u64,
+}
+
+static SOURCE_USE_INDEX_REBUILDS: AtomicU64 = AtomicU64::new(0);
+static SOURCE_USE_INDEX_SOURCE_NODES: AtomicU64 = AtomicU64::new(0);
+static SOURCE_USE_INDEX_IDENTITY_QUERIES: AtomicU64 = AtomicU64::new(0);
+static SOURCE_USE_INDEX_RESERVED_QUERIES: AtomicU64 = AtomicU64::new(0);
+
+/// Returns process-wide source identity-use work counts without document values.
+pub fn source_identity_use_index_diagnostics() -> SourceIdentityUseIndexDiagnostics {
+    SourceIdentityUseIndexDiagnostics {
+        rebuilds: SOURCE_USE_INDEX_REBUILDS.load(Ordering::Relaxed),
+        source_nodes_indexed: SOURCE_USE_INDEX_SOURCE_NODES.load(Ordering::Relaxed),
+        identity_queries: SOURCE_USE_INDEX_IDENTITY_QUERIES.load(Ordering::Relaxed),
+        reserved_id_queries: SOURCE_USE_INDEX_RESERVED_QUERIES.load(Ordering::Relaxed),
+    }
+}
+
+/// Resets source identity-use work counts without changing preserved data.
+pub fn reset_source_identity_use_index_diagnostics() {
+    SOURCE_USE_INDEX_REBUILDS.store(0, Ordering::Relaxed);
+    SOURCE_USE_INDEX_SOURCE_NODES.store(0, Ordering::Relaxed);
+    SOURCE_USE_INDEX_IDENTITY_QUERIES.store(0, Ordering::Relaxed);
+    SOURCE_USE_INDEX_RESERVED_QUERIES.store(0, Ordering::Relaxed);
+}
+
 /// A vector whose clones share immutable storage and detach on mutable access.
 /// Its vector-like API keeps the preservation tree's ordered semantic surface.
 #[derive(Debug)]
@@ -432,12 +464,46 @@ pub enum PreservationError {
     ManagedAnchorMissing,
     ManagedAnchorAmbiguous,
     ManagedTextMismatch,
+    /// Value-free call-site tag for managed projection mismatches.
+    ManagedTextMismatchAt(ManagedTextMismatchSite),
     UnsupportedTextMapping,
     UnsupportedRoleMapping,
     StructuralAttachmentConflict,
     PotentialReferenceConflict,
     ParagraphIdentityEntropyUnavailable,
     ParagraphIdentityCollisionLimit,
+}
+
+/// Stable, bounded call-site categories for managed-text synchronization failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedTextMismatchSite {
+    ScopedEditValidation,
+    TextReplacement,
+    TextElementsReplacement,
+    ParagraphRemoval,
+}
+
+impl ManagedTextMismatchSite {
+    pub const fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::ScopedEditValidation => "scoped-edit-validation",
+            Self::TextReplacement => "text-replacement",
+            Self::TextElementsReplacement => "text-elements-replacement",
+            Self::ParagraphRemoval => "paragraph-removal",
+        }
+    }
+}
+
+fn categorize_managed_text_mismatch(
+    error: PreservationError,
+    site: ManagedTextMismatchSite,
+) -> PreservationError {
+    match error {
+        PreservationError::ManagedTextMismatch => {
+            PreservationError::ManagedTextMismatchAt(site)
+        }
+        other => other,
+    }
 }
 
 /// The source's expanded name and, when available, original qualified spelling.
@@ -670,6 +736,7 @@ pub struct PreservationState {
     pub references: Vec<ForeignReference>,
     pub board_graph: BoardGraph,
     pub(crate) managed_paragraph_index: Option<BTreeMap<StableId, Vec<ManagedParagraphLocation>>>,
+    pub(crate) source_identity_use_index: Option<SourceIdentityUseIndex>,
     pub(crate) source_text_bytes: usize,
 }
 
@@ -677,6 +744,265 @@ pub struct PreservationState {
 pub(crate) struct ManagedParagraphLocation {
     section_index: usize,
     node_path: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SourceIdentityUseIndex {
+    paragraph_identity_counts: BTreeMap<String, usize>,
+    referenced_paragraph_ids: BTreeSet<String>,
+    anchored_paragraph_ids: BTreeSet<String>,
+    externally_used_paragraph_ids: BTreeSet<String>,
+    source_id_values: BTreeSet<String>,
+}
+
+#[derive(Debug, Default)]
+struct SubstringAutomatonNode {
+    transitions: BTreeMap<u8, usize>,
+    failure: usize,
+    output_link: Option<usize>,
+    outputs: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct SubstringAutomaton {
+    patterns: Vec<String>,
+    nodes: Vec<SubstringAutomatonNode>,
+}
+
+impl SubstringAutomaton {
+    fn new(patterns: Vec<String>) -> Self {
+        let mut automaton = Self {
+            patterns,
+            nodes: vec![SubstringAutomatonNode::default()],
+        };
+        for (pattern_index, pattern) in automaton.patterns.iter().enumerate() {
+            let mut node_index = 0;
+            for byte in pattern.bytes() {
+                let next = if let Some(next) = automaton.nodes[node_index].transitions.get(&byte) {
+                    *next
+                } else {
+                    let next = automaton.nodes.len();
+                    automaton.nodes.push(SubstringAutomatonNode::default());
+                    automaton.nodes[node_index].transitions.insert(byte, next);
+                    next
+                };
+                node_index = next;
+            }
+            automaton.nodes[node_index].outputs.push(pattern_index);
+        }
+
+        let mut pending = std::collections::VecDeque::new();
+        let root_children = automaton.nodes[0]
+            .transitions
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        pending.extend(root_children);
+        while let Some(node_index) = pending.pop_front() {
+            let edges = automaton.nodes[node_index]
+                .transitions
+                .iter()
+                .map(|(byte, child)| (*byte, *child))
+                .collect::<Vec<_>>();
+            for (byte, child) in edges {
+                let mut failure = automaton.nodes[node_index].failure;
+                while failure != 0 && !automaton.nodes[failure].transitions.contains_key(&byte) {
+                    failure = automaton.nodes[failure].failure;
+                }
+                let fallback = automaton.nodes[failure]
+                    .transitions
+                    .get(&byte)
+                    .copied()
+                    .unwrap_or(0);
+                automaton.nodes[child].failure = fallback;
+                automaton.nodes[child].output_link = if automaton.nodes[fallback].outputs.is_empty() {
+                    automaton.nodes[fallback].output_link
+                } else {
+                    Some(fallback)
+                };
+                pending.push_back(child);
+            }
+        }
+        automaton
+    }
+
+    fn scan(&self, text: &str, skip_exact: Option<&str>, hits: &mut BTreeSet<String>) {
+        if self.patterns.is_empty() {
+            return;
+        }
+        let mut state = 0;
+        for byte in text.bytes() {
+            while state != 0 && !self.nodes[state].transitions.contains_key(&byte) {
+                state = self.nodes[state].failure;
+            }
+            state = self.nodes[state]
+                .transitions
+                .get(&byte)
+                .copied()
+                .unwrap_or(0);
+            let mut output_state = Some(state);
+            while let Some(output) = output_state {
+                for pattern_index in &self.nodes[output].outputs {
+                    let pattern = &self.patterns[*pattern_index];
+                    if skip_exact != Some(pattern.as_str()) {
+                        hits.insert(pattern.clone());
+                    }
+                }
+                output_state = self.nodes[output].output_link;
+            }
+        }
+    }
+}
+
+impl SourceIdentityUseIndex {
+    fn build(
+        sections: &[PreservedSection],
+        identities: &[ForeignIdentity],
+        references: &[ForeignReference],
+        anchors: &[SourceAnchor],
+        board_references: &[ForeignReference],
+        managed_index: &mut BTreeMap<StableId, Vec<ManagedParagraphLocation>>,
+        text_bytes: &mut usize,
+    ) -> (Self, u64) {
+        let mut index = Self::default();
+        for identity in identities {
+            if identity.domain == ForeignIdDomain::Paragraph {
+                *index
+                    .paragraph_identity_counts
+                    .entry(identity.value.clone())
+                    .or_default() += 1;
+            }
+        }
+        for reference in references.iter().chain(board_references) {
+            if reference.source.domain == ForeignIdDomain::Paragraph {
+                index
+                    .referenced_paragraph_ids
+                    .insert(reference.source.value.clone());
+            }
+            if reference.target.domain == ForeignIdDomain::Paragraph {
+                index
+                    .referenced_paragraph_ids
+                    .insert(reference.target.value.clone());
+            }
+        }
+        for anchor in anchors {
+            if let AnchorTarget::Foreign(identity) = &anchor.target {
+                if identity.domain == ForeignIdDomain::Paragraph {
+                    index.anchored_paragraph_ids.insert(identity.value.clone());
+                }
+            }
+        }
+
+        let patterns = index.paragraph_identity_counts.keys().cloned().collect::<Vec<_>>();
+        let automaton = SubstringAutomaton::new(patterns);
+        let mut visited = 0u64;
+        fn collect(
+            nodes: &[PreservedNode],
+            section_index: usize,
+            path: &mut Vec<usize>,
+            automaton: &SubstringAutomaton,
+            index: &mut SourceIdentityUseIndex,
+            managed_index: &mut BTreeMap<StableId, Vec<ManagedParagraphLocation>>,
+            visited: &mut u64,
+            text_bytes: &mut usize,
+        ) {
+            for (node_index, node) in nodes.iter().enumerate() {
+                *visited = visited.saturating_add(1);
+                match node {
+                    PreservedNode::Element(element) => {
+                        path.push(node_index);
+                        if let SourceOwnership::Managed(id) = &element.ownership {
+                            managed_index
+                                .entry(id.clone())
+                                .or_default()
+                                .push(ManagedParagraphLocation {
+                                    section_index,
+                                    node_path: path.clone(),
+                                });
+                        }
+                        let mut unqualified_ids = element.attributes.iter().filter(|attribute| {
+                            attribute.name.namespace_uri.is_none()
+                                && attribute.name.local_name.eq_ignore_ascii_case("id")
+                        });
+                        let unique_id = unqualified_ids.next().map(|attribute| attribute.value.as_str())
+                            .filter(|_| unqualified_ids.next().is_none());
+                        for attribute in &element.attributes {
+                            if attribute.name.namespace_uri.is_none()
+                                && attribute.name.local_name.eq_ignore_ascii_case("id")
+                            {
+                                index.source_id_values.insert(attribute.value.clone());
+                            }
+                            let exempt = (element.name.local_name == "Paragraph"
+                                && attribute.name.namespace_uri.is_none()
+                                && attribute.name.local_name.eq_ignore_ascii_case("id"))
+                                .then_some(unique_id)
+                                .flatten()
+                                .filter(|value| *value == attribute.value.as_str());
+                            automaton.scan(
+                                &attribute.value,
+                                exempt,
+                                &mut index.externally_used_paragraph_ids,
+                            );
+                        }
+                        collect(
+                            &element.children,
+                            section_index,
+                            path,
+                            automaton,
+                            index,
+                            managed_index,
+                            visited,
+                            text_bytes,
+                        );
+                        path.pop();
+                    }
+                    PreservedNode::Text(text)
+                    | PreservedNode::CData(text)
+                    | PreservedNode::Comment(text) => {
+                        *text_bytes = text_bytes.saturating_add(text.len());
+                        automaton.scan(
+                            text,
+                            None,
+                            &mut index.externally_used_paragraph_ids,
+                        );
+                    }
+                    PreservedNode::ProcessingInstruction { target, data } => {
+                        *text_bytes = text_bytes.saturating_add(data.len());
+                        automaton.scan(
+                            target,
+                            None,
+                            &mut index.externally_used_paragraph_ids,
+                        );
+                        automaton.scan(
+                            data,
+                            None,
+                            &mut index.externally_used_paragraph_ids,
+                        );
+                    }
+                }
+            }
+        }
+        for (section_index, section) in sections.iter().enumerate() {
+            collect(
+                &section.children,
+                section_index,
+                &mut Vec::new(),
+                &automaton,
+                &mut index,
+                managed_index,
+                &mut visited,
+                text_bytes,
+            );
+        }
+        (index, visited)
+    }
+
+    fn paragraph_is_safely_removable(&self, id: &str) -> bool {
+        self.paragraph_identity_counts.get(id) == Some(&1)
+            && !self.referenced_paragraph_ids.contains(id)
+            && !self.anchored_paragraph_ids.contains(id)
+            && !self.externally_used_paragraph_ids.contains(id)
+    }
 }
 
 impl PartialEq for PreservationState {
@@ -698,78 +1024,141 @@ impl PreservationState {
         &self.source_layout_settings
     }
 
+    /// Reconstructs all transient preservation indexes after direct edits to
+    /// the publicly exposed source tree or identity/reference collections.
+    /// Managed editing APIs maintain these indexes transactionally.
+    pub fn rebuild_indexes(&mut self) {
+        self.rebuild_managed_paragraph_index();
+    }
+
     /// Rebuilds the transient source-tree location map from the authoritative
     /// ordered preservation tree. Call after any out-of-band structural update.
     pub(crate) fn rebuild_managed_paragraph_index(&mut self) {
-        fn collect(
-            nodes: &[PreservedNode],
-            section_index: usize,
-            path: &mut Vec<usize>,
-            index: &mut BTreeMap<StableId, Vec<ManagedParagraphLocation>>,
-            visited: &mut u64,
-            text_bytes: &mut usize,
-        ) {
-            for (node_index, node) in nodes.iter().enumerate() {
-                *visited = visited.saturating_add(1);
-                let PreservedNode::Element(element) = node else {
-                    match node {
-                        PreservedNode::Text(text)
-                        | PreservedNode::CData(text)
-                        | PreservedNode::Comment(text) => {
-                            *text_bytes = text_bytes.saturating_add(text.len());
-                        }
-                        PreservedNode::ProcessingInstruction { data, .. } => {
-                            *text_bytes = text_bytes.saturating_add(data.len());
-                        }
-                        PreservedNode::Element(_) => {}
-                    }
-                    continue;
-                };
-                path.push(node_index);
-                if let SourceOwnership::Managed(id) = &element.ownership {
-                    index
-                        .entry(id.clone())
-                        .or_default()
-                        .push(ManagedParagraphLocation {
-                            section_index,
-                            node_path: path.clone(),
-                        });
-                }
-                collect(
-                    &element.children,
-                    section_index,
-                    path,
-                    index,
-                    visited,
-                    text_bytes,
-                );
-                path.pop();
-            }
-        }
-
-        let mut index = BTreeMap::new();
-        let mut visited = 0u64;
+        let mut managed_index = BTreeMap::new();
         let mut text_bytes = 0usize;
-        for (section_index, section) in self.sections.iter().enumerate() {
-            collect(
-                &section.children,
-                section_index,
-                &mut Vec::new(),
-                &mut index,
-                &mut visited,
-                &mut text_bytes,
-            );
-        }
+        let (source_index, visited) = SourceIdentityUseIndex::build(
+            &self.sections,
+            &self.identities,
+            &self.references,
+            &self.anchors,
+            &self.board_graph.references,
+            &mut managed_index,
+            &mut text_bytes,
+        );
         increment_counter(&MANAGED_INDEX_REBUILDS);
         add_counter(&MANAGED_INDEX_SOURCE_NODES, visited);
-        self.managed_paragraph_index = Some(index);
+        self.managed_paragraph_index = Some(managed_index);
         self.source_text_bytes = text_bytes;
+        increment_counter(&SOURCE_USE_INDEX_REBUILDS);
+        add_counter(&SOURCE_USE_INDEX_SOURCE_NODES, visited);
+        self.source_identity_use_index = Some(source_index);
     }
 
-    fn ensure_managed_paragraph_index(&mut self) {
+    pub(crate) fn invalidate_source_identity_use_index(&mut self) {
+        self.source_identity_use_index = None;
+    }
+
+    pub(crate) fn ensure_source_identity_use_index(&mut self) {
+        if self.source_identity_use_index.is_none() {
+            self.rebuild_managed_paragraph_index();
+        }
+    }
+
+    pub(crate) fn has_source_identity_use_index(&self) -> bool {
+        self.source_identity_use_index.is_some()
+    }
+
+    pub(crate) fn paragraph_identity_safely_removable(&self, id: &str) -> bool {
+        increment_counter(&SOURCE_USE_INDEX_IDENTITY_QUERIES);
+        self.source_identity_use_index
+            .as_ref()
+            .is_some_and(|index| index.paragraph_is_safely_removable(id))
+    }
+
+    pub(crate) fn indexed_source_id_values(&self) -> BTreeSet<String> {
+        increment_counter(&SOURCE_USE_INDEX_RESERVED_QUERIES);
+        self.source_identity_use_index
+            .as_ref()
+            .map(|index| index.source_id_values.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn ensure_managed_paragraph_index(&mut self) {
         if self.managed_paragraph_index.is_none() {
             self.rebuild_managed_paragraph_index();
         }
+    }
+
+    /// Looks up a managed element through the preservation-owned location index.
+    /// A missing index retains the counted complete-search fallback for callers
+    /// operating on externally constructed preservation states.
+    pub(crate) fn managed_element(
+        &self,
+        id: &StableId,
+    ) -> Result<Option<&PreservedElement>, PreservationError> {
+        match self.indexed_location(id) {
+            Ok(Some(location)) => {
+                let element = self.managed_element_at(location);
+                if element.is_some_and(|element| {
+                    !matches!(&element.ownership, SourceOwnership::Managed(target) if target == id)
+                }) {
+                    return Err(PreservationError::ManagedAnchorMissing);
+                }
+                Ok(element)
+            }
+            Ok(None) if self.managed_paragraph_index.is_none() => {
+                Ok(find_managed_element_counted(&self.sections, id))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Gets the indexed source location's document depth and inherited
+    /// `xml:space` state without walking unrelated source branches.
+    pub(crate) fn managed_element_context(
+        &self,
+        id: &StableId,
+    ) -> Result<Option<(usize, bool)>, PreservationError> {
+        let location = match self.indexed_location(id) {
+            Ok(Some(location)) => location,
+            Ok(None) if self.managed_paragraph_index.is_none() => {
+                return Ok(find_managed_context_counted(&self.sections, id));
+            }
+            Ok(None) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let section = self.sections.get(location.section_index)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        if !self.managed_element_at(location).is_some_and(|element| {
+            matches!(&element.ownership, SourceOwnership::Managed(target) if target == id)
+        }) {
+            return Err(PreservationError::ManagedAnchorMissing);
+        }
+        indexed_element_context(&section.children, &location.node_path)
+            .map(Some)
+            .ok_or(PreservationError::ManagedAnchorMissing)
+    }
+
+    /// Mutable indexed access for a detached candidate. The source-use index is
+    /// invalidated before mutation; callers rebuild both indexes before publish.
+    pub(crate) fn managed_element_mut_indexed(
+        &mut self,
+        id: &StableId,
+    ) -> Result<&mut PreservedElement, PreservationError> {
+        self.ensure_managed_paragraph_index();
+        self.invalidate_source_identity_use_index();
+        let location = self.indexed_location(id)?
+            .cloned()
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let section = self.sections.get_mut(location.section_index)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let element = element_at_path_mut(&mut section.children, &location.node_path)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        if !matches!(&element.ownership, SourceOwnership::Managed(target) if target == id) {
+            return Err(PreservationError::ManagedAnchorMissing);
+        }
+        Ok(element)
     }
 
     fn indexed_location(
@@ -888,7 +1277,9 @@ impl PreservationState {
             }
         }
         if source_projection != semantic.text {
-            return Err(PreservationError::ManagedTextMismatch);
+            return Err(PreservationError::ManagedTextMismatchAt(
+                ManagedTextMismatchSite::ScopedEditValidation,
+            ));
         }
         let old_bytes = source_text_bytes_in_element(before);
         let new_bytes = source_text_bytes_in_element(after);
@@ -1239,7 +1630,11 @@ impl PreservationState {
                 end,
                 inserted,
                 expected_runs,
-            );
+            )
+            .map_err(|error| categorize_managed_text_mismatch(
+                error,
+                ManagedTextMismatchSite::TextReplacement,
+            ));
         }
         let indexes = direct_text_child_indexes(element);
         if indexes.is_empty() {
@@ -1250,7 +1645,11 @@ impl PreservationState {
                 end,
                 inserted,
                 expected_runs,
-            );
+            )
+            .map_err(|error| categorize_managed_text_mismatch(
+                error,
+                ManagedTextMismatchSite::TextReplacement,
+            ));
         }
         let source_segments = indexes
             .iter()
@@ -1260,7 +1659,9 @@ impl PreservationState {
             })
             .collect::<Vec<_>>();
         if source_segments.concat() != old_text {
-            return Err(PreservationError::ManagedTextMismatch);
+            return Err(PreservationError::ManagedTextMismatchAt(
+                ManagedTextMismatchSite::TextReplacement,
+            ));
         }
         if expected_runs.is_some_and(|runs| runs != source_segments.as_slice()) {
             return Err(PreservationError::UnsupportedTextMapping);
@@ -1311,33 +1712,8 @@ impl PreservationState {
             return Err(PreservationError::TextTooLarge);
         }
         let paragraph = self.managed_element_mut(id)?;
-        let mut text_elements = Vec::new();
-        for (index, node) in paragraph.children.iter().enumerate() {
-            match node {
-                PreservedNode::Element(element)
-                    if element.name.local_name == "Text"
-                        && element.name.namespace_uri == paragraph.name.namespace_uri =>
-                {
-                    text_elements.push(index);
-                }
-                PreservedNode::Text(text) | PreservedNode::CData(text)
-                    if text.trim().is_empty() => {}
-                _ => return Err(PreservationError::UnsupportedTextMapping),
-            }
-        }
+        let text_elements = validate_managed_text_elements_replacement(paragraph, expected_runs)?;
         if expected_runs.is_empty() {
-            for index in &text_elements {
-                let PreservedNode::Element(text_element) = &paragraph.children[*index] else {
-                    return Err(PreservationError::UnsupportedTextMapping);
-                };
-                if !text_element.attributes.is_empty()
-                    || text_element.children.iter().any(|child| {
-                        !matches!(child, PreservedNode::Text(text) if text.is_empty())
-                    })
-                {
-                    return Err(PreservationError::UnsupportedTextMapping);
-                }
-            }
             let indexes = text_elements.into_iter().collect::<BTreeSet<_>>();
             paragraph.children = paragraph
                 .children
@@ -1361,30 +1737,6 @@ impl PreservationState {
                     }));
             }
             return Ok(());
-        }
-        if text_elements.is_empty() || text_elements.len() != expected_runs.len() {
-            return Err(PreservationError::UnsupportedTextMapping);
-        }
-
-        for (index, expected) in text_elements.iter().zip(expected_runs) {
-            let PreservedNode::Element(text_element) = &paragraph.children[*index] else {
-                return Err(PreservationError::UnsupportedTextMapping);
-            };
-            if !text_element.attributes.is_empty() {
-                return Err(PreservationError::UnsupportedTextMapping);
-            }
-            let mut actual = String::new();
-            for child in &text_element.children {
-                match child {
-                    PreservedNode::Text(text) | PreservedNode::CData(text) => {
-                        actual.push_str(text);
-                    }
-                    _ => return Err(PreservationError::UnsupportedTextMapping),
-                }
-            }
-            if &actual != expected {
-                return Err(PreservationError::ManagedTextMismatch);
-            }
         }
 
         if replacement.is_empty() {
@@ -1426,6 +1778,23 @@ impl PreservationState {
             }
         }
         Ok(())
+    }
+
+    /// Checks that a complete plain-text replacement has an exact, supported
+    /// source mapping without mutating the retained tree. Derived correction
+    /// uses this to defer an unsupported scene before reconciling its arcs.
+    pub(crate) fn validate_managed_text_elements_replacement(
+        &self,
+        id: &StableId,
+        expected_runs: &[String],
+    ) -> Result<(), PreservationError> {
+        let paragraph = if let Some(location) = self.indexed_location(id)? {
+            self.managed_element_at(location)
+        } else {
+            find_managed_element_counted(&self.sections, id)
+        }
+        .ok_or(PreservationError::ManagedAnchorMissing)?;
+        validate_managed_text_elements_replacement(paragraph, expected_runs).map(|_| ())
     }
 
     /// Updates only a recognized paragraph Type mapping. All other source
@@ -1473,6 +1842,7 @@ impl PreservationState {
         after: &mut [ScreenplayElement],
     ) -> Result<(), PreservationError> {
         self.ensure_managed_paragraph_index();
+        self.ensure_source_identity_use_index();
         let before_ids = before
             .iter()
             .map(|element| element.id.clone())
@@ -1586,6 +1956,7 @@ impl PreservationState {
                 }));
         }
 
+        self.invalidate_source_identity_use_index();
         let children = content_children_mut(&mut self.sections)
             .ok_or(PreservationError::ManagedAnchorMissing)?;
         let mut insert_at = None;
@@ -1642,7 +2013,9 @@ impl PreservationState {
             paragraph_foreign_id(target).map(str::to_owned)
         };
         if provenance.and_then(|item| item.foreign_id.as_deref()) != foreign_id.as_deref() {
-            return Err(PreservationError::ManagedTextMismatch);
+            return Err(PreservationError::ManagedTextMismatchAt(
+                ManagedTextMismatchSite::ParagraphRemoval,
+            ));
         }
         if let Some(value) = foreign_id.as_deref() {
             let referenced = self
@@ -1728,7 +2101,8 @@ impl PreservationState {
         Ok(())
     }
 
-    fn fresh_foreign_paragraph_id(&self) -> Result<String, PreservationError> {
+    fn fresh_foreign_paragraph_id(&mut self) -> Result<String, PreservationError> {
+        self.ensure_source_identity_use_index();
         let reserved = self
             .identities
             .iter()
@@ -1751,7 +2125,7 @@ impl PreservationState {
                     reference.target.value.clone(),
                 ]
             }))
-            .chain(source_id_values(&self.sections));
+            .chain(self.indexed_source_id_values());
         let mut allocator = ParagraphIdAllocator::new(reserved);
         allocator.allocate().map_err(|error| match error {
             ParagraphIdAllocationError::EntropyUnavailable => {
@@ -1781,6 +2155,7 @@ impl PreservationState {
         id: &StableId,
     ) -> Result<&mut PreservedElement, PreservationError> {
         self.ensure_managed_paragraph_index();
+        self.invalidate_source_identity_use_index();
         let location = self
             .indexed_location(id)?
             .cloned()
@@ -1792,6 +2167,66 @@ impl PreservationState {
         element_at_path_mut(&mut section.children, &location.node_path)
             .ok_or(PreservationError::ManagedAnchorMissing)
     }
+}
+
+fn validate_managed_text_elements_replacement(
+    paragraph: &PreservedElement,
+    expected_runs: &[String],
+) -> Result<Vec<usize>, PreservationError> {
+    let mut text_elements = Vec::new();
+    for (index, node) in paragraph.children.iter().enumerate() {
+        match node {
+            PreservedNode::Element(element)
+                if element.name.local_name == "Text"
+                    && element.name.namespace_uri == paragraph.name.namespace_uri =>
+            {
+                text_elements.push(index);
+            }
+            PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => {}
+            _ => return Err(PreservationError::UnsupportedTextMapping),
+        }
+    }
+
+    if expected_runs.is_empty() {
+        for index in &text_elements {
+            let PreservedNode::Element(text_element) = &paragraph.children[*index] else {
+                return Err(PreservationError::UnsupportedTextMapping);
+            };
+            if !text_element.attributes.is_empty()
+                || text_element.children.iter().any(|child| {
+                    !matches!(child, PreservedNode::Text(text) if text.is_empty())
+                })
+            {
+                return Err(PreservationError::UnsupportedTextMapping);
+            }
+        }
+        return Ok(text_elements);
+    }
+
+    if text_elements.is_empty() || text_elements.len() != expected_runs.len() {
+        return Err(PreservationError::UnsupportedTextMapping);
+    }
+    for (index, expected) in text_elements.iter().zip(expected_runs) {
+        let PreservedNode::Element(text_element) = &paragraph.children[*index] else {
+            return Err(PreservationError::UnsupportedTextMapping);
+        };
+        if !text_element.attributes.is_empty() {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let mut actual = String::new();
+        for child in &text_element.children {
+            match child {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => actual.push_str(text),
+                _ => return Err(PreservationError::UnsupportedTextMapping),
+            }
+        }
+        if &actual != expected {
+            return Err(PreservationError::ManagedTextMismatchAt(
+                ManagedTextMismatchSite::TextElementsReplacement,
+            ));
+        }
+    }
+    Ok(text_elements)
 }
 
 fn plain_source_name(name: &str) -> SourceName {
@@ -1982,6 +2417,75 @@ fn element_at_path<'a>(
     } else {
         element_at_path(&element.children, rest)
     }
+}
+
+fn indexed_element_context(
+    mut nodes: &[PreservedNode],
+    path: &[usize],
+) -> Option<(usize, bool)> {
+    let mut inherited_space_preserve = false;
+    for index in path {
+        let PreservedNode::Element(element) = nodes.get(*index)? else {
+            return None;
+        };
+        inherited_space_preserve = effective_xml_space_preserve(
+            element,
+            inherited_space_preserve,
+        );
+        nodes = &element.children;
+    }
+    (!path.is_empty()).then_some((path.len().saturating_sub(1), inherited_space_preserve))
+}
+
+fn effective_xml_space_preserve(element: &PreservedElement, inherited: bool) -> bool {
+    element
+        .attributes
+        .iter()
+        .find(|attribute| {
+            attribute.name.local_name == "space"
+                && (attribute.name.namespace_uri.as_deref()
+                    == Some("http://www.w3.org/XML/1998/namespace")
+                    || attribute.name.qualified_name.as_deref() == Some("xml:space"))
+        })
+        .map_or(inherited, |attribute| match attribute.value.as_str() {
+            "default" => false,
+            "preserve" => true,
+            _ => true,
+        })
+}
+
+fn find_managed_context_counted(
+    sections: &[PreservedSection],
+    id: &StableId,
+) -> Option<(usize, bool)> {
+    fn visit(
+        nodes: &[PreservedNode],
+        id: &StableId,
+        depth: usize,
+        inherited_space_preserve: bool,
+    ) -> Option<(usize, bool)> {
+        for node in nodes {
+            increment_counter(&MANAGED_INDEX_FALLBACK_NODES);
+            let PreservedNode::Element(element) = node else {
+                continue;
+            };
+            let space_preserve = effective_xml_space_preserve(element, inherited_space_preserve);
+            if matches!(&element.ownership, SourceOwnership::Managed(target) if target == id) {
+                return Some((depth, space_preserve));
+            }
+            if let Some(found) = visit(
+                &element.children,
+                id,
+                depth.saturating_add(1),
+                space_preserve,
+            ) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    sections.iter().find_map(|section| visit(&section.children, id, 0, false))
 }
 
 fn element_at_path_mut<'a>(
@@ -2255,28 +2759,6 @@ fn text_element_for_run(template: &PreservedElement, run: &TextRun) -> Preserved
         .collect();
     element.children = vec![PreservedNode::Text(run.text.clone().into())].into();
     element
-}
-
-fn source_id_values(sections: &[PreservedSection]) -> BTreeSet<String> {
-    fn collect(nodes: &[PreservedNode], ids: &mut BTreeSet<String>) {
-        for node in nodes {
-            if let PreservedNode::Element(element) = node {
-                for attribute in &element.attributes {
-                    if attribute.name.namespace_uri.is_none()
-                        && attribute.name.local_name.eq_ignore_ascii_case("id")
-                    {
-                        ids.insert(attribute.value.clone());
-                    }
-                }
-                collect(&element.children, ids);
-            }
-        }
-    }
-    let mut ids = BTreeSet::new();
-    for section in sections {
-        collect(&section.children, &mut ids);
-    }
-    ids
 }
 
 fn has_potential_reference(
@@ -2675,8 +3157,105 @@ mod tests {
             references: Vec::new(),
             board_graph: BoardGraph::default(),
             managed_paragraph_index: None,
+            source_identity_use_index: None,
             source_text_bytes: 0,
         }
+    }
+
+    #[test]
+    fn managed_mismatch_sites_are_distinct_and_value_free() {
+        let id = StableId::new("element").unwrap_or_else(|_| unreachable!());
+
+        let mut text_replacement = base_state();
+        let text_replacement_error = text_replacement
+            .replace_managed_text(
+                &id,
+                "INT. OTHER",
+                0,
+                0,
+                "",
+                None,
+            )
+            .expect_err("semantic/source text disagreement must reject replacement");
+        assert_eq!(
+            text_replacement_error,
+            PreservationError::ManagedTextMismatchAt(ManagedTextMismatchSite::TextReplacement),
+        );
+
+        let mut text_elements = base_state();
+        let paragraph = text_elements
+            .managed_element_mut(&id)
+            .unwrap_or_else(|_| unreachable!());
+        paragraph.children = vec![PreservedNode::Element(PreservedElement {
+            name: name("Text"),
+            attributes: Vec::new(),
+            namespace_bindings: Vec::new(),
+            source_type: None,
+            ownership: SourceOwnership::Opaque,
+            dependency_confidence: DependencyConfidence::Unknown,
+            anchor: None,
+            children: vec![PreservedNode::Text("SOURCE-ONLY-VALUE".into())].into(),
+        })]
+        .into();
+        let text_elements_error = text_elements
+            .replace_managed_text_elements(
+                &id,
+                &["EXPECTED-VALUE".to_owned()],
+                "replacement",
+            )
+            .expect_err("source text runs must match the expected semantic runs");
+        assert_eq!(
+            text_elements_error,
+            PreservationError::ManagedTextMismatchAt(
+                ManagedTextMismatchSite::TextElementsReplacement,
+            ),
+        );
+
+        let mut paragraph_removal = base_state();
+        let provenance = crate::SourceProvenance {
+            format: crate::SourceFormat::Fdx,
+            section: crate::SourceSection::Content,
+            ordinal: 0,
+            foreign_id: Some("PRIVATE-FOREIGN-ID".to_owned()),
+            foreign_role: None,
+        };
+        let removal_error = paragraph_removal
+            .remove_managed_paragraph(&id, Some(&provenance))
+            .expect_err("mismatched provenance must reject removal");
+        assert_eq!(
+            removal_error,
+            PreservationError::ManagedTextMismatchAt(
+                ManagedTextMismatchSite::ParagraphRemoval,
+            ),
+        );
+
+        let baseline = base_state();
+        let mut scoped_edit = baseline.clone();
+        let paragraph = scoped_edit
+            .managed_element_mut(&id)
+            .unwrap_or_else(|_| unreachable!());
+        paragraph.children[1] = PreservedNode::CData("SOURCE-ONLY-VALUE".into());
+        let semantic = ScreenplayElement::new("element", Role::SceneHeading, "INT. ROOM")
+            .unwrap_or_else(|_| unreachable!());
+        let scoped_error = scoped_edit
+            .validate_scoped_managed_edit(&baseline, &semantic)
+            .expect_err("scoped validation must reject source projection disagreement");
+        assert_eq!(
+            scoped_error,
+            PreservationError::ManagedTextMismatchAt(
+                ManagedTextMismatchSite::ScopedEditValidation,
+            ),
+        );
+
+        let value_free = format!(
+            "{text_replacement_error:?} {text_elements_error:?} {removal_error:?} {scoped_error:?}"
+        );
+        assert!(!value_free.contains("SOURCE-ONLY-VALUE"));
+        assert!(!value_free.contains("PRIVATE-FOREIGN-ID"));
+        assert_eq!(
+            ManagedTextMismatchSite::TextElementsReplacement.diagnostic_name(),
+            "text-elements-replacement",
+        );
     }
 
     #[test]
@@ -3034,5 +3613,213 @@ mod tests {
         let mut oversized = base_state();
         oversized.source.original_bytes = SharedBytes::source(vec![0; MAX_SOURCE_BYTES + 1]);
         assert_eq!(oversized.validate(), Err(PreservationError::SourceTooLarge));
+    }
+
+    #[test]
+    fn source_identity_index_matches_legacy_safety_and_reservation_scans() {
+        fn legacy_external_use(sections: &[PreservedSection], id: &str) -> bool {
+            fn scan(nodes: &[PreservedNode], id: &str) -> bool {
+                nodes.iter().any(|node| match node {
+                    PreservedNode::Element(element) => {
+                        let mut ids = element.attributes.iter().filter(|attribute| {
+                            attribute.name.namespace_uri.is_none()
+                                && attribute.name.local_name.eq_ignore_ascii_case("id")
+                        });
+                        let target = (element.name.local_name == "Paragraph")
+                            .then(|| ids.next().map(|attribute| attribute.value.as_str()))
+                            .flatten()
+                            .filter(|_| ids.next().is_none())
+                            == Some(id);
+                        element.attributes.iter().any(|attribute| {
+                            attribute.value.contains(id)
+                                && !(target
+                                    && attribute.name.namespace_uri.is_none()
+                                    && attribute.name.local_name.eq_ignore_ascii_case("id"))
+                        }) || scan(&element.children, id)
+                    }
+                    PreservedNode::Text(text)
+                    | PreservedNode::CData(text)
+                    | PreservedNode::Comment(text) => text.contains(id),
+                    PreservedNode::ProcessingInstruction { target, data } => {
+                        target.contains(id) || data.contains(id)
+                    }
+                })
+            }
+            sections.iter().any(|section| scan(&section.children, id))
+        }
+
+        fn legacy_source_ids(sections: &[PreservedSection]) -> BTreeSet<String> {
+            fn scan(nodes: &[PreservedNode], ids: &mut BTreeSet<String>) {
+                for node in nodes {
+                    if let PreservedNode::Element(element) = node {
+                        for attribute in &element.attributes {
+                            if attribute.name.namespace_uri.is_none()
+                                && attribute.name.local_name.eq_ignore_ascii_case("id")
+                            {
+                                ids.insert(attribute.value.clone());
+                            }
+                        }
+                        scan(&element.children, ids);
+                    }
+                }
+            }
+            let mut ids = BTreeSet::new();
+            for section in sections {
+                scan(&section.children, &mut ids);
+            }
+            ids
+        }
+
+        fn paragraph_identity(value: &str) -> ForeignIdentity {
+            ForeignIdentity::new(ForeignIdDomain::Paragraph, value)
+                .unwrap_or_else(|_| unreachable!())
+        }
+
+        let mut state = base_state();
+        let values = [
+            "SAFE_ID",
+            "ID_ATTR",
+            "ID_TEXT",
+            "ID_CDATA",
+            "ID_COMMENT",
+            "ID_PI_TARGET",
+            "ID_PI_DATA",
+            "ID_CHILD_ATTR",
+            "DUPLICATE_ID",
+            "REFERENCED_ID",
+            "ANCHORED_ID",
+        ];
+        state.identities = values.iter().map(|value| paragraph_identity(value)).collect();
+        state.identities.push(paragraph_identity("DUPLICATE_ID"));
+        state.references.push(ForeignReference {
+            source: ForeignIdentity::new(ForeignIdDomain::Board, "board-ref")
+                .unwrap_or_else(|_| unreachable!()),
+            target: paragraph_identity("REFERENCED_ID"),
+            policy: ReferencePolicy::CrossDomainMayOrphan,
+        });
+        let foreign_anchor = SourceAnchorId::new("foreign-anchor")
+            .unwrap_or_else(|_| unreachable!());
+        state.anchors.push(SourceAnchor {
+            id: foreign_anchor,
+            target: AnchorTarget::Foreign(paragraph_identity("ANCHORED_ID")),
+            relation: AnchorRelation::Attached,
+        });
+        let PreservedNode::Element(managed) = &mut state.sections[0].children[0] else {
+            unreachable!();
+        };
+        managed.attributes.push(PreservedAttribute {
+            name: name("id"),
+            value: "SAFE_ID".into(),
+        });
+        let opaque = PreservedElement {
+            name: name("VendorPayload"),
+            attributes: vec![
+                PreservedAttribute {
+                    name: name("ref"),
+                    value: "prefix-ID_ATTR-suffix".into(),
+                },
+                PreservedAttribute {
+                    name: name("ID"),
+                    value: "SOURCE_RESERVED".into(),
+                },
+                PreservedAttribute {
+                    name: SourceName {
+                        namespace_uri: Some("urn:vendor".into()),
+                        local_name: "id".into(),
+                        qualified_name: Some("vendor:id".into()),
+                    },
+                    value: "NAMESPACE_ONLY".into(),
+                },
+            ],
+            namespace_bindings: Vec::new(),
+            source_type: None,
+            ownership: SourceOwnership::Opaque,
+            dependency_confidence: DependencyConfidence::Unknown,
+            anchor: None,
+            children: vec![
+                PreservedNode::Text("before-ID_TEXT-after".into()),
+                PreservedNode::CData("before-ID_CDATA-after".into()),
+                PreservedNode::Comment("before-ID_COMMENT-after".into()),
+                PreservedNode::ProcessingInstruction {
+                    target: "ID_PI_TARGET".into(),
+                    data: "before-ID_PI_DATA-after".into(),
+                },
+                PreservedNode::Element(PreservedElement {
+                    name: name("NestedVendor"),
+                    attributes: vec![PreservedAttribute {
+                        name: name("data"),
+                        value: "x-ID_CHILD_ATTR-y".into(),
+                    }],
+                    namespace_bindings: Vec::new(),
+                    source_type: None,
+                    ownership: SourceOwnership::Opaque,
+                    dependency_confidence: DependencyConfidence::Unknown,
+                    anchor: None,
+                    children: Vec::new().into(),
+                }),
+            ]
+            .into(),
+        };
+        state.sections[0].children.push(PreservedNode::Element(opaque));
+        state.rebuild_managed_paragraph_index();
+
+        let legacy_ids = legacy_source_ids(&state.sections);
+        assert_eq!(state.indexed_source_id_values(), legacy_ids);
+        for identity in state
+            .identities
+            .iter()
+            .filter(|identity| identity.domain == ForeignIdDomain::Paragraph)
+        {
+            let legacy = state.identities.iter().filter(|other| **other == *identity).count() == 1
+                && !state.references.iter().chain(&state.board_graph.references).any(|reference| {
+                    reference.source == *identity || reference.target == *identity
+                })
+                && !state.anchors.iter().any(|anchor| {
+                    matches!(&anchor.target, AnchorTarget::Foreign(target) if target == identity)
+                })
+                && !legacy_external_use(&state.sections, &identity.value);
+            assert_eq!(
+                state.paragraph_identity_safely_removable(&identity.value),
+                legacy,
+                "differential mismatch for an indexed Paragraph identity",
+            );
+        }
+        assert!(state.paragraph_identity_safely_removable("SAFE_ID"));
+        assert!(state.indexed_source_id_values().contains("SOURCE_RESERVED"));
+        assert!(!state.indexed_source_id_values().contains("NAMESPACE_ONLY"));
+    }
+
+    #[test]
+    fn managed_source_mutation_invalidates_then_rebuilds_identity_use_index() {
+        let mut state = base_state();
+        state.identities.push(
+            ForeignIdentity::new(ForeignIdDomain::Paragraph, "LATE_USE")
+                .unwrap_or_else(|_| unreachable!()),
+        );
+        state.rebuild_managed_paragraph_index();
+        assert!(state.paragraph_identity_safely_removable("LATE_USE"));
+        let managed_id = StableId::new("element").unwrap_or_else(|_| unreachable!());
+        state
+            .replace_managed_text(&managed_id, "INT. ROOM", 9, 9, " LATE_USE", None)
+            .unwrap_or_else(|_| unreachable!());
+        assert!(state.source_identity_use_index.is_none());
+        state.ensure_source_identity_use_index();
+        assert!(!state.paragraph_identity_safely_removable("LATE_USE"));
+
+        let mut clone = state.clone();
+        clone.invalidate_source_identity_use_index();
+        assert_eq!(clone, state, "transient indexes stay outside semantic equality");
+    }
+
+    #[test]
+    fn derived_publication_rebuilds_both_transient_preservation_indexes() {
+        let mut state = base_state();
+        state.rebuild_managed_paragraph_index();
+        let mut project = project_with_preservation(state);
+        assert!(crate::scene_metadata::reconcile_project(&mut project)
+            .unwrap_or_else(|_| unreachable!()));
+        let state = project.preservation.as_ref().unwrap_or_else(|| unreachable!());
+        assert!(state.has_managed_paragraph_index());
+        assert!(state.has_source_identity_use_index());
     }
 }
