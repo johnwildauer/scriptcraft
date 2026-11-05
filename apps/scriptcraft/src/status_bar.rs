@@ -1,11 +1,131 @@
 use crate::focus_mode::FocusModeView;
+use crate::toolbar::{
+    toolbar_cursor_icon, toolbar_group_fill, toolbar_icon_hover_rect,
+};
 use eframe::egui::{
     self, Align, Color32, Direction, FontSelection, Pos2, Rect, Sense, Vec2, WidgetInfo,
     WidgetText, WidgetType,
 };
+use egui_material_icons::{
+    icons::{ICON_LOCATION_SEARCHING, ICON_MODE_NIGHT, ICON_TIMER},
+    MaterialIcon,
+};
 pub(super) const MIN_ZOOM_PERCENT: u16 = 75;
 pub(super) const MAX_ZOOM_PERCENT: u16 = 300;
 pub(super) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250, 300];
+
+/// Status-only presentation values. Keep these independent of toolbar and
+/// framework defaults so later manual tuning cannot silently affect other UI.
+mod presentation {
+    use eframe::egui::{self, Color32};
+
+    /// Horizontal inset of the bottom status panel, in logical points.
+    pub(super) const PANEL_HORIZONTAL_INSET: i8 = 12;
+    /// Symmetric top/bottom inset of the bottom status panel, in logical points.
+    pub(super) const PANEL_VERTICAL_INSET: i8 = 5;
+    /// Padding around each status icon's hover rectangle, in logical points.
+    pub(super) const ICON_HOVER_PADDING: f32 = 2.0;
+    /// Status icon allocation width, preserving the current ZOOM_SLIDER_MIN_WIDTH slot.
+    pub(super) const ICON_SLOT_WIDTH: f32 = 27.0;
+    /// Horizontal gap between adjacent right-side status controls, in points.
+    pub(super) const ITEM_GAP: f32 = 4.0;
+    /// Minimum width of the status zoom slider, in logical points.
+    pub(super) const ZOOM_SLIDER_MIN_WIDTH: f32 = 40.0;
+    /// Maximum width of the status zoom slider, in logical points.
+    pub(super) const ZOOM_SLIDER_MAX_WIDTH: f32 = 84.0;
+    /// Percentage text reservation on each horizontal side, in points.
+    pub(super) const PERCENTAGE_SIDE_RESERVATION: f32 = 8.0;
+    /// Symmetric horizontal inset around the visible-page counter, in points.
+    /// Zero preserves the current page-counter geometry.
+    pub(super) const PAGE_COUNTER_HORIZONTAL_INSET: f32 = 24.0;
+    /// Status-owned Body text size, in logical points.
+    pub(super) const BODY_TEXT_SIZE: f32 = 10.0;
+    /// Status-owned Button text size, in logical points.
+    pub(super) const BUTTON_TEXT_SIZE: f32 = 10.0;
+    /// Center helper/operation/error text size, independent of other status text.
+    pub(super) const CENTER_TEXT_SIZE: f32 = 12.0;
+    /// Material glyph size used by the existing icon renderer, in logical points.
+    pub(super) const ICON_GLYPH_SIZE: f32 = 17.0;
+    /// Status zoom slider rail thickness, inherited as 8 logical points.
+    /// Adjust this status-only value manually if a thinner rail is desired.
+    pub(super) const ZOOM_SLIDER_RAIL_HEIGHT: f32 = 4.0;
+    /// Production default: keep the detailed Diagnostics presentation disabled.
+    /// Set to `true` only for explicit local development; changing this source
+    /// constant requires rebuilding and relaunching the application.
+    pub(super) const ENABLE_DIAGNOSTICS: bool = false;
+
+    /// Optional app override for every status-owned default/idle text and icon.
+    /// Leave `None` to follow the active Appearance theme's text foreground.
+    pub(super) const DEFAULT_FOREGROUND_OVERRIDE: Option<Color32> = None;
+    /// Optional center-message-only foreground override. Leave `None` to use
+    /// the status default foreground without changing other status text colors.
+    pub(super) const CENTER_FOREGROUND_OVERRIDE: Option<Color32> = None;
+    /// Optional app override shared by every interactive status hover foreground.
+    /// Leave `None` to follow the active Appearance theme's hovered-widget text.
+    pub(super) const HOVERED_FOREGROUND_OVERRIDE: Option<Color32> = None;
+
+    pub(super) fn default_foreground(ui: &egui::Ui) -> Color32 {
+        DEFAULT_FOREGROUND_OVERRIDE.unwrap_or_else(|| ui.visuals().text_color())
+    }
+
+    pub(super) fn center_foreground(ui: &egui::Ui) -> Color32 {
+        CENTER_FOREGROUND_OVERRIDE.unwrap_or_else(|| default_foreground(ui))
+    }
+
+    pub(super) fn hovered_foreground(ui: &egui::Ui) -> Color32 {
+        HOVERED_FOREGROUND_OVERRIDE
+            .unwrap_or_else(|| ui.visuals().widgets.hovered.text_color())
+    }
+}
+
+pub(super) fn status_panel_frame(ctx: &egui::Context) -> egui::Frame {
+    // Start from the framework status-panel frame to retain its panel fill and
+    // default stroke/separator contract; both symmetric insets are status-local
+    // values surfaced for manual adjustment.
+    egui::Frame::side_top_panel(ctx.global_style().as_ref()).inner_margin(egui::Margin::symmetric(
+        presentation::PANEL_HORIZONTAL_INSET,
+        presentation::PANEL_VERTICAL_INSET,
+    ))
+}
+
+pub(super) const fn diagnostics_enabled() -> bool {
+    presentation::ENABLE_DIAGNOSTICS
+}
+
+fn status_font_id(ui: &egui::Ui, text_style: egui::TextStyle) -> egui::FontId {
+    let mut font = text_style.resolve(ui.style());
+    font.size = match text_style {
+        egui::TextStyle::Body => presentation::BODY_TEXT_SIZE,
+        egui::TextStyle::Button => presentation::BUTTON_TEXT_SIZE,
+        _ => font.size,
+    };
+    font
+}
+
+fn with_status_text_style<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        for (text_style, size) in [
+            (egui::TextStyle::Body, presentation::BODY_TEXT_SIZE),
+            (egui::TextStyle::Button, presentation::BUTTON_TEXT_SIZE),
+        ] {
+            if let Some(font) = ui.style_mut().text_styles.get_mut(&text_style) {
+                font.size = size;
+            }
+        }
+        contents(ui)
+    })
+    .inner
+}
+
+fn with_center_text_style<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        if let Some(font) = ui.style_mut().text_styles.get_mut(&egui::TextStyle::Body) {
+            font.size = presentation::CENTER_TEXT_SIZE;
+        }
+        contents(ui)
+    })
+    .inner
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum AppearanceMode {
@@ -122,93 +242,110 @@ pub(super) fn configure_appearance(
     (resolved_theme, applied)
 }
 
-#[allow(dead_code)] // Stable slots for the later timer and focus work orders.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum RightStatusItemId {
-    SprintTimer,
-    FocusMode,
-    Appearance,
-    Zoom,
-}
-
-impl RightStatusItemId {
-    fn order(self) -> u8 {
-        match self {
-            Self::SprintTimer => 0,
-            Self::FocusMode => 1,
-            Self::Appearance => 2,
-            Self::Zoom => 3,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct RightStatusItemWidth {
-    pub(super) id: RightStatusItemId,
-    pub(super) width: f32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RightStatusLayout {
-    pub(super) inline: Vec<RightStatusItemId>,
-    pub(super) overflow: Vec<RightStatusItemId>,
-}
-
-pub(super) fn plan_right_status_items(
-    available_width: f32,
+struct StatusRowLayout {
+    page: Rect,
+    center: Rect,
+    icons: [Rect; 3],
+    slider: Rect,
+    percentage: Rect,
     item_spacing: f32,
-    overflow_trigger_width: f32,
-    items: &[RightStatusItemWidth],
-) -> RightStatusLayout {
-    let mut ordered = items
-        .iter()
-        .copied()
-        .filter(|item| item.width.is_finite() && item.width > 0.0)
-        .collect::<Vec<_>>();
-    ordered.sort_by_key(|item| item.id.order());
-    ordered.dedup_by_key(|item| item.id);
+}
 
-    let available_width = if available_width.is_finite() {
-        available_width.max(0.0)
-    } else {
-        0.0
-    };
-    let spacing = if item_spacing.is_finite() {
-        item_spacing.max(0.0)
-    } else {
-        0.0
-    };
-    let total = ordered.iter().map(|item| item.width).sum::<f32>()
-        + spacing * ordered.len().saturating_sub(1) as f32;
-    if total <= available_width {
-        return RightStatusLayout {
-            inline: ordered.iter().map(|item| item.id).collect(),
-            overflow: Vec::new(),
-        };
-    }
-
-    let trigger = if overflow_trigger_width.is_finite() {
-        overflow_trigger_width.max(0.0)
-    } else {
-        0.0
-    };
-    let inline_budget = (available_width - trigger - spacing).max(0.0);
-    let mut inline = Vec::new();
-    let mut used = 0.0;
-    for item in &ordered {
-        let candidate = used + if inline.is_empty() { 0.0 } else { spacing } + item.width;
-        if candidate > inline_budget {
-            break;
+/// Reserve the right-hand controls first, then bound the page and mirrored center
+/// regions against the status row. At a physically unusable width the right-side
+/// slots and their gaps shrink proportionally; they remain bounded and
+/// nonoverlapping but are not promised usable targets.
+fn plan_status_row(
+    available: Rect,
+    item_spacing: f32,
+    page_label_width: f32,
+    percentage_width: f32,
+    icon_widths: [f32; 3],
+    slider_min: f32,
+    slider_max: f32,
+) -> StatusRowLayout {
+    let nonnegative = |value: f32| {
+        if value.is_finite() {
+            value.max(0.0)
+        } else {
+            0.0
         }
-        inline.push(item.id);
-        used = candidate;
+    };
+    let width = nonnegative(available.width());
+    let height = nonnegative(available.height());
+    let spacing = nonnegative(item_spacing);
+    let icons = icon_widths.map(nonnegative);
+    let percentage_width = nonnegative(percentage_width);
+    let slider_min = nonnegative(slider_min);
+    let slider_max = nonnegative(slider_max).max(slider_min);
+    let page_label_width = nonnegative(page_label_width);
+
+    let fixed_right_width = icons.iter().sum::<f32>()
+        + percentage_width
+        + slider_min
+        + spacing * 4.0;
+    let compression = if width < fixed_right_width && fixed_right_width > 0.0 {
+        width / fixed_right_width
+    } else {
+        1.0
+    };
+    let spacing = spacing * compression;
+    let icons = icons.map(|value| value * compression);
+    let percentage_width = percentage_width * compression;
+    let mut slider_width = slider_min * compression;
+    let page_width = if compression < 1.0 {
+        0.0
+    } else {
+        let left_available = (width - fixed_right_width).max(0.0);
+        // The page stays left-aligned and cannot enter the mirrored center
+        // region. Before slider growth, its usable left allocation is bounded
+        // by both the right-group width and the space before that group.
+        let bounded_page_width = fixed_right_width.min(left_available);
+        page_label_width.min(bounded_page_width)
+    };
+    if compression == 1.0 {
+        let available_for_growth = (width - fixed_right_width - page_width).max(0.0);
+        slider_width += available_for_growth.min(slider_max - slider_min);
     }
-    let overflow = ordered
-        .iter()
-        .skip(inline.len())
-        .map(|item| item.id)
-        .collect();
-    RightStatusLayout { inline, overflow }
+
+    let right_width = icons.iter().sum::<f32>()
+        + percentage_width
+        + slider_width
+        + spacing * 4.0;
+    let row_min = available.min;
+    let row_right = row_min.x + width;
+    let make_rect = |left: f32, width: f32| {
+        Rect::from_min_size(egui::pos2(left, row_min.y), Vec2::new(width.max(0.0), height))
+    };
+
+    let mut right_edge = row_right;
+    let percentage = make_rect(right_edge - percentage_width, percentage_width);
+    right_edge = percentage.left() - spacing;
+    let slider = make_rect(right_edge - slider_width, slider_width);
+    right_edge = slider.left() - spacing;
+    let appearance = make_rect(right_edge - icons[2], icons[2]);
+    right_edge = appearance.left() - spacing;
+    let focus = make_rect(right_edge - icons[1], icons[1]);
+    right_edge = focus.left() - spacing;
+    let timer = make_rect(right_edge - icons[0], icons[0]);
+    let center_width = (width - 2.0 * right_width).max(0.0);
+    let center = if center_width > 0.0 {
+        make_rect(row_min.x + right_width, center_width)
+    } else {
+        // At narrow widths the mirrored interval is empty. Keep its collapsed
+        // position on Timer's left boundary, without crossing controls.
+        make_rect(timer.left(), 0.0)
+    };
+
+    StatusRowLayout {
+        page: make_rect(row_min.x, page_width),
+        center,
+        icons: [timer, focus, appearance],
+        slider,
+        percentage,
+        item_spacing: spacing,
+    }
 }
 
 pub(super) fn resolved_ui_pixels_per_point(native: Option<f32>) -> f32 {
@@ -244,53 +381,42 @@ pub(super) fn normalized_zoom_percent(value: f64) -> u16 {
 fn zoom_controls(
     ui: &mut egui::Ui,
     zoom_percent: &mut u16,
-    region_width: Option<f32>,
-) -> (bool, Rect, Rect, egui::Id) {
+    slider_rect: Rect,
+    percentage_rect: Rect,
+    percentage_label: &str,
+) -> (bool, Option<egui::Response>) {
     let old_value = *zoom_percent;
-    let mut slider_rect = Rect::NOTHING;
-    let mut presets_rect = Rect::NOTHING;
-    let mut presets_id = egui::Id::NULL;
-    ui.horizontal(|ui| {
-        let available_width = region_width.unwrap_or_else(|| ui.available_width());
-        let slider_label = "Page zoom";
-        let label_reserve = if region_width.is_some() { 64.0 } else { 0.0 };
-        let slider_width = (available_width - 64.0 - ui.spacing().item_spacing.x - label_reserve)
-            .clamp(40.0, 165.0);
-        slider_rect = zoom_slider(ui, slider_width, zoom_percent, slider_label).rect;
-        let presets_response = egui::ComboBox::from_id_salt("status-page-zoom-presets")
-            .selected_text(format!("{zoom_percent}%"))
-            .width(64.0)
-            .show_ui(ui, |ui| {
-                for preset in ZOOM_PRESETS {
-                    ui.selectable_value(zoom_percent, preset, format!("{preset}%"));
-                }
-            })
-            .response;
-        presets_rect = presets_response.rect;
-        presets_id = presets_response.id;
+    let slider_response = (slider_rect.width() > 0.0).then(|| {
+        one_line_region_at(ui, slider_rect, |slider_ui| {
+            zoom_slider(slider_ui, slider_rect.width(), zoom_percent)
+        })
+        .inner
     });
-    (
-        *zoom_percent != old_value,
-        slider_rect,
-        presets_rect,
-        presets_id,
-    )
+
+    one_line_region_at(ui, percentage_rect, |percentage_ui| {
+        zoom_presets_button(percentage_ui, zoom_percent, percentage_label)
+    });
+    (*zoom_percent != old_value, slider_response)
 }
 
-fn zoom_slider(
-    ui: &mut egui::Ui,
-    width: f32,
-    zoom_percent: &mut u16,
-    label: &str,
-) -> egui::Response {
-    let response = ui.add_sized(
-        [width, ui.spacing().interact_size.y],
-        egui::Slider::new(zoom_percent, MIN_ZOOM_PERCENT..=MAX_ZOOM_PERCENT)
-            .integer()
-            .trailing_fill(true)
-            .show_value(false)
-            .text(label),
-    );
+fn zoom_slider(ui: &mut egui::Ui, width: f32, zoom_percent: &mut u16) -> egui::Response {
+    let response = ui
+        .scope(|ui| {
+            ui.spacing_mut().slider_rail_height = presentation::ZOOM_SLIDER_RAIL_HEIGHT;
+            // egui Slider allocates from Spacing::slider_width internally;
+            // add_sized alone constrains its child UI but leaves that stock
+            // response at the default 100 points. Match the planner-owned slot.
+            ui.spacing_mut().slider_width = width;
+            ui.add_sized(
+                [width, ui.spacing().interact_size.y],
+                egui::Slider::new(zoom_percent, MIN_ZOOM_PERCENT..=MAX_ZOOM_PERCENT)
+                    .integer()
+                    .trailing_fill(true)
+                    .show_value(false)
+                    .handle_shape(egui::style::HandleShape::Circle),
+            )
+        })
+        .inner;
     if response.has_focus() {
         if ui.input(|input| input.key_pressed(egui::Key::Home)) {
             *zoom_percent = MIN_ZOOM_PERCENT;
@@ -298,7 +424,129 @@ fn zoom_slider(
             *zoom_percent = MAX_ZOOM_PERCENT;
         }
     }
+    response.widget_info(|| {
+        WidgetInfo::slider(
+            response.enabled(),
+            f64::from(*zoom_percent),
+            "Page zoom",
+        )
+    });
+    ui.ctx().accesskit_node_builder(response.id, |node| {
+        node.set_label("Page zoom");
+        node.set_numeric_value(f64::from(*zoom_percent));
+        node.set_min_numeric_value(f64::from(MIN_ZOOM_PERCENT));
+        node.set_max_numeric_value(f64::from(MAX_ZOOM_PERCENT));
+        node.set_numeric_value_step(1.0);
+    });
     response
+}
+
+fn paint_zoom_slider_knob(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    zoom_percent: u16,
+    right_group_rect: Rect,
+    status_row_rect: Rect,
+) {
+    let clip_rect = right_group_rect
+        .intersect(status_row_rect)
+        .intersect(ui.clip_rect());
+    if !ui.is_rect_visible(clip_rect) {
+        return;
+    }
+
+    // Match egui 0.34's horizontal Circle handle geometry: the center range is
+    // inset by handle_radius, while interaction expansion affects the painted
+    // circle radius but not the value-to-position mapping.
+    let handle_radius = response.rect.height() / 2.5;
+    let position_range = response.rect.x_range().shrink(handle_radius);
+    let normalized = (f32::from(zoom_percent - MIN_ZOOM_PERCENT)
+        / f32::from(MAX_ZOOM_PERCENT - MIN_ZOOM_PERCENT))
+        .clamp(0.0, 1.0);
+    let center = egui::pos2(
+        egui::emath::lerp(position_range, normalized),
+        response.rect.center().y,
+    );
+
+    let visuals = ui.style().interact(response);
+    let foreground = if response.hovered() {
+        presentation::hovered_foreground(ui)
+    } else {
+        presentation::default_foreground(ui)
+    };
+    let painter = ui.painter().with_clip_rect(clip_rect);
+    painter.circle(
+        center,
+        handle_radius + visuals.expansion,
+        foreground,
+        egui::Stroke::new(visuals.fg_stroke.width, foreground),
+    );
+}
+
+fn paint_status_hover_control(
+    ui: &egui::Ui,
+    response: egui::Response,
+    hover_rect: Rect,
+) -> (egui::Response, Color32) {
+    let hover_rect = hover_rect.intersect(ui.max_rect()).intersect(ui.clip_rect());
+    let response = response.on_hover_cursor(toolbar_cursor_icon());
+    if response.hovered() {
+        let fill = toolbar_group_fill(ui.style(), true);
+        if fill != Color32::TRANSPARENT {
+            ui.painter().rect_filled(hover_rect, 2.0, fill);
+        }
+        (response, presentation::hovered_foreground(ui))
+    } else {
+        (response, presentation::default_foreground(ui))
+    }
+}
+
+fn zoom_presets_button(
+    ui: &mut egui::Ui,
+    zoom_percent: &mut u16,
+    percentage_label: &str,
+) -> egui::Response {
+    let rect = ui.max_rect();
+    let hover_rect = rect.intersect(ui.max_rect()).intersect(ui.clip_rect());
+    let response = ui
+        .interact(
+            hover_rect,
+            ui.make_persistent_id("status-page-zoom-presets"),
+            Sense::click(),
+        );
+        // .on_hover_text(format!("Page Zoom"));
+    let accessible_name = format!("Page zoom presets, currently {percentage_label}");
+    let (response, text_color) = paint_status_hover_control(ui, response, hover_rect);
+    let button_response = interactive_response(ui, response, &accessible_name);
+    let galley = with_status_text_style(ui, |ui| {
+        WidgetText::from(percentage_label.to_owned()).into_galley(
+            ui,
+            None,
+            rect.width(),
+            egui::TextStyle::Button,
+        )
+    });
+    let text_left = (rect.center().x - galley.size().x / 2.0)
+        .clamp(rect.left(), (rect.right() - galley.size().x).max(rect.left()));
+    let text_position = egui::pos2(text_left, rect.center().y - galley.size().y / 2.0);
+    let painter_clip = rect.intersect(ui.clip_rect());
+    ui.painter()
+        .with_clip_rect(painter_clip)
+        .galley(text_position, galley, text_color);
+
+    egui::Popup::menu(&button_response.response)
+        .open_memory(
+            button_response
+                .activated
+                .then_some(egui::SetOpenCommand::Toggle),
+        )
+        .show(|ui| {
+            ui.set_min_width(72.0);
+            for preset in ZOOM_PRESETS {
+                ui.selectable_value(zoom_percent, preset, format!("{preset}%"));
+            }
+        });
+    button_response.response
 }
 
 #[allow(dead_code)] // WO-002 defines reusable interaction capabilities without assigning actions.
@@ -318,6 +566,7 @@ pub(super) struct StatusItem {
 }
 
 impl StatusItem {
+    #[allow(dead_code)] // The reusable text capability is reserved for status-item consumers.
     pub(super) fn text(id: &'static str, label: impl Into<String>) -> Self {
         let label = label.into();
         Self {
@@ -372,7 +621,7 @@ fn interactive_response(
     response.widget_info(|| {
         WidgetInfo::labeled(
             WidgetType::Button,
-            response.enabled,
+            response.enabled(),
             accessible_name.to_owned(),
         )
     });
@@ -387,13 +636,69 @@ fn interactive_response(
     }
 }
 
+fn status_icon_width() -> f32 {
+    presentation::ICON_SLOT_WIDTH
+}
+
+fn status_icon_control(
+    ui: &mut egui::Ui,
+    icon: MaterialIcon,
+    stable_id: &'static str,
+    enabled: bool,
+    accessible_name: &str,
+) -> StatusItemResponse {
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.push_id(stable_id, |ui| {
+            let padding = presentation::ICON_HOVER_PADDING;
+            let row_height = ui.spacing().interact_size.y;
+            let width = status_icon_width().min(ui.available_width().max(0.0));
+            let icon_control_size = Vec2::new(
+                (width - padding * 2.0).max(1.0),
+                (row_height - padding * 2.0).max(1.0),
+            );
+            let slot_size = icon_control_size + Vec2::splat(padding * 2.0);
+            let (id, slot_rect) = ui.allocate_space(slot_size);
+            let icon_control_rect = Rect::from_center_size(slot_rect.center(), icon_control_size);
+            let hover_rect = toolbar_icon_hover_rect(icon_control_rect, padding)
+                .intersect(ui.max_rect())
+                .intersect(ui.clip_rect());
+            let response = ui.interact(hover_rect, id.with("status-icon"), Sense::click());
+            let (response, text_color) = paint_status_hover_control(ui, response, hover_rect);
+
+            let galley = WidgetText::from(
+                icon.rich_text().size(presentation::ICON_GLYPH_SIZE),
+            )
+            .into_galley(
+                ui,
+                None,
+                icon_control_rect.width(),
+                egui::TextStyle::Button,
+            );
+            let text_position = icon_control_rect.center() - galley.size() / 2.0;
+            ui.painter().galley(text_position, galley, text_color);
+
+            interactive_response(ui, response, accessible_name)
+        })
+        .inner
+    })
+    .inner
+}
+
 /// Render a status-item capability without assigning it an application action.
 /// The caller may route the activation result; no action is stored or invented here.
+#[allow(dead_code)] // Kept as the renderer for the reusable status-item capability model.
 pub(super) fn render_item(ui: &mut egui::Ui, item: &StatusItem) -> Option<StatusItemResponse> {
     match item.kind {
         StatusItemKind::Text => {
             ui.push_id(item.id, |ui| {
-                paint_noninteractive_text(ui, item.id, &item.label, ui.visuals().text_color());
+                with_status_text_style(ui, |ui| {
+                    paint_noninteractive_text(
+                        ui,
+                        item.id,
+                        &item.label,
+                        presentation::default_foreground(ui),
+                    );
+                });
             });
             None
         }
@@ -426,11 +731,10 @@ fn paint_noninteractive_text(
     text: &str,
     color: Color32,
 ) -> Rect {
-    let mut layout_job = WidgetText::from(text).into_layout_job(
-        ui.style(),
-        FontSelection::Default,
-        ui.text_valign(),
-    );
+    let mut layout_job = WidgetText::from(text)
+        .into_layout_job(ui.style(), FontSelection::Default, ui.text_valign())
+        .as_ref()
+        .clone();
     let available_width = ui.available_width();
     let (galley_pos, galley, bounds) = if ui.wrap_mode() == egui::TextWrapMode::Wrap
         && ui.layout().main_dir() == Direction::LeftToRight
@@ -446,11 +750,11 @@ fn paint_noninteractive_text(
         if let Some(first_section) = layout_job.sections.first_mut() {
             first_section.leading_space = first_row_indentation;
         }
-        let galley = ui.fonts(|fonts| fonts.layout_job(layout_job));
+        let galley = ui.painter().layout_job(layout_job);
         let pos = egui::pos2(ui.max_rect().left(), ui.cursor().top());
         let mut bounds = Rect::NOTHING;
         for row in &galley.rows {
-            let row_rect = row.rect.translate(pos.to_vec2());
+            let row_rect = row.rect().translate(pos.to_vec2());
             ui.advance_cursor_after_rect(row_rect);
             bounds = bounds.union(row_rect);
         }
@@ -469,7 +773,7 @@ fn paint_noninteractive_text(
         }
         layout_job.halign = ui.layout().horizontal_placement();
         layout_job.justify = ui.layout().horizontal_justify();
-        let galley = ui.fonts(|fonts| fonts.layout_job(layout_job));
+        let galley = ui.painter().layout_job(layout_job);
         let (_, rect) = ui.allocate_space(galley.size());
         let pos = match galley.job.halign {
             Align::LEFT => rect.left_top(),
@@ -485,7 +789,7 @@ fn paint_noninteractive_text(
     let accessibility_id = ui.make_persistent_id(("status-label", id_source));
     ui.ctx().accesskit_node_builder(accessibility_id, |node| {
         node.set_role(egui::accesskit::Role::Label);
-        node.set_name(text.to_owned());
+        node.set_label(text.to_owned());
         node.set_bounds(egui::accesskit::Rect {
             x0: bounds.min.x.into(),
             y0: bounds.min.y.into(),
@@ -505,7 +809,7 @@ pub(super) enum VisiblePage {
 impl VisiblePage {
     pub(super) fn label(self) -> String {
         match self {
-            Self::Available { one_based, total } => format!("Page {one_based} of {total}"),
+            Self::Available { one_based, total } => format!("{one_based} of {total}"),
             Self::Unavailable => "Page unavailable".to_owned(),
         }
     }
@@ -602,6 +906,7 @@ pub(super) struct ViewportCenterAnchor {
 #[derive(Debug, Default)]
 pub(super) struct ViewportPageTracker {
     published: Option<GeometrySnapshot>,
+    last_valid: Option<VisiblePage>,
     repaint_after_publish: bool,
 }
 
@@ -679,12 +984,13 @@ impl ViewportPageTracker {
         invalidated: bool,
     ) -> VisiblePage {
         if invalidated {
+            self.published = None;
             self.repaint_after_publish = true;
-            return VisiblePage::Unavailable;
+            return self.last_valid.unwrap_or(VisiblePage::Unavailable);
         }
         let Some(snapshot) = self.published.as_ref() else {
             self.repaint_after_publish = true;
-            return VisiblePage::Unavailable;
+            return self.last_valid.unwrap_or(VisiblePage::Unavailable);
         };
         if frame.checked_sub(snapshot.published_frame) != Some(1)
             || snapshot.layout_revision != layout_revision
@@ -694,9 +1000,16 @@ impl ViewportPageTracker {
             || snapshot.page_rects.is_empty()
         {
             self.repaint_after_publish = true;
-            return VisiblePage::Unavailable;
+            return self.last_valid.unwrap_or(VisiblePage::Unavailable);
         }
-        select_visible_page(&snapshot.page_rects, snapshot.clip)
+        let selected = select_visible_page(&snapshot.page_rects, snapshot.clip);
+        if matches!(selected, VisiblePage::Available { .. }) {
+            self.last_valid = Some(selected);
+            selected
+        } else {
+            self.repaint_after_publish = true;
+            self.last_valid.unwrap_or(VisiblePage::Unavailable)
+        }
     }
 
     // Snapshot publication keeps geometry fields explicit and avoids a wrapper
@@ -737,6 +1050,12 @@ impl ViewportPageTracker {
 
     pub(super) fn invalidate(&mut self) {
         self.published = None;
+        self.repaint_after_publish = true;
+    }
+
+    pub(super) fn reset_for_document_replacement(&mut self) {
+        self.published = None;
+        self.last_valid = None;
         self.repaint_after_publish = true;
     }
 
@@ -801,6 +1120,25 @@ fn one_line_region<R>(
     )
 }
 
+fn one_line_region_at<R>(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |region| {
+            region.set_clip_rect(region.clip_rect().intersect(rect));
+            region.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            let result = contents(region);
+            region.set_min_size(rect.size());
+            result
+        },
+    )
+}
+
 fn paint_clipped_single_line(
     ui: &egui::Ui,
     id_source: &str,
@@ -809,21 +1147,63 @@ fn paint_clipped_single_line(
     color: Color32,
     rect: Rect,
 ) {
-    let mut layout_job =
-        WidgetText::from(text).into_layout_job(ui.style(), FontSelection::Default, Align::Center);
+    let mut layout_job = WidgetText::from(text)
+        .into_layout_job(ui.style(), FontSelection::Default, Align::Center)
+        .as_ref()
+        .clone();
     layout_job.wrap.max_width = rect.width();
     layout_job.wrap.max_rows = 1;
     layout_job.wrap.break_anywhere = true;
     layout_job.halign = Align::Min;
-    let galley = ui.fonts(|fonts| fonts.layout_job(layout_job));
-    let pos = egui::pos2(rect.left(), rect.center().y - galley.size().y * 0.5);
+    let galley = ui.painter().layout_job(layout_job);
+    let centered_left = rect.center().x - galley.size().x * 0.5;
+    let pos = egui::pos2(
+        centered_left.clamp(rect.left(), (rect.right() - galley.size().x).max(rect.left())),
+        rect.center().y - galley.size().y * 0.5,
+    );
     if ui.is_rect_visible(rect) {
         ui.painter().with_clip_rect(rect).galley(pos, galley, color);
     }
     let accessibility_id = ui.make_persistent_id(("status-label", id_source));
     ui.ctx().accesskit_node_builder(accessibility_id, |node| {
         node.set_role(egui::accesskit::Role::Label);
-        node.set_name(accessible_name.to_owned());
+        node.set_label(accessible_name.to_owned());
+        node.set_bounds(egui::accesskit::Rect {
+            x0: rect.min.x.into(),
+            y0: rect.min.y.into(),
+            x1: rect.max.x.into(),
+            y1: rect.max.y.into(),
+        });
+    });
+}
+
+fn page_counter_content_rect(rect: Rect) -> Rect {
+    let inset = presentation::PAGE_COUNTER_HORIZONTAL_INSET;
+    let inset = if inset.is_finite() { inset.max(0.0) } else { 0.0 };
+    let center_x = rect.center().x;
+    let left = (rect.left() + inset).min(center_x);
+    let right = (rect.right() - inset).max(center_x);
+    Rect::from_min_max(egui::pos2(left, rect.top()), egui::pos2(right, rect.bottom()))
+}
+
+fn paint_page_counter(ui: &egui::Ui, text: &str, rect: Rect, color: Color32) {
+    let mut layout_job = WidgetText::from(text)
+        .into_layout_job(ui.style(), FontSelection::Default, Align::Center)
+        .as_ref()
+        .clone();
+    layout_job.wrap.max_width = rect.width();
+    layout_job.wrap.max_rows = 1;
+    layout_job.wrap.break_anywhere = true;
+    layout_job.halign = Align::Min;
+    let galley = ui.painter().layout_job(layout_job);
+    let position = egui::pos2(rect.left(), rect.center().y - galley.size().y * 0.5);
+    if ui.is_rect_visible(rect) {
+        ui.painter().with_clip_rect(rect).galley(position, galley, color);
+    }
+    let accessibility_id = ui.make_persistent_id(("status-label", "visible-page"));
+    ui.ctx().accesskit_node_builder(accessibility_id, |node| {
+        node.set_role(egui::accesskit::Role::Label);
+        node.set_label(text.to_owned());
         node.set_bounds(egui::accesskit::Rect {
             x0: rect.min.x.into(),
             y0: rect.min.y.into(),
@@ -893,7 +1273,7 @@ pub(super) fn show_with_focus_mode(
     ui: &mut egui::Ui,
     page: VisiblePage,
     center: &CenterProjection,
-    diagnostics: DiagnosticProjection<'_>,
+    diagnostics: Option<DiagnosticProjection<'_>>,
     zoom_percent: &mut u16,
     appearance: &mut AppearanceMode,
     timer_open: &mut bool,
@@ -916,23 +1296,35 @@ pub(super) fn show_with_focus_mode(
     )
 }
 
-fn measured_button_width(ui: &egui::Ui, text: &str) -> f32 {
-    let text_width = ui.fonts(|fonts| {
-        fonts
-            .layout_no_wrap(
-                text.to_owned(),
-                egui::TextStyle::Button.resolve(ui.style()),
-                Color32::WHITE,
-            )
-            .size()
-            .x
-    });
-    text_width + ui.spacing().button_padding.x * 2.0
+fn measured_percentage_slot_width(ui: &egui::Ui) -> f32 {
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(
+            format!("{MAX_ZOOM_PERCENT}%"),
+            status_font_id(ui, egui::TextStyle::Button),
+            presentation::default_foreground(ui),
+        )
+    .size()
+    .x;
+    text_width + presentation::PERCENTAGE_SIDE_RESERVATION * 2.0
 }
 
 fn appearance_menu(ui: &mut egui::Ui, appearance: &mut AppearanceMode) -> bool {
     let previous = *appearance;
-    let menu = ui.menu_button("Appearance", |ui| {
+    let control = status_icon_control(
+        ui,
+        ICON_MODE_NIGHT.filled(),
+        "appearance-status-item",
+        true,
+        "Appearance mode",
+    );
+    control
+        .response
+        .clone()
+        .on_hover_text("Appearance");
+    egui::Popup::menu(&control.response)
+        .open_memory(control.activated.then_some(egui::SetOpenCommand::Toggle))
+        .show(|ui| {
         ui.set_min_width(156.0);
         for choice in [
             AppearanceMode::System,
@@ -943,254 +1335,7 @@ fn appearance_menu(ui: &mut egui::Ui, appearance: &mut AppearanceMode) -> bool {
             ui.selectable_value(appearance, choice, choice.label());
         }
     });
-    menu.response.widget_info(|| {
-        WidgetInfo::labeled(
-            WidgetType::Button,
-            menu.response.enabled,
-            "Appearance mode".to_owned(),
-        )
-    });
     *appearance != previous
-}
-
-fn appearance_choices(ui: &mut egui::Ui, appearance: &mut AppearanceMode) -> bool {
-    let previous = *appearance;
-    for choice in [
-        AppearanceMode::System,
-        AppearanceMode::Day,
-        AppearanceMode::Night,
-        AppearanceMode::Midnight,
-    ] {
-        ui.selectable_value(appearance, choice, choice.label());
-    }
-    *appearance != previous
-}
-
-#[allow(clippy::too_many_arguments)] // Keep each transient status action owned by its desktop caller.
-fn render_right_item(
-    ui: &mut egui::Ui,
-    item: RightStatusItemId,
-    width: f32,
-    zoom_percent: &mut u16,
-    appearance: &mut AppearanceMode,
-    timer_open: Option<&mut bool>,
-    timer_just_opened: Option<&mut bool>,
-    focus_view: Option<&FocusModeView>,
-    focus_activated: Option<&mut bool>,
-    focus_width: f32,
-) -> (bool, bool, Option<Rect>, Option<Rect>) {
-    ui.push_id(item, |ui| match item {
-        RightStatusItemId::SprintTimer => {
-            let mut activated = false;
-            let mut timer_rect = None;
-            ui.allocate_ui_with_layout(
-                egui::vec2(width, ui.spacing().interact_size.y),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    let timer_item =
-                        StatusItem::clickable_icon("sprint-timer-status-item", "⏱", "Sprint Timer");
-                    if let Some(rendered) = render_item(ui, &timer_item) {
-                        rendered.response.clone().on_hover_text("Sprint Timer");
-                        timer_rect = Some(rendered.response.rect);
-                        activated = rendered.activated;
-                    }
-                },
-            );
-            if activated {
-                if let Some(open) = timer_open {
-                    *open = !*open;
-                    if *open {
-                        if let Some(just_opened) = timer_just_opened {
-                            *just_opened = true;
-                        }
-                    }
-                }
-            }
-            (false, false, timer_rect, None)
-        }
-        RightStatusItemId::Appearance => {
-            ui.allocate_ui_with_layout(
-                egui::vec2(width, ui.spacing().interact_size.y),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| (false, appearance_menu(ui, appearance), None, None),
-            )
-            .inner
-        }
-        RightStatusItemId::Zoom => {
-            ui.allocate_ui_with_layout(
-                egui::vec2(width, ui.spacing().interact_size.y),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    (
-                        zoom_controls(ui, zoom_percent, Some(width)).0,
-                        false,
-                        None,
-                        None,
-                    )
-                },
-            )
-            .inner
-        }
-        RightStatusItemId::FocusMode => {
-            let mut focus_rect = None;
-            ui.allocate_ui_with_layout(
-                egui::vec2(focus_width, ui.spacing().interact_size.y),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    if let Some(view) = focus_view {
-                        let item = StatusItem::clickable_text(
-                            "focus-mode-status-item",
-                            view.button_text(),
-                            view.accessible_name(),
-                        );
-                        let rendered = ui
-                            .add_enabled_ui(view.enabled(), |ui| {
-                                let response = ui
-                                    .push_id(item.id, |ui| {
-                                        ui.add_sized(
-                                            egui::vec2(focus_width, ui.spacing().interact_size.y),
-                                            egui::Button::new(&item.label),
-                                        )
-                                    })
-                                    .inner;
-                                Some(interactive_response(ui, response, &item.accessible_name))
-                            })
-                            .inner;
-                        if let Some(rendered) = rendered {
-                            rendered
-                                .response
-                                .clone()
-                                .on_hover_text(view.accessible_name());
-                            focus_rect = Some(rendered.response.rect);
-                            if rendered.activated {
-                                if let Some(activated) = focus_activated {
-                                    *activated = true;
-                                }
-                            }
-                        }
-                    }
-                    (false, false, None, focus_rect)
-                },
-            )
-            .inner
-        }
-    })
-    .inner
-}
-
-#[allow(clippy::too_many_arguments)] // Each live control state remains explicitly caller-owned.
-fn overflow_menu(
-    ui: &mut egui::Ui,
-    overflow: &[RightStatusItemId],
-    page: VisiblePage,
-    center: &CenterProjection,
-    zoom_percent: &mut u16,
-    appearance: &mut AppearanceMode,
-    timer_open: &mut Option<&mut bool>,
-    timer_just_opened: &mut Option<&mut bool>,
-    focus_view: Option<&FocusModeView>,
-    focus_activated: Option<&mut bool>,
-) -> (bool, bool, Option<Rect>, Option<Rect>) {
-    let mut zoom_changed = false;
-    let mut appearance_changed = false;
-    let mut timer_rect = None;
-    let mut focus_rect = None;
-    let mut focus_activated = focus_activated;
-    let trigger = if center.error.is_some() {
-        "! More"
-    } else {
-        "More"
-    };
-    let accessible_name = if center.error.is_some() {
-        "Error. More status controls and details"
-    } else {
-        "More status controls and details"
-    };
-    let menu = ui.menu_button(trigger, |ui| {
-        ui.set_min_width(288.0);
-        egui::ScrollArea::vertical()
-            .max_height(320.0)
-            .show(ui, |ui| {
-                ui.label(page.label());
-                if let Some(message) = status_message(center) {
-                    ui.label(message);
-                }
-                ui.separator();
-                for item in overflow {
-                    match item {
-                        RightStatusItemId::Appearance => {
-                            appearance_changed |= appearance_choices(ui, appearance);
-                        }
-                        RightStatusItemId::Zoom => {
-                            zoom_changed |= zoom_controls(ui, zoom_percent, Some(270.0)).0;
-                        }
-                        RightStatusItemId::SprintTimer => {
-                            let response = ui
-                                .push_id(RightStatusItemId::SprintTimer, |ui| {
-                                    ui.button("⏱  Sprint Timer")
-                                })
-                                .inner;
-                            response.clone().on_hover_text("Sprint Timer");
-                            timer_rect = Some(response.rect);
-                            response.widget_info(|| {
-                                WidgetInfo::labeled(
-                                    WidgetType::Button,
-                                    response.enabled,
-                                    "Sprint Timer".to_owned(),
-                                )
-                            });
-                            if response.clicked() {
-                                if let Some(open) = timer_open.as_deref_mut() {
-                                    *open = !*open;
-                                    if *open {
-                                        if let Some(just_opened) = timer_just_opened.as_deref_mut()
-                                        {
-                                            *just_opened = true;
-                                        }
-                                    }
-                                }
-                                ui.close_menu();
-                            }
-                        }
-                        RightStatusItemId::FocusMode => {
-                            if let Some(view) = focus_view {
-                                let response = ui
-                                    .add_enabled_ui(view.enabled(), |ui| {
-                                        ui.push_id(RightStatusItemId::FocusMode, |ui| {
-                                            ui.button(view.button_text())
-                                        })
-                                        .inner
-                                    })
-                                    .inner;
-                                response.clone().on_hover_text(view.accessible_name());
-                                response.widget_info(|| {
-                                    WidgetInfo::labeled(
-                                        WidgetType::Button,
-                                        response.enabled,
-                                        view.accessible_name(),
-                                    )
-                                });
-                                focus_rect = Some(response.rect);
-                                if response.clicked() {
-                                    if let Some(activated) = focus_activated.as_deref_mut() {
-                                        *activated = true;
-                                    }
-                                    ui.close_menu();
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-    });
-    menu.response.widget_info(|| {
-        WidgetInfo::labeled(
-            WidgetType::Button,
-            menu.response.enabled,
-            accessible_name.to_owned(),
-        )
-    });
-    (zoom_changed, appearance_changed, timer_rect, focus_rect)
 }
 
 #[allow(clippy::too_many_arguments)] // Explicit projections and caller-owned state avoid hidden status globals.
@@ -1198,7 +1343,7 @@ fn show_impl_with_appearance(
     ui: &mut egui::Ui,
     page: VisiblePage,
     center: &CenterProjection,
-    diagnostics: DiagnosticProjection<'_>,
+    diagnostics: Option<DiagnosticProjection<'_>>,
     zoom_percent: &mut u16,
     appearance: &mut AppearanceMode,
     diagnostics_open: Option<bool>,
@@ -1211,171 +1356,213 @@ fn show_impl_with_appearance(
     let mut appearance_changed = false;
     let mut timer_rect = None;
     let mut focus_rect = None;
+    let mut zoom_slider_response = None;
     let mut timer_open = timer_open;
     let mut timer_just_opened = timer_just_opened;
     let mut focus_activated = focus_activated;
     let message = status_message(center);
     let row_height = ui.spacing().interact_size.y;
-    let timer_width = ui.spacing().interact_size.x.max(36.0);
-    ui.columns(3, |regions| {
-        let right_width = regions[2].available_width().max(0.0);
-        let appearance_width = measured_button_width(&regions[2], "Appearance");
-        let zoom_width = 270.0;
-        let trigger_label = if center.error.is_some() {
-            "! More"
-        } else {
-            "More"
-        };
-        let trigger_width = measured_button_width(&regions[2], trigger_label);
-        let mut right_items = Vec::with_capacity(4);
-        if timer_open.is_some() {
-            right_items.push(RightStatusItemWidth {
-                id: RightStatusItemId::SprintTimer,
-                width: timer_width,
-            });
-        }
-        let focus_width = measured_button_width(&regions[2], "⛶ Focus Mode").max(112.0);
-        if focus_view.is_some() {
-            right_items.push(RightStatusItemWidth {
-                id: RightStatusItemId::FocusMode,
-                width: focus_width,
-            });
-        }
-        right_items.extend([
-            RightStatusItemWidth {
-                id: RightStatusItemId::Appearance,
-                width: appearance_width,
-            },
-            RightStatusItemWidth {
-                id: RightStatusItemId::Zoom,
-                width: zoom_width,
-            },
-        ]);
-        let plan = plan_right_status_items(
-            right_width,
-            regions[2].spacing().item_spacing.x,
-            trigger_width,
-            &right_items,
-        );
-
-        // Controls are processed first so a zoom edit makes this frame's page
-        // projection unavailable before the page label is painted.
-        one_line_region(
-            &mut regions[2],
-            egui::vec2(right_width, row_height),
-            |right_ui| {
-                right_ui.with_layout(
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |right_ui| {
-                        if !plan.overflow.is_empty() {
-                            let (zoom, mode, timer_button_rect, focus_button_rect) = overflow_menu(
-                                right_ui,
-                                &plan.overflow,
-                                page,
-                                center,
+    let available = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+    let row_rect = Rect::from_min_size(
+        available.min,
+        Vec2::new(available.width().max(0.0), row_height.min(available.height().max(0.0))),
+    );
+    let page_label = page.label();
+    let page_label_text_width = ui
+        .painter()
+        .layout_no_wrap(
+            page_label.clone(),
+            status_font_id(ui, egui::TextStyle::Body),
+            presentation::default_foreground(ui),
+        )
+        .size()
+        .x;
+    let page_inset = presentation::PAGE_COUNTER_HORIZONTAL_INSET;
+    let page_inset = if page_inset.is_finite() {
+        page_inset.max(0.0)
+    } else {
+        0.0
+    };
+    let page_label_width = page_label_text_width + page_inset * 2.0;
+    let percentage_label = format!("{zoom_percent}%");
+    let percentage_width = measured_percentage_slot_width(ui);
+    let icon_width = status_icon_width();
+    let item_spacing = presentation::ITEM_GAP;
+    let layout = plan_status_row(
+        row_rect,
+        item_spacing,
+        page_label_width,
+        percentage_width,
+        [icon_width; 3],
+        presentation::ZOOM_SLIDER_MIN_WIDTH,
+        presentation::ZOOM_SLIDER_MAX_WIDTH,
+    );
+    let right_left = layout.icons[0].left();
+    let right_rect = Rect::from_min_max(
+        egui::pos2(right_left, row_rect.top()),
+        egui::pos2(row_rect.right(), row_rect.bottom()),
+    );
+    let planned_zoom = Rect::from_min_max(
+        egui::pos2(layout.slider.left(), row_rect.top()),
+        egui::pos2(layout.percentage.right(), row_rect.bottom()),
+    );
+    // Process the complete right group first so its interaction state is
+    // established before the page label is painted.
+    one_line_region(ui, row_rect.size(), |row_ui| {
+        one_line_region_at(row_ui, right_rect, |right_ui| {
+            right_ui.spacing_mut().item_spacing.x = layout.item_spacing;
+            right_ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |right_ui| {
+                    one_line_region_at(
+                        right_ui,
+                        planned_zoom,
+                        |zoom_ui| {
+                            let (changed, slider_response) = zoom_controls(
+                                zoom_ui,
                                 zoom_percent,
-                                appearance,
-                                &mut timer_open,
-                                &mut timer_just_opened,
-                                focus_view,
-                                focus_activated.as_deref_mut(),
+                                layout.slider,
+                                layout.percentage,
+                                &percentage_label,
                             );
-                            zoom_changed |= zoom;
-                            appearance_changed |= mode;
-                            timer_rect = timer_button_rect;
-                            focus_rect = focus_button_rect;
-                        }
-                        for item in plan.inline.iter().rev() {
-                            let width = match item {
-                                RightStatusItemId::Appearance => appearance_width,
-                                RightStatusItemId::Zoom => zoom_width,
-                                RightStatusItemId::SprintTimer => timer_width,
-                                RightStatusItemId::FocusMode => focus_width,
-                            };
-                            let (zoom, mode, timer_button_rect, focus_button_rect) =
-                                render_right_item(
-                                    right_ui,
-                                    *item,
-                                    width.min(right_ui.available_width()),
-                                    zoom_percent,
-                                    appearance,
-                                    timer_open.as_deref_mut(),
-                                    timer_just_opened.as_deref_mut(),
-                                    focus_view,
-                                    focus_activated.as_deref_mut(),
-                                    focus_width,
+                            zoom_changed |= changed;
+                            zoom_slider_response = slider_response;
+                        },
+                    );
+                    one_line_region(
+                        right_ui,
+                        Vec2::new(layout.icons[2].width(), row_height),
+                        |icon_ui| {
+                            appearance_changed |= appearance_menu(icon_ui, appearance);
+                        },
+                    );
+
+                    one_line_region(
+                        right_ui,
+                        Vec2::new(layout.icons[1].width(), row_height),
+                        |icon_ui| {
+                            if let Some(view) = focus_view {
+                                let accessible_name = view.accessible_name();
+                                let rendered = status_icon_control(
+                                    icon_ui,
+                                    ICON_LOCATION_SEARCHING.outlined(),
+                                    "focus-mode-status-item",
+                                    view.enabled(),
+                                    &accessible_name,
                                 );
-                            zoom_changed |= zoom;
-                            appearance_changed |= mode;
-                            timer_rect = timer_button_rect.or(timer_rect);
-                            focus_rect = focus_button_rect.or(focus_rect);
-                        }
-                    },
-                );
-            },
-        );
+                                rendered
+                                    .response
+                                    .clone()
+                                    .on_hover_text("Focus Mode");
+                                focus_rect = Some(rendered.response.rect);
+                                if rendered.activated {
+                                    if let Some(activated) = focus_activated.as_deref_mut() {
+                                        *activated = true;
+                                    }
+                                }
+                            }
+                        },
+                    );
 
-        let page_width = regions[0].available_width().max(0.0);
-        one_line_region(
-            &mut regions[0],
-            egui::vec2(page_width, row_height),
-            |page_ui| {
-                let visible_page = if zoom_changed {
-                    VisiblePage::Unavailable
-                } else {
-                    page
-                };
-                let item = StatusItem {
-                    accessible_name: visible_page.label(),
-                    ..StatusItem::text("visible-page", visible_page.label())
-                };
-                render_item(page_ui, &item);
-            },
-        );
+                    one_line_region(
+                        right_ui,
+                        Vec2::new(layout.icons[0].width(), row_height),
+                        |icon_ui| {
+                            let rendered = status_icon_control(
+                                icon_ui,
+                                ICON_TIMER.outlined(),
+                                "sprint-timer-status-item",
+                                true,
+                                "Sprint Timer",
+                            );
+                            rendered.response.clone().on_hover_text("Sprint Timer");
+                            timer_rect = Some(rendered.response.rect);
+                            if rendered.activated {
+                                if let Some(open) = timer_open.as_deref_mut() {
+                                    *open = !*open;
+                                    if *open {
+                                        if let Some(just_opened) = timer_just_opened.as_deref_mut()
+                                        {
+                                            *just_opened = true;
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    );
 
-        let status_width = regions[1].available_width().max(0.0);
-        one_line_region(
-            &mut regions[1],
-            egui::vec2(status_width, row_height),
-            |region| {
-                let status_rect = region.max_rect().intersect(region.clip_rect());
-                if let Some(message) = message.as_deref() {
+                    // Paint the custom knob after every ordinary right-group
+                    // control so later sibling hover fills cannot cover it.
+                    if let Some(response) = zoom_slider_response.as_ref() {
+                        paint_zoom_slider_knob(
+                            right_ui,
+                            response,
+                            *zoom_percent,
+                            right_rect,
+                            row_rect,
+                        );
+                    }
+                },
+            );
+        });
+        one_line_region_at(row_ui, layout.center, |region| {
+            let status_rect = region.max_rect().intersect(region.clip_rect());
+            if let Some(message) = message.as_deref() {
+                with_center_text_style(region, |region| {
                     paint_clipped_single_line(
                         region,
                         "operation-status",
                         message,
                         message,
-                        if center.error.is_some() {
-                            Color32::RED
-                        } else {
-                            region.visuals().text_color()
-                        },
+                        presentation::center_foreground(region),
                         status_rect,
                     );
-                }
-            },
-        );
-    });
-    egui::CollapsingHeader::new("Diagnostics")
-        .id_salt("status-bar-diagnostics")
-        .default_open(false)
-        .open(diagnostics_open)
-        .show(ui, |ui| {
-            let summary = diagnostics.safe_summary();
-            let summary_height = ui.text_style_height(&egui::TextStyle::Body);
-            let summary_width = ui.available_width();
-            one_line_region(
-                ui,
-                egui::vec2(summary_width, summary_height),
-                |summary_ui| {
-                    paint_noninteractive_text(
-                        summary_ui,
-                        "status-diagnostics-summary",
-                        &summary,
-                        summary_ui.visuals().text_color(),
-                    );
-                },
-            );
+                });
+            }
         });
+
+        one_line_region_at(row_ui, layout.page, |page_ui| {
+            let label = page.label();
+            let page_rect = page_counter_content_rect(page_ui.max_rect())
+                .intersect(page_ui.clip_rect())
+                .intersect(page_ui.max_rect());
+            with_status_text_style(page_ui, |page_ui| {
+                paint_page_counter(
+                    page_ui,
+                    &label,
+                    page_rect,
+                    presentation::default_foreground(page_ui),
+                );
+            });
+        });
+    });
+    if presentation::ENABLE_DIAGNOSTICS {
+        let diagnostics = diagnostics.expect("enabled Diagnostics require a projection");
+        with_status_text_style(ui, |ui| {
+            let default_foreground = presentation::default_foreground(ui);
+            ui.visuals_mut().override_text_color = Some(default_foreground);
+            egui::CollapsingHeader::new("Diagnostics")
+                .id_salt("status-bar-diagnostics")
+                .default_open(false)
+                .open(diagnostics_open)
+                .show(ui, |ui| {
+                    let summary = diagnostics.safe_summary();
+                    let summary_height = ui.text_style_height(&egui::TextStyle::Body);
+                    let summary_width = ui.available_width();
+                    one_line_region(
+                        ui,
+                        egui::vec2(summary_width, summary_height),
+                        |summary_ui| {
+                            paint_noninteractive_text(
+                                summary_ui,
+                                "status-diagnostics-summary",
+                                &summary,
+                                presentation::default_foreground(summary_ui),
+                            );
+                        },
+                    );
+                });
+        });
+    }
     (zoom_changed, appearance_changed, timer_rect, focus_rect)
 }

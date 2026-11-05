@@ -172,12 +172,10 @@ pub(super) fn toolbar_label_width(ui: &egui::Ui, label: &str) -> f32 {
         .get(&TextStyle::Body)
         .cloned()
         .unwrap_or_else(|| FontId::proportional(14.0));
-    ui.fonts(|fonts| {
-        fonts
-            .layout_no_wrap(label.to_owned(), font_id, Color32::TRANSPARENT)
-            .size()
-            .x
-    })
+    ui.painter()
+        .layout_no_wrap(label.to_owned(), font_id, Color32::TRANSPARENT)
+        .size()
+        .x
 }
 
 pub(super) fn toolbar_content_width(widths: &[(ToolbarItem, f32)], overflow_width: f32) -> f32 {
@@ -318,7 +316,7 @@ impl ScriptCraftApp {
                     }) {
                     Ok(session) => {
                         self.session = session;
-                        self.page_geometry.invalidate();
+                        self.page_geometry.reset_for_document_replacement();
                         self.layout_cache = LayoutCache::default();
                         self.surface_focused = false;
                         self.native_path = None;
@@ -359,15 +357,14 @@ impl ScriptCraftApp {
             ui.painter().rect_filled(icon_rect, 2.0, fill);
         }
         let body_font = presentation.font_id();
-        let label_size = ui.fonts(|fonts| {
-            fonts
-                .layout_no_wrap(
-                    item.label.to_owned(),
-                    body_font.clone(),
-                    Color32::TRANSPARENT,
-                )
-                .size()
-        });
+        let label_size = ui
+            .painter()
+            .layout_no_wrap(
+                item.label.to_owned(),
+                body_font.clone(),
+                Color32::TRANSPARENT,
+            )
+            .size();
         let label_center = egui::pos2(
             rect.center().x,
             icon_control_rect.max.y + ui.spacing().item_spacing.y + label_size.y / 2.0,
@@ -492,7 +489,7 @@ impl ScriptCraftApp {
                     ToolbarItemKind::Action(action) => {
                         if ui.button(item.label).clicked() {
                             chosen_action = Some(action);
-                            ui.close_menu();
+                            ui.close();
                         }
                     }
                     ToolbarItemKind::Elements => {
@@ -504,7 +501,7 @@ impl ScriptCraftApp {
                                     .clicked()
                                 {
                                     chosen_role = Some(role);
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             }
                         });
@@ -602,7 +599,7 @@ pub(super) fn live_toolbar_metrics(ui: &egui::Ui) -> ToolbarPresentationMetrics 
 }
 
 pub(super) fn toolbar_chrome_color(ctx: &egui::Context) -> Color32 {
-    ctx.style().visuals.widgets.open.weak_bg_fill
+    ctx.global_style().visuals.widgets.open.weak_bg_fill
 }
 
 pub(super) fn toolbar_icon_control_rect(

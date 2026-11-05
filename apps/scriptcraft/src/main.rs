@@ -653,7 +653,7 @@ impl ScriptCraftApp {
             let anchor = self.page_geometry.capture_center_anchor(
                 self.performance.frames,
                 self.session.revision(),
-                ctx.screen_rect(),
+                ctx.content_rect(),
                 self.page_scale.unwrap_or(f32::NAN),
             );
             if anchor.is_some() {
@@ -952,7 +952,7 @@ impl ScriptCraftApp {
         self.pending_window_restore = window_state;
         self.pending_fdx_open = None;
         self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
-        self.page_geometry.invalidate();
+        self.page_geometry.reset_for_document_replacement();
         self.layout_cache = LayoutCache::default();
         self.rendered_revision = None;
         self.preferred_vertical_x = None;
@@ -1219,7 +1219,12 @@ impl ScriptCraftApp {
         let painter = ui.painter_at(page_rect);
         let palette = self.page_palette;
         painter.rect_filled(page_rect, 2.0, palette.paper);
-        painter.rect_stroke(page_rect, 2.0, Stroke::new(1.0_f32, palette.border));
+        painter.rect_stroke(
+            page_rect,
+            2.0,
+            Stroke::new(1.0_f32, palette.border),
+            egui::StrokeKind::Middle,
+        );
 
         for line in &layout.pages[page_index].lines {
             let x = page_rect.left() + line.geometry.x.to_points_f32() * scale;
@@ -1571,7 +1576,7 @@ impl ScriptCraftApp {
             self.page_geometry.publish(
                 self.performance.frames,
                 self.session.revision(),
-                ui.ctx().screen_rect(),
+                ui.ctx().content_rect(),
                 scale,
                 published_page_rects,
                 actual_clip,
@@ -1770,7 +1775,7 @@ impl ScriptCraftApp {
 
     fn handle_surface_input(&mut self, ctx: &egui::Context) {
         self.native_input_diagnostics.dispatch_enabled = self.surface_focused;
-        if ctx.input(|input| input.raw_scroll_delta != Vec2::ZERO) {
+        if ctx.input(|input| has_nonzero_mouse_wheel(&input.raw.events)) {
             // Explicit user scrolling wins over a not-yet-applied zoom request.
             // It must not be pulled back to the old viewport center afterward.
             if self.pending_zoom_anchor.is_some() {
@@ -1789,7 +1794,7 @@ impl ScriptCraftApp {
         let events = ctx.input(|input| input.events.clone());
         let modifiers = ctx.input(|input| input.modifiers);
         self.dispatch_surface_events(&events, modifiers);
-        if !events.is_empty() || ctx.input(|input| input.raw_scroll_delta != Vec2::ZERO) {
+        if !events.is_empty() || ctx.input(|input| has_nonzero_mouse_wheel(&input.raw.events)) {
             self.request_repaint(ctx);
         }
     }
@@ -2308,7 +2313,8 @@ fn position_galley_in_fixed_cells(galley: &mut Galley, char_width: f32) -> bool 
         return false;
     }
     let char_count = galley.job.text.chars().count();
-    let row = &mut galley.rows[0];
+    let placed_row = &mut galley.rows[0];
+    let row = std::sync::Arc::make_mut(&mut placed_row.row);
     if row.glyphs.len() != char_count {
         return false;
     }
@@ -2353,8 +2359,8 @@ fn position_galley_in_fixed_cells(galley: &mut Galley, char_width: f32) -> bool 
     }
 
     let fixed_width = char_count as f32 * char_width;
-    row.rect.min.x = 0.0;
-    row.rect.max.x = fixed_width;
+    placed_row.pos.x = 0.0;
+    row.size.x = fixed_width;
     row.visuals.mesh_bounds = row.visuals.mesh.calc_bounds();
     galley.rect.min.x = 0.0;
     galley.rect.max.x = fixed_width;
@@ -2462,7 +2468,7 @@ fn document_cursor_icon() -> egui::CursorIcon {
 fn chrome_frame(ctx: &egui::Context) -> egui::Frame {
     // The top toolbar panel uses the shared app fill and a zero-inset frame;
     // row padding remains explicit and its separator stays disabled.
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(toolbar_chrome_color(ctx))
         .stroke(egui::Stroke::NONE)
 }
@@ -2472,64 +2478,76 @@ fn central_panel_frame(ctx: &egui::Context) -> egui::Frame {
     // normal 8-point document inset, but use the same explicit surface fill
     // as the top chrome so the boundary cannot expose panel_fill as a dark
     // (black-looking) strip between the two app-owned surfaces.
-    egui::Frame::central_panel(ctx.style().as_ref()).fill(toolbar_chrome_color(ctx))
+    egui::Frame::central_panel(ctx.global_style().as_ref()).fill(toolbar_chrome_color(ctx))
 }
 
-fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egui::Rect {
+fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui::Rect {
+    let ctx = ui.ctx().clone();
     let now = app.timer_now();
     app.reconcile_sprint_timer(now);
     let fullscreen = ctx.input(|input| input.viewport().fullscreen);
     app.focus_mode.observe(fullscreen, now);
-    let (resolved_theme, applied_appearance) =
-        status_bar::configure_appearance(ctx, app.appearance_mode, app.applied_appearance);
+    let (resolved_theme, applied_appearance) = status_bar::configure_appearance(
+        &ctx,
+        app.appearance_mode,
+        app.applied_appearance,
+    );
     app.applied_appearance = applied_appearance;
     app.page_palette = status_bar::PagePalette::for_theme(app.appearance_mode, resolved_theme);
 
-    egui::TopBottomPanel::top("titlebar-toolbar")
-        .frame(chrome_frame(ctx))
+    egui::Panel::top("titlebar-toolbar")
+        .frame(chrome_frame(&ctx))
         .show_separator_line(false)
-        .exact_height(toolbar_content_height(&ctx.style()))
-        .show(ctx, |ui| app.toolbar(ui));
-    let viewport_rect = ctx.screen_rect();
+        .exact_size(toolbar_content_height(&ctx.global_style()))
+        .show_inside(ui, |ui| app.toolbar(ui));
+    let viewport_rect = ctx.content_rect();
     let page_number = app.page_geometry.visible_page(
         app.performance.frames,
         app.session.revision(),
         viewport_rect,
         app.page_scale.unwrap_or(f32::NAN),
         app.reveal_intent == RevealIntent::Conditional
-            || page_geometry_input_invalidated(ctx, app.page_geometry.clip()),
+            || page_geometry_input_invalidated(&ctx, app.page_geometry.clip()),
     );
     let center = status_bar::project_center(&app.status, app.error.as_deref());
-    let performance = app.performance;
-    let input_diagnostics = &app.native_input_diagnostics;
-    let derived_work = app.session.pending_derived_work_summary();
-    let performance_summary = format!(
-        "{} derived-pending={} derived-pending-complete={} derived-pending-scenes={} derived-retryable={} derived-pending-deferred-scenes={} derived-failed-complete={} derived-failed-scenes={}",
-        app.performance.safe_summary(),
-        derived_work.pending,
-        derived_work.complete,
-        derived_work.affected_scene_count,
-        derived_work.retryable,
-        derived_work.deferred_scene_count,
-        derived_work.failed_complete,
-        derived_work.failed_scene_count,
-    );
-    let diagnostics = DiagnosticProjection {
-        focused: input_diagnostics.focused,
-        focus_lock: input_diagnostics.focus_lock_installed,
-        dispatch_enabled: input_diagnostics.dispatch_enabled,
-        received_events: input_diagnostics.received_events,
-        dispatched_frames: input_diagnostics.dispatched_frames,
-        pointer_activations: input_diagnostics.pointer_activations,
-        last_event_category: input_diagnostics.last_event_category,
-        performance_events: performance.events,
-        layout_builds: performance.layout_builds,
-        layout_cache_hits: performance.layout_cache_hits,
-        painted_pages: performance.painted_pages,
-        repaint_requests: performance.repaint_requests,
-        performance_summary: &performance_summary,
+    let performance_summary = if status_bar::diagnostics_enabled() {
+        let derived_work = app.session.pending_derived_work_summary();
+        Some(format!(
+            "{} derived-pending={} derived-pending-complete={} derived-pending-scenes={} derived-retryable={} derived-pending-deferred-scenes={} derived-failed-complete={} derived-failed-scenes={}",
+            app.performance.safe_summary(),
+            derived_work.pending,
+            derived_work.complete,
+            derived_work.affected_scene_count,
+            derived_work.retryable,
+            derived_work.deferred_scene_count,
+            derived_work.failed_complete,
+            derived_work.failed_scene_count,
+        ))
+    } else {
+        None
     };
-    egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+    let diagnostics = performance_summary.as_deref().map(|performance_summary| {
+        let performance = app.performance;
+        let input_diagnostics = &app.native_input_diagnostics;
+        DiagnosticProjection {
+            focused: input_diagnostics.focused,
+            focus_lock: input_diagnostics.focus_lock_installed,
+            dispatch_enabled: input_diagnostics.dispatch_enabled,
+            received_events: input_diagnostics.received_events,
+            dispatched_frames: input_diagnostics.dispatched_frames,
+            pointer_activations: input_diagnostics.pointer_activations,
+            last_event_category: input_diagnostics.last_event_category,
+            performance_events: performance.events,
+            layout_builds: performance.layout_builds,
+            layout_cache_hits: performance.layout_cache_hits,
+            painted_pages: performance.painted_pages,
+            repaint_requests: performance.repaint_requests,
+            performance_summary,
+        }
+    });
+    egui::Panel::bottom("status")
+        .frame(status_bar::status_panel_frame(&ctx))
+        .show_inside(ui, |ui| {
         let was_timer_open = app.sprint_timer.popup_open;
         let focus_view = app.focus_mode.view();
         let mut focus_activated = false;
@@ -2559,7 +2577,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egu
             // Pointer/keyboard slider and exact preset edits become the new
             // continuous pinch baseline, keeping both control paths in sync
             // without changing document/session state.
-            app.capture_pending_zoom_anchor(ctx);
+            app.capture_pending_zoom_anchor(&ctx);
             app.sync_pinch_zoom_from_controls();
             app.page_geometry.invalidate();
             app.page_scale = None;
@@ -2572,11 +2590,11 @@ fn show_application_panels(app: &mut ScriptCraftApp, ctx: &egui::Context) -> egu
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(request.target));
             }
         }
-    });
+        });
     let central = egui::CentralPanel::default()
-        .frame(central_panel_frame(ctx))
-        .show(ctx, |ui| app.live_document_surface(ui));
-    sprint_timer::show_popup(ctx, &mut app.sprint_timer, now, &mut app.notification_sink);
+        .frame(central_panel_frame(&ctx))
+        .show_inside(ui, |ui| app.live_document_surface(ui));
+    sprint_timer::show_popup(&ctx, &mut app.sprint_timer, now, &mut app.notification_sink);
     central.response.rect
 }
 
@@ -2663,38 +2681,39 @@ impl eframe::App for ScriptCraftApp {
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ScriptCraftApp::update(self, ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ScriptCraftApp::update(self, ui);
     }
 }
 
 impl ScriptCraftApp {
-    fn update(&mut self, ctx: &egui::Context) {
+    fn update(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
-        self.update_native_window_state(ctx);
-        self.notification_sink.set_repaint_context(ctx);
+        self.update_native_window_state(&ctx);
+        self.notification_sink.set_repaint_context(&ctx);
         let migration_pending = self.pending_fdx_open.is_some();
         if !migration_pending {
             // Route events using the editor-focus state established by the prior
             // surface frame, then let this frame's layout and paint observe edits.
-            self.handle_surface_input(ctx);
+            self.handle_surface_input(&ctx);
             // Scheduled derived work sees every accepted same-frame edit and
             // never delays already-queued editor input on its deadline frame.
-            self.refresh_cast_lists_on_schedule(ctx, Instant::now());
+            self.refresh_cast_lists_on_schedule(&ctx, Instant::now());
         }
         let timer_now = self.timer_now();
         self.reconcile_sprint_timer(timer_now);
         if migration_pending {
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
                 let _ = ui.allocate_space(ui.available_size());
             });
-            show_fdx_migration_dialog(self, ctx);
+            show_fdx_migration_dialog(self, &ctx);
         } else {
-            show_application_panels(self, ctx);
+            show_application_panels(self, ui);
         }
-        self.schedule_sprint_timer_repaint(ctx, self.timer_now());
-        self.schedule_focus_mode_repaint(ctx, self.timer_now());
+        self.schedule_sprint_timer_repaint(&ctx, self.timer_now());
+        self.schedule_focus_mode_repaint(&ctx, self.timer_now());
         self.performance.frame_nanos = self
             .performance
             .frame_nanos
@@ -2754,8 +2773,8 @@ fn take_window_restore_commands(
 
 fn page_geometry_input_invalidated(ctx: &egui::Context, previous_clip: Option<egui::Rect>) -> bool {
     ctx.input(|input| {
-        let scroll_changed =
-            input.raw_scroll_delta != Vec2::ZERO || input.smooth_scroll_delta != Vec2::ZERO;
+        let scroll_changed = has_nonzero_mouse_wheel(&input.raw.events)
+            || input.smooth_scroll_delta != Vec2::ZERO;
         let pointer_scrolling = input.pointer.any_down()
             && input
                 .pointer
@@ -2763,6 +2782,15 @@ fn page_geometry_input_invalidated(ctx: &egui::Context, previous_clip: Option<eg
                 .zip(previous_clip)
                 .is_some_and(|(position, clip)| clip.contains(position));
         scroll_changed || pointer_scrolling
+    })
+}
+
+fn has_nonzero_mouse_wheel(events: &[egui::Event]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::MouseWheel { delta, .. } if *delta != Vec2::ZERO
+        )
     })
 }
 
@@ -2796,6 +2824,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             document_font::install(&cc.egui_ctx);
+            egui_material_icons::initialize(&cc.egui_ctx);
             ScriptCraftApp::new()
                 .map(|app| Box::new(app) as Box<dyn eframe::App>)
                 .map_err(|error| error.into())

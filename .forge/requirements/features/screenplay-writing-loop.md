@@ -570,10 +570,32 @@ content.
     noninteractive-text, clickable-text, and clickable-icon Item capabilities. Interactive Items
     shall have explicit accessible names and support keyboard focus and pointer or keyboard
     activation; noninteractive text shall not own focus, activation, pointer response, or cursor
-    behavior. The right-hand controls shall be Sprint Timer, Focus Mode, Appearance, and page
-    zoom in that order, whether presented inline or through the status overflow disclosure. Each
-    control shall appear as one actionable representation at a time; no other status action or
-    icon assignment shall be introduced without authorization.
+    behavior. Sprint Timer, Focus Mode, Appearance, the page-zoom slider, and the current-percentage
+    control shall remain permanently inline at supported widths, in that order, with no status
+    overflow disclosure or alternate action representation. No other status action or icon
+    assignment shall be introduced without authorization. Sprint Timer shall show only the outlined
+    Timer symbol, Focus Mode only the outlined Location Searching symbol, and Appearance only the
+    filled Mode Night symbol; these controls shall have no visible captions, and Appearance shall
+    have no closed-control arrow. The slider shall have no visible caption, and the closed percentage
+    control shall show only the current integer percentage without an arrow. Accessible names and
+    tooltips shall remain meaningful without visible captions. Focus Mode shall retain its
+    state-specific accessible description and shall only be enabled when its existing window-state
+    gate permits activation. Status icons and the current-percentage control shall share toolbar hover
+    semantics: clipped hovered-widget background, two-point corner radius, default cursor, and the
+    status-local hover padding setting. Percentage hover shall be immediate, shall not activate or
+    open its menu, and shall not add timed animation. Idle control backgrounds shall remain
+    transparent. Status hover geometry shall not share or change the toolbar's numeric padding.
+    Status-owned default/idle text and icon foreground for Timer, Focus Mode, Appearance, percentage,
+    and page, plus Diagnostics when enabled through its explicit development gate, shall use one
+    status-local theme-aware setting. Center operation/error text shall have its own optional
+    status-local foreground override and fall back to that default foreground when unset;
+    adjusting the center override shall not recolor other status content. Center text shall also use
+    its own status-local logical-point font-size setting, independent of Body, Button, page, and
+    Diagnostics typography;
+    interactive status hover foreground shall use a separate shared setting. Both settings shall
+    expose one documented manual override point while following the active Appearance when the
+    override is unset. Popup-menu entries retain menu-owned styling. Pointer and keyboard activation
+    shall continue to invoke the existing status actions and accessible behavior.
   - **AC-WRITING-006.2:** The status bar shall report the current operation status without
     displaying a cumulative frame count, project path, or separate Clean/Dirty indicator. Clean
     and dirty state remain owned by the live editing session and shall not be changed by status
@@ -594,16 +616,50 @@ content.
     shall not expose screenplay or XML node text, attribute/namespace values, IDs/UUIDs, anchor or
     semantic identity values, serialized XML, image data, or filesystem paths. The strict comparison
     and refusal remain unchanged. Save-failure wording shall state that the document is unchanged.
-    Diagnostics is retained for the current release scope, with its removal deferred until pre-release.
-  - **AC-WRITING-006.4:** At narrow widths where the status controls remain usable, a deterministic
-    bounded fallback shall retain access to visible-page state, operation/error status,
-    privacy-safe Diagnostics, Sprint Timer, Focus Mode, Appearance, and
-    both page-zoom controls through inline content or the accessible overflow disclosure. Error
-    state shall remain identifiable and its details reachable. Status text shall clip
-    horizontally as single-line content rather than wrap or grow the footer. Below the minimum
-    usable viewport, the interface shall remain bounded and avoid overlapping or unsafe
-    interactions; no clickable-control guarantee is made for a physically unusable or zero-width
-    viewport.
+    Status Diagnostics presentation is disabled by default through one manual source constant and may
+    be enabled only as an explicit development choice requiring rebuild and relaunch. Disabled mode
+    gates the detailed status projection and disclosure only; privacy-safe operation errors and the
+    operational counters/instrumentation remain. No profile condition, Cargo feature, runtime
+    preference, or document-persisted setting controls this gate.
+  - **AC-WRITING-006.4:** Allocate the status row by priority: reserve Sprint Timer, Focus Mode,
+    Appearance, the page-zoom slider, and the current-percentage control inline at the far right;
+    retain the visible-page indicator in a separately left-aligned, bounded allocation; and allocate
+    the operation/error message in a region centered on the status-row content, not between unequal
+    siblings. For row content width `W` and the actual full right-group width `R` (from the row's
+    right edge to Timer's left edge), the nominal center region shall have width `max(W - 2R, 0)`,
+    left edge `row_left + R`, and right edge `row_right - R`. When `W <= 2R`, collapse it to zero
+    width at Timer's left edge. The page allocation shall be capped before the mirrored center
+    region and right controls so it cannot overlap either; its symmetric horizontal inset shall be
+    a named status-local setting initialized to 0 points and applied consistently to measured and
+    allocated width, paint clipping, and accessibility bounds. Grow the slider from its named
+    40-point minimum toward its named 165-point maximum only after fixed right controls and the
+    bounded page allocation fit. The center message shall be horizontally and vertically centered
+    in its explicit region, clip or disappear when that region is exhausted, and never displace or
+    reclaim space from the right controls. There shall be no status More/! More trigger, overflow
+    path, or breakpoint-based compact mode. At supported widths including 1200, 480, and 320
+    logical points, the five right-hand elements shall remain inline and within the visible row;
+    page text clips within its own region if necessary. Operation/error text shall clip horizontally
+    as single-line content rather than wrap or grow the footer, and the existing accessible error
+    projection shall remain available. The symmetric top/bottom panel inset, zoom slider bounds,
+    center font size/color, and page inset shall be named, status-local manual settings initialized
+    to their current effective values; adjusting center settings shall not alter Body, Button, page,
+    or Diagnostics typography/colors. The privacy-safe Diagnostics disclosure and detailed status
+    projection shall be present only when the manual development gate is enabled; disabled mode shall
+    allocate no Diagnostics row, body, placeholder height, focus target, or accessibility node. Below the minimum physically
+    usable viewport, including zero width, layout and hit regions shall remain bounded and
+    nonoverlapping, but usable hit targets are not promised. Status panel horizontal and vertical
+    insets, icon slot width, inter-item gap, percentage side reservation, zoom slider minimum and
+    maximum widths, page-counter horizontal inset, center font size, and status-local text/icon sizes
+    shall be owned by named status-presentation settings initialized to their current effective
+    values; their
+    adjustments shall not mutate toolbar or global framework styling. Measure one stable percentage
+    slot from the maximum supported label and active status Button font, plus the existing leading and
+    trailing reservations; digit-count changes shall not move the other right controls or change the
+    residual center region. Center the current label in that slot. The measured post-slot trace showed
+    the planned and actual percentage rectangles sharing the same right edge; preserve that explicit
+    rectangle authority rather than compensating through panel or percentage insets. The stock slider
+    response shall fill its planner allocation, avoiding an unintended gap before the separately
+    anchored percentage slot.
   - **AC-WRITING-006.5:** Given the actual rendered sheet rectangles and actual editor scroll clip,
     the visible-page Item shall use one-based numbering and select the sheet with the greatest
     vertical overlap; exact overlap ties shall select the earlier rendered sheet. If no sheet
@@ -612,14 +668,44 @@ content.
     page.
   - **AC-WRITING-006.6:** Visible-page state shall be independent of caret/source position and
     remain current after scrolling, resize, presentation-scale changes, layout reflow, and
-    conditional caret reveal. If layout or geometry is invalid, missing, or stale, the status
-    bar shall show an explicit unavailable state until fresh geometry is published. Page-status
-    updates shall not scroll the editor, reveal the caret, steal focus, or change editor input
-    ownership.
+    conditional caret reveal. For the active document, retain the most recent page and total
+    selected from accepted fresh geometry while same-document geometry is invalid, missing, stale,
+    explicitly invalidated, or undergoing refresh/failure; replace that value only after another
+    accepted fresh geometry selection. Startup and immediately after successful New or Open shall
+    show unavailable until the replacement/current document publishes valid geometry. Failed Open
+    and same-document Save shall not clear the retained value. Session revisions are not document
+    identity, so a successful replacement shall clear both the published snapshot and retained
+    value even when revisions alias. Page-status updates shall not use caret/source position as a
+    fallback, scroll the editor, reveal the caret, steal focus, persist view state, or change editor
+    input ownership.
   - **AC-WRITING-006.7:** The desktop status bar shall provide one accessible, apparently continuous
-    whole-percent page zoom slider from 75% through 300% and an adjacent menu containing exactly
-    75%, 90%, 100%, 125%, 150%, 175%, 200%, 250%, and 300%. Both controls shall share one
-    whole-percent page-zoom value and show every intermediate integer accurately. At 100%, page
+    whole-percent page zoom slider from 75% through 300%, with integer stepping, proportional
+    trailing fill, hidden value text, and no visible caption. Its accessible name shall identify
+    Page zoom and expose the current value and inclusive minimum/maximum. An adjacent arrowless
+    current-percentage button shall display every intermediate integer accurately and open a menu
+    containing exactly 75%, 90%, 100%, 125%, 150%, 175%, 200%, 250%, and 300%, in that order. Both
+    controls shall share one whole-percent page-zoom value. Measure a stable percentage allocation
+    from the maximum supported label (300%) in the active status Button font plus the existing leading
+    and trailing reservations. Keep the actual current whole-percent label for painting and the
+    accessible current-value name, centered horizontally and vertically in that fixed slot. The
+    planner's percentage rectangle shall be authoritative for allocation, interaction, clipping,
+    accessibility bounds, popup anchoring, and painting; do not reconstruct a second position from a
+    nested sequential layout. If narrow-width compression makes the current galley not fully fit,
+    keep its origin bounded and clip within the allocation without expanding or overlapping controls.
+    The slider shall use a full circular
+    knob colored from the same status-local default/hovered foreground settings as status text and
+    icons, without recoloring its rail or trailing fill. Its rail thickness shall use a status-local
+    setting initialized to the inherited 8 logical points; this requirement does not apply the
+    optional 30–40% reduction. Preserve the existing 40–165 logical-point slider allocation, stock
+    slider response, input and accessibility behavior, and page-zoom semantics. Size the stock slider
+    through its scoped egui slider-width setting from the planner's allocation, preserving the planned
+    40–165-point width without a separate sizing constant. Paint the custom knob after the ordinary
+    Timer, Focus Mode, Appearance, slider, and percentage controls, using the
+    stock slider response and current zoom value. Clip it to the intersection of the overall
+    right-hand group, status row, and inherited parent clip, not the slider response rectangle; its
+    normal stroke and interaction expansion may use the right-group gaps but shall not escape the row
+    or parent clip. Keep it on the ordinary status paint layer so popup menus and unrelated overlays
+    retain their normal ordering. At 100%, page
     presentation width shall use the effective paper width in document points multiplied by the
     platform's logical-points-per-document-point conversion: 1.0 on macOS, 96/72 on Windows, and
     neutral 1.0 on unsupported platforms. The selected percentage shall be retained across resizes.
@@ -639,11 +725,18 @@ content.
     points) and compact (480 × 820 logical points) widths. After frame 1, the panel-height range
     across frames 2–60 shall be no greater than 1 logical point, with no monotonic growth;
     status controls and content shall remain available and the panel shall leave both toolbar
-    and editor visible.
-  - **AC-WRITING-006.9:** The rendered status content and expanded Diagnostics summary shall remain
-    single-line and clipped to their allocated regions at wide, breakpoint-adjacent, compact,
-    and narrow widths. Changes in long status text or diagnostic counters shall not add rows or
-    increase stable footer height; opening Diagnostics may add only its fixed disclosure row.
+    and editor visible. Center message sizing shall remain a stable one-row presentation; changing
+    only its center-local font or color override shall not modify Body, Button, page, or Diagnostics
+    styles or add status rows.
+  - **AC-WRITING-006.9:** The rendered status content and, when the explicit development gate is
+    enabled, expanded Diagnostics summary shall remain single-line and clipped to their allocated
+    regions at wide, breakpoint-adjacent, compact, and narrow widths. Center operation/error text
+    shall be centered within its explicit allocated region while retaining the full accessible text;
+    the visible-page counter shall remain left-aligned and clipped to its own inset allocation.
+    Changes in long status text or diagnostic counters shall not add rows or increase stable footer height; the enabled Diagnostics
+    disclosure retains its collapsed default and opening it may add only its fixed disclosure row.
+    With the gate disabled, no Diagnostics row, body, placeholder height, focus target, or accessibility
+    node shall be allocated.
   - **AC-WRITING-006.10:** A supported native inward/outward pinch event shall adjust the same
     transient per-window whole-percent page zoom as the status slider and presets, preserving
     the inclusive 75–300% limits and all document, session, pagination, export, and editor-input

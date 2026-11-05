@@ -36,10 +36,6 @@ impl FocusModeView {
             && !self.external_settling
     }
 
-    pub(super) fn button_text(self) -> &'static str {
-        "⛶ Focus Mode"
-    }
-
     pub(super) fn accessible_name(self) -> String {
         match (self.pending, self.observed, self.uncertain) {
             (_, None, true) => {

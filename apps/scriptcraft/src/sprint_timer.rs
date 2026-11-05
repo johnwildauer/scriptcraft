@@ -484,7 +484,7 @@ pub(super) fn show_popup(
     let default_position = if timer.popup_anchor.is_positive() {
         timer.popup_anchor.left_top() - egui::vec2(0.0, 230.0)
     } else {
-        ctx.screen_rect().center() - egui::vec2(145.0, 90.0)
+        ctx.content_rect().center() - egui::vec2(145.0, 90.0)
     };
     let output = egui::Area::new(egui::Id::new("sprint-timer-popup"))
         .order(egui::Order::Foreground)

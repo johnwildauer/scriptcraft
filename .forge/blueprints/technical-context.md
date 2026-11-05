@@ -21,6 +21,110 @@ ScriptCraft runs as a local Rust desktop application built and launched through 
 
 The workspace uses Rust and Cargo. The desktop boundary contains the eframe/egui presentation layer and native-file-dialog integration; UI and platform concerns stay outside the reusable core. The core owns semantic session/project operations, fixed-profile layout, native persistence, and noncanonical export adapters. Framework and dependency versions are implementation choices rather than permanent architecture constraints.
 
+For the user-authorized UI Icons v1 foundation, the desktop uses eframe/egui
+0.34 with egui_material_icons 0.6.0, enabling its filled and outline icon fonts.
+The app-creation callback installs the named Courier Prime document families
+first, then initializes Material fonts on the same egui context before app
+construction. The icon crate supplies embedded Regular-weight icon fonts; this
+is an implementation exception to the icon-assignment reference's retained
+weight-200 preference. These presentation dependencies do not enter the
+headless screenplay core or change document typography by intent. WO-001 has not
+been user-validated; dependency selection alone is not build or runtime evidence.
+
+WO-002 assigns outlined Timer to Sprint Timer and outlined Location Searching to
+Focus Mode, plus filled Mode Night to Appearance. Inline status controls render
+these typed Material icons without visible captions; the appearance choices
+remain textual in the open menu. Their shared status-icon control uses the
+toolbar's hover-rectangle and hovered-widget-fill semantics, two-point corner
+radius, and default cursor, using an independent status-local two-point padding
+setting. The percentage control now uses the same clipped, immediate hover
+painting and shared hovered foreground without opening its popup on hover.
+Status-owned default text and icon foregrounds share one status-local source;
+interactive status controls share a separate hovered foreground. Both default
+to the active Appearance theme's text color (default) or hovered-widget text
+color (hover) and each exposes one `Option<Color32>` override point. Center
+operation/error text has its own optional color override and falls back to the
+status default foreground when unset; popup-menu entries keep menu-owned colors
+and typography.
+Focus Mode retains its state-based enablement and detailed accessible
+description, while timer popup placement continues to use the icon interaction
+rectangle. The status row uses bounded, explicit regions: the three icons, zoom
+slider, and percentage control remain prioritized inline at the far right; the
+visible-page counter is separately left-aligned and clipped in its own bounded
+allocation; and operation/error text occupies a mirrored center region rather
+than the residual space between siblings. For row content width `W` and actual
+full right-group width `R`, that region has nominal width `max(W - 2R, 0)`,
+left edge `row_left + R`, and right edge `row_right - R`, ending at Timer's left
+edge. When `W <= 2R`, it collapses to zero width at that Timer boundary. Page
+allocation is capped to avoid overlap with the mirrored center and right group.
+The slider grows from its 40-point minimum toward its 165-point maximum only
+after fixed controls and bounded page allocation fit. There is no status
+overflow, More trigger, or breakpoint-based compact mode; below physically
+usable widths, controls compress within nonoverlapping bounds without a
+hit-target usability promise. Center text is single-line and centered within its
+explicit region; it has its own 10-point font setting and optional foreground
+override, falling back to the shared status default foreground. These center
+settings do not alter Body/Button, page, or Diagnostics typography or colors.
+The slider has no visible caption but retains its Page zoom accessible name and
+numeric range/value. The arrowless far-right percentage button displays the
+current integer and opens the nine shared zoom presets. The Diagnostics second
+row and detailed status projection are gated by
+`status_bar.rs::presentation::ENABLE_DIAGNOSTICS`, a manual source constant
+defaulting to production-off; explicitly enabling it for development requires
+rebuilding and relaunching. Disabled mode adds no row or accessibility/focus
+target. Status-local settings live in [`presentation`](../../apps/scriptcraft/src/status_bar.rs:19): panel
+horizontal/vertical insets 12/2 points, icon hover padding 2, icon slot width
+28, item gap 4, percentage reservation 8 per side, slider bounds 40–165, page
+counter horizontal inset 0, Body and Button text 10 each, center text 10, icon
+glyph size 17, and slider rail thickness 4 points. Only the bottom status panel
+uses its adjustable symmetric insets; its panel fill, separator behavior, and
+other panels remain framework-owned.
+WO-006 keeps the zoom slider on the stock response and interaction path while
+selecting `HandleShape::Circle` for that slider only. Its
+`status_bar.rs::presentation::ZOOM_SLIDER_RAIL_HEIGHT` setting remains manually
+adjustable and is applied only through a child-Ui spacing override inside
+`zoom_slider()`; global spacing and other sliders are untouched. The custom
+circle uses the stock handle position/radius geometry and interaction expansion,
+fills and strokes from WO-005's shared default/hovered status foreground
+functions, and leaves the stock rail and proportional trailing fill beneath it.
+WO-007 carries the actual stock slider response out of zoom-control rendering
+and defers this paint until after the ordinary Timer, Focus Mode, Appearance,
+slider, and percentage controls have painted. It is the last ordinary
+right-group status paint and uses the current zoom value. Its clip is the
+intersection of the overall right-group rectangle, status-row rectangle, and
+inherited parent clip, allowing normal stroke/interaction expansion beyond the
+slider response into group gaps without escaping the row or parent clip. It
+remains on the ordinary status paint layer rather than a global foreground
+layer, preserving popup and unrelated-overlay ordering. No knob color source,
+widget background mutation, tooltip copy, or presentation value is changed.
+Slider width, integer range, stock input and AccessKit behavior, and zoom
+state/presentation contracts remain as before. Endpoint clipping appearance,
+compilation, and all behavior remain unverified and pending user review and
+validation.
+V2-WO-002 supersedes WO-008's current-label-width and right-aligned-galley contract. [`measured_percentage_slot_width()`](../../apps/scriptcraft/src/status_bar.rs) measures the maximum supported reference (`MAX_ZOOM_PERCENT` plus `%`) in the active status Button font and adds both unchanged [`PERCENTAGE_SIDE_RESERVATION`](../../apps/scriptcraft/src/status_bar.rs) values. [`show_impl_with_appearance()`](../../apps/scriptcraft/src/status_bar.rs) continues to construct the current label for visible paint and accessibility, while this stable width feeds [`plan_status_row()`](../../apps/scriptcraft/src/status_bar.rs). The planner's percentage rectangle is passed directly to each bounded child region: [`zoom_controls()`](../../apps/scriptcraft/src/status_bar.rs) places the stock slider and percentage at their planner rectangles without sequential-width reconstruction. [`zoom_presets_button()`](../../apps/scriptcraft/src/status_bar.rs) uses the percentage slot for allocation, the full clipped interaction/accessibility response, popup anchor, paint clip, and galley placement; it centers the current galley horizontally and vertically, bounding its origin at narrow widths.
+
+V2-WO-004 consumed the user-supplied baseline and post-slot traces. The baseline at egui content width 1512 recorded a planned 165-point slider but a 100-point actual slider, with the actual percentage rectangle ending 65 points before its planned right edge. The post-slot trace at content width 800 records identical planned and actual percentage rectangles `[746.78..788.00]`; thus the percentage right-edge owner was corrected by V2-WO-002, and no additional percentage or panel inset defect remains in that trace. The remaining measured delta is the stock slider response: planned end 742.78 versus actual end 677.78, again a 65-point shortfall. egui 0.34's public `Spacing::slider_width` setting is now set within the slider's scoped UI from the planner-provided width before adding the stock slider; its default was 100 points, and `add_sized` alone did not change the stock response's internally requested slider width. This uses the existing planner width (40–165 points), adds no numeric constant, and preserves the stock slider widget/response path. Existing reservations, colors, zoom semantics, centered label geometry, popup/accessibility behavior, and WO-007 deferred knob paint/clip remain unchanged in source. The baseline's former 85-point content/window-edge-to-galley observation decomposes into the 65-point slider/percentage geometry shortfall plus the intended 12-point panel inset and 8-point centered-galley reservation; after the slot correction only the intentional 20-point edge accounting remains in the supplied post-slot frame. These trace files are user evidence, not agent validation; the post-slot trace covers only 800×600 at 100% and effective ppp 2.0. No behavior or compilation check was run, and all validation remains user-owned.
+V2-WO-001 through V2-WO-004 implementation handoffs are submitted with user review and
+validation pending; no framework compatibility or behavior check is implied.
+The separate deep-scroll zoom coordinate and prepaint-compensation contract
+below remains unchanged.
+
+The editor publishes its actual allocated page rectangles, scroll clip, scale,
+viewport, revision, and scroll offset after rendering; the status row consumes
+only a fresh immediately preceding publication. The viewport-page tracker keeps
+that geometry snapshot separate from the last valid one-based page/total selected
+from it. Same-document invalidation clears the published snapshot and requests a
+fresh publication while retaining the last valid display value through scrolling,
+zoom, resize, reflow, invalid geometry, and same-document failures; only a fresh
+valid selection replaces it. Startup begins without a retained value. Successful
+New/Open activation resets both lifetimes, while failed Open and same-document
+Save do not reset the retained page. This reset is explicit because session
+revision alone does not identify a document. Zoom presentation uses the tracker's
+retained-or-fresh value rather than an independent same-frame unavailable
+override. These are implementation-submitted behaviors pending user review and
+validation; geometry publication, viewport-centered zoom compensation, native
+pinch, persistence, pagination, and editor input/focus remain separate contracts.
+
 - Desktop shell owns presentation and platform/file interactions. Screenplay Core supplies reusable headless document capability, not an independently runnable container. The [writing-loop requirements](../requirements/features/screenplay-writing-loop.md) describe the composed user-facing flow.
 
 Desktop input delegates semantic operations to the core session and project. The core's shared fixed-profile page layout supplies desktop presentation and PDF generation; viewport zoom affects presentation, not print geometry. FDX Version 6 is the canonical native save boundary and uses atomic replacement. The headless core separates an [FDX codec](../../crates/scriptcraft-core/src/fdx.rs) from filesystem persistence and couples the semantic model to ordered source-preservation state; only managed fields are regenerated. PDF and deliberately lossy plain-text exports are noncanonical outputs. Fountain conversion is a separate secondary adapter, not native persistence. Transient view state remains separate from canonical project content.
@@ -44,8 +148,8 @@ or the saved percentage. Desktop hit testing uses the matching layout-to-present
 
 - **Configuration and secrets handling:** This local product architecture does not depend on service credentials or a secrets-management system; no additional configuration or deployment mechanism is specified here.
 - **Identity and access:** An account or identity subsystem is not part of the described single-writer desktop product.
-- **Errors, reliability, and observability:** Editing operations preserve transactional state. Save failures preserve the native project and leave the session's saved/dirty state accurate. Transactional save details project privacy-safe session-preparation, codec serialization/re-read, storage, or missing-baseline categories without screenplay text or unnecessary paths. The desktop status row keeps document-unchanged wording, left-aligns its operation/error message in the center region, and does not duplicate the session-owned dirty state with a Clean/Dirty indicator. Errors and diagnostics avoid unnecessary exposure of screenplay content. Core preservation COW counters report only wrapper-share and detachment counts, never document-derived values; these counters are not currently included in the desktop projection.
-- Desktop performance diagnostics are presentation-owned and value-free: the desktop retains cumulative saturating counters and nanosecond phase totals, while an explicit benchmark reset captures a baseline for deltas without changing the session or discarding prior totals. The single-line projection may include only fixed phase/counter names, numeric values, the debug/release build-profile label, and a closed set of operation labels. It must never include document text, FDX values or bytes, filesystem paths, IDs, or source data. Core layout wrapping reports build/reuse counts and elapsed actual-wrap time separately from the immutable layout value so instrumentation cannot affect layout equality or pagination. Whole-layout cache hits are not per-element wrap reuse. RS-WO-005 adds separate span-galley build/reuse counters; those counts never imply per-element wrap reuse or indexed interaction queries. Derived diagnostics distinguish due-tick attempts/completions/skips, irrelevant-revision skips, changed/unchanged outcomes, safe deferrals, and cumulative requested/attempted/deferred scene counts; live pending/complete/retryable and deferred-scene counts are numeric/value-free only.
+- **Errors, reliability, and observability:** Editing operations preserve transactional state. Save failures preserve the native project and leave the session's saved/dirty state accurate. Transactional save details project privacy-safe session-preparation, codec serialization/re-read, storage, or missing-baseline categories without screenplay text or unnecessary paths. The desktop status row keeps document-unchanged wording, horizontally and vertically centers its operation/error message in its explicit mirrored center region, and does not duplicate the session-owned dirty state with a Clean/Dirty indicator. Errors and diagnostics avoid unnecessary exposure of screenplay content. Core preservation COW counters report only wrapper-share and detachment counts, never document-derived values; these counters are not currently included in the desktop projection. The explicit `ENABLE_DIAGNOSTICS` source constant gates only status Diagnostics presentation and projection; its production-off value does not disable operational counters, native-input/performance instrumentation, scheduler state, repaint/layout scheduling, or error reporting.
+- Desktop performance diagnostics are operationally retained and value-free: the desktop keeps cumulative saturating counters and nanosecond phase totals, while an explicit benchmark reset captures a baseline for deltas without changing the session or discarding prior totals. The status-specific detailed summary string, pending-derived-work presentation query, and `DiagnosticProjection` are constructed only when the manual Diagnostics gate is enabled. The single-line projection may include only fixed phase/counter names, numeric values, the debug/release build-profile label, and a closed set of operation labels. It must never include document text, FDX values or bytes, filesystem paths, IDs, or source data. Core layout wrapping reports build/reuse counts and elapsed actual-wrap time separately from the immutable layout value so instrumentation cannot affect layout equality or pagination. Whole-layout cache hits are not per-element wrap reuse. RS-WO-005 adds separate span-galley build/reuse counters; those counts never imply per-element wrap reuse or indexed interaction queries. Derived diagnostics distinguish due-tick attempts/completions/skips, irrelevant-revision skips, changed/unchanged outcomes, safe deferrals, and cumulative requested/attempted/deferred scene counts; live pending/complete/retryable and deferred-scene counts are numeric/value-free only.
 - **Persistence and data evolution:** Native files are FDX Version 6. Explicit non-6 inputs receive a warning and a Version 6 importer attempt; previous versions use the lossy title/content-only path, while newer handling is best effort without a compatibility promise. Malformed input fails safely. Save validates a complete candidate before atomic replacement and publishes session corrections only after success. Legacy JSON migration is not a product commitment.
 - **Verification approach:** Cargo workspace formatting, check, build, and Clippy checks cover build hygiene. Four consolidated headless core acceptance tests cover bounded editing/history, repeatable layout/export, native FDX preservation/reopen, and failed-Save-As safety scenarios. Desktop interaction and platform integration require applicable desktop/manual checks; automated core checks do not establish native OS behavior.
 
@@ -64,7 +168,7 @@ Later references in this document to deleted test files, desktop oracles, inline
 
 ## Desktop performance diagnostics
 
-The desktop owns the performance recorder, status-bar projection, benchmark-operation labels, and reset-baseline lifecycle. Existing totals remain cumulative across document replacement; `reset_benchmark` records the current totals as the next benchmark baseline and `benchmark_delta` uses saturating subtraction. The reset affects diagnostics only and does not change editing revision, selection, dirty state, history, layout-cache identity, or rendered output. Layout build instrumentation lives beside core layout construction but returns `LayoutBuildDiagnostics` separately from `ScreenplayLayout`; wrap timings cover only `wrap_element` calls, not validation or pagination.
+The desktop owns the performance recorder, status-bar projection, benchmark-operation labels, and reset-baseline lifecycle. `status_bar.rs::presentation::ENABLE_DIAGNOSTICS` defaults to `false`; when disabled, status summary formatting, its pending-derived-work presentation query, projection construction, and the entire second-row disclosure are skipped. When explicitly enabled, the prior collapsed disclosure and summary remain available. Existing totals remain cumulative across document replacement in either mode; `reset_benchmark` records the current totals as the next benchmark baseline and `benchmark_delta` uses saturating subtraction. The reset affects diagnostics only and does not change editing revision, selection, dirty state, history, layout-cache identity, or rendered output. Layout build instrumentation lives beside core layout construction but returns `LayoutBuildDiagnostics` separately from `ScreenplayLayout`; wrap timings cover only `wrap_element` calls, not validation or pagination.
 
 Core preservation diagnostics separately count shared vector/text/source-byte/image wrapper clones and detached vector/text/source-byte/image payloads. These process-wide, saturating counters are value-free structural counts, not timings, and are not projected into the desktop status-bar diagnostics.
 

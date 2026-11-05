@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 
 pub(crate) const COURIER_PRIME_FAMILY: &str = "Courier Prime";
@@ -43,7 +45,7 @@ fn add_face(
 ) {
     definitions
         .font_data
-        .insert(data_key.to_owned(), FontData::from_static(bytes));
+        .insert(data_key.to_owned(), Arc::new(FontData::from_static(bytes)));
     definitions.families.insert(
         FontFamily::Name(family_name.into()),
         vec![data_key.to_owned()],

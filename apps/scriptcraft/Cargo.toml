@@ -6,7 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-eframe = "0.29"
+eframe = "0.34"
+egui_material_icons = { version = "0.6.0", features = ["outline"] }
 rfd = "0.15"
 scriptcraft-core = { path = "../../crates/scriptcraft-core" }
 
