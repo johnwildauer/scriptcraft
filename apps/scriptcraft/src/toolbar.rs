@@ -14,7 +14,7 @@ pub(super) const TOOLBAR_ITEM_GAP: f32 = 4.0;
 pub(super) const TOOLBAR_TOP_PADDING: f32 = 6.0;
 // Preserve the toolbar's text/control clearance. The trailing span is part of
 // the exact top-panel allocation and must not be removed to fix a viewport row.
-pub(super) const TOOLBAR_BOTTOM_PADDING: f32 = 4.0;
+pub(super) const TOOLBAR_BOTTOM_PADDING: f32 = 6.0;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ToolbarIconHoverPadding {
@@ -94,12 +94,16 @@ mod toolbar_presentation {
         ui: &egui::Ui,
         item: ToolbarItemSpec,
         icon: Option<IconSpec>,
+        palette: crate::theme::ToolbarPalette,
     ) -> Color32 {
         icon.and_then(|spec| spec.disabled_color)
             .or(item.presentation.disabled_color)
             .or(DISABLED_FOREGROUND_OVERRIDE)
             .unwrap_or_else(|| {
                 let enabled = enabled_foreground(ui, item, icon);
+                if enabled == palette.foreground {
+                    return palette.disabled_foreground;
+                }
                 Color32::from_rgba_unmultiplied(
                     enabled.r(),
                     enabled.g(),
@@ -433,12 +437,18 @@ where
     }
 }
 
-fn paint_toolbar_icon(ui: &egui::Ui, center: egui::Pos2, icon: IconSpec, item: ToolbarItemSpec) {
+fn paint_toolbar_icon(
+    ui: &egui::Ui,
+    center: egui::Pos2,
+    icon: IconSpec,
+    item: ToolbarItemSpec,
+    palette: crate::theme::ToolbarPalette,
+) {
     let point_size = toolbar_presentation::icon_point_size(icon);
     let color = if matches!(item.enablement, EnablementPolicy::Enabled) {
         toolbar_presentation::enabled_foreground(ui, item, Some(icon))
     } else {
-        toolbar_presentation::disabled_foreground(ui, item, Some(icon))
+        toolbar_presentation::disabled_foreground(ui, item, Some(icon), palette)
     };
     let galley = WidgetText::from(toolbar_presentation::material_icon_text(icon).size(point_size))
     .into_galley(
@@ -456,6 +466,7 @@ fn paint_toolbar_graphic(
     center: egui::Pos2,
     graphic: ToolbarGraphic,
     item: ToolbarItemSpec,
+    palette: crate::theme::ToolbarPalette,
 ) {
     let paint_group = |icons: &[IconSpec]| {
         let total_width = icons
@@ -473,13 +484,14 @@ fn paint_toolbar_graphic(
                 egui::pos2(x + point_size / 2.0, center.y),
                 icon,
                 item,
+                palette,
             );
             x += point_size + toolbar_presentation::DEFAULT_GRAPHIC_GAP;
         }
     };
     match graphic {
         ToolbarGraphic::None | ToolbarGraphic::TextDropdown => {}
-        ToolbarGraphic::Icon(icon) => paint_toolbar_icon(ui, center, icon, item),
+        ToolbarGraphic::Icon(icon) => paint_toolbar_icon(ui, center, icon, item, palette),
         ToolbarGraphic::Icons(icons) => paint_group(icons),
         ToolbarGraphic::IconDisclosure {
             primary,
@@ -529,6 +541,7 @@ impl ScriptCraftApp {
         width: f32,
         presentation: ToolbarPresentationMetrics,
     ) {
+        let palette = self.theme_palette.toolbar;
         let (id, rect) = ui.allocate_space(Vec2::new(width, ui.spacing().interact_size.y * 2.0));
         let icon_control_size = Vec2::splat(presentation.icon_control_size);
         let icon_control_rect = toolbar_icon_control_rect(rect, icon_control_size);
@@ -559,12 +572,12 @@ impl ScriptCraftApp {
             ui.painter().rect_filled(icon_rect, 2.0, fill);
         }
         let body_font = presentation.font_id();
-        paint_toolbar_graphic(ui, icon_control_rect.center(), item.graphic, item);
+        paint_toolbar_graphic(ui, icon_control_rect.center(), item.graphic, item, palette);
         if item.caption_visible {
             let label_color = if enabled {
                 toolbar_presentation::enabled_foreground(ui, item, None)
             } else {
-                toolbar_presentation::disabled_foreground(ui, item, None)
+                toolbar_presentation::disabled_foreground(ui, item, None, palette)
             };
             let label_galley = ui.painter().layout_no_wrap(
                 item.label.to_owned(),
@@ -766,7 +779,12 @@ impl ScriptCraftApp {
                     ToolbarBehavior::None if item.enablement == EnablementPolicy::Disabled => {
                         ui.label(
                             RichText::new(item.label).color(
-                                toolbar_presentation::disabled_foreground(ui, item, None),
+                                toolbar_presentation::disabled_foreground(
+                                    ui,
+                                    item,
+                                    None,
+                                    self.theme_palette.toolbar,
+                                ),
                             ),
                         );
                     }
@@ -792,6 +810,15 @@ impl ScriptCraftApp {
     }
 
     pub(super) fn toolbar(&mut self, ui: &mut egui::Ui) {
+        let palette = self.theme_palette.toolbar;
+        let visuals = ui.visuals_mut();
+        visuals.widgets.noninteractive.fg_stroke.color = palette.foreground;
+        visuals.widgets.hovered.bg_fill = palette.hover_fill;
+        visuals.widgets.hovered.weak_bg_fill = palette.hover_fill;
+        visuals.widgets.hovered.fg_stroke.color = palette.hover_foreground;
+        visuals.widgets.active.bg_fill = palette.pressed_fill;
+        visuals.widgets.open.bg_fill = palette.open_fill;
+
         // Use the clipped panel content edge for both allocation and rendering.
         // The logical panel width can extend past the visible viewport after
         // frame/panel and native viewport insets have been applied.
@@ -866,6 +893,17 @@ impl ScriptCraftApp {
             );
             ui.add_space(TOOLBAR_BOTTOM_PADDING);
         });
+        if palette.border != Color32::TRANSPARENT {
+            let toolbar_rect = ui.max_rect().intersect(ui.clip_rect());
+            let y = toolbar_rect.bottom() - 0.5;
+            ui.painter().line_segment(
+                [
+                    egui::pos2(toolbar_rect.left(), y),
+                    egui::pos2(toolbar_rect.right(), y),
+                ],
+                egui::Stroke::new(1.0, palette.border),
+            );
+        }
     }
 }
 
@@ -886,10 +924,6 @@ pub(super) fn live_toolbar_metrics(ui: &egui::Ui) -> ToolbarPresentationMetrics 
         icon_control_size: ui.spacing().interact_size.y,
         font_size: toolbar_presentation::DEFAULT_ITEM_TEXT_POINT_SIZE,
     }
-}
-
-pub(super) fn toolbar_chrome_color(ctx: &egui::Context) -> Color32 {
-    ctx.global_style().visuals.widgets.open.weak_bg_fill
 }
 
 pub(super) fn toolbar_icon_control_rect(

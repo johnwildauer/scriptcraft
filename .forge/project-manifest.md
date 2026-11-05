@@ -161,6 +161,27 @@ with the outlined Material Unfold More glyph through egui's custom icon painter,
 while retaining framework-owned selection and popup behavior; the icon reference
 records this assignment. No agent validation was run.
 
+### Appearance theme consolidation WO-001/WO-002 implementation submission — 2026-11-05
+
+The approved appearance plan is being implemented sequentially in the desktop
+presentation layer. WO-001 adds `apps/scriptcraft/src/theme.rs` as the central
+owner of transient System/Day/Night/Midnight resolution, app semantic palettes,
+and egui visuals generation. Toolbar, Script Workspace, and status surfaces now
+consume separate palette groups; existing item/icon and status-local foreground
+override precedence is retained. WO-002 applies estimated Day/Night/Midnight
+neutral values from the supplied references, retains existing selection, caret,
+IME, hidden-text, warning, error, generic-selection, and text-cursor values, and
+adds explicit page-selection-boundary painting. The zoom slider rail is scoped
+to its status palette while its trailing fill remains tied to egui selection.
+The exact token table and work-order handoff are recorded in
+[`appearance-theme-consolidation.md`](../.plan/2026-11-05-appearance-theme-consolidation/appearance-theme-consolidation.md).
+
+Implementation is submitted for user review. No agent build, check, test, lint,
+formatting command, manual verification, review, contrast check, or validation
+was run. Screenshot RGB values are initial visual estimates and remain pending
+side-by-side user calibration; implementation, compilation, rendering, and
+accessibility outcomes are not claimed as verified or accepted.
+
 ### Gates and intervention
 
 - **Design approval:** Human approval required by default at `review -> execute`, subject to explicit user direction and applicable external rules.

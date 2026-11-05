@@ -29,11 +29,12 @@ mod focus_mode;
 mod material_font;
 mod sprint_timer;
 mod status_bar;
+mod theme;
 mod toolbar;
 mod toolbar_items;
 use sprint_timer::{NotificationResult, NotificationSink};
 use status_bar::{DiagnosticProjection, ViewportCenterAnchor, ViewportPageTracker};
-use toolbar::{toolbar_chrome_color, toolbar_content_height};
+use toolbar::toolbar_content_height;
 
 const EDITOR_SURFACE_ID: &str = "page-editor-surface";
 const CARET_WIDTH: f32 = 1.5;
@@ -444,9 +445,9 @@ struct ScriptCraftApp {
     effective_pixels_per_point: Option<f32>,
     zoom_percent: u16,
     pinch_zoom_percent: f64,
-    appearance_mode: status_bar::AppearanceMode,
-    applied_appearance: Option<(status_bar::AppearanceMode, egui::Theme)>,
-    page_palette: status_bar::PagePalette,
+    appearance_mode: theme::AppearanceMode,
+    applied_appearance: theme::AppliedAppearance,
+    theme_palette: theme::ApplicationPalette,
     caret_blink_focus_generation: u64,
     caret_blink_reset_time: f64,
     layout_cache: LayoutCache,
@@ -497,11 +498,11 @@ impl ScriptCraftApp {
             effective_pixels_per_point: None,
             zoom_percent: 100,
             pinch_zoom_percent: 100.0,
-            appearance_mode: status_bar::AppearanceMode::System,
+            appearance_mode: theme::AppearanceMode::System,
             applied_appearance: None,
-            page_palette: status_bar::PagePalette::for_theme(
-                status_bar::AppearanceMode::System,
-                egui::Theme::Light,
+            theme_palette: theme::ApplicationPalette::from_visuals(
+                theme::ResolvedAppearance::Day,
+                &egui::Visuals::light(),
             ),
             caret_blink_focus_generation: 0,
             caret_blink_reset_time: 0.0,
@@ -1219,7 +1220,7 @@ impl ScriptCraftApp {
             layout.pages[page_index].lines.len() as u64,
         );
         let painter = ui.painter_at(page_rect);
-        let palette = self.page_palette;
+        let palette = self.theme_palette.script_workspace.page;
         painter.rect_filled(page_rect, 2.0, palette.paper);
         painter.rect_stroke(
             page_rect,
@@ -1246,6 +1247,15 @@ impl ScriptCraftApp {
                     ),
                     0.0,
                     palette.selection,
+                );
+                painter.rect_stroke(
+                    egui::Rect::from_min_size(
+                        egui::pos2(left, y),
+                        Vec2::new(width.max(1.0), line.geometry.height.to_points_f32() * scale),
+                    ),
+                    0.0,
+                    Stroke::new(1.0, palette.selection_boundary),
+                    egui::StrokeKind::Inside,
                 );
             }
             paint_fixed_metric_text_with_selection(
@@ -1370,7 +1380,10 @@ impl ScriptCraftApp {
                 self.page_geometry.invalidate();
                 self.page_scale = None;
                 self.show_error(error.clone());
-                ui.colored_label(Color32::RED, format!("Layout error: {error:?}"));
+                ui.colored_label(
+                    self.theme_palette.feedback.error,
+                    format!("Layout error: {error:?}"),
+                );
                 return;
             }
         };
@@ -2459,28 +2472,29 @@ fn ordered_selection(selection: Selection) -> (Position, Position) {
     }
 }
 
-fn chrome_clear_color(visuals: &egui::Visuals) -> [f32; 4] {
-    visuals.widgets.open.weak_bg_fill.to_normalized_gamma_f32()
+fn chrome_clear_color(palette: theme::ScriptWorkspacePalette) -> [f32; 4] {
+    palette.background.to_normalized_gamma_f32()
 }
 
 fn document_cursor_icon() -> egui::CursorIcon {
     egui::CursorIcon::Text
 }
 
-fn chrome_frame(ctx: &egui::Context) -> egui::Frame {
-    // The top toolbar panel uses the shared app fill and a zero-inset frame;
-    // row padding remains explicit and its separator stays disabled.
+fn chrome_frame(palette: theme::ToolbarPalette) -> egui::Frame {
+    // The semantic divider is painted along the toolbar's lower edge; keep the
+    // frame stroke-free so no top or vertical borders are introduced.
     egui::Frame::NONE
-        .fill(toolbar_chrome_color(ctx))
+        .fill(palette.background)
         .stroke(egui::Stroke::NONE)
 }
 
-fn central_panel_frame(ctx: &egui::Context) -> egui::Frame {
-    // The central panel is the immediate owner below the toolbar. Keep its
-    // normal 8-point document inset, but use the same explicit surface fill
-    // as the top chrome so the boundary cannot expose panel_fill as a dark
-    // (black-looking) strip between the two app-owned surfaces.
-    egui::Frame::central_panel(ctx.global_style().as_ref()).fill(toolbar_chrome_color(ctx))
+fn central_panel_frame(
+    ctx: &egui::Context,
+    palette: theme::ScriptWorkspacePalette,
+) -> egui::Frame {
+    // Keep the existing document inset while allowing the Script Workspace to
+    // own a surface color independent from the toolbar.
+    egui::Frame::central_panel(ctx.global_style().as_ref()).fill(palette.background)
 }
 
 fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui::Rect {
@@ -2489,16 +2503,16 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     app.reconcile_sprint_timer(now);
     let fullscreen = ctx.input(|input| input.viewport().fullscreen);
     app.focus_mode.observe(fullscreen, now);
-    let (resolved_theme, applied_appearance) = status_bar::configure_appearance(
+    let (_resolved_theme, applied_appearance, theme_palette) = theme::configure_appearance(
         &ctx,
         app.appearance_mode,
         app.applied_appearance,
     );
     app.applied_appearance = applied_appearance;
-    app.page_palette = status_bar::PagePalette::for_theme(app.appearance_mode, resolved_theme);
+    app.theme_palette = theme_palette;
 
     egui::Panel::top("titlebar-toolbar")
-        .frame(chrome_frame(&ctx))
+        .frame(chrome_frame(app.theme_palette.toolbar))
         .show_separator_line(false)
         .exact_size(toolbar_content_height(&ctx.global_style()))
         .show_inside(ui, |ui| app.toolbar(ui));
@@ -2548,14 +2562,16 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         }
     });
     egui::Panel::bottom("status")
-        .frame(status_bar::status_panel_frame(&ctx))
+        .frame(status_bar::status_panel_frame(&ctx, app.theme_palette.status))
         .show_inside(ui, |ui| {
+        status_bar::apply_status_palette(ui, app.theme_palette.status);
         let was_timer_open = app.sprint_timer.popup_open;
         let focus_view = app.focus_mode.view();
         let mut focus_activated = false;
         let (zoom_changed, appearance_changed, timer_button_rect, _focus_button_rect) =
             status_bar::show_with_focus_mode(
                 ui,
+                app.theme_palette.status,
                 page_number,
                 &center,
                 diagnostics,
@@ -2594,7 +2610,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         }
         });
     let central = egui::CentralPanel::default()
-        .frame(central_panel_frame(&ctx))
+        .frame(central_panel_frame(&ctx, app.theme_palette.script_workspace))
         .show_inside(ui, |ui| app.live_document_surface(ui));
     sprint_timer::show_popup(&ctx, &mut app.sprint_timer, now, &mut app.notification_sink);
     central.response.rect
@@ -2632,8 +2648,8 @@ fn show_fdx_migration_dialog(app: &mut ScriptCraftApp, ctx: &egui::Context) {
 }
 
 impl eframe::App for ScriptCraftApp {
-    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-        chrome_clear_color(visuals)
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        chrome_clear_color(self.theme_palette.script_workspace)
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {

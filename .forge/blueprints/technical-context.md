@@ -7,7 +7,7 @@ This map describes ScriptCraft's desired technical structure and runtime boundar
 | Area | Path | Role in the target structure |
 |---|---|---|
 | Cargo workspace | [`Cargo.toml`](../../Cargo.toml) | Defines the workspace for the desktop application and reusable core crate. |
-| Desktop application | [`apps/scriptcraft/`](../../apps/scriptcraft/), [`main.rs`](../../apps/scriptcraft/src/main.rs), and [`src/`](../../apps/scriptcraft/src/) | Runnable local desktop shell and its UI/platform modules; owns presentation and native file interaction. |
+| Desktop application | [`apps/scriptcraft/`](../../apps/scriptcraft/), [`main.rs`](../../apps/scriptcraft/src/main.rs), [`theme.rs`](../../apps/scriptcraft/src/theme.rs), and [`src/`](../../apps/scriptcraft/src/) | Runnable local desktop shell and its UI/platform modules; owns presentation, semantic appearance palettes, and native file interaction. |
 | Screenplay core | [`crates/scriptcraft-core/`](../../crates/scriptcraft-core/), [`lib.rs`](../../crates/scriptcraft-core/src/lib.rs), [`editing.rs`](../../crates/scriptcraft-core/src/editing.rs), [`text_state.rs`](../../crates/scriptcraft-core/src/text_state.rs), [`layout.rs`](../../crates/scriptcraft-core/src/layout.rs), [`persistence.rs`](../../crates/scriptcraft-core/src/persistence.rs), and [`exports.rs`](../../crates/scriptcraft-core/src/exports.rs) | Reusable headless library for semantic editing, bounded FDX view-state offset mapping, shared layout, native-project persistence, and noncanonical export adapters. |
 | Core verification | [`crates/scriptcraft-core/tests/`](../../crates/scriptcraft-core/tests/) | Automated tests for core behavior independently of the desktop UI. |
 | Bundled typeface | [`fonts/CourierPrime/`](../../fonts/CourierPrime/) | Bundled Courier Prime font assets used by the screenplay experience. |
@@ -20,6 +20,10 @@ ScriptCraft runs as a local Rust desktop application built and launched through 
 ## Technology and boundaries
 
 The workspace uses Rust and Cargo. The desktop boundary contains the eframe/egui presentation layer and native-file-dialog integration; UI and platform concerns stay outside the reusable core. The core owns semantic session/project operations, fixed-profile layout, native persistence, and noncanonical export adapters. Framework and dependency versions are implementation choices rather than permanent architecture constraints.
+
+The desktop appearance model is owned by [`theme.rs`](../../apps/scriptcraft/src/theme.rs), above egui's binary Light/Dark theme selection. Transient System resolves through the framework-reported theme or configured fallback; Day, Night, and Midnight are concrete application palettes. One semantic palette maps to complete egui visuals and distinct toolbar, Script Workspace, status, shared-control, overlay, and feedback groups. The Script Workspace page palette remains desktop-only and supplies paper, text, hidden text, border, selection, selection boundary, caret, and IME colors. Toolbar and status panel surfaces are independent even when their initial compatibility values match. Item/icon overrides remain above toolbar palette defaults; status-local default, center, and hovered foreground overrides remain above status palette defaults. The palette is not persisted and is not part of screenplay core, document layout, or exports.
+
+The initial Day/Night/Midnight RGBs in `theme.rs` are image-derived estimates, not sampled values, and remain subject to user side-by-side calibration. The theme builder preserves the existing page selection, selected-text, caret, IME, generic egui selection/text-cursor, hyperlink, warning, and error colors. Screenplay selection fill remains independent from egui global selection; the zoom slider's trailing fill continues to use egui selection while its rail is scoped to the inactive widget fill. The status slider's custom knob continues to share status default/hover foreground behavior. A one-point toolbar divider is drawn along the toolbar's lower edge only; it does not add frame borders or change toolbar allocation. The visible page-selection boundary uses an explicit palette stroke so contrast can be reviewed against the lighter Night paper. No compilation, runtime, visual, or contrast validation is claimed for these changes.
 
 The desktop toolbar owns a declarative item catalog in
 [`toolbar_items.rs`](../../apps/scriptcraft/src/toolbar_items.rs), while
@@ -133,13 +137,13 @@ row and detailed status projection are gated by
 `status_bar.rs::presentation::ENABLE_DIAGNOSTICS`, a manual source constant
 defaulting to production-off; explicitly enabling it for development requires
 rebuilding and relaunching. Disabled mode adds no row or accessibility/focus
-target. Status-local settings live in [`presentation`](../../apps/scriptcraft/src/status_bar.rs:19): panel
+target. Status-local geometry and foreground override settings live in [`presentation`](../../apps/scriptcraft/src/status_bar.rs:19): panel
 horizontal/vertical insets 12/2 points, icon hover padding 2, icon slot width
 28, item gap 4, percentage reservation 8 per side, slider bounds 40–165, page
 counter horizontal inset 0, Body and Button text 10 each, center text 10, icon
 glyph size 17, and slider rail thickness 4 points. Only the bottom status panel
-uses its adjustable symmetric insets; its panel fill, separator behavior, and
-other panels remain framework-owned.
+uses its adjustable symmetric insets. Its fill and border colors come from the
+central status palette; panel sizing and stroke geometry remain framework-owned.
 WO-006 keeps the zoom slider on the stock response and interaction path while
 selecting `HandleShape::Circle` for that slider only. Its
 `status_bar.rs::presentation::ZOOM_SLIDER_RAIL_HEIGHT` setting remains manually

@@ -1,6 +1,7 @@
 use crate::focus_mode::FocusModeView;
+use crate::theme::{AppearanceMode, StatusPalette};
 use crate::toolbar::{
-    toolbar_cursor_icon, toolbar_group_fill, toolbar_icon_hover_rect,
+    toolbar_cursor_icon, toolbar_icon_hover_rect,
 };
 use eframe::egui::{
     self, Align, Color32, Direction, FontSelection, Pos2, Rect, Sense, Vec2, WidgetInfo,
@@ -78,14 +79,24 @@ mod presentation {
     }
 }
 
-pub(super) fn status_panel_frame(ctx: &egui::Context) -> egui::Frame {
-    // Start from the framework status-panel frame to retain its panel fill and
-    // default stroke/separator contract; both symmetric insets are status-local
-    // values surfaced for manual adjustment.
-    egui::Frame::side_top_panel(ctx.global_style().as_ref()).inner_margin(egui::Margin::symmetric(
-        presentation::PANEL_HORIZONTAL_INSET,
-        presentation::PANEL_VERTICAL_INSET,
-    ))
+pub(super) fn status_panel_frame(ctx: &egui::Context, palette: StatusPalette) -> egui::Frame {
+    let frame = egui::Frame::side_top_panel(ctx.global_style().as_ref());
+    let stroke = egui::Stroke::new(frame.stroke.width, palette.border);
+    frame
+        .inner_margin(egui::Margin::symmetric(
+            presentation::PANEL_HORIZONTAL_INSET,
+            presentation::PANEL_VERTICAL_INSET,
+        ))
+        .fill(palette.background)
+        .stroke(stroke)
+}
+
+pub(super) fn apply_status_palette(ui: &mut egui::Ui, palette: StatusPalette) {
+    let visuals = ui.visuals_mut();
+    visuals.widgets.noninteractive.fg_stroke.color = palette.foreground;
+    visuals.widgets.hovered.bg_fill = palette.hover_fill;
+    visuals.widgets.hovered.weak_bg_fill = palette.hover_fill;
+    visuals.widgets.hovered.fg_stroke.color = palette.hover_foreground;
 }
 
 pub(super) const fn diagnostics_enabled() -> bool {
@@ -117,129 +128,21 @@ fn with_status_text_style<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui:
     .inner
 }
 
-fn with_center_text_style<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+fn with_center_text_style<R>(
+    ui: &mut egui::Ui,
+    center_foreground: Color32,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     ui.scope(|ui| {
         if let Some(font) = ui.style_mut().text_styles.get_mut(&egui::TextStyle::Body) {
             font.size = presentation::CENTER_TEXT_SIZE;
         }
+        ui.visuals_mut().override_text_color = Some(
+            presentation::CENTER_FOREGROUND_OVERRIDE.unwrap_or(center_foreground),
+        );
         contents(ui)
     })
     .inner
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) enum AppearanceMode {
-    #[default]
-    System,
-    Day,
-    Night,
-    Midnight,
-}
-
-impl AppearanceMode {
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::System => "System",
-            Self::Day => "Day Mode",
-            Self::Night => "Night Mode",
-            Self::Midnight => "Midnight Mode",
-        }
-    }
-
-    fn theme_preference(self) -> egui::ThemePreference {
-        match self {
-            Self::System => egui::ThemePreference::System,
-            Self::Day => egui::ThemePreference::Light,
-            Self::Night | Self::Midnight => egui::ThemePreference::Dark,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct PagePalette {
-    pub(super) paper: Color32,
-    pub(super) text: Color32,
-    pub(super) subdued_text: Color32,
-    pub(super) border: Color32,
-    pub(super) selection: Color32,
-    pub(super) selection_text: Color32,
-    pub(super) caret: Color32,
-    pub(super) ime_text: Color32,
-}
-
-impl PagePalette {
-    pub(super) fn for_theme(mode: AppearanceMode, theme: egui::Theme) -> Self {
-        match (theme, mode == AppearanceMode::Midnight) {
-            (egui::Theme::Light, _) => Self {
-                paper: Color32::from_rgb(246, 246, 246),
-                text: Color32::from_rgb(32, 32, 32),
-                subdued_text: Color32::from_rgb(98, 98, 98),
-                border: Color32::from_rgb(105, 105, 105),
-                selection: Color32::from_rgb(56, 109, 177),
-                selection_text: Color32::WHITE,
-                caret: Color32::from_rgb(20, 80, 150),
-                ime_text: Color32::from_rgb(76, 42, 122),
-            },
-            (egui::Theme::Dark, true) => Self {
-                paper: Color32::from_rgb(12, 14, 18),
-                text: Color32::from_rgb(238, 240, 244),
-                subdued_text: Color32::from_rgb(156, 163, 173),
-                border: Color32::from_rgb(112, 118, 130),
-                selection: Color32::from_rgb(75, 117, 163),
-                selection_text: Color32::WHITE,
-                caret: Color32::from_rgb(85, 213, 255),
-                ime_text: Color32::from_rgb(211, 194, 255),
-            },
-            (egui::Theme::Dark, false) => Self {
-                paper: Color32::from_rgb(28, 30, 35),
-                text: Color32::from_rgb(238, 238, 238),
-                subdued_text: Color32::from_rgb(156, 163, 173),
-                border: Color32::from_rgb(128, 130, 138),
-                selection: Color32::from_rgb(75, 117, 163),
-                selection_text: Color32::WHITE,
-                caret: Color32::from_rgb(85, 213, 255),
-                ime_text: Color32::from_rgb(211, 194, 255),
-            },
-        }
-    }
-}
-
-pub(super) fn configure_appearance(
-    ctx: &egui::Context,
-    mode: AppearanceMode,
-    currently_applied: Option<(AppearanceMode, egui::Theme)>,
-) -> (egui::Theme, Option<(AppearanceMode, egui::Theme)>) {
-    let system_theme = ctx
-        .system_theme()
-        .unwrap_or_else(|| ctx.options(|options| options.fallback_theme));
-    let resolved_theme = match mode {
-        AppearanceMode::System => system_theme,
-        AppearanceMode::Day => egui::Theme::Light,
-        AppearanceMode::Night | AppearanceMode::Midnight => egui::Theme::Dark,
-    };
-    let applied = Some((mode, resolved_theme));
-
-    if currently_applied != applied {
-        let light = egui::Visuals::light();
-        let mut dark = egui::Visuals::dark();
-        if mode == AppearanceMode::Midnight {
-            dark.panel_fill = Color32::from_rgb(12, 14, 18);
-            dark.window_fill = Color32::from_rgb(15, 17, 22);
-            dark.faint_bg_color = Color32::from_rgb(20, 22, 27);
-            dark.extreme_bg_color = Color32::from_rgb(8, 10, 13);
-            dark.code_bg_color = Color32::from_rgb(16, 18, 23);
-            dark.widgets.noninteractive.bg_fill = Color32::from_rgb(14, 16, 20);
-            dark.widgets.inactive.bg_fill = Color32::from_rgb(25, 28, 34);
-            dark.widgets.hovered.bg_fill = Color32::from_rgb(38, 43, 52);
-            dark.widgets.active.bg_fill = Color32::from_rgb(48, 56, 68);
-            dark.widgets.open.bg_fill = Color32::from_rgb(22, 25, 31);
-        }
-        ctx.set_visuals_of(egui::Theme::Light, light);
-        ctx.set_visuals_of(egui::Theme::Dark, dark);
-        ctx.set_theme(mode.theme_preference());
-    }
-
-    (resolved_theme, applied)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -380,6 +283,7 @@ pub(super) fn normalized_zoom_percent(value: f64) -> u16 {
 
 fn zoom_controls(
     ui: &mut egui::Ui,
+    palette: StatusPalette,
     zoom_percent: &mut u16,
     slider_rect: Rect,
     percentage_rect: Rect,
@@ -388,7 +292,7 @@ fn zoom_controls(
     let old_value = *zoom_percent;
     let slider_response = (slider_rect.width() > 0.0).then(|| {
         one_line_region_at(ui, slider_rect, |slider_ui| {
-            zoom_slider(slider_ui, slider_rect.width(), zoom_percent)
+            zoom_slider(slider_ui, palette, slider_rect.width(), zoom_percent)
         })
         .inner
     });
@@ -399,10 +303,17 @@ fn zoom_controls(
     (*zoom_percent != old_value, slider_response)
 }
 
-fn zoom_slider(ui: &mut egui::Ui, width: f32, zoom_percent: &mut u16) -> egui::Response {
+fn zoom_slider(
+    ui: &mut egui::Ui,
+    palette: StatusPalette,
+    width: f32,
+    zoom_percent: &mut u16,
+) -> egui::Response {
     let response = ui
         .scope(|ui| {
             ui.spacing_mut().slider_rail_height = presentation::ZOOM_SLIDER_RAIL_HEIGHT;
+            ui.visuals_mut().widgets.inactive.bg_fill = palette.slider_rail;
+            ui.visuals_mut().selection.bg_fill = palette.slider_trailing_fill;
             // egui Slider allocates from Spacing::slider_width internally;
             // add_sized alone constrains its child UI but leaves that stock
             // response at the default 100 points. Match the planner-owned slot.
@@ -443,6 +354,7 @@ fn zoom_slider(ui: &mut egui::Ui, width: f32, zoom_percent: &mut u16) -> egui::R
 
 fn paint_zoom_slider_knob(
     ui: &egui::Ui,
+    palette: StatusPalette,
     response: &egui::Response,
     zoom_percent: u16,
     right_group_rect: Rect,
@@ -470,9 +382,9 @@ fn paint_zoom_slider_knob(
 
     let visuals = ui.style().interact(response);
     let foreground = if response.hovered() {
-        presentation::hovered_foreground(ui)
+        presentation::HOVERED_FOREGROUND_OVERRIDE.unwrap_or(palette.slider_knob_hover)
     } else {
-        presentation::default_foreground(ui)
+        presentation::DEFAULT_FOREGROUND_OVERRIDE.unwrap_or(palette.slider_knob)
     };
     let painter = ui.painter().with_clip_rect(clip_rect);
     painter.circle(
@@ -491,7 +403,7 @@ fn paint_status_hover_control(
     let hover_rect = hover_rect.intersect(ui.max_rect()).intersect(ui.clip_rect());
     let response = response.on_hover_cursor(toolbar_cursor_icon());
     if response.hovered() {
-        let fill = toolbar_group_fill(ui.style(), true);
+        let fill = ui.style().visuals.widgets.hovered.bg_fill;
         if fill != Color32::TRANSPARENT {
             ui.painter().rect_filled(hover_rect, 2.0, fill);
         }
@@ -1274,6 +1186,7 @@ impl DiagnosticProjection<'_> {
 #[allow(clippy::too_many_arguments)] // Keep transient timer ownership at the app caller.
 pub(super) fn show_with_focus_mode(
     ui: &mut egui::Ui,
+    palette: StatusPalette,
     page: VisiblePage,
     center: &CenterProjection,
     diagnostics: Option<DiagnosticProjection<'_>>,
@@ -1286,6 +1199,7 @@ pub(super) fn show_with_focus_mode(
 ) -> (bool, bool, Option<Rect>, Option<Rect>) {
     show_impl_with_appearance(
         ui,
+        palette,
         page,
         center,
         diagnostics,
@@ -1344,6 +1258,7 @@ fn appearance_menu(ui: &mut egui::Ui, appearance: &mut AppearanceMode) -> bool {
 #[allow(clippy::too_many_arguments)] // Explicit projections and caller-owned state avoid hidden status globals.
 fn show_impl_with_appearance(
     ui: &mut egui::Ui,
+    palette: StatusPalette,
     page: VisiblePage,
     center: &CenterProjection,
     diagnostics: Option<DiagnosticProjection<'_>>,
@@ -1423,6 +1338,7 @@ fn show_impl_with_appearance(
                         |zoom_ui| {
                             let (changed, slider_response) = zoom_controls(
                                 zoom_ui,
+                                palette,
                                 zoom_percent,
                                 layout.slider,
                                 layout.percentage,
@@ -1499,6 +1415,7 @@ fn show_impl_with_appearance(
                     if let Some(response) = zoom_slider_response.as_ref() {
                         paint_zoom_slider_knob(
                             right_ui,
+                            palette,
                             response,
                             *zoom_percent,
                             right_rect,
@@ -1511,7 +1428,7 @@ fn show_impl_with_appearance(
         one_line_region_at(row_ui, layout.center, |region| {
             let status_rect = region.max_rect().intersect(region.clip_rect());
             if let Some(message) = message.as_deref() {
-                with_center_text_style(region, |region| {
+                with_center_text_style(region, palette.center_foreground, |region| {
                     paint_clipped_single_line(
                         region,
                         "operation-status",

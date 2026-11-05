@@ -798,9 +798,16 @@ content.
     Night/Midnight dark pages; Midnight's page and major app surfaces shall be measurably darker
     than Night. Page text and IME text shall retain at least 4.5:1 contrast against their
     composited backgrounds, selected text at least 4.5:1 against the selection, and the caret
-    and visible selection boundary at least 3:1 against adjacent page colors. Appearance changes
+    and visible selection boundary at least 3:1 against adjacent page colors. The visible page
+    selection boundary shall use the centralized selection-boundary token independently from its
+    fill and selected-text colors. Appearance changes
     shall not persist and shall not change screenplay data, layout/source mappings, session
-    revision, dirty/undo state, page zoom, or PDF/plain-text output.
+    revision, dirty/undo state, page zoom, or PDF/plain-text output. Desktop colors shall be owned by
+    one application-level semantic palette, with distinct toolbar, Script Workspace, status, shared
+    control, overlay, and feedback designations. The palette shall map into the framework's native
+    visuals while retaining app-specific page, status, and toolbar colors; per-item/icon overrides
+    remain explicit higher-precedence exceptions. Palette ownership shall not move into screenplay
+    data or shared document layout.
   - **AC-WRITING-006.12:** Sprint Timer shall be an accessible per-window status action with
     mutually exclusive Countdown and Stopwatch modes. Countdown shall default to 25 minutes,
     accept whole minutes from 1 through 1440, preserve invalid input without starting, and
