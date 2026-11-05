@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 mod document_font;
 mod focus_mode;
+mod material_font;
 mod sprint_timer;
 mod status_bar;
 mod toolbar;
@@ -2825,7 +2826,10 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             document_font::install(&cc.egui_ctx);
-            egui_material_icons::initialize(&cc.egui_ctx);
+            material_font::install(
+                &cc.egui_ctx,
+                &toolbar_items::custom_material_icon_axes(),
+            );
             ScriptCraftApp::new()
                 .map(|app| Box::new(app) as Box<dyn eframe::App>)
                 .map_err(|error| error.into())

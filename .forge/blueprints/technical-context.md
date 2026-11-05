@@ -33,8 +33,17 @@ color overrides take precedence over per-item color overrides, toolbar-local
 color overrides, and the theme-derived enabled foreground; absent an explicit
 disabled color, disabled graphics and captions use the resolved enabled color at
 reduced alpha. The toolbar-wide icon variant defaults to outlined, with optional
-per-icon filled/outlined override. Toolbar icon size, item text size, and graphic
-gaps are named logical-point settings; the default item text size is 14 points.
+per-icon filled/outlined override. Toolbar icon size, item text size, Elements
+role-option text size, and graphic gaps are named logical-point settings. The
+item and Elements role-option text-size defaults are independently configurable
+and currently resolve to 11 and 14 points respectively. The closed selected
+Elements role uses the role-option size; the Elements caption uses the item text
+size. Role-option rows have 12 points of horizontal padding on each side. Toolbar
+icon hover expansion uses four independent logical-point edges
+(left/top/right/bottom), currently 8/0/8/3; it
+controls the icon hover/click rectangle, not glyph baseline placement. The
+overflow menu button's egui padding remains symmetric and projects each opposite
+edge pair to its average. Status icon padding remains status-local and symmetric.
 Item order, enabled state, presentation, allocation, and popup geometry are
 desktop transient state and are not persisted in screenplay or FDX data. The
 temporary catalog order is leading Flexible Space, New, Open, Save, Save As, pre-Elements
@@ -52,21 +61,36 @@ existing adapters. The overflow control uses the catalog's outlined Double
 Arrows Material icon, is icon-only with an accessible name, and is rendered only
 when allocation produces overflow entries; it adds no permanent wide-layout
 width. Both the central Elements ComboBox and its nested overflow submenu derive
-their scroll area's desired height from all role-row text/button metrics and
-inter-row spacing. The usable egui content viewport minus the popup frame margins
+their scroll area's desired height from all role-row text/button metrics using
+the independently configurable role-option font size, and inter-row spacing.
+The central ComboBox paints the outlined Material Unfold More glyph in place of
+egui's default triangle through its icon-painter hook; ComboBox selection,
+keyboard, popup, and accessibility behavior remain framework-owned. The overflow
+submenu retains its menu-owned indicator. The usable egui content viewport minus
+the popup frame margins
 is the only height cap; a genuinely short viewport retains bounded scrolling.
 WO-002 and WO-003 implementations are submitted for user review and validation;
 no agent validation is claimed.
 
-For the user-authorized UI Icons v1 foundation, the desktop uses eframe/egui
-0.34 with egui_material_icons 0.6.0, enabling its filled and outline icon fonts.
-The app-creation callback installs the named Courier Prime document families
-first, then initializes Material fonts on the same egui context before app
-construction. The icon crate supplies embedded Regular-weight icon fonts; this
-is an implementation exception to the icon-assignment reference's retained
-weight-200 preference. These presentation dependencies do not enter the
-headless screenplay core or change document typography by intent. WO-001 has not
-been user-validated; dependency selection alone is not build or runtime evidence.
+The desktop uses eframe/egui 0.34 and retains `egui_material_icons` 0.6.0 for
+typed icon constants, codepoints, and filled/outlined identity. The app bundles
+the upstream Material Symbols Rounded variable TTF under Apache-2.0 and registers
+app-owned faces under the crate's existing family names. The app-creation
+callback installs Courier Prime first and adds the Material faces to that same
+egui context before app construction; the initializer from the icon crate is not
+called. Named application defaults are weight 200, optical size 24, and grade 0,
+with `FILL=0` for outlined and `FILL=1` for filled. Toolbar `IconSpec` axes
+overrides take per-axis precedence over those defaults; status icons retain the
+shared defaults. All seven standard weights are registered at the default
+optical-size/grade pair, and catalog-declared non-default optical-size/grade
+combinations receive separate named faces. Typed optical-size choices are 20,
+24, and 48; typed grade choices are -50, 0, and 200. This face isolation avoids
+reusing glyph cache entries across variation locations. The shared rich-text
+adapter keeps codepoint and fill/outline identity while choosing the named face.
+The native font is a desktop presentation asset and does not enter the headless
+screenplay core or change document typography. WO-002 implementation is
+submitted for user review; no agent build, runtime, or visual validation is
+claimed.
 
 WO-002 assigns outlined Timer to Sprint Timer and outlined Location Searching to
 Focus Mode, plus filled Mode Night to Appearance. Inline status controls render

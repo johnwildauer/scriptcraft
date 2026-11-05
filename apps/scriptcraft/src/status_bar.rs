@@ -659,14 +659,17 @@ fn status_icon_control(
             let slot_size = icon_control_size + Vec2::splat(padding * 2.0);
             let (id, slot_rect) = ui.allocate_space(slot_size);
             let icon_control_rect = Rect::from_center_size(slot_rect.center(), icon_control_size);
-            let hover_rect = toolbar_icon_hover_rect(icon_control_rect, padding)
+            let hover_rect = toolbar_icon_hover_rect(
+                icon_control_rect,
+                crate::toolbar::ToolbarIconHoverPadding::uniform(padding),
+            )
                 .intersect(ui.max_rect())
                 .intersect(ui.clip_rect());
             let response = ui.interact(hover_rect, id.with("status-icon"), Sense::click());
             let (response, text_color) = paint_status_hover_control(ui, response, hover_rect);
 
             let galley = WidgetText::from(
-                icon.rich_text().size(presentation::ICON_GLYPH_SIZE),
+                crate::material_font::rich_text(icon, None).size(presentation::ICON_GLYPH_SIZE),
             )
             .into_galley(
                 ui,

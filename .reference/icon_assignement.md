@@ -1,13 +1,19 @@
 # App Icons to Material Icons Assignment 
 
-This app will use Material icons from `egui_material_icons` 0.6.0 with its default `filled` and `compressed` features plus `outline`. We will default to "outline" icons, using "filled" for only a handful (see below). Our default font weight preference remains 200.
-
-**WO-001 implementation exception (user-approved 2026-11-04):** The crate's
-embedded filled and outlined fonts render at Regular weight and expose no weight
-selection API. Regular is accepted for this implementation only; it does not
-replace the weight-200 design preference above. Material font initialization
-follows Courier Prime registration. This foundation does not change the WIP
-assignments below or claim that status-bar icon substitutions are implemented.
+This app uses the typed icon constants and codepoints from `egui_material_icons`
+0.6.0 and the app-bundled native Material Symbols Rounded variable TTF. Outlined
+icons are the default, with filled used only where assigned below. The native
+defaults use weight 200, optical size 24, and grade 0; outlined uses `FILL=0`
+and filled uses `FILL=1`. Toolbar `IconSpec` entries may independently override
+weight, optical size, and grade. All seven standard weights are registered at the
+default optical-size/grade pair; non-default optical-size/grade faces are
+registered only for combinations explicitly used by the toolbar catalog. Status
+icons use the shared defaults. Courier Prime is registered first, then the
+app-owned Material faces are added to the same egui context. See
+[`fonts/MaterialSymbols/README.md`](../fonts/MaterialSymbols/README.md) for the
+upstream source, pin, checksum, axes, and license record. Axis override behavior
+is implementation-submitted and awaits user visual review and validation. The
+WIP assignments below remain unchanged.
 
 ## Toolbar Temporary 
 
@@ -19,7 +25,7 @@ assignments below or claim that status-bar icon substitutions are implemented.
 | Save | Save |
 | Save As | Save As |
 | (Flexible Space) |  |
-| Elements | (Dropdown) |
+| Elements | (Dropdown with outlined Unfold More indicator) |
 | (Flexible Space) |  |
 | Show/Hide | Visibility + Keyboard Arrow Down |
 | Export Text | File Export |

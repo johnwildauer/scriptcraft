@@ -124,6 +124,43 @@ run. All review and validation remain user-owned under the authoritative policy
 above. Dependency resolution is setup evidence only and is not compilation or
 behavior evidence.
 
+### Native Material icon font WO-001 implementation submission — 2026-11-05
+
+The native Material icon-font work is on the observed initiative branch
+`dev/2026-11-05-toolbar-item-model`; the pre-existing approved change to the
+initiative plan was preserved. WO-001 adds the pinned Material Symbols Rounded
+variable TTF and Apache-2.0 license record, then registers outlined and filled
+weight-200 faces additively after Courier Prime. The asset provenance and SHA-256
+are recorded in [`fonts/MaterialSymbols/README.md`](../fonts/MaterialSymbols/README.md).
+Implementation submission is not build or runtime evidence. No agent check,
+build, test, lint, formatting, manual verification, review, or validation was run;
+user review and validation remain pending.
+
+### Native Material icon font WO-002 implementation submission — 2026-11-05
+
+WO-002 adds typed weight, optical-size, and grade selections with named defaults
+and optional per-icon overrides in the desktop toolbar catalog. The app registers
+all seven standard weights at the default optical-size/grade pair and only adds
+separate faces for non-default optical-size/grade combinations explicitly used
+by catalog icons. Toolbar, overflow, and status icons now share the app-owned
+rich-text adapter, with status icons retaining the defaults. These source and
+documentation changes are submitted for user review; no agent build, check, test,
+lint, formatter, manual verification, review, or validation was run. User review
+and validation remain pending.
+
+The subsequent toolbar-presentation follow-up separates Elements role-option text
+sizing from the general toolbar item text setting and adds independent left/top/
+right/bottom padding for toolbar icon hover/click rectangles. The user-owned
+source values were preserved; the current Elements item and role-option sizes are
+11 and 14 points, with 12 points of horizontal role-row padding per side. egui's
+overflow menu button still requires symmetric padding, so its per-axis value is
+derived from opposing-edge averages.
+These changes and their durable requirement/blueprint updates are submitted for
+user review. The central Elements ComboBox also replaces its default triangle
+with the outlined Material Unfold More glyph through egui's custom icon painter,
+while retaining framework-owned selection and popup behavior; the icon reference
+records this assignment. No agent validation was run.
+
 ### Gates and intervention
 
 - **Design approval:** Human approval required by default at `review -> execute`, subject to explicit user direction and applicable external rules.

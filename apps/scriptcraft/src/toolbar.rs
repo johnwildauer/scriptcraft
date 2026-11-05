@@ -11,11 +11,47 @@ pub(super) const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 46.0;
 pub(super) const TOOLBAR_GROUP_HORIZONTAL_PADDING: f32 = 8.0;
 pub(super) const TOOLBAR_ROW_PADDING: f32 = 4.0;
 pub(super) const TOOLBAR_ITEM_GAP: f32 = 4.0;
-pub(super) const TOOLBAR_TOP_PADDING: f32 = 4.0;
+pub(super) const TOOLBAR_TOP_PADDING: f32 = 6.0;
 // Preserve the toolbar's text/control clearance. The trailing span is part of
 // the exact top-panel allocation and must not be removed to fix a viewport row.
-pub(super) const TOOLBAR_BOTTOM_PADDING: f32 = 3.0;
-pub(super) const TOOLBAR_ICON_HOVER_PADDING: f32 = 1.0;
+pub(super) const TOOLBAR_BOTTOM_PADDING: f32 = 4.0;
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ToolbarIconHoverPadding {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl ToolbarIconHoverPadding {
+    pub(super) const fn uniform(value: f32) -> Self {
+        Self {
+            left: value,
+            top: value,
+            right: value,
+            bottom: value,
+        }
+    }
+
+    // egui's Button spacing accepts symmetric x/y padding, so average opposite
+    // sides to preserve the total extent when this value is used by a menu button.
+    fn for_button(self) -> Vec2 {
+        Vec2::new(
+            (self.left + self.right) * 0.5,
+            (self.top + self.bottom) * 0.5,
+        )
+    }
+}
+
+/// Per-edge hit/hover expansion: left, top, right, bottom (logical points).
+pub(super) const TOOLBAR_ICON_HOVER_PADDING: ToolbarIconHoverPadding =
+    ToolbarIconHoverPadding {
+        left: 8.0,
+        top: 0.0,
+        right: 8.0,
+        bottom: 3.0,
+    };
 
 /// Toolbar-local visual defaults. These settings are deliberately separate
 /// from status-bar presentation and all dimensions are logical points.
@@ -35,7 +71,11 @@ mod toolbar_presentation {
     pub(super) const DEFAULT_MATERIAL_ICON_VARIANT: ToolbarIconVariant =
         ToolbarIconVariant::Outlined;
     /// Default toolbar caption and menu text size, in logical points.
-    pub(super) const DEFAULT_ITEM_TEXT_POINT_SIZE: f32 = 14.0;
+    pub(super) const DEFAULT_ITEM_TEXT_POINT_SIZE: f32 = 11.0;
+    /// Elements role-option text size, independent of toolbar item text.
+    pub(super) const DEFAULT_ELEMENTS_ROLE_OPTION_POINT_SIZE: f32 = 14.0;
+    /// Horizontal padding on each side of an Elements role-option row, in points.
+    pub(super) const DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING: f32 = 18.0;
     /// Gap between icons in grouped or primary/disclosure graphics, in logical points.
     pub(super) const DEFAULT_GRAPHIC_GAP: f32 = 4.0;
 
@@ -76,11 +116,25 @@ mod toolbar_presentation {
             .unwrap_or(DEFAULT_MATERIAL_ICON_POINT_SIZE)
     }
 
-    pub(super) fn material_icon(icon: IconSpec) -> egui_material_icons::MaterialIcon {
-        match icon.variant.unwrap_or(DEFAULT_MATERIAL_ICON_VARIANT) {
+    pub(super) fn elements_role_option_font_id(ui: &egui::Ui) -> egui::FontId {
+        let mut font_id = ui
+            .style()
+            .text_styles
+            .get(&egui::TextStyle::Button)
+            .cloned()
+            .unwrap_or_else(|| {
+                egui::FontId::proportional(DEFAULT_ELEMENTS_ROLE_OPTION_POINT_SIZE)
+            });
+        font_id.size = DEFAULT_ELEMENTS_ROLE_OPTION_POINT_SIZE;
+        font_id
+    }
+
+    pub(super) fn material_icon_text(icon: IconSpec) -> egui::RichText {
+        let material_icon = match icon.variant.unwrap_or(DEFAULT_MATERIAL_ICON_VARIANT) {
             ToolbarIconVariant::Filled => icon.icon.filled(),
             ToolbarIconVariant::Outlined => icon.icon.outlined(),
-        }
+        };
+        crate::material_font::rich_text(material_icon, icon.material_axes)
     }
 }
 
@@ -114,13 +168,7 @@ pub(super) fn screenplay_role_label(role: Role) -> &'static str {
 /// Desired inner scroll height for all Elements rows, bounded by the usable
 /// egui content viewport after accounting for the popup frame.
 fn elements_role_popup_max_height(ui: &egui::Ui) -> f32 {
-    let mut button_font = ui
-        .style()
-        .text_styles
-        .get(&TextStyle::Button)
-        .cloned()
-        .unwrap_or_else(|| FontId::proportional(toolbar_presentation::DEFAULT_ITEM_TEXT_POINT_SIZE));
-    button_font.size = toolbar_presentation::DEFAULT_ITEM_TEXT_POINT_SIZE;
+    let button_font = toolbar_presentation::elements_role_option_font_id(ui);
     let spacing = ui.spacing();
     let row_height = SUPPORTED_SCREENPLAY_ROLES
         .iter()
@@ -392,11 +440,7 @@ fn paint_toolbar_icon(ui: &egui::Ui, center: egui::Pos2, icon: IconSpec, item: T
     } else {
         toolbar_presentation::disabled_foreground(ui, item, Some(icon))
     };
-    let galley = WidgetText::from(
-        toolbar_presentation::material_icon(icon)
-            .rich_text()
-            .size(point_size),
-    )
+    let galley = WidgetText::from(toolbar_presentation::material_icon_text(icon).size(point_size))
     .into_galley(
         ui,
         None,
@@ -581,13 +625,38 @@ impl ScriptCraftApp {
                     .width(width)
                     .height(role_popup_height)
                     .wrap_mode(TextWrapMode::Truncate)
-                    // The stock ComboBox has no independent closed-text alignment
-                    // setting. Keep its button, popup, ID, keyboard handling, and
-                    // arrow intact, then paint only the closed selected galley below.
+                    // Keep the stock ComboBox button, popup, ID, and keyboard behavior,
+                    // but replace its triangle with the outlined up/down Material glyph.
+                    .icon(|ui, icon_rect, visuals, _is_open| {
+                        let icon_text = crate::material_font::rich_text(
+                            egui_material_icons::icons::ICON_UNFOLD_MORE.outlined(),
+                            None,
+                        )
+                        .size(icon_rect.height());
+                        let galley = WidgetText::from(icon_text).into_galley(
+                            ui,
+                            None,
+                            icon_rect.width(),
+                            TextStyle::Button,
+                        );
+                        ui.painter().galley(
+                            icon_rect.center() - galley.size() / 2.0,
+                            galley,
+                            visuals.fg_stroke.color,
+                        );
+                    })
                     .selected_text("")
                     .show_ui(ui, |ui| {
+                        ui.spacing_mut().button_padding.x =
+                            toolbar_presentation::DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING;
+                        let role_option_font =
+                            toolbar_presentation::elements_role_option_font_id(ui);
                         for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
-                            ui.selectable_value(&mut next_role, role, label);
+                            ui.selectable_value(
+                                &mut next_role,
+                                role,
+                                RichText::new(label).font(role_option_font.clone()),
+                            );
                         }
                     });
                 let popup_open = combo_result.inner.is_some();
@@ -602,7 +671,7 @@ impl ScriptCraftApp {
                     let text_color = toolbar_presentation::enabled_foreground(ui, item, None);
                     let galley = WidgetText::from(
                         RichText::new(screenplay_role_label(next_role))
-                            .font(presentation.font_id())
+                            .font(toolbar_presentation::elements_role_option_font_id(ui))
                             .color(text_color),
                     )
                     .into_galley(
@@ -651,12 +720,11 @@ impl ScriptCraftApp {
             _ => unreachable!("overflow indicator must use a single Material icon"),
         };
         let icon_color = toolbar_presentation::enabled_foreground(ui, indicator, Some(icon));
-        ui.spacing_mut().button_padding = Vec2::splat(TOOLBAR_ICON_HOVER_PADDING);
+        ui.spacing_mut().button_padding = TOOLBAR_ICON_HOVER_PADDING.for_button();
         ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(2);
         ui.visuals_mut().widgets.active.corner_radius = egui::CornerRadius::same(2);
         let menu_result = ui.menu_button(
-            toolbar_presentation::material_icon(icon)
-                .rich_text()
+            toolbar_presentation::material_icon_text(icon)
                 .size(toolbar_presentation::icon_point_size(icon))
                 .color(icon_color),
             |ui| {
@@ -671,13 +739,21 @@ impl ScriptCraftApp {
                     ToolbarBehavior::ElementsRoleDropdown => {
                         let selected_role = self.focused_role();
                         ui.menu_button(item.label, |ui| {
+                            ui.spacing_mut().button_padding.x = toolbar_presentation::
+                                DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING;
                             let role_popup_height = elements_role_popup_max_height(ui);
+                            let role_option_font =
+                                toolbar_presentation::elements_role_option_font_id(ui);
                             egui::ScrollArea::vertical()
                                 .max_height(role_popup_height)
                                 .show(ui, |ui| {
                                     for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
                                         if ui
-                                            .selectable_label(selected_role == Some(role), label)
+                                            .selectable_label(
+                                                selected_role == Some(role),
+                                                RichText::new(label)
+                                                    .font(role_option_font.clone()),
+                                            )
                                             .clicked()
                                         {
                                             chosen_role = Some(role);
@@ -829,10 +905,13 @@ pub(super) fn toolbar_icon_control_rect(
     )
 }
 
-pub(super) fn toolbar_icon_hover_rect(icon_control_rect: egui::Rect, padding: f32) -> egui::Rect {
-    egui::Rect::from_center_size(
-        icon_control_rect.center(),
-        icon_control_rect.size() + Vec2::splat(padding * 2.0),
+pub(super) fn toolbar_icon_hover_rect(
+    icon_control_rect: egui::Rect,
+    padding: ToolbarIconHoverPadding,
+) -> egui::Rect {
+    egui::Rect::from_min_max(
+        icon_control_rect.min - Vec2::new(padding.left, padding.top),
+        icon_control_rect.max + Vec2::new(padding.right, padding.bottom),
     )
 }
 

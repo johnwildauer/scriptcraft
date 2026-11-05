@@ -534,10 +534,16 @@ model. Native window chrome remains owned by macOS where applicable.
   - **AC-WRITING-005.3:** Toolbar Items shall resolve their declarative graphic, caption visibility,
     and enabled/disabled foreground through desktop toolbar presentation. Action Items shall use an
     icon-first, borderless icon control with a small explicit padding region as the hover/click
-    surface. The centered text caption beneath an action graphic shall remain outside that response,
+    surface; that region shall support independently adjustable left, top, right, and bottom padding.
+    The centered text caption beneath an action graphic shall remain outside that response,
     retain its resolved normal foreground when enabled, remain available for accessibility use, and
     not add a redundant visible-label tooltip. Icon graphics shall use their assigned typed Material
     icons; graphic, behavior, enablement, and caption visibility shall remain separate item fields.
+    Toolbar and status Material glyphs shall use the bundled native Material Symbols Rounded TTF,
+    with outlined and filled forms selected through the corresponding `FILL` axis. The initial
+    developer defaults shall be weight 200, optical size 24, and grade 0; toolbar icons may override
+    supported axes per icon, while status icons retain the defaults. These axes shall be explicit
+    presentation metadata and shall not affect text/document fonts.
     Show/Hide shall display outlined Visibility and independently specified outlined Keyboard Arrow
     Down graphics plus its caption, and Export Text shall display its outlined File Export graphic
     plus its caption. Both shall use the disabled foreground for every graphic and caption, with no
@@ -546,9 +552,16 @@ model. Native window chrome remains owned by macOS where applicable.
     appears in overflow, its label shall retain the disabled foreground and remain noninteractive.
   - **AC-WRITING-005.4:** Given the current caret/focus is within a screenplay element, the Elements
     Item shall display that element's explicit role using the supported labels in
-    REQ-WRITING-LOOP-007. The central dropdown and the Elements submenu in toolbar overflow shall
+    REQ-WRITING-LOOP-007. The central Elements ComboBox's closed control shall use an outlined
+    Unfold More Material icon instead of egui's default triangle, while preserving the ComboBox's
+    selection, keyboard, popup, and accessibility behavior. The central dropdown and the Elements
+    submenu in toolbar overflow shall
     derive their desired vertical extent from all supported role rows and active menu metrics,
     including row spacing and popup frame allowance, rather than an arbitrary short fixed height.
+    The Elements closed selected role and role rows in the central dropdown and overflow submenu
+    shall use the same separately named logical-point text-size default. The Elements caption shall
+    retain toolbar item text sizing. Role-option rows shall provide 12 logical points of horizontal
+    inset on each side. Popup desired-height measurement shall use the role-row font metrics.
     All supported labels shall be simultaneously visible at ordinary usable viewport heights;
     viewport bounds are the only height limitation, and constrained viewports shall retain bounded
     scrolling that makes every role reachable. Choosing a label from either presentation shall apply
@@ -598,7 +611,16 @@ content.
     assignment shall be introduced without authorization. Sprint Timer shall show only the outlined
     Timer symbol, Focus Mode only the outlined Location Searching symbol, and Appearance only the
     filled Mode Night symbol; these controls shall have no visible captions, and Appearance shall
-    have no closed-control arrow. The slider shall have no visible caption, and the closed percentage
+    have no closed-control arrow. These native Material glyphs shall use the app's registered
+    Material Symbols Rounded faces with shared defaults weight 200, optical size 24, and grade 0;
+    outlined and filled identity shall be selected by the `FILL` axis. Toolbar icons may override
+    weight, optical size, and grade independently per icon, with omitted axes inheriting the named
+    defaults. Supported weight choices shall be 100–700 in 100-unit increments; supported optical
+    sizes shall be 20, 24, and 48; supported grades shall be -50, 0, and 200. Distinct axis
+    combinations shall use separate registered faces so glyph cache results
+    cannot cross-contaminate weights. Status icons shall use the shared defaults. Axis choices shall
+    not alter icon identity, point size, color, interaction, layout, or document typography. The
+    slider shall have no visible caption, and the closed percentage
     control shall show only the current integer percentage without an arrow. Accessible names and
     tooltips shall remain meaningful without visible captions. Focus Mode shall retain its
     state-specific accessible description and shall only be enabled when its existing window-state

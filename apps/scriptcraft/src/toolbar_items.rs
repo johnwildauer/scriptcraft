@@ -1,4 +1,7 @@
 use eframe::egui::Color32;
+use crate::material_font::{
+    MaterialIconAxes, MaterialIconAxisOverrides,
+};
 use egui_material_icons::{
     icons::{
         ICON_DRAFT, ICON_DOUBLE_ARROW, ICON_UPLOAD_FILE, ICON_FILE_OPEN,
@@ -32,6 +35,7 @@ const SHOW_HIDE_GRAPHIC: ToolbarGraphic = ToolbarGraphic::IconDisclosure {
 pub(super) struct IconSpec {
     pub(super) icon: MaterialIcon,
     pub(super) variant: Option<ToolbarIconVariant>,
+    pub(super) material_axes: Option<MaterialIconAxisOverrides>,
     pub(super) point_size: Option<f32>,
     pub(super) enabled_color: Option<Color32>,
     pub(super) disabled_color: Option<Color32>,
@@ -42,10 +46,61 @@ impl IconSpec {
         Self {
             icon,
             variant: None,
+            material_axes: None,
             point_size: None,
             enabled_color: None,
             disabled_color: None,
         }
+    }
+
+    #[allow(dead_code)] // Catalog capability for declaring per-icon native font axes.
+    pub(super) const fn with_material_axes(
+        mut self,
+        axes: MaterialIconAxisOverrides,
+    ) -> Self {
+        self.material_axes = Some(axes);
+        self
+    }
+}
+
+/// Returns non-default optical-size/grade combinations explicitly used by the
+/// current icon catalog so startup registers only the faces the catalog needs.
+pub(super) fn custom_material_icon_axes() -> Vec<MaterialIconAxes> {
+    let mut axes = Vec::new();
+    for item in TEMPORARY_TOOLBAR_ITEMS {
+        match item.graphic {
+            ToolbarGraphic::Icon(icon) => add_custom_axes(icon, &mut axes),
+            ToolbarGraphic::Icons(icons) => {
+                for icon in icons.iter().copied() {
+                    add_custom_axes(icon, &mut axes);
+                }
+            }
+            ToolbarGraphic::IconDisclosure {
+                primary,
+                disclosure,
+            } => {
+                add_custom_axes(primary, &mut axes);
+                add_custom_axes(disclosure, &mut axes);
+            }
+            ToolbarGraphic::None | ToolbarGraphic::TextDropdown => {}
+        }
+    }
+    if let ToolbarGraphic::Icon(icon) = OVERFLOW_ITEM_SPEC.graphic {
+        add_custom_axes(icon, &mut axes);
+    }
+    axes
+}
+
+fn add_custom_axes(icon: IconSpec, axes: &mut Vec<MaterialIconAxes>) {
+    let Some(overrides) = icon.material_axes else {
+        return;
+    };
+    let resolved = overrides.resolve(MaterialIconAxes::DEFAULT);
+    if (resolved.optical_size != MaterialIconAxes::DEFAULT.optical_size
+        || resolved.grade != MaterialIconAxes::DEFAULT.grade)
+        && !axes.contains(&resolved)
+    {
+        axes.push(resolved);
     }
 }
 
