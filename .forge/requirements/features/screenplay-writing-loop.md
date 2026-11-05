@@ -521,33 +521,55 @@ model. Native window chrome remains owned by macOS where applicable.
     project commands in a consistent toolbar while preserving command safety and the semantic
     editing model.
   - **AC-WRITING-005.1:** Given the desktop app is running, the toolbar shall present the typed
-    default Item order New, Open, Save, Save As, Flexible Space, Elements, Flexible Space, and
-    Export PDF.
+    default Item order leading Flexible Space, New, Open, Save, Save As, pre-Elements Flexible
+    Space, Elements, post-Elements Flexible Space, Show/Hide, Export Text, Export PDF, and trailing
+    Flexible Space. The four Flexible Spaces shall have unique identities and divide the post-budget
+    remainder equally when every ordinary Item fits. A trailing outlined Double Arrows Material
+    overflow indicator shall be present in the catalog but rendered only when non-spacing Items
+    overflow; it shall consume no permanent width and shall have no visible caption.
   - **AC-WRITING-005.2:** Given an actionable toolbar Item is activated, the desktop shall route it
     through application/session adapters and preserve command safety, status, persistence, and
     fixed-layout PDF behavior. New shall not replace a dirty session without the writer's
     explicit informed consent, without prescribing a particular dialog or action sequence.
-  - **AC-WRITING-005.3:** Action Items shall use an icon-first, borderless icon control with a small
-    explicit padding region as the hover/click surface. The centered text label beneath it shall
-    remain outside that response, retain its normal text color, remain available for
-    accessibility use, and not add a redundant visible-label tooltip.
+  - **AC-WRITING-005.3:** Toolbar Items shall resolve their declarative graphic, caption visibility,
+    and enabled/disabled foreground through desktop toolbar presentation. Action Items shall use an
+    icon-first, borderless icon control with a small explicit padding region as the hover/click
+    surface. The centered text caption beneath an action graphic shall remain outside that response,
+    retain its resolved normal foreground when enabled, remain available for accessibility use, and
+    not add a redundant visible-label tooltip. Icon graphics shall use their assigned typed Material
+    icons; graphic, behavior, enablement, and caption visibility shall remain separate item fields.
+    Show/Hide shall display outlined Visibility and independently specified outlined Keyboard Arrow
+    Down graphics plus its caption, and Export Text shall display its outlined File Export graphic
+    plus its caption. Both shall use the disabled foreground for every graphic and caption, with no
+    hover fill or foreground change, pointer or keyboard activation, focus acquisition, popup,
+    command dispatch, or accessibility state that presents either Item as enabled. If either Item
+    appears in overflow, its label shall retain the disabled foreground and remain noninteractive.
   - **AC-WRITING-005.4:** Given the current caret/focus is within a screenplay element, the Elements
     Item shall display that element's explicit role using the supported labels in
-    REQ-WRITING-LOOP-007; choosing a label
-    shall apply the role through the transactional session operation and preserve the document
-    on rejection.
+    REQ-WRITING-LOOP-007. The central dropdown and the Elements submenu in toolbar overflow shall
+    derive their desired vertical extent from all supported role rows and active menu metrics,
+    including row spacing and popup frame allowance, rather than an arbitrary short fixed height.
+    All supported labels shall be simultaneously visible at ordinary usable viewport heights;
+    viewport bounds are the only height limitation, and constrained viewports shall retain bounded
+    scrolling that makes every role reachable. Choosing a label from either presentation shall apply
+    the role through the transactional session operation and preserve the document on rejection.
   - **AC-WRITING-005.5:** Given a toolbar width, Space shall consume one deterministic 72-point
-    width, rendered normal Items shall consume their complete group width including label text
-    measured at runtime with the active egui style/font, and Flexible Space Items shall divide
-    the remaining width equally after the shared 4-point horizontal row-padding and 4-point
-    inter-item-gap budget. A narrow toolbar shall retain the leftmost fitting Items while
-    exposing non-spacing Items through a far-right `>>` text menu. Action entries and Elements
-    role choices in that menu shall remain executable without persisting toolbar layout state. A
-    fully fitting composition shall keep its rightmost Item, including its label, inside the
-    actual clipped toolbar content right edge after panel, frame, and viewport insets are
-    applied. Items with an approved typed width override, including the Elements control, shall
-    use the same resolved width for allocation and rendering without changing the shared
-    padding, gap, flexible-space, overflow, or clipped-edge budget.
+    width, rendered normal Items shall consume their complete graphic arrangement and visible
+    caption width measured at runtime using active egui style/font metrics and resolved icon point
+    sizes, and the four Flexible Space Items shall divide the remaining width equally after the
+    shared 4-point horizontal row-padding and 4-point inter-item-gap budget whenever all ordinary
+    Items fit. At narrow widths Flexible Spaces shall be excluded from overflow and consume no
+    allocation slots. The toolbar shall retain leftmost fitting non-spacing Items and expose the
+    remaining non-spacing Items through a far-right menu whose icon-only trigger is the catalog's
+    outlined Double Arrows Material graphic, uses the accessible name Toolbar overflow, and is
+    rendered only when entries overflow. Disabled Show/Hide and Export Text entries in that menu
+    shall remain disabled-colored, noninteractive labels; enabled action entries and Elements role
+    choices shall remain executable without persisting toolbar layout state. A fully fitting
+    composition shall keep its rightmost visible Item, including its label, inside the actual
+    clipped toolbar content right edge after panel, frame, and viewport insets are applied. Items
+    with an approved typed width override, including the Elements control, shall use the same
+    resolved width for allocation and rendering without changing the shared padding, gap,
+    flexible-space, overflow, or clipped-edge budget.
   - **AC-WRITING-005.6:** On macOS, the desktop shall use the OS-owned native window header and
     place the toolbar at the top of the window content area below it. Header interactions shall
     remain OS-owned. This criterion does not prescribe a particular OS double-click outcome or

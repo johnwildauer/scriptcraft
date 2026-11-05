@@ -1,98 +1,85 @@
 use super::*;
+use super::toolbar_items::{
+    EnablementPolicy, IconSpec, OVERFLOW_ITEM_SPEC, ToolbarAction, ToolbarBehavior, ToolbarGraphic,
+    ToolbarIconVariant, ToolbarItemSpec, ToolbarLayoutPolicy, TEMPORARY_TOOLBAR_ITEMS,
+};
 
 // Manual toolbar geometry controls: tune Item group width and row spacing here.
 // The 46-point normal slot is the compact baseline recorded by the focused
 // geometry tests; labels may still expand a slot when active font metrics need it.
 pub(super) const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 46.0;
-pub(super) const TOOLBAR_ELEMENTS_WIDTH: f32 = 128.0;
-#[allow(dead_code)] // Retained typed spacing policy; covered by deterministic toolbar tests.
-pub(super) const TOOLBAR_SPACE_WIDTH: f32 = 72.0;
 pub(super) const TOOLBAR_GROUP_HORIZONTAL_PADDING: f32 = 8.0;
-pub(super) const TOOLBAR_OVERFLOW_WIDTH: f32 = 32.0;
 pub(super) const TOOLBAR_ROW_PADDING: f32 = 4.0;
 pub(super) const TOOLBAR_ITEM_GAP: f32 = 4.0;
-pub(super) const TOOLBAR_TOP_PADDING: f32 = 0.0;
+pub(super) const TOOLBAR_TOP_PADDING: f32 = 4.0;
 // Preserve the toolbar's text/control clearance. The trailing span is part of
 // the exact top-panel allocation and must not be removed to fix a viewport row.
-pub(super) const TOOLBAR_BOTTOM_PADDING: f32 = 2.0;
-pub(super) const TOOLBAR_ICON_HOVER_PADDING: f32 = 2.0;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ToolbarAction {
-    New,
-    Open,
-    Save,
-    SaveAs,
-    ExportPdf,
-}
+pub(super) const TOOLBAR_BOTTOM_PADDING: f32 = 3.0;
+pub(super) const TOOLBAR_ICON_HOVER_PADDING: f32 = 1.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ToolbarItemKind {
-    Action(ToolbarAction),
-    Elements,
-    #[allow(dead_code)] // Supported non-flexible spacing Item, not in the default composition.
-    Space,
-    FlexibleSpace,
-}
+/// Toolbar-local visual defaults. These settings are deliberately separate
+/// from status-bar presentation and all dimensions are logical points.
+mod toolbar_presentation {
+    use super::{IconSpec, ToolbarIconVariant, ToolbarItemSpec};
+    use eframe::egui::{self, Color32};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum ToolbarWidthOverride {
-    Measured,
-    Fixed(f32),
-}
+    /// Optional enabled foreground for toolbar captions and icons; `None` follows Appearance.
+    pub(super) const ENABLED_FOREGROUND_OVERRIDE: Option<Color32> = None;
+    /// Optional disabled foreground; `None` uses the resolved enabled foreground at reduced alpha.
+    pub(super) const DISABLED_FOREGROUND_OVERRIDE: Option<Color32> = None;
+    /// Alpha multiplier used only when no explicit disabled-color override resolves.
+    pub(super) const DISABLED_OPACITY_MULTIPLIER: f32 = 0.45;
+    /// Agent-default Material glyph size, initially matching the existing Body glyph size.
+    pub(super) const DEFAULT_MATERIAL_ICON_POINT_SIZE: f32 = 18.0;
+    /// Default Material glyph family; individual icons may override this variant.
+    pub(super) const DEFAULT_MATERIAL_ICON_VARIANT: ToolbarIconVariant =
+        ToolbarIconVariant::Outlined;
+    /// Default toolbar caption and menu text size, in logical points.
+    pub(super) const DEFAULT_ITEM_TEXT_POINT_SIZE: f32 = 14.0;
+    /// Gap between icons in grouped or primary/disclosure graphics, in logical points.
+    pub(super) const DEFAULT_GRAPHIC_GAP: f32 = 4.0;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct ToolbarItem {
-    pub(super) id: &'static str,
-    pub(super) label: &'static str,
-    pub(super) icon: &'static str,
-    pub(super) kind: ToolbarItemKind,
-    pub(super) width_override: ToolbarWidthOverride,
-}
-
-impl ToolbarItem {
-    pub(super) const fn action(
-        id: &'static str,
-        label: &'static str,
-        icon: &'static str,
-        action: ToolbarAction,
-    ) -> Self {
-        Self {
-            id,
-            label,
-            icon,
-            kind: ToolbarItemKind::Action(action),
-            width_override: ToolbarWidthOverride::Measured,
-        }
+    pub(super) fn enabled_foreground(
+        ui: &egui::Ui,
+        item: ToolbarItemSpec,
+        icon: Option<IconSpec>,
+    ) -> Color32 {
+        icon.and_then(|spec| spec.enabled_color)
+            .or(item.presentation.enabled_color)
+            .or(ENABLED_FOREGROUND_OVERRIDE)
+            .unwrap_or_else(|| ui.visuals().text_color())
     }
 
-    pub(super) const fn elements() -> Self {
-        Self {
-            id: "elements",
-            label: "Elements",
-            icon: "▾",
-            kind: ToolbarItemKind::Elements,
-            width_override: ToolbarWidthOverride::Fixed(TOOLBAR_ELEMENTS_WIDTH),
-        }
+    pub(super) fn disabled_foreground(
+        ui: &egui::Ui,
+        item: ToolbarItemSpec,
+        icon: Option<IconSpec>,
+    ) -> Color32 {
+        icon.and_then(|spec| spec.disabled_color)
+            .or(item.presentation.disabled_color)
+            .or(DISABLED_FOREGROUND_OVERRIDE)
+            .unwrap_or_else(|| {
+                let enabled = enabled_foreground(ui, item, icon);
+                Color32::from_rgba_unmultiplied(
+                    enabled.r(),
+                    enabled.g(),
+                    enabled.b(),
+                    (f32::from(enabled.a()) * DISABLED_OPACITY_MULTIPLIER)
+                        .round()
+                        .clamp(0.0, 255.0) as u8,
+                )
+            })
     }
 
-    pub(super) const fn flexible_space(id: &'static str) -> Self {
-        Self {
-            id,
-            label: "Flexible Space",
-            icon: "",
-            kind: ToolbarItemKind::FlexibleSpace,
-            width_override: ToolbarWidthOverride::Measured,
-        }
+    pub(super) fn icon_point_size(icon: IconSpec) -> f32 {
+        icon.point_size
+            .unwrap_or(DEFAULT_MATERIAL_ICON_POINT_SIZE)
     }
 
-    #[allow(dead_code)] // Retained for typed compositions and covered by allocation tests.
-    pub(super) const fn space(id: &'static str) -> Self {
-        Self {
-            id,
-            label: "Space",
-            icon: "",
-            kind: ToolbarItemKind::Space,
-            width_override: ToolbarWidthOverride::Fixed(TOOLBAR_SPACE_WIDTH),
+    pub(super) fn material_icon(icon: IconSpec) -> egui_material_icons::MaterialIcon {
+        match icon.variant.unwrap_or(DEFAULT_MATERIAL_ICON_VARIANT) {
+            ToolbarIconVariant::Filled => icon.icon.filled(),
+            ToolbarIconVariant::Outlined => icon.icon.outlined(),
         }
     }
 }
@@ -124,61 +111,122 @@ pub(super) fn screenplay_role_label(role: Role) -> &'static str {
         .unwrap_or("Unknown")
 }
 
-pub(super) fn default_toolbar_items() -> [ToolbarItem; 8] {
-    [
-        ToolbarItem::action("new", "New", "＋", ToolbarAction::New),
-        ToolbarItem::action("open", "Open", "↥", ToolbarAction::Open),
-        ToolbarItem::action("save", "Save", "▣", ToolbarAction::Save),
-        ToolbarItem::action("save-as", "Save As", "⇩", ToolbarAction::SaveAs),
-        ToolbarItem::flexible_space("flexible-space-before-elements"),
-        ToolbarItem::elements(),
-        ToolbarItem::flexible_space("flexible-space-after-elements"),
-        ToolbarItem::action("export-pdf", "Export PDF", "⇱", ToolbarAction::ExportPdf),
-    ]
+/// Desired inner scroll height for all Elements rows, bounded by the usable
+/// egui content viewport after accounting for the popup frame.
+fn elements_role_popup_max_height(ui: &egui::Ui) -> f32 {
+    let mut button_font = ui
+        .style()
+        .text_styles
+        .get(&TextStyle::Button)
+        .cloned()
+        .unwrap_or_else(|| FontId::proportional(toolbar_presentation::DEFAULT_ITEM_TEXT_POINT_SIZE));
+    button_font.size = toolbar_presentation::DEFAULT_ITEM_TEXT_POINT_SIZE;
+    let spacing = ui.spacing();
+    let row_height = SUPPORTED_SCREENPLAY_ROLES
+        .iter()
+        .map(|(_, label)| {
+            let text_height = ui
+                .painter()
+                .layout_no_wrap(
+                    (*label).to_owned(),
+                    button_font.clone(),
+                    Color32::TRANSPARENT,
+                )
+                .size()
+                .y;
+            spacing
+                .interact_size
+                .y
+                .max(text_height + spacing.button_padding.y * 2.0)
+        })
+        .sum::<f32>();
+    let row_gaps = spacing.item_spacing.y
+        * SUPPORTED_SCREENPLAY_ROLES.len().saturating_sub(1) as f32;
+    let desired_content_height = row_height + row_gaps;
+
+    let popup_margin = egui::Frame::popup(ui.style()).total_margin();
+    let available_content_height = (ui.ctx().content_rect().height()
+        - popup_margin.top
+        - popup_margin.bottom)
+        .max(0.0);
+    desired_content_height.min(available_content_height)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+pub(super) fn default_toolbar_items() -> [ToolbarItemSpec; 13] {
+    TEMPORARY_TOOLBAR_ITEMS
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct ToolbarAllocation {
-    pub(super) visible: Vec<(ToolbarItem, f32)>,
-    pub(super) overflow: Vec<ToolbarItem>,
+    pub(super) visible: Vec<(ToolbarItemSpec, f32)>,
+    pub(super) overflow: Vec<ToolbarItemSpec>,
     pub(super) overflow_width: f32,
     pub(super) row_width: f32,
 }
 
-pub(super) fn is_flexible_toolbar_space(item: ToolbarItem) -> bool {
-    matches!(item.kind, ToolbarItemKind::FlexibleSpace)
+pub(super) fn is_flexible_toolbar_space(item: ToolbarItemSpec) -> bool {
+    matches!(item.layout, ToolbarLayoutPolicy::FlexibleSpace)
 }
 
-pub(super) fn toolbar_item_width<F>(item: ToolbarItem, measure_label: F) -> f32
+pub(super) fn toolbar_item_width<F, G>(
+    item: ToolbarItemSpec,
+    measure_label: F,
+    measure_graphic: G,
+) -> f32
 where
     F: Fn(&str) -> f32,
+    G: Fn(&ToolbarGraphic) -> f32,
 {
-    if is_flexible_toolbar_space(item) {
-        return 0.0;
+    match item.layout {
+        ToolbarLayoutPolicy::FlexibleSpace => 0.0,
+        ToolbarLayoutPolicy::FixedWidth(width) | ToolbarLayoutPolicy::FixedSpace(width) => width,
+        ToolbarLayoutPolicy::Measured => {
+            let graphic_width = measure_graphic(&item.graphic);
+            let caption_width = if item.caption_visible {
+                measure_label(item.label) + TOOLBAR_GROUP_HORIZONTAL_PADDING
+            } else {
+                0.0
+            };
+            TOOLBAR_NORMAL_ITEM_WIDTH.max(graphic_width).max(caption_width)
+        }
     }
-    match item.width_override {
-        ToolbarWidthOverride::Fixed(width) => width,
-        ToolbarWidthOverride::Measured => {
-            let label_width = measure_label(item.label) + TOOLBAR_GROUP_HORIZONTAL_PADDING;
-            TOOLBAR_NORMAL_ITEM_WIDTH.max(label_width)
+}
+
+pub(super) fn toolbar_graphic_width(graphic: &ToolbarGraphic) -> f32 {
+    let icon_width = |icon: IconSpec| {
+        toolbar_presentation::icon_point_size(icon)
+    };
+    match graphic {
+        ToolbarGraphic::None | ToolbarGraphic::TextDropdown => 0.0,
+        ToolbarGraphic::Icon(icon) => icon_width(*icon),
+        ToolbarGraphic::Icons(icons) => {
+            icons.iter().copied().map(icon_width).sum::<f32>()
+                + icons.len().saturating_sub(1) as f32
+                    * toolbar_presentation::DEFAULT_GRAPHIC_GAP
+        }
+        ToolbarGraphic::IconDisclosure {
+            primary,
+            disclosure,
+        } => {
+            icon_width(*primary)
+                + toolbar_presentation::DEFAULT_GRAPHIC_GAP
+                + icon_width(*disclosure)
         }
     }
 }
 
 pub(super) fn toolbar_label_width(ui: &egui::Ui, label: &str) -> f32 {
-    let font_id = ui
-        .style()
-        .text_styles
-        .get(&TextStyle::Body)
-        .cloned()
-        .unwrap_or_else(|| FontId::proportional(14.0));
+    let font_id = FontId::proportional(toolbar_presentation::DEFAULT_ITEM_TEXT_POINT_SIZE);
     ui.painter()
         .layout_no_wrap(label.to_owned(), font_id, Color32::TRANSPARENT)
         .size()
         .x
 }
 
-pub(super) fn toolbar_content_width(widths: &[(ToolbarItem, f32)], overflow_width: f32) -> f32 {
+pub(super) fn toolbar_content_width(
+    widths: &[(ToolbarItemSpec, f32)],
+    overflow_width: f32,
+) -> f32 {
     let child_count = widths.len() as f32 + f32::from(overflow_width > 0.0);
     widths.iter().map(|(_, width)| width).sum::<f32>()
         + TOOLBAR_ROW_PADDING * 2.0
@@ -186,7 +234,10 @@ pub(super) fn toolbar_content_width(widths: &[(ToolbarItem, f32)], overflow_widt
         + overflow_width
 }
 
-pub(super) fn toolbar_row_width(widths: &[(ToolbarItem, f32)], overflow_width: f32) -> f32 {
+pub(super) fn toolbar_row_width(
+    widths: &[(ToolbarItemSpec, f32)],
+    overflow_width: f32,
+) -> f32 {
     toolbar_content_width(widths, overflow_width)
 }
 
@@ -220,28 +271,43 @@ pub(super) fn elements_closed_text_position(text_rect: egui::Rect, text_size: Ve
 }
 
 /// Allocate the transient toolbar without mutating project state.
-/// Spacing items have one fixed slot; rendered items use their complete,
-/// measured label-aware group width. Flexible spaces share only the remaining
+/// Fixed spacing items have one slot; rendered items use their complete,
+/// graphic- and caption-aware measured width. Flexible spaces share only the remaining
 /// width once every normal item fits.
-pub(super) fn allocate_toolbar<F>(
-    items: &[ToolbarItem],
+pub(super) fn allocate_toolbar<F, G>(
+    catalog_items: &[ToolbarItemSpec],
     available_width: f32,
     measure_label: F,
+    measure_graphic: G,
 ) -> ToolbarAllocation
 where
     F: Fn(&str) -> f32 + Copy,
+    G: Fn(&ToolbarGraphic) -> f32 + Copy,
 {
+    let items: Vec<_> = catalog_items
+        .iter()
+        .copied()
+        .filter(|item| item.behavior != ToolbarBehavior::OverflowMenu)
+        .collect();
+    let overflow_width = catalog_items
+        .iter()
+        .find(|item| item.behavior == ToolbarBehavior::OverflowMenu)
+        .and_then(|item| match item.layout {
+            ToolbarLayoutPolicy::FixedWidth(width) => Some(width),
+            _ => None,
+        })
+        .unwrap_or(0.0);
     let fixed_width = items
         .iter()
         .copied()
-        .map(|item| toolbar_item_width(item, measure_label))
+        .map(|item| toolbar_item_width(item, measure_label, measure_graphic))
         .sum::<f32>();
     let full_fixed_width = fixed_width
         + TOOLBAR_ROW_PADDING * 2.0
         + (items.len().saturating_sub(1) as f32) * TOOLBAR_ITEM_GAP;
     let flexible_count = items
         .iter()
-        .filter(|item| matches!(item.kind, ToolbarItemKind::FlexibleSpace))
+            .filter(|item| matches!(item.layout, ToolbarLayoutPolicy::FlexibleSpace))
         .count();
 
     if full_fixed_width <= available_width {
@@ -257,7 +323,7 @@ where
                     let width = if is_flexible_toolbar_space(*item) {
                         flexible_width
                     } else {
-                        toolbar_item_width(*item, measure_label)
+                        toolbar_item_width(*item, measure_label, measure_graphic)
                     };
                     (*item, width)
                 })
@@ -275,32 +341,106 @@ where
         if is_flexible_toolbar_space(item) {
             continue;
         }
-        if matches!(item.kind, ToolbarItemKind::Space) {
+        if matches!(item.layout, ToolbarLayoutPolicy::FixedSpace(_)) {
             let mut candidate = visible.clone();
-            candidate.push((item, toolbar_item_width(item, measure_label)));
+            candidate.push((
+                item,
+                toolbar_item_width(item, measure_label, measure_graphic),
+            ));
             if fitting
-                && toolbar_content_width(&candidate, TOOLBAR_OVERFLOW_WIDTH) <= available_width
+                && toolbar_content_width(
+                    &candidate,
+                    overflow_width,
+                ) <= available_width
             {
-                visible.push((item, toolbar_item_width(item, measure_label)));
+                visible.push((
+                    item,
+                    toolbar_item_width(item, measure_label, measure_graphic),
+                ));
             }
             continue;
         }
         let mut candidate = visible.clone();
-        candidate.push((item, toolbar_item_width(item, measure_label)));
-        if fitting && toolbar_content_width(&candidate, TOOLBAR_OVERFLOW_WIDTH) <= available_width {
-            visible.push((item, toolbar_item_width(item, measure_label)));
+        candidate.push((
+            item,
+            toolbar_item_width(item, measure_label, measure_graphic),
+        ));
+        if fitting && toolbar_content_width(&candidate, overflow_width) <= available_width {
+            visible.push((
+                item,
+                toolbar_item_width(item, measure_label, measure_graphic),
+            ));
         } else {
             fitting = false;
             overflow.push(item);
         }
     }
 
-    let row_width = toolbar_row_width(&visible, TOOLBAR_OVERFLOW_WIDTH);
+    let row_width = toolbar_row_width(&visible, overflow_width);
     ToolbarAllocation {
         visible,
         overflow,
-        overflow_width: TOOLBAR_OVERFLOW_WIDTH,
+        overflow_width,
         row_width,
+    }
+}
+
+fn paint_toolbar_icon(ui: &egui::Ui, center: egui::Pos2, icon: IconSpec, item: ToolbarItemSpec) {
+    let point_size = toolbar_presentation::icon_point_size(icon);
+    let color = if matches!(item.enablement, EnablementPolicy::Enabled) {
+        toolbar_presentation::enabled_foreground(ui, item, Some(icon))
+    } else {
+        toolbar_presentation::disabled_foreground(ui, item, Some(icon))
+    };
+    let galley = WidgetText::from(
+        toolbar_presentation::material_icon(icon)
+            .rich_text()
+            .size(point_size),
+    )
+    .into_galley(
+        ui,
+        None,
+        point_size,
+        TextStyle::Button,
+    );
+    ui.painter()
+        .galley(center - galley.size() / 2.0, galley, color);
+}
+
+fn paint_toolbar_graphic(
+    ui: &egui::Ui,
+    center: egui::Pos2,
+    graphic: ToolbarGraphic,
+    item: ToolbarItemSpec,
+) {
+    let paint_group = |icons: &[IconSpec]| {
+        let total_width = icons
+            .iter()
+            .copied()
+            .map(toolbar_presentation::icon_point_size)
+            .sum::<f32>()
+            + icons.len().saturating_sub(1) as f32
+                * toolbar_presentation::DEFAULT_GRAPHIC_GAP;
+        let mut x = center.x - total_width / 2.0;
+        for icon in icons.iter().copied() {
+            let point_size = toolbar_presentation::icon_point_size(icon);
+            paint_toolbar_icon(
+                ui,
+                egui::pos2(x + point_size / 2.0, center.y),
+                icon,
+                item,
+            );
+            x += point_size + toolbar_presentation::DEFAULT_GRAPHIC_GAP;
+        }
+    };
+    match graphic {
+        ToolbarGraphic::None | ToolbarGraphic::TextDropdown => {}
+        ToolbarGraphic::Icon(icon) => paint_toolbar_icon(ui, center, icon, item),
+        ToolbarGraphic::Icons(icons) => paint_group(icons),
+        ToolbarGraphic::IconDisclosure {
+            primary,
+            disclosure,
+        } => paint_group(&[primary, disclosure]),
     }
 }
 
@@ -341,7 +481,7 @@ impl ScriptCraftApp {
     pub(super) fn toolbar_action_button(
         &mut self,
         ui: &mut egui::Ui,
-        item: ToolbarItem,
+        item: ToolbarItemSpec,
         width: f32,
         presentation: ToolbarPresentationMetrics,
     ) {
@@ -349,42 +489,58 @@ impl ScriptCraftApp {
         let icon_control_size = Vec2::splat(presentation.icon_control_size);
         let icon_control_rect = toolbar_icon_control_rect(rect, icon_control_size);
         let icon_rect = toolbar_icon_hover_rect(icon_control_rect, TOOLBAR_ICON_HOVER_PADDING);
+        let enabled = item.enablement == EnablementPolicy::Enabled;
         let response = ui
-            .interact(icon_rect, id.with("icon"), Sense::click())
+            .interact(
+                icon_rect,
+                id.with("icon"),
+                if enabled {
+                    Sense::click()
+                } else {
+                    // Hover-only keeps disabled accessibility state explicit but
+                    // cannot focus, activate, or receive the enabled hover paint.
+                    Sense::hover()
+                },
+            )
             .on_hover_cursor(egui::CursorIcon::Default);
-        let fill = toolbar_group_fill(ui.style(), response.hovered());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                enabled,
+                item.accessibility_name.to_owned(),
+            )
+        });
+        let fill = toolbar_group_fill(ui.style(), enabled && response.hovered());
         if fill != Color32::TRANSPARENT {
             ui.painter().rect_filled(icon_rect, 2.0, fill);
         }
         let body_font = presentation.font_id();
-        let label_size = ui
-            .painter()
-            .layout_no_wrap(
+        paint_toolbar_graphic(ui, icon_control_rect.center(), item.graphic, item);
+        if item.caption_visible {
+            let label_color = if enabled {
+                toolbar_presentation::enabled_foreground(ui, item, None)
+            } else {
+                toolbar_presentation::disabled_foreground(ui, item, None)
+            };
+            let label_galley = ui.painter().layout_no_wrap(
                 item.label.to_owned(),
-                body_font.clone(),
-                Color32::TRANSPARENT,
-            )
-            .size();
-        let label_center = egui::pos2(
-            rect.center().x,
-            icon_control_rect.max.y + ui.spacing().item_spacing.y + label_size.y / 2.0,
-        );
-        ui.painter().text(
-            icon_control_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            item.icon,
-            body_font.clone(),
-            ui.visuals().text_color(),
-        );
-        ui.painter().text(
-            label_center,
-            egui::Align2::CENTER_CENTER,
-            item.label,
-            body_font,
-            ui.visuals().text_color(),
-        );
+                body_font,
+                label_color,
+            );
+            let label_center = egui::pos2(
+                rect.center().x,
+                icon_control_rect.max.y
+                    + ui.spacing().item_spacing.y
+                    + label_galley.size().y / 2.0,
+            );
+            ui.painter().galley(
+                label_center - label_galley.size() / 2.0,
+                label_galley,
+                label_color,
+            );
+        }
         if response.clicked() {
-            if let ToolbarItemKind::Action(action) = item.kind {
+            if let ToolbarBehavior::Action(action) = item.behavior {
                 self.dispatch_toolbar_action(action);
             }
         }
@@ -406,7 +562,7 @@ impl ScriptCraftApp {
     pub(super) fn elements_toolbar_item(
         &mut self,
         ui: &mut egui::Ui,
-        item: ToolbarItem,
+        item: ToolbarItemSpec,
         width: f32,
         presentation: ToolbarPresentationMetrics,
     ) {
@@ -420,8 +576,10 @@ impl ScriptCraftApp {
                 // same explicit budget used by allocate_toolbar so it cannot
                 // advance the parent row past the allocated Elements slot.
                 ui.set_width(width);
+                let role_popup_height = elements_role_popup_max_height(ui);
                 let combo_result = egui::ComboBox::from_id_salt(item.id)
                     .width(width)
+                    .height(role_popup_height)
                     .wrap_mode(TextWrapMode::Truncate)
                     // The stock ComboBox has no independent closed-text alignment
                     // setting. Keep its button, popup, ID, keyboard handling, and
@@ -441,9 +599,11 @@ impl ScriptCraftApp {
                         ui.spacing().icon_spacing,
                         ui.spacing().icon_width,
                     );
+                    let text_color = toolbar_presentation::enabled_foreground(ui, item, None);
                     let galley = WidgetText::from(
                         RichText::new(screenplay_role_label(next_role))
-                            .font(presentation.font_id()),
+                            .font(presentation.font_id())
+                            .color(text_color),
                     )
                     .into_galley(
                         ui,
@@ -452,9 +612,7 @@ impl ScriptCraftApp {
                         TextStyle::Button,
                     );
                     let text_position = elements_closed_text_position(text_rect, galley.size());
-                    let visuals = ui.style().interact(&combo_response);
-                    ui.painter()
-                        .galley(text_position, galley, visuals.text_color());
+                    ui.painter().galley(text_position, galley, text_color);
                 }
                 // This caption is decorative. Allocate/paint it instead of adding a
                 // label response that can compete with the ComboBox cursor owner.
@@ -465,7 +623,7 @@ impl ScriptCraftApp {
                     egui::Align2::LEFT_CENTER,
                     item.label,
                     label_font,
-                    ui.visuals().text_color(),
+                    toolbar_presentation::enabled_foreground(ui, item, None),
                 );
                 debug_assert!(combo_response.rect.width() <= width + f32::EPSILON);
             },
@@ -480,35 +638,74 @@ impl ScriptCraftApp {
         }
     }
 
-    pub(super) fn toolbar_overflow_menu(&mut self, ui: &mut egui::Ui, items: &[ToolbarItem]) {
+    pub(super) fn toolbar_overflow_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        indicator: ToolbarItemSpec,
+        items: &[ToolbarItemSpec],
+    ) {
         let mut chosen_action = None;
         let mut chosen_role = None;
-        ui.menu_button(">>", |ui| {
+        let icon = match indicator.graphic {
+            ToolbarGraphic::Icon(icon) => icon,
+            _ => unreachable!("overflow indicator must use a single Material icon"),
+        };
+        let icon_color = toolbar_presentation::enabled_foreground(ui, indicator, Some(icon));
+        ui.spacing_mut().button_padding = Vec2::splat(TOOLBAR_ICON_HOVER_PADDING);
+        ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(2);
+        ui.visuals_mut().widgets.active.corner_radius = egui::CornerRadius::same(2);
+        let menu_result = ui.menu_button(
+            toolbar_presentation::material_icon(icon)
+                .rich_text()
+                .size(toolbar_presentation::icon_point_size(icon))
+                .color(icon_color),
+            |ui| {
             for item in items.iter().copied() {
-                match item.kind {
-                    ToolbarItemKind::Action(action) => {
+                match item.behavior {
+                    ToolbarBehavior::Action(action) => {
                         if ui.button(item.label).clicked() {
                             chosen_action = Some(action);
                             ui.close();
                         }
                     }
-                    ToolbarItemKind::Elements => {
+                    ToolbarBehavior::ElementsRoleDropdown => {
                         let selected_role = self.focused_role();
                         ui.menu_button(item.label, |ui| {
-                            for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
-                                if ui
-                                    .selectable_label(selected_role == Some(role), label)
-                                    .clicked()
-                                {
-                                    chosen_role = Some(role);
-                                    ui.close();
-                                }
-                            }
+                            let role_popup_height = elements_role_popup_max_height(ui);
+                            egui::ScrollArea::vertical()
+                                .max_height(role_popup_height)
+                                .show(ui, |ui| {
+                                    for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
+                                        if ui
+                                            .selectable_label(selected_role == Some(role), label)
+                                            .clicked()
+                                        {
+                                            chosen_role = Some(role);
+                                            ui.close();
+                                        }
+                                    }
+                                });
                         });
                     }
-                    ToolbarItemKind::Space | ToolbarItemKind::FlexibleSpace => {}
+                    ToolbarBehavior::None if item.enablement == EnablementPolicy::Disabled => {
+                        ui.label(
+                            RichText::new(item.label).color(
+                                toolbar_presentation::disabled_foreground(ui, item, None),
+                            ),
+                        );
+                    }
+                    ToolbarBehavior::None | ToolbarBehavior::OverflowMenu => {}
                 }
             }
+            },
+        );
+        let response = menu_result.response.on_hover_cursor(egui::CursorIcon::Default);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                indicator.accessibility_name.to_owned(),
+            )
         });
         if let Some(action) = chosen_action {
             self.dispatch_toolbar_action(action);
@@ -526,12 +723,20 @@ impl ScriptCraftApp {
         let row_left = ui.cursor().left();
         let available_width =
             toolbar_actual_available_width(content_rect, ui.clip_rect(), row_left);
-        let allocation = allocate_toolbar(&default_toolbar_items(), available_width, |label| {
-            toolbar_label_width(ui, label)
-        });
+        let allocation = allocate_toolbar(
+            &default_toolbar_items(),
+            available_width,
+            |label| toolbar_label_width(ui, label),
+            toolbar_graphic_width,
+        );
         let presentation = live_toolbar_metrics(ui);
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
+            for text_style in [TextStyle::Body, TextStyle::Button] {
+                if let Some(font) = ui.style_mut().text_styles.get_mut(&text_style) {
+                    font.size = toolbar_presentation::DEFAULT_ITEM_TEXT_POINT_SIZE;
+                }
+            }
             ui.add_space(TOOLBAR_TOP_PADDING);
             ui.allocate_ui_with_layout(
                 Vec2::new(allocation.row_width, ui.spacing().interact_size.y * 2.0),
@@ -544,15 +749,23 @@ impl ScriptCraftApp {
                             ui.add_space(TOOLBAR_ITEM_GAP);
                         }
                         first = false;
-                        ui.push_id(item.id, |ui| match item.kind {
-                            ToolbarItemKind::Action(_) => {
+                        ui.push_id(item.id, |ui| match item.behavior {
+                            ToolbarBehavior::Action(_) => {
                                 self.toolbar_action_button(ui, item, width, presentation)
                             }
-                            ToolbarItemKind::Elements => {
+                            ToolbarBehavior::ElementsRoleDropdown => {
                                 self.elements_toolbar_item(ui, item, width, presentation)
                             }
-                            ToolbarItemKind::Space | ToolbarItemKind::FlexibleSpace => {
-                                ui.add_space(width);
+                            ToolbarBehavior::None | ToolbarBehavior::OverflowMenu => {
+                                if matches!(
+                                    item.layout,
+                                    ToolbarLayoutPolicy::FixedSpace(_)
+                                        | ToolbarLayoutPolicy::FlexibleSpace
+                                ) {
+                                    ui.add_space(width);
+                                } else {
+                                    self.toolbar_action_button(ui, item, width, presentation);
+                                }
                             }
                         });
                     }
@@ -560,9 +773,16 @@ impl ScriptCraftApp {
                         if !first {
                             ui.add_space(TOOLBAR_ITEM_GAP);
                         }
-                        ui.allocate_ui(
+                        ui.allocate_ui_with_layout(
                             Vec2::new(allocation.overflow_width, ui.spacing().interact_size.y),
-                            |ui| self.toolbar_overflow_menu(ui, &allocation.overflow),
+                            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                            |ui| {
+                                self.toolbar_overflow_menu(
+                                    ui,
+                                    OVERFLOW_ITEM_SPEC,
+                                    &allocation.overflow,
+                                )
+                            },
                         );
                     }
                     ui.add_space(TOOLBAR_ROW_PADDING);
@@ -586,15 +806,9 @@ impl ToolbarPresentationMetrics {
 }
 
 pub(super) fn live_toolbar_metrics(ui: &egui::Ui) -> ToolbarPresentationMetrics {
-    let font = ui
-        .style()
-        .text_styles
-        .get(&TextStyle::Body)
-        .cloned()
-        .unwrap_or_else(|| FontId::proportional(14.0));
     ToolbarPresentationMetrics {
         icon_control_size: ui.spacing().interact_size.y,
-        font_size: font.size,
+        font_size: toolbar_presentation::DEFAULT_ITEM_TEXT_POINT_SIZE,
     }
 }
 

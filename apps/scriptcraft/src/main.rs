@@ -29,6 +29,7 @@ mod focus_mode;
 mod sprint_timer;
 mod status_bar;
 mod toolbar;
+mod toolbar_items;
 use sprint_timer::{NotificationResult, NotificationSink};
 use status_bar::{DiagnosticProjection, ViewportCenterAnchor, ViewportPageTracker};
 use toolbar::{toolbar_chrome_color, toolbar_content_height};

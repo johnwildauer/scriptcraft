@@ -21,6 +21,43 @@ ScriptCraft runs as a local Rust desktop application built and launched through 
 
 The workspace uses Rust and Cargo. The desktop boundary contains the eframe/egui presentation layer and native-file-dialog integration; UI and platform concerns stay outside the reusable core. The core owns semantic session/project operations, fixed-profile layout, native persistence, and noncanonical export adapters. Framework and dependency versions are implementation choices rather than permanent architecture constraints.
 
+The desktop toolbar owns a declarative item catalog in
+[`toolbar_items.rs`](../../apps/scriptcraft/src/toolbar_items.rs), while
+[`toolbar.rs`](../../apps/scriptcraft/src/toolbar.rs) owns transient allocation,
+painting, popup behavior, and command/session adapters. Each item keeps identity,
+label/accessibility name, caption visibility, graphic, behavior, enablement, and
+layout policy separate. Graphics support no graphic, one icon, independently
+specified icon groups, an independently specified primary/disclosure pair, and a
+behavior-supplied text dropdown value. Per-icon point-size and enabled/disabled
+color overrides take precedence over per-item color overrides, toolbar-local
+color overrides, and the theme-derived enabled foreground; absent an explicit
+disabled color, disabled graphics and captions use the resolved enabled color at
+reduced alpha. The toolbar-wide icon variant defaults to outlined, with optional
+per-icon filled/outlined override. Toolbar icon size, item text size, and graphic
+gaps are named logical-point settings; the default item text size is 14 points.
+Item order, enabled state, presentation, allocation, and popup geometry are
+desktop transient state and are not persisted in screenplay or FDX data. The
+temporary catalog order is leading Flexible Space, New, Open, Save, Save As, pre-Elements
+Flexible Space, Elements, post-Elements Flexible Space, Show/Hide, Export Text,
+Export PDF, trailing Flexible Space, followed by a catalog-only overflow
+indicator. The four uniquely identified Flexible Spaces divide the post-budget
+remainder equally when ordinary Items fit and are excluded from narrow-width
+overflow. Show/Hide uses independently configurable outlined Visibility and
+Keyboard Arrow Down icons; Export Text uses its outlined File Export assignment.
+Both items use the disabled foreground for every graphic and caption and have no
+hover presentation change, activation, focus, popup, or command behavior. In
+overflow they remain disabled-colored text labels with no interaction. Enabled
+New/Open/Save/Save As/Export PDF and Elements role routing remain on their
+existing adapters. The overflow control uses the catalog's outlined Double
+Arrows Material icon, is icon-only with an accessible name, and is rendered only
+when allocation produces overflow entries; it adds no permanent wide-layout
+width. Both the central Elements ComboBox and its nested overflow submenu derive
+their scroll area's desired height from all role-row text/button metrics and
+inter-row spacing. The usable egui content viewport minus the popup frame margins
+is the only height cap; a genuinely short viewport retains bounded scrolling.
+WO-002 and WO-003 implementations are submitted for user review and validation;
+no agent validation is claimed.
+
 For the user-authorized UI Icons v1 foundation, the desktop uses eframe/egui
 0.34 with egui_material_icons 0.6.0, enabling its filled and outline icon fonts.
 The app-creation callback installs the named Courier Prime document families

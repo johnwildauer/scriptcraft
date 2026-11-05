@@ -9,16 +9,50 @@ replace the weight-200 design preference above. Material font initialization
 follows Courier Prime registration. This foundation does not change the WIP
 assignments below or claim that status-bar icon substitutions are implemented.
 
+## Toolbar Temporary 
+
+| App Icon | Material Icon |
+| --- | --- |
+| (Flexible Space) |  |
+| New | Draft |
+| Open | File Open |
+| Save | Save |
+| Save As | Save As |
+| (Flexible Space) |  |
+| Elements | (Dropdown) |
+| (Flexible Space) |  |
+| Show/Hide | Visibility + Keyboard Arrow Down |
+| Export Text | File Export |
+| Export PDF | Picture As Pdf |
+| (Flexible Space) |  |
+| (Overflow Indicator) | Double Arrows |
+
+**WO-002 implementation handoff:** The temporary composition above is now
+represented by the toolbar catalog with the four distinct Flexible Space entries
+and a conditional icon-only outlined Double Arrows overflow control. Show/Hide
+uses independently specified outlined Visibility and Keyboard Arrow Down glyphs;
+Export Text uses the crate's outlined `ICON_DRIVE_EXPORT` glyph for the File
+Export assignment. Show/Hide and Export Text are intentionally disabled and
+remain inert in both the toolbar and overflow. This records implementation only;
+user review and validation remain pending. The future Toolbar (WIP) assignments
+below are unchanged.
+
+**Toolbar presentation defaults (2026-11-05 follow-up):** Toolbar Material icons
+resolve to the outlined font variant unless an individual icon explicitly
+overrides it. Toolbar item text uses the named 14-point logical-size default;
+these toolbar-local settings do not change the status bar or screenplay text.
+
+
 ## Toolbar (WIP)
 
 | App Icon | Material Icon |
 | --------- | --------- |
 | Elements | (Dropdown) |
-| Views | “Web Asset” + “Keyboard Arrow Down” |
+| Views | Web Asset + Keyboard Arrow Down |
 | Normal View | |
 | Page View | |
 | Speed View |  |
-| Beat Board |  |
+| Beat Board | Dashboard |
 | Scene View |  |
 | Index Cards - Script |  |
 | Index Cards - Summary |  |
@@ -31,9 +65,9 @@ assignments below or claim that status-bar icon substitutions are implemented.
 | Title Page |  |
 | Insert Image |  |
 | Show/Hide |  |
-| Navigator |  |
+| Navigator | Table |
 | Feedback |  |
-| Save |  |
+| Save | Download |
 | Print |  |
 | Cut |  |
 | Copy |  |
