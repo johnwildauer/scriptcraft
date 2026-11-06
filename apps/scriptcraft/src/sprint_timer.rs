@@ -1,5 +1,6 @@
 use eframe::egui::{self, Key, WidgetInfo, WidgetType};
-use std::process::Command;
+use scriptcraft_commands::{Command, SprintTimerMode as CommandTimerMode};
+use std::process::Command as ProcessCommand;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
@@ -202,6 +203,22 @@ impl SprintTimer {
             TimerState::CountdownRunning { .. } | TimerState::StopwatchRunning { .. } => "Pause",
             TimerState::CountdownPaused { .. } | TimerState::StopwatchPaused { .. } => "Resume",
             TimerState::CountdownCompleted { .. } => "Reset",
+        }
+    }
+
+    pub(super) fn primary_command(&self) -> Command {
+        match self.state {
+            TimerState::Idle => match self.mode {
+                TimerMode::Countdown => Command::ToolsSprintTimerStart,
+                TimerMode::Stopwatch => Command::ToolsSprintTimerStart,
+            },
+            TimerState::CountdownRunning { .. } | TimerState::StopwatchRunning { .. } => {
+                Command::ToolsSprintTimerPause
+            }
+            TimerState::CountdownPaused { .. } | TimerState::StopwatchPaused { .. } => {
+                Command::ToolsSprintTimerResume
+            }
+            TimerState::CountdownCompleted { .. } => Command::ToolsSprintTimerReset,
         }
     }
 
@@ -458,10 +475,10 @@ pub(super) fn show_popup(
     ctx: &egui::Context,
     timer: &mut SprintTimer,
     now: Duration,
-    sink: &mut dyn NotificationSink,
-) {
+) -> Vec<Command> {
+    let mut commands = Vec::new();
     if !timer.popup_open {
-        return;
+        return commands;
     }
 
     let escape = ctx.input(|input| input.key_pressed(Key::Escape));
@@ -475,9 +492,8 @@ pub(super) fn show_popup(
         });
     timer.just_opened = false;
     if escape || outside_press {
-        timer.popup_open = false;
-        timer.close_popup();
-        return;
+        commands.push(Command::ToolsSprintTimerClosePopup);
+        return commands;
     }
 
     let mut open = true;
@@ -495,6 +511,7 @@ pub(super) fn show_popup(
                 ui.horizontal(|ui| {
                     ui.heading("Sprint Timer");
                     if ui.button("Close").clicked() {
+                        commands.push(Command::ToolsSprintTimerClosePopup);
                         open = false;
                     }
                 });
@@ -506,7 +523,12 @@ pub(super) fn show_popup(
                         ui.selectable_value(&mut selected, TimerMode::Stopwatch, "Stopwatch");
                     });
                     if selected != timer.mode {
-                        timer.select_mode(selected);
+                        commands.push(Command::ToolsSprintTimerSetMode {
+                            mode: match selected {
+                                TimerMode::Countdown => CommandTimerMode::Countdown,
+                                TimerMode::Stopwatch => CommandTimerMode::Stopwatch,
+                            },
+                        });
                     }
                 });
                 ui.separator();
@@ -521,8 +543,9 @@ pub(super) fn show_popup(
                         if timer.is_idle() {
                             ui.horizontal(|ui| {
                                 ui.label("Minutes");
+                                let mut minutes_input = timer.minutes_input.clone();
                                 let response = ui.add(
-                                    egui::TextEdit::singleline(&mut timer.minutes_input)
+                                    egui::TextEdit::singleline(&mut minutes_input)
                                         .id(egui::Id::new("sprint-timer-minutes"))
                                         .desired_width(88.0)
                                         .hint_text("25"),
@@ -535,15 +558,14 @@ pub(super) fn show_popup(
                                     )
                                 });
                                 if response.changed() {
-                                    timer.set_minutes_input(timer.minutes_input.clone());
+                                    commands.push(Command::ToolsSprintTimerSetMinutes {
+                                        text: minutes_input,
+                                    });
                                 }
                                 let enter = (response.has_focus() || response.lost_focus())
                                     && ui.input(|input| input.key_pressed(Key::Enter));
                                 if enter {
-                                    if let Some(notice) = timer.start_countdown(now) {
-                                        let result = sink.request(notice);
-                                        timer.apply_notification_result(notice.generation, result);
-                                    }
+                                    commands.push(Command::ToolsSprintTimerStart);
                                 }
                             });
                         }
@@ -585,36 +607,10 @@ pub(super) fn show_popup(
 
                 ui.horizontal(|ui| {
                     let primary_label = timer.primary_label();
+                    let primary_command = timer.primary_command();
                     let primary = ui.button(primary_label);
                     if primary.clicked() {
-                        match (timer.mode, primary_label) {
-                            (TimerMode::Countdown, "Start Sprint") => {
-                                if let Some(notice) = timer.start_countdown(now) {
-                                    let result = sink.request(notice);
-                                    timer.apply_notification_result(notice.generation, result);
-                                }
-                            }
-                            (TimerMode::Stopwatch, "Start") => {
-                                if let Some(notice) = timer.start_stopwatch(now) {
-                                    let result = sink.request(notice);
-                                    timer.apply_notification_result(notice.generation, result);
-                                }
-                            }
-                            (_, "Pause") => {
-                                if let Some(notice) = timer.pause(now) {
-                                    let result = sink.request(notice);
-                                    timer.apply_notification_result(notice.generation, result);
-                                }
-                            }
-                            (_, "Resume") => {
-                                if let Some(notice) = timer.resume(now) {
-                                    let result = sink.request(notice);
-                                    timer.apply_notification_result(notice.generation, result);
-                                }
-                            }
-                            (_, "Reset") => timer.reset(),
-                            _ => {}
-                        }
+                        commands.push(primary_command);
                     }
                     let end = ui.add_enabled(timer.end_enabled(), egui::Button::new("End Sprint"));
                     end.widget_info(|| {
@@ -625,10 +621,7 @@ pub(super) fn show_popup(
                         )
                     });
                     if end.clicked() {
-                        if let Some(notice) = timer.end(now) {
-                            let result = sink.request(notice);
-                            timer.apply_notification_result(notice.generation, result);
-                        }
+                        commands.push(Command::ToolsSprintTimerEnd);
                     }
                 });
             })
@@ -636,9 +629,14 @@ pub(super) fn show_popup(
     timer.popup_rect = output.response.rect;
     timer.popup_anchor = egui::Rect::NOTHING;
     if !open {
-        timer.popup_open = false;
-        timer.close_popup();
+        if !commands
+            .iter()
+            .any(|command| command.id() == scriptcraft_commands::CommandId::ToolsSprintTimerClosePopup)
+        {
+            commands.push(Command::ToolsSprintTimerClosePopup);
+        }
     }
+    commands
 }
 
 pub(super) struct NativeNotificationSink {
@@ -685,7 +683,7 @@ impl NotificationSink for NativeNotificationSink {
             let spawned = thread::Builder::new()
                 .name("scriptcraft-notification".to_owned())
                 .spawn(move || {
-                    let result = Command::new("/usr/bin/osascript")
+                    let result = ProcessCommand::new("/usr/bin/osascript")
                         .arg("-e")
                         .arg(script)
                         .output()

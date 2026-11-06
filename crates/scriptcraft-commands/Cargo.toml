@@ -1,0 +1,13 @@
+[package]
+name = "scriptcraft-commands"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+scriptcraft-core = { path = "../scriptcraft-core" }
+serde = { version = "=1.0.229", features = ["derive"] }
+
+[lints]
+workspace = true

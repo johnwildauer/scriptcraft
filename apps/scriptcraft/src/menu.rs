@@ -1,11 +1,15 @@
-//! Menu presentation policy and the single handoff queue for menu commands.
+//! Menu presentation policy and the shared ordered desktop-command handoff.
 
-use super::app_commands::{AppCommand, AppCommandAvailability};
+use super::app_commands::{
+    command_for_id, AppCommandAvailability, CommandInvocation,
+};
 use super::menu_items::{
     LogicalShortcut, MenuEntrySpec, MenuItemBehavior, MenuItemSpec, PlaceholderKind, SemanticIcon,
     ShortcutKey, MENU_CATALOG,
 };
+use super::shortcuts::{shortcut_matches, ShortcutPlatform};
 use eframe::egui;
+use scriptcraft_commands::{CommandId, CommandOrigin};
 use std::collections::VecDeque;
 
 /// Initial presentation values are agent-defaults pending user review against
@@ -90,7 +94,8 @@ pub(super) const fn in_window_menu_shortcuts_owned() -> bool {
 pub(super) fn command_for_key_event(
     key: egui::Key,
     modifiers: egui::Modifiers,
-) -> Option<AppCommand> {
+) -> Option<CommandId> {
+    let platform = ShortcutPlatform::current();
     for menu in MENU_CATALOG {
         for entry in menu.entries {
             let MenuEntrySpec::Item(item) = entry else {
@@ -99,15 +104,17 @@ pub(super) fn command_for_key_event(
             let MenuItemBehavior::Command(command) = item.behavior else {
                 continue;
             };
-            let advertised_match = item.shortcut.is_some_and(|shortcut| {
-                shortcut_key(shortcut.key)
-                    .is_some_and(|shortcut_key| shortcut_key == key)
-                    && shortcut_modifiers_match(shortcut, modifiers)
-            });
+            let advertised_match = item
+                .shortcut
+                .is_some_and(|shortcut| shortcut_matches(shortcut, key, modifiers, platform));
             let windows_alias_match = cfg!(windows)
                 && item.windows_alias.is_some_and(|shortcut| {
-                    shortcut_key(shortcut.key).is_some_and(|shortcut_key| shortcut_key == key)
-                        && shortcut_modifiers_match(shortcut, modifiers)
+                    shortcut_matches(
+                        shortcut,
+                        key,
+                        modifiers,
+                        ShortcutPlatform::Windows,
+                    )
                 });
             if advertised_match || windows_alias_match {
                 return Some(command);
@@ -117,75 +124,30 @@ pub(super) fn command_for_key_event(
     None
 }
 
-fn shortcut_key(key: ShortcutKey) -> Option<egui::Key> {
-    match key {
-        ShortcutKey::A => Some(egui::Key::A),
-        ShortcutKey::B
-        | ShortcutKey::D
-        | ShortcutKey::E
-        | ShortcutKey::F
-        | ShortcutKey::G
-        | ShortcutKey::H
-        | ShortcutKey::I
-        | ShortcutKey::J
-        | ShortcutKey::K
-        | ShortcutKey::L
-        | ShortcutKey::M
-        | ShortcutKey::Q
-        | ShortcutKey::R
-        | ShortcutKey::T
-        | ShortcutKey::U => None,
-        ShortcutKey::C => Some(egui::Key::C),
-        ShortcutKey::N => Some(egui::Key::N),
-        ShortcutKey::O => Some(egui::Key::O),
-        ShortcutKey::P => Some(egui::Key::P),
-        ShortcutKey::S => Some(egui::Key::S),
-        ShortcutKey::V => Some(egui::Key::V),
-        ShortcutKey::W => Some(egui::Key::W),
-        ShortcutKey::X => Some(egui::Key::X),
-        ShortcutKey::Y => Some(egui::Key::Y),
-        ShortcutKey::Z => Some(egui::Key::Z),
-        ShortcutKey::Comma
-        | ShortcutKey::Semicolon
-        | ShortcutKey::Period
-        | ShortcutKey::Enter
-        | ShortcutKey::BracketLeft
-        | ShortcutKey::BracketRight
-        | ShortcutKey::Backslash
-        | ShortcutKey::Pipe
-        | ShortcutKey::ArrowRight => None,
-    }
-}
-
-fn shortcut_modifiers_match(shortcut: LogicalShortcut, modifiers: egui::Modifiers) -> bool {
-    let unexpected_platform_modifier = if cfg!(target_os = "macos") {
-        modifiers.ctrl
-    } else {
-        modifiers.mac_cmd
-    };
-    modifiers.alt == shortcut.option
-        && unexpected_platform_modifier == shortcut.control
-        && modifiers.command == shortcut.primary
-        && modifiers.shift == shortcut.shift
-}
-
-/// One FIFO owned by the application receives activations from both the egui
-/// and native adapters. Producers enqueue shared `AppCommand` identities;
-/// the application takes the pending batch at its command-dispatch handoff,
-/// where the shared dispatcher rechecks current availability.
+/// One FIFO owned by the application receives deferred typed invocations from
+/// egui menus, native menus, and owned menu accelerators. The dispatcher
+/// rechecks availability after detaching each activation-ordered batch.
 #[derive(Debug, Default)]
-pub(super) struct PendingMenuCommands {
-    pending: VecDeque<AppCommand>,
+pub(super) struct PendingDesktopCommands {
+    pending: VecDeque<CommandInvocation>,
 }
 
-impl PendingMenuCommands {
-    pub(super) fn enqueue(&mut self, command: AppCommand) {
-        self.pending.push_back(command);
+impl PendingDesktopCommands {
+    pub(super) fn enqueue(&mut self, invocation: CommandInvocation) {
+        self.pending.push_back(invocation);
+    }
+
+    pub(super) fn enqueue_id(&mut self, id: CommandId, origin: CommandOrigin) {
+        if let Some(command) = command_for_id(id) {
+            self.enqueue(CommandInvocation::new(command, origin));
+        }
     }
 
     /// Detaches queued commands in activation order for the application to
     /// dispatch; commands enqueued afterward remain for the next handoff.
-    pub(super) fn take_pending(&mut self) -> std::collections::vec_deque::IntoIter<AppCommand> {
+    pub(super) fn take_pending(
+        &mut self,
+    ) -> std::collections::vec_deque::IntoIter<CommandInvocation> {
         std::mem::take(&mut self.pending).into_iter()
     }
 }
@@ -195,7 +157,7 @@ impl PendingMenuCommands {
 pub(super) fn show_menu_bar(
     ui: &mut egui::Ui,
     availability: AppCommandAvailability,
-    pending: &mut PendingMenuCommands,
+    pending: &mut PendingDesktopCommands,
 ) {
     let metrics = MENU_PRESENTATION;
     let viewport_height = ui.ctx().content_rect().height();
@@ -334,7 +296,7 @@ pub(super) fn show_menu_bar(
                                         }
                                         if response.clicked() {
                                             if let MenuItemBehavior::Command(command) = item.behavior {
-                                                pending.enqueue(command);
+                                                pending.enqueue_id(command, CommandOrigin::Menu);
                                                 ui.close();
                                                 ui.ctx().request_repaint();
                                             }
@@ -422,7 +384,7 @@ fn material_icon(icon: SemanticIcon) -> egui_material_icons::MaterialIcon {
     }
 }
 
-fn command_enabled(command: AppCommand, availability: AppCommandAvailability) -> bool {
+fn command_enabled(command: CommandId, availability: AppCommandAvailability) -> bool {
     availability.is_enabled(command)
 }
 
@@ -460,6 +422,32 @@ fn shortcut_label(shortcut: LogicalShortcut) -> String {
         ShortcutKey::Semicolon => ";",
         ShortcutKey::Period => ".",
         ShortcutKey::Enter => "Enter",
+        ShortcutKey::Tab => "Tab",
+        ShortcutKey::Backspace => "Backspace",
+        ShortcutKey::Delete => "Delete",
+        ShortcutKey::Digit0 => "0",
+        ShortcutKey::Digit1 => "1",
+        ShortcutKey::Digit2 => "2",
+        ShortcutKey::Digit3 => "3",
+        ShortcutKey::Digit4 => "4",
+        ShortcutKey::Digit5 => "5",
+        ShortcutKey::Digit6 => "6",
+        ShortcutKey::Digit7 => "7",
+        ShortcutKey::Digit8 => "8",
+        ShortcutKey::Digit9 => "9",
+        ShortcutKey::Tab => "Tab",
+        ShortcutKey::Backspace => "Backspace",
+        ShortcutKey::Delete => "Delete",
+        ShortcutKey::Digit0 => "0",
+        ShortcutKey::Digit1 => "1",
+        ShortcutKey::Digit2 => "2",
+        ShortcutKey::Digit3 => "3",
+        ShortcutKey::Digit4 => "4",
+        ShortcutKey::Digit5 => "5",
+        ShortcutKey::Digit6 => "6",
+        ShortcutKey::Digit7 => "7",
+        ShortcutKey::Digit8 => "8",
+        ShortcutKey::Digit9 => "9",
         ShortcutKey::BracketLeft => "[",
         ShortcutKey::BracketRight => "]",
         ShortcutKey::Backslash => "\\",
@@ -486,21 +474,9 @@ fn shortcut_label(shortcut: LogicalShortcut) -> String {
 impl super::ScriptCraftApp {
     /// Dispatches the detached queue batch in order. Each shared command
     /// performs its normal current-availability check before it can mutate.
-    pub(super) fn dispatch_pending_menu_commands(&mut self, ctx: &eframe::egui::Context) {
-        for command in self.pending_menu_commands.take_pending() {
-            self.dispatch_app_command(command, ctx);
-            if matches!(
-                command,
-                AppCommand::Undo
-                    | AppCommand::Redo
-                    | AppCommand::Cut
-                    | AppCommand::Copy
-                    | AppCommand::Paste
-                    | AppCommand::Delete
-                    | AppCommand::SelectAll
-            ) {
-                self.restore_editor_focus(ctx);
-            }
+    pub(super) fn dispatch_pending_commands(&mut self, ctx: &eframe::egui::Context) {
+        for invocation in self.pending_commands.take_pending() {
+            self.dispatch_command(invocation, ctx);
         }
     }
 }

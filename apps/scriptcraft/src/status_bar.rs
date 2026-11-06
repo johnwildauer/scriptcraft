@@ -11,6 +11,7 @@ use egui_material_icons::{
     icons::{ICON_LOCATION_SEARCHING, ICON_MODE_NIGHT, ICON_TIMER},
     MaterialIcon,
 };
+use scriptcraft_commands::{Appearance, Command, ZoomPercent};
 pub(super) const MIN_ZOOM_PERCENT: u16 = 75;
 pub(super) const MAX_ZOOM_PERCENT: u16 = 300;
 pub(super) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250, 300];
@@ -1216,6 +1217,12 @@ impl DiagnosticProjection<'_> {
     }
 }
 
+#[derive(Debug, Default)]
+pub(super) struct StatusCommandIntents {
+    pub(super) commands: Vec<Command>,
+    pub(super) timer_button_rect: Option<Rect>,
+}
+
 #[allow(clippy::too_many_arguments)] // Keep transient timer ownership at the app caller.
 pub(super) fn show_with_focus_mode(
     ui: &mut egui::Ui,
@@ -1223,13 +1230,10 @@ pub(super) fn show_with_focus_mode(
     page: VisiblePage,
     center: &CenterProjection,
     diagnostics: Option<DiagnosticProjection<'_>>,
-    zoom_percent: &mut u16,
-    appearance: &mut AppearanceMode,
-    timer_open: &mut bool,
-    timer_just_opened: &mut bool,
+    zoom_percent: u16,
+    appearance: AppearanceMode,
     focus_view: &FocusModeView,
-    focus_activated: &mut bool,
-) -> (bool, bool, Option<Rect>, Option<Rect>) {
+ ) -> StatusCommandIntents {
     show_impl_with_appearance(
         ui,
         palette,
@@ -1239,10 +1243,7 @@ pub(super) fn show_with_focus_mode(
         zoom_percent,
         appearance,
         None,
-        Some(timer_open),
-        Some(timer_just_opened),
         Some(focus_view),
-        Some(focus_activated),
     )
 }
 
@@ -1295,22 +1296,18 @@ fn show_impl_with_appearance(
     page: VisiblePage,
     center: &CenterProjection,
     diagnostics: Option<DiagnosticProjection<'_>>,
-    zoom_percent: &mut u16,
-    appearance: &mut AppearanceMode,
+    zoom_value: u16,
+    appearance_value: AppearanceMode,
     diagnostics_open: Option<bool>,
-    timer_open: Option<&mut bool>,
-    timer_just_opened: Option<&mut bool>,
     focus_view: Option<&FocusModeView>,
-    focus_activated: Option<&mut bool>,
-) -> (bool, bool, Option<Rect>, Option<Rect>) {
+ ) -> StatusCommandIntents {
+    let mut zoom_percent = zoom_value;
+    let mut appearance = appearance_value;
+    let mut commands = Vec::new();
     let mut zoom_changed = false;
     let mut appearance_changed = false;
     let mut timer_rect = None;
-    let mut focus_rect = None;
     let mut zoom_slider_response = None;
-    let mut timer_open = timer_open;
-    let mut timer_just_opened = timer_just_opened;
-    let mut focus_activated = focus_activated;
     let message = status_message(center);
     let row_height = presentation::STATUS_ROW_HEIGHT;
     let available = ui.available_rect_before_wrap().intersect(ui.clip_rect());
@@ -1372,7 +1369,7 @@ fn show_impl_with_appearance(
                             let (changed, slider_response) = zoom_controls(
                                 zoom_ui,
                                 palette,
-                                zoom_percent,
+                                &mut zoom_percent,
                                 layout.slider,
                                 layout.percentage,
                                 &percentage_label,
@@ -1385,7 +1382,7 @@ fn show_impl_with_appearance(
                         right_ui,
                         Vec2::new(layout.icons[2].width(), row_height),
                         |icon_ui| {
-                            appearance_changed |= appearance_menu(icon_ui, appearance);
+                            appearance_changed |= appearance_menu(icon_ui, &mut appearance);
                         },
                     );
 
@@ -1406,11 +1403,8 @@ fn show_impl_with_appearance(
                                     .response
                                     .clone()
                                     .on_hover_text("Focus Mode");
-                                focus_rect = Some(rendered.response.rect);
                                 if rendered.activated {
-                                    if let Some(activated) = focus_activated.as_deref_mut() {
-                                        *activated = true;
-                                    }
+                                    commands.push(Command::ViewFocusModeToggle);
                                 }
                             }
                         },
@@ -1430,15 +1424,7 @@ fn show_impl_with_appearance(
                             rendered.response.clone().on_hover_text("Sprint Timer");
                             timer_rect = Some(rendered.response.rect);
                             if rendered.activated {
-                                if let Some(open) = timer_open.as_deref_mut() {
-                                    *open = !*open;
-                                    if *open {
-                                        if let Some(just_opened) = timer_just_opened.as_deref_mut()
-                                        {
-                                            *just_opened = true;
-                                        }
-                                    }
-                                }
+                                commands.push(Command::ToolsSprintTimerTogglePopup);
                             }
                         },
                     );
@@ -1450,7 +1436,7 @@ fn show_impl_with_appearance(
                             right_ui,
                             palette,
                             response,
-                            *zoom_percent,
+                            zoom_percent,
                             right_rect,
                             row_rect,
                         );
@@ -1517,5 +1503,22 @@ fn show_impl_with_appearance(
                 });
         });
     }
-    (zoom_changed, appearance_changed, timer_rect, focus_rect)
+    if zoom_changed {
+        if let Ok(percent) = ZoomPercent::new(zoom_percent) {
+            commands.push(Command::ViewZoomSet { percent });
+        }
+    }
+    if appearance_changed {
+        let appearance = match appearance {
+            AppearanceMode::System => Appearance::System,
+            AppearanceMode::Day => Appearance::Day,
+            AppearanceMode::Night => Appearance::Night,
+            AppearanceMode::Midnight => Appearance::Midnight,
+        };
+        commands.push(Command::ViewAppearanceSet { appearance });
+    }
+    StatusCommandIntents {
+        commands,
+        timer_button_rect: timer_rect,
+    }
 }

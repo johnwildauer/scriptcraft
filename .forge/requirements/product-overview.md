@@ -151,13 +151,20 @@ screenwriter.
 - Export PDF from fixed print layout and provide a deliberately lossy plain-text
   copy that communicates its loss.
 - Keep core behavior headless-capable and testable without a desktop window.
+- Route enabled ScriptCraft-owned actions through the UI-independent internal command contract:
+  41 stable dotted identities, typed/serializable parameters, command origins, one desktop dispatcher,
+  and a headless semantic editor executor. Screenplay mutations shall be executable through that
+  contract without a GUI; desktop dialogs, clipboard, focus, viewport, and notifications remain host
+  effects. Native predefined macOS Application-menu services remain OS-owned unless an existing safe
+  host API can route them. The contract does not itself expose a command palette, CLI, MCP server,
+  network service, macro UI, or plugin host; these remain out of product scope.
 
 ### Out of scope
 
 - DOCX compatibility and blanket Final Draft compatibility.
 - Collaboration, cloud sync, tracked revisions, comments, or revision comparison.
-- MCP, remote control, network automation, or a command catalog as a product
-  feature.
+- MCP, remote control, network automation, or a user-facing command catalog/palette as a product
+  feature. The internal command contract used to unify existing clients is not such a product feature.
 - Planning, beat-board, outline-editor, structure-line, production breakdown,
   scheduling, budgeting, or character databases.
 - Editing broad Word-like formatting, tables, fields, headers/footers, footnotes,

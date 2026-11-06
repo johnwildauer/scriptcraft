@@ -2,8 +2,14 @@ use super::{
     add_performance_counter, add_performance_nanos, document_font, status_bar, theme,
     PerformanceDiagnostics, RevealIntent, ScriptCraftApp,
 };
+use super::app_commands::CommandInvocation;
+use super::shortcuts::{editor_command_for_key_event, ShortcutPlatform};
 use eframe::egui::{self, Color32, FontFamily, FontId, Key, Sense, Stroke, Vec2};
 use egui::epaint::text::{Galley, LayoutJob};
+use scriptcraft_commands::{
+    Command, CommandId, CommandOrigin, HorizontalDirection, LineEdge, PointerPhase,
+    VerticalDirection,
+};
 use scriptcraft_core::editing::{EditError, Position, Selection};
 use scriptcraft_core::layout::{Caret, FixedRect, InteractionQueryDiagnostics, ScreenplayLayout};
 use scriptcraft_core::FixedPoint;
@@ -125,35 +131,6 @@ impl ScriptCraftApp {
                 (distance.to_bits(), *index)
             })
             .map(|(index, _)| index)
-    }
-
-    fn apply_pointer_selection(
-        &mut self,
-        position: Position,
-        drag_started: bool,
-        dragged: bool,
-    ) -> Result<(), EditError> {
-        let selection = if drag_started {
-            self.drag_anchor = Some(position);
-            Selection::caret(position)
-        } else if dragged {
-            Selection {
-                anchor: self.drag_anchor.unwrap_or(self.session.selection().anchor),
-                focus: position,
-            }
-        } else {
-            self.drag_anchor = None;
-            Selection::caret(position)
-        };
-        let result = self.session.set_selection(selection);
-        if result.is_ok() {
-            self.preferred_vertical_x = None;
-            self.rendered_revision = None;
-            // Pointer selection is authoritative: it must not inherit a reveal
-            // request queued by an earlier edit or navigation command.
-            self.reveal_intent = RevealIntent::None;
-        }
-        result
     }
 
     fn selection_range(
@@ -621,11 +598,14 @@ impl ScriptCraftApp {
                 || response.dragged()
                 || (response.hovered() && ui.input(|input| input.pointer.primary_down()));
             if pointer_active {
-                response.request_focus();
                 self.native_input_diagnostics.pointer_activations = self
                     .native_input_diagnostics
                     .pointer_activations
                     .saturating_add(1);
+                self.dispatch_command(
+                    CommandInvocation::new(Command::EditorFocus, CommandOrigin::Pointer),
+                    ui.ctx(),
+                );
                 if let Some(page_index) = Self::pointer_body_page(&layout, &page_rects, pointer) {
                     if let Some(position) = self.caret_from_pointer(
                         &layout,
@@ -634,14 +614,21 @@ impl ScriptCraftApp {
                         scale,
                         pointer,
                     ) {
-                        if let Err(error) = self.apply_pointer_selection(
-                            position,
-                            response.drag_started(),
-                            response.dragged(),
-                        ) {
-                            self.show_error(error);
+                        let phase = if response.drag_started() {
+                            PointerPhase::Press
+                        } else if response.dragged() {
+                            PointerPhase::Drag
                         } else {
-                            self.clear_error();
+                            PointerPhase::Release
+                        };
+                        if let Ok(position) = scriptcraft_commands::Position::from_core(position) {
+                            self.dispatch_command(
+                                CommandInvocation::new(
+                                    Command::EditorSelectionPointer { position, phase },
+                                    CommandOrigin::Pointer,
+                                ),
+                                ui.ctx(),
+                            );
                         }
                     }
                 }
@@ -677,8 +664,14 @@ impl ScriptCraftApp {
         }
     }
 
-    fn dispatch_surface_events(&mut self, events: &[egui::Event], modifiers: egui::Modifiers) {
+    fn dispatch_surface_events(
+        &mut self,
+        events: &[egui::Event],
+        modifiers: egui::Modifiers,
+        ctx: &egui::Context,
+    ) {
         let started = Instant::now();
+        let ime_event_in_frame = events.iter().any(|event| matches!(event, egui::Event::Ime(_)));
         self.performance.events = self.performance.events.saturating_add(events.len() as u64);
         for (index, event) in events.iter().enumerate() {
             self.record_native_event(match event {
@@ -693,6 +686,7 @@ impl ScriptCraftApp {
                 egui::Event::Key { pressed: false, .. } => "key-released",
                 _ => "other",
             });
+            let mut command = None;
             let result = match event {
                 egui::Event::Text(text)
                     if !text.is_empty()
@@ -704,10 +698,18 @@ impl ScriptCraftApp {
                         && !(modifiers.ctrl && !cfg!(target_os = "macos"))
                         && text.chars().all(|character| !character.is_control()) =>
                 {
-                    Some(self.session.insert(text))
+                    command = Some(CommandInvocation::new(
+                        Command::EditorTextInsert { text: text.clone() },
+                        CommandOrigin::Keyboard,
+                    ));
+                    None
                 }
                 egui::Event::Paste(text) if !text.is_empty() => {
-                    Some(self.session.insert_paste(text))
+                    command = Some(CommandInvocation::new(
+                        Command::EditorTextPaste { text: text.clone() },
+                        CommandOrigin::Keyboard,
+                    ));
+                    None
                 }
                 egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
                     self.ime_active = true;
@@ -718,7 +720,13 @@ impl ScriptCraftApp {
                 egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
                     self.ime_active = false;
                     self.ime_preedit.clear();
-                    (!text.is_empty()).then(|| self.session.insert(text))
+                    if !text.is_empty() {
+                        command = Some(CommandInvocation::new(
+                            Command::EditorTextInsert { text: text.clone() },
+                            CommandOrigin::ImeCommit,
+                        ));
+                    }
+                    None
                 }
                 egui::Event::Ime(egui::ImeEvent::Enabled) => {
                     self.ime_active = true;
@@ -731,12 +739,41 @@ impl ScriptCraftApp {
                 }
                 egui::Event::Key {
                     key,
+                    physical_key,
                     pressed: true,
                     modifiers,
                     ..
-                } => self.key_event(*key, *modifiers),
+                } => {
+                    if !self.ime_active && !ime_event_in_frame {
+                        command = editor_command_for_key_event(
+                            *key,
+                            *physical_key,
+                            *modifiers,
+                            ShortcutPlatform::current(),
+                        )
+                        .map(|command| {
+                            let origin = match command.id() {
+                                CommandId::EditorParagraphEnter
+                                | CommandId::EditorParagraphTab
+                                | CommandId::EditorElementChange => CommandOrigin::Shortcut,
+                                _ => CommandOrigin::Keyboard,
+                            };
+                            CommandInvocation::new(command, origin)
+                        });
+                    }
+                    if command.is_none() {
+                        command = self.navigation_key_event(*key, *modifiers).map(|command| {
+                            CommandInvocation::new(command, CommandOrigin::Keyboard)
+                        });
+                    }
+                    None
+                }
                 _ => continue,
             };
+            if let Some(command) = command {
+                self.dispatch_command(command, ctx);
+                continue;
+            }
             if let Some(result) = result {
                 self.mutate(
                     result,
@@ -751,18 +788,32 @@ impl ScriptCraftApp {
             .saturating_add(started.elapsed().as_nanos());
     }
 
-    fn key_event(&mut self, key: Key, modifiers: egui::Modifiers) -> Option<Result<(), EditError>> {
+    fn navigation_key_event(&self, key: Key, modifiers: egui::Modifiers) -> Option<Command> {
         match key {
-            Key::Backspace => Some(self.session.backspace()),
-            Key::Delete => Some(self.session.delete()),
-            Key::Enter => Some(self.session.enter()),
-            Key::Tab => Some(self.session.tab()),
-            Key::ArrowLeft => Some(self.move_horizontal(false, modifiers.shift)),
-            Key::ArrowRight => Some(self.move_horizontal(true, modifiers.shift)),
-            Key::ArrowUp => Some(self.move_vertical(false, modifiers.shift)),
-            Key::ArrowDown => Some(self.move_vertical(true, modifiers.shift)),
-            Key::Home => Some(self.move_to_edge(false, modifiers.shift)),
-            Key::End => Some(self.move_to_edge(true, modifiers.shift)),
+            Key::ArrowLeft => Some(Command::EditorNavigationHorizontal {
+                direction: HorizontalDirection::Left,
+                extend: modifiers.shift,
+            }),
+            Key::ArrowRight => Some(Command::EditorNavigationHorizontal {
+                direction: HorizontalDirection::Right,
+                extend: modifiers.shift,
+            }),
+            Key::ArrowUp => Some(Command::EditorNavigationVertical {
+                direction: VerticalDirection::Up,
+                extend: modifiers.shift,
+            }),
+            Key::ArrowDown => Some(Command::EditorNavigationVertical {
+                direction: VerticalDirection::Down,
+                extend: modifiers.shift,
+            }),
+            Key::Home => Some(Command::EditorNavigationLineEdge {
+                edge: LineEdge::Start,
+                extend: modifiers.shift,
+            }),
+            Key::End => Some(Command::EditorNavigationLineEdge {
+                edge: LineEdge::End,
+                extend: modifiers.shift,
+            }),
             _ => None,
         }
     }
@@ -787,26 +838,30 @@ impl ScriptCraftApp {
             .saturating_add(1);
         let events = ctx.input(|input| input.events.clone());
         let modifiers = ctx.input(|input| input.modifiers);
-        self.dispatch_surface_events(&events, modifiers);
+        self.dispatch_surface_events(&events, modifiers, ctx);
         if !events.is_empty() || ctx.input(|input| has_nonzero_mouse_wheel(&input.raw.events)) {
             self.request_repaint(ctx);
         }
     }
 
-    fn move_horizontal(&mut self, right: bool, extend: bool) -> Result<(), EditError> {
+    pub(super) fn navigation_selection_horizontal(
+        &mut self,
+        direction: HorizontalDirection,
+        extend: bool,
+    ) -> Selection {
         self.preferred_vertical_x = None;
         let selection = self.session.selection();
         if selection.anchor != selection.focus && !extend {
-            let position = if right {
+            let position = if direction == HorizontalDirection::Right {
                 ordered_selection(selection).1
             } else {
                 ordered_selection(selection).0
             };
-            return self.session.set_selection(Selection::caret(position));
+            return Selection::caret(position);
         }
         let position = selection.focus;
         let item = &self.session.project().elements[position.element];
-        let next = if right {
+        let next = if direction == HorizontalDirection::Right {
             if position.offset < item.text.len() {
                 Position {
                     offset: item.text[position.offset..]
@@ -840,17 +895,21 @@ impl ScriptCraftApp {
         } else {
             position
         };
-        self.session.set_selection(if extend {
+        if extend {
             Selection {
                 anchor: selection.anchor,
                 focus: next,
             }
         } else {
             Selection::caret(next)
-        })
+        }
     }
 
-    fn move_vertical(&mut self, down: bool, extend: bool) -> Result<(), EditError> {
+    pub(super) fn navigation_selection_vertical(
+        &mut self,
+        direction: VerticalDirection,
+        extend: bool,
+    ) -> Result<Selection, EditError> {
         let selection = self.session.selection();
         let current = selection.focus;
         let layout = self
@@ -878,8 +937,9 @@ impl ScriptCraftApp {
         );
         let Some(current_index) = current_index else {
             self.preferred_vertical_x = None;
-            return self.session.set_selection(selection);
+            return Ok(selection);
         };
+        let down = direction == VerticalDirection::Down;
         let target_index = if down {
             current_index
                 .checked_add(1)
@@ -889,7 +949,7 @@ impl ScriptCraftApp {
         };
         let Some(current_line) = layout.body_line(current_index) else {
             self.preferred_vertical_x = None;
-            return self.session.set_selection(selection);
+            return Ok(selection);
         };
         let Some(target_index) = target_index else {
             self.preferred_vertical_x = None;
@@ -901,7 +961,7 @@ impl ScriptCraftApp {
                     current_line.source.start
                 },
             };
-            return self.session.set_selection(if extend {
+            return Ok(if extend {
                 Selection {
                     anchor: selection.anchor,
                     focus: next,
@@ -917,7 +977,7 @@ impl ScriptCraftApp {
         self.preferred_vertical_x = Some(goal);
         let Some(target_line) = layout.body_line(target_index) else {
             self.preferred_vertical_x = None;
-            return self.session.set_selection(selection);
+            return Ok(selection);
         };
         let cell = target_line.char_width.raw().max(1);
         let columns = (goal
@@ -928,7 +988,7 @@ impl ScriptCraftApp {
             element: target_line.element,
             offset: target_line.source_for_display_char(columns as usize),
         };
-        self.session.set_selection(if extend {
+        Ok(if extend {
             Selection {
                 anchor: selection.anchor,
                 focus: next,
@@ -938,10 +998,14 @@ impl ScriptCraftApp {
         })
     }
 
-    fn move_to_edge(&mut self, end: bool, extend: bool) -> Result<(), EditError> {
+    pub(super) fn navigation_selection_line_edge(
+        &mut self,
+        edge: LineEdge,
+        extend: bool,
+    ) -> Selection {
         self.preferred_vertical_x = None;
         let selection = self.session.selection();
-        let position = if end {
+        let position = if edge == LineEdge::End {
             Position {
                 element: selection.focus.element,
                 offset: self.session.project().elements[selection.focus.element]
@@ -954,15 +1018,16 @@ impl ScriptCraftApp {
                 offset: 0,
             }
         };
-        self.session.set_selection(if extend {
+        if extend {
             Selection {
                 anchor: selection.anchor,
                 focus: position,
             }
         } else {
             Selection::caret(position)
-        })
-    }}
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PresentationMetrics {

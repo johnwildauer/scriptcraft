@@ -327,6 +327,43 @@ closeout does not waive the repository-wide user-owned validation policy: no age
 build, check, test, lint, formatting, launch, review, or validator is authorized here,
 and implementation submission remains unaccepted and unvalidated.
 
+### Hotkeys and consolidated command layer WO-001–WO-008 implementation submission — 2026-11-06
+
+The user-directed initiative handoff identifies the existing local branch as
+`dev/2026-11-06-hotkey-command-layer`; this is user-supplied branch attribution, not a
+fresh Git observation. WO-008 reconciles the internal command architecture and its user-owned
+validation handoff. The root workspace manifest lists `apps/scriptcraft`,
+`crates/scriptcraft-commands`, and `crates/scriptcraft-core`. The desktop manifest depends on the
+local command and core packages; `scriptcraft-commands` depends on local `scriptcraft-core` and exact
+`serde = 1.0.229` with the `derive` feature. The lockfile/dependency facts recorded by WO-001 are
+historical setup observations; WO-008 made no dependency, workspace, or lockfile change.
+
+WO-001–WO-007 submitted the 41-ID UI-independent typed command contract, headless editor executor,
+desktop dispatcher, focused hotkeys, selection/navigation/focus routing, document/clipboard/modal/
+viewport effects, and view/status/appearance/focus-mode/timer/notification routing. WO-008 updates the
+product overview, writing-loop requirements and technical context and records a source inventory. One
+document-open TextState Selection restoration path that directly called the replacement session setter
+was routed through the existing `editor.selection.set` command and headless executor; invalid restored
+selection retains the existing caret-0,0 fallback. The inventory found no other enabled
+ScriptCraft-owned screenplay mutation path outside the dispatcher/executor. Native predefined macOS
+About/Hide/Hide Others/Show All/Quit remain OS-owned; picker paths that cannot be represented as UTF-8
+remain rejected. Existing File New dirty-session consent and File Close confirmation discrepancies
+remain outside scope. These are source/documentation findings, not execution or behavioral evidence.
+
+Exact WO-008 changed paths are `apps/scriptcraft/src/main.rs`,
+`.forge/requirements/features/screenplay-writing-loop.md`,
+`.forge/requirements/product-overview.md`, `.forge/blueprints/technical-context.md`, this manifest,
+`.plan/2026-11-06-hotkey-command-layer/hotkey-command-layer-v1.md`,
+`.plan/2026-11-06-hotkey-command-layer/work-orders/WO-008-durable-contracts-and-validation.md`, and
+`.plan/2026-11-06-hotkey-command-layer/work-orders/WO-008-user-validation-handoff.md`. Earlier
+work-order changed-file lists remain in their historical handoffs.
+
+No agent tests, builds, checks, Clippy, formatting, launch, manual verification, review, or independent
+validation were run. Compilation, serialization, runtime/platform behavior, and every validation
+scenario remain unverified. User review, validation, and acceptance remain pending; the detailed
+scenario matrix is the [WO-008 user-validation handoff](../.plan/2026-11-06-hotkey-command-layer/work-orders/WO-008-user-validation-handoff.md).
+No commit or push was made.
+
 ### Gates and intervention
 
 - **Design approval:** Human approval required by default at `review -> execute`, subject to explicit user direction and applicable external rules.

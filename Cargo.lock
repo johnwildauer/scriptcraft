@@ -2945,7 +2945,16 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "rfd",
+ "scriptcraft-commands",
  "scriptcraft-core",
+]
+
+[[package]]
+name = "scriptcraft-commands"
+version = "0.1.0"
+dependencies = [
+ "scriptcraft-core",
+ "serde",
 ]
 
 [[package]]

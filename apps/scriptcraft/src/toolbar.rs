@@ -3,6 +3,8 @@ use super::toolbar_items::{
     EnablementPolicy, IconSpec, OVERFLOW_ITEM_SPEC, ToolbarBehavior, ToolbarGraphic,
     ToolbarIconVariant, ToolbarItemSpec, ToolbarLayoutPolicy, TEMPORARY_TOOLBAR_ITEMS,
 };
+use super::app_commands::{command_for_id, CommandInvocation};
+use scriptcraft_commands::{Command, CommandOrigin, RoleValue};
 
 // Manual toolbar geometry controls: tune Item group width and row spacing here.
 // The 46-point normal slot is the compact baseline recorded by the focused
@@ -576,7 +578,12 @@ impl ScriptCraftApp {
         }
         if response.clicked() {
             if let ToolbarBehavior::Action(action) = item.behavior {
-                self.dispatch_app_command(action, ui.ctx());
+                if let Some(command) = command_for_id(action) {
+                    self.dispatch_command(
+                        CommandInvocation::new(command, CommandOrigin::Toolbar),
+                        ui.ctx(),
+                    );
+                }
             }
         }
     }
@@ -589,9 +596,16 @@ impl ScriptCraftApp {
             .map(|element| element.role)
     }
 
-    pub(super) fn change_role_from_toolbar(&mut self, role: Role) {
-        let result = self.session.change_role(role);
-        self.mutate(result, "Changed focused element role", RevealIntent::None);
+    pub(super) fn change_role_from_toolbar(&mut self, role: Role, ctx: &egui::Context) {
+        self.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorElementChange {
+                    role: RoleValue::new(role),
+                },
+                CommandOrigin::Toolbar,
+            ),
+            ctx,
+        );
     }
 
     pub(super) fn elements_toolbar_item(
@@ -740,7 +754,7 @@ impl ScriptCraftApp {
             .response
             .on_hover_cursor(toolbar_cursor_icon());
         if selected_role != Some(next_role) {
-            self.change_role_from_toolbar(next_role);
+            self.change_role_from_toolbar(next_role, ui.ctx());
         }
     }
 
@@ -826,10 +840,15 @@ impl ScriptCraftApp {
             )
         });
         if let Some(action) = chosen_action {
-            self.dispatch_app_command(action, ui.ctx());
+            if let Some(command) = command_for_id(action) {
+                self.dispatch_command(
+                    CommandInvocation::new(command, CommandOrigin::Toolbar),
+                    ui.ctx(),
+                );
+            }
         }
         if let Some(role) = chosen_role {
-            self.change_role_from_toolbar(role);
+            self.change_role_from_toolbar(role, ui.ctx());
         }
     }
 
