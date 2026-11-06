@@ -276,9 +276,9 @@ pub struct WindowState {
 impl WindowState {
     pub const DEFAULT: Self = Self {
         left: 0,
-        top: 95,
+        top: 75,
         width: 870,
-        height: 854,
+        height: 874,
     };
 
     pub fn new(left: i32, top: i32, width: i32, height: i32) -> Option<Self> {

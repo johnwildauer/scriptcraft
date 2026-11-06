@@ -7,7 +7,7 @@ This map describes ScriptCraft's desired technical structure and runtime boundar
 | Area | Path | Role in the target structure |
 |---|---|---|
 | Cargo workspace | [`Cargo.toml`](../../Cargo.toml) | Defines the workspace for the desktop application and reusable core crate. |
-| Desktop application | [`apps/scriptcraft/`](../../apps/scriptcraft/), [`main.rs`](../../apps/scriptcraft/src/main.rs), [`theme.rs`](../../apps/scriptcraft/src/theme.rs), and [`src/`](../../apps/scriptcraft/src/) | Runnable local desktop shell and its UI/platform modules; owns presentation, semantic appearance palettes, and native file interaction. |
+| Desktop application | [`apps/scriptcraft/`](../../apps/scriptcraft/), [`main.rs`](../../apps/scriptcraft/src/main.rs), [`script_view.rs`](../../apps/scriptcraft/src/script_view.rs), [`theme.rs`](../../apps/scriptcraft/src/theme.rs), and [`src/`](../../apps/scriptcraft/src/) | Runnable local desktop shell and its UI/platform modules; application orchestration, Script View presentation and interaction, semantic appearance palettes, and native file interaction remain desktop-owned. |
 | Screenplay core | [`crates/scriptcraft-core/`](../../crates/scriptcraft-core/), [`lib.rs`](../../crates/scriptcraft-core/src/lib.rs), [`editing.rs`](../../crates/scriptcraft-core/src/editing.rs), [`text_state.rs`](../../crates/scriptcraft-core/src/text_state.rs), [`layout.rs`](../../crates/scriptcraft-core/src/layout.rs), [`persistence.rs`](../../crates/scriptcraft-core/src/persistence.rs), and [`exports.rs`](../../crates/scriptcraft-core/src/exports.rs) | Reusable headless library for semantic editing, bounded FDX view-state offset mapping, shared layout, native-project persistence, and noncanonical export adapters. |
 | Core verification | [`crates/scriptcraft-core/tests/`](../../crates/scriptcraft-core/tests/) | Automated tests for core behavior independently of the desktop UI. |
 | Bundled typeface | [`fonts/CourierPrime/`](../../fonts/CourierPrime/) | Bundled Courier Prime font assets used by the screenplay experience. |
@@ -23,7 +23,7 @@ The workspace uses Rust and Cargo. The desktop boundary contains the eframe/egui
 
 The desktop appearance model is owned by [`theme.rs`](../../apps/scriptcraft/src/theme.rs), above egui's binary Light/Dark theme selection. Transient System resolves through the framework-reported theme or configured fallback; Day, Night, and Midnight are concrete application palettes. One semantic palette maps to complete egui visuals and distinct toolbar, Script Workspace, status, shared-control, overlay, and feedback groups. The Script Workspace page palette remains desktop-only and supplies paper, text, hidden text, border, selection, selection boundary, caret, and IME colors. Toolbar and status panel surfaces are independent even when their initial compatibility values match. Item/icon overrides remain above toolbar palette defaults; status-local default, center, and hovered foreground overrides remain above status palette defaults. The palette is not persisted and is not part of screenplay core, document layout, or exports.
 
-The initial Day/Night/Midnight RGBs in `theme.rs` are image-derived estimates, not sampled values, and remain subject to user side-by-side calibration. The theme builder preserves the existing page selection, selected-text, caret, IME, generic egui selection/text-cursor, hyperlink, warning, and error colors. Screenplay selection fill remains independent from egui global selection; the zoom slider's trailing fill continues to use egui selection while its rail is scoped to the inactive widget fill. The status slider's custom knob continues to share status default/hover foreground behavior. A one-point toolbar divider is drawn along the toolbar's lower edge only; it does not add frame borders or change toolbar allocation. The visible page-selection boundary uses an explicit palette stroke so contrast can be reviewed against the lighter Night paper. No compilation, runtime, visual, or contrast validation is claimed for these changes.
+The initial Day/Night/Midnight RGBs in `theme.rs` are image-derived estimates, not sampled values, and remain subject to user side-by-side calibration. The theme builder preserves the existing page selection, selected-text, caret, IME, generic egui selection/text-cursor, hyperlink, warning, and error colors. Screenplay selection fill remains independent from egui global selection; the zoom slider's trailing fill continues to use egui selection while its rail is scoped to the inactive widget fill. The status slider's custom knob continues to share status default/hover foreground behavior. Toolbar, screenplay-page, and status borders have independent local width and semantic palette-color owners. The toolbar divider is drawn along the toolbar's lower edge only and does not add frame borders or change toolbar allocation. The page border retains its middle-stroke kind and is clipped by the page painter. The status panel disables egui's generic framework separator and uses a stroke-free frame; its single explicit full-width top divider uses the status palette border color and is painted against the outer panel rectangle, without introducing side or bottom borders. The visible page-selection boundary uses an explicit palette stroke so contrast can be reviewed against the lighter Night paper.
 
 The desktop toolbar owns a declarative item catalog in
 [`toolbar_items.rs`](../../apps/scriptcraft/src/toolbar_items.rs), while
@@ -38,16 +38,26 @@ color overrides, and the theme-derived enabled foreground; absent an explicit
 disabled color, disabled graphics and captions use the resolved enabled color at
 reduced alpha. The toolbar-wide icon variant defaults to outlined, with optional
 per-icon filled/outlined override. Toolbar icon size, item text size, Elements
-role-option text size, and graphic gaps are named logical-point settings. The
-item and Elements role-option text-size defaults are independently configurable
-and currently resolve to 11 and 14 points respectively. The closed selected
-Elements role uses the role-option size; the Elements caption uses the item text
-size. Role-option rows have 12 points of horizontal padding on each side. Toolbar
-icon hover expansion uses four independent logical-point edges
-(left/top/right/bottom), currently 8/0/8/3; it
-controls the icon hover/click rectangle, not glyph baseline placement. The
-overflow menu button's egui padding remains symmetric and projects each opposite
-edge pair to its average. Status icon padding remains status-local and symmetric.
+role-option text size, and graphic gaps are separately owned presentation
+settings. The item and Elements role-option text-size settings are independently
+configurable. The closed selected Elements role uses the role-option size; the
+Elements caption uses the item text size. Role-option row padding remains
+separate from the shared control-to-caption gap. The toolbar owns one explicit
+control-to-caption gap shared by action graphics and the Elements control. Action
+Items and Elements captions use one shared group-relative rectangle derived from
+the nominal control-slot height and that gap, and are centered within it. Elements
+caption placement is independent of the stock ComboBox response height; its
+separately owned vertical optical adjustment affects only that decorative caption.
+Action Items and Elements share one derived Item-group height. The exact toolbar panel
+height derives from its top padding and that group, with no trailing allocation after
+the Item group. Its divider uses a toolbar-local width and palette color and sits at the panel's lower edge; top-level composition
+places Script View immediately after the toolbar; the margin-free Script Workspace
+frame and zero top scroll-content margin add no separate boundary inset. Toolbar icon
+hover expansion uses independent per-edge padding for the icon hover/click
+rectangle, not glyph baseline placement. ComboBox button padding and Elements
+role-option row padding remain independent from the caption gap. The overflow
+menu button's egui padding remains symmetric and projects each opposite edge pair
+to its average. Status icon padding remains status-local and symmetric.
 Item order, enabled state, presentation, allocation, and popup geometry are
 desktop transient state and are not persisted in screenplay or FDX data. The
 temporary catalog order is leading Flexible Space, New, Open, Save, Save As, pre-Elements
@@ -73,106 +83,83 @@ keyboard, popup, and accessibility behavior remain framework-owned. The overflow
 submenu retains its menu-owned indicator. The usable egui content viewport minus
 the popup frame margins
 is the only height cap; a genuinely short viewport retains bounded scrolling.
-WO-002 and WO-003 implementations are submitted for user review and validation;
-no agent validation is claimed.
 
-The desktop uses eframe/egui 0.34 and retains `egui_material_icons` 0.6.0 for
-typed icon constants, codepoints, and filled/outlined identity. The app bundles
-the upstream Material Symbols Rounded variable TTF under Apache-2.0 and registers
-app-owned faces under the crate's existing family names. The app-creation
-callback installs Courier Prime first and adds the Material faces to that same
-egui context before app construction; the initializer from the icon crate is not
-called. Named application defaults are weight 200, optical size 24, and grade 0,
-with `FILL=0` for outlined and `FILL=1` for filled. Toolbar `IconSpec` axes
-overrides take per-axis precedence over those defaults; status icons retain the
-shared defaults. All seven standard weights are registered at the default
-optical-size/grade pair, and catalog-declared non-default optical-size/grade
-combinations receive separate named faces. Typed optical-size choices are 20,
-24, and 48; typed grade choices are -50, 0, and 200. This face isolation avoids
-reusing glyph cache entries across variation locations. The shared rich-text
-adapter keeps codepoint and fill/outline identity while choosing the named face.
+The desktop uses eframe/egui and retains `egui_material_icons` for typed icon
+constants, codepoints, and filled/outlined identity. The app bundles the upstream
+Material Symbols Rounded variable TTF under Apache-2.0 and registers app-owned
+faces under the crate's existing family names. The app-creation callback installs
+Courier Prime first and adds the Material faces to that same egui context before
+app construction; the initializer from the icon crate is not called. Named
+application defaults govern weight, optical size, grade, and fill. Toolbar
+`IconSpec` axes overrides take per-axis precedence over those defaults; status
+icons retain the shared defaults. Supported axis combinations use separate
+named faces where needed to avoid reusing glyph cache entries across variation
+locations. The shared rich-text adapter keeps codepoint and fill/outline identity
+while choosing the named face.
 The native font is a desktop presentation asset and does not enter the headless
-screenplay core or change document typography. WO-002 implementation is
-submitted for user review; no agent build, runtime, or visual validation is
-claimed.
+screenplay core or change document typography.
 
-WO-002 assigns outlined Timer to Sprint Timer and outlined Location Searching to
-Focus Mode, plus filled Mode Night to Appearance. Inline status controls render
-these typed Material icons without visible captions; the appearance choices
-remain textual in the open menu. Their shared status-icon control uses the
-toolbar's hover-rectangle and hovered-widget-fill semantics, two-point corner
-radius, and default cursor, using an independent status-local two-point padding
-setting. The percentage control now uses the same clipped, immediate hover
-painting and shared hovered foreground without opening its popup on hover.
-Status-owned default text and icon foregrounds share one status-local source;
-interactive status controls share a separate hovered foreground. Both default
-to the active Appearance theme's text color (default) or hovered-widget text
-color (hover) and each exposes one `Option<Color32>` override point. Center
-operation/error text has its own optional color override and falls back to the
-status default foreground when unset; popup-menu entries keep menu-owned colors
-and typography.
-Focus Mode retains its state-based enablement and detailed accessible
-description, while timer popup placement continues to use the icon interaction
-rectangle. The status row uses bounded, explicit regions: the three icons, zoom
-slider, and percentage control remain prioritized inline at the far right; the
-visible-page counter is separately left-aligned and clipped in its own bounded
-allocation; and operation/error text occupies a mirrored center region rather
-than the residual space between siblings. For row content width `W` and actual
-full right-group width `R`, that region has nominal width `max(W - 2R, 0)`,
-left edge `row_left + R`, and right edge `row_right - R`, ending at Timer's left
-edge. When `W <= 2R`, it collapses to zero width at that Timer boundary. Page
-allocation is capped to avoid overlap with the mirrored center and right group.
-The slider grows from its 40-point minimum toward its 165-point maximum only
-after fixed controls and bounded page allocation fit. There is no status
-overflow, More trigger, or breakpoint-based compact mode; below physically
-usable widths, controls compress within nonoverlapping bounds without a
-hit-target usability promise. Center text is single-line and centered within its
-explicit region; it has its own 10-point font setting and optional foreground
-override, falling back to the shared status default foreground. These center
-settings do not alter Body/Button, page, or Diagnostics typography or colors.
-The slider has no visible caption but retains its Page zoom accessible name and
-numeric range/value. The arrowless far-right percentage button displays the
-current integer and opens the nine shared zoom presets. The Diagnostics second
-row and detailed status projection are gated by
-`status_bar.rs::presentation::ENABLE_DIAGNOSTICS`, a manual source constant
-defaulting to production-off; explicitly enabling it for development requires
-rebuilding and relaunching. Disabled mode adds no row or accessibility/focus
-target. Status-local geometry and foreground override settings live in [`presentation`](../../apps/scriptcraft/src/status_bar.rs:19): panel
-horizontal/vertical insets 12/2 points, icon hover padding 2, icon slot width
-28, item gap 4, percentage reservation 8 per side, slider bounds 40–165, page
-counter horizontal inset 0, Body and Button text 10 each, center text 10, icon
-glyph size 17, and slider rail thickness 4 points. Only the bottom status panel
-uses its adjustable symmetric insets. Its fill and border colors come from the
-central status palette; panel sizing and stroke geometry remain framework-owned.
-WO-006 keeps the zoom slider on the stock response and interaction path while
-selecting `HandleShape::Circle` for that slider only. Its
-`status_bar.rs::presentation::ZOOM_SLIDER_RAIL_HEIGHT` setting remains manually
-adjustable and is applied only through a child-Ui spacing override inside
-`zoom_slider()`; global spacing and other sliders are untouched. The custom
-circle uses the stock handle position/radius geometry and interaction expansion,
-fills and strokes from WO-005's shared default/hovered status foreground
-functions, and leaves the stock rail and proportional trailing fill beneath it.
-WO-007 carries the actual stock slider response out of zoom-control rendering
-and defers this paint until after the ordinary Timer, Focus Mode, Appearance,
-slider, and percentage controls have painted. It is the last ordinary
-right-group status paint and uses the current zoom value. Its clip is the
-intersection of the overall right-group rectangle, status-row rectangle, and
-inherited parent clip, allowing normal stroke/interaction expansion beyond the
-slider response into group gaps without escaping the row or parent clip. It
-remains on the ordinary status paint layer rather than a global foreground
-layer, preserving popup and unrelated-overlay ordering. No knob color source,
-widget background mutation, tooltip copy, or presentation value is changed.
-Slider width, integer range, stock input and AccessKit behavior, and zoom
-state/presentation contracts remain as before. Endpoint clipping appearance,
-compilation, and all behavior remain unverified and pending user review and
-validation.
-V2-WO-002 supersedes WO-008's current-label-width and right-aligned-galley contract. [`measured_percentage_slot_width()`](../../apps/scriptcraft/src/status_bar.rs) measures the maximum supported reference (`MAX_ZOOM_PERCENT` plus `%`) in the active status Button font and adds both unchanged [`PERCENTAGE_SIDE_RESERVATION`](../../apps/scriptcraft/src/status_bar.rs) values. [`show_impl_with_appearance()`](../../apps/scriptcraft/src/status_bar.rs) continues to construct the current label for visible paint and accessibility, while this stable width feeds [`plan_status_row()`](../../apps/scriptcraft/src/status_bar.rs). The planner's percentage rectangle is passed directly to each bounded child region: [`zoom_controls()`](../../apps/scriptcraft/src/status_bar.rs) places the stock slider and percentage at their planner rectangles without sequential-width reconstruction. [`zoom_presets_button()`](../../apps/scriptcraft/src/status_bar.rs) uses the percentage slot for allocation, the full clipped interaction/accessibility response, popup anchor, paint clip, and galley placement; it centers the current galley horizontally and vertically, bounding its origin at narrow widths.
+The desktop status row is owned by [`status_bar.rs`](../../apps/scriptcraft/src/status_bar.rs).
+Its presentation settings define the ordinary row height and the panel's symmetric
+vertical insets; the default panel height is derived from those components rather
+than maintained as an independent total. The application supplies this derived
+value as the bottom panel's default size, not an exact constraint. This keeps the
+ordinary row at its configured height while allowing the optional Diagnostics
+disclosure to expand through the panel's normal layout behavior.
 
-V2-WO-004 consumed the user-supplied baseline and post-slot traces. The baseline at egui content width 1512 recorded a planned 165-point slider but a 100-point actual slider, with the actual percentage rectangle ending 65 points before its planned right edge. The post-slot trace at content width 800 records identical planned and actual percentage rectangles `[746.78..788.00]`; thus the percentage right-edge owner was corrected by V2-WO-002, and no additional percentage or panel inset defect remains in that trace. The remaining measured delta is the stock slider response: planned end 742.78 versus actual end 677.78, again a 65-point shortfall. egui 0.34's public `Spacing::slider_width` setting is now set within the slider's scoped UI from the planner-provided width before adding the stock slider; its default was 100 points, and `add_sized` alone did not change the stock response's internally requested slider width. This uses the existing planner width (40–165 points), adds no numeric constant, and preserves the stock slider widget/response path. Existing reservations, colors, zoom semantics, centered label geometry, popup/accessibility behavior, and WO-007 deferred knob paint/clip remain unchanged in source. The baseline's former 85-point content/window-edge-to-galley observation decomposes into the 65-point slider/percentage geometry shortfall plus the intended 12-point panel inset and 8-point centered-galley reservation; after the slot correction only the intentional 20-point edge accounting remains in the supplied post-slot frame. These trace files are user evidence, not agent validation; the post-slot trace covers only 800×600 at 100% and effective ppp 2.0. No behavior or compilation check was run, and all validation remains user-owned.
-V2-WO-001 through V2-WO-004 implementation handoffs are submitted with user review and
-validation pending; no framework compatibility or behavior check is implied.
-The separate deep-scroll zoom coordinate and prepaint-compensation contract
-below remains unchanged.
+The status frame is stroke-free, and the bottom panel disables the generic egui
+separator. The status module owns a named local divider width and paints one full-width
+top divider from the status palette against the outer panel rectangle returned by the
+panel, rather than the inset content rectangle. This divider is the status surface's
+only frame-like edge; no side or bottom frame borders are added. These explicit local
+border owners do not change egui's global noninteractive widget colors or unrelated
+panel and content geometry.
+
+The row gives priority to the inline Timer, Focus Mode, Appearance, zoom slider,
+and current-percentage controls at the right. The visible-page counter has its own
+bounded left allocation, and operation/error text uses a mirrored center region.
+These regions and their control hit/accessibility bounds remain clipped to the row;
+content compression does not create an overflow action or compact-mode switch.
+The status module owns its row-local control geometry without changing global
+framework spacing or toolbar sizing. The current page reflects accepted editor
+viewport geometry rather than caret position.
+
+Timer, Focus Mode, and Appearance use their assigned Material glyphs without
+visible captions; Appearance choices remain textual in the menu. Focus Mode
+retains its state-based enablement and accessible description, and timer popup
+placement follows its interaction rectangle. Text, icons, hover treatment, and
+the zoom knob use status-local foreground ownership with optional theme-aware
+overrides; popup entries keep menu-owned styling. Center operation/error text is
+single-line, centered in its explicit region, and independently styled. The zoom
+slider and arrowless percentage control share the window's integer zoom value;
+their bounded rectangles own painting, interaction, popup anchoring, and
+accessibility. The custom circular knob follows the stock slider response and is
+clipped to the status row, right group, and inherited parent clip.
+
+Detailed status diagnostics and their disclosure are controlled by
+`presentation::ENABLE_DIAGNOSTICS`, a manual production-off source gate.
+Disabled mode constructs no detailed projection or Diagnostics row, placeholder,
+focus target, or accessibility node. When explicitly enabled for development,
+the disclosure retains its collapsed default and may expand the panel beyond the
+ordinary row allocation. Operational instrumentation and privacy-safe operation
+errors remain independent of this presentation gate.
+
+Script View owns independent top and bottom scroll-content page-edge spacing and
+its local policy for unobscured scrolling. Actual allocation and prepaint zoom
+compensation use the same asymmetric page-origin and content-extent model.
+
+The desktop [`script_view.rs`](../../apps/scriptcraft/src/script_view.rs) module owns
+the screenplay page surface: page allocation and painting, viewport culling, scroll
+and presentation-scale geometry, zoom compensation, pointer selection, caret and
+IME presentation, surface input routing, vertical navigation, and fixed-cell text
+galley support. It operates on the application-owned session, layout, theme, and
+transient view state; it does not create a second document or view-state store.
+[`main.rs`](../../apps/scriptcraft/src/main.rs) retains application and document
+orchestration, file operations, top-level panel composition, and integration with
+toolbar and status modules. The surface publishes its allocated page geometry and
+viewport state for status projection and zoom coordination, while semantic edits
+continue through the core session and shared layout remains the source for page
+geometry.
 
 The editor publishes its actual allocated page rectangles, scroll clip, scale,
 viewport, revision, and scroll offset after rendering; the status row consumes
@@ -186,9 +173,20 @@ New/Open activation resets both lifetimes, while failed Open and same-document
 Save do not reset the retained page. This reset is explicit because session
 revision alone does not identify a document. Zoom presentation uses the tracker's
 retained-or-fresh value rather than an independent same-frame unavailable
-override. These are implementation-submitted behaviors pending user review and
-validation; geometry publication, viewport-centered zoom compensation, native
-pinch, persistence, pagination, and editor input/focus remain separate contracts.
+override. Script View's independent top and bottom page-edge spacing belongs to
+scrollable content, not a fixed viewport inset, and contributes to scroll extent
+without changing core document layout. The first page can begin at the viewport
+edge while the document end retains its own allowance. The Script Workspace frame
+has no fixed margin; Script View disables scroll-edge fades locally without
+changing unrelated scroll areas. Actual page allocation and prepaint zoom
+compensation share equivalent asymmetric origins, strides, and extents: page-local
+coordinates scale with zoom, while page-edge spacing, inter-page separation,
+horizontal buffers, and outside-page displacement remain fixed logical geometry.
+Zoom compensation is
+applied before allocation and paint, clamped against matching content extents, and
+keeps published page rectangles and scroll state aligned. Manual scrolling takes
+precedence over an unapplied zoom request, and caret reveal is deferred while a
+compensation frame is pending.
 
 - Desktop shell owns presentation and platform/file interactions. Screenplay Core supplies reusable headless document capability, not an independently runnable container. The [writing-loop requirements](../requirements/features/screenplay-writing-loop.md) describe the composed user-facing flow.
 
@@ -197,8 +195,12 @@ Desktop input delegates semantic operations to the core session and project. The
 The root WindowState projection is a narrow exception to fully transient view state: the core reader
 projects one bounded direct-root block into an optional typed geometry value, while the desktop owns
 latest native logical geometry and a one-shot pending restore. The save boundary carries that snapshot
-through 001.1's save-scoped context into a detached preservation candidate; it never becomes Project,
+through the save-scoped context into a detached preservation candidate; it never becomes Project,
 EditingSession history, or layout/PDF input. Save/Save As replace only direct root WindowState nodes.
+The core's typed WindowState default is the shared source for fresh-process native startup and generated
+or fallback FDX state: Left/Top map to outer position, while Width/Height map to inner logical size.
+Imported one-shot restore remains independent of that startup default, and a complete live native
+snapshot takes precedence during transactional saves.
 
 Document points are stable 1/72-inch units owned by core layout and PDF; a default Letter sheet is
 612 × 792 document points on every OS. The desktop converts those points to egui logical page
@@ -255,21 +257,28 @@ The source-identity-use index separately summarizes Paragraph identity multiplic
 
 V2-WO-003.2 authors coverage for nested heading depth and inherited XML-space, duplicate managed ownership, scoped-refresh lookup probes, zero indexed-query fallback visits, and one rebuild after changed derived publication. Existing source-index coverage authors mutation-invalidation and rebuild-boundary cases; existing scene metadata coverage includes unsupported-scene safe deferral. All coverage remains unrun under repository policy. The authorized V2-WO-002.4–V2-WO-003.2 batch is submitted for user testing except V2-WO-002.6, whose reported Scene Heading synchronization failure remains blocked and unestablished. No user validation, performance measurement, or acceptance is recorded; V2-WO-004 through V2-WO-006 remain deferred.
 
-## V2 viewport-centered zoom
+## Script View scrolling and viewport-centered zoom
 
-V2-WO-001.1 publishes actual scroll offset, clip, scale, and allocated page rectangles and captures one bounded page-local point from the old viewport center before zoom invalidates that geometry. V2-WO-001.2 resolves the pending point only after all newly scaled page rows have been allocated. The page-local document coordinate is multiplied by the new scale; the separately captured outside-page displacement is retained in logical points, so vertical page gaps and edge distances are not scaled. Horizontal placement uses each newly allocated page rectangle, which already includes the current leading padding; neither page gaps nor padding are treated as scaled document coordinates.
+Script View owns scroll-content page-edge spacing, page allocation, scroll extent,
+and surface-local scroll presentation. Boundary spacing moves with the scrollable
+content and contributes to its extent; it is not a viewport inset or a document
+layout dimension. The Script Workspace frame has no fixed margin, and Script View
+disables scroll-edge fades only for its own scroll area. Other scroll areas retain
+their independent styling.
 
-Before the ScrollArea child is shown, the desktop derives the pending viewport-center target in content coordinates from the known scaled page geometry, outer viewport, and existing vertical item-spacing origin. It clamps the target offset independently to the predicted content extents and supplies it through `ScrollArea::scroll_offset()` so the child allocates and paints at the corrected offset in that same frame. egui's overlay scrollbars do not consume the inner viewport extent. The post-paint state mutation and rectangle translation are removed; painted page rectangles, published page geometry, and the resulting offset now describe one view. Page-local document coordinates scale, while fixed page gaps, outside-page displacement, and horizontal padding remain in logical points. Repeated zoom requests retain the first anchor. Raw manual scrolling cancels an unapplied request before the surface pass and takes precedence; a simultaneous pending caret reveal is deferred for the correction frame rather than allowed to override it. Zoom does not create a reveal request or mutate selection/session state. Document replacement continues to clear pending anchor state. This is presentation-only; fixed layout, page count, persistence percentage, canonical content, and exports are unchanged.
-
-V2-WO-001.2 is implementation-submitted with user validation pending. The desktop oracle now authors unrun coverage for both scroll axes, the 75% and 300% limits, beginning/middle/end positions, edge clamping, one-shot stability, unchanged selection/revision, constant outside-page displacement, and manual-scroll independence. Existing zoom tests cover native-factor normalization/coalescing and the status controls' shared integer zoom value. No agent-run checks or desktop validation were performed; the authored coverage is not evidence of passing behavior.
-
-### V4 validated deep-scroll zoom coordinate contract
-
-With egui 0.29.1, a `ScrollArea` child max-rect begins at `inner_rect.min - state.offset`; page rectangles allocated inside that child are viewport-positioned, as is the viewport clip. The capture point is the viewport-relative center plus the committed scroll offset, yielding a content-space point. Before containment or nearest-page selection, each allocated viewport-positioned page rectangle is translated by that same committed offset into content coordinates. This transform is required exactly once: WO-001's initial removal of the translation was incorrect and was restored. The captured page-local document point is measured within the normalized content-space page; outside-page displacement remains a separate logical-point vector and is not zoom-scaled.
-
-Prepaint compensation derives the target from the new page origin, scaled page-local document point, retained outside-page displacement, and viewport-relative center. Its vertical geometry uses a per-row stride of page height + the explicit 12-point page gap + egui's 3-point vertical item spacing; item spacing is included in every row and in the content extent, not added as a one-time top inset. The target offset is clamped independently against the predicted content extents and applied through the ScrollArea before child allocation and paint. Thus the painted page rectangles, published viewport-positioned rectangles, and committed offset describe the same frame. WO-009's pre-paint smoothing/order is preserved; v4 supersedes its prior anchor-coordinate behavior. Focused synthetic capture, deep-scroll lifecycle (including continuous native pinch and status-slider paths), and edge tests pass, but do not establish native desktop behavior or user acceptance; the manual evidence matrix and acceptance remain user-owned in the v4 closeout record.
-
-V3-WO-006 adds desktop-only, saturating value-free lifecycle counts for anchor capture success/miss, manual-scroll cancellation, compensation queueing, geometry publication, and anchor consumption to `PerformanceMeasurements`/`safe_summary()`. Its complete-frame oracle invokes `raw_input_hook()` and application updates for repeated native pinch, the actual status slider, cancellation, and settled follow-up frames, checking page index, page-local point, outside-page displacement, and one-shot consumption. The authorized native-path failure established successful capture, no cancellation, a correct queued target, and geometry publication/consumption without the requested offset being applied. V3-WO-007 corrected the missed scroll-state application; V3-WO-009 then moved that one-shot offset to pre-paint ordering so the actual painted rectangles, published geometry, and committed offset agree for every zoom frame. The focused lifecycle command passed with six consecutive native-pinch frames, plus retained status-slider, cancellation, and settled-anchor assertions. This is synthetic evidence, not proof of the user's exact desktop gesture. The user's platform event shape and actual desktop before/after observations, manual confirmation, and acceptance remain outstanding. Counters do not establish user-perceived behavior or performance.
+The surface publishes the actual scroll offset, clip, scale, and allocated page
+rectangles. Zoom anchoring captures a bounded page-local document point and keeps
+outside-page displacement as separate fixed logical presentation geometry. The
+prepaint compensation derives its target from the newly scaled page origin and
+page-local point, applies the pending offset before allocation and paint, and
+clamps against the same content extent used by actual page allocation. Actual and
+prepaint geometry account for page-edge spacing, row stride, and content extent
+equivalently, with each contribution included once. Page-local coordinates scale;
+page-edge spacing, inter-page separation, horizontal buffers, and outside-page
+displacement do not. Published page rectangles, clip, scale, and committed offset
+therefore describe the same frame. Manual scrolling cancels an unapplied request;
+caret reveal defers while compensation is pending. Zoom remains presentation-only
+and does not change canonical content, fixed layout, persistence, or exports.
 
 V3-WO-001 adds numeric changed/unchanged scene totals to desktop performance diagnostics, projected from existing `CastListCorrection` outcomes alongside requested/attempted/deferred/failed counts. User evidence established the imported newly inserted Cast List repeated-refresh branch and WO-002's narrow production correction synchronizes semantic runs with retained source runs. The authorized focused regression command subsequently passed. Its later Save/reopen failure was test identity drift: the test had carried transient semantic `StableId` across rebase/reopen, and now resolves the list by durable foreign FDX paragraph identity. It continues to assert Cast List role, semantic/source runs, native save/reopen, Character values, and unrelated source preservation. Fatal refresh failure suspension and safe-stop deferral remain separate: failed pending work is nonretryable until relevant invalidation, while safe-deferred work is reconsidered after a relevant revision. Neither outcome weakens complete explicit Save/Save As preparation or fatal validation/storage gates. WO-001's broader diagnostic/scheduler cases remain unrun.
 

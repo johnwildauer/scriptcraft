@@ -20,10 +20,14 @@ pub(super) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250,
 mod presentation {
     use eframe::egui::{self, Color32};
 
+    /// Height of the ordinary status content row, in logical points.
+    pub(super) const STATUS_ROW_HEIGHT: f32 = 20.0;
+    /// Local width for the status panel's explicitly painted top divider.
+    pub(super) const STATUS_PANEL_TOP_BORDER_WIDTH: f32 = 1.0;
     /// Horizontal inset of the bottom status panel, in logical points.
     pub(super) const PANEL_HORIZONTAL_INSET: i8 = 12;
     /// Symmetric top/bottom inset of the bottom status panel, in logical points.
-    pub(super) const PANEL_VERTICAL_INSET: i8 = 5;
+    pub(super) const PANEL_VERTICAL_INSET: i8 = 3;
     /// Padding around each status icon's hover rectangle, in logical points.
     pub(super) const ICON_HOVER_PADDING: f32 = 2.0;
     /// Status icon allocation width, preserving the current ZOOM_SLIDER_MIN_WIDTH slot.
@@ -80,15 +84,33 @@ mod presentation {
 }
 
 pub(super) fn status_panel_frame(ctx: &egui::Context, palette: StatusPalette) -> egui::Frame {
-    let frame = egui::Frame::side_top_panel(ctx.global_style().as_ref());
-    let stroke = egui::Stroke::new(frame.stroke.width, palette.border);
-    frame
+    egui::Frame::side_top_panel(ctx.global_style().as_ref())
         .inner_margin(egui::Margin::symmetric(
             presentation::PANEL_HORIZONTAL_INSET,
             presentation::PANEL_VERTICAL_INSET,
         ))
         .fill(palette.background)
-        .stroke(stroke)
+        .stroke(egui::Stroke::NONE)
+}
+
+pub(super) fn paint_panel_top_border(
+    ui: &egui::Ui,
+    panel_rect: Rect,
+    palette: StatusPalette,
+) {
+    let width = presentation::STATUS_PANEL_TOP_BORDER_WIDTH;
+    let y = panel_rect.top() + width * 0.5;
+    ui.painter_at(panel_rect).line_segment(
+        [
+            egui::pos2(panel_rect.left(), y),
+            egui::pos2(panel_rect.right(), y),
+        ],
+        egui::Stroke::new(width, palette.border),
+    );
+}
+
+pub(super) const fn default_panel_height() -> f32 {
+    presentation::STATUS_ROW_HEIGHT + (presentation::PANEL_VERTICAL_INSET as f32 * 2.0)
 }
 
 pub(super) fn apply_status_palette(ui: &mut egui::Ui, palette: StatusPalette) {
@@ -319,7 +341,7 @@ fn zoom_slider(
             // response at the default 100 points. Match the planner-owned slot.
             ui.spacing_mut().slider_width = width;
             ui.add_sized(
-                [width, ui.spacing().interact_size.y],
+                [width, presentation::STATUS_ROW_HEIGHT],
                 egui::Slider::new(zoom_percent, MIN_ZOOM_PERCENT..=MAX_ZOOM_PERCENT)
                     .integer()
                     .trailing_fill(true)
@@ -562,7 +584,7 @@ fn status_icon_control(
     ui.add_enabled_ui(enabled, |ui| {
         ui.push_id(stable_id, |ui| {
             let padding = presentation::ICON_HOVER_PADDING;
-            let row_height = ui.spacing().interact_size.y;
+            let row_height = presentation::STATUS_ROW_HEIGHT;
             let width = status_icon_width().min(ui.available_width().max(0.0));
             let icon_control_size = Vec2::new(
                 (width - padding * 2.0).max(1.0),
@@ -618,14 +640,25 @@ pub(super) fn render_item(ui: &mut egui::Ui, item: &StatusItem) -> Option<Status
             None
         }
         StatusItemKind::ClickableText => {
-            let response = ui.push_id(item.id, |ui| ui.button(&item.label)).inner;
+            let response = ui
+                .push_id(item.id, |ui| {
+                    ui.scope(|ui| {
+                        ui.spacing_mut().interact_size.y = presentation::STATUS_ROW_HEIGHT;
+                        ui.button(&item.label)
+                    })
+                    .inner
+                })
+                .inner;
             Some(interactive_response(ui, response, &item.accessible_name))
         }
         StatusItemKind::ClickableIcon => {
             let response = ui
                 .push_id(item.id, |ui| {
                     ui.add_sized(
-                        ui.spacing().interact_size,
+                        Vec2::new(
+                            ui.spacing().interact_size.x,
+                            presentation::STATUS_ROW_HEIGHT,
+                        ),
                         egui::Button::new(&item.label)
                             .frame(false)
                             .sense(Sense::click()),
@@ -1279,7 +1312,7 @@ fn show_impl_with_appearance(
     let mut timer_just_opened = timer_just_opened;
     let mut focus_activated = focus_activated;
     let message = status_message(center);
-    let row_height = ui.spacing().interact_size.y;
+    let row_height = presentation::STATUS_ROW_HEIGHT;
     let available = ui.available_rect_before_wrap().intersect(ui.clip_rect());
     let row_rect = Rect::from_min_size(
         available.min,

@@ -195,6 +195,15 @@ viewport presentation. This does not promise exact layout fidelity for every FDX
     save-failure safety remain transactional and unchanged. Structural counters may report index
     rebuilds/lookups, scoped accepts, complete candidate validations, and safe fallbacks; no timing
     guarantee or speed result is implied.
+  - **AC-WRITING-002.14:** Desktop page-edge breathing room shall belong to scrollable content, move
+    with that content, and contribute to its scroll extent rather than remain as a fixed viewport
+    inset. Script View shall own independent top and bottom content-edge spacing so the first page
+    can begin flush with the viewport while the document end retains its own allowance. Script View
+    page content shall remain unobscured by scroll-edge fade overlays during ordinary vertical or
+    horizontal scrolling; this surface-local presentation policy shall not change unrelated scroll
+    areas. Presentation spacing shall not alter core document layout, and actual page allocation and
+    prepaint zoom compensation shall use equivalent asymmetric page origins and content extents while
+    scaling page-local coordinates independently from fixed presentation spacing.
 
 ### Durable native project persistence
 
@@ -395,8 +404,10 @@ project meaning; failures preserve the prior valid destination and unsaved state
     Open or trigger a restore. Unknown/missing Mode uses Normal. A valid imported geometry is sent
     once as a best-effort native outer position and inner logical size after activation; absent or
     unusable geometry leaves the current window unchanged, and no later frame retries the request.
-    Save/Save As serialize the latest valid OS-logical outer position and inner size, using the
-    documented 870 × 854 at (0,95) agent-default when no complete native snapshot is available.
+    Fresh-process native startup and generated/fallback FDX WindowState use one shared typed
+    default, mapping Left/Top to outer position and Width/Height to inner logical size. Save/Save As
+    serialize the latest valid OS-logical outer position and inner size, using that same default only
+    when no complete native snapshot is available.
     Window movement/resizing does not alter Project semantics, revision, dirty state, history, fixed
     layout, or PDF output. Actual transactional Save/Save As replaces all direct root WindowState
     duplicates with one canonical Height, Left, Mode, Top, Width block, inserting a missing block
@@ -537,13 +548,18 @@ model. Native window chrome remains owned by macOS where applicable.
     surface; that region shall support independently adjustable left, top, right, and bottom padding.
     The centered text caption beneath an action graphic shall remain outside that response,
     retain its resolved normal foreground when enabled, remain available for accessibility use, and
-    not add a redundant visible-label tooltip. Icon graphics shall use their assigned typed Material
-    icons; graphic, behavior, enablement, and caption visibility shall remain separate item fields.
-    Toolbar and status Material glyphs shall use the bundled native Material Symbols Rounded TTF,
-    with outlined and filled forms selected through the corresponding `FILL` axis. The initial
-    developer defaults shall be weight 200, optical size 24, and grade 0; toolbar icons may override
-    supported axes per icon, while status icons retain the defaults. These axes shall be explicit
-    presentation metadata and shall not affect text/document fonts.
+    not add a redundant visible-label tooltip. Action and Elements captions shall share an explicit
+    control-to-caption vertical rhythm and fit within the common Item-group budget. Both captions
+    shall use the same group-relative rectangle derived from the nominal control slot and shared gap,
+    and shall be centered horizontally and vertically within it. Elements shall own a separate
+    vertical optical adjustment with a neutral default; its nominal caption placement shall not
+    depend on the closed ComboBox response height. The complete composition shall remain contained
+    by the toolbar panel. Icon graphics shall use their assigned
+    typed Material icons; graphic, behavior, enablement, and caption visibility shall remain separate
+    item fields. Toolbar and status Material glyphs shall use the bundled native Material Symbols
+    Rounded TTF, with outlined and filled forms selected through the corresponding `FILL` axis.
+    Toolbar icons may override supported axes per icon, while status icons retain their defaults.
+    These axes shall be explicit presentation metadata and shall not affect text/document fonts.
     Show/Hide shall display outlined Visibility and independently specified outlined Keyboard Arrow
     Down graphics plus its caption, and Export Text shall display its outlined File Export graphic
     plus its caption. Both shall use the disabled foreground for every graphic and caption, with no
@@ -559,19 +575,21 @@ model. Native window chrome remains owned by macOS where applicable.
     derive their desired vertical extent from all supported role rows and active menu metrics,
     including row spacing and popup frame allowance, rather than an arbitrary short fixed height.
     The Elements closed selected role and role rows in the central dropdown and overflow submenu
-    shall use the same separately named logical-point text-size default. The Elements caption shall
-    retain toolbar item text sizing. Role-option rows shall provide 12 logical points of horizontal
-    inset on each side. Popup desired-height measurement shall use the role-row font metrics.
+    shall use the same separately named text-size default. The Elements caption shall retain toolbar
+    item text sizing and use the centered nominal caption rectangle, independently of the stock
+    ComboBox response height; its separately owned vertical optical adjustment shall not move action
+    captions. Role-option rows shall retain their separately owned horizontal inset. Popup
+    desired-height measurement shall use the role-row font metrics.
     All supported labels shall be simultaneously visible at ordinary usable viewport heights;
     viewport bounds are the only height limitation, and constrained viewports shall retain bounded
     scrolling that makes every role reachable. Choosing a label from either presentation shall apply
     the role through the transactional session operation and preserve the document on rejection.
-  - **AC-WRITING-005.5:** Given a toolbar width, Space shall consume one deterministic 72-point
+  - **AC-WRITING-005.5:** Given a toolbar width, Space shall consume its deterministic catalog
     width, rendered normal Items shall consume their complete graphic arrangement and visible
     caption width measured at runtime using active egui style/font metrics and resolved icon point
     sizes, and the four Flexible Space Items shall divide the remaining width equally after the
-    shared 4-point horizontal row-padding and 4-point inter-item-gap budget whenever all ordinary
-    Items fit. At narrow widths Flexible Spaces shall be excluded from overflow and consume no
+    shared horizontal row-padding and inter-item-gap budget whenever all ordinary Items fit. At
+    narrow widths Flexible Spaces shall be excluded from overflow and consume no
     allocation slots. The toolbar shall retain leftmost fitting non-spacing Items and expose the
     remaining non-spacing Items through a far-right menu whose icon-only trigger is the catalog's
     outlined Double Arrows Material graphic, uses the accessible name Toolbar overflow, and is
@@ -591,6 +609,12 @@ model. Native window chrome remains owned by macOS where applicable.
     request the standard arrow cursor, while the whole-document editing response shall request
     the text/I-beam cursor. Decorative labels and painted page rectangles shall not create
     competing cursor owners.
+  - **AC-WRITING-005.8:** The toolbar panel's exact height shall derive from its top padding and
+    shared Item-group height, with no additional blank allocation after the Item group. Its lower
+    divider shall align with the panel edge, and Script View shall follow the toolbar without an
+    intervening application spacer or fixed frame/top-content inset. Script View page-edge spacing
+    remains owned by scrollable content. The toolbar divider shall use an explicit toolbar-local
+    width setting and the toolbar palette's border color, without adding other toolbar frame edges.
 
 ### Desktop status bar and visible page
 
@@ -625,7 +649,7 @@ content.
     tooltips shall remain meaningful without visible captions. Focus Mode shall retain its
     state-specific accessible description and shall only be enabled when its existing window-state
     gate permits activation. Status icons and the current-percentage control shall share toolbar hover
-    semantics: clipped hovered-widget background, two-point corner radius, default cursor, and the
+    semantics: clipped hovered-widget background, rounded corners, default cursor, and the
     status-local hover padding setting. Percentage hover shall be immediate, shall not activate or
     open its menu, and shall not add timed animation. Idle control backgrounds shall remain
     transparent. Status hover geometry shall not share or change the toolbar's numeric padding.
@@ -674,17 +698,22 @@ content.
     left edge `row_left + R`, and right edge `row_right - R`. When `W <= 2R`, collapse it to zero
     width at Timer's left edge. The page allocation shall be capped before the mirrored center
     region and right controls so it cannot overlap either; its symmetric horizontal inset shall be
-    a named status-local setting initialized to 0 points and applied consistently to measured and
-    allocated width, paint clipping, and accessibility bounds. Grow the slider from its named
-    40-point minimum toward its named 165-point maximum only after fixed right controls and the
-    bounded page allocation fit. The center message shall be horizontally and vertically centered
+    a named status-local setting applied consistently to measured and
+    allocated width, paint clipping, and accessibility bounds. Grow the slider within its named
+    status-local width bounds only after fixed right controls and the bounded page allocation fit.
+    The center message shall be horizontally and vertically centered
     in its explicit region, clip or disappear when that region is exhausted, and never displace or
     reclaim space from the right controls. There shall be no status More/! More trigger, overflow
     path, or breakpoint-based compact mode. At supported widths including 1200, 480, and 320
     logical points, the five right-hand elements shall remain inline and within the visible row;
     page text clips within its own region if necessary. Operation/error text shall clip horizontally
     as single-line content rather than wrap or grow the footer, and the existing accessible error
-    projection shall remain available. The symmetric top/bottom panel inset, zoom slider bounds,
+    projection shall remain available. One named status-local setting shall own the ordinary row
+    height, and the bottom panel's default height shall derive from that row and the existing
+    symmetric vertical insets, without an independent total-height setting. The caller shall use
+    default rather than exact panel sizing. The ordinary row shall retain its current effective
+    height; explicitly enabled Diagnostics may expand through normal panel allocation, while the
+    production-off mode adds no row. The symmetric top/bottom panel inset, zoom slider bounds,
     center font size/color, and page inset shall be named, status-local manual settings initialized
     to their current effective values; adjusting center settings shall not alter Body, Button, page,
     or Diagnostics typography/colors. The privacy-safe Diagnostics disclosure and detailed status
@@ -739,11 +768,10 @@ content.
     The slider shall use a full circular
     knob colored from the same status-local default/hovered foreground settings as status text and
     icons, without recoloring its rail or trailing fill. Its rail thickness shall use a status-local
-    setting initialized to the inherited 8 logical points; this requirement does not apply the
-    optional 30–40% reduction. Preserve the existing 40–165 logical-point slider allocation, stock
+    setting; no optional reduction is required. Preserve planner-owned slider allocation, stock
     slider response, input and accessibility behavior, and page-zoom semantics. Size the stock slider
-    through its scoped egui slider-width setting from the planner's allocation, preserving the planned
-    40–165-point width without a separate sizing constant. Paint the custom knob after the ordinary
+    through its scoped egui slider-width setting from the planner's allocation without a separate
+    sizing constant. Paint the custom knob after the ordinary
     Timer, Focus Mode, Appearance, slider, and percentage controls, using the
     stock slider response and current zoom value. Clip it to the intersection of the overall
     right-hand group, status row, and inherited parent clip, not the slider response rectangle; its
@@ -765,9 +793,8 @@ content.
     pagination, source mapping, and PDF geometry remain OS-independent. Persisted TextState Scaling
     is only the user's whole-percent zoom and never stores platform or native display multipliers.
   - **AC-WRITING-006.8:** With status content and viewport size unchanged, the bottom status panel
-    shall remain height-stable across 60 consecutive egui frames at normal (1200 × 820 logical
-    points) and compact (480 × 820 logical points) widths. After frame 1, the panel-height range
-    across frames 2–60 shall be no greater than 1 logical point, with no monotonic growth;
+    shall remain height-stable across consecutive egui frames at normal and compact widths, with no
+    monotonic growth after initial layout;
     status controls and content shall remain available and the panel shall leave both toolbar
     and editor visible. Center message sizing shall remain a stable one-row presentation; changing
     only its center-local font or color override shall not modify Body, Button, page, or Diagnostics
@@ -803,11 +830,16 @@ content.
     fill and selected-text colors. Appearance changes
     shall not persist and shall not change screenplay data, layout/source mappings, session
     revision, dirty/undo state, page zoom, or PDF/plain-text output. Desktop colors shall be owned by
-    one application-level semantic palette, with distinct toolbar, Script Workspace, status, shared
-    control, overlay, and feedback designations. The palette shall map into the framework's native
-    visuals while retaining app-specific page, status, and toolbar colors; per-item/icon overrides
-    remain explicit higher-precedence exceptions. Palette ownership shall not move into screenplay
-    data or shared document layout.
+     one application-level semantic palette, with distinct toolbar, Script Workspace, status, shared
+     control, overlay, and feedback designations. The palette shall map into the framework's native
+     visuals while retaining app-specific page, status, and toolbar colors; per-item/icon overrides
+     remain explicit higher-precedence exceptions. Palette ownership shall not move into screenplay
+     data or shared document layout. Toolbar and screenplay-page borders shall use separate named
+     local width settings and their respective palette colors; the page border shall retain its
+     middle-stroke kind and page-painter clipping. The status frame shall remain stroke-free and the
+     bottom panel's framework separator shall be disabled. One explicit full-width top divider shall
+     use the status palette border color and a named status-local width, painted within and anchored
+     to the outer status-panel rectangle; the status frame shall not add side or bottom borders.
   - **AC-WRITING-006.12:** Sprint Timer shall be an accessible per-window status action with
     mutually exclusive Countdown and Stopwatch modes. Countdown shall default to 25 minutes,
     accept whole minutes from 1 through 1440, preserve invalid input without starting, and

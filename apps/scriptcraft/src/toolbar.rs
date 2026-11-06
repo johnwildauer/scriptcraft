@@ -11,10 +11,13 @@ pub(super) const TOOLBAR_NORMAL_ITEM_WIDTH: f32 = 46.0;
 pub(super) const TOOLBAR_GROUP_HORIZONTAL_PADDING: f32 = 8.0;
 pub(super) const TOOLBAR_ROW_PADDING: f32 = 4.0;
 pub(super) const TOOLBAR_ITEM_GAP: f32 = 4.0;
-pub(super) const TOOLBAR_TOP_PADDING: f32 = 6.0;
-// Preserve the toolbar's text/control clearance. The trailing span is part of
-// the exact top-panel allocation and must not be removed to fix a viewport row.
-pub(super) const TOOLBAR_BOTTOM_PADDING: f32 = 6.0;
+pub(super) const TOOLBAR_TOP_PADDING: f32 = 4.0;
+pub(super) const TOOLBAR_CONTROL_CAPTION_GAP: f32 = 1.0;
+pub(super) const TOOLBAR_ELEMENTS_CAPTION_VERTICAL_OFFSET: f32 = 0.0;
+// Explicit owner for trailing toolbar allocation; exact panel sizing includes this value.
+pub(super) const TOOLBAR_BOTTOM_PADDING: f32 = 4.0;
+/// Local width for the toolbar's explicitly painted bottom divider.
+pub(super) const TOOLBAR_BOTTOM_BORDER_WIDTH: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ToolbarIconHoverPadding {
@@ -66,7 +69,7 @@ mod toolbar_presentation {
     /// Alpha multiplier used only when no explicit disabled-color override resolves.
     pub(super) const DISABLED_OPACITY_MULTIPLIER: f32 = 0.45;
     /// Agent-default Material glyph size, initially matching the existing Body glyph size.
-    pub(super) const DEFAULT_MATERIAL_ICON_POINT_SIZE: f32 = 18.0;
+    pub(super) const DEFAULT_MATERIAL_ICON_POINT_SIZE: f32 = 19.0;
     /// Default Material glyph family; individual icons may override this variant.
     pub(super) const DEFAULT_MATERIAL_ICON_VARIANT: ToolbarIconVariant =
         ToolbarIconVariant::Outlined;
@@ -77,7 +80,7 @@ mod toolbar_presentation {
     /// Horizontal padding on each side of an Elements role-option row, in points.
     pub(super) const DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING: f32 = 18.0;
     /// Gap between icons in grouped or primary/disclosure graphics, in logical points.
-    pub(super) const DEFAULT_GRAPHIC_GAP: f32 = 4.0;
+    pub(super) const DEFAULT_GRAPHIC_GAP: f32 = 0.0;
 
     pub(super) fn enabled_foreground(
         ui: &egui::Ui,
@@ -542,7 +545,8 @@ impl ScriptCraftApp {
         presentation: ToolbarPresentationMetrics,
     ) {
         let palette = self.theme_palette.toolbar;
-        let (id, rect) = ui.allocate_space(Vec2::new(width, ui.spacing().interact_size.y * 2.0));
+        let group_height = toolbar_item_group_height(ui.style());
+        let (id, rect) = ui.allocate_space(Vec2::new(width, group_height));
         let icon_control_size = Vec2::splat(presentation.icon_control_size);
         let icon_control_rect = toolbar_icon_control_rect(rect, icon_control_size);
         let icon_rect = toolbar_icon_hover_rect(icon_control_rect, TOOLBAR_ICON_HOVER_PADDING);
@@ -584,11 +588,14 @@ impl ScriptCraftApp {
                 body_font,
                 label_color,
             );
+            let caption_rect = toolbar_caption_rect(
+                rect,
+                icon_control_rect.height(),
+                TOOLBAR_CONTROL_CAPTION_GAP,
+            );
             let label_center = egui::pos2(
-                rect.center().x,
-                icon_control_rect.max.y
-                    + ui.spacing().item_spacing.y
-                    + label_galley.size().y / 2.0,
+                caption_rect.center().x,
+                caption_rect.center().y,
             );
             ui.painter().galley(
                 label_center - label_galley.size() / 2.0,
@@ -625,14 +632,16 @@ impl ScriptCraftApp {
     ) {
         let selected_role = self.focused_role();
         let mut next_role = selected_role.unwrap_or(Role::Action);
+        let group_height = toolbar_item_group_height(ui.style());
         let group_response = ui.allocate_ui_with_layout(
-            Vec2::new(width, ui.spacing().interact_size.y * 2.0),
+            Vec2::new(width, group_height),
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
                 // ComboBox has an intrinsic minimum. Constrain this child to the
                 // same explicit budget used by allocate_toolbar so it cannot
                 // advance the parent row past the allocated Elements slot.
                 ui.set_width(width);
+                let group_rect = ui.max_rect();
                 let role_popup_height = elements_role_popup_max_height(ui);
                 let combo_result = egui::ComboBox::from_id_salt(item.id)
                     .width(width)
@@ -672,6 +681,9 @@ impl ScriptCraftApp {
                             );
                         }
                     });
+                // The popup has finished using its normal role-row spacing. Disable
+                // child layout spacing only for the explicit caption allocations below.
+                ui.spacing_mut().item_spacing.y = 0.0;
                 let popup_open = combo_result.inner.is_some();
                 let combo_response = combo_result.response.on_hover_cursor(toolbar_cursor_icon());
                 if !popup_open {
@@ -698,15 +710,31 @@ impl ScriptCraftApp {
                 }
                 // This caption is decorative. Allocate/paint it instead of adding a
                 // label response that can compete with the ComboBox cursor owner.
-                let (_, label_rect) = ui.allocate_space(ui.spacing().interact_size);
+                let remaining_caption_height = (group_height
+                    - combo_response.rect.height()
+                    - TOOLBAR_CONTROL_CAPTION_GAP)
+                    .max(0.0);
+                let (_gap_id, _gap_rect) = ui.allocate_space(Vec2::new(
+                    width,
+                    TOOLBAR_CONTROL_CAPTION_GAP,
+                ));
+                let (_, label_rect) =
+                    ui.allocate_space(Vec2::new(width, remaining_caption_height));
                 let label_font = presentation.font_id();
+                let caption_rect = toolbar_caption_rect(
+                    group_rect,
+                    presentation.icon_control_size,
+                    TOOLBAR_CONTROL_CAPTION_GAP,
+                )
+                .translate(Vec2::new(0.0, TOOLBAR_ELEMENTS_CAPTION_VERTICAL_OFFSET));
                 ui.painter().text(
-                    label_rect.left_center(),
-                    egui::Align2::LEFT_CENTER,
+                    caption_rect.center(),
+                    egui::Align2::CENTER_CENTER,
                     item.label,
                     label_font,
                     toolbar_presentation::enabled_foreground(ui, item, None),
                 );
+                let _ = label_rect;
                 debug_assert!(combo_response.rect.width() <= width + f32::EPSILON);
             },
         );
@@ -842,7 +870,10 @@ impl ScriptCraftApp {
             }
             ui.add_space(TOOLBAR_TOP_PADDING);
             ui.allocate_ui_with_layout(
-                Vec2::new(allocation.row_width, ui.spacing().interact_size.y * 2.0),
+                Vec2::new(
+                    allocation.row_width,
+                    toolbar_item_group_height(ui.style()),
+                ),
                 egui::Layout::left_to_right(egui::Align::Min),
                 |ui| {
                     ui.add_space(TOOLBAR_ROW_PADDING);
@@ -901,7 +932,7 @@ impl ScriptCraftApp {
                     egui::pos2(toolbar_rect.left(), y),
                     egui::pos2(toolbar_rect.right(), y),
                 ],
-                egui::Stroke::new(1.0, palette.border),
+                egui::Stroke::new(TOOLBAR_BOTTOM_BORDER_WIDTH, palette.border),
             );
         }
     }
@@ -939,6 +970,20 @@ pub(super) fn toolbar_icon_control_rect(
     )
 }
 
+pub(super) fn toolbar_caption_rect(
+    group_rect: egui::Rect,
+    nominal_control_height: f32,
+    control_caption_gap: f32,
+) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(
+            group_rect.left(),
+            group_rect.top() + nominal_control_height + control_caption_gap,
+        ),
+        group_rect.max,
+    )
+}
+
 pub(super) fn toolbar_icon_hover_rect(
     icon_control_rect: egui::Rect,
     padding: ToolbarIconHoverPadding,
@@ -961,6 +1006,10 @@ pub(super) fn toolbar_group_fill(style: &egui::Style, hovered: bool) -> Color32 
     }
 }
 
+pub(super) fn toolbar_item_group_height(style: &egui::Style) -> f32 {
+    style.spacing.interact_size.y * 2.0
+}
+
 pub(super) fn toolbar_content_height(style: &egui::Style) -> f32 {
-    style.spacing.interact_size.y * 2.0 + TOOLBAR_BOTTOM_PADDING
+    TOOLBAR_TOP_PADDING + toolbar_item_group_height(style) + TOOLBAR_BOTTOM_PADDING
 }
