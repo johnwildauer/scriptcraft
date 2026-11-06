@@ -29,15 +29,17 @@ mod macos_sf_symbols;
 mod menu;
 mod menu_items;
 mod script_view;
+mod shortcuts;
 mod sprint_timer;
 mod status_bar;
 mod theme;
 mod toolbar;
 mod toolbar_items;
-use app_commands::AppCommand;
-use sprint_timer::{NotificationResult, NotificationSink};
+use sprint_timer::NotificationResult;
 use status_bar::{DiagnosticProjection, ViewportCenterAnchor, ViewportPageTracker};
 use toolbar::toolbar_content_height;
+use app_commands::CommandInvocation;
+use scriptcraft_commands::{Command, CommandOrigin, DocumentPath, ImportResolution, ZoomFactor};
 
 fn has_extension(path: &std::path::Path, expected: &str) -> bool {
     path.extension()
@@ -388,7 +390,7 @@ enum RevealIntent {
 
 struct ScriptCraftApp {
     session: EditingSession,
-    pending_menu_commands: menu::PendingMenuCommands,
+    pending_commands: menu::PendingDesktopCommands,
     #[cfg(target_os = "macos")]
     native_menu: Option<macos_menu::NativeMenuController>,
     focus_mode: focus_mode::FocusModeController,
@@ -444,7 +446,7 @@ impl ScriptCraftApp {
         let (notification_sink, notification_results) = sprint_timer::NativeNotificationSink::new();
         Ok(Self {
             session,
-            pending_menu_commands: menu::PendingMenuCommands::default(),
+            pending_commands: menu::PendingDesktopCommands::default(),
             #[cfg(target_os = "macos")]
             native_menu: None,
             focus_mode: focus_mode::FocusModeController::default(),
@@ -500,14 +502,10 @@ impl ScriptCraftApp {
     }
 
     fn reconcile_sprint_timer(&mut self, now: Duration) {
-        if let Some(notice) = self.sprint_timer.reconcile(now) {
-            let result = self.notification_sink.request(notice);
-            self.sprint_timer
-                .apply_notification_result(notice.generation, result);
-        }
+        let notification = self.sprint_timer.reconcile(now);
+        self.request_timer_notification(notification);
         while let Ok((generation, result)) = self.notification_results.try_recv() {
-            self.sprint_timer
-                .apply_notification_result(generation, result);
+            self.apply_timer_notification_result(generation, result);
         }
     }
 
@@ -699,9 +697,15 @@ impl ScriptCraftApp {
         Ok(layout)
     }
 
-    fn save_native(&mut self) {
+    fn save_native(&mut self, ctx: &egui::Context) {
         let Some(path) = self.native_path.clone() else {
-            self.save_as_native();
+            self.dispatch_command(
+                CommandInvocation::new(
+                    Command::FileSaveAsRequest,
+                    CommandOrigin::InternalFollowUp,
+                ),
+                ctx,
+            );
             return;
         };
         self.save_native_at(&path);
@@ -796,10 +800,10 @@ impl ScriptCraftApp {
         self.status = format!("FDX save failed; document unchanged; {health}");
     }
 
-    fn open_native(&mut self) {
+    fn open_native(&mut self, ctx: &egui::Context) {
         let dialog = rfd::FileDialog::new().add_filter("Final Draft document", &["fdx"]);
         if let Some(path) = dialog.pick_file() {
-            self.open_native_at(&path);
+            self.dispatch_document_path_command(&path, false, ctx);
         }
     }
 
@@ -915,11 +919,28 @@ impl ScriptCraftApp {
                 return;
             }
         };
-        if replacement.set_selection(text_state.selection).is_err() {
-            let _ = replacement.set_selection(Selection::caret(Position {
-                element: 0,
-                offset: 0,
-            }));
+        let restored_selection = scriptcraft_commands::Selection::from_core(text_state.selection)
+            .ok()
+            .map(|selection| Command::EditorSelectionSet { selection })
+            .is_some_and(|command| {
+                matches!(
+                    scriptcraft_commands::execute_editor_command(&mut replacement, &command),
+                    scriptcraft_commands::CommandOutcome::Changed
+                        | scriptcraft_commands::CommandOutcome::NoOp
+                )
+            });
+        if !restored_selection {
+            if let Ok(selection) = scriptcraft_commands::Selection::from_core(Selection::caret(
+                Position {
+                    element: 0,
+                    offset: 0,
+                },
+            )) {
+                let _ = scriptcraft_commands::execute_editor_command(
+                    &mut replacement,
+                    &Command::EditorSelectionSet { selection },
+                );
+            }
         }
         self.session = replacement;
         self.zoom_percent = text_state.scaling.clamp(
@@ -963,18 +984,38 @@ impl ScriptCraftApp {
         self.finish_fdx_import(pending.path, pending.source, consent);
     }
 
-    fn save_as_native(&mut self) {
+    fn save_as_native(&mut self, ctx: &egui::Context) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Final Draft document", &["fdx"])
             .set_file_name("Untitled Screenplay.fdx")
             .save_file()
         {
-            if !has_extension(&path, "fdx") {
-                self.show_error("Native Save As requires an .fdx destination");
-                return;
-            }
-            self.save_fdx_as_at(&path);
+            self.dispatch_document_path_command(&path, true, ctx);
         }
+    }
+
+    fn dispatch_document_path_command(
+        &mut self,
+        path: &std::path::Path,
+        save_as: bool,
+        ctx: &egui::Context,
+    ) {
+        let Some(path) = path
+            .to_str()
+            .and_then(|path| DocumentPath::new(path).ok())
+        else {
+            self.show_error("Selected document path is not valid UTF-8");
+            return;
+        };
+        let command = if save_as {
+            Command::FileSaveAs { path }
+        } else {
+            Command::FileOpen { path }
+        };
+        self.dispatch_command(
+            CommandInvocation::new(command, CommandOrigin::InternalFollowUp),
+            ctx,
+        );
     }
 
     fn export_pdf(&mut self) {
@@ -1086,7 +1127,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                 menu::show_menu_bar(
                     ui,
                     availability,
-                    &mut app.pending_menu_commands,
+                    &mut app.pending_commands,
                 );
             });
         let rect = menu_panel.response.rect;
@@ -1155,47 +1196,27 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         .show_separator_line(false)
         .show_inside(ui, |ui| {
         status_bar::apply_status_palette(ui, app.theme_palette.status);
-        let was_timer_open = app.sprint_timer.popup_open;
         let focus_view = app.focus_mode.view();
-        let mut focus_activated = false;
-        let (zoom_changed, appearance_changed, timer_button_rect, _focus_button_rect) =
-            status_bar::show_with_focus_mode(
+        let status_intents = status_bar::show_with_focus_mode(
                 ui,
                 app.theme_palette.status,
                 page_number,
                 &center,
                 diagnostics,
-                &mut app.zoom_percent,
-                &mut app.appearance_mode,
-                &mut app.sprint_timer.popup_open,
-                &mut app.sprint_timer.just_opened,
+                app.zoom_percent,
+                app.appearance_mode,
                 &focus_view,
-                &mut focus_activated,
             );
-        if !was_timer_open && app.sprint_timer.popup_open {
-            app.sprint_timer.popup_anchor = timer_button_rect.unwrap_or(egui::Rect::NOTHING);
-        }
-        if was_timer_open && !app.sprint_timer.popup_open {
-            app.sprint_timer.close_popup();
-        }
-        if appearance_changed {
-            ctx.request_repaint();
-        }
-        if zoom_changed {
-            // Pointer/keyboard slider and exact preset edits become the new
-            // continuous pinch baseline, keeping both control paths in sync
-            // without changing document/session state.
-            app.capture_pending_zoom_anchor(&ctx);
-            app.sync_pinch_zoom_from_controls();
-            app.page_geometry.invalidate();
-            app.page_scale = None;
-        }
-        if focus_activated {
-            if let Some(request) = app.focus_mode.request(now) {
-                // The request/pending generation is committed before the
-                // viewport effect so same-frame or reentrant activation cannot
-                // issue an implicit inverse.
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(request.target));
+        let timer_button_rect = status_intents.timer_button_rect;
+        for command in status_intents.commands {
+            let opening_timer = matches!(&command, Command::ToolsSprintTimerTogglePopup)
+                && !app.sprint_timer.popup_open;
+            app.dispatch_command(
+                CommandInvocation::new(command, CommandOrigin::Pointer),
+                &ctx,
+            );
+            if opening_timer {
+                app.sprint_timer.popup_anchor = timer_button_rect.unwrap_or(egui::Rect::NOTHING);
             }
         }
         });
@@ -1207,7 +1228,13 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     let central = egui::CentralPanel::default()
         .frame(script_view::central_panel_frame(&ctx, app.theme_palette.script_workspace))
         .show_inside(ui, |ui| app.live_document_surface(ui));
-    sprint_timer::show_popup(&ctx, &mut app.sprint_timer, now, &mut app.notification_sink);
+    let timer_commands = sprint_timer::show_popup(&ctx, &mut app.sprint_timer, now);
+    for command in timer_commands {
+        app.dispatch_command(
+            CommandInvocation::new(command, CommandOrigin::Pointer),
+            &ctx,
+        );
+    }
     central.response.rect
 }
 
@@ -1238,7 +1265,17 @@ fn show_fdx_migration_dialog(app: &mut ScriptCraftApp, ctx: &egui::Context) {
             });
         });
     if let Some(consent) = choice {
-        app.resolve_pending_fdx_import(consent);
+        let resolution = match consent {
+            FdxMigrationConsent::Continue => ImportResolution::Continue,
+            FdxMigrationConsent::Cancel => ImportResolution::Cancel,
+        };
+        app.dispatch_command(
+            CommandInvocation::new(
+                Command::FileImportResolve { resolution },
+                CommandOrigin::InternalFollowUp,
+            ),
+            ctx,
+        );
     }
 }
 
@@ -1267,19 +1304,17 @@ impl eframe::App for ScriptCraftApp {
         let scale_changed = self.effective_pixels_per_point != Some(effective_pixels_per_point);
         self.effective_pixels_per_point = Some(effective_pixels_per_point);
 
-        let original_zoom = self.zoom_percent;
         for event in &raw_input.events {
             if let egui::Event::Zoom(factor) = event {
                 self.record_native_event("zoom");
-                if let Some(next) =
-                    status_bar::zoom_after_native_factor(self.pinch_zoom_percent, *factor)
-                {
-                    let next_zoom = status_bar::normalized_zoom_percent(next);
-                    if next_zoom != self.zoom_percent {
-                        self.capture_pending_zoom_anchor(ctx);
-                    }
-                    self.pinch_zoom_percent = next;
-                    self.zoom_percent = next_zoom;
+                if let Ok(factor) = ZoomFactor::new(*factor) {
+                    self.dispatch_command(
+                        CommandInvocation::new(
+                            Command::ViewZoomPinch { factor },
+                            CommandOrigin::InternalFollowUp,
+                        ),
+                        ctx,
+                    );
                 }
             }
         }
@@ -1309,14 +1344,15 @@ impl eframe::App for ScriptCraftApp {
                     _ => None,
                 };
                 if let Some(command) = command {
-                    self.pending_menu_commands.enqueue(command);
+                    self.pending_commands
+                        .enqueue_id(command, CommandOrigin::Shortcut);
                 } else {
                     retained_events.push(event);
                 }
             }
             raw_input.events = retained_events;
         }
-        if self.zoom_percent != original_zoom || scale_changed {
+        if scale_changed {
             self.page_geometry.invalidate();
             self.page_scale = None;
         }
@@ -1335,11 +1371,11 @@ impl ScriptCraftApp {
         self.update_native_window_state(&ctx);
         #[cfg(target_os = "macos")]
         if let Some(native_menu) = &self.native_menu {
-            native_menu.drain_events(&mut self.pending_menu_commands);
+            native_menu.drain_events(&mut self.pending_commands);
         }
         // Menu activations rendered in the previous pass are dispatched once
         // before ordinary editor input, with command availability rechecked.
-        self.dispatch_pending_menu_commands(&ctx);
+        self.dispatch_pending_commands(&ctx);
         self.notification_sink.set_repaint_context(&ctx);
         let migration_pending = self.pending_fdx_open.is_some();
         if !migration_pending {
@@ -1383,9 +1419,7 @@ impl ScriptCraftApp {
             self.latest_window_state = Some(reported);
         }
         if let Some(commands) = take_window_restore_commands(&mut self.pending_window_restore) {
-            for command in commands {
-                ctx.send_viewport_cmd(command);
-            }
+            self.restore_imported_window(commands, ctx);
         }
     }
 }

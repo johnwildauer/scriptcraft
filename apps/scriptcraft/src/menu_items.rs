@@ -5,7 +5,9 @@
 //! one catalog. Availability remains a fresh application-state projection for
 //! real commands; placeholders are intrinsically disabled and never dispatch.
 
-use super::app_commands::AppCommand;
+use scriptcraft_commands::CommandId;
+use super::shortcuts::{display_shortcut, primary_shortcut};
+pub(super) use super::shortcuts::{LogicalShortcut, ShortcutKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MenuSpec {
@@ -23,7 +25,7 @@ pub(super) enum MenuEntrySpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MenuItemBehavior {
-    Command(AppCommand),
+    Command(CommandId),
     DisabledPlaceholder(PlaceholderKind),
 }
 
@@ -64,77 +66,6 @@ pub(super) enum SemanticIcon {
     SelectAll,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Display/native accelerator metadata only. Only `Command` menu behavior may
-/// participate in raw-input recognition or dispatch. `primary` means Command
-/// on macOS and Ctrl on Windows; the other modifiers are literal modifiers.
-pub(super) struct LogicalShortcut {
-    pub(super) key: ShortcutKey,
-    pub(super) primary: bool,
-    pub(super) control: bool,
-    pub(super) option: bool,
-    pub(super) shift: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ShortcutKey {
-    A,
-    B,
-    C,
-    D,
-    E,
-    F,
-    G,
-    H,
-    I,
-    J,
-    K,
-    L,
-    M,
-    N,
-    O,
-    P,
-    Q,
-    R,
-    S,
-    T,
-    U,
-    V,
-    W,
-    X,
-    Y,
-    Z,
-    Comma,
-    Semicolon,
-    Period,
-    Enter,
-    BracketLeft,
-    BracketRight,
-    Backslash,
-    Pipe,
-    ArrowRight,
-}
-
-const fn primary_shortcut(key: ShortcutKey, shift: bool) -> LogicalShortcut {
-    LogicalShortcut {
-        key,
-        primary: true,
-        control: false,
-        option: false,
-        shift,
-    }
-}
-
-const fn display_shortcut(
-    key: ShortcutKey,
-    primary: bool,
-    control: bool,
-    option: bool,
-    shift: bool,
-) -> LogicalShortcut {
-    LogicalShortcut { key, primary, control, option, shift }
-}
-
 const fn command_item(
     id: &'static str,
     label: &'static str,
@@ -142,7 +73,7 @@ const fn command_item(
     icon: Option<SemanticIcon>,
     shortcut: Option<LogicalShortcut>,
     windows_alias: Option<LogicalShortcut>,
-    command: AppCommand,
+    command: CommandId,
 ) -> MenuEntrySpec {
     MenuEntrySpec::Item(MenuItemSpec {
         id, label, accessibility_name, icon, shortcut, windows_alias,
@@ -170,15 +101,15 @@ const CHECKED: PlaceholderKind = PlaceholderKind::Checked;
 const SEARCH: PlaceholderKind = PlaceholderKind::Search;
 
 const FILE_ENTRIES: &[MenuEntrySpec] = &[
-    command_item("file.new", "New", "New document", Some(SemanticIcon::DocumentNew), Some(primary_shortcut(ShortcutKey::N, false)), None, AppCommand::New),
+    command_item("file.new", "New", "New document", Some(SemanticIcon::DocumentNew), Some(primary_shortcut(ShortcutKey::N, false)), None, CommandId::FileNew),
     placeholder("file.new-from-template", "New from Template...", "New from template (disabled placeholder)", ITEM, Some(primary_shortcut(ShortcutKey::N, true))),
-    command_item("file.open", "Open...", "Open document", Some(SemanticIcon::FolderOpen), Some(primary_shortcut(ShortcutKey::O, false)), None, AppCommand::Open),
+    command_item("file.open", "Open...", "Open document", Some(SemanticIcon::FolderOpen), Some(primary_shortcut(ShortcutKey::O, false)), None, CommandId::FileOpenRequest),
     placeholder("file.open-recent", "Open Recent", "Open Recent submenu placeholder", DISCLOSURE, None),
-    command_item("file.close", "Close", "Close window", Some(SemanticIcon::WindowClose), Some(primary_shortcut(ShortcutKey::W, false)), None, AppCommand::Close),
+    command_item("file.close", "Close", "Close window", Some(SemanticIcon::WindowClose), Some(primary_shortcut(ShortcutKey::W, false)), None, CommandId::FileClose),
     SEP,
-    command_item("file.save", "Save", "Save document", Some(SemanticIcon::Save), Some(primary_shortcut(ShortcutKey::S, false)), None, AppCommand::Save),
-    command_item("file.save-as", "Save As...", "Save document as", Some(SemanticIcon::SaveAs), Some(primary_shortcut(ShortcutKey::S, true)), None, AppCommand::SaveAs),
-    command_item("file.save-as-pdf", "Save As PDF...", "Save document as PDF", Some(SemanticIcon::PdfExport), Some(primary_shortcut(ShortcutKey::P, true)), None, AppCommand::ExportPdf),
+    command_item("file.save", "Save", "Save document", Some(SemanticIcon::Save), Some(primary_shortcut(ShortcutKey::S, false)), None, CommandId::FileSave),
+    command_item("file.save-as", "Save As...", "Save document as", Some(SemanticIcon::SaveAs), Some(primary_shortcut(ShortcutKey::S, true)), None, CommandId::FileSaveAsRequest),
+    command_item("file.save-as-pdf", "Save As PDF...", "Save document as PDF", Some(SemanticIcon::PdfExport), Some(primary_shortcut(ShortcutKey::P, true)), None, CommandId::FileSaveAsPdf),
     placeholder("file.export", "Export", "Export submenu placeholder", DISCLOSURE, None),
     placeholder("file.backup", "Backup...", "Backup (disabled placeholder)", ITEM, None),
     placeholder("file.revert", "Revert", "Revert (disabled placeholder)", ITEM, None),
@@ -192,15 +123,15 @@ const FILE_ENTRIES: &[MenuEntrySpec] = &[
 ];
 
 const EDIT_ENTRIES: &[MenuEntrySpec] = &[
-    command_item("edit.undo", "Undo", "Undo last action", Some(SemanticIcon::Undo), Some(primary_shortcut(ShortcutKey::Z, false)), None, AppCommand::Undo),
-    command_item("edit.redo", "Redo", "Redo last action", Some(SemanticIcon::Redo), Some(primary_shortcut(ShortcutKey::Z, true)), Some(primary_shortcut(ShortcutKey::Y, false)), AppCommand::Redo),
+    command_item("edit.undo", "Undo", "Undo last action", Some(SemanticIcon::Undo), Some(primary_shortcut(ShortcutKey::Z, false)), None, CommandId::EditUndo),
+    command_item("edit.redo", "Redo", "Redo last action", Some(SemanticIcon::Redo), Some(primary_shortcut(ShortcutKey::Z, true)), Some(primary_shortcut(ShortcutKey::Y, false)), CommandId::EditRedo),
     SEP,
-    command_item("edit.cut", "Cut", "Cut selected text", Some(SemanticIcon::Cut), Some(primary_shortcut(ShortcutKey::X, false)), None, AppCommand::Cut),
-    command_item("edit.copy", "Copy", "Copy selected text", Some(SemanticIcon::Copy), Some(primary_shortcut(ShortcutKey::C, false)), None, AppCommand::Copy),
-    command_item("edit.paste", "Paste", "Paste clipboard text", Some(SemanticIcon::Paste), Some(primary_shortcut(ShortcutKey::V, false)), None, AppCommand::Paste),
+    command_item("edit.cut", "Cut", "Cut selected text", Some(SemanticIcon::Cut), Some(primary_shortcut(ShortcutKey::X, false)), None, CommandId::EditCut),
+    command_item("edit.copy", "Copy", "Copy selected text", Some(SemanticIcon::Copy), Some(primary_shortcut(ShortcutKey::C, false)), None, CommandId::EditCopy),
+    command_item("edit.paste", "Paste", "Paste clipboard text", Some(SemanticIcon::Paste), Some(primary_shortcut(ShortcutKey::V, false)), None, CommandId::EditPaste),
     SEP,
-    command_item("edit.delete", "Delete", "Delete forward", Some(SemanticIcon::Delete), None, None, AppCommand::Delete),
-    command_item("edit.select-all", "Select All", "Select all screenplay text", Some(SemanticIcon::SelectAll), Some(primary_shortcut(ShortcutKey::A, false)), None, AppCommand::SelectAll),
+    command_item("edit.delete", "Delete", "Delete forward", Some(SemanticIcon::Delete), None, None, CommandId::EditDelete),
+    command_item("edit.select-all", "Select All", "Select all screenplay text", Some(SemanticIcon::SelectAll), Some(primary_shortcut(ShortcutKey::A, false)), None, CommandId::EditSelectAll),
     placeholder("edit.select-scene", "Select Scene", "Select Scene (disabled placeholder)", ITEM, Some(display_shortcut(ShortcutKey::A, false, false, false, true))),
     SEP,
     placeholder("edit.track-changes", "Track Changes", "Track Changes submenu placeholder", DISCLOSURE, None),

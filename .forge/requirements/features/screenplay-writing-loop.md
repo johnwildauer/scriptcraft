@@ -894,7 +894,7 @@ content.
     their current catalog order and groups. Their current labels, icons, availability projection,
     shortcuts, aliases, and command behavior shall not change. The reference's state-specific Undo/
     Redo labels shall not be duplicated. Only these existing command rows carry an application
-    command; placeholders shall not create `AppCommand` variants or no-op handlers. The shared
+    command; placeholders shall not create command IDs/variants or no-op handlers. The shared
     dispatcher and fresh availability projection remain authoritative for actual commands.
   - **AC-WRITING-011.2:** Windows shall present the full in-window ten-menu strip immediately above
     the toolbar and shall not construct the macOS backend. macOS shall install the native ScriptCraft
@@ -953,6 +953,139 @@ content.
     noninteractive, accessible Search label only—not as a text field, focus target, or command.
     Disclosure, checked, and Search placeholders carry no application behavior. Newly added
     placeholder icons remain unassigned; existing functional File/Edit icon mappings are retained.
+
+### Consolidated commands and screenplay hotkeys
+
+- **REQ-WRITING-LOOP-012: Consolidated command layer.** Every enabled ScriptCraft-owned user action
+  shall have a stable command identity and typed, serializable parameters and shall pass through one
+  consolidated application dispatcher. Menus, native menus, toolbar controls, hotkeys, keyboard and
+  pointer editing, status controls, timers, tests, and future CLI/MCP clients shall invoke the same
+  commands rather than maintain parallel operation implementations. This internal architecture does
+  not itself add a user-facing command catalog, command palette, CLI, MCP server, macro UI, plugin
+  host, or network feature.
+  - **AC-WRITING-012.1:** Command descriptors and envelopes shall remain independent of egui,
+    native menus, file dialogs, clipboard objects, and windowing types. Unknown IDs, malformed or
+    out-of-range parameters, and unavailable commands shall fail without semantic mutation. Command
+    origin may identify menu, toolbar, shortcut, keyboard, pointer, IME, internal follow-up, test,
+    CLI, or MCP invocation for diagnostics, but shall not change command semantics. Commands,
+    origins, hotkeys, and transient view state shall not enter FDX or other screenplay persistence.
+  - **AC-WRITING-012.2:** Typing, paste, Backspace, forward Delete, Enter, Tab, explicit Role change,
+    Undo, Redo, Select All, and direct Selection updates shall execute through one headless semantic
+    command adapter over the real EditingSession. No command shall bypass transactional project,
+    source-preservation, UTF-8, history, dirty-state, revision, or failure-rollback rules by mutating
+    Project fields directly. The adapter shall distinguish semantic mutation, accepted no-op,
+    unavailable history/selection state, invalid command parameters, and the original EditError
+    failure. It shall be callable without desktop/window context. Layout-aware navigation and pointer
+    handlers may compute a semantic Selection from current layout, but shall commit it through that
+    same adapter.
+  - **AC-WRITING-012.3:** Desktop host adapters shall own file pickers, direct-path document/storage
+    operations, canonical clipboard access, recorded editor focus, viewport effects, zoom/appearance
+    changes, timer state transitions, and notifications. Existing status controls shall emit typed
+    zoom, appearance, focus-mode, and sprint-timer commands that execute through the consolidated
+    dispatcher; validated native pinch shall dispatch before affected layout. Notification requests
+    and asynchronous results shall remain narrow host effects, and an effect-dispatched outcome shall
+    not assert effect success or delivery. Picker requests and direct-path commands
+    shall be distinct: a picker only obtains a path and then dispatches the direct-path command;
+    direct-path Open and Save As shall not require a GUI and shall retain the existing staged Open,
+    FDX version-preflight, transactional save, extension, status/error, and failure-rollback rules.
+    Migration Continue/Cancel shall dispatch a typed resolution while retaining pending-source
+    ownership, dirty-session refusal, and cancel-without-activation behavior. Cut shall dispatch
+    deletion only after a successful clipboard write, and Paste shall dispatch text insertion only
+    after a successful nonempty text read. Save without a current path may dispatch the existing Save
+    As request. Close and imported one-shot window restore shall remain viewport host effects; native
+    window-state capture and restore data shall not become semantic Project state.
+  - **AC-WRITING-012.4:** Menu/native/owned-menu-accelerator invocations shall retain one FIFO,
+    carry their typed command and origin, and recheck fresh availability at dispatch. Toolbar actions
+    and Role changes shall invoke the same typed dispatcher with Toolbar origin. Focused editor text,
+    IME commit, Enter, Tab, deletion,
+    element shortcuts, and navigation shall instead dispatch synchronously in original event order;
+    they shall not be extracted into an earlier queue that reorders text relative to paragraph keys.
+    Pointer activation shall map the existing page/layout hit test to a semantic Position, dispatch
+    `editor.focus` and then `editor.selection.pointer` synchronously, and keep egui coordinates and
+    rectangles out of command payloads. Explicit Selection commits shall use the headless semantic
+    adapter. The recorded editor surface and egui focus request remain desktop-adapter-owned.
+    One physical key activation shall produce at most one command and one resulting operation. Disabled
+    placeholders/items shall never resolve to commands.
+  - **AC-WRITING-012.5:** Unmodified Enter and Tab shall resolve to the existing semantic Enter and
+    Tab commands and shall preserve AC-WRITING-001.4a exactly, including Dialogue interior splitting,
+    blank-only Character to Transition, Note to Summary, automatic Parenthetical behavior,
+    strict-boundary no-ops, history, and source safeguards. Modified Enter/Tab shall not accidentally
+    invoke these unmodified bindings. Editor hotkeys shall require preceding-frame screenplay-surface
+    focus, exact listed modifiers, no active IME/IME frame, and no migration modal. Key releases and
+    numpad keys shall not be aliased by the initial hotkey contract; element digits shall match the
+    logical top-row digit and its corresponding physical key.
+  - **AC-WRITING-012.6:** Primary means Command on macOS and Control on Windows. The base element
+    shortcuts shall be Primary + 0 General, +1 Scene Heading, +2 Action, +3 Character, +4
+    Parenthetical, +5 Dialogue, +6 Transition, +7 Shot, +8 Cast List, and +9 New Act. Additional
+    elements shall use Primary + Control on macOS and Primary + Shift on Windows: 8 Sequence, 9 End
+    of Act, 0 Summary, 1 Outline 1, 2 Outline 2, 3 Outline 3, and 4 Note. Every binding shall dispatch
+    the same explicit Role-change command with its typed target Role. Same-Role and preservation
+    rejection behavior shall remain owned by EditingSession, not duplicated in the hotkey resolver.
+  - **AC-WRITING-012.7:** Element-number bindings shall remain editor-local and shall not be inserted
+    into the native macOS menu or alter the menu accelerator ownership in AC-WRITING-011.2. Existing
+    global menu commands shall continue outside editor focus. Editor hotkeys shall not add Find,
+    search, SmartType, revision, Beat Board, Index Cards, Scene View, Dual Dialogue, or other
+    reference-only functionality.
+  - **AC-WRITING-012.8:** Existing enabled document, Edit, text, selection, navigation, focus, view,
+    status, appearance, timer, migration-modal, and viewport actions shall be included in the command
+    inventory. Framework-only hover, painting, popup geometry, caret blink, IME preedit, raw scroll,
+    repaint scheduling, and layout publication remain adapter bookkeeping rather than semantic
+    commands. Native predefined macOS About/Hide/Hide Others/Show All/Quit services shall remain an
+    explicit OS-owned exception unless routed through an existing safe host API; no new unsafe AppKit
+    messaging is authorized to remove that exception.
+
+### Stable command and hotkey contract
+
+The current internal catalog contains 41 stable dotted command IDs. These IDs are the shared
+activation vocabulary, not user-facing commands or a promise that every ID has a headless semantic
+implementation. Typed parameters are owned values: strings are UTF-8, Role and enum values use
+explicit domain types, Selection positions are checked UTF-8 byte offsets, and host objects (egui,
+native handles, dialog/clipboard instances, pointer coordinates, and rectangles) are never payloads.
+The command envelope is versioned independently of FDX; command, origin, keymap, and transient view
+state are not screenplay persistence.
+
+| Family | Stable IDs | Typed parameters / execution owner |
+|---|---|---|
+| File/document | `file.new`, `file.open.request`, `file.open`, `file.close`, `file.save`, `file.save-as.request`, `file.save-as`, `file.save-as-pdf`, `file.import.resolve` | `file.open` and `file.save-as` take a validated `DocumentPath`; `file.import.resolve` takes Continue/Cancel. Pickers are request effects only. Direct-path commands use the existing staged Open and transactional Save/Save As adapters. |
+| Edit/clipboard | `edit.undo`, `edit.redo`, `edit.cut`, `edit.copy`, `edit.paste`, `edit.delete`, `edit.select-all` | No payload. Semantic operations use the headless executor; clipboard reads/writes remain desktop effects. Cut dispatches deletion only after a successful write; Paste dispatches nonempty text only after a successful read. |
+| Text/paragraph/role | `editor.text.insert`, `editor.text.paste`, `editor.delete.backward`, `editor.paragraph.enter`, `editor.paragraph.tab`, `editor.element.change` | Text commands take owned UTF-8 text; Role change takes one typed Role. Existing `EditingSession` methods remain semantic authority. |
+| Selection/navigation/focus | `editor.selection.set`, `editor.selection.pointer`, `editor.navigation.horizontal`, `editor.navigation.vertical`, `editor.navigation.line-edge`, `editor.focus` | Selection takes checked semantic endpoints; pointer takes a semantic Position and Press/Drag/Release phase; navigation takes typed direction/edge and extend flag; focus has no payload. Layout and hit testing remain desktop adapters; Selection commits use the headless executor. |
+| View/focus mode | `view.zoom.set`, `view.zoom.pinch`, `view.appearance.set`, `view.focus-mode.toggle` | Zoom set takes a bounded whole-percent value; pinch takes a validated factor; appearance takes System/Day/Night/Midnight; focus-mode toggle has no payload. Viewport/native requests remain host effects. |
+| Sprint timer | `tools.sprint-timer.toggle-popup`, `tools.sprint-timer.close-popup`, `tools.sprint-timer.set-mode`, `tools.sprint-timer.set-minutes`, `tools.sprint-timer.start`, `tools.sprint-timer.pause`, `tools.sprint-timer.resume`, `tools.sprint-timer.reset`, `tools.sprint-timer.end` | Mode is Countdown/Stopwatch; minutes input is owned text validated by the existing 1–1440 rule; other actions have no payload. Clock observation, repaint scheduling, and notification delivery are host-owned. |
+
+| Role | Command parameter | macOS | Windows |
+|---|---|---|---|
+| General | `general` | Command + 0 | Control + 0 |
+| Scene Heading | `scene_heading` | Command + 1 | Control + 1 |
+| Action | `action` | Command + 2 | Control + 2 |
+| Character | `character` | Command + 3 | Control + 3 |
+| Parenthetical | `parenthetical` | Command + 4 | Control + 4 |
+| Dialogue | `dialogue` | Command + 5 | Control + 5 |
+| Transition | `transition` | Command + 6 | Control + 6 |
+| Shot | `shot` | Command + 7 | Control + 7 |
+| Cast List | `cast_list` | Command + 8 | Control + 8 |
+| New Act | `new_act` | Command + 9 | Control + 9 |
+| Sequence | `sequence` | Command + Control + 8 | Control + Shift + 8 |
+| End of Act | `end_of_act` | Command + Control + 9 | Control + Shift + 9 |
+| Summary | `summary` | Command + Control + 0 | Control + Shift + 0 |
+| Outline 1 | `outline_1` | Command + Control + 1 | Control + Shift + 1 |
+| Outline 2 | `outline_2` | Command + Control + 2 | Control + Shift + 2 |
+| Outline 3 | `outline_3` | Command + Control + 3 | Control + Shift + 3 |
+| Note | `note` | Command + Control + 4 | Control + Shift + 4 |
+
+Unmodified Enter/Tab dispatch `editor.paragraph.enter`/`editor.paragraph.tab`. The 17 role chords
+dispatch `editor.element.change` with the listed Role; digits are logical top-row Digit 0–9 and must
+match their physical top-row key. Menu/native/in-window accelerators keep their established owner
+(native macOS while installed, in-window on Windows) and ordered FIFO; focused text, IME commit,
+paragraph, deletion, role, navigation, and pointer paths stay synchronous in source event order.
+Editor hotkeys require preceding-frame screenplay focus, exact modifiers, no active or same-frame
+IME activity, and no migration modal. Key releases remain untouched, repeat remains event-driven, and
+numpad aliases are excluded. Current command availability is recomputed at desktop dispatch; stale
+history/selection and modal-blocked commands reject without semantic mutation. Semantic results
+distinguish changed, no-op, unavailable, rejected, and original core edit failure. Desktop effects
+report `EffectDispatched` as routing only; existing status/error handling remains authoritative.
+The native picker adapter currently rejects paths that cannot be represented as UTF-8 rather than
+lossily rewriting them.
 
 ## Constraints
 

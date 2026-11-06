@@ -6,7 +6,8 @@ This map describes ScriptCraft's desired technical structure and runtime boundar
 
 | Area | Path | Role in the target structure |
 |---|---|---|
-| Cargo workspace | [`Cargo.toml`](../../Cargo.toml) | Defines the workspace for the desktop application and reusable core crate. |
+| Cargo workspace | [`Cargo.toml`](../../Cargo.toml) | Defines the workspace for the desktop application, UI-independent command crate, and reusable core crate. |
+| Command contract | [`crates/scriptcraft-commands/`](../../crates/scriptcraft-commands/) | UI-independent typed command IDs, serializable envelopes, origin metadata, descriptors, and headless semantic editor executor. |
 | Desktop application | [`apps/scriptcraft/`](../../apps/scriptcraft/), [`main.rs`](../../apps/scriptcraft/src/main.rs), [`script_view.rs`](../../apps/scriptcraft/src/script_view.rs), [`theme.rs`](../../apps/scriptcraft/src/theme.rs), and [`src/`](../../apps/scriptcraft/src/) | Runnable local desktop shell and its UI/platform modules; application orchestration, Script View presentation and interaction, semantic appearance palettes, and native file interaction remain desktop-owned. |
 | Screenplay core | [`crates/scriptcraft-core/`](../../crates/scriptcraft-core/), [`lib.rs`](../../crates/scriptcraft-core/src/lib.rs), [`editing.rs`](../../crates/scriptcraft-core/src/editing.rs), [`text_state.rs`](../../crates/scriptcraft-core/src/text_state.rs), [`layout.rs`](../../crates/scriptcraft-core/src/layout.rs), [`persistence.rs`](../../crates/scriptcraft-core/src/persistence.rs), and [`exports.rs`](../../crates/scriptcraft-core/src/exports.rs) | Reusable headless library for semantic editing, bounded FDX view-state offset mapping, shared layout, native-project persistence, and noncanonical export adapters. |
 | Core verification | [`crates/scriptcraft-core/tests/`](../../crates/scriptcraft-core/tests/) | Automated tests for core behavior independently of the desktop UI. |
@@ -156,6 +157,20 @@ their bounded rectangles own painting, interaction, popup anchoring, and
 accessibility. The custom circular knob follows the stock slider response and is
 clipped to the status row, right group, and inherited parent clip.
 
+Status controls produce typed `view.zoom.set`, `view.appearance.set`,
+`view.focus-mode.toggle`, and `tools.sprint-timer.*` command intents; the desktop
+dispatcher owns changes to transient view and timer state. Native pinch events
+are validated and dispatched as `view.zoom.pinch` before layout, while raw Zoom
+events remain removed from downstream egui input. The dispatcher preserves zoom
+anchor capture, pinch-baseline synchronization, geometry invalidation, transient
+appearance resolution, focus-mode request generations/gates, timer mode/input
+constraints, and timer clock arithmetic. Popup geometry, outside/Escape detection,
+and notification worker wakeups remain host presentation/effect bookkeeping.
+Completion notification requests and asynchronous results pass through the
+desktop timer-notification adapter and existing native sink; pending/accepted
+feedback never asserts delivery. A desktop `EffectDispatched` outcome records
+routing only; existing status/error handling remains authoritative.
+
 Detailed status diagnostics and their disclosure are controlled by
 `presentation::ENABLE_DIAGNOSTICS`, a manual production-off source gate.
 Disabled mode constructs no detailed projection or Diagnostics row, placeholder,
@@ -234,18 +249,21 @@ or the saved percentage. Desktop hit testing uses the matching layout-to-present
 ## Desktop application-menu implementation context
 
 The menu system is desktop-only and leaves screenplay core, persistence, fixed layout, and exports
-unchanged. [`app_commands.rs`](../../apps/scriptcraft/src/app_commands.rs) owns the shared
-`AppCommand` identities, current `AppCommandAvailability` projection, dispatcher, editor-focus
-restoration helper, and the one explicit `arboard` clipboard adapter. Existing File/PDF operations
-and Edit session operations flow through this dispatcher; clipboard extraction reads canonical
+unchanged. [`app_commands.rs`](../../apps/scriptcraft/src/app_commands.rs) owns typed
+`scriptcraft-commands::Command` invocations and origins, the current `AppCommandAvailability`
+projection, the desktop dispatcher and typed dispatch result, editor-focus restoration, and the one
+explicit `arboard` clipboard adapter. Existing File/PDF operations remain behind this boundary;
+Undo, Redo, Cut deletion, Paste insertion, Delete, Select All, and toolbar Role changes use the
+headless `execute_editor_command` executor for their semantic session operation. Desktop mutations
+continue through the existing status/error/reveal adapter. Clipboard extraction reads canonical
 body-element UTF-8, copies exact selected text with one newline per crossed element boundary, and
-does not inherit print/export transformations. Cut writes before invoking the transactional delete;
-Paste reads only on activation and invokes the existing paste operation.
+does not inherit print/export transformations. Cut writes before invoking transactional deletion;
+Paste reads only on activation and invokes the existing paste operation through the executor.
 
 [`menu_items.rs`](../../apps/scriptcraft/src/menu_items.rs) is the one ordered,
 presentation-independent catalog for File, Edit, View, Format, Insert, Document, Tools, Production,
 Window, and Help, matching [`final-draft-13-menus.md`](../../.reference/final-draft-13-menus.md).
-Each entry distinguishes `Command(AppCommand)` from `DisabledPlaceholder(PlaceholderKind)`; the
+Each entry distinguishes `Command(CommandId)` from `DisabledPlaceholder(PlaceholderKind)`; the
 placeholder kinds are ordinary disabled row, disclosure-only, checked, and Help Search. The 13
 existing File/Edit command rows retain their IDs, labels, accessibility names, icons, shortcuts,
 aliases, fresh availability projection, and dispatcher behavior. The other 132 rows are disabled
@@ -257,23 +275,25 @@ Search is a disabled accessible label, not an input or focus target. Placeholder
 Option, Shift, alphabetic/punctuation/bracket/backslash/pipe/Return/arrow keys; placeholder metadata
 is not input-recognition authority. [`menu.rs`](../../apps/scriptcraft/src/menu.rs) owns the
 source-only preview policy, menu-local egui renderer/metrics, recognition of command-only shortcuts,
-in-window accelerator-consumption policy, and the FIFO of shared command identities. Its in-window
-strip retains its existing 24-logical-point height and popup height bounds. On Windows the
+in-window accelerator-consumption policy, and the FIFO of typed command invocations with origins.
+Its detached batches preserve activation order and recheck current availability at dispatch. Its
+in-window strip retains its existing 24-logical-point height and popup height bounds. On Windows the
 in-window strip owns command accelerators; on macOS the preview remains enabled while native owns
 command accelerators.
 
 [`macos_menu.rs`](../../apps/scriptcraft/src/macos_menu.rs) is compiled only for macOS and owns
 main-thread native Application-menu construction separately from all ten shared catalog menus,
-muda-retained menu/item handles, native accelerators, the native-ID-to-command map, event inbox, and
-label/enablement synchronization. Only the 13 command rows enter the native command map. Disabled
+muda-retained menu/item handles, native accelerators, the native-ID-to-`CommandId` map, event inbox,
+and label/enablement synchronization. Only the 13 command rows enter the native command map. Disabled
 ordinary/Search placeholders are native disabled items and may carry their display accelerators;
 checked placeholders are disabled checked items, and `>` placeholders are disabled empty submenus.
 No placeholder ID maps to a command, and unknown/event IDs are ignored at the FIFO handoff. The
 resolved `muda` 0.17.2 handler captures the egui context, appends activated IDs to a thread-safe
 inbox, and requests repaint. In that version, installing the handler replaces delivery to
 `MenuEvent::receiver()`, so `main.rs` drains the handler-fed inbox rather than polling that receiver.
-The next app update maps only known command IDs into the shared FIFO; native command labels and
-enabled state remain synchronized through the catalog and availability projection.
+The next app update maps only known stable command IDs into the shared FIFO with `NativeMenu`
+origin; native command labels and enabled state remain synchronized through the catalog and shared
+availability projection.
 
 [`macos_sf_symbols.rs`](../../apps/scriptcraft/src/macos_sf_symbols.rs) is the macOS-only,
 main-thread-confined image adapter owned for the full `NativeMenuController` lifetime. After muda
@@ -336,6 +356,134 @@ do not authorize content beyond the reference. Close has no new unsaved-change c
 still has the pre-existing dirty-session consent discrepancy in its replacement path; and neither OS
 runtime behavior nor Windows acceptance is established by source implementation. No automated
 desktop tests were added. User review and validation remain pending.
+
+## Consolidated command and hotkey architecture
+
+The approved direction and sequential handoffs are recorded in
+[`hotkey-command-layer-v1.md`](../../.plan/2026-11-06-hotkey-command-layer/hotkey-command-layer-v1.md)
+and its eight work orders. WO-001–WO-007 implementation submissions are present; WO-008 reconciles
+their durable contracts and provides a user-owned validation handoff. All submissions remain
+unvalidated; the initiative and per-order records do not infer acceptance from source changes.
+
+A UI-independent [`scriptcraft-commands`](../../crates/scriptcraft-commands/) workspace package owns
+stable dotted command IDs, typed serializable parameters, a descriptor catalog, and command-origin
+metadata. It has no eframe/egui, rfd, arboard, native-menu, or windowing dependency. Static menu and
+toolbar catalogs carry stable IDs or parameterless factories; dynamic text, path, Role, Selection,
+navigation, view, and timer parameters are constructed at activation or external-input parsing.
+Unknown IDs and malformed parameters reject before execution. This wire contract is separate from
+FDX and does not persist commands, origins, keymaps, or desktop state.
+
+WO-001 creates that package with an explicit versioned Serde envelope, dotted command identifiers,
+typed parameters, origin values, and a 41-entry descriptor catalog. The package depends only on
+`scriptcraft-core` and Serde, and the wire representation does not select a concrete codec. UTF-8
+selection offsets are represented as checked-width byte positions; the envelope exposes
+document-aware validation for element ranges and UTF-8 boundaries before an executor receives
+selection commands.
+
+The desktop [`app_commands.rs`](../../apps/scriptcraft/src/app_commands.rs) boundary is the single
+typed application dispatcher for the implemented desktop action inventory. A generalized ordered
+queue serves menu clicks, native menu events, and owned menu accelerators; each detached activation
+carries its typed command and origin, and dispatch recomputes availability. Focused editor events,
+navigation, and pointer selection dispatch synchronously in original event order. Toolbar actions,
+document requests/direct paths, migration decisions, clipboard follow-ups, view/status/appearance,
+focus-mode, and timer actions all converge on this dispatcher; accepted semantic edits and Selection
+commits delegate to the headless executor. Existing status/error, reveal, repaint, and focus semantics
+remain the host's authority. `EffectDispatched` means only that an effect was routed to its adapter,
+not that it succeeded; existing status/error reporting is authoritative. Disabled placeholders never
+acquire command IDs for activation.
+
+A headless editor executor in `scriptcraft-commands::executor` delegates text/paste, Backspace/Delete,
+Enter/Tab, explicit Role changes, Undo/Redo, Select All, and direct Selection updates to exactly one
+existing `EditingSession` operation per accepted command. Its typed result distinguishes changed,
+accepted no-op, unavailable history/selection, rejected command/parameters, and the original
+`EditError`. Unsupported desktop/effect commands are rejected without session mutation. The executor
+owns no second transition matrix or document model. Desktop layout-aware navigation computes a desired
+semantic Selection from the current immutable layout, and the pointer hit-test adapter converts page
+geometry to a semantic Position; both commit Selection only through this executor. Core canonical
+text, transaction, preservation, revision, dirty-state, and history behavior remains unchanged.
+
+WO-002 moves the Unicode/Role/dirty-state/history semantic acceptance scenario to the command package
+so the same typed commands available to the desktop exercise the executor without creating a
+core-to-command dependency cycle. Focused command scenarios cover all Role parameters, Enter/Tab
+delegation across the 17 roles, typing versus paste, both deletion directions, no-op/unavailable
+history, invalid selections, Select All, unsupported commands, and state-preserving edit failures.
+These are authored test cases, not evidence of execution or successful validation; user review and
+validation remain pending under repository policy.
+
+The Open and Save As picker adapters only obtain a UTF-8 document path; selection dispatches
+`file.open` or `file.save-as`, and cancellation dispatches neither. Those direct-path commands require
+no picker and reuse the existing staged content-based Open/FDX preflight and transactional Save As
+operations. Save with a current path retains its Save/Save As baseline-mode selection; without one it
+dispatches the existing Save As request. Open dirty-session refusal, pending-import ownership,
+extension checks, save failure rollback, and fixed `scriptcraft.pdf` export behavior remain unchanged.
+Canonical selection extraction stays in the clipboard adapter: Cut dispatches deletion only after a
+successful write, and Paste dispatches text paste only after a successful nonempty read. The migration
+dialog dispatches typed Continue/Cancel resolution while retaining staged-source ownership and modal
+blocking for other commands. Close and imported one-shot window restore use the viewport effect
+adapter; native window-state capture remains a host observation, not semantic Project state. The
+explicit `editor.focus` command requests egui focus only through the recorded-surface desktop focus
+adapter. Native predefined macOS Application-menu services remain an explicit OS-owned boundary unless
+an existing safe host API can route them without broadening the AppKit unsafe exception.
+
+A shared desktop [`shortcuts.rs`](../../apps/scriptcraft/src/shortcuts.rs) owns logical shortcut and
+top-row digit definitions for menu and editor consumers. Native macOS retains ownership of menu
+accelerators and Windows retains the in-window owner. Editor-local Enter/Tab and element-number
+bindings are not inserted into the native menu catalog. Focused editor events resolve and dispatch
+synchronously in original order, rather than entering the deferred menu queue; this preserves text
+before a following Enter/Tab. Exact modifier matching, preceding-frame editor focus, IME suppression,
+migration-modal exclusion, key-release preservation, and existing repeat behavior are required.
+Unmodified Enter/Tab retain the existing core matrices. Primary + 0–9 maps to General through New Act
+in the reference order; Mac Primary + Control and Windows Primary + Shift map 8/9/0/1/2/3/4 to
+Sequence, End of Act, Summary, Outline 1, Outline 2, Outline 3, and Note. All number bindings dispatch
+the same typed Role-change command and inherit its transactional same-role and preservation behavior.
+The event adapter requires the top-row logical digit to correspond to its physical key, while key
+releases remain untouched and repeated pressed events retain event-driven behavior. Arrow/Home/End
+events now construct typed horizontal, vertical, and line-edge commands and synchronously enter the
+same dispatcher in original event order. Layout-aware handlers return semantic Selection values and
+preserve the current visual-line/source mapping, Shift anchor, preferred vertical goal, boundary, and
+clamping rules; `editor.selection.set` through the headless executor remains the sole Selection commit
+path. Pointer hit testing retains page selection, nearest body-page, and title-page exclusion behavior,
+but its command carries only a semantic Position and bounded Press/Drag/Release phase, never egui
+coordinates or rectangles. Pointer activation issues `editor.focus` before a possible pointer-selection
+command; recorded surface lookup and egui focus requests stay desktop-owned. These source-level
+boundaries are not evidence of platform compilation or runtime behavior.
+
+Framework-only hover, popup geometry, paint, caret blink, IME preedit, raw scrolling, repaint
+scheduling, and layout publication remain adapter bookkeeping. Committed application actions are
+commands. No Find/search, SmartType, revision, board/card/scene-view, customization, CLI, MCP, macro,
+plugin, or other new user-facing functionality is implied by this target boundary.
+
+### WO-008 direct-action source inventory and residual boundaries
+
+This inventory is source inspection for contract reconciliation only, not behavioral validation, review,
+or evidence that the paths compile or work at runtime. The remaining desktop interaction routes found
+in the inspected source are:
+
+- Screenplay text, IME commit, Backspace/Delete, Enter/Tab, focused role shortcuts, arrows/Home/End,
+  pointer selection, explicit focus, Select All, toolbar Roles, menu/native menu, and enabled toolbar
+  actions route through the typed dispatcher; semantic writes use the headless executor. Document-open
+  TextState Selection restoration was also routed through `editor.selection.set` and that executor in
+  [`main.rs`](../../apps/scriptcraft/src/main.rs:922), removing the one remaining observed direct
+  session-selection setter outside the executor.
+- Open/Save As pickers only acquire paths; selected paths dispatch direct-path commands. File, export,
+  storage, clipboard, migration, Close, fullscreen, imported-window restore, and notification effects
+  are named dispatcher handlers/adapters. Typed path values are UTF-8; a picker path without UTF-8
+  representation is rejected rather than rewritten.
+- Status zoom/appearance controls create command intents. Native pinch is validated and dispatched
+  before layout. Timer popup buttons/mode/minutes/lifecycle and outside/Escape close create commands.
+  Popup rectangle/anchor, `just_opened`, status-widget local values, clock reconciliation, focus-mode
+  observation of OS fullscreen state, asynchronous notification result application, and repaint/layout
+  bookkeeping are presentation or host-effect state, not separate enabled screenplay mutation routes.
+- Framework-owned input/focus mechanics (IME preedit, raw scrolling, popup placement, caret blink,
+  hover/paint, repaint scheduling, layout publication) remain non-command adapter bookkeeping.
+  Native predefined macOS About, Hide, Hide Others, Show All, and Quit remain OS-owned services; this
+  is the explicit unresolved dispatcher exception, not a screenplay mutation bypass. No new unsafe
+  AppKit bridge is authorized.
+
+No other enabled ScriptCraft-owned screenplay mutation path outside the dispatcher/headless executor
+was identified in this scoped source inventory. The UTF-8 picker-path limitation and OS-owned
+predefined macOS services are residual limitations, not hidden success claims. All prior WO-001–WO-007
+behavior and implementation paths remain subject to user validation.
 
 ## Cross-cutting design
 

@@ -1,5 +1,5 @@
 use eframe::egui::Color32;
-use super::AppCommand;
+use scriptcraft_commands::CommandId;
 use crate::material_font::{
     MaterialIconAxes, MaterialIconAxisOverrides,
 };
@@ -116,7 +116,7 @@ pub(super) enum ToolbarGraphic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolbarBehavior {
     None,
-    Action(AppCommand),
+    Action(CommandId),
     ElementsRoleDropdown,
     OverflowMenu,
 }
@@ -165,7 +165,7 @@ const fn action(
     id: &'static str,
     label: &'static str,
     icon: MaterialIcon,
-    action: AppCommand,
+    action: CommandId,
 ) -> ToolbarItemSpec {
     ToolbarItemSpec {
         id,
@@ -192,10 +192,10 @@ pub(super) const TEMPORARY_TOOLBAR_ITEMS: [ToolbarItemSpec; 13] = [
         layout: ToolbarLayoutPolicy::FlexibleSpace,
         presentation: ItemPresentationOverrides::NONE,
     },
-    action("new", "New", ICON_DRAFT, AppCommand::New),
-    action("open", "Open", ICON_FILE_OPEN, AppCommand::Open),
-    action("save", "Save", ICON_SAVE, AppCommand::Save),
-    action("save-as", "Save As", ICON_SAVE_AS, AppCommand::SaveAs),
+    action("new", "New", ICON_DRAFT, CommandId::FileNew),
+    action("open", "Open", ICON_FILE_OPEN, CommandId::FileOpenRequest),
+    action("save", "Save", ICON_SAVE, CommandId::FileSave),
+    action("save-as", "Save As", ICON_SAVE_AS, CommandId::FileSaveAsRequest),
     ToolbarItemSpec {
         id: "flexible-space-pre-elements",
         label: "Flexible Space",
@@ -255,7 +255,7 @@ pub(super) const TEMPORARY_TOOLBAR_ITEMS: [ToolbarItemSpec; 13] = [
         "export-pdf",
         "Export PDF",
         ICON_PICTURE_AS_PDF,
-        AppCommand::ExportPdf,
+        CommandId::FileSaveAsPdf,
     ),
     ToolbarItemSpec {
         id: "flexible-space-trailing",

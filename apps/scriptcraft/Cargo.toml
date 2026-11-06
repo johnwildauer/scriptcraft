@@ -10,6 +10,7 @@ arboard = "3.7.0"
 eframe = "0.34"
 egui_material_icons = { version = "0.6.0", features = ["outline"] }
 rfd = "0.15"
+scriptcraft-commands = { path = "../../crates/scriptcraft-commands" }
 scriptcraft-core = { path = "../../crates/scriptcraft-core" }
 
 [target.'cfg(target_os = "macos")'.dependencies]

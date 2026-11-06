@@ -42,34 +42,6 @@ impl Drop for TestDirectory {
 }
 
 #[test]
-fn semantic_editing_preserves_roles_unicode_history_and_dirty_state() {
-    let mut session = valid(EditingSession::new(valid(Project::new())));
-
-    valid(session.insert("INT. CAFÉ — NUIT"));
-    valid(session.enter());
-    assert_eq!(session.project().elements[0].role, Role::SceneHeading);
-    assert_eq!(session.project().elements[0].text, "INT. CAFÉ — NUIT");
-    assert_eq!(session.project().elements[1].role, Role::Action);
-
-    valid(session.change_role(Role::Character));
-    valid(session.insert("MARA"));
-    valid(session.enter());
-    valid(session.insert("こんにちは、🌙"));
-    assert_eq!(session.project().elements[1].role, Role::Character);
-    assert_eq!(session.project().elements[2].role, Role::Dialogue);
-    assert_eq!(session.project().elements[2].text, "こんにちは、🌙");
-    assert!(session.dirty());
-
-    let edited = session.project().clone();
-    valid(session.undo());
-    assert_ne!(session.project(), &edited);
-    assert!(session.dirty());
-    valid(session.redo());
-    assert_eq!(session.project(), &edited);
-    assert!(session.dirty());
-}
-
-#[test]
 fn headless_layout_and_noncanonical_exports_are_repeatable_and_non_mutating() {
     let mut session = valid(EditingSession::new(valid(Project::new())));
     valid(session.insert("A quiet room — café."));

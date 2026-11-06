@@ -2,7 +2,7 @@
 //!
 //! Native menu construction, event wakeup/routing, and state synchronization.
 
-use super::app_commands::{AppCommand, AppCommandAvailability};
+use super::app_commands::AppCommandAvailability;
 use super::menu_items::{
     LogicalShortcut, MenuEntrySpec, MenuItemBehavior, MenuItemSpec, PlaceholderKind, ShortcutKey,
     MENU_CATALOG,
@@ -11,6 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use scriptcraft_commands::{CommandId, CommandOrigin};
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{
     AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
@@ -24,7 +25,7 @@ type NativeEventInbox = Arc<Mutex<VecDeque<MenuId>>>;
 pub(super) struct NativeMenuController {
     _root: Menu,
     _submenus: Vec<Submenu>,
-    command_items: HashMap<MenuId, (AppCommand, MenuItem)>,
+    command_items: HashMap<MenuId, (CommandId, MenuItem)>,
     _placeholder_items: Vec<MenuItem>,
     _checked_placeholder_items: Vec<CheckMenuItem>,
     _predefined_items: Vec<PredefinedMenuItem>,
@@ -152,7 +153,7 @@ impl NativeMenuController {
     }
 
     /// Transfers native activation IDs into the shared application FIFO.
-    pub(super) fn drain_events(&self, pending: &mut super::menu::PendingMenuCommands) {
+    pub(super) fn drain_events(&self, pending: &mut super::menu::PendingDesktopCommands) {
         let events = {
             let mut inbox = self
                 .event_inbox
@@ -162,7 +163,7 @@ impl NativeMenuController {
         };
         for id in events {
             if let Some((command, _)) = self.command_items.get(&id) {
-                pending.enqueue(*command);
+                pending.enqueue_id(*command, CommandOrigin::NativeMenu);
             }
         }
     }
@@ -203,7 +204,7 @@ fn append_catalog_item(
     submenu: &Submenu,
     spec: &MenuItemSpec,
     availability: AppCommandAvailability,
-    command_items: &mut HashMap<MenuId, (AppCommand, MenuItem)>,
+    command_items: &mut HashMap<MenuId, (CommandId, MenuItem)>,
     retained_submenus: &mut Vec<Submenu>,
     placeholder_items: &mut Vec<MenuItem>,
     checked_placeholder_items: &mut Vec<CheckMenuItem>,
@@ -299,6 +300,19 @@ fn native_key(key: ShortcutKey) -> Code {
         ShortcutKey::Semicolon => Code::Semicolon,
         ShortcutKey::Period => Code::Period,
         ShortcutKey::Enter => Code::Enter,
+        ShortcutKey::Tab => Code::Tab,
+        ShortcutKey::Backspace => Code::Backspace,
+        ShortcutKey::Delete => Code::Delete,
+        ShortcutKey::Digit0 => Code::Digit0,
+        ShortcutKey::Digit1 => Code::Digit1,
+        ShortcutKey::Digit2 => Code::Digit2,
+        ShortcutKey::Digit3 => Code::Digit3,
+        ShortcutKey::Digit4 => Code::Digit4,
+        ShortcutKey::Digit5 => Code::Digit5,
+        ShortcutKey::Digit6 => Code::Digit6,
+        ShortcutKey::Digit7 => Code::Digit7,
+        ShortcutKey::Digit8 => Code::Digit8,
+        ShortcutKey::Digit9 => Code::Digit9,
         ShortcutKey::BracketLeft => Code::BracketLeft,
         ShortcutKey::BracketRight => Code::BracketRight,
         ShortcutKey::Backslash | ShortcutKey::Pipe => Code::Backslash,
