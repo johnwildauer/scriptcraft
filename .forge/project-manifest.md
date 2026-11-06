@@ -182,6 +182,35 @@ was run. Screenshot RGB values are initial visual estimates and remain pending
 side-by-side user calibration; implementation, compilation, rendering, and
 accessibility outcomes are not claimed as verified or accepted.
 
+### Toolbar-to-Script View residual-gap WO-012 implementation submission — 2026-11-06
+
+On the existing `dev/2026-11-06-script-view-boundary` branch, WO-012 changes the
+closed Elements toolbar composition so vertical item spacing is suppressed before
+the ComboBox allocation, then restored inside its popup before role-row creation.
+This prevents the explicit caption allocations from inheriting the ComboBox's
+post-widget cursor spacing. The current explicit toolbar bottom padding was
+preserved as directed; the durable requirement and blueprint now allow explicitly
+owned trailing padding while disallowing implicit toolbar gaps and child-response
+overflow. Source reasoning predicts the toolbar response will remain within its
+configured panel boundary, but no runtime result is claimed.
+
+At the user's later explicit request, a coding agent ran only
+[`cargo check --workspace`](../.plan/2026-11-06-toolbar-script-view-gap/work-orders/WO-012-elements-spacing-overflow.md:52).
+It exited successfully (code 0; reported completion in 0.22 seconds) and emitted
+four warnings: future-incompatible `float_literal_f32_fallback` at
+[`script_view.rs`](../apps/scriptcraft/src/script_view.rs:239), and dead-code
+warnings for `Size20`/`Size48` at [`material_font.rs`](../apps/scriptcraft/src/material_font.rs:60),
+`Minus50`/`Plus200` at [`material_font.rs`](../apps/scriptcraft/src/material_font.rs:85),
+and `Filled` at [`toolbar_items.rs`](../apps/scriptcraft/src/toolbar_items.rs:25).
+No deprecation warning was reported. No tests, Clippy, formatting, additional
+build/check, or manual runtime verification was run, and the coding agent made no
+source edits. This is a one-off user-authorized exception, not a change to the
+repository-wide user-owned review/validation policy. User review, warning
+disposition, and runtime visual acceptance remain pending. Findings and the full
+warning summary are recorded in
+[`toolbar-script-view-gap-findings.md`](../.plan/2026-11-06-toolbar-script-view-gap/toolbar-script-view-gap-findings.md)
+and [`WO-012-elements-spacing-overflow.md`](../.plan/2026-11-06-toolbar-script-view-gap/work-orders/WO-012-elements-spacing-overflow.md).
+
 ### Gates and intervention
 
 - **Design approval:** Human approval required by default at `review -> execute`, subject to explicit user direction and applicable external rules.

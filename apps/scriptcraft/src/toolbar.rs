@@ -17,7 +17,7 @@ pub(super) const TOOLBAR_ELEMENTS_CAPTION_VERTICAL_OFFSET: f32 = 0.0;
 // Explicit owner for trailing toolbar allocation; exact panel sizing includes this value.
 pub(super) const TOOLBAR_BOTTOM_PADDING: f32 = 4.0;
 /// Local width for the toolbar's explicitly painted bottom divider.
-pub(super) const TOOLBAR_BOTTOM_BORDER_WIDTH: f32 = 2.0;
+pub(super) const TOOLBAR_BOTTOM_BORDER_WIDTH: f32 = 1.5;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ToolbarIconHoverPadding {
@@ -642,7 +642,12 @@ impl ScriptCraftApp {
                 // advance the parent row past the allocated Elements slot.
                 ui.set_width(width);
                 let group_rect = ui.max_rect();
+                let vertical_item_spacing = ui.spacing().item_spacing.y;
                 let role_popup_height = elements_role_popup_max_height(ui);
+                // The closed control is followed by explicitly budgeted caption
+                // allocations, so do not let ComboBox's post-widget spacing push
+                // those allocations beyond this Item group's declared height.
+                ui.spacing_mut().item_spacing.y = 0.0;
                 let combo_result = egui::ComboBox::from_id_salt(item.id)
                     .width(width)
                     .height(role_popup_height)
@@ -669,6 +674,9 @@ impl ScriptCraftApp {
                     })
                     .selected_text("")
                     .show_ui(ui, |ui| {
+                        // Popup role rows retain the normal vertical rhythm even
+                        // though the closed control/caption composition does not.
+                        ui.spacing_mut().item_spacing.y = vertical_item_spacing;
                         ui.spacing_mut().button_padding.x =
                             toolbar_presentation::DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING;
                         let role_option_font =
@@ -681,9 +689,6 @@ impl ScriptCraftApp {
                             );
                         }
                     });
-                // The popup has finished using its normal role-row spacing. Disable
-                // child layout spacing only for the explicit caption allocations below.
-                ui.spacing_mut().item_spacing.y = 0.0;
                 let popup_open = combo_result.inner.is_some();
                 let combo_response = combo_result.response.on_hover_cursor(toolbar_cursor_icon());
                 if !popup_open {
@@ -839,6 +844,7 @@ impl ScriptCraftApp {
 
     pub(super) fn toolbar(&mut self, ui: &mut egui::Ui) {
         let palette = self.theme_palette.toolbar;
+        let vertical_item_spacing = ui.spacing().item_spacing.y;
         let visuals = ui.visuals_mut();
         visuals.widgets.noninteractive.fg_stroke.color = palette.foreground;
         visuals.widgets.hovered.bg_fill = palette.hover_fill;
@@ -863,6 +869,10 @@ impl ScriptCraftApp {
         let presentation = live_toolbar_metrics(ui);
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
+            // Top padding, the Item group, and bottom padding define the panel's
+            // complete vertical extent. Do not let the outer top-down layout add
+            // implicit gaps between those explicit allocations.
+            ui.spacing_mut().item_spacing.y = 0.0;
             for text_style in [TextStyle::Body, TextStyle::Button] {
                 if let Some(font) = ui.style_mut().text_styles.get_mut(&text_style) {
                     font.size = toolbar_presentation::DEFAULT_ITEM_TEXT_POINT_SIZE;
@@ -876,6 +886,9 @@ impl ScriptCraftApp {
                 ),
                 egui::Layout::left_to_right(egui::Align::Min),
                 |ui| {
+                    // Descendant controls and popup rows retain the normal style
+                    // spacing; only the enclosing panel composition suppresses it.
+                    ui.spacing_mut().item_spacing.y = vertical_item_spacing;
                     ui.add_space(TOOLBAR_ROW_PADDING);
                     let mut first = true;
                     for (item, width) in allocation.visible.iter().copied() {

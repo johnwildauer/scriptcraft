@@ -49,10 +49,17 @@ the nominal control-slot height and that gap, and are centered within it. Elemen
 caption placement is independent of the stock ComboBox response height; its
 separately owned vertical optical adjustment affects only that decorative caption.
 Action Items and Elements share one derived Item-group height. The exact toolbar panel
-height derives from its top padding and that group, with no trailing allocation after
-the Item group. Its divider uses a toolbar-local width and palette color and sits at the panel's lower edge; top-level composition
-places Script View immediately after the toolbar; the margin-free Script Workspace
-frame and zero top scroll-content margin add no separate boundary inset. Toolbar icon
+height derives from its top padding, that group, and any explicitly owned trailing
+padding. The outer top-down allocation suppresses implicit vertical spacing between
+those explicit extents. The closed Elements control/caption composition suppresses
+post-control vertical spacing before allocating its ComboBox and remaining caption
+space, keeping the child response within the shared Item-group height; its popup child
+restores normal vertical spacing for role rows. Other nested controls retain their
+normal spacing. These scopes keep the returned toolbar boundary aligned with its
+visible panel boundary. Its divider uses a toolbar-local width and palette color and
+sits at the panel's lower edge; top-level composition places Script View immediately
+after that shared boundary; the margin-free Script Workspace frame and zero top
+scroll-content margin add no separate boundary inset. Toolbar icon
 hover expansion uses independent per-edge padding for the icon hover/click
 rectangle, not glyph baseline placement. ComboBox button padding and Elements
 role-option row padding remain independent from the caption gap. The overflow

@@ -203,7 +203,12 @@ viewport presentation. This does not promise exact layout fidelity for every FDX
     horizontal scrolling; this surface-local presentation policy shall not change unrelated scroll
     areas. Presentation spacing shall not alter core document layout, and actual page allocation and
     prepaint zoom compensation shall use equivalent asymmetric page origins and content extents while
-    scaling page-local coordinates independently from fixed presentation spacing.
+    scaling page-local coordinates independently from fixed presentation spacing. The desktop
+    toolbar's visible lower edge and returned panel boundary shall coincide: its explicit outer
+    composition shall not acquire implicit vertical gaps or child-response overflow, and the Script
+    View viewport shall begin at that shared boundary. Closed Elements control/caption allocation
+    shall suppress inherited post-control vertical spacing before the ComboBox is allocated, while
+    popup role rows and nested toolbar controls retain their normal spacing.
 
 ### Durable native project persistence
 
@@ -609,12 +614,14 @@ model. Native window chrome remains owned by macOS where applicable.
     request the standard arrow cursor, while the whole-document editing response shall request
     the text/I-beam cursor. Decorative labels and painted page rectangles shall not create
     competing cursor owners.
-  - **AC-WRITING-005.8:** The toolbar panel's exact height shall derive from its top padding and
-    shared Item-group height, with no additional blank allocation after the Item group. Its lower
-    divider shall align with the panel edge, and Script View shall follow the toolbar without an
-    intervening application spacer or fixed frame/top-content inset. Script View page-edge spacing
-    remains owned by scrollable content. The toolbar divider shall use an explicit toolbar-local
-    width setting and the toolbar palette's border color, without adding other toolbar frame edges.
+  - **AC-WRITING-005.8:** The toolbar panel's exact height shall derive from its top padding, shared
+    Item-group height, and any explicitly owned trailing padding. Its outer composition shall not
+    add implicit vertical gaps, and child content shall remain within its allocated Item-group
+    height rather than expanding the returned panel boundary. Its lower divider shall align with the
+    panel edge, and Script View shall follow the toolbar without an intervening application spacer
+    or fixed frame/top-content inset. Script View page-edge spacing remains owned by scrollable
+    content. The toolbar divider shall use an explicit toolbar-local width setting and the toolbar
+    palette's border color, without adding other toolbar frame edges.
 
 ### Desktop status bar and visible page
 
