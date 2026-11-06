@@ -575,12 +575,22 @@ model. Native window chrome remains owned by macOS where applicable.
     Item shall display that element's explicit role using the supported labels in
     REQ-WRITING-LOOP-007. The central Elements ComboBox's closed control shall use an outlined
     Unfold More Material icon instead of egui's default triangle, while preserving the ComboBox's
-    selection, keyboard, popup, and accessibility behavior. The central dropdown and the Elements
-    submenu in toolbar overflow shall
-    derive their desired vertical extent from all supported role rows and active menu metrics,
-    including row spacing and popup frame allowance, rather than an arbitrary short fixed height.
-    The Elements closed selected role and role rows in the central dropdown and overflow submenu
-    shall use the same separately named text-size default. The Elements caption shall retain toolbar
+     selection, keyboard, popup, and accessibility behavior. The central dropdown and the Elements
+     submenu in toolbar overflow shall
+     derive their desired vertical extent from all supported role rows and active menu metrics,
+     including row spacing and popup frame allowance, rather than an arbitrary short fixed height.
+     The closed central control shall use the separately named
+     `DEFAULT_ELEMENTS_CLOSED_COMBO_OUTLINE_WIDTH` parameter, defaulting to 1.0 logical point, for
+      its outline. The outline shall use the app-owned toolbar palette's hover foreground, distinct
+      from the toolbar hover fill, while idle and hovered; hover shall retain the existing solid fill
+      without changing the outline color.
+     Its separately named `DEFAULT_ELEMENTS_CLOSED_COMBO_HEIGHT` parameter shall default to 18.0
+     logical points and control only the closed control's minimum interaction height; it shall not
+     replace the dynamically derived role-popup height. The idle/hover outline and closed-height presentation
+     shall not alter popup frame or role-option row visuals, and the open control shall retain its
+     appropriate active/open appearance.
+     The Elements closed selected role and role rows in the central dropdown and overflow submenu
+     shall use the same separately named text-size default. The Elements caption shall retain toolbar
     item text sizing and use the centered nominal caption rectangle, independently of the stock
     ComboBox response height; its separately owned vertical optical adjustment shall not move action
     captions. Role-option rows shall retain their separately owned horizontal inset. Popup
@@ -868,6 +878,81 @@ content.
     screenplay/project data, editor state, page zoom, pagination, or exports. Native transition
     completion, green-button equivalence, and exact window/monitor restoration are not
     guaranteed by a reported state or command request.
+
+### Desktop application menus
+
+- **REQ-WRITING-LOOP-011: Shared desktop application menus.** The desktop shall present the complete
+  ordered File, Edit, View, Format, Insert, Document, Tools, Production, Window, and Help catalog
+  from [`final-draft-13-menus.md`](../../../.reference/final-draft-13-menus.md) through one shared
+  catalog. Existing File/Edit operations retain their shared command path; every additional row is a
+  visible disabled placeholder. Windows uses the in-window egui menu; macOS uses native application
+  menus while retaining the enabled in-window preview during this development submission.
+  - **AC-WRITING-011.1:** The shared catalog shall reproduce every reference label, item order,
+    separator/group boundary, shortcut annotation, disclosure marker, and checkmark across the ten
+    top-level menus. Existing File commands remain New, Open..., Close, Save, Save As..., and Save As
+    PDF...; existing Edit commands remain Undo, Redo, Cut, Copy, Paste, Delete, and Select All, in
+    their current catalog order and groups. Their current labels, icons, availability projection,
+    shortcuts, aliases, and command behavior shall not change. The reference's state-specific Undo/
+    Redo labels shall not be duplicated. Only these existing command rows carry an application
+    command; placeholders shall not create `AppCommand` variants or no-op handlers. The shared
+    dispatcher and fresh availability projection remain authoritative for actual commands.
+  - **AC-WRITING-011.2:** Windows shall present the full in-window ten-menu strip immediately above
+    the toolbar and shall not construct the macOS backend. macOS shall install the native ScriptCraft
+    Application menu separately from the ten shared catalog menus and retain the clickable full
+    in-window preview. The source-only in-window preview switch shall remain enabled for this
+    development submission. Native macOS alone shall own accelerators whenever its backend is
+    active, including dual preview; the in-window menu shall own accelerators on Windows. Native
+    command events and in-window command activations shall converge on one ordered command queue
+    and dispatcher. Clicking any top-level catalog menu shall open its popup; while one is open,
+    hovering another top-level menu shall switch to that popup without activating a row. Ordinary
+    egui keyboard navigation and dismissal shall remain available.
+  - **AC-WRITING-011.3:** Cut and Copy shall use ordered canonical screenplay body UTF-8, preserve
+    exact casing and selected characters, and insert one newline per crossed paragraph boundary;
+    they shall not use print/export transformations. Cut shall write to the system clipboard before
+    deleting and leave the screenplay unchanged on clipboard-write failure. Paste shall read only
+    when activated and submit nonempty text through the existing transactional paste operation;
+    empty/unreadable clipboard content shall not mutate the screenplay and shall produce a
+    privacy-safe notice. Clipboard contents shall not be polled for per-frame enablement.
+  - **AC-WRITING-011.4:** Menu definitions, enablement, queue contents, popups, focus, and menu
+    presentation shall remain transient desktop state; they shall not enter screenplay semantics,
+    FDX persistence, fixed layout, or exports. Menu commands shall target the application session
+    rather than popup focus and shall restore editor focus after Edit dispatch when the editor
+    surface has been recorded. Current availability shall be rechecked at dispatch, including
+    migration-modal blocking.
+  - **AC-WRITING-011.5:** Reference entries ending in `>` shall be represented by disabled,
+    disclosure-only rows with a caret in egui and disabled empty submenus in native macOS. This
+    limited structural placeholder explicitly supersedes earlier no-caret/no-submenu wording; no
+    submenu children, recursive menu content, or functional submenu navigation are authorized.
+    No entries beyond the linked complete reference catalog are implied. This criterion does not
+    authorize production OS-only automatic switching, disabling the preview, unsaved-close
+    confirmation, or a repair to the pre-existing New dirty-session consent discrepancy. Native
+    menu appearance/accessibility and in-window rendering remain platform presentation
+    responsibilities and require user review; submission is not acceptance evidence.
+  - **AC-WRITING-011.6:** Native macOS menu images shall be optional AppKit SF Symbol template images,
+    assigned only to File New (`plus`), Open (`arrow.up.right`), Close (`xmark`), Save
+    (`square.and.arrow.down`), Save As (`square.and.arrow.down.on.square`) and Edit Undo
+    (`arrow.uturn.backward`), Redo (`arrow.uturn.forward`), Cut (`scissors`), Copy (`doc.on.doc`),
+    and Paste (`doc.on.clipboard`). Save As PDF, Delete, and Select All shall remain image-free.
+    Symbol metadata shall remain in the macOS adapter, independent of shared semantic icons and the
+    enabled in-window Material-icon preview. The adapter shall resolve catalog-backed native menu
+    item references once after muda installation, retain them for the native controller lifetime,
+    and remain confined to the AppKit main thread. Images shall be initialized at 18 points with
+    template rendering; missing symbols/items or unavailable native handles shall leave optional
+    images absent and shall not block startup or command activation. Muda shall remain authoritative
+    for menu construction, IDs, labels, commands, events, and enablement; synchronization shall not
+    assign images or traverse the native hierarchy per frame. These are implementation contracts,
+    not claims that symbols are present on every supported OS or that appearance/behavior has been
+    visually or operationally accepted.
+  - **AC-WRITING-011.7:** Every row not backed by one of the existing thirteen File/Edit commands
+    shall be a disabled placeholder with no application command, command-map entry, pending-queue
+    entry, raw-input shortcut recognition, dispatch, or activation side effect. Shortcut metadata on
+    placeholders is display-only and may include Command, Control, Option, Shift, Return/Enter,
+    punctuation, brackets, backslash/pipe, or right-arrow forms; it shall never become a live
+    shortcut. Preserve two static checked-but-disabled rows (Script - Page View and `blank
+    document.fdx`) without projecting document/view state. Render Help Search as a disabled,
+    noninteractive, accessible Search label only—not as a text field, focus target, or command.
+    Disclosure, checked, and Search placeholders carry no application behavior. Newly added
+    placeholder icons remain unassigned; existing functional File/Edit icon mappings are retained.
 
 ## Constraints
 

@@ -80,12 +80,25 @@ overflow they remain disabled-colored text labels with no interaction. Enabled
 New/Open/Save/Save As/Export PDF and Elements role routing remain on their
 existing adapters. The overflow control uses the catalog's outlined Double
 Arrows Material icon, is icon-only with an accessible name, and is rendered only
-when allocation produces overflow entries; it adds no permanent wide-layout
-width. Both the central Elements ComboBox and its nested overflow submenu derive
-their scroll area's desired height from all role-row text/button metrics using
-the independently configurable role-option font size, and inter-row spacing.
-The central ComboBox paints the outlined Material Unfold More glyph in place of
-egui's default triangle through its icon-painter hook; ComboBox selection,
+    when allocation produces overflow entries; it adds no permanent wide-layout
+    width. Both the central Elements ComboBox and its nested overflow submenu derive
+    their scroll area's desired height from all role-row text/button metrics using
+    the independently configurable role-option font size, and inter-row spacing.
+    The central closed ComboBox uses the separately adjustable
+    `DEFAULT_ELEMENTS_CLOSED_COMBO_HEIGHT = 18.0` logical points as its local minimum
+    interaction height, matching egui's current default interaction-height floor; content
+    and button padding can make the full response taller. The setting is restored before
+    caption allocation and inside the popup before role-row layout.
+    Its `.height(role_popup_height)` remains the independently derived popup content
+    cap and is not the closed-control height. The closed outline uses
+    `DEFAULT_ELEMENTS_CLOSED_COMBO_OUTLINE_WIDTH = 1.0` logical point and is painted
+    only around the closed response using the app-owned toolbar palette's hover
+    foreground, distinct from the toolbar hover fill. The stock hovered solid fill
+    remains intact; open/active visuals remain framework-owned. The outline is a narrow
+    painter overlay rather than a `Visuals` override, so popup frames and role rows
+    do not inherit a changed border style.
+    The central ComboBox paints the outlined Material Unfold More glyph in place of
+    egui's default triangle through its icon-painter hook; ComboBox selection,
 keyboard, popup, and accessibility behavior remain framework-owned. The overflow
 submenu retains its menu-owned indicator. The usable egui content viewport minus
 the popup frame margins
@@ -217,6 +230,112 @@ conversion, with neutral 1.0 if the native value is absent or invalid. Page zoom
 desktop page presentation and base typography only. Persisted root TextState Scaling is only the
 user's whole-percent zoom; neither OS conversion nor native display scale enters core layout, PDF,
 or the saved percentage. Desktop hit testing uses the matching layout-to-presentation transform.
+
+## Desktop application-menu implementation context
+
+The menu system is desktop-only and leaves screenplay core, persistence, fixed layout, and exports
+unchanged. [`app_commands.rs`](../../apps/scriptcraft/src/app_commands.rs) owns the shared
+`AppCommand` identities, current `AppCommandAvailability` projection, dispatcher, editor-focus
+restoration helper, and the one explicit `arboard` clipboard adapter. Existing File/PDF operations
+and Edit session operations flow through this dispatcher; clipboard extraction reads canonical
+body-element UTF-8, copies exact selected text with one newline per crossed element boundary, and
+does not inherit print/export transformations. Cut writes before invoking the transactional delete;
+Paste reads only on activation and invokes the existing paste operation.
+
+[`menu_items.rs`](../../apps/scriptcraft/src/menu_items.rs) is the one ordered,
+presentation-independent catalog for File, Edit, View, Format, Insert, Document, Tools, Production,
+Window, and Help, matching [`final-draft-13-menus.md`](../../.reference/final-draft-13-menus.md).
+Each entry distinguishes `Command(AppCommand)` from `DisabledPlaceholder(PlaceholderKind)`; the
+placeholder kinds are ordinary disabled row, disclosure-only, checked, and Help Search. The 13
+existing File/Edit command rows retain their IDs, labels, accessibility names, icons, shortcuts,
+aliases, fresh availability projection, and dispatcher behavior. The other 132 rows are disabled
+placeholders (99 ordinary, 30 disclosure, two checked, one Search); none adds an application
+command or a no-op handler. The two static checked rows are Script - Page View and `blank
+document.fdx`. Disclosure rows have no child content and no functional nested navigation. Help
+Search is a disabled accessible label, not an input or focus target. Placeholder icons remain unset.
+`LogicalShortcut` carries display/native accelerator metadata including primary, literal Control and
+Option, Shift, alphabetic/punctuation/bracket/backslash/pipe/Return/arrow keys; placeholder metadata
+is not input-recognition authority. [`menu.rs`](../../apps/scriptcraft/src/menu.rs) owns the
+source-only preview policy, menu-local egui renderer/metrics, recognition of command-only shortcuts,
+in-window accelerator-consumption policy, and the FIFO of shared command identities. Its in-window
+strip retains its existing 24-logical-point height and popup height bounds. On Windows the
+in-window strip owns command accelerators; on macOS the preview remains enabled while native owns
+command accelerators.
+
+[`macos_menu.rs`](../../apps/scriptcraft/src/macos_menu.rs) is compiled only for macOS and owns
+main-thread native Application-menu construction separately from all ten shared catalog menus,
+muda-retained menu/item handles, native accelerators, the native-ID-to-command map, event inbox, and
+label/enablement synchronization. Only the 13 command rows enter the native command map. Disabled
+ordinary/Search placeholders are native disabled items and may carry their display accelerators;
+checked placeholders are disabled checked items, and `>` placeholders are disabled empty submenus.
+No placeholder ID maps to a command, and unknown/event IDs are ignored at the FIFO handoff. The
+resolved `muda` 0.17.2 handler captures the egui context, appends activated IDs to a thread-safe
+inbox, and requests repaint. In that version, installing the handler replaces delivery to
+`MenuEvent::receiver()`, so `main.rs` drains the handler-fed inbox rather than polling that receiver.
+The next app update maps only known command IDs into the shared FIFO; native command labels and
+enabled state remain synchronized through the catalog and availability projection.
+
+[`macos_sf_symbols.rs`](../../apps/scriptcraft/src/macos_sf_symbols.rs) is the macOS-only,
+main-thread-confined image adapter owned for the full `NativeMenuController` lifetime. After muda
+installs the root, it retains the borrowed root `NSMenu`, resolves unique catalog-title paths to
+requested native items once, and retains the resolved `NSMenuItem` handles alongside that root.
+The native-only mapping is File New `plus`, Open `arrow.up.right`, Close `xmark`, Save
+`square.and.arrow.down`, Save As `square.and.arrow.down.on.square`; Edit Undo `arrow.uturn.backward`,
+Redo `arrow.uturn.forward`, Cut `scissors`, Copy `doc.on.doc`, Paste `doc.on.clipboard`. Save As PDF,
+Delete, and Select All remain image-free. AppKit system-symbol images use an 18-point initial size
+and template rendering; missing handles or symbols produce bounded static warnings and leave the
+item image-free without failing startup. The adapter performs no per-frame hierarchy lookup or
+image assignment; muda continues to own command IDs, labels, accelerators, events, and enablement.
+
+The AppKit boundary is deliberately narrow: `objc2` 0.6.5, `objc2-app-kit` 0.3.2, and
+`objc2-foundation` 0.3.2 are macOS-target dependencies matching muda's resolved objc2 generation.
+The sole unsafe operation is the function-local retain of muda's borrowed root `NSMenu` handle in
+`retain_native_menu()`, guarded by one local `#[allow(unsafe_code)]` and a safety comment covering
+the borrowed-handle lifetime and main-thread check. There are no raw Objective-C message sends or
+module/crate-wide unsafe allowances; package unsafe-code denial remains in force elsewhere. The
+in-window Material icon renderer and shared semantic icon assignments are unchanged.
+
+[`main.rs`](../../apps/scriptcraft/src/main.rs) orchestrates both presentations and the update
+handoff. The in-window panel order is menu strip, existing toolbar, Script Workspace, then the
+existing bottom status panel; the menu strip is inserted immediately before the toolbar only when
+the in-window policy enables it. Each update refreshes native-window state, drains native event IDs
+into the FIFO, dispatches the detached FIFO batch in activation order with fresh availability
+rechecked, then routes ordinary editor input and renders the application panels. Egui menu clicks
+enqueue during panel rendering and are dispatched on a later update. Recognized pressed in-window
+shortcuts are extracted from raw input before editor routing only when the in-window backend owns
+accelerators; unrelated keys and IME input remain. Native macOS is the sole accelerator owner while
+installed, including dual preview; Windows uses the in-window backend. Edit dispatch targets the
+application session, not the menu's transient focus, and requests focus/repaint for the recorded
+editor surface after dispatch when available. Native item enabled states are synchronized from the
+shared availability projection at the end of each update. The in-window catalog buttons retain
+egui click-to-open and ordinary keyboard/dismissal behavior; a menu-local bridge switches to a
+different top-level popup on hover only while a tracked catalog popup is open, and does not enqueue
+a command. Rows use disabled state for placeholders, with a display-only right caret for disclosure
+rows, a checkmark in the existing icon slot for the two checked placeholders, and a disabled Search
+label. Command matching explicitly ignores all placeholder rows, so their shortcut labels cannot
+become raw-input commands. The locked egui 0.34.3 `MenuBar`/`MenuConfig` APIs expose styling and popup close behavior,
+not top-level hover switching; `MenuButton` uses click-driven `Popup::menu`, while `SubMenuButton`
+hover behavior is for nested menus and does not switch an already-open sibling. The adapter uses
+egui popup memory (`Popup::open_id`) rather than changing global pointer or focus state.
+
+The in-window switch `IN_WINDOW_MENU_PREVIEW_ENABLED` is currently `true`; it is a source-only
+development switch, not a preference or persisted field. Windows always presents the complete egui
+catalog; macOS currently presents the native Application menu, all ten shared native catalog menus,
+and the complete egui catalog preview.
+Automatic production OS-only selection and disabling the preview are deferred to a separately
+approved change. Current egui menu metrics in source are: bar height 24, bar/item/shortcut text
+12/12/12, icon size 14, row height 22, icon slot 28, bar gap 8×0, bar padding 8×0, row padding
+4×0, row atom spacing 6×2, popup padding 10×8, separator spacing/stroke 9/1, and
+bar/row/popup corner radii 7/4/8 logical units. Popup width remains content-driven without custom
+narrow-window reflow; appearance and geometry are not claimed to match the reference pixel-for-pixel.
+
+Known boundaries remain explicit: disclosure-only placeholders have empty content and do not enable
+functional submenu navigation; no behavior is added for other placeholder rows. The 10-menu catalog
+and disclosure rows supersede the prior File/Edit-only/additional-menu and no-caret exclusions, but
+do not authorize content beyond the reference. Close has no new unsaved-change confirmation; New
+still has the pre-existing dirty-session consent discrepancy in its replacement path; and neither OS
+runtime behavior nor Windows acceptance is established by source implementation. No automated
+desktop tests were added. User review and validation remain pending.
 
 ## Cross-cutting design
 

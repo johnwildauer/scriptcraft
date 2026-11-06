@@ -18,15 +18,23 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+mod app_commands;
 mod document_font;
 mod focus_mode;
 mod material_font;
+#[cfg(target_os = "macos")]
+mod macos_menu;
+#[cfg(target_os = "macos")]
+mod macos_sf_symbols;
+mod menu;
+mod menu_items;
 mod script_view;
 mod sprint_timer;
 mod status_bar;
 mod theme;
 mod toolbar;
 mod toolbar_items;
+use app_commands::AppCommand;
 use sprint_timer::{NotificationResult, NotificationSink};
 use status_bar::{DiagnosticProjection, ViewportCenterAnchor, ViewportPageTracker};
 use toolbar::toolbar_content_height;
@@ -380,6 +388,9 @@ enum RevealIntent {
 
 struct ScriptCraftApp {
     session: EditingSession,
+    pending_menu_commands: menu::PendingMenuCommands,
+    #[cfg(target_os = "macos")]
+    native_menu: Option<macos_menu::NativeMenuController>,
     focus_mode: focus_mode::FocusModeController,
     sprint_timer: sprint_timer::SprintTimer,
     timer_clock_origin: Instant,
@@ -433,6 +444,9 @@ impl ScriptCraftApp {
         let (notification_sink, notification_results) = sprint_timer::NativeNotificationSink::new();
         Ok(Self {
             session,
+            pending_menu_commands: menu::PendingMenuCommands::default(),
+            #[cfg(target_os = "macos")]
+            native_menu: None,
             focus_mode: focus_mode::FocusModeController::default(),
             sprint_timer: sprint_timer::SprintTimer::default(),
             timer_clock_origin: Instant::now(),
@@ -1062,6 +1076,29 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     app.applied_appearance = applied_appearance;
     app.theme_palette = theme_palette;
 
+    if menu::in_window_menu_enabled() {
+        let availability = app.app_command_availability();
+        let menu_panel = egui::Panel::top("application-menu")
+            .frame(chrome_frame(app.theme_palette.toolbar))
+            .show_separator_line(false)
+            .exact_size(menu::MENU_PANEL_HEIGHT)
+            .show_inside(ui, |ui| {
+                menu::show_menu_bar(
+                    ui,
+                    availability,
+                    &mut app.pending_menu_commands,
+                );
+            });
+        let rect = menu_panel.response.rect;
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left(), rect.bottom() - 0.5),
+                egui::pos2(rect.right(), rect.bottom() - 0.5),
+            ],
+            egui::Stroke::new(1.0, app.theme_palette.toolbar.border),
+        );
+    }
+
     egui::Panel::top("titlebar-toolbar")
         .frame(chrome_frame(app.theme_palette.toolbar))
         .show_separator_line(false)
@@ -1251,6 +1288,34 @@ impl eframe::App for ScriptCraftApp {
         raw_input
             .events
             .retain(|event| !matches!(event, egui::Event::Zoom(_)));
+
+        // The active platform backend owns accelerators: native macOS while the
+        // native menu is installed, otherwise the in-window backend on Windows.
+        // Consume only recognized pressed keys; preserve unrelated input.
+        let ime_event_in_frame = raw_input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Ime(_)));
+        if menu::in_window_menu_shortcuts_owned() && !self.ime_active && !ime_event_in_frame {
+            let mut retained_events = Vec::with_capacity(raw_input.events.len());
+            for event in std::mem::take(&mut raw_input.events) {
+                let command = match &event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => menu::command_for_key_event(*key, *modifiers),
+                    _ => None,
+                };
+                if let Some(command) = command {
+                    self.pending_menu_commands.enqueue(command);
+                } else {
+                    retained_events.push(event);
+                }
+            }
+            raw_input.events = retained_events;
+        }
         if self.zoom_percent != original_zoom || scale_changed {
             self.page_geometry.invalidate();
             self.page_scale = None;
@@ -1268,6 +1333,13 @@ impl ScriptCraftApp {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
         self.update_native_window_state(&ctx);
+        #[cfg(target_os = "macos")]
+        if let Some(native_menu) = &self.native_menu {
+            native_menu.drain_events(&mut self.pending_menu_commands);
+        }
+        // Menu activations rendered in the previous pass are dispatched once
+        // before ordinary editor input, with command availability rechecked.
+        self.dispatch_pending_menu_commands(&ctx);
         self.notification_sink.set_repaint_context(&ctx);
         let migration_pending = self.pending_fdx_open.is_some();
         if !migration_pending {
@@ -1290,6 +1362,10 @@ impl ScriptCraftApp {
         }
         self.schedule_sprint_timer_repaint(&ctx, self.timer_now());
         self.schedule_focus_mode_repaint(&ctx, self.timer_now());
+        #[cfg(target_os = "macos")]
+        if let Some(native_menu) = &self.native_menu {
+            native_menu.synchronize(self.app_command_availability());
+        }
         self.performance.frame_nanos = self
             .performance
             .frame_nanos
@@ -1405,6 +1481,17 @@ fn main() -> eframe::Result {
                 &toolbar_items::custom_material_icon_axes(),
             );
             ScriptCraftApp::new()
+                .and_then(|mut app| {
+                    #[cfg(target_os = "macos")]
+                    {
+                        let availability = app.app_command_availability();
+                        app.native_menu = Some(macos_menu::NativeMenuController::install(
+                            availability,
+                            cc.egui_ctx.clone(),
+                        )?);
+                    }
+                    Ok(app)
+                })
                 .map(|app| Box::new(app) as Box<dyn eframe::App>)
                 .map_err(|error| error.into())
         }),

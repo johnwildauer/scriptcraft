@@ -9,7 +9,7 @@ research notes or implementation observations as product mandates.
 - **Status:** `complete` — initialization reviews and historical baseline evidence are linked; review warnings remain follow-ups.
 - **Path type:** `existing`
 - **Initialized on:** `2026-10-25`
-- **Last revised:** `2026-11-04`
+- **Last revised:** `2026-11-06`
 - **Record owner:** `Forge initialization agent`
 
 ## Project intake
@@ -210,6 +210,122 @@ disposition, and runtime visual acceptance remain pending. Findings and the full
 warning summary are recorded in
 [`toolbar-script-view-gap-findings.md`](../.plan/2026-11-06-toolbar-script-view-gap/toolbar-script-view-gap-findings.md)
 and [`WO-012-elements-spacing-overflow.md`](../.plan/2026-11-06-toolbar-script-view-gap/work-orders/WO-012-elements-spacing-overflow.md).
+
+### Menu system WO-001–WO-010 implementation submission — 2026-11-06
+
+The menu-system work was submitted sequentially on the existing local branch
+`dev/2026-11-06-menu-system`; source inspection for WO-010 found that branch checked
+out with the initiative's existing modified and untracked work present. No new
+branch or commit was created by WO-010. The desktop manifest records direct
+`arboard = "3.7.0"`; the macOS-target manifest records
+`muda = { version = "0.17", default-features = false }`, and the existing lockfile
+resolves `muda` to 0.17.2 and includes both dependencies for ScriptCraft. These are
+dependency/lockfile facts, not compilation or runtime evidence.
+
+WO-001–WO-009 added the shared desktop command dispatcher, canonical clipboard
+adapter, declarative File/Edit catalog, in-window renderer and source preview
+switch, macOS native menu/event adapter, and shared queue/accelerator arbitration.
+WO-010 adds durable requirement and technical-context records and reconciles the
+initiative/work-order handoffs with that source. The switch remains enabled;
+macOS is configured for native plus in-window preview, while Windows uses the
+in-window menu. Native macOS is the sole accelerator owner while installed; the
+`muda` 0.17.2 event handler feeds an app-drained ID inbox because handler
+registration suppresses `MenuEvent::receiver()` delivery. Initial menu metrics,
+canonical clipboard behavior, module boundaries, and known limitations are
+recorded in the linked initiative plan and technical context.
+
+This is implementation submission only. No build, check, test, lint, formatting,
+application launch, manual verification, review, or independent validator was run
+for this initiative under repository-wide user-owned validation policy. No
+automated desktop-test target was added, and no prior work order is marked
+validated or accepted. User evidence and acceptance remain pending, including
+macOS native/dual-preview and Windows in-window behavior, command/shortcut and
+clipboard/focus/modal interactions, layout/appearance and viewport-scale review,
+and any desired workspace checks. The known pre-existing New dirty-session
+consent discrepancy is not claimed fixed. Automatic production OS-only switching
+and disabling the preview remain deferred to a separately approved change.
+
+The user subsequently reported E0282 at `MenuEvent::set_event_handler` in
+[`macos_menu.rs`](../apps/scriptcraft/src/macos_menu.rs), because the closure
+parameter type was unknown at `event.id`. The callback was narrowly annotated as
+`move |event: MenuEvent|` using the imported type from `muda 0.17.2`. No eframe/
+egui version or dependency changed: eframe remains 0.34, locked at 0.34.3. This
+records the user-provided compiler evidence and source correction only; no build
+or other validation was run, and compilation is not claimed to pass.
+
+### Menu-system WO-011–WO-012 implementation submissions — 2026-11-06
+
+WO-011 and WO-012 were implemented sequentially on the existing
+`dev/2026-11-06-menu-system` branch after explicit user authorization; existing
+work was preserved and no branch or commit was created. The desktop package's
+macOS-target dependencies are `objc2 = 0.6.5`, `objc2-app-kit = 0.3.2`, and
+`objc2-foundation = 0.3.2` with the narrow feature sets recorded in
+[`apps/scriptcraft/Cargo.toml`](../apps/scriptcraft/Cargo.toml). They match the
+objc2 generation used by `muda = "0.17"`, locked at 0.17.2. The lockfile records
+the direct ScriptCraft dependency edges. These dependencies were resolved/fetched
+as WO-011 setup evidence only; WO-012 adds no dependencies, and no compilation is
+claimed. Eframe/egui remain unchanged at the already recorded versions.
+
+The native adapter uses AppKit system-symbol images for File New `plus`, Open
+`arrow.up.right`, Close `xmark`, Save `square.and.arrow.down`, Save As
+`square.and.arrow.down.on.square`, and Edit Undo `arrow.uturn.backward`, Redo
+`arrow.uturn.forward`, Cut `scissors`, Copy `doc.on.doc`, Paste
+`doc.on.clipboard`. Save As PDF, Delete, and Select All have no native images.
+Images are requested as 18-point templates; the macOS-only adapter retains the
+installed root and resolved item references on the main thread for the native
+controller lifetime. The sole unsafe operation is the locally allowed retain of
+muda's borrowed root AppKit handle; no raw Objective-C message sends or broader
+unsafe allowance were added. Missing symbols or item paths are optional and emit
+at most ten bounded static catalog-ID/symbol warnings during installation. Muda
+continues to own labels, enablement, commands, events, and item identity; no
+per-frame image assignment or hierarchy lookup is introduced. The egui preview
+remains enabled and its Material icon assignments are unchanged.
+
+Both work orders are implementation submissions only, not accepted or validated.
+No build, check, test, lint, formatting command, launch, manual verification,
+review, or independent validator was run under repository policy; no automated
+desktop tests were added. Compilation, target OS symbol availability, native menu
+resolution, visual Light/Dark and disabled-state appearance, startup fallback,
+command/shortcut/wakeup behavior, and in-window preview interaction remain
+unverified and pending user evidence. Historical WO-011 notes about the former
+limited named-image path and the then-unstarted WO-012 describe their original
+handoff state; the completed SF Symbols mapping above supersedes those interim
+implementation facts. User review and acceptance remain pending.
+
+### Menu-system WO-013 complete catalog implementation submission — 2026-11-06
+
+WO-013 extends the existing menu-system checkout on `dev/2026-11-06-menu-system`;
+the user-directed existing branch was preserved and no branch or commit was created.
+The shared desktop catalog now carries ten ordered reference menus and distinguishes
+real `AppCommand` rows from disabled placeholders without adding no-op commands.
+The existing thirteen File/Edit command rows retain their mapped behavior and icon/
+shortcut metadata; 132 other rows are disabled placeholders: 99 ordinary rows, 30
+disclosure-only rows, two statically checked rows, and one disabled Help Search label.
+All 33 newly cataloged placeholder shortcuts are display/native-accelerator metadata
+only and are excluded from egui raw-input matching, the native ID-to-command map,
+the pending command queue, and dispatch. Placeholder icons remain unassigned. The
+native Application menu remains native-only and separate from the ten shared menus.
+
+No dependencies, lockfile entries, core behavior, toolbar/status behavior, or production
+preview policy changed. Existing egui menu height/popup bounds, icon/label/shortcut
+alignment, hover switching, and enabled File/Edit behavior were preserved by source
+adaptation; these are not runtime or visual verification claims. Repository policy
+prohibited and no agent build, check, test, lint, formatting command, launch, manual
+verification, review, or independent validator was run. Both backend compilation and
+all native/in-window rendering, accessibility, disabled activation, and shortcut
+behavior remain user-unverified. This implementation submission is not acceptance.
+
+The user subsequently explicitly authorized Git closeout for the complete initiative:
+commit all current changes on `dev/2026-11-06-menu-system` and merge that branch back
+to `master`. Preserve all current work, including untracked initiative/reference files,
+and use ordinary non-destructive Git behavior only; do not force, rewrite history, use
+a remote, or create a pull request. If master has diverged or conflicts arise, stop
+without overriding either side. The resulting implementation commit, merge form, and
+final master HEAD are evidenced by Git history after the operations; this authorization
+record does not invent a hash or claim the operations have already completed. This
+closeout does not waive the repository-wide user-owned validation policy: no agent
+build, check, test, lint, formatting, launch, review, or validator is authorized here,
+and implementation submission remains unaccepted and unvalidated.
 
 ### Gates and intervention
 

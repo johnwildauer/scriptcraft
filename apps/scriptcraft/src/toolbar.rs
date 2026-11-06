@@ -1,6 +1,6 @@
 use super::*;
 use super::toolbar_items::{
-    EnablementPolicy, IconSpec, OVERFLOW_ITEM_SPEC, ToolbarAction, ToolbarBehavior, ToolbarGraphic,
+    EnablementPolicy, IconSpec, OVERFLOW_ITEM_SPEC, ToolbarBehavior, ToolbarGraphic,
     ToolbarIconVariant, ToolbarItemSpec, ToolbarLayoutPolicy, TEMPORARY_TOOLBAR_ITEMS,
 };
 
@@ -76,9 +76,13 @@ mod toolbar_presentation {
     /// Default toolbar caption and menu text size, in logical points.
     pub(super) const DEFAULT_ITEM_TEXT_POINT_SIZE: f32 = 11.0;
     /// Elements role-option text size, independent of toolbar item text.
-    pub(super) const DEFAULT_ELEMENTS_ROLE_OPTION_POINT_SIZE: f32 = 14.0;
+    pub(super) const DEFAULT_ELEMENTS_ROLE_OPTION_POINT_SIZE: f32 = 13.0;
     /// Horizontal padding on each side of an Elements role-option row, in points.
     pub(super) const DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING: f32 = 18.0;
+    /// Stroke width for the closed Elements ComboBox outline, in logical points.
+    pub(super) const DEFAULT_ELEMENTS_CLOSED_COMBO_OUTLINE_WIDTH: f32 = 1.0;
+    /// Closed Elements ComboBox minimum height, independent of the role popup height.
+    pub(super) const DEFAULT_ELEMENTS_CLOSED_COMBO_HEIGHT: f32 = 18.0;
     /// Gap between icons in grouped or primary/disclosure graphics, in logical points.
     pub(super) const DEFAULT_GRAPHIC_GAP: f32 = 0.0;
 
@@ -504,39 +508,6 @@ fn paint_toolbar_graphic(
 }
 
 impl ScriptCraftApp {
-    pub(super) fn dispatch_toolbar_action(&mut self, action: ToolbarAction) {
-        match action {
-            ToolbarAction::New => {
-                match Project::new()
-                    .map_err(|error| format!("new project failed: {error:?}"))
-                    .and_then(|project| {
-                        EditingSession::with_policy(project, self.session.policy())
-                            .map_err(|error| format!("session failed: {error:?}"))
-                    }) {
-                    Ok(session) => {
-                        self.session = session;
-                        self.page_geometry.reset_for_document_replacement();
-                        self.layout_cache = LayoutCache::default();
-                        self.surface_focused = false;
-                        self.native_path = None;
-                        self.fdx_baseline = None;
-                        self.pending_fdx_open = None;
-                        self.next_cast_list_refresh = Instant::now()
-                            + scriptcraft_core::cast_list::CAST_LIST_REFRESH_INTERVAL;
-                        self.rendered_revision = None;
-                        self.status = "New in-memory project".into();
-                        self.clear_error();
-                    }
-                    Err(error) => self.show_error(error),
-                }
-            }
-            ToolbarAction::Open => self.open_native(),
-            ToolbarAction::Save => self.save_native(),
-            ToolbarAction::SaveAs => self.save_as_native(),
-            ToolbarAction::ExportPdf => self.export_pdf(),
-        }
-    }
-
     pub(super) fn toolbar_action_button(
         &mut self,
         ui: &mut egui::Ui,
@@ -605,7 +576,7 @@ impl ScriptCraftApp {
         }
         if response.clicked() {
             if let ToolbarBehavior::Action(action) = item.behavior {
-                self.dispatch_toolbar_action(action);
+                self.dispatch_app_command(action, ui.ctx());
             }
         }
     }
@@ -643,11 +614,14 @@ impl ScriptCraftApp {
                 ui.set_width(width);
                 let group_rect = ui.max_rect();
                 let vertical_item_spacing = ui.spacing().item_spacing.y;
+                let original_interact_height = ui.spacing().interact_size.y;
                 let role_popup_height = elements_role_popup_max_height(ui);
                 // The closed control is followed by explicitly budgeted caption
                 // allocations, so do not let ComboBox's post-widget spacing push
                 // those allocations beyond this Item group's declared height.
                 ui.spacing_mut().item_spacing.y = 0.0;
+                ui.spacing_mut().interact_size.y =
+                    toolbar_presentation::DEFAULT_ELEMENTS_CLOSED_COMBO_HEIGHT;
                 let combo_result = egui::ComboBox::from_id_salt(item.id)
                     .width(width)
                     .height(role_popup_height)
@@ -676,7 +650,9 @@ impl ScriptCraftApp {
                     .show_ui(ui, |ui| {
                         // Popup role rows retain the normal vertical rhythm even
                         // though the closed control/caption composition does not.
+                        // The closed button's local height must not resize popup rows.
                         ui.spacing_mut().item_spacing.y = vertical_item_spacing;
+                        ui.spacing_mut().interact_size.y = original_interact_height;
                         ui.spacing_mut().button_padding.x =
                             toolbar_presentation::DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING;
                         let role_option_font =
@@ -689,6 +665,9 @@ impl ScriptCraftApp {
                             );
                         }
                     });
+                // Do not let the closed-control height affect the caption or other
+                // controls in this Item group.
+                ui.spacing_mut().interact_size.y = original_interact_height;
                 let popup_open = combo_result.inner.is_some();
                 let combo_response = combo_result.response.on_hover_cursor(toolbar_cursor_icon());
                 if !popup_open {
@@ -712,6 +691,18 @@ impl ScriptCraftApp {
                     );
                     let text_position = elements_closed_text_position(text_rect, galley.size());
                     ui.painter().galley(text_position, galley, text_color);
+                    // Paint only the closed control's outline, using the app-owned
+                    // toolbar hover foreground without changing widget visuals, the
+                    // separate hover fill, or popup role rows.
+                    ui.painter().rect_stroke(
+                        combo_response.rect,
+                        ui.visuals().widgets.inactive.corner_radius,
+                        egui::Stroke::new(
+                            toolbar_presentation::DEFAULT_ELEMENTS_CLOSED_COMBO_OUTLINE_WIDTH,
+                            self.theme_palette.toolbar.hover_fill,
+                        ),
+                        egui::StrokeKind::Inside,
+                    );
                 }
                 // This caption is decorative. Allocate/paint it instead of adding a
                 // label response that can compete with the ComboBox cursor owner.
@@ -835,7 +826,7 @@ impl ScriptCraftApp {
             )
         });
         if let Some(action) = chosen_action {
-            self.dispatch_toolbar_action(action);
+            self.dispatch_app_command(action, ui.ctx());
         }
         if let Some(role) = chosen_role {
             self.change_role_from_toolbar(role);

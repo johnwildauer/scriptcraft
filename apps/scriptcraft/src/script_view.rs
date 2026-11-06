@@ -752,21 +752,6 @@ impl ScriptCraftApp {
     }
 
     fn key_event(&mut self, key: Key, modifiers: egui::Modifiers) -> Option<Result<(), EditError>> {
-        if modifiers.command || (modifiers.ctrl && !cfg!(target_os = "macos")) {
-            return match key {
-                Key::Z if modifiers.shift => Some(self.session.redo()),
-                Key::Z => Some(self.session.undo()),
-                Key::Y => Some(self.session.redo()),
-                Key::A => Some(self.session.set_selection(Selection {
-                    anchor: Position {
-                        element: 0,
-                        offset: 0,
-                    },
-                    focus: self.document_end(),
-                })),
-                _ => None,
-            };
-        }
         match key {
             Key::Backspace => Some(self.session.backspace()),
             Key::Delete => Some(self.session.delete()),
@@ -805,14 +790,6 @@ impl ScriptCraftApp {
         self.dispatch_surface_events(&events, modifiers);
         if !events.is_empty() || ctx.input(|input| has_nonzero_mouse_wheel(&input.raw.events)) {
             self.request_repaint(ctx);
-        }
-    }
-
-    fn document_end(&self) -> Position {
-        let element = self.session.project().elements.len().saturating_sub(1);
-        Position {
-            element,
-            offset: self.session.project().elements[element].text.len(),
         }
     }
 
