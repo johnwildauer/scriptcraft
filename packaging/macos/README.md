@@ -6,6 +6,8 @@ This source-owned packaging path builds an Apple Silicon `ScriptCraft.app` from 
 
 The app and DMG are **ad-hoc signed and unnotarized**. Ad-hoc signing supplies a local bundle signature/integrity check; it does not authenticate a developer, satisfy Gatekeeper for downloaded software, or imply notarization. This guide makes no clean-launch, Developer ID, or notarization claim. The current artifact target is `aarch64-apple-darwin`; it is an artifact choice for this packaging path, not a permanent product platform-support declaration. No minimum macOS version is declared, and the bundle does not register FDX document associations or claim Finder double-click/Open With support.
 
+The icon source is the canonical shared [`AppIcon.png`](../resources/AppIcon.png). macOS package iconset/ICNS generation from that PNG is unchanged.
+
 ## Prerequisites
 
 Install or select these prerequisites yourself before packaging; `package.sh` does not install tools, access the network, or use signing credentials:
@@ -103,7 +105,7 @@ Because this artifact is unsigned by an Apple Developer ID and unnotarized, a re
 ## Troubleshooting
 
 - **Missing Rust target or Xcode tools:** Install/select the user-approved prerequisite separately. Confirm `rustup target list --installed` includes `aarch64-apple-darwin` and `xcode-select -p` succeeds, then rerun the script. The script does not install prerequisites.
-- **Icon generation/dimensions:** Confirm `packaging/macos/AppIcon.png` is the supplied 1024×1024 PNG and that `sips` and `iconutil` are available. Preserve the master; do not crop or replace it with a generated iconset image. A failed icon generation aborts packaging before signing.
+- **Icon generation/dimensions:** Confirm the shared [`AppIcon.png`](../resources/AppIcon.png) is the supplied 1024×1024 PNG and that `sips` and `iconutil` are available. Preserve the master; do not crop or replace it with a generated iconset image. A failed icon generation aborts packaging before signing.
 - **Runtime macOS Dock icon:** Eframe's macOS startup icon setter can replace the app-bundle icon with the supplied image. The app deliberately supplies eframe's empty-icon sentinel on macOS, leaving the icon declared by `CFBundleIconFile` under Launch Services ownership. Do not restore a parsed-PNG eframe icon on macOS. Non-macOS native builds continue using the embedded PNG. Rebuild with `./packaging/macos/package.sh` after changing the bundle icon or runtime setup.
 - **Font license or attribution records:** Confirm the source records remain at their expected `fonts/` paths; the script checks and copies them into the app bundle. Rust dependency notice generation is intentionally outside this local packaging flow and remains a separate distribution-preparation review item.
 - **Stale generated output:** The script replaces the fixed `ScriptCraft.app` and current-version package outputs/intermediates only under `target/macos-package/`. Old versioned DMGs are intentionally preserved; identify the desired version explicitly and do not delete the broad `target/` tree. Remove only a known package-generated file if a user decides it is stale.

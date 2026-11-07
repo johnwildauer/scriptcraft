@@ -2,7 +2,7 @@
 //! native targets, supply the embedded PNG as the runtime window icon.
 
 #[cfg(not(target_os = "macos"))]
-const APP_ICON_PNG: &[u8] = include_bytes!("../../../packaging/macos/AppIcon.png");
+const APP_ICON_PNG: &[u8] = include_bytes!("../../../packaging/resources/AppIcon.png");
 
 pub(super) fn egui_icon() -> Result<eframe::egui::IconData, String> {
     #[cfg(target_os = "macos")]

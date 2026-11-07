@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+build = "build.rs"
 
 [dependencies]
 arboard = "3.7.0"
@@ -12,6 +13,9 @@ egui_material_icons = { version = "0.6.0", features = ["outline"] }
 rfd = "0.15"
 scriptcraft-commands = { path = "../../crates/scriptcraft-commands" }
 scriptcraft-core = { path = "../../crates/scriptcraft-core" }
+
+[build-dependencies]
+embed-resource = "3.0"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png"] }

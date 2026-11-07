@@ -1,5 +1,6 @@
 #![deny(unsafe_code)]
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::egui::{self, Color32, FontId, RichText, Sense, TextStyle, TextWrapMode, Vec2, WidgetText};
 use scriptcraft_core::cast_list::CAST_LIST_REFRESH_INTERVAL;
