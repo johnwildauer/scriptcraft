@@ -608,7 +608,11 @@ pub enum Command {
     #[serde(rename = "file.save-as.request")]
     FileSaveAsRequest,
     #[serde(rename = "file.save-as")]
-    FileSaveAs { path: DocumentPath },
+    FileSaveAs {
+        path: DocumentPath,
+        #[serde(default)]
+        overwrite: bool,
+    },
     #[serde(rename = "file.save-as-pdf")]
     FileSaveAsPdf,
     #[serde(rename = "file.import.resolve")]
@@ -827,7 +831,11 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 42] = [
     descriptor(CommandId::FileClose, "file", "none"),
     descriptor(CommandId::FileSave, "file", "none"),
     descriptor(CommandId::FileSaveAsRequest, "file", "none"),
-    descriptor(CommandId::FileSaveAs, "file", "path: document_path"),
+    descriptor(
+        CommandId::FileSaveAs,
+        "file",
+        "path: document_path, overwrite: bool (default false)",
+    ),
     descriptor(CommandId::FileSaveAsPdf, "file", "none"),
     descriptor(CommandId::FileImportResolve, "file", "resolution: import_resolution"),
     descriptor(CommandId::EditUndo, "edit", "none"),
@@ -909,4 +917,93 @@ pub fn validate_descriptor_catalog() -> Result<(), CatalogError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod save_as_wire_compatibility_tests {
+    use super::{Command, CommandId};
+    use serde::de::value::{Error as ValueError, MapDeserializer};
+    use serde::de::{IntoDeserializer, Visitor};
+    use serde::{Deserialize, Deserializer};
+
+    enum WireValue {
+        String(&'static str),
+        Bool(bool),
+        Map(Vec<(&'static str, WireValue)>),
+    }
+
+    impl<'de> IntoDeserializer<'de, ValueError> for WireValue {
+        type Deserializer = Self;
+
+        fn into_deserializer(self) -> Self::Deserializer {
+            self
+        }
+    }
+
+    impl<'de> Deserializer<'de> for WireValue {
+        type Error = ValueError;
+
+        fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: Visitor<'de>,
+        {
+            match self {
+                Self::String(value) => visitor.visit_string(value.to_owned()),
+                Self::Bool(value) => visitor.visit_bool(value),
+                Self::Map(entries) => visitor.visit_map(MapDeserializer::new(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (Self::String(key), value)),
+                )),
+            }
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct
+            map struct enum identifier ignored_any
+        }
+    }
+
+    fn save_as_wire(params: Vec<(&'static str, WireValue)>) -> WireValue {
+        WireValue::Map(vec![
+            ("id", WireValue::String("file.save-as")),
+            ("params", WireValue::Map(params)),
+        ])
+    }
+
+    #[test]
+    fn omitted_overwrite_consent_deserializes_as_false_and_preserves_command_id() {
+        let command = Command::deserialize(save_as_wire(vec![(
+            "path",
+            WireValue::String("/tmp/legacy-command.fdx"),
+        )]))
+        .unwrap_or_else(|_| unreachable!("legacy Save As payload remains decodable"));
+
+        assert_eq!(command.id(), CommandId::FileSaveAs);
+        assert!(matches!(
+            command,
+            Command::FileSaveAs {
+                overwrite: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn explicit_overwrite_consent_round_trips_as_true() {
+        let command = Command::deserialize(save_as_wire(vec![
+            ("path", WireValue::String("/tmp/confirmed-command.fdx")),
+            ("overwrite", WireValue::Bool(true)),
+        ]))
+        .unwrap_or_else(|_| unreachable!("explicit Save As payload is decodable"));
+
+        assert!(matches!(
+            command,
+            Command::FileSaveAs {
+                overwrite: true,
+                ..
+            }
+        ));
+    }
 }

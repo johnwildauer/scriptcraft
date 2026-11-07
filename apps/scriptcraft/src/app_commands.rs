@@ -1,4 +1,4 @@
-use super::{EditingSession, LayoutCache, Project, ScriptCraftApp, Selection};
+use super::{LayoutCache, Project, ScriptCraftApp, Selection};
 use eframe::egui;
 use scriptcraft_commands::{
     execute_editor_command, Appearance, Command, CommandId, CommandOrigin, CommandOutcome,
@@ -8,7 +8,6 @@ use scriptcraft_commands::{
 };
 use super::sprint_timer::NotificationSink;
 use std::collections::VecDeque;
-use std::time::Instant;
 
 /// An activation plus its diagnostic source. Origins never change execution
 /// semantics; adapters assign the origin as they create the invocation.
@@ -183,26 +182,7 @@ impl ScriptCraftApp {
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FileNew => {
-                match Project::new().ok().and_then(|project| {
-                    EditingSession::with_policy(project, self.session.policy()).ok()
-                }) {
-                    Some(session) => {
-                        self.session = session;
-                        self.page_geometry.reset_for_document_replacement();
-                        self.layout_cache = LayoutCache::default();
-                        self.surface_focused = false;
-                        self.native_path = None;
-                        self.fdx_baseline = None;
-                        self.pending_fdx_open = None;
-                        self.next_cast_list_refresh =
-                            Instant::now() + super::CAST_LIST_REFRESH_INTERVAL;
-                        self.rendered_revision = None;
-                        self.clear_error();
-                    }
-                    None => self.show_error(
-                        "NEW_PROJECT_FAILED: active document and session remain unchanged",
-                    ),
-                }
+                self.launch_blank_instance();
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FileOpenRequest => {
@@ -210,7 +190,7 @@ impl ScriptCraftApp {
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FileOpen { path } => {
-                self.open_native_at(path.as_path());
+                self.launch_document_instance(path.as_path());
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FileClose => {
@@ -225,8 +205,8 @@ impl ScriptCraftApp {
                 self.save_as_native(ctx);
                 DesktopCommandOutcome::EffectDispatched
             }
-            Command::FileSaveAs { path } => {
-                self.save_fdx_as_at(path.as_path());
+            Command::FileSaveAs { path, overwrite } => {
+                self.save_fdx_as_at(path.as_path(), overwrite);
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FileImportResolve { resolution } => {
@@ -906,6 +886,93 @@ mod diagnostic_command_tests {
                 .map(DiagnosticMessage::as_str),
             Some("later")
         );
+    }
+}
+
+#[cfg(test)]
+mod save_as_consent_tests {
+    use super::CommandInvocation;
+    use crate::ScriptCraftApp;
+    use scriptcraft_commands::{Command, CommandId, CommandOrigin, DocumentPath};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_destination() -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!(
+            "scriptcraft-save-as-consent-{}-{nonce}.fdx",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn direct_save_as_requires_explicit_consent_to_replace_existing_path() {
+        let path = unique_destination();
+        std::fs::write(&path, b"prior destination")
+            .unwrap_or_else(|_| unreachable!("temporary destination can be written"));
+        let path_text = path
+            .to_str()
+            .unwrap_or_else(|| unreachable!("temporary path is UTF-8"));
+        let document_path = DocumentPath::new(path_text)
+            .unwrap_or_else(|_| unreachable!("temporary document path is valid"));
+
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else {
+            let _ = std::fs::remove_file(path);
+            return;
+        };
+        app.session
+            .insert("pending screenplay text")
+            .unwrap_or_else(|_| unreachable!("test insertion is valid"));
+        let before = app.session.clone();
+        let context = eframe::egui::Context::default();
+
+        let rejected = app.dispatch_command(
+            CommandInvocation::new(
+                Command::FileSaveAs {
+                    path: document_path.clone(),
+                    overwrite: false,
+                },
+                CommandOrigin::InternalFollowUp,
+            ),
+            &context,
+        );
+        assert_eq!(rejected.command, CommandId::FileSaveAs);
+        assert_eq!(std::fs::read(&path).ok().as_deref(), Some(&b"prior destination"[..]));
+        assert_eq!(app.session, before);
+        assert!(app.session.dirty());
+        assert!(app.native_path.is_none());
+        assert!(app.fdx_baseline.is_none());
+
+        let accepted = app.dispatch_command(
+            CommandInvocation::new(
+                Command::FileSaveAs {
+                    path: document_path,
+                    overwrite: true,
+                },
+                CommandOrigin::InternalFollowUp,
+            ),
+            &context,
+        );
+        assert_eq!(accepted.command, CommandId::FileSaveAs);
+        let saved_bytes = std::fs::read(&path)
+            .unwrap_or_else(|_| unreachable!("successful Save As produced a destination"));
+        assert_ne!(saved_bytes, b"prior destination");
+        let reopened = scriptcraft_core::fdx::read_v6(&saved_bytes)
+            .unwrap_or_else(|_| unreachable!("successful Save As output is valid FDX"));
+        assert!(reopened
+            .project
+            .elements
+            .iter()
+            .any(|element| element.text == "pending screenplay text"));
+        assert!(!app.session.dirty());
+        assert_eq!(app.native_path.as_deref(), Some(path.as_path()));
+        assert!(app.fdx_baseline.is_some());
+
+        let _ = std::fs::remove_file(path);
     }
 }
 

@@ -5,13 +5,15 @@ use scriptcraft_core::editing::{EditingSession, Position, Selection};
 use scriptcraft_core::exports::{export_pdf, export_text};
 use scriptcraft_core::fdx::{read_v6, write_v6};
 use scriptcraft_core::fdx_storage::{
-    save_session, FdxSaveMode, FdxSaveTarget, FdxStorageErrorKind, StdFdxStorageFileSystem,
-    TransactionalSaveError,
+    save_session, FdxSaveMode, FdxSaveTarget, FdxStorageError, FdxStorageErrorKind,
+    FdxStorageFileSystem, StdFdxStorageFileSystem, TransactionalSaveError,
 };
 use scriptcraft_core::layout::ScreenplayLayout;
 use scriptcraft_core::{Project, Role};
 use std::fs;
-use std::path::PathBuf;
+use std::cell::Cell;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("acceptance scenario uses valid bounded input"))
@@ -130,6 +132,225 @@ fn failed_save_as_keeps_existing_destination_and_live_unsaved_session() {
         fs::read(&destination).ok().as_deref(),
         Some(&b"prior valid destination"[..])
     );
+    assert_eq!(session, before);
+    assert!(session.dirty());
+    assert!(target.path().is_none());
+    assert!(target.baseline().is_none());
+}
+
+#[test]
+fn confirmed_save_as_creates_an_absent_destination_without_changing_source() {
+    let directory = TestDirectory::new();
+    let source = directory.path("source.fdx");
+    let destination = directory.path("new-destination.fdx");
+    let source_bytes = valid(write_v6(&valid(Project::new())));
+    fs::write(&source, &source_bytes)
+        .unwrap_or_else(|_| unreachable!("temporary source can be written"));
+
+    let mut session = valid(EditingSession::new(valid(Project::new())));
+    valid(session.insert("new Save As screenplay"));
+    let mut target = FdxSaveTarget::new_unsaved();
+    let outcome = valid(save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::SaveAsOverwrite(destination.clone()),
+    ));
+
+    let saved = valid(read_v6(&valid(fs::read(&destination))));
+    assert_eq!(saved.project.elements[0].text, "new Save As screenplay");
+    assert_eq!(valid(fs::read(&source)), source_bytes);
+    assert_eq!(target.path(), Some(destination.as_path()));
+    assert!(target.baseline().is_some());
+    assert!(!session.dirty());
+    assert!(!outcome.temporary_cleanup_warning);
+}
+
+#[test]
+fn confirmed_save_as_replaces_an_existing_regular_destination() {
+    let directory = TestDirectory::new();
+    let destination = directory.path("existing.fdx");
+    fs::write(&destination, b"prior destination bytes")
+        .unwrap_or_else(|_| unreachable!("temporary destination can be written"));
+
+    let mut session = valid(EditingSession::new(valid(Project::new())));
+    valid(session.insert("replacement screenplay"));
+    let mut target = FdxSaveTarget::new_unsaved();
+    valid(save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::SaveAsOverwrite(destination.clone()),
+    ));
+
+    let bytes = valid(fs::read(&destination));
+    assert_ne!(bytes, b"prior destination bytes");
+    let reopened = valid(read_v6(&bytes));
+    assert_eq!(reopened.project.elements[0].text, "replacement screenplay");
+    assert_eq!(target.path(), Some(destination.as_path()));
+    assert_eq!(target.baseline().map(|baseline| baseline.path()), Some(destination.as_path()));
+    assert!(!session.dirty());
+}
+
+#[cfg(unix)]
+#[test]
+fn confirmed_save_as_rejects_symlinks_without_changing_target_or_session() {
+    let directory = TestDirectory::new();
+    let target_file = directory.path("target.fdx");
+    let destination = directory.path("link.fdx");
+    fs::write(&target_file, b"symlink target remains unchanged")
+        .unwrap_or_else(|_| unreachable!("temporary target can be written"));
+    std::os::unix::fs::symlink(&target_file, &destination)
+        .unwrap_or_else(|_| unreachable!("temporary symlink can be created"));
+    let mut session = valid(EditingSession::new(valid(Project::new())));
+    valid(session.insert("unsaved"));
+    let before = session.clone();
+    let mut target = FdxSaveTarget::new_unsaved();
+
+    let error = save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::SaveAsOverwrite(destination),
+    )
+    .err()
+    .unwrap_or_else(|| unreachable!("confirmed Save As must not follow symlinks"));
+    assert!(matches!(
+        error,
+        TransactionalSaveError::Storage(ref storage)
+            if storage.kind == FdxStorageErrorKind::SymlinkDestination
+    ));
+    assert_eq!(valid(fs::read(&target_file)), b"symlink target remains unchanged");
+    assert_eq!(session, before);
+    assert!(session.dirty());
+    assert!(target.path().is_none());
+    assert!(target.baseline().is_none());
+}
+
+#[test]
+fn confirmed_save_as_rejects_nonregular_and_oversized_destinations() {
+    let directory = TestDirectory::new();
+    let nonregular = directory.path("directory.fdx");
+    fs::create_dir(&nonregular)
+        .unwrap_or_else(|_| unreachable!("temporary destination directory can be created"));
+    let oversized = directory.path("oversized.fdx");
+    fs::File::create(&oversized)
+        .and_then(|file| {
+            file.set_len((scriptcraft_core::fdx::MAX_SOURCE_BYTES as u64).saturating_add(1))
+        })
+        .unwrap_or_else(|_| unreachable!("sparse oversized test file can be created"));
+
+    for (destination, expected_kind) in [
+        (nonregular, FdxStorageErrorKind::NotRegularFile),
+        (oversized, FdxStorageErrorKind::SourceTooLarge),
+    ] {
+        let mut session = valid(EditingSession::new(valid(Project::new())));
+        valid(session.insert("unsaved"));
+        let before = session.clone();
+        let mut target = FdxSaveTarget::new_unsaved();
+        let error = save_session(
+            &StdFdxStorageFileSystem,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAsOverwrite(destination),
+        )
+        .err()
+        .unwrap_or_else(|| unreachable!("unsafe destination must be rejected"));
+        assert!(matches!(
+            error,
+            TransactionalSaveError::Storage(ref storage) if storage.kind == expected_kind
+        ));
+        assert_eq!(session, before);
+        assert!(session.dirty());
+        assert!(target.path().is_none());
+        assert!(target.baseline().is_none());
+    }
+}
+
+struct MutateDestinationAfterFirstRead {
+    mutated: Cell<bool>,
+}
+
+impl FdxStorageFileSystem for MutateDestinationAfterFirstRead {
+    type TempFile = fs::File;
+    type Permissions = fs::Permissions;
+
+    fn read_bounded(&self, path: &Path, limit: usize) -> Result<Vec<u8>, FdxStorageError> {
+        let bytes = StdFdxStorageFileSystem.read_bounded(path, limit)?;
+        if !self.mutated.replace(true) {
+            fs::write(path, b"external concurrent update")
+                .unwrap_or_else(|_| unreachable!("test destination can be changed"));
+        }
+        Ok(bytes)
+    }
+
+    fn inspect_destination(
+        &self,
+        path: &Path,
+    ) -> Result<Option<Self::Permissions>, FdxStorageError> {
+        StdFdxStorageFileSystem.inspect_destination(path)
+    }
+
+    fn create_temp(
+        &self,
+        destination: &Path,
+    ) -> Result<(PathBuf, Self::TempFile), FdxStorageError> {
+        StdFdxStorageFileSystem.create_temp(destination)
+    }
+
+    fn set_temp_permissions(
+        &self,
+        temp: &mut Self::TempFile,
+        permissions: &Self::Permissions,
+    ) -> Result<(), FdxStorageError> {
+        StdFdxStorageFileSystem.set_temp_permissions(temp, permissions)
+    }
+
+    fn sync_temp(&self, temp: &mut Self::TempFile) -> Result<(), FdxStorageError> {
+        StdFdxStorageFileSystem.sync_temp(temp)
+    }
+
+    fn replace(&self, temp: &Path, destination: &Path) -> Result<(), FdxStorageError> {
+        StdFdxStorageFileSystem.replace(temp, destination)
+    }
+
+    fn install_new(&self, temp: &Path, destination: &Path) -> Result<(), FdxStorageError> {
+        StdFdxStorageFileSystem.install_new(temp, destination)
+    }
+
+    fn remove_temp(&self, temp: &Path) -> Result<(), FdxStorageError> {
+        StdFdxStorageFileSystem.remove_temp(temp)
+    }
+}
+
+#[test]
+fn confirmed_save_as_rejects_destination_changed_after_consent_and_rolls_back_session() {
+    let directory = TestDirectory::new();
+    let destination = directory.path("raced.fdx");
+    fs::write(&destination, b"selected destination baseline")
+        .unwrap_or_else(|_| unreachable!("temporary destination can be written"));
+    let mut session = valid(EditingSession::new(valid(Project::new())));
+    valid(session.insert("unsaved screenplay"));
+    let before = session.clone();
+    let mut target = FdxSaveTarget::new_unsaved();
+    let filesystem = MutateDestinationAfterFirstRead {
+        mutated: Cell::new(false),
+    };
+
+    let error = save_session(
+        &filesystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::SaveAsOverwrite(destination.clone()),
+    )
+    .err()
+    .unwrap_or_else(|| unreachable!("external destination change must conflict"));
+    assert!(matches!(
+        error,
+        TransactionalSaveError::Storage(ref storage)
+            if storage.kind == FdxStorageErrorKind::Conflict
+    ));
+    assert_eq!(valid(fs::read(&destination)), b"external concurrent update");
     assert_eq!(session, before);
     assert!(session.dirty());
     assert!(target.path().is_none());

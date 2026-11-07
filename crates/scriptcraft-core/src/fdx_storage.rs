@@ -278,12 +278,14 @@ impl FdxSaveTarget {
     }
 }
 
-/// Save keeps the opened target and its conflict baseline; Save As installs a
-/// new destination without overwriting an existing file.
+/// Save keeps the opened target and its conflict baseline; ordinary Save As is
+/// create-only. Save As with explicit replacement consent may atomically replace
+/// an existing regular file after capturing and rechecking its bounded baseline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FdxSaveMode {
     Save,
     SaveAs(PathBuf),
+    SaveAsOverwrite(PathBuf),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,7 +447,9 @@ fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandid
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
     let operation = match &mode {
         FdxSaveMode::Save => fdx::SaveOperation::Save,
-        FdxSaveMode::SaveAs(_) => fdx::SaveOperation::SaveAs,
+        FdxSaveMode::SaveAs(_) | FdxSaveMode::SaveAsOverwrite(_) => {
+            fdx::SaveOperation::SaveAs
+        }
     };
     let context = fdx::SaveContext::new(operation)
         .with_session_open_timestamp(session.session_open_timestamp().to_owned())
@@ -462,7 +466,7 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
     mut context: fdx::SaveContext,
     codec: &C,
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
-    let (destination, existing_baseline) = match mode {
+    let (destination, existing_baseline, overwrite_consent) = match mode {
         FdxSaveMode::Save => {
             let path = target
                 .path
@@ -473,9 +477,10 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
                 .as_ref()
                 .ok_or(TransactionalSaveError::MissingBaseline)?
                 .clone();
-            (path, Some(baseline))
+            (path, Some(baseline), false)
         }
-        FdxSaveMode::SaveAs(destination) => (destination, None),
+        FdxSaveMode::SaveAs(destination) => (destination, None, false),
+        FdxSaveMode::SaveAsOverwrite(destination) => (destination, None, true),
     };
 
     let corrected = session
@@ -498,6 +503,7 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
     // application transition follows successful filesystem publication.
     let receipt = match existing_baseline.as_ref() {
         Some(baseline) => replace(fs, &destination, &prepared, baseline),
+        None if overwrite_consent => save_as_overwrite(fs, &destination, &prepared),
         None => save_as(fs, &destination, &prepared),
     }
     .map_err(TransactionalSaveError::Storage)?;
@@ -780,6 +786,28 @@ pub fn save_as<F: FdxStorageFileSystem>(
     publish_temp(fs, destination, candidate, None)
 }
 
+/// Save As with explicit native replacement consent. A pre-existing destination
+/// must be a readable regular file and is read through the bounded no-follow
+/// adapter before using the same conflict-checked atomic replacement path as
+/// ordinary Save. If absent, installation remains create-only, so a racing
+/// creator cannot be overwritten without a baseline.
+pub fn save_as_overwrite<F: FdxStorageFileSystem>(
+    fs: &F,
+    destination: &Path,
+    candidate: &PreparedFdx,
+) -> Result<FdxSaveReceipt, FdxStorageError> {
+    match fs.inspect_destination(destination)? {
+        Some(_) => {
+            let baseline = FdxBaseline {
+                path: destination.to_owned(),
+                bytes: fs.read_bounded(destination, MAX_SOURCE_BYTES)?,
+            };
+            replace(fs, destination, candidate, &baseline)
+        }
+        None => save_as(fs, destination, candidate),
+    }
+}
+
 fn publish_temp<F: FdxStorageFileSystem>(
     fs: &F,
     destination: &Path,
@@ -872,4 +900,78 @@ fn nonempty_parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
+}
+
+#[cfg(test)]
+mod confirmed_save_as_tests {
+    use super::*;
+
+    struct FailingCandidateCodec;
+
+    impl SaveCandidateCodec for FailingCandidateCodec {
+        fn serialize(
+            &self,
+            _project: &Project,
+            _context: &mut fdx::SaveContext,
+        ) -> Result<PreparedFdx, TransactionalSaveError> {
+            Err(TransactionalSaveError::Codec(fdx::FdxError::UnsupportedConstruct))
+        }
+
+        fn reread(&self, _bytes: &[u8]) -> Result<Project, fdx::FdxError> {
+            Err(fdx::FdxError::UnsupportedConstruct)
+        }
+    }
+
+    #[test]
+    fn failed_candidate_keeps_existing_destination_and_live_save_state() {
+        let directory = std::env::temp_dir().join(format!(
+            "scriptcraft-confirmed-save-as-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory)
+            .unwrap_or_else(|_| unreachable!("test directory can be created"));
+        let destination = directory.join("existing.fdx");
+        std::fs::write(&destination, b"prior destination bytes")
+            .unwrap_or_else(|_| unreachable!("test destination can be written"));
+
+        let project = Project::new()
+            .unwrap_or_else(|_| unreachable!("new project is valid"));
+        let mut session = EditingSession::new(project)
+            .unwrap_or_else(|_| unreachable!("new project session is valid"));
+        session
+            .insert("unsaved screenplay")
+            .unwrap_or_else(|_| unreachable!("test insertion is valid"));
+        let before = session.clone();
+        let mut target = FdxSaveTarget::new_unsaved();
+        let text_state = fdx::TextState {
+            scaling: 100,
+            selection: session.selection(),
+        };
+
+        let error = save_session_with_codec_and_view_state(
+            &StdFdxStorageFileSystem,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAsOverwrite(destination.clone()),
+            &FailingCandidateCodec,
+            fdx::WindowState::DEFAULT,
+            text_state,
+        )
+        .err()
+        .unwrap_or_else(|| unreachable!("candidate serialization must fail"));
+
+        assert!(matches!(error, TransactionalSaveError::Codec(_)));
+        assert_eq!(
+            std::fs::read(&destination).ok().as_deref(),
+            Some(&b"prior destination bytes"[..])
+        );
+        assert_eq!(session, before);
+        assert!(session.dirty());
+        assert!(target.path().is_none());
+        assert!(target.baseline().is_none());
+
+        std::fs::remove_dir_all(directory)
+            .unwrap_or_else(|_| unreachable!("test directory can be removed"));
+    }
 }
