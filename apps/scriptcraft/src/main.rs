@@ -31,6 +31,7 @@ mod macos_menu;
 mod macos_sf_symbols;
 mod menu;
 mod menu_items;
+mod runtime_icon;
 mod script_view;
 mod shortcuts;
 mod sprint_timer;
@@ -2223,11 +2224,13 @@ fn page_geometry_input_invalidated(ctx: &egui::Context, previous_clip: Option<eg
     })
 }
 
-fn native_options() -> eframe::NativeOptions {
+fn native_options() -> Result<eframe::NativeOptions, String> {
     let window_state = fdx::WindowState::DEFAULT;
-    eframe::NativeOptions {
+    let icon = runtime_icon::egui_icon()?;
+    Ok(eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(UNTITLED_DOCUMENT_TITLE)
+            .with_icon(std::sync::Arc::new(icon))
             .with_inner_size(egui::vec2(
                 window_state.width as f32,
                 window_state.height as f32,
@@ -2243,7 +2246,7 @@ fn native_options() -> eframe::NativeOptions {
             .with_fullsize_content_view(false)
             .with_titlebar_buttons_shown(true),
         ..Default::default()
-    }
+    })
 }
 
 struct StartupPresentation {
@@ -2287,7 +2290,7 @@ fn startup_presentation(
 ) -> Result<StartupPresentation, String> {
     let menu_policy = resolve_startup_menu_policy(current_menu_host(), requested)?;
     Ok(StartupPresentation {
-        options: native_options(),
+        options: native_options()?,
         menu_policy,
     })
 }

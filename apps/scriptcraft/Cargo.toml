@@ -13,6 +13,9 @@ rfd = "0.15"
 scriptcraft-commands = { path = "../../crates/scriptcraft-commands" }
 scriptcraft-core = { path = "../../crates/scriptcraft-core" }
 
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.17", default-features = false }
 objc2 = { version = "=0.6.5", default-features = false, features = ["std"] }
