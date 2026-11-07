@@ -2,8 +2,9 @@
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use scriptcraft_commands::{
-    execute_editor_command, Command, CommandOutcome, CommandRejection, Position, RoleValue,
-    Selection, UnavailableReason,
+    execute_editor_command, validate_descriptor_catalog, Command, CommandId, CommandOutcome,
+    CommandRejection, DiagnosticMessage, Position, RoleValue, Selection, UnavailableReason,
+    COMMAND_DESCRIPTORS, MAX_DIAGNOSTIC_MESSAGE_BYTES,
 };
 use scriptcraft_core::editing::{EditError, EditingSession, Position as CorePosition, Selection as CoreSelection};
 use scriptcraft_core::{Project, Role, MAX_TEXT_BYTES};
@@ -14,6 +15,33 @@ fn valid<T, E>(result: Result<T, E>) -> T {
 
 fn new_session() -> EditingSession {
     valid(EditingSession::new(valid(Project::new())))
+}
+
+#[test]
+fn diagnostic_status_is_bounded_catalogued_and_rejected_by_headless_execution() {
+    let message = valid(DiagnosticMessage::new("SAVE_FAILED: destination conflict"));
+    assert_eq!(CommandId::ALL.len(), 42);
+    assert_eq!(COMMAND_DESCRIPTORS.len(), 42);
+    assert_eq!(validate_descriptor_catalog(), Ok(()));
+    assert_eq!(CommandId::UiStatusSet.as_str(), "ui.status.set");
+    assert_eq!(
+        DiagnosticMessage::new("x".repeat(MAX_DIAGNOSTIC_MESSAGE_BYTES + 1)).err(),
+        Some(scriptcraft_commands::InvalidDiagnosticMessage)
+    );
+    assert!(DiagnosticMessage::new("two\nlines").is_err());
+
+    let mut session = new_session();
+    let before = session.clone();
+    assert_eq!(
+        execute_editor_command(
+            &mut session,
+            &Command::UiStatusSet {
+                message: Some(message),
+            },
+        ),
+        CommandOutcome::Rejected(CommandRejection::UnsupportedCommand(CommandId::UiStatusSet))
+    );
+    assert_eq!(session, before);
 }
 
 fn position(element: u32, offset: u32) -> Position {

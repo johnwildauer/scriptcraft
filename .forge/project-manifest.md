@@ -9,7 +9,7 @@ research notes or implementation observations as product mandates.
 - **Status:** `complete` — initialization reviews and historical baseline evidence are linked; review warnings remain follow-ups.
 - **Path type:** `existing`
 - **Initialized on:** `2026-10-25`
-- **Last revised:** `2026-11-06`
+- **Last revised:** `2026-11-07`
 - **Record owner:** `Forge initialization agent`
 
 ## Project intake
@@ -338,7 +338,7 @@ local command and core packages; `scriptcraft-commands` depends on local `script
 `serde = 1.0.229` with the `derive` feature. The lockfile/dependency facts recorded by WO-001 are
 historical setup observations; WO-008 made no dependency, workspace, or lockfile change.
 
-WO-001–WO-007 submitted the 41-ID UI-independent typed command contract, headless editor executor,
+At that earlier hotkey-command-layer submission, WO-001–WO-007 supplied a 41-ID UI-independent typed command contract, headless editor executor,
 desktop dispatcher, focused hotkeys, selection/navigation/focus routing, document/clipboard/modal/
 viewport effects, and view/status/appearance/focus-mode/timer/notification routing. WO-008 updates the
 product overview, writing-loop requirements and technical context and records a source inventory. One
@@ -363,6 +363,225 @@ validation were run. Compilation, serialization, runtime/platform behavior, and 
 scenario remain unverified. User review, validation, and acceptance remain pending; the detailed
 scenario matrix is the [WO-008 user-validation handoff](../.plan/2026-11-06-hotkey-command-layer/work-orders/WO-008-user-validation-handoff.md).
 No commit or push was made.
+
+### UI indicators and platform shell WO-001 implementation submission — 2026-11-07
+
+WO-001 was submitted on the local branch `dev/2026-11-06-ui-indicators-platform-shell`, created from
+the observed `master` checkout at `20496cd` (`Merge hotkey command layer`). Before branch creation,
+the working tree had no tracked modifications or staged changes; the sole untracked path was the
+user-provided `.plan/2026-11-06-ui-indicators-platform-shell/` assessment directory. The destination
+branch did not exist, and ordinary `git switch -c` preserved that directory and all checkout content.
+No reset, stash, overwrite, commit, merge, or destructive Git operation was used.
+
+WO-001 adds a pure final-filename title projection with the `Untitled Screenplay` fallback, startup
+title configuration, a deduplicated `ViewportCommand::Title` adapter effect, and focused projection
+tests. Existing successful New/Open/Save/Save As path transitions are the sole title source; their
+failure/cancellation paths retain the active path and therefore the displayed title. Native window
+decorations and OS-owned title placement remain unchanged. No persistence format, dependency, or
+other work-order behavior changed. The initiative assessment, durable title requirement, technical
+context, source changes, authored tests, exact changed-file list, and remaining user-owned lifecycle
+acceptance scenarios are recorded in the [WO-001 implementation handoff](../.plan/2026-11-06-ui-indicators-platform-shell/work-orders/WO-001-dynamic-native-document-title-handoff.md).
+
+This is implementation submission only. No tests, build, check, lint, formatting command, application
+launch, manual verification, review, or independent validation was run; compilation and all native OS
+title behavior remain unverified. User review, validation, and acceptance remain pending. WO-002 through
+WO-007 have not been implemented by this submission. No commit or merge was made.
+
+### UI indicators and platform shell WO-002 implementation submission — 2026-11-07
+
+WO-002 was submitted on the already checked-out branch
+`dev/2026-11-06-ui-indicators-platform-shell`, confirmed by the initial status inspection. The tracked
+WO-001 source/manifest/requirements/technical-context edits and the pre-existing untracked initiative
+assessment were preserved as the starting state. Work built on those files without switching branches,
+stashing, resetting, committing, merging, or overwriting existing work.
+
+The typed `scriptcraft-commands` catalog and descriptor list now contain 42 IDs, including
+`ui.status.set`. Its optional `DiagnosticMessage` payload is a nonempty single line, limited to 512
+UTF-8 bytes; the same validator is used by construction and Serde deserialization. No dependency or
+lockfile change was made. The headless executor rejects this desktop-only effect. Desktop posts and
+clears dispatch typed InternalFollowUp commands through the existing dispatcher, remain enabled
+during the migration modal, and preserve FIFO order with a reentrancy guard. The command handler alone
+writes the diagnostic field. Routine operation/development center messages were removed and the
+interim center projection is Ready pending WO-004 live hints. Retained errors/warnings now appear only
+inside the existing Diagnostics disclosure. Diagnostics is still off by default; its disabled state
+intentionally hides errors and creates no Diagnostics row, body, focus target, or accessibility node.
+Save failure categories/details and unchanged-document semantics remain privacy-safe; no document
+content or path is posted. The existing WO-001 native-title work and migration modal warnings remain
+in place.
+
+Exact WO-002 changed paths are `crates/scriptcraft-commands/src/lib.rs`,
+`crates/scriptcraft-commands/tests/editor_executor.rs`, `apps/scriptcraft/src/app_commands.rs`,
+`apps/scriptcraft/src/main.rs`, `apps/scriptcraft/src/script_view.rs`,
+`apps/scriptcraft/src/status_bar.rs`, `.forge/requirements/features/screenplay-writing-loop.md`,
+`.forge/blueprints/technical-context.md`, this manifest,
+`.plan/2026-11-06-ui-indicators-platform-shell/ui-indicators-platform-shell-v1.md`, and
+`.plan/2026-11-06-ui-indicators-platform-shell/work-orders/WO-002-diagnostic-status-command-handoff.md`.
+The focused catalog/bounds/headless, desktop set/replace/clear/order/modal, and Ready/default-gate
+tests were authored but not run. No build, check, test, lint, formatting command, launch, manual
+verification, review, independent validator, or other validation was performed. Compilation,
+serialization round trips, Diagnostics-enabled rendering, save/open/clipboard failures, and runtime
+behavior remain unverified; user review, validation, and acceptance remain pending. The explicit
+handoff records coverage limits and acceptance scenarios. WO-003–WO-007 remain pending. No commit or
+merge was made.
+
+### UI indicators and platform shell WO-003 implementation submission — 2026-11-07
+
+WO-003 was submitted on the already checked-out `dev/2026-11-06-ui-indicators-platform-shell`
+branch, preserving the unvalidated WO-001/WO-002 submissions and all existing tracked/untracked
+work. No branch switch, stash, reset, overwrite, commit, or merge was performed. Core editing now
+exposes `EditingSession::paragraph_key_targets()`, returning `ParagraphKeyTargets` with typed Enter
+and Tab `ParagraphKeyTarget::{Target(Role), NoOp, Unavailable}` outcomes. Both real Enter/Tab edits
+and this nonmutating projection use the same shared selection/policy/generated-Parenthetical
+resolver; mutation, preservation, capacity, history, dirty-state, and revision behavior remain in
+the existing transactional edit path. Same-role Tab remains a displayable Target even though its
+real command is a consumed no-op. No desktop behavior, dependency, lockfile, or command catalog
+changed.
+
+Exact WO-003 changed paths are `crates/scriptcraft-core/src/editing.rs`,
+`crates/scriptcraft-core/tests/paragraph_key_projection.rs`,
+`.forge/requirements/features/screenplay-writing-loop.md`,
+`.forge/blueprints/technical-context.md`, this manifest,
+`.plan/2026-11-06-ui-indicators-platform-shell/ui-indicators-platform-shell-v1.md`, and
+`.plan/2026-11-06-ui-indicators-platform-shell/work-orders/WO-003-shared-paragraph-key-target-projection-handoff.md`.
+Focused coverage was authored for all 17 roles with empty/nonempty text, strict and relaxed
+boundaries, UTF-8 byte offsets, noncollapsed selection, Dialogue interior/end, Character blank-only
+Tab, same-role outcomes, and Parenthetical delimiters, repair, generated provenance, and disabled
+automatic Parentheticals, with real-command comparisons where meaningful. Tests were not run. No
+build, check, test, lint, formatting command, launch, manual verification, review, independent
+validator, or other validation was performed. Compilation and all runtime/editing behavior remain
+unverified; user review, validation, and acceptance remain pending. Later WO-004 must consume this
+API rather than reproduce its transition rules. WO-004–WO-007 remain pending; no commit or merge was
+made.
+
+### UI indicators and platform shell WO-004 implementation submission — 2026-11-07
+
+WO-004 was submitted on the existing user-designated `dev/2026-11-06-ui-indicators-platform-shell`
+branch, preserving WO-001–WO-003 and all tracked/untracked work. No branch switch, stash, reset,
+overwrite, commit, or merge was performed. No dependency, lockfile, core editing behavior, command
+catalog, or Enter/Tab/element command routing changed.
+
+The desktop status center now projects Ready, shared-core paragraph-key targets at collapsed element
+ends, or held element-choice lists derived from the shared shortcut binding table. Exact host chords,
+focus, selection, IME/current-frame IME, modal state, release restoration, role labels, and modifier-only
+repaint are wired into the projection. Modifier lists use a bounded measured font-fit policy and retain
+full accessible text while clipping if their minimum-size layout exceeds available center width. The
+migration modal retains only a noninteractive Ready status footer; its existing other application
+panels and controls remain suppressed. WO-002's Diagnostics-off source gate remains unchanged.
+
+Exact WO-004 changed paths are `apps/scriptcraft/src/status_bar.rs`,
+`apps/scriptcraft/src/shortcuts.rs`, `apps/scriptcraft/src/main.rs`,
+`.forge/requirements/features/screenplay-writing-loop.md`,
+`.forge/blueprints/technical-context.md`, this manifest,
+`.plan/2026-11-06-ui-indicators-platform-shell/ui-indicators-platform-shell-v1.md`, and
+`.plan/2026-11-06-ui-indicators-platform-shell/work-orders/WO-004-live-cursor-modifier-guidance-handoff.md`.
+Focused source tests were authored for paragraph end/empty/interior and all roles, chord/list mapping
+on both platforms, exact modifiers, focus/IME/modal/selection/release, modifier-only transitions, and
+status-list fitting/geometry. They were not run. No build, check, test, lint, formatting command,
+launch, manual verification, review, independent validator, or other validation was performed.
+Compilation, native modifier delivery, rendering/accessibility, modal footer presentation, and all
+runtime behavior remain unverified; user review, validation, and acceptance remain pending. The
+implementation handoff records the visual-width limitation and user-owned scenarios. WO-005–WO-007
+remain pending; no commit or merge was made.
+
+### UI indicators and platform shell WO-005 implementation submission — 2026-11-07
+
+WO-005 was implemented on the already checked-out `dev/2026-11-06-ui-indicators-platform-shell`
+branch. The existing WO-001–WO-004 source/document submissions, other uncommitted edits, and untracked
+initiative contents were preserved. No branch switch, reset, stash, overwrite, commit, or merge was
+performed; no dependency or lockfile changed.
+
+This current work-order submission supersedes earlier UI-menu evidence in this manifest that described
+macOS dual preview and the source-only preview switch; those earlier entries remain historical records
+of the prior implementation state, not current menu policy.
+
+The source-only dual-preview switch has been replaced by the app-owned `RuntimeMenuPolicy` in
+`apps/scriptcraft/src/menu.rs`. `MenuPlatformChoice::{Auto, MacOS, Windows}` and the pure
+`RuntimeMenuPolicy::resolve(host, choice)` seam are ready for a later CLI adapter but do not parse CLI
+arguments. Auto selects native macOS only, in-window only on Windows, and no menu backend on other
+targets. A Windows-style in-window choice is policy-supported on any target; native macOS choice is
+rejected off macOS. The selected policy is stored in `ScriptCraftApp` and gates native construction,
+in-window panel composition, native event draining and availability synchronization, and raw-input
+accelerator extraction. Exactly one backend owns menu accelerators when active; in-window matching
+continues to use host shortcut semantics. macOS native installation failure is contextualized and
+aborts startup rather than silently presenting an incomplete or multiply-owned menu UI. Shared
+catalog, placeholders, command FIFO/dispatcher, availability, focus behavior, and unrelated host
+keyboard/platform behavior were not intentionally changed. Unsupported targets do not compile or
+construct native menu modules.
+
+Exact WO-005 changed paths are `apps/scriptcraft/src/menu.rs`, `apps/scriptcraft/src/main.rs`,
+`.forge/requirements/features/screenplay-writing-loop.md`, `.forge/blueprints/technical-context.md`,
+this manifest, `.plan/2026-11-06-ui-indicators-platform-shell/ui-indicators-platform-shell-v1.md`, and
+`.plan/2026-11-06-ui-indicators-platform-shell/work-orders/WO-005-runtime-os-default-menu-policy-handoff.md`.
+Focused source tests were authored for host defaults, explicit supported/unsupported requests, sole
+renderer selection, and accelerator ownership. They were not run. No tests, build, check, lint,
+formatting command, launch, manual verification, review, independent validator, or other validation
+was performed. Compilation, native installation, runtime menu event/shortcut behavior, rendering,
+focus restoration, and native startup-error presentation remain unverified; user review, validation,
+and acceptance are pending. Exact API notes, coverage boundaries, risks, and user scenarios are in
+the WO-005 implementation handoff. WO-006 and WO-007 remained pending at the time of that submission.
+No commit or merge was made.
+
+### UI indicators and platform shell WO-006 implementation submission — 2026-11-07
+
+WO-006 is submitted on the user-designated existing branch
+`dev/2026-11-06-ui-indicators-platform-shell`, preserving the pre-existing WO-001–WO-005 and all
+tracked/untracked work. No branch switch, stash, reset, overwrite, commit, or merge was performed; no
+dependency or lockfile changed.
+
+The desktop startup parses `--menu-platform=auto|macos|windows` using the standard library and resolves
+the WO-005 host policy before eframe launch or native-menu construction. The selection is process-only.
+Malformed, duplicate, unknown, positional, non-UTF-8, and unsupported native-macOS choices produce
+usage errors and exit before launch. On macOS the Windows override selects only the in-window egui
+renderer and its accelerator owner; it does not install the native menu controller. The host is not
+spoofed: editor shortcut/status labels, menu input modifier resolution, document-point conversion,
+native scale, file dialogs, clipboard, notifications, window controls, and document behavior remain
+host-specific. Windows-style rendering is a development simulation, not OS emulation; its `Ctrl`
+annotation does not change macOS primary input from Command. Existing Auto behavior and supported
+other-target Windows-style in-window selection remain as specified. No parser dependency, settings UI,
+or persisted field was added.
+
+Exact WO-006 changed paths are `apps/scriptcraft/src/main.rs`,
+`.forge/requirements/features/screenplay-writing-loop.md`, `.forge/blueprints/technical-context.md`,
+this manifest, `.plan/2026-11-06-ui-indicators-platform-shell/ui-indicators-platform-shell-v1.md`, and
+`.plan/2026-11-06-ui-indicators-platform-shell/work-orders/WO-006-cli-menu-platform-development-override-handoff.md`.
+The main source authors focused argument parser, host-policy rejection, renderer selection, and unique
+accelerator-owner cases; policy/ownership cases also remain in `menu.rs`. All are authored but unrun.
+No build, check, test, lint, formatter, launch, manual verification, review, or independent validation
+was performed. Compilation, real process exit output, native/in-window rendering, keyboard delivery,
+and all runtime/platform interactions remain unverified. User review, validation, and acceptance remain
+pending. The handoff records usage, deterministic failures, host-modifier limitations, coverage
+boundaries, and user-owned acceptance scenarios. WO-007 remains pending; no commit or merge was made.
+
+### UI indicators and platform shell WO-007 documentation submission — 2026-11-07
+
+WO-007 reconciles the durable product overview, writing-loop requirements, technical context, initiative
+record, and manifest against the WO-001–WO-006 implementation handoffs. Those six orders remain
+implementation submissions only: **none is accepted or validated**, all reported authored tests remain
+unrun, and user review/validation/acceptance are pending. The 42-ID total is the earlier 41-command
+catalog plus WO-002's `ui.status.set`; there is no dependency or lockfile change reported. The center is
+Ready/cursor/modifier guidance only. Diagnostics is intentionally disabled by default, so errors assigned
+there are hidden when the gate is off. Runtime menu defaults are native-only on macOS, in-window-only on
+Windows, and no backend on other targets; the transient CLI override and macOS Windows-style Ctrl
+annotations do not change Command-based host accelerators or other host OS integrations. Native title
+placement remains OS-owned without a cross-platform centering guarantee.
+
+The reported initiative branch is `dev/2026-11-06-ui-indicators-platform-shell`. WO-007 performed no
+branch switch, stash, reset, overwrite, commit, merge, test, build, check, lint, formatting command,
+launch, manual verification, agent review, or validation. The branch/worktree facts are inherited from
+the prior handoffs; no fresh Git inventory is claimed. Existing tracked and untracked work is to remain
+preserved. No source, tests, dependency, or lockfile was changed by WO-007.
+
+Exact WO-007 changed paths are `.forge/requirements/product-overview.md`,
+`.forge/requirements/features/screenplay-writing-loop.md`, `.forge/blueprints/technical-context.md`,
+`.forge/project-manifest.md`, `.plan/2026-11-06-ui-indicators-platform-shell/ui-indicators-platform-shell-v1.md`,
+`.plan/2026-11-06-ui-indicators-platform-shell/work-orders/WO-007-durable-contracts-and-user-validation-handoff.md`,
+and `.plan/2026-11-06-ui-indicators-platform-shell/work-orders/WO-007-user-validation-handoff.md`.
+The consolidated handoff leaves workspace format/check/build/Clippy/test commands for the user to run and
+includes macOS/Windows lifecycle, error/diagnostics visibility, status/input, menu/CLI/accelerator, and
+regression scenarios. WO-002's lack of concrete Serde codec round-trip coverage, all unverified runtime
+behavior, possible narrow-width modifier-list clipping, and native installation error presentation are
+explicit pending evidence/risks, not invented outcomes. No validation or acceptance is claimed; no
+commit or merge was made.
 
 ### Gates and intervention
 

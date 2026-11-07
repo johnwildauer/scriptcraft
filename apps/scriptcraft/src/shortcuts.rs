@@ -179,10 +179,7 @@ pub(super) fn shortcut_matches(
     platform: ShortcutPlatform,
 ) -> bool {
     key_for_shortcut(shortcut.key) == Some(key)
-        && modifiers.alt == shortcut.option
-        && literal_control_modifier(modifiers, platform) == shortcut.control
-        && modifiers.command == shortcut.primary
-        && modifiers.shift == shortcut.shift
+        && shortcut_modifiers_match(shortcut, modifiers, platform)
 }
 
 fn literal_control_modifier(modifiers: egui::Modifiers, platform: ShortcutPlatform) -> bool {
@@ -190,6 +187,97 @@ fn literal_control_modifier(modifiers: egui::Modifiers, platform: ShortcutPlatfo
         ShortcutPlatform::MacOS => modifiers.ctrl,
         ShortcutPlatform::Windows | ShortcutPlatform::Other => modifiers.mac_cmd,
     }
+}
+
+fn shortcut_modifiers_match(
+    shortcut: LogicalShortcut,
+    modifiers: egui::Modifiers,
+    platform: ShortcutPlatform,
+) -> bool {
+    modifiers.alt == shortcut.option
+        && literal_control_modifier(modifiers, platform) == shortcut.control
+        && modifiers.command == shortcut.primary
+        && modifiers.shift == shortcut.shift
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ElementHintChord {
+    Base,
+    Extended,
+}
+
+/// Recognize only the exact modifier shapes accepted by the editor binding
+/// resolver so status guidance cannot advertise a rejected chord.
+pub(super) fn element_hint_chord(
+    modifiers: egui::Modifiers,
+    platform: ShortcutPlatform,
+) -> Option<ElementHintChord> {
+    let base = primary_shortcut(ShortcutKey::Digit0, false);
+    let extended = match platform {
+        ShortcutPlatform::MacOS => LogicalShortcut {
+            control: true,
+            ..base
+        },
+        ShortcutPlatform::Windows => LogicalShortcut {
+            shift: true,
+            ..base
+        },
+        ShortcutPlatform::Other => return None,
+    };
+    if shortcut_modifiers_match(base, modifiers, platform) {
+        Some(ElementHintChord::Base)
+    } else if shortcut_modifiers_match(extended, modifiers, platform) {
+        Some(ElementHintChord::Extended)
+    } else {
+        None
+    }
+}
+
+/// Project rows from the shared binding table. The extended role ordering is a
+/// presentation-only sequence; every digit still comes from the binding table.
+pub(super) fn element_hint_bindings(extended: bool) -> Vec<(u8, Role)> {
+    let role_order: Vec<Role> = if extended {
+        vec![
+            Role::Summary,
+            Role::Outline1,
+            Role::Outline2,
+            Role::Outline3,
+            Role::Note,
+            Role::Sequence,
+            Role::EndOfAct,
+        ]
+    } else {
+        EDITOR_ELEMENT_BINDINGS
+            .iter()
+            .filter(|binding| !binding.extended)
+            .map(|binding| binding.role)
+            .collect()
+    };
+    role_order
+        .into_iter()
+        .filter_map(|role| {
+            EDITOR_ELEMENT_BINDINGS
+                .iter()
+                .find(|binding| binding.extended == extended && binding.role == role)
+                .and_then(|binding| digit_value(binding.digit).map(|digit| (digit, role)))
+        })
+        .collect()
+}
+
+fn digit_value(digit: ShortcutKey) -> Option<u8> {
+    Some(match digit {
+        ShortcutKey::Digit0 => 0,
+        ShortcutKey::Digit1 => 1,
+        ShortcutKey::Digit2 => 2,
+        ShortcutKey::Digit3 => 3,
+        ShortcutKey::Digit4 => 4,
+        ShortcutKey::Digit5 => 5,
+        ShortcutKey::Digit6 => 6,
+        ShortcutKey::Digit7 => 7,
+        ShortcutKey::Digit8 => 8,
+        ShortcutKey::Digit9 => 9,
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -289,7 +377,7 @@ fn logical_digit(key: egui::Key) -> Option<ShortcutKey> {
     })
 }
 
-fn modifiers_are_none(modifiers: egui::Modifiers) -> bool {
+pub(super) fn modifiers_are_none(modifiers: egui::Modifiers) -> bool {
     !modifiers.alt
         && !modifiers.ctrl
         && !modifiers.command
@@ -374,6 +462,53 @@ mod tests {
                 .is_none());
             }
         }
+    }
+
+    #[test]
+    fn guidance_chord_projection_matches_host_resolver_modifiers_and_shared_bindings() {
+        for (platform, base, extended, wrong, extra) in [
+            (
+                ShortcutPlatform::MacOS,
+                modifiers(ShortcutPlatform::MacOS, true, false, false),
+                modifiers(ShortcutPlatform::MacOS, true, true, false),
+                modifiers(ShortcutPlatform::MacOS, true, false, true),
+                modifiers(ShortcutPlatform::MacOS, false, true, false),
+            ),
+            (
+                ShortcutPlatform::Windows,
+                modifiers(ShortcutPlatform::Windows, true, false, false),
+                modifiers(ShortcutPlatform::Windows, true, false, true),
+                modifiers(ShortcutPlatform::Windows, true, true, false),
+                modifiers(ShortcutPlatform::Windows, false, false, true),
+            ),
+        ] {
+            assert_eq!(element_hint_chord(base, platform), Some(ElementHintChord::Base));
+            assert_eq!(
+                element_hint_chord(extended, platform),
+                Some(ElementHintChord::Extended)
+            );
+            assert_eq!(element_hint_chord(wrong, platform), None);
+            assert_eq!(element_hint_chord(extra, platform), None);
+            let mut with_alt = base;
+            with_alt.alt = true;
+            assert_eq!(element_hint_chord(with_alt, platform), None);
+        }
+        assert_eq!(
+            element_hint_chord(
+                modifiers(ShortcutPlatform::Other, true, false, false),
+                ShortcutPlatform::Other,
+            ),
+            None
+        );
+
+        let base = element_hint_bindings(false);
+        let extended = element_hint_bindings(true);
+        assert_eq!(base.len(), 10);
+        assert_eq!(extended.len(), 7);
+        assert_eq!(base.first(), Some(&(0, Role::General)));
+        assert!(extended.contains(&(0, Role::Summary)));
+        assert!(extended.contains(&(8, Role::Sequence)));
+        assert!(extended.contains(&(9, Role::EndOfAct)));
     }
 
     #[test]

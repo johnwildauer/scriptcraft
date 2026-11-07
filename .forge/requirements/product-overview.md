@@ -152,12 +152,22 @@ screenwriter.
   copy that communicates its loss.
 - Keep core behavior headless-capable and testable without a desktop window.
 - Route enabled ScriptCraft-owned actions through the UI-independent internal command contract:
-  41 stable dotted identities, typed/serializable parameters, command origins, one desktop dispatcher,
+  42 stable dotted identities, typed/serializable parameters, command origins, one desktop dispatcher,
   and a headless semantic editor executor. Screenplay mutations shall be executable through that
   contract without a GUI; desktop dialogs, clipboard, focus, viewport, and notifications remain host
   effects. Native predefined macOS Application-menu services remain OS-owned unless an existing safe
   host API can route them. The contract does not itself expose a command palette, CLI, MCP server,
   network service, macro UI, or plugin host; these remain out of product scope.
+- The decorated native window title reflects the active FDX filename after successful lifecycle
+  changes and otherwise shows `Untitled Screenplay`; failed/cancelled operations retain the prior
+  title. Native decorations and title positioning remain OS-owned.
+- The status center is reserved for Ready and live cursor/modifier guidance. Routine success text is
+  not presented there. Retained operation errors are assigned to the Diagnostics disclosure, which
+  is intentionally disabled by default; while disabled, those errors are hidden rather than moved to
+  the center.
+- Menu presentation follows the runtime OS default: native-only on macOS, in-window-only on Windows,
+  and no backend by default on other targets. A process-transient development argument may select
+  in-window menus without impersonating another host OS.
 
 ### Out of scope
 

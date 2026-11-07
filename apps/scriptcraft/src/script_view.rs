@@ -338,11 +338,10 @@ impl ScriptCraftApp {
             Err(error) => {
                 self.page_geometry.invalidate();
                 self.page_scale = None;
-                self.show_error(error.clone());
-                ui.colored_label(
-                    self.theme_palette.feedback.error,
-                    format!("Layout error: {error:?}"),
-                );
+                self.show_error(format!(
+                    "LAYOUT_BUILD_FAILED: {}; document unchanged",
+                    crate::safe_layout_error_category(&error)
+                ));
                 return;
             }
         };
@@ -777,7 +776,6 @@ impl ScriptCraftApp {
             if let Some(result) = result {
                 self.mutate(
                     result,
-                    "Edited through EditingSession",
                     RevealIntent::Conditional,
                 );
             }

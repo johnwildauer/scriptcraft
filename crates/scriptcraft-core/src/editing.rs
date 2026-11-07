@@ -159,6 +159,26 @@ impl Default for EditPolicy {
     }
 }
 
+/// Read-only outcome for a paragraph-key projection. A `Target` is the role
+/// resolved by editing policy, not a promise that later safety checks will
+/// allow the candidate to publish. `NoOp` describes a consumed key with no
+/// semantic target; `Unavailable` describes a key that cannot resolve for the
+/// current selection (or whose editing resolver rejects the request).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParagraphKeyTarget {
+    Target(Role),
+    NoOp,
+    Unavailable,
+}
+
+/// Actual Enter and Tab target decisions for the session's current selection
+/// and editing policy. This value is a nonmutating hint, not a preview edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParagraphKeyTargets {
+    pub enter: ParagraphKeyTarget,
+    pub tab: ParagraphKeyTarget,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditError {
     InvalidElement,
@@ -379,6 +399,27 @@ impl EditingSession {
     }
     pub fn selection(&self) -> Selection {
         self.selection
+    }
+    /// Projects the exact role decisions used by [`Self::enter`] and
+    /// [`Self::tab`] without executing edits, touching history, or changing
+    /// dirty/revision state. The result intentionally does not guarantee that
+    /// preservation or capacity checks will accept a later edit.
+    pub fn paragraph_key_targets(&self) -> ParagraphKeyTargets {
+        let enter = resolve_enter(
+            &self.project,
+            self.selection,
+            &self.generated_parentheticals,
+            &self.policy,
+        )
+        .map_or(ParagraphKeyTarget::Unavailable, |decision| decision.target);
+        let tab = resolve_tab(
+            &self.project,
+            self.selection,
+            &self.generated_parentheticals,
+            &self.policy,
+        )
+        .map_or(ParagraphKeyTarget::Unavailable, |decision| decision.target);
+        ParagraphKeyTargets { enter, tab }
     }
     pub const fn dirty(&self) -> bool {
         self.dirty
@@ -769,72 +810,36 @@ impl EditingSession {
         self.mutate(
             MutationValidationScope::Complete,
             |project, selection, generated, policy| {
-                let (start, end) = selection.ordered();
-                if start != end {
-                    return Err(EditError::InvalidSelection);
-                }
-                let item = project
-                    .elements
-                    .get(start.element)
-                    .ok_or(EditError::InvalidElement)?;
-                if strict_boundary_rejects(
-                    project,
-                    policy,
-                    start.element,
-                    item.role,
-                    item.text.len(),
-                    start.offset,
-                ) {
-                    return Ok(*selection);
-                }
-                let item_role = item.role;
-                let item_text = item.text.clone();
-                let mut position = start;
-                if item_role == Role::Parenthetical {
-                    if position.offset == 0 && item_text.starts_with('(') {
+                let decision = resolve_enter(project, *selection, generated, policy)?;
+                match decision.action {
+                    EnterAction::NoOp => Ok(*selection),
+                    EnterAction::InsertParentheticalBefore { element, automatic } => {
                         let id = split_id(project)?;
                         let new = ScreenplayElement::new(
                             id.clone(),
                             Role::Parenthetical,
-                            if policy.auto_parenthetical { "()" } else { "" },
+                            if automatic { "()" } else { "" },
                         )?;
-                        project.elements.insert(position.element, new);
-                        if policy.auto_parenthetical {
+                        project.elements.insert(element, new);
+                        if automatic {
                             generated.insert(id);
-                            return Ok(Selection::caret(Position {
-                                element: position.element,
-                                offset: 1,
-                            }));
+                            Ok(Selection::caret(Position { element, offset: 1 }))
+                        } else {
+                            Ok(Selection::caret(Position { element, offset: 0 }))
                         }
-                        return Ok(Selection::caret(Position {
-                            element: position.element,
-                            offset: 0,
-                        }));
                     }
-                    if empty_parenthetical_at(item_text.as_str(), position.offset)
-                        && generated.contains(project.elements[position.element].id.as_str())
-                    {
+                    EnterAction::ClearGeneratedAndSplit { position, role } => {
                         project.elements[position.element].text.clear();
-                        position.offset = 0;
                         generated.remove(project.elements[position.element].id.as_str());
-                    } else if let Some(boundary) =
-                        parenthetical_repair_boundary(item_text.as_str(), position.offset)
-                    {
-                        project.elements[position.element].text =
-                            repair_parenthetical(item_text.as_str());
-                        position.offset = boundary;
-                        return insert_dialogue_below(project, position.element);
-                    } else if !item_text.is_empty() {
-                        return Ok(*selection);
+                        split_at(project, position, role)
                     }
+                    EnterAction::RepairAndInsertDialogue { element } => {
+                        let text = project.elements[element].text.clone();
+                        project.elements[element].text = repair_parenthetical(text.as_str());
+                        insert_dialogue_below(project, element)
+                    }
+                    EnterAction::Split { position, role } => split_at(project, position, role),
                 }
-                let role = project.elements[position.element].role;
-                let next_role = if role == Role::Dialogue && position.offset < item_text.len() {
-                    Role::Dialogue
-                } else {
-                    enter_transition(role).ok_or(EditError::UnsupportedTransition { from: role })?
-                };
-                split_at(project, position, next_role)
             },
         )
     }
@@ -845,103 +850,67 @@ impl EditingSession {
         self.mutate(
             MutationValidationScope::Complete,
             |project, selection, generated, policy| {
-                let (start, end) = selection.ordered();
-                if start != end {
-                    return Ok(*selection);
-                }
-                let item = project
-                    .elements
-                    .get(start.element)
-                    .ok_or(EditError::InvalidElement)?;
-                if strict_boundary_rejects(
-                    project,
-                    policy,
-                    start.element,
-                    item.role,
-                    item.text.len(),
-                    start.offset,
-                ) {
-                    return Ok(*selection);
-                }
-                let item_role = item.role;
-                let item_text = item.text.clone();
-                let mut position = start;
-                if policy.auto_parenthetical && item_role == Role::Parenthetical {
-                    if is_delimiter_only_parenthetical(item_text.as_str()) {
+                let decision = resolve_tab(project, *selection, generated, policy)?;
+                match decision.action {
+                    TabAction::NoOp => Ok(*selection),
+                    TabAction::DelimiterParentheticalToDialogue { element } => {
+                        let text_len = project.elements[element].text.len();
                         replace_range(
                             project,
-                            Position {
-                                element: position.element,
-                                offset: 0,
-                            },
-                            Position {
-                                element: position.element,
-                                offset: item_text.len(),
-                            },
+                            Position { element, offset: 0 },
+                            Position { element, offset: text_len },
                             "",
                         )?;
                         update_preserved_role(
                             project,
-                            position.element,
-                            item_role,
+                            element,
+                            Role::Parenthetical,
                             Role::Dialogue,
                         )?;
-                        project.elements[position.element].role = Role::Dialogue;
-                        generated.remove(project.elements[position.element].id.as_str());
-                        position.offset = 0;
-                        return Ok(Selection::caret(position));
+                        project.elements[element].role = Role::Dialogue;
+                        generated.remove(project.elements[element].id.as_str());
+                        Ok(Selection::caret(Position { element, offset: 0 }))
                     }
-                    if empty_parenthetical_at(item_text.as_str(), position.offset)
-                        && generated.contains(project.elements[position.element].id.as_str())
-                    {
-                        project.elements[position.element].text.clear();
-                        position.offset = 0;
-                        generated.remove(project.elements[position.element].id.as_str());
-                    } else if let Some(boundary) =
-                        parenthetical_repair_boundary(item_text.as_str(), position.offset)
-                    {
-                        project.elements[position.element].text =
-                            repair_parenthetical(item_text.as_str());
-                        position.offset = boundary;
-                        return insert_dialogue_below(project, position.element);
-                    } else if !item_text.is_empty() {
-                        return Ok(*selection);
+                    TabAction::RepairAndInsertDialogue { element } => {
+                        let text = project.elements[element].text.clone();
+                        project.elements[element].text = repair_parenthetical(text.as_str());
+                        insert_dialogue_below(project, element)
+                    }
+                    TabAction::SetRole {
+                        position,
+                        role,
+                        clear_generated_parenthetical,
+                    } => {
+                        if clear_generated_parenthetical {
+                            project.elements[position.element].text.clear();
+                            generated.remove(project.elements[position.element].id.as_str());
+                        }
+                        let old_role = project.elements[position.element].role;
+                        if old_role != role {
+                            update_preserved_role(project, position.element, old_role, role)?;
+                            project.elements[position.element].role = role;
+                        }
+                        if policy.auto_parenthetical
+                            && role == Role::Parenthetical
+                            && project.elements[position.element].text.is_empty()
+                        {
+                            replace_range(
+                                project,
+                                Position { element: position.element, offset: 0 },
+                                Position { element: position.element, offset: 0 },
+                                "()",
+                            )?;
+                            generated.insert(
+                                project.elements[position.element].id.as_str().to_owned(),
+                            );
+                            return Ok(Selection::caret(Position {
+                                element: position.element,
+                                offset: 1,
+                            }));
+                        }
+                        Ok(Selection::caret(position))
                     }
                 }
-                let element = &project.elements[position.element];
-                let element_role = element.role;
-                let element_is_empty = element.text.is_empty();
-                let next_role = tab_transition(element_role, element_is_empty);
-                if let Some(role) = next_role {
-                    if element_role != role {
-                        update_preserved_role(project, position.element, element_role, role)?;
-                        project.elements[position.element].role = role;
-                    }
-                    if policy.auto_parenthetical
-                        && role == Role::Parenthetical
-                        && project.elements[position.element].text.is_empty()
-                    {
-                        replace_range(
-                            project,
-                            Position {
-                                element: position.element,
-                                offset: 0,
-                            },
-                            Position {
-                                element: position.element,
-                                offset: 0,
-                            },
-                            "()",
-                        )?;
-                        generated.insert(project.elements[position.element].id.as_str().to_owned());
-                        return Ok(Selection::caret(Position {
-                            element: position.element,
-                            offset: 1,
-                        }));
-                    }
-                    return Ok(Selection::caret(position));
-                }
-                Ok(Selection::caret(position))
             },
         )
     }
@@ -1779,6 +1748,200 @@ fn strict_boundary_rejects(
         )
         && project.elements.get(element).is_some()
         && offset != text_len
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EnterDecision {
+    target: ParagraphKeyTarget,
+    action: EnterAction,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EnterAction {
+    NoOp,
+    InsertParentheticalBefore { element: usize, automatic: bool },
+    ClearGeneratedAndSplit { position: Position, role: Role },
+    RepairAndInsertDialogue { element: usize },
+    Split { position: Position, role: Role },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TabDecision {
+    target: ParagraphKeyTarget,
+    action: TabAction,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TabAction {
+    NoOp,
+    DelimiterParentheticalToDialogue { element: usize },
+    RepairAndInsertDialogue { element: usize },
+    SetRole {
+        position: Position,
+        role: Role,
+        clear_generated_parenthetical: bool,
+    },
+}
+
+/// The shared Enter decision is intentionally value-only. Editing executes its
+/// action after this point; hint projection reads only `target`.
+fn resolve_enter(
+    project: &Project,
+    selection: Selection,
+    generated: &BTreeSet<String>,
+    policy: &EditPolicy,
+) -> Result<EnterDecision, EditError> {
+    let (start, end) = selection.ordered();
+    if start != end {
+        return Err(EditError::InvalidSelection);
+    }
+    let item = project
+        .elements
+        .get(start.element)
+        .ok_or(EditError::InvalidElement)?;
+    if strict_boundary_rejects(
+        project,
+        policy,
+        start.element,
+        item.role,
+        item.text.len(),
+        start.offset,
+    ) {
+        return Ok(EnterDecision {
+            target: ParagraphKeyTarget::NoOp,
+            action: EnterAction::NoOp,
+        });
+    }
+
+    let mut position = start;
+    if item.role == Role::Parenthetical {
+        if position.offset == 0 && item.text.starts_with('(') {
+            return Ok(EnterDecision {
+                target: ParagraphKeyTarget::Target(Role::Parenthetical),
+                action: EnterAction::InsertParentheticalBefore {
+                    element: position.element,
+                    automatic: policy.auto_parenthetical,
+                },
+            });
+        }
+        if empty_parenthetical_at(item.text.as_str(), position.offset)
+            && generated.contains(item.id.as_str())
+        {
+            position.offset = 0;
+            let role = enter_transition(item.role)
+                .ok_or(EditError::UnsupportedTransition { from: item.role })?;
+            return Ok(EnterDecision {
+                target: ParagraphKeyTarget::Target(role),
+                action: EnterAction::ClearGeneratedAndSplit { position, role },
+            });
+        }
+        if parenthetical_repair_boundary(item.text.as_str(), position.offset).is_some() {
+            return Ok(EnterDecision {
+                target: ParagraphKeyTarget::Target(Role::Dialogue),
+                action: EnterAction::RepairAndInsertDialogue {
+                    element: position.element,
+                },
+            });
+        }
+        if !item.text.is_empty() {
+            return Ok(EnterDecision {
+                target: ParagraphKeyTarget::NoOp,
+                action: EnterAction::NoOp,
+            });
+        }
+    }
+
+    let role = if item.role == Role::Dialogue && position.offset < item.text.len() {
+        Role::Dialogue
+    } else {
+        enter_transition(item.role)
+            .ok_or(EditError::UnsupportedTransition { from: item.role })?
+    };
+    Ok(EnterDecision {
+        target: ParagraphKeyTarget::Target(role),
+        action: EnterAction::Split { position, role },
+    })
+}
+
+/// The shared Tab decision preserves consumed no-ops and same-role displayable
+/// targets separately. Its action is also the sole source for real Tab edits.
+fn resolve_tab(
+    project: &Project,
+    selection: Selection,
+    generated: &BTreeSet<String>,
+    policy: &EditPolicy,
+) -> Result<TabDecision, EditError> {
+    let (start, end) = selection.ordered();
+    if start != end {
+        return Ok(TabDecision {
+            target: ParagraphKeyTarget::Unavailable,
+            action: TabAction::NoOp,
+        });
+    }
+    let item = project
+        .elements
+        .get(start.element)
+        .ok_or(EditError::InvalidElement)?;
+    if strict_boundary_rejects(
+        project,
+        policy,
+        start.element,
+        item.role,
+        item.text.len(),
+        start.offset,
+    ) {
+        return Ok(TabDecision {
+            target: ParagraphKeyTarget::NoOp,
+            action: TabAction::NoOp,
+        });
+    }
+
+    let mut position = start;
+    let mut clear_generated_parenthetical = false;
+    if policy.auto_parenthetical && item.role == Role::Parenthetical {
+        if is_delimiter_only_parenthetical(item.text.as_str()) {
+            return Ok(TabDecision {
+                target: ParagraphKeyTarget::Target(Role::Dialogue),
+                action: TabAction::DelimiterParentheticalToDialogue {
+                    element: position.element,
+                },
+            });
+        }
+        if empty_parenthetical_at(item.text.as_str(), position.offset)
+            && generated.contains(item.id.as_str())
+        {
+            position.offset = 0;
+            clear_generated_parenthetical = true;
+        } else if parenthetical_repair_boundary(item.text.as_str(), position.offset).is_some() {
+            return Ok(TabDecision {
+                target: ParagraphKeyTarget::Target(Role::Dialogue),
+                action: TabAction::RepairAndInsertDialogue {
+                    element: position.element,
+                },
+            });
+        } else if !item.text.is_empty() {
+            return Ok(TabDecision {
+                target: ParagraphKeyTarget::NoOp,
+                action: TabAction::NoOp,
+            });
+        }
+    }
+
+    let role = tab_transition(item.role, item.text.is_empty());
+    Ok(match role {
+        Some(role) => TabDecision {
+            target: ParagraphKeyTarget::Target(role),
+            action: TabAction::SetRole {
+                position,
+                role,
+                clear_generated_parenthetical,
+            },
+        },
+        None => TabDecision {
+            target: ParagraphKeyTarget::NoOp,
+            action: TabAction::NoOp,
+        },
+    })
 }
 
 fn empty_parenthetical_at(text: &str, offset: usize) -> bool {

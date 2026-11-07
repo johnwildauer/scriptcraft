@@ -78,6 +78,16 @@ and predictable role transitions.
     shorter lines and document/page edges, and support Shift selection. The transient goal shall
     reset after horizontal movement, edits, pointer selection, Home/End, role changes,
     undo/redo, or a boundary no-op.
+  - **AC-WRITING-001.4c:** Core paragraph-key guidance shall be a read-only typed projection of the
+    same Enter/Tab resolver used by actual editing, over the current selection, runtime editing
+    policy, and generated-Parenthetical provenance. It shall return role values rather than
+    presentation strings and shall distinguish a displayable target (including same-role Tab
+    targets) from consumed no-ops and unavailable selections/resolutions. It shall preserve the
+    UTF-8 byte-boundary, collapsed-selection, strict-boundary, empty/nonempty Character, Dialogue
+    interior, and Parenthetical delimiter/repair/generated-pair rules of AC-WRITING-001.4a. Asking
+    for guidance shall not mutate document, selection, provenance, history, dirty state, revision, or
+    source-preservation state. A target describes decision logic only; subsequent capacity and
+    preservation safe-stops remain transactional and are not guaranteed by the projection.
   - **AC-WRITING-001.5:** Given malformed or out-of-bound input, the system shall return a bounded
     error without corrupting the project or session state.
 
@@ -632,16 +642,24 @@ model. Native window chrome remains owned by macOS where applicable.
     or fixed frame/top-content inset. Script View page-edge spacing remains owned by scrollable
     content. The toolbar divider shall use an explicit toolbar-local width setting and the toolbar
     palette's border color, without adding other toolbar frame edges.
+  - **AC-WRITING-005.9:** The decorated native window shall begin with the title `Untitled Screenplay`
+    for a new/unsaved document and show only the final filename component, including its extension,
+    for the active native FDX document. Successful New shall restore the untitled title; successful
+    Open, Save, and Save As shall reflect the newly active filename when it changes. Failed or
+    cancelled Open, Save, or Save As shall leave the prior title unchanged. The title shall not
+    include a full path, dirty marker, or duplicate application-name suffix. Native decorations and
+    operating-system title positioning shall remain enabled; a custom title bar or cross-platform
+    centering guarantee is not required.
 
 ### Desktop status bar and visible page
 
-The status bar communicates the live editing session, operation/error state, and page actually
-visible in the editor without taking ownership of editing input or exposing private screenplay
-content.
+The status bar communicates cursor guidance, an explicitly gated diagnostic channel, and the page
+actually visible in the editor without taking ownership of editing input or exposing private
+screenplay content.
 
 - **REQ-WRITING-LOOP-006: Desktop status bar and visible page.** The desktop status bar shall show
-    the page currently visible and concise, trustworthy document and operation state while
-    preserving access to errors and controls.
+    the page currently visible, cursor guidance, and the existing controls. Routine operation text
+    shall not displace the center guidance.
   - **AC-WRITING-006.1:** The desktop status presentation shall support distinct
     noninteractive-text, clickable-text, and clickable-icon Item capabilities. Interactive Items
     shall have explicit accessible names and support keyboard focus and pointer or keyboard
@@ -672,7 +690,7 @@ content.
     transparent. Status hover geometry shall not share or change the toolbar's numeric padding.
     Status-owned default/idle text and icon foreground for Timer, Focus Mode, Appearance, percentage,
     and page, plus Diagnostics when enabled through its explicit development gate, shall use one
-    status-local theme-aware setting. Center operation/error text shall have its own optional
+    status-local theme-aware setting. Center Ready/cursor guidance shall have its own optional
     status-local foreground override and fall back to that default foreground when unset;
     adjusting the center override shall not recolor other status content. Center text shall also use
     its own status-local logical-point font-size setting, independent of Body, Button, page, and
@@ -681,14 +699,38 @@ content.
     expose one documented manual override point while following the active Appearance when the
     override is unset. Popup-menu entries retain menu-owned styling. Pointer and keyboard activation
     shall continue to invoke the existing status actions and accessible behavior.
-  - **AC-WRITING-006.2:** The status bar shall report the current operation status without
-    displaying a cumulative frame count, project path, or separate Clean/Dirty indicator. Clean
-    and dirty state remain owned by the live editing session and shall not be changed by status
-    presentation. A clean in-memory project without a named path shall not be described as
-    previously saved.
-  - **AC-WRITING-006.3:** Operation errors shall remain visibly identifiable, and bounded
-    diagnostics shall remain reachable without exposing screenplay text, source text, serialized
-    project contents, or unnecessary filesystem paths. Save errors shall retain a concise
+  - **AC-WRITING-006.2:** The center shall render exactly one automatic, noninteractive
+    Ready/cursor/modifier projection; diagnostic commands and routine success/development messages
+    shall never override it. When the editor is unfocused, IME is active or has an event in the
+    current frame, or a migration modal is active, the projection shall be `Ready`. Otherwise, an
+    exact supported platform element chord takes priority and displays every digit/role choice from
+    the shared editor binding table, using canonical role labels. The extended list shall begin with
+    Summary. macOS shall show the base list for Command and the extended list for Command+Control;
+    Windows shall show the base list for Control and the extended list for Control+Shift. Releasing
+    or changing modifiers shall restore the current ordinary projection, and unsupported extra
+    modifiers shall not advertise an element chord.
+  - **AC-WRITING-006.2a:** Without a held exact element chord, paragraph-key guidance shall be
+    available only for a collapsed caret at the end of its canonical UTF-8 element text, including
+    the end of an empty element, with no unsupported modifiers. It shall use the shared read-only
+    `EditingSession::paragraph_key_targets()` decisions: show only `Target(role)` results, omit
+    `NoOp` and `Unavailable`, and show `Ready` if neither key has a displayable target. A
+    same-role displayable target remains visible. macOS guidance shall use `[Cmd] hold for
+    Elements`; Windows guidance shall use `[Ctrl] hold for Elements`. Noncollapsed selections and
+    interior carets suppress paragraph hints, while an exact held element chord may still show
+    choices when focused and input policy permits. Hints shall not imply preservation, capacity, or
+    transaction acceptance. Modifier lists shall be measured and fitted in the available center
+    region where possible, remain clipped to the status row at narrow widths, and retain their full
+    accessible label. Modifier-only changes shall repaint the projection without dispatching an
+    editor command or entering the menu command queue. Clean and dirty state remain owned by the
+    live editing session and shall not be changed by status presentation.
+  - **AC-WRITING-006.3:** Retained operation errors and warnings shall be routed through the typed
+    `ui.status.set` command into the existing Diagnostics disclosure, with a bounded optional
+    single-line payload (maximum 512 UTF-8 bytes); no value clears the current diagnostic. Diagnostics
+    remains disabled by default through one manual source constant. When disabled, errors are
+    intentionally hidden: no Diagnostics row, body, placeholder height, focus target, or accessibility
+    node is allocated, and no error is redirected into the center. Diagnostics content shall not expose
+    screenplay text, source text, serialized project contents, or unnecessary filesystem paths. Save
+    errors shall retain a concise
     privacy-safe category distinguishing session preparation, codec serialization/re-read,
     storage, and missing-baseline failures. A Save/Save As codec `UnsupportedConstruct` diagnostic
     shall retain its stable integer call-site prefix at character zero of the underlying diagnostic
@@ -701,15 +743,13 @@ content.
     shall not expose screenplay or XML node text, attribute/namespace values, IDs/UUIDs, anchor or
     semantic identity values, serialized XML, image data, or filesystem paths. The strict comparison
     and refusal remain unchanged. Save-failure wording shall state that the document is unchanged.
-    Status Diagnostics presentation is disabled by default through one manual source constant and may
-    be enabled only as an explicit development choice requiring rebuild and relaunch. Disabled mode
-    gates the detailed status projection and disclosure only; privacy-safe operation errors and the
-    operational counters/instrumentation remain. No profile condition, Cargo feature, runtime
-    preference, or document-persisted setting controls this gate.
+    The disabled gate only controls presentation, not diagnostic command routing or failure-safe
+    behavior. No profile condition, Cargo feature, runtime preference, or document-persisted setting
+    controls this gate.
   - **AC-WRITING-006.4:** Allocate the status row by priority: reserve Sprint Timer, Focus Mode,
     Appearance, the page-zoom slider, and the current-percentage control inline at the far right;
     retain the visible-page indicator in a separately left-aligned, bounded allocation; and allocate
-    the operation/error message in a region centered on the status-row content, not between unequal
+    center guidance in a region centered on the status-row content, not between unequal
     siblings. For row content width `W` and the actual full right-group width `R` (from the row's
     right edge to Timer's left edge), the nominal center region shall have width `max(W - 2R, 0)`,
     left edge `row_left + R`, and right edge `row_right - R`. When `W <= 2R`, collapse it to zero
@@ -718,14 +758,13 @@ content.
     a named status-local setting applied consistently to measured and
     allocated width, paint clipping, and accessibility bounds. Grow the slider within its named
     status-local width bounds only after fixed right controls and the bounded page allocation fit.
-    The center message shall be horizontally and vertically centered
+    The center projection shall be horizontally and vertically centered
     in its explicit region, clip or disappear when that region is exhausted, and never displace or
     reclaim space from the right controls. There shall be no status More/! More trigger, overflow
     path, or breakpoint-based compact mode. At supported widths including 1200, 480, and 320
     logical points, the five right-hand elements shall remain inline and within the visible row;
-    page text clips within its own region if necessary. Operation/error text shall clip horizontally
-    as single-line content rather than wrap or grow the footer, and the existing accessible error
-    projection shall remain available. One named status-local setting shall own the ordinary row
+    page text clips within its own region if necessary. Center guidance shall clip horizontally as
+    single-line content rather than wrap or grow the footer. One named status-local setting shall own the ordinary row
     height, and the bottom panel's default height shall derive from that row and the existing
     symmetric vertical insets, without an independent total-height setting. The caller shall use
     default rather than exact panel sizing. The ordinary row shall retain its current effective
@@ -818,13 +857,14 @@ content.
     styles or add status rows.
   - **AC-WRITING-006.9:** The rendered status content and, when the explicit development gate is
     enabled, expanded Diagnostics summary shall remain single-line and clipped to their allocated
-    regions at wide, breakpoint-adjacent, compact, and narrow widths. Center operation/error text
-    shall be centered within its explicit allocated region while retaining the full accessible text;
-    the visible-page counter shall remain left-aligned and clipped to its own inset allocation.
-    Changes in long status text or diagnostic counters shall not add rows or increase stable footer height; the enabled Diagnostics
-    disclosure retains its collapsed default and opening it may add only its fixed disclosure row.
-    With the gate disabled, no Diagnostics row, body, placeholder height, focus target, or accessibility
-    node shall be allocated.
+    regions at wide, breakpoint-adjacent, compact, and narrow widths. Ready/cursor/modifier guidance
+    shall be centered within its explicit allocated region and retain its full accessible text;
+    operation errors shall not appear in the center. The visible-page counter shall remain left-aligned
+    and clipped to its own inset allocation. Changes in long guidance or diagnostic counters shall not
+    add rows or increase stable footer height; the enabled Diagnostics disclosure retains its collapsed
+    default and opening it may add only its fixed disclosure row. With the gate disabled, no Diagnostics
+    row, body, placeholder height, focus target, or accessibility node shall be allocated, and retained
+    errors assigned there are intentionally hidden rather than redirected to the center.
   - **AC-WRITING-006.10:** A supported native inward/outward pinch event shall adjust the same
     transient per-window whole-percent page zoom as the status slider and presets, preserving
     the inclusive 75–300% limits and all document, session, pagination, export, and editor-input
@@ -885,8 +925,12 @@ content.
   ordered File, Edit, View, Format, Insert, Document, Tools, Production, Window, and Help catalog
   from [`final-draft-13-menus.md`](../../../.reference/final-draft-13-menus.md) through one shared
   catalog. Existing File/Edit operations retain their shared command path; every additional row is a
-  visible disabled placeholder. Windows uses the in-window egui menu; macOS uses native application
-  menus while retaining the enabled in-window preview during this development submission.
+  visible disabled placeholder. The app shall select one runtime menu backend: macOS defaults to
+  native application/catalog menus only, Windows defaults to the in-window egui catalog only, and
+  other targets default to no menu backend. The process-transient
+  `--menu-platform=auto|macos|windows` startup argument may select the in-window backend on another
+  target for development; a native macOS request is unsupported off macOS. This contract supersedes
+  the former source-only dual-preview default.
   - **AC-WRITING-011.1:** The shared catalog shall reproduce every reference label, item order,
     separator/group boundary, shortcut annotation, disclosure marker, and checkmark across the ten
     top-level menus. Existing File commands remain New, Open..., Close, Save, Save As..., and Save As
@@ -896,16 +940,28 @@ content.
     Redo labels shall not be duplicated. Only these existing command rows carry an application
     command; placeholders shall not create command IDs/variants or no-op handlers. The shared
     dispatcher and fresh availability projection remain authoritative for actual commands.
-  - **AC-WRITING-011.2:** Windows shall present the full in-window ten-menu strip immediately above
-    the toolbar and shall not construct the macOS backend. macOS shall install the native ScriptCraft
-    Application menu separately from the ten shared catalog menus and retain the clickable full
-    in-window preview. The source-only in-window preview switch shall remain enabled for this
-    development submission. Native macOS alone shall own accelerators whenever its backend is
-    active, including dual preview; the in-window menu shall own accelerators on Windows. Native
-    command events and in-window command activations shall converge on one ordered command queue
-    and dispatcher. Clicking any top-level catalog menu shall open its popup; while one is open,
-    hovering another top-level menu shall switch to that popup without activating a row. Ordinary
-    egui keyboard navigation and dismissal shall remain available.
+  - **AC-WRITING-011.2:** Exactly one selected runtime menu backend shall render and own menu
+    accelerators: native macOS on the macOS default, or the in-window catalog on Windows and on an
+    explicit supported in-window override. No menu backend is selected by default on other targets.
+    The native controller shall not be constructed unless the resolved policy selects native macOS;
+    the native module shall remain absent on non-macOS targets. Native event draining and
+    availability synchronization, in-window panel rendering, and raw-input shortcut extraction shall
+    all consume that same resolved policy. An in-window backend owns matching menu shortcuts using
+    the actual host shortcut semantics; menu presentation selection shall not pretend the host is a
+    different OS for editor bindings or native integrations. A native installation failure shall
+    fail startup with contextual error rather than silently continuing with no menu or a competing
+    accelerator owner. The startup argument shall reject malformed values, duplicates, unknown or
+    unexpected arguments, and unsupported host/choice combinations with a usage error before
+    application launch. The macOS Windows-menu override is a development simulation of the
+    in-window menu appearance and Windows-style menu annotations only, not full OS emulation: actual
+    host modifier semantics remain in force (including Command-based primary accelerators on macOS),
+    and editor shortcut/status labels, document-point conversion, native display scale, file dialogs,
+    clipboard, notifications, window controls, and compiled platform integrations remain host-owned.
+    The selection is not persisted or exposed as a settings preference. Native command events and
+    in-window command activations shall converge on one ordered command queue and dispatcher. Clicking
+    any top-level catalog menu shall open its popup;
+    while one is open, hovering another top-level menu shall switch to that popup without activating
+    a row. Ordinary egui keyboard navigation and dismissal shall remain available.
   - **AC-WRITING-011.3:** Cut and Copy shall use ordered canonical screenplay body UTF-8, preserve
     exact casing and selected characters, and insert one newline per crossed paragraph boundary;
     they shall not use print/export transformations. Cut shall write to the system clipboard before
@@ -923,9 +979,10 @@ content.
     disclosure-only rows with a caret in egui and disabled empty submenus in native macOS. This
     limited structural placeholder explicitly supersedes earlier no-caret/no-submenu wording; no
     submenu children, recursive menu content, or functional submenu navigation are authorized.
-    No entries beyond the linked complete reference catalog are implied. This criterion does not
-    authorize production OS-only automatic switching, disabling the preview, unsaved-close
-    confirmation, or a repair to the pre-existing New dirty-session consent discrepancy. Native
+    No entries beyond the linked complete reference catalog are implied. The former deferral of
+    production OS-only automatic switching and disabling the preview is explicitly superseded by
+    REQ-WRITING-LOOP-011 and AC-WRITING-011.2. This criterion does not authorize unsaved-close
+    confirmation or a repair to the pre-existing New dirty-session consent discrepancy. Native
     menu appearance/accessibility and in-window rendering remain platform presentation
     responsibilities and require user review; submission is not acceptance evidence.
   - **AC-WRITING-011.6:** Native macOS menu images shall be optional AppKit SF Symbol template images,
@@ -934,7 +991,7 @@ content.
     (`arrow.uturn.backward`), Redo (`arrow.uturn.forward`), Cut (`scissors`), Copy (`doc.on.doc`),
     and Paste (`doc.on.clipboard`). Save As PDF, Delete, and Select All shall remain image-free.
     Symbol metadata shall remain in the macOS adapter, independent of shared semantic icons and the
-    enabled in-window Material-icon preview. The adapter shall resolve catalog-backed native menu
+    in-window Material-icon renderer. The adapter shall resolve catalog-backed native menu
     item references once after muda installation, retain them for the native controller lifetime,
     and remain confined to the AppKit main thread. Images shall be initialized at 18 points with
     template rendering; missing symbols/items or unavailable native handles shall leave optional
@@ -1027,7 +1084,7 @@ content.
     search, SmartType, revision, Beat Board, Index Cards, Scene View, Dual Dialogue, or other
     reference-only functionality.
   - **AC-WRITING-012.8:** Existing enabled document, Edit, text, selection, navigation, focus, view,
-    status, appearance, timer, migration-modal, and viewport actions shall be included in the command
+    diagnostic status, appearance, timer, migration-modal, and viewport actions shall be included in the command
     inventory. Framework-only hover, painting, popup geometry, caret blink, IME preedit, raw scroll,
     repaint scheduling, and layout publication remain adapter bookkeeping rather than semantic
     commands. Native predefined macOS About/Hide/Hide Others/Show All/Quit services shall remain an
@@ -1036,7 +1093,7 @@ content.
 
 ### Stable command and hotkey contract
 
-The current internal catalog contains 41 stable dotted command IDs. These IDs are the shared
+The current internal catalog contains 42 stable dotted command IDs. These IDs are the shared
 activation vocabulary, not user-facing commands or a promise that every ID has a headless semantic
 implementation. Typed parameters are owned values: strings are UTF-8, Role and enum values use
 explicit domain types, Selection positions are checked UTF-8 byte offsets, and host objects (egui,
@@ -1052,6 +1109,7 @@ state are not screenplay persistence.
 | Selection/navigation/focus | `editor.selection.set`, `editor.selection.pointer`, `editor.navigation.horizontal`, `editor.navigation.vertical`, `editor.navigation.line-edge`, `editor.focus` | Selection takes checked semantic endpoints; pointer takes a semantic Position and Press/Drag/Release phase; navigation takes typed direction/edge and extend flag; focus has no payload. Layout and hit testing remain desktop adapters; Selection commits use the headless executor. |
 | View/focus mode | `view.zoom.set`, `view.zoom.pinch`, `view.appearance.set`, `view.focus-mode.toggle` | Zoom set takes a bounded whole-percent value; pinch takes a validated factor; appearance takes System/Day/Night/Midnight; focus-mode toggle has no payload. Viewport/native requests remain host effects. |
 | Sprint timer | `tools.sprint-timer.toggle-popup`, `tools.sprint-timer.close-popup`, `tools.sprint-timer.set-mode`, `tools.sprint-timer.set-minutes`, `tools.sprint-timer.start`, `tools.sprint-timer.pause`, `tools.sprint-timer.resume`, `tools.sprint-timer.reset`, `tools.sprint-timer.end` | Mode is Countdown/Stopwatch; minutes input is owned text validated by the existing 1–1440 rule; other actions have no payload. Clock observation, repaint scheduling, and notification delivery are host-owned. |
+| UI diagnostics | `ui.status.set` | Desktop-only optional diagnostic line, bounded to 512 UTF-8 bytes and one line; `null` clears. The headless executor rejects this host effect. |
 
 | Role | Command parameter | macOS | Windows |
 |---|---|---|---|
@@ -1075,15 +1133,16 @@ state are not screenplay persistence.
 
 Unmodified Enter/Tab dispatch `editor.paragraph.enter`/`editor.paragraph.tab`. The 17 role chords
 dispatch `editor.element.change` with the listed Role; digits are logical top-row Digit 0–9 and must
-match their physical top-row key. Menu/native/in-window accelerators keep their established owner
-(native macOS while installed, in-window on Windows) and ordered FIFO; focused text, IME commit,
+match their physical top-row key. Menu/native/in-window accelerators have exactly one owner selected
+by AC-WRITING-011.2 and retain ordered FIFO; focused text, IME commit,
 paragraph, deletion, role, navigation, and pointer paths stay synchronous in source event order.
 Editor hotkeys require preceding-frame screenplay focus, exact modifiers, no active or same-frame
 IME activity, and no migration modal. Key releases remain untouched, repeat remains event-driven, and
 numpad aliases are excluded. Current command availability is recomputed at desktop dispatch; stale
-history/selection and modal-blocked commands reject without semantic mutation. Semantic results
-distinguish changed, no-op, unavailable, rejected, and original core edit failure. Desktop effects
-report `EffectDispatched` as routing only; existing status/error handling remains authoritative.
+history/selection and modal-blocked commands reject without semantic mutation, except diagnostic
+status set/clear which remains permitted during the migration modal. Semantic results distinguish
+changed, no-op, unavailable, rejected, and original core edit failure. Desktop effects report
+`EffectDispatched` as routing only; diagnostic state is written only by the desktop dispatcher.
 The native picker adapter currently rejects paths that cannot be represented as UTF-8 rather than
 lossily rewriting them.
 

@@ -138,9 +138,19 @@ panel and content geometry.
 
 The row gives priority to the inline Timer, Focus Mode, Appearance, zoom slider,
 and current-percentage controls at the right. The visible-page counter has its own
-bounded left allocation, and operation/error text uses a mirrored center region.
-These regions and their control hit/accessibility bounds remain clipped to the row;
-content compression does not create an overflow action or compact-mode switch.
+bounded left allocation, and Ready/cursor guidance uses a mirrored center region.
+The status center projects the shared core paragraph-key target decision only for
+a focused, non-IME, non-modal collapsed caret at canonical UTF-8 element end;
+`Target(role)` values are displayable, while `NoOp` and `Unavailable` are omitted.
+Exact focused element chords take priority and project digit/role rows from the
+same desktop binding table used by key dispatch, using the specified presentation
+order and canonical role labels.
+Modifier samples are presentation-only and modifier transitions request repaint;
+they do not enter the menu command queue. During the migration modal, the ordinary
+panels remain suppressed but the bottom panel retains a noninteractive Ready
+center row without exposing status controls. These regions and their control
+hit/accessibility bounds remain clipped to the row; content compression does not
+create an overflow action or compact-mode switch.
 The status module owns its row-local control geometry without changing global
 framework spacing or toolbar sizing. The current page reflects accepted editor
 viewport geometry rather than caret position.
@@ -150,12 +160,20 @@ visible captions; Appearance choices remain textual in the menu. Focus Mode
 retains its state-based enablement and accessible description, and timer popup
 placement follows its interaction rectangle. Text, icons, hover treatment, and
 the zoom knob use status-local foreground ownership with optional theme-aware
-overrides; popup entries keep menu-owned styling. Center operation/error text is
+overrides; popup entries keep menu-owned styling. Center Ready/cursor guidance is
 single-line, centered in its explicit region, and independently styled. The zoom
 slider and arrowless percentage control share the window's integer zoom value;
 their bounded rectangles own painting, interaction, popup anchoring, and
 accessibility. The custom circular knob follows the stock slider response and is
 clipped to the status row, right group, and inherited parent clip.
+
+The center's held-element projection uses Command / Command+Control on macOS and
+Control / Control+Shift on Windows, with exact resolver-compatible modifier
+matching. Paragraph guidance uses the host-correct Command/Control hold label.
+Long modifier lists are measured in the available center region and use a smaller
+status-local font size, shrinking to a floor before row clipping; the full text
+remains the accessibility label. Page geometry, the status row height, and the
+right-control allocation are independent of this text fitting.
 
 Status controls produce typed `view.zoom.set`, `view.appearance.set`,
 `view.focus-mode.toggle`, and `tools.sprint-timer.*` command intents; the desktop
@@ -169,15 +187,17 @@ and notification worker wakeups remain host presentation/effect bookkeeping.
 Completion notification requests and asynchronous results pass through the
 desktop timer-notification adapter and existing native sink; pending/accepted
 feedback never asserts delivery. A desktop `EffectDispatched` outcome records
-routing only; existing status/error handling remains authoritative.
+routing only; the typed diagnostic status command is the only writer of the
+diagnostic message channel.
 
 Detailed status diagnostics and their disclosure are controlled by
-`presentation::ENABLE_DIAGNOSTICS`, a manual production-off source gate.
-Disabled mode constructs no detailed projection or Diagnostics row, placeholder,
-focus target, or accessibility node. When explicitly enabled for development,
+`presentation::ENABLE_DIAGNOSTICS`, a manual production-off source gate. Disabled
+mode constructs no detailed projection or Diagnostics row, placeholder, focus
+target, or accessibility node; retained diagnostic errors are intentionally hidden
+and never move into the Ready/cursor center. When explicitly enabled for development,
 the disclosure retains its collapsed default and may expand the panel beyond the
-ordinary row allocation. Operational instrumentation and privacy-safe operation
-errors remain independent of this presentation gate.
+ordinary row allocation. Operational instrumentation and diagnostic command routing
+remain independent of this presentation gate.
 
 Script View owns independent top and bottom scroll-content page-edge spacing and
 its local policy for unobscured scrolling. Actual allocation and prepaint zoom
@@ -246,6 +266,17 @@ desktop page presentation and base typography only. Persisted root TextState Sca
 user's whole-percent zoom; neither OS conversion nor native display scale enters core layout, PDF,
 or the saved percentage. Desktop hit testing uses the matching layout-to-presentation transform.
 
+The native document title is desktop-only viewport state. [`main.rs`](../../apps/scriptcraft/src/main.rs)
+projects the active `native_path` to its final UTF-8 filename component (including extension), or
+`Untitled Screenplay` when there is no active path. Startup configures that same untitled title in
+both the viewport builder and eframe entry point. At the end of the desktop frame, a cached projected
+title is compared before [`app_commands.rs`](../../apps/scriptcraft/src/app_commands.rs)'s
+`DesktopViewportEffects` sends `ViewportCommand::Title`; repeated frames and path changes that retain
+the same filename issue no duplicate effect. New/Open/Save/Save As only alter the active path after
+their existing successful state transition, so failed or cancelled operations retain the prior
+projection. The title is not persisted in FDX and carries no full path or dirty suffix. Native
+decorations and OS-owned title positioning remain in use; no custom title-bar renderer is introduced.
+
 ## Desktop application-menu implementation context
 
 The menu system is desktop-only and leaves screenplay core, persistence, fixed layout, and exports
@@ -255,7 +286,7 @@ projection, the desktop dispatcher and typed dispatch result, editor-focus resto
 explicit `arboard` clipboard adapter. Existing File/PDF operations remain behind this boundary;
 Undo, Redo, Cut deletion, Paste insertion, Delete, Select All, and toolbar Role changes use the
 headless `execute_editor_command` executor for their semantic session operation. Desktop mutations
-continue through the existing status/error/reveal adapter. Clipboard extraction reads canonical
+retain transactional reveal behavior while diagnostics use the typed status command. Clipboard extraction reads canonical
 body-element UTF-8, copies exact selected text with one newline per crossed element boundary, and
 does not inherit print/export transformations. Cut writes before invoking transactional deletion;
 Paste reads only on activation and invokes the existing paste operation through the executor.
@@ -274,12 +305,16 @@ Search is a disabled accessible label, not an input or focus target. Placeholder
 `LogicalShortcut` carries display/native accelerator metadata including primary, literal Control and
 Option, Shift, alphabetic/punctuation/bracket/backslash/pipe/Return/arrow keys; placeholder metadata
 is not input-recognition authority. [`menu.rs`](../../apps/scriptcraft/src/menu.rs) owns the
-source-only preview policy, menu-local egui renderer/metrics, recognition of command-only shortcuts,
-in-window accelerator-consumption policy, and the FIFO of typed command invocations with origins.
-Its detached batches preserve activation order and recheck current availability at dispatch. Its
-in-window strip retains its existing 24-logical-point height and popup height bounds. On Windows the
-in-window strip owns command accelerators; on macOS the preview remains enabled while native owns
-command accelerators.
+injectable startup choice (`MenuPlatformChoice`), target-aware `RuntimeMenuPolicy` resolver, menu-local
+egui renderer/metrics, recognition of command-only shortcuts, accelerator-owner projection, and the
+FIFO of typed command invocations with origins. Startup parses only the process-transient
+`--menu-platform=auto|macos|windows` argument before application/menu construction; malformed,
+duplicate, unknown, positional, and unsupported choices fail with a deterministic usage error before
+launch. `Auto` resolves to the native macOS backend on macOS, the in-window backend on Windows, and
+no backend on other targets; a Windows-style in-window request is supported on any target, while a
+native macOS request is rejected off macOS. The selection is not a preference or persisted field.
+Its detached FIFO batches preserve activation order and recheck current availability at dispatch.
+The in-window strip retains its existing 24-logical-point height and popup height bounds.
 
 [`macos_menu.rs`](../../apps/scriptcraft/src/macos_menu.rs) is compiled only for macOS and owns
 main-thread native Application-menu construction separately from all ten shared catalog menus,
@@ -315,19 +350,29 @@ the borrowed-handle lifetime and main-thread check. There are no raw Objective-C
 module/crate-wide unsafe allowances; package unsafe-code denial remains in force elsewhere. The
 in-window Material icon renderer and shared semantic icon assignments are unchanged.
 
-[`main.rs`](../../apps/scriptcraft/src/main.rs) orchestrates both presentations and the update
-handoff. The in-window panel order is menu strip, existing toolbar, Script Workspace, then the
-existing bottom status panel; the menu strip is inserted immediately before the toolbar only when
-the in-window policy enables it. Each update refreshes native-window state, drains native event IDs
-into the FIFO, dispatches the detached FIFO batch in activation order with fresh availability
-rechecked, then routes ordinary editor input and renders the application panels. Egui menu clicks
-enqueue during panel rendering and are dispatched on a later update. Recognized pressed in-window
-shortcuts are extracted from raw input before editor routing only when the in-window backend owns
-accelerators; unrelated keys and IME input remain. Native macOS is the sole accelerator owner while
-installed, including dual preview; Windows uses the in-window backend. Edit dispatch targets the
+[`main.rs`](../../apps/scriptcraft/src/main.rs) parses and resolves the menu request before invoking
+eframe, stores one resolved app-owned runtime policy, and uses it for native installation, panel
+composition, native event draining/synchronization, and raw-input accelerator extraction. The
+in-window panel order is menu strip, existing toolbar, Script
+Workspace, then the existing bottom status panel; the menu strip is inserted immediately before the
+toolbar only when the selected backend is in-window. Each update refreshes native-window state, drains
+native event IDs only for the native backend into the FIFO, dispatches the detached FIFO batch in
+activation order with fresh availability rechecked, then routes ordinary editor input and renders the
+application panels. Egui menu clicks enqueue during panel rendering and are dispatched on a later
+update. Recognized pressed in-window shortcuts are extracted from raw input before editor routing
+only when the in-window backend owns accelerators; unrelated keys and IME input remain. Exactly one
+backend owns menu accelerators: native macOS or in-window; no backend means neither. In-window menu
+shortcut matching continues to use actual host shortcut semantics. On macOS, the Windows-menu override
+shows the egui catalog without constructing/installing the native controller; its Windows-style
+appearance/annotations are a development simulation, not OS emulation, and primary accelerator input
+still follows macOS Command semantics. Editor shortcut/status labels, document-point conversion,
+native display scale, native dialogs, clipboard, notifications, window controls, and compiled native
+integrations remain host-specific. Edit dispatch targets the
 application session, not the menu's transient focus, and requests focus/repaint for the recorded
 editor surface after dispatch when available. Native item enabled states are synchronized from the
-shared availability projection at the end of each update. The in-window catalog buttons retain
+shared availability projection only for the selected native backend at the end of each update. A
+selected native installation error is contextualized and aborts startup rather than silently running
+with no menu or competing accelerator ownership. The in-window catalog buttons retain
 egui click-to-open and ordinary keyboard/dismissal behavior; a menu-local bridge switches to a
 different top-level popup on hover only while a tracked catalog popup is open, and does not enqueue
 a command. Rows use disabled state for placeholders, with a display-only right caret for disclosure
@@ -338,12 +383,11 @@ not top-level hover switching; `MenuButton` uses click-driven `Popup::menu`, whi
 hover behavior is for nested menus and does not switch an already-open sibling. The adapter uses
 egui popup memory (`Popup::open_id`) rather than changing global pointer or focus state.
 
-The in-window switch `IN_WINDOW_MENU_PREVIEW_ENABLED` is currently `true`; it is a source-only
-development switch, not a preference or persisted field. Windows always presents the complete egui
-catalog; macOS currently presents the native Application menu, all ten shared native catalog menus,
-and the complete egui catalog preview.
-Automatic production OS-only selection and disabling the preview are deferred to a separately
-approved change. Current egui menu metrics in source are: bar height 24, bar/item/shortcut text
+The former source-only `IN_WINDOW_MENU_PREVIEW_ENABLED` dual-preview implementation and the former
+deferral of automatic production OS-only selection are historical and superseded by the runtime policy
+above. The macOS default installs only the native Application menu and ten native shared-catalog menus;
+Windows defaults to only the complete in-window catalog. Other targets default to no menu backend, with
+the CLI allowing an explicit in-window development simulation. Current egui menu metrics in source are: bar height 24, bar/item/shortcut text
 12/12/12, icon size 14, row height 22, icon slot 28, bar gap 8×0, bar padding 8×0, row padding
 4×0, row atom spacing 6×2, popup padding 10×8, separator spacing/stroke 9/1, and
 bar/row/popup corner radii 7/4/8 logical units. Popup width remains content-driven without custom
@@ -374,7 +418,9 @@ Unknown IDs and malformed parameters reject before execution. This wire contract
 FDX and does not persist commands, origins, keymaps, or desktop state.
 
 WO-001 creates that package with an explicit versioned Serde envelope, dotted command identifiers,
-typed parameters, origin values, and a 41-entry descriptor catalog. The package depends only on
+typed parameters, origin values, and a 41-entry descriptor catalog. WO-002 adds `ui.status.set`,
+bringing the catalog to 42 entries. Its optional diagnostic line is validated as nonempty, single-line,
+and at most 512 UTF-8 bytes during deserialization. The package depends only on
 `scriptcraft-core` and Serde, and the wire representation does not select a concrete codec. UTF-8
 selection offsets are represented as checked-width byte positions; the envelope exposes
 document-aware validation for element ranges and UTF-8 boundaries before an executor receives
@@ -387,10 +433,16 @@ carries its typed command and origin, and dispatch recomputes availability. Focu
 navigation, and pointer selection dispatch synchronously in original event order. Toolbar actions,
 document requests/direct paths, migration decisions, clipboard follow-ups, view/status/appearance,
 focus-mode, and timer actions all converge on this dispatcher; accepted semantic edits and Selection
-commits delegate to the headless executor. Existing status/error, reveal, repaint, and focus semantics
-remain the host's authority. `EffectDispatched` means only that an effect was routed to its adapter,
-not that it succeeded; existing status/error reporting is authoritative. Disabled placeholders never
-acquire command IDs for activation.
+commits delegate to the headless executor. `ui.status.set` is a desktop-only effect; the headless
+executor rejects it without session mutation. Desktop report/clear producers queue the typed command
+and flush it through the dispatcher in FIFO order after the current dispatch; a reentrancy guard keeps
+nested dispatch from recursively draining or reordering reports. Diagnostic set/clear remains
+available during migration modal state. The command handler alone writes the diagnostic channel.
+Routine success strings have been removed. The WO-002 integration checkpoint projected only `Ready`;
+the current center uses live paragraph-key targets from the shared core resolver and exact host element
+chords from the shared binding table, falling back to `Ready` for ineligible focus/IME/modal/modifier
+states. `EffectDispatched` means only that an effect was routed to its adapter, not that it succeeded.
+Disabled placeholders never acquire command IDs for activation.
 
 A headless editor executor in `scriptcraft-commands::executor` delegates text/paste, Backspace/Delete,
 Enter/Tab, explicit Role changes, Undo/Redo, Select All, and direct Selection updates to exactly one
@@ -426,9 +478,9 @@ adapter. Native predefined macOS Application-menu services remain an explicit OS
 an existing safe host API can route them without broadening the AppKit unsafe exception.
 
 A shared desktop [`shortcuts.rs`](../../apps/scriptcraft/src/shortcuts.rs) owns logical shortcut and
-top-row digit definitions for menu and editor consumers. Native macOS retains ownership of menu
-accelerators and Windows retains the in-window owner. Editor-local Enter/Tab and element-number
-bindings are not inserted into the native menu catalog. Focused editor events resolve and dispatch
+top-row digit definitions for menu and editor consumers. The runtime menu policy selects exactly one
+menu accelerator owner: native macOS, in-window, or none on the other-target Auto fallback.
+Editor-local Enter/Tab and element-number bindings are not inserted into the native menu catalog. Focused editor events resolve and dispatch
 synchronously in original order, rather than entering the deferred menu queue; this preserves text
 before a following Enter/Tab. Exact modifier matching, preceding-frame editor focus, IME suppression,
 migration-modal exclusion, key-release preservation, and existing repeat behavior are required.
@@ -489,16 +541,16 @@ behavior and implementation paths remain subject to user validation.
 
 - **Configuration and secrets handling:** This local product architecture does not depend on service credentials or a secrets-management system; no additional configuration or deployment mechanism is specified here.
 - **Identity and access:** An account or identity subsystem is not part of the described single-writer desktop product.
-- **Errors, reliability, and observability:** Editing operations preserve transactional state. Save failures preserve the native project and leave the session's saved/dirty state accurate. Transactional save details project privacy-safe session-preparation, codec serialization/re-read, storage, or missing-baseline categories without screenplay text or unnecessary paths. The desktop status row keeps document-unchanged wording, horizontally and vertically centers its operation/error message in its explicit mirrored center region, and does not duplicate the session-owned dirty state with a Clean/Dirty indicator. Errors and diagnostics avoid unnecessary exposure of screenplay content. Core preservation COW counters report only wrapper-share and detachment counts, never document-derived values; these counters are not currently included in the desktop projection. The explicit `ENABLE_DIAGNOSTICS` source constant gates only status Diagnostics presentation and projection; its production-off value does not disable operational counters, native-input/performance instrumentation, scheduler state, repaint/layout scheduling, or error reporting.
+- **Errors, reliability, and observability:** Editing operations preserve transactional state. Save failures preserve the native project and leave the session's saved/dirty state accurate. Transactional save details project privacy-safe session-preparation, codec serialization/re-read, storage, or missing-baseline categories without screenplay text or unnecessary paths. The status center is exclusively Ready/cursor/modifier guidance: exact held host chords use the shared binding table; paragraph guidance uses shared core targets only at collapsed element ends; focus loss, IME, modal, interior/selection, and unsupported-modifier states resolve to Ready as applicable. Routine success and development messages do not appear there. Errors/warnings are retained through `ui.status.set` and displayed only inside Diagnostics when explicitly enabled; with the source gate off they are intentionally hidden, not redirected elsewhere. Diagnostics never expose screenplay content, serialized source, IDs, or unnecessary paths. Save errors retain a stable save-failure prefix, safe low-level category/details, and explicit unchanged-document wording. Core preservation COW counters report only wrapper-share and detachment counts, never document-derived values; these counters are not currently included in the desktop projection. The explicit `ENABLE_DIAGNOSTICS` source constant gates only status Diagnostics presentation and projection; its production-off value does not disable operational counters, native-input/performance instrumentation, scheduler state, repaint/layout scheduling, or typed diagnostic command routing.
 - Desktop performance diagnostics are operationally retained and value-free: the desktop keeps cumulative saturating counters and nanosecond phase totals, while an explicit benchmark reset captures a baseline for deltas without changing the session or discarding prior totals. The status-specific detailed summary string, pending-derived-work presentation query, and `DiagnosticProjection` are constructed only when the manual Diagnostics gate is enabled. The single-line projection may include only fixed phase/counter names, numeric values, the debug/release build-profile label, and a closed set of operation labels. It must never include document text, FDX values or bytes, filesystem paths, IDs, or source data. Core layout wrapping reports build/reuse counts and elapsed actual-wrap time separately from the immutable layout value so instrumentation cannot affect layout equality or pagination. Whole-layout cache hits are not per-element wrap reuse. RS-WO-005 adds separate span-galley build/reuse counters; those counts never imply per-element wrap reuse or indexed interaction queries. Derived diagnostics distinguish due-tick attempts/completions/skips, irrelevant-revision skips, changed/unchanged outcomes, safe deferrals, and cumulative requested/attempted/deferred scene counts; live pending/complete/retryable and deferred-scene counts are numeric/value-free only.
 - **Persistence and data evolution:** Native files are FDX Version 6. Explicit non-6 inputs receive a warning and a Version 6 importer attempt; previous versions use the lossy title/content-only path, while newer handling is best effort without a compatibility promise. Malformed input fails safely. Save validates a complete candidate before atomic replacement and publishes session corrections only after success. Legacy JSON migration is not a product commitment.
 - **Verification approach:** Cargo workspace formatting, check, build, and Clippy checks cover build hygiene. Four consolidated headless core acceptance tests cover bounded editing/history, repeatable layout/export, native FDX preservation/reopen, and failed-Save-As safety scenarios. Desktop interaction and platform integration require applicable desktop/manual checks; automated core checks do not establish native OS behavior.
 
 ### Acceptance-suite consolidation — 2026-11-04
 
-Under explicit user direction, existing tests were classified obsolete by default rather than treated as permanent work-order gates. The 37 historical integration files and 18 inline app/core unit-test modules were retired. The sole active test target is [`core_acceptance.rs`](../../crates/scriptcraft-core/tests/core_acceptance.rs:1), containing four contract-focused scenarios; no desktop automated tests remain. The final workspace formatting, check, build, Clippy, and test commands passed, with four tests passed and zero failed. Evidence and limitations are recorded in the [`build-hygiene report`](../../.plan/2026-11-04-build-cleanup/build-hygiene-report.md).
+Under explicit user direction, the historical suite was consolidated rather than treated as permanent work-order gates. The 37 historical integration files and 18 inline app/core unit-test modules were retired. The consolidated core acceptance target is [`core_acceptance.rs`](../../crates/scriptcraft-core/tests/core_acceptance.rs:1), containing four contract-focused scenarios. A later user-directed WO-004 adds focused app-local status-guidance and modifier tests in `main.rs`, `status_bar.rs`, and `shortcuts.rs`; those tests are authored but unrun and do not imply validation. The final workspace formatting, check, build, Clippy, and test commands recorded for the consolidation passed historically, with four tests passed and zero failed. Evidence and limitations are recorded in the [`build-hygiene report`](../../.plan/2026-11-04-build-cleanup/build-hygiene-report.md).
 
-Later references in this document to deleted test files, desktop oracles, inline test modules, and authored-but-unrun historical coverage are historical design/implementation evidence only. They do not describe active test targets or current verification coverage, and the retired suite's assertion failures are not represented as repaired product behavior.
+Later references in this document to deleted test files, desktop oracles, and retired inline test modules are historical design/implementation evidence only. The newly authored WO-004 desktop tests have not been executed; neither their presence nor the historical consolidation results establish current validation. The retired suite's assertion failures are not represented as repaired product behavior.
 
 ## Architectural constraints
 
@@ -509,13 +561,68 @@ Later references in this document to deleted test files, desktop oracles, inline
 
 ## Desktop performance diagnostics
 
-The desktop owns the performance recorder, status-bar projection, benchmark-operation labels, and reset-baseline lifecycle. `status_bar.rs::presentation::ENABLE_DIAGNOSTICS` defaults to `false`; when disabled, status summary formatting, its pending-derived-work presentation query, projection construction, and the entire second-row disclosure are skipped. When explicitly enabled, the prior collapsed disclosure and summary remain available. Existing totals remain cumulative across document replacement in either mode; `reset_benchmark` records the current totals as the next benchmark baseline and `benchmark_delta` uses saturating subtraction. The reset affects diagnostics only and does not change editing revision, selection, dirty state, history, layout-cache identity, or rendered output. Layout build instrumentation lives beside core layout construction but returns `LayoutBuildDiagnostics` separately from `ScreenplayLayout`; wrap timings cover only `wrap_element` calls, not validation or pagination.
+The desktop owns the performance recorder, status-bar projection, benchmark-operation labels, and reset-baseline lifecycle. `status_bar.rs::presentation::ENABLE_DIAGNOSTICS` defaults to `false`; when disabled, status summary formatting, its pending-derived-work presentation query, projection construction, and the entire second-row disclosure are skipped. Retained diagnostic messages are likewise intentionally not visible in the disabled state. When explicitly enabled, the collapsed disclosure contains the operational summary and the current optional diagnostic message; it may expand the panel. Existing totals remain cumulative across document replacement in either mode; `reset_benchmark` records the current totals as the next benchmark baseline and `benchmark_delta` uses saturating subtraction. The reset affects diagnostics only and does not change editing revision, selection, dirty state, history, layout-cache identity, or rendered output. Layout build instrumentation lives beside core layout construction but returns `LayoutBuildDiagnostics` separately from `ScreenplayLayout`; wrap timings cover only `wrap_element` calls, not validation or pagination.
 
 Core preservation diagnostics separately count shared vector/text/source-byte/image wrapper clones and detached vector/text/source-byte/image payloads. These process-wide, saturating counters are value-free structural counts, not timings, and are not projected into the desktop status-bar diagnostics.
 
 The current renderer has whole-layout cache hit/build counts, page consideration/culling/painting, line and selection-span submissions, line/span galley build/reuse counts, per-element wrap build/reuse counts, caret/linear-query counts, refresh outcomes, and phase totals. Desktop page rows and complete page rectangles are allocated for the whole document to preserve scrolling, status tracking, pointer routing, and reveal; only pages intersecting the editor clip plus one fixed page of vertical overscan on either side are painted. Hidden pages issue no line, selection, text, underline, caret, or IME paint. Collapsed caret geometry is resolved at most once per frame and reused for reveal and owner-page paint. RS-WO-005 stores a bounded fixed-cell galley cache in egui context-local temporary data, keyed by span text, role-face family and size, fixed cell width, line height, text color, and pixels-per-point. Each galley is re-positioned to explicit cell coordinates; host-font advances do not participate in screenplay pagination or fixed-cell placement. Selection color boundaries form separate spans; underline and selected-background geometry remain independently painted, and the shared layout display/source map remains the authority for casing expansions and selection endpoints. RS-WO-006 stores a bounded immutable core wrap cache keyed by complete canonical content (verified after fingerprint lookup), stable element identity, role, purpose, title/body context, effective paragraph geometry and text style, and wrapping limits. It shares canonical/display line strings and source maps while rerunning page placement over the whole document. Project replacement changes an opaque clone-stable layout identity and clears both cached layout and wraps; runtime/source inputs and purpose participate in complete-layout and effective-wrap invalidation. The core cache excludes egui atlas data, presentation scale/palette, and the WO-005 context-local galley cache. Indexed interaction queries remain a later mechanism and their counters are independent. Timing values are observational only: automated regressions assert exact work counts and state isolation, never elapsed-time thresholds. User review and validation are required; no agent-run checks are permitted by repository policy.
 
 The render-speed initiative maintains two deliberately distinct measurement surfaces. The core [`wo006_responsiveness.rs`](../../crates/scriptcraft-core/tests/wo006_responsiveness.rs) benchmark measures core layout build/cache lookup only and has no desktop frame, paint, or repaint counters. The desktop oracle is authored in the `main.rs` test module and drives the egui document surface against deterministic imported-FDX fixtures. Its current baseline distinguishes a whole-layout cache hit from all-page consideration/geometry allocation and viewport-bounded painting/line submissions; it asserts visible fixed-cell galley builds/reuses and one-wrap-build/unchanged-wrap-reuse work on ordinary edits. Indexed interaction query counts and index-entry probes are now included for pointer hit testing, caret-owner/geometry resolution, and vertical movement. Later orders must revise only the expectations for mechanisms they actually introduce. The oracle uses structural counts and layout equivalence, not timing thresholds; all review and validation remain user-owned.
+
+## UI indicators and platform shell WO-002 submission — 2026-11-07
+
+The UI-independent command contract contains a bounded optional diagnostic message and a 42-ID
+descriptor inventory. The desktop dispatcher alone writes the channel; report and clear intents
+travel as ordered internal follow-up commands, including when a migration modal is active. The
+headless executor rejects the desktop-only effect. Diagnostics remains disabled by default, which
+means retained errors are intentionally hidden and no diagnostic disclosure row/accessibility
+structure is emitted. The center exclusively projects Ready, shared paragraph-key targets, or exact
+held-element binding lists; diagnostic text never participates in its priority.
+Routine success/development messages were removed. Save failures retain safe transactional categories,
+details, and unchanged-document wording without document contents or paths. Focused catalog, bound,
+headless-rejection, desktop dispatch/order/modal, and Ready/gate cases were authored but not run; no
+agent validation was performed. User review, validation, and acceptance remain pending. See the
+[WO-002 handoff](../../.plan/2026-11-06-ui-indicators-platform-shell/work-orders/WO-002-diagnostic-status-command-handoff.md)
+for exact changed paths, test limits, and user acceptance scenarios.
+
+## UI indicators and platform shell WO-007 durable contract — 2026-11-07
+
+The current command inventory is 42 stable IDs: the prior 41-entry catalog plus WO-002's typed,
+optional `ui.status.set` diagnostic effect. The desktop dispatcher alone writes the diagnostic channel;
+the headless executor rejects the host-only effect. Diagnostics is intentionally disabled by default.
+When disabled, assigned errors are hidden and no disclosure row, placeholder, focus target, or
+accessibility node is constructed; error text never falls back into the status center. The center is
+only Ready/cursor/modifier guidance, with paragraph targets from the shared core resolver and exact
+host chords from the shared shortcut table.
+
+The native title is a transient desktop projection of the active path's final filename, with
+`Untitled Screenplay` before a successful path transition. Failed/cancelled Open/Save/Save As preserve
+the previous title; native decorations and title positioning are OS-owned and no Windows centering
+guarantee is made.
+
+Runtime menu selection defaults to native Application/catalog menus only on macOS, the in-window
+catalog only on Windows, and no menu backend on other targets. The source-only dual-preview flag and
+deferred OS-only switching are superseded historical states. Startup's process-transient
+`--menu-platform=auto|macos|windows` selection resolves before eframe/native construction, with one
+renderer and accelerator owner. Invalid/duplicate/unexpected arguments and unsupported native choices
+reject before launch; argument/policy failures use exit code 2. Native menu installation failure aborts
+startup contextually instead of silently choosing an incomplete backend. Launcher presentation of
+that startup error remains unobserved.
+
+On macOS, the `windows` override previews Windows-style in-window menu presentation and Ctrl
+annotations only. Actual menu accelerators remain Command-based, and editor/status modifier labels,
+native dialogs, clipboard, notifications, window controls, page/document-point conversion, native
+scale, and document semantics remain host-owned. This is not OS emulation. The old 41-ID total,
+persistent center operation/error strings, always-visible error claims, mandatory dual preview, and
+deferred production OS switching must not be treated as current contracts; dated records retain their
+historical meaning only.
+
+WO-001–WO-006 are implementation submissions, not accepted or validated behavior. WO-007 only updates
+durable records and supplies the [user-validation handoff](../../.plan/2026-11-06-ui-indicators-platform-shell/work-orders/WO-007-user-validation-handoff.md).
+In particular, WO-002 did not add concrete Serde codec round-trip coverage; modifier lists may clip
+visually at narrow widths despite their full accessible label; and native menu startup-error
+presentation, native window behavior, real platform input, diagnostics-enabled rendering, and Windows
+runtime remain user-unverified. No validation result is inferred.
 
 RS-WO-007 stores derived page/line locations over complete immutable layout output. Its element-to-placed-line index retains page/line order, including title-page line locations needed to preserve the existing first-match caret geometry and owner-page behavior. A body-only document-order index records source ranges and fixed absolute vertical coordinates, while a separate sorted permutation supports nearest-y lookup without changing vertical-navigation order. Caret and owner-page queries inspect only the requested element's lines; nearest-line hit testing binary-searches the vertical permutation and considers only adjacent coordinate groups, retaining exact distance and page/line tie-breaking; vertical movement accesses indexed current and adjacent body lines without a flattened whole-document vector. Title pages are excluded from body hit testing/navigation. The core indexes reference shared immutable layout lines and carry no egui/presentation state; they are rebuilt with fresh complete layouts and reused with complete-layout cache hits. The desktop recorder reports indexed query calls and index-entry probes separately from legacy linear-query counts. These are diagnostics, not user measurements or proof of behavior; RS-WO-001–WO-007 coverage remains unvalidated by the user, and no timing results are recorded.
 
@@ -699,6 +806,7 @@ discarding unsupported authored arc content.
 - Managed screenplay body and direct managed title-role Paragraphs use one empty-content projection: empty canonical text has no semantic runs and no direct managed `Text` children, while the Paragraph identity/role/Type/direct attributes, attachments, and non-Text source children remain source-owned. Imported empty or formatted-empty `Text` runs project to no semantic runs and are removed only during managed writer reconciliation; whitespace-only canonical content remains a Text run. Edit and derived plain Cast List paths synchronize semantic text/runs with source runs in a transactional candidate, and typing into a childless managed Paragraph creates a namespaced source `Text` element. Strict expected/actual tree comparison drops only serializer-invisible empty XML text nodes before joining adjacent nonempty text nodes; it retains empty CDATA, whitespace-only nodes, comments, PIs, empty elements, and opaque empty `Text` structures. Identity, managed mapping, mixed-content, and source-tree checks otherwise remain strict.
 - Managed body Paragraphs may also project the eight supported direct geometry/spacing/page-start fields into an ephemeral map keyed by current semantic element identity. Resolution is per field in direct > role > application-default order, and the map participates in layout cache equality. Typography/visibility remain role-level; title-page and run-level settings remain preservation-only. The ordered source tree remains authoritative, so invalid and unknown values are not normalized. Splitting retains attributes only on the surviving original identity and does not copy them; joining refuses transactionally when the removed paragraph carries any supported direct field. Role changes preserve these attributes under the existing managed-attribute reconciliation.
 - Runtime keyboard policy reads each role's application-default ReturnKey and TabKey from the shared formatting table and resolves target labels against that table; imported per-document Behavior is retained by source preservation but does not configure editing. Enter follows General → General, Scene Heading → Action, Action → Action, Character → Dialogue, Parenthetical → Dialogue, Dialogue → Action at collapsed end / Dialogue split at collapsed interior, Transition → Scene Heading, Shot/Cast List → Action, New Act/Sequence → Scene Heading, End of Act → New Act, and Summary/Outline 1/2/3/Note → Summary. Same-role Enter still performs a normal split. Tab follows General → General, Scene Heading → Action, Action → Character, blank Character → Transition, Parenthetical → Dialogue, Dialogue → Parenthetical, Transition → Scene Heading, Shot/Cast List → Action, New Act/Sequence → Scene Heading, End of Act → New Act, Summary → Outline 1, Outline 1 → Outline 2, Outline 2 → Outline 3, Outline 3 → Note, and Note → Summary. Same-role Tab is a consumed no-op. Existing UTF-8, transactional history, automatic-parenthetical, strict-boundary and source-preservation rules remain the editing boundary; this does not persist an application editing-policy field or execute imported Behavior.
+- The WO-003 core hint seam is [`EditingSession::paragraph_key_targets()`](../../crates/scriptcraft-core/src/editing.rs), returning [`ParagraphKeyTargets`](../../crates/scriptcraft-core/src/editing.rs) with typed Enter and Tab [`ParagraphKeyTarget`](../../crates/scriptcraft-core/src/editing.rs) values (`Target(Role)`, `NoOp`, or `Unavailable`). The read-only projection and actual `EditingSession::enter()` / `EditingSession::tab()` call the same private policy/provenance-aware resolver; only editing executes its resolved operation. Same-role Tab can therefore return `Target(General)` while its command remains a no-op. Noncollapsed selection is unavailable for guidance; strict-boundary and special Parenthetical consumed no-ops remain distinct. Projection performs no candidate mutation or speculative edit and does not guarantee that later capacity or preservation checks will publish an edit. WO-003 coverage is authored but unrun; this is implementation-submission evidence, not validation or acceptance.
 - Every actual managed role transition uses one editing candidate to keep the semantic role, preserved FDX paragraph `Type` and `source_type`, and semantic foreign-role provenance synchronized. The preservation layer changes only the recognized Type mapping; unknown attributes and nested attachments remain source-owned. Mapping conflicts and Scene Heading attachment conflicts reject the candidate without publishing changes to project, selection, history, or dirty state. Auto-generated/removed Parenthetical text is reconciled through the managed text mapping in that same candidate. Typed, pasted, split, joined, role-assigned, undone, and redone text retains exact canonical casing; there is no active edit-time cue-uppercasing policy. AllCaps remains a display-only Unicode transform with display-to-source spans, while native FDX retains canonical case. This contract does not authorize structural edits to attached scene data.
 - Import records cast-list text unchanged. The ordered refresh/save-candidate path reconciles supported `SceneProperties`/`SceneArcBeats` independently per managed heading using the shared normalized Character projection: trim outer Unicode whitespace, remove at most one recognized trailing delivery extension, deduplicate by Unicode lowercase association key in first-occurrence order, and store derived names in Unicode uppercase. A supported arc beat has one nested same-namespace Paragraph whose ordered children are same-namespace `Text` runs containing only text/CDATA, optionally separated by whitespace-only formatting nodes. The nested Paragraph stays opaque to screenplay body content; its source attributes, ID, text, run order, and run formatting are retained unchanged for matched normalized Character names while only derived beat Name/order is updated. Adds allocate fresh UUID v4 IDs; removals do not require runtime creation proof and remove the entire derived beat, Paragraph, and arc text. New nested paragraphs are opaque source nodes whose identities are registered in the preservation graph, not semantic elements or anchors. Removal still requires a unique registered Paragraph ID with no known references or external source-tree uses. Duplicate beats, multiple nested Paragraphs, unknown non-text child structures, and unsafe references defer only the affected scene: its complete SceneProperties/SceneArcBeats subtree and Cast Lists remain unchanged while independent supported scenes may reconcile. This safe-stop scopes the derived update, not an otherwise valid canonical native Save or Save As. New-document FDX generation uses the same derived projection. Cast List presentation consumes uppercase names from reconciled scene arcs, sorted case-insensitively using the existing list behavior; preservation-free projects use the same uppercase derived projection from canonical Character cues. A formatted list that cannot be corrected without unsupported run rewriting keeps its text and attributes and does not block other derived updates or native saves. Scheduled refresh, detached Save/Save As preparation, and undo/redo correction apply the same per-scene deferral and Cast List policy in one detached candidate. Model and preservation validation, managed-source synchronization, required identity allocation, serialization/re-read comparison, conflict detection, and atomic publication remain strict; only the derived update is deferred.
 - Supported scene-arc membership and its supported nested arc text are app-owned after deserialization. Normalized Character names—not nested UUIDs or runtime creation history—associate entries across reopen and roster edits. A retained name keeps its entire nested Paragraph subtree; a rename to a different normalized key is removal plus a new blank arc, and removal discards that derived arc text. Canonical Character text is never rewritten by this projection. The separate-reopen stale-arc save block is removed for the recognized supported shape; unsupported structures continue to safe-stop under this order's bounded behavior.

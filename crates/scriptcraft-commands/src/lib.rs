@@ -64,11 +64,12 @@ pub enum CommandId {
     ToolsSprintTimerResume,
     ToolsSprintTimerReset,
     ToolsSprintTimerEnd,
+    UiStatusSet,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 42] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -110,6 +111,7 @@ impl CommandId {
         Self::ToolsSprintTimerResume,
         Self::ToolsSprintTimerReset,
         Self::ToolsSprintTimerEnd,
+        Self::UiStatusSet,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -155,6 +157,7 @@ impl CommandId {
             Self::ToolsSprintTimerResume => "tools.sprint-timer.resume",
             Self::ToolsSprintTimerReset => "tools.sprint-timer.reset",
             Self::ToolsSprintTimerEnd => "tools.sprint-timer.end",
+            Self::UiStatusSet => "ui.status.set",
         }
     }
 }
@@ -398,6 +401,64 @@ impl fmt::Display for InvalidDocumentPath {
 
 impl std::error::Error for InvalidDocumentPath {}
 
+/// Maximum UTF-8 byte length for a single diagnostic status line.
+pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
+
+/// A bounded, single-line diagnostic message suitable for the UI status channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticMessage(String);
+
+impl DiagnosticMessage {
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidDiagnosticMessage> {
+        let value = value.into();
+        if value.trim().is_empty()
+            || value.len() > MAX_DIAGNOSTIC_MESSAGE_BYTES
+            || value.chars().any(|character| {
+                character.is_control() || matches!(character, '\u{2028}' | '\u{2029}')
+            })
+        {
+            return Err(InvalidDiagnosticMessage);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for DiagnosticMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DiagnosticMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidDiagnosticMessage;
+
+impl fmt::Display for InvalidDiagnosticMessage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "diagnostic message must be nonempty, single-line, and no longer than {MAX_DIAGNOSTIC_MESSAGE_BYTES} UTF-8 bytes"
+        )
+    }
+}
+
+impl std::error::Error for InvalidDiagnosticMessage {}
+
 /// Whole-number zoom percentage constrained to the current desktop range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -616,6 +677,8 @@ pub enum Command {
     ToolsSprintTimerReset,
     #[serde(rename = "tools.sprint-timer.end")]
     ToolsSprintTimerEnd,
+    #[serde(rename = "ui.status.set")]
+    UiStatusSet { message: Option<DiagnosticMessage> },
 }
 
 impl Command {
@@ -662,6 +725,7 @@ impl Command {
             Self::ToolsSprintTimerResume => CommandId::ToolsSprintTimerResume,
             Self::ToolsSprintTimerReset => CommandId::ToolsSprintTimerReset,
             Self::ToolsSprintTimerEnd => CommandId::ToolsSprintTimerEnd,
+            Self::UiStatusSet { .. } => CommandId::UiStatusSet,
         }
     }
 }
@@ -756,7 +820,7 @@ const fn descriptor(id: CommandId, family: &'static str, parameters: &'static st
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 41] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 42] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -798,6 +862,7 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 41] = [
     descriptor(CommandId::ToolsSprintTimerResume, "tools", "none"),
     descriptor(CommandId::ToolsSprintTimerReset, "tools", "none"),
     descriptor(CommandId::ToolsSprintTimerEnd, "tools", "none"),
+    descriptor(CommandId::UiStatusSet, "ui", "message: optional diagnostic_message (<=512 UTF-8 bytes, single-line)"),
 ];
 
 pub fn descriptor_for(id: CommandId) -> Option<&'static CommandDescriptor> {

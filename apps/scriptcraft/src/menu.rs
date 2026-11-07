@@ -68,25 +68,208 @@ const MENU_PRESENTATION: MenuPresentationMetrics = MenuPresentationMetrics {
 /// Fixed height of the in-window menu strip, in logical points.
 pub(super) const MENU_PANEL_HEIGHT: f32 = MENU_PRESENTATION.bar_height;
 
-/// Keeps the Windows-style in-window menu preview on while developing both
-/// presentations on macOS. This is a source-only development switch, not a
-/// user setting. Do not turn it off in this work-order batch.
-pub(super) const IN_WINDOW_MENU_PREVIEW_ENABLED: bool = true;
-
-/// Native macOS menu installation is target policy, independent of whether
-/// the in-window preview is enabled.
-pub(super) const NATIVE_MACOS_MENU_ENABLED: bool = cfg!(target_os = "macos");
-
-/// Windows always uses the in-window menu. macOS uses it while the explicit
-/// development preview switch is enabled. Other targets have no menu backend.
-pub(super) const fn in_window_menu_enabled() -> bool {
-    cfg!(windows) || (cfg!(target_os = "macos") && IN_WINDOW_MENU_PREVIEW_ENABLED)
+/// Injectable startup choice for the runtime menu policy. The CLI adapter is a
+/// later work order; production startup currently supplies `Auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MenuPlatformChoice {
+    Auto,
+    MacOS,
+    Windows,
 }
 
-/// Native macOS owns accelerators whenever its backend is active, including
-/// the dual-preview configuration. Windows keeps in-window ownership.
-pub(super) const fn in_window_menu_shortcuts_owned() -> bool {
-    cfg!(windows) || (in_window_menu_enabled() && !NATIVE_MACOS_MENU_ENABLED)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MenuHostPlatform {
+    MacOS,
+    Windows,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MenuBackend {
+    NativeMacOS,
+    InWindow,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MenuAcceleratorOwner {
+    NativeMacOS,
+    InWindow,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RuntimeMenuPolicy {
+    backend: MenuBackend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct UnsupportedMenuPlatformChoice {
+    pub(super) host: MenuHostPlatform,
+    pub(super) requested: MenuPlatformChoice,
+}
+
+impl RuntimeMenuPolicy {
+    /// Resolves a requested menu presentation against the actual compile target.
+    /// A menu-platform choice never changes unrelated host integrations.
+    pub(super) const fn resolve(
+        host: MenuHostPlatform,
+        requested: MenuPlatformChoice,
+    ) -> Result<Self, UnsupportedMenuPlatformChoice> {
+        let backend = match (host, requested) {
+            (MenuHostPlatform::MacOS, MenuPlatformChoice::Auto | MenuPlatformChoice::MacOS) => {
+                MenuBackend::NativeMacOS
+            }
+            (MenuHostPlatform::Windows, MenuPlatformChoice::Auto | MenuPlatformChoice::Windows) => {
+                MenuBackend::InWindow
+            }
+            (MenuHostPlatform::Other, MenuPlatformChoice::Auto) => MenuBackend::None,
+            (_, MenuPlatformChoice::Windows) => MenuBackend::InWindow,
+            _ => return Err(UnsupportedMenuPlatformChoice { host, requested }),
+        };
+        Ok(Self { backend })
+    }
+
+    pub(super) const fn for_current_target() -> Self {
+        let host = if cfg!(target_os = "macos") {
+            MenuHostPlatform::MacOS
+        } else if cfg!(windows) {
+            MenuHostPlatform::Windows
+        } else {
+            MenuHostPlatform::Other
+        };
+        match Self::resolve(host, MenuPlatformChoice::Auto) {
+            Ok(policy) => policy,
+            Err(_) => Self { backend: MenuBackend::None },
+        }
+    }
+
+    pub(super) const fn renders_in_window(self) -> bool {
+        matches!(self.backend, MenuBackend::InWindow)
+    }
+
+    pub(super) const fn installs_native_macos(self) -> bool {
+        matches!(self.backend, MenuBackend::NativeMacOS)
+    }
+
+    pub(super) const fn in_window_shortcuts_owned(self) -> bool {
+        matches!(self.accelerator_owner(), MenuAcceleratorOwner::InWindow)
+    }
+
+    pub(super) const fn accelerator_owner(self) -> MenuAcceleratorOwner {
+        match self.backend {
+            MenuBackend::NativeMacOS => MenuAcceleratorOwner::NativeMacOS,
+            MenuBackend::InWindow => MenuAcceleratorOwner::InWindow,
+            MenuBackend::None => MenuAcceleratorOwner::None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod runtime_menu_policy_tests {
+    use super::{
+        MenuAcceleratorOwner, MenuHostPlatform, MenuPlatformChoice, RuntimeMenuPolicy,
+    };
+
+    #[test]
+    fn automatic_policy_selects_only_the_host_default_backend() {
+        let macos = RuntimeMenuPolicy::resolve(
+            MenuHostPlatform::MacOS,
+            MenuPlatformChoice::Auto,
+        );
+        let windows = RuntimeMenuPolicy::resolve(
+            MenuHostPlatform::Windows,
+            MenuPlatformChoice::Auto,
+        );
+        let other = RuntimeMenuPolicy::resolve(
+            MenuHostPlatform::Other,
+            MenuPlatformChoice::Auto,
+        );
+
+        assert!(macos.is_ok());
+        assert!(windows.is_ok());
+        assert!(other.is_ok());
+        if let (Ok(macos), Ok(windows), Ok(other)) = (macos, windows, other) {
+            assert!(macos.installs_native_macos());
+            assert!(!macos.renders_in_window());
+            assert!(!windows.installs_native_macos());
+            assert!(windows.renders_in_window());
+            assert!(!other.installs_native_macos());
+            assert!(!other.renders_in_window());
+        }
+    }
+
+    #[test]
+    fn a_selected_backend_is_the_only_renderer_and_accelerator_owner() {
+        for (host, requested, native, in_window, owner) in [
+            (
+                MenuHostPlatform::MacOS,
+                MenuPlatformChoice::Auto,
+                true,
+                false,
+                MenuAcceleratorOwner::NativeMacOS,
+            ),
+            (
+                MenuHostPlatform::Windows,
+                MenuPlatformChoice::Auto,
+                false,
+                true,
+                MenuAcceleratorOwner::InWindow,
+            ),
+            (
+                MenuHostPlatform::Windows,
+                MenuPlatformChoice::Windows,
+                false,
+                true,
+                MenuAcceleratorOwner::InWindow,
+            ),
+            (
+                MenuHostPlatform::MacOS,
+                MenuPlatformChoice::Windows,
+                false,
+                true,
+                MenuAcceleratorOwner::InWindow,
+            ),
+            (
+                MenuHostPlatform::Other,
+                MenuPlatformChoice::Auto,
+                false,
+                false,
+                MenuAcceleratorOwner::None,
+            ),
+            (
+                MenuHostPlatform::Other,
+                MenuPlatformChoice::Windows,
+                false,
+                true,
+                MenuAcceleratorOwner::InWindow,
+            ),
+        ] {
+            let policy = RuntimeMenuPolicy::resolve(host, requested);
+            assert!(policy.is_ok());
+            if let Ok(policy) = policy {
+                assert_eq!(policy.renders_in_window(), in_window);
+                assert_eq!(policy.installs_native_macos(), native);
+                assert_eq!(policy.accelerator_owner(), owner);
+                assert_eq!(
+                    policy.in_window_shortcuts_owned(),
+                    owner == MenuAcceleratorOwner::InWindow
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_macos_choice_is_rejected_before_backend_construction_off_macos() {
+        for host in [MenuHostPlatform::Windows, MenuHostPlatform::Other] {
+            assert!(RuntimeMenuPolicy::resolve(host, MenuPlatformChoice::MacOS).is_err());
+        }
+        assert_eq!(
+            RuntimeMenuPolicy::resolve(MenuHostPlatform::MacOS, MenuPlatformChoice::MacOS)
+                .map(RuntimeMenuPolicy::installs_native_macos),
+            Ok(true)
+        );
+    }
 }
 
 /// Resolves catalog shortcuts and the Windows-only Redo alias from the logical
@@ -388,8 +571,8 @@ fn command_enabled(command: CommandId, availability: AppCommandAvailability) -> 
     availability.is_enabled(command)
 }
 
-/// The in-window preview intentionally presents Windows-style shortcut labels
-/// on every development target, including macOS dual-preview sessions.
+/// The in-window catalog preserves its Windows-style shortcut annotations;
+/// actual shortcut matching continues to resolve against the host platform.
 fn shortcut_label(shortcut: LogicalShortcut) -> String {
     let key = match shortcut.key {
         ShortcutKey::A => "A",

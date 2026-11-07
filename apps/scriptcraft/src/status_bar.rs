@@ -12,6 +12,12 @@ use egui_material_icons::{
     MaterialIcon,
 };
 use scriptcraft_commands::{Appearance, Command, ZoomPercent};
+use scriptcraft_core::editing::{EditingSession, ParagraphKeyTarget};
+use scriptcraft_core::formatting::formatting_for_role;
+use crate::shortcuts::{
+    element_hint_bindings, element_hint_chord, modifiers_are_none, ElementHintChord,
+    ShortcutPlatform,
+};
 pub(super) const MIN_ZOOM_PERCENT: u16 = 75;
 pub(super) const MAX_ZOOM_PERCENT: u16 = 300;
 pub(super) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250, 300];
@@ -50,6 +56,10 @@ mod presentation {
     pub(super) const BUTTON_TEXT_SIZE: f32 = 10.0;
     /// Center helper/operation/error text size, independent of other status text.
     pub(super) const CENTER_TEXT_SIZE: f32 = 12.0;
+    /// Compact font size for complete held-modifier lists, in logical points.
+    pub(super) const MODIFIER_HINT_TEXT_SIZE: f32 = 8.5;
+    /// Minimum modifier-list size before the clipped one-line fallback applies.
+    pub(super) const MODIFIER_HINT_MIN_TEXT_SIZE: f32 = 6.0;
     /// Material glyph size used by the existing icon renderer, in logical points.
     pub(super) const ICON_GLYPH_SIZE: f32 = 17.0;
     /// Status zoom slider rail thickness, inherited as 8 logical points.
@@ -154,11 +164,12 @@ fn with_status_text_style<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui:
 fn with_center_text_style<R>(
     ui: &mut egui::Ui,
     center_foreground: Color32,
+    text_size: f32,
     contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
     ui.scope(|ui| {
         if let Some(font) = ui.style_mut().text_styles.get_mut(&egui::TextStyle::Body) {
-            font.size = presentation::CENTER_TEXT_SIZE;
+            font.size = text_size;
         }
         ui.visuals_mut().override_text_color = Some(
             presentation::CENTER_FOREGROUND_OVERRIDE.unwrap_or(center_foreground),
@@ -1042,14 +1053,126 @@ fn distance_squared_to_rect(point: Pos2, rect: Rect) -> f32 {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CenterProjection {
-    pub(super) operation: String,
-    pub(super) error: Option<String>,
+    pub(super) text: String,
+    pub(super) modifier_list: bool,
 }
 
-pub(super) fn project_center(operation: &str, error: Option<&str>) -> CenterProjection {
+fn ready_center() -> CenterProjection {
     CenterProjection {
-        operation: operation.to_owned(),
-        error: error.map(str::to_owned),
+        text: "Ready".to_owned(),
+        modifier_list: false,
+    }
+}
+
+fn modifier_list_text(chord: ElementHintChord) -> Option<String> {
+    let extended = chord == ElementHintChord::Extended;
+    let rows = element_hint_bindings(extended);
+    (!rows.is_empty()).then(|| {
+        rows.into_iter()
+            .map(|(digit, role)| {
+                format!(
+                    "[{digit}] {}",
+                    formatting_for_role(role).fdx_label
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
+
+pub(super) fn project_center(
+    session: &EditingSession,
+    focused: bool,
+    ime_active: bool,
+    migration_modal: bool,
+    modifiers: egui::Modifiers,
+    platform: ShortcutPlatform,
+) -> CenterProjection {
+    if !focused || ime_active || migration_modal {
+        return ready_center();
+    }
+
+    if let Some(chord) = element_hint_chord(modifiers, platform) {
+        if let Some(text) = modifier_list_text(chord) {
+            return CenterProjection {
+                text,
+                modifier_list: true,
+            };
+        }
+    }
+    if !modifiers_are_none(modifiers) {
+        return ready_center();
+    }
+
+    let selection = session.selection();
+    if selection.anchor != selection.focus {
+        return ready_center();
+    }
+    let caret = selection.focus;
+    let Some(element) = session.project().elements.get(caret.element) else {
+        return ready_center();
+    };
+    if caret.offset != element.text.len() {
+        return ready_center();
+    }
+
+    let targets = session.paragraph_key_targets();
+    let mut parts = Vec::with_capacity(3);
+    if let ParagraphKeyTarget::Target(role) = targets.tab {
+        parts.push(format!("[Tab] {}", formatting_for_role(role).fdx_label));
+    }
+    if let ParagraphKeyTarget::Target(role) = targets.enter {
+        parts.push(format!("[Enter] {}", formatting_for_role(role).fdx_label));
+    }
+    if parts.is_empty() {
+        return ready_center();
+    }
+
+    let hold_label = match platform {
+        ShortcutPlatform::MacOS => Some("[Cmd] hold for Elements"),
+        ShortcutPlatform::Windows => Some("[Ctrl] hold for Elements"),
+        ShortcutPlatform::Other => None,
+    };
+    if let Some(hold_label) = hold_label {
+        parts.push(hold_label.to_owned());
+    }
+    CenterProjection {
+        text: parts.join(", "),
+        modifier_list: false,
+    }
+}
+
+fn modifier_hint_font_size(ui: &egui::Ui, text: &str, available_width: f32) -> f32 {
+    let base_size = presentation::MODIFIER_HINT_TEXT_SIZE;
+    let width = if available_width.is_finite() {
+        available_width.max(0.0)
+    } else {
+        0.0
+    };
+    if width <= 0.0 {
+        return base_size;
+    }
+    let mut font = status_font_id(ui, egui::TextStyle::Body);
+    font.size = base_size;
+    let measured_width = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font, presentation::center_foreground(ui))
+        .size()
+        .x;
+    fitted_modifier_hint_font_size(measured_width, width)
+}
+
+fn fitted_modifier_hint_font_size(measured_width: f32, available_width: f32) -> f32 {
+    let base_size = presentation::MODIFIER_HINT_TEXT_SIZE;
+    if !measured_width.is_finite()
+        || !available_width.is_finite()
+        || measured_width <= available_width.max(0.0)
+        || measured_width <= 0.0
+    {
+        base_size
+    } else {
+        (base_size * available_width.max(0.0) / measured_width)
+            .max(presentation::MODIFIER_HINT_MIN_TEXT_SIZE)
     }
 }
 
@@ -1162,15 +1285,6 @@ fn paint_page_counter(ui: &egui::Ui, text: &str, rect: Rect, color: Color32) {
     });
 }
 
-fn status_message(center: &CenterProjection) -> Option<String> {
-    match (center.operation.is_empty(), center.error.as_deref()) {
-        (true, None) => None,
-        (true, Some(error)) => Some(error.to_owned()),
-        (false, None) => Some(center.operation.clone()),
-        (false, Some(error)) => Some(format!("{}: {error}", center.operation)),
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DiagnosticProjection<'a> {
     pub(super) focused: bool,
@@ -1186,6 +1300,7 @@ pub(super) struct DiagnosticProjection<'a> {
     pub(super) painted_pages: u64,
     pub(super) repaint_requests: u64,
     pub(super) performance_summary: &'a str,
+    pub(super) diagnostic_message: Option<&'a str>,
 }
 
 impl DiagnosticProjection<'_> {
@@ -1245,6 +1360,40 @@ pub(super) fn show_with_focus_mode(
         None,
         Some(focus_view),
     )
+}
+
+/// Keep the exclusive center projection visible while the migration dialog
+/// suppresses the ordinary application panels. No status controls or
+/// Diagnostics disclosure are introduced into the modal surface.
+pub(super) fn show_modal_ready_status(ui: &mut egui::Ui, palette: StatusPalette) {
+    apply_status_palette(ui, palette);
+    let available = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+    let row_rect = Rect::from_min_size(
+        available.min,
+        Vec2::new(
+            available.width().max(0.0),
+            presentation::STATUS_ROW_HEIGHT.min(available.height().max(0.0)),
+        ),
+    );
+    let center = ready_center();
+    one_line_region_at(ui, row_rect, |region| {
+        let status_rect = region.max_rect().intersect(region.clip_rect());
+        with_center_text_style(
+            region,
+            palette.center_foreground,
+            presentation::CENTER_TEXT_SIZE,
+            |region| {
+                paint_clipped_single_line(
+                    region,
+                    "status-center",
+                    &center.text,
+                    &center.text,
+                    presentation::center_foreground(region),
+                    status_rect,
+                );
+            },
+        );
+    });
 }
 
 fn measured_percentage_slot_width(ui: &egui::Ui) -> f32 {
@@ -1308,7 +1457,6 @@ fn show_impl_with_appearance(
     let mut appearance_changed = false;
     let mut timer_rect = None;
     let mut zoom_slider_response = None;
-    let message = status_message(center);
     let row_height = presentation::STATUS_ROW_HEIGHT;
     let available = ui.available_rect_before_wrap().intersect(ui.clip_rect());
     let row_rect = Rect::from_min_size(
@@ -1446,18 +1594,21 @@ fn show_impl_with_appearance(
         });
         one_line_region_at(row_ui, layout.center, |region| {
             let status_rect = region.max_rect().intersect(region.clip_rect());
-            if let Some(message) = message.as_deref() {
-                with_center_text_style(region, palette.center_foreground, |region| {
-                    paint_clipped_single_line(
-                        region,
-                        "operation-status",
-                        message,
-                        message,
-                        presentation::center_foreground(region),
-                        status_rect,
-                    );
-                });
-            }
+            let text_size = if center.modifier_list {
+                modifier_hint_font_size(region, &center.text, status_rect.width())
+            } else {
+                presentation::CENTER_TEXT_SIZE
+            };
+            with_center_text_style(region, palette.center_foreground, text_size, |region| {
+                paint_clipped_single_line(
+                    region,
+                    "status-center",
+                    &center.text,
+                    &center.text,
+                    presentation::center_foreground(region),
+                    status_rect,
+                );
+            });
         });
 
         one_line_region_at(row_ui, layout.page, |page_ui| {
@@ -1500,6 +1651,20 @@ fn show_impl_with_appearance(
                             );
                         },
                     );
+                    if let Some(message) = diagnostics.diagnostic_message {
+                        one_line_region(
+                            ui,
+                            egui::vec2(summary_width, summary_height),
+                            |diagnostic_ui| {
+                                paint_noninteractive_text(
+                                    diagnostic_ui,
+                                    "status-diagnostic-message",
+                                    message,
+                                    presentation::default_foreground(diagnostic_ui),
+                                );
+                            },
+                        );
+                    }
                 });
         });
     }
@@ -1520,5 +1685,250 @@ fn show_impl_with_appearance(
     StatusCommandIntents {
         commands,
         timer_button_rect: timer_rect,
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_status_tests {
+    use super::{
+        diagnostics_enabled, element_hint_bindings, fitted_modifier_hint_font_size,
+        modifier_list_text, plan_status_row, project_center, ready_center, CenterProjection,
+        ElementHintChord,
+    };
+    use crate::shortcuts::ShortcutPlatform;
+    use eframe::egui;
+    use scriptcraft_core::editing::{EditPolicy, EditingSession, Position, Selection};
+    use scriptcraft_core::formatting::formatting_for_role;
+    use scriptcraft_core::{Project, Role};
+
+    fn valid<T, E>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|_| unreachable!("status projection fixture is valid"))
+    }
+
+    fn session(role: Role, text: &str, anchor: usize, focus: usize) -> EditingSession {
+        let mut project = valid(Project::new());
+        project.elements[0].role = role;
+        project.elements[0].text = text.to_owned();
+        let mut session = valid(EditingSession::with_policy(project, EditPolicy::default()));
+        valid(session.set_selection(Selection {
+            anchor: Position { element: 0, offset: anchor },
+            focus: Position { element: 0, offset: focus },
+        }));
+        session
+    }
+
+    fn modifiers(platform: ShortcutPlatform, primary: bool, control: bool, shift: bool) -> egui::Modifiers {
+        egui::Modifiers {
+            alt: false,
+            ctrl: platform == ShortcutPlatform::MacOS && control,
+            command: primary,
+            mac_cmd: platform != ShortcutPlatform::MacOS && control,
+            shift,
+        }
+    }
+
+    fn projection(session: &EditingSession, platform: ShortcutPlatform) -> CenterProjection {
+        project_center(
+            session,
+            true,
+            false,
+            false,
+            egui::Modifiers::NONE,
+            platform,
+        )
+    }
+
+    #[test]
+    fn ready_fallback_and_disabled_diagnostics_are_preserved() {
+        assert_eq!(ready_center().text, "Ready");
+        assert!(!diagnostics_enabled());
+    }
+
+    #[test]
+    fn collapsed_empty_and_nonempty_ends_use_shared_targets_for_every_role() {
+        for role in Role::ALL {
+            for text in ["", "ending"] {
+                let editing_session = session(role, text, text.len(), text.len());
+                let targets = editing_session.paragraph_key_targets();
+                let center = projection(&editing_session, ShortcutPlatform::MacOS);
+                let any_target = matches!(
+                    targets.tab,
+                    scriptcraft_core::editing::ParagraphKeyTarget::Target(_)
+                ) || matches!(
+                    targets.enter,
+                    scriptcraft_core::editing::ParagraphKeyTarget::Target(_)
+                );
+                assert_eq!(center.text == "Ready", !any_target, "{role:?}: {}", center.text);
+                for (key, target) in [("[Tab]", targets.tab), ("[Enter]", targets.enter)] {
+                    if let scriptcraft_core::editing::ParagraphKeyTarget::Target(target_role) = target {
+                        let expected = format!("{key} {}", formatting_for_role(target_role).fdx_label);
+                        assert!(center.text.contains(&expected), "{role:?}: {}", center.text);
+                    } else {
+                        assert!(!center.text.contains(key), "{role:?}: {}", center.text);
+                    }
+                }
+                if center.text != "Ready" {
+                    assert!(center.text.contains("[Cmd] hold for Elements"));
+                }
+            }
+        }
+        let empty_action = session(Role::Action, "", 0, 0);
+        assert!(projection(&empty_action, ShortcutPlatform::Windows)
+            .text
+            .contains("[Ctrl] hold for Elements"));
+    }
+
+    #[test]
+    fn paragraph_hints_require_a_collapsed_end_but_element_chord_has_priority() {
+        let interior = session(Role::Action, "abc", 1, 1);
+        assert_eq!(projection(&interior, ShortcutPlatform::MacOS).text, "Ready");
+        let selected = session(Role::Action, "abc", 0, 3);
+        assert_eq!(projection(&selected, ShortcutPlatform::MacOS).text, "Ready");
+
+        let mac_base = modifiers(ShortcutPlatform::MacOS, true, false, false);
+        let chord_projection = project_center(
+            &selected,
+            true,
+            false,
+            false,
+            mac_base,
+            ShortcutPlatform::MacOS,
+        );
+        assert!(chord_projection.text.starts_with("[0] General"));
+        assert!(chord_projection.modifier_list);
+    }
+
+    #[test]
+    fn focus_ime_and_modal_always_suppress_chord_hints() {
+        let editing_session = session(Role::Action, "abc", 3, 3);
+        for (focused, ime_active, modal) in [
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
+            let center = project_center(
+                &editing_session,
+                focused,
+                ime_active,
+                modal,
+                modifiers(ShortcutPlatform::MacOS, true, false, false),
+                ShortcutPlatform::MacOS,
+            );
+            assert_eq!(center.text, "Ready");
+        }
+    }
+
+    #[test]
+    fn shared_binding_lists_cover_every_role_with_summary_first_extended_order() {
+        let base = element_hint_bindings(false);
+        let extended = element_hint_bindings(true);
+        assert_eq!(base.len(), 10);
+        assert_eq!(extended.len(), 7);
+        let base_text = modifier_list_text(ElementHintChord::Base).unwrap_or_default();
+        let expected_base = [
+            "[0] General",
+            "[1] Scene Heading",
+            "[2] Action",
+            "[3] Character",
+            "[4] Parenthetical",
+            "[5] Dialogue",
+            "[6] Transition",
+            "[7] Shot",
+            "[8] Cast List",
+            "[9] New Act",
+        ];
+        let mut previous = 0;
+        for row in expected_base {
+            let position = base_text.find(row).unwrap_or(usize::MAX);
+            assert!(position >= previous, "{base_text}");
+            previous = position;
+        }
+        let mut roles: Vec<_> = base.iter().chain(&extended).map(|(_, role)| *role).collect();
+        roles.sort_unstable();
+        let mut all_roles = Role::ALL;
+        all_roles.sort_unstable();
+        assert_eq!(roles, all_roles);
+
+        let extended_text = modifier_list_text(ElementHintChord::Extended).unwrap_or_default();
+        let expected = [
+            "[0] Summary",
+            "[1] Outline 1",
+            "[2] Outline 2",
+            "[3] Outline 3",
+            "[4] Note",
+            "[8] Sequence",
+            "[9] End of Act",
+        ];
+        let mut previous = 0;
+        for row in expected {
+            let position = extended_text.find(row).unwrap_or(usize::MAX);
+            assert!(position >= previous, "{extended_text}");
+            previous = position;
+        }
+    }
+
+    #[test]
+    fn host_chords_are_exact_release_restores_paragraph_projection_and_labels_are_host_correct() {
+        let editing_session = session(Role::Action, "x", 1, 1);
+        for (platform, base, extended, wrong) in [
+            (
+                ShortcutPlatform::MacOS,
+                modifiers(ShortcutPlatform::MacOS, true, false, false),
+                modifiers(ShortcutPlatform::MacOS, true, true, false),
+                modifiers(ShortcutPlatform::MacOS, true, false, true),
+            ),
+            (
+                ShortcutPlatform::Windows,
+                modifiers(ShortcutPlatform::Windows, true, false, false),
+                modifiers(ShortcutPlatform::Windows, true, false, true),
+                modifiers(ShortcutPlatform::Windows, true, true, false),
+            ),
+        ] {
+            let base_projection = project_center(&editing_session, true, false, false, base, platform);
+            assert!(base_projection.text.starts_with("[0] General"));
+            let extended_projection =
+                project_center(&editing_session, true, false, false, extended, platform);
+            assert!(extended_projection.text.starts_with("[0] Summary"));
+            assert!(!extended_projection.text.contains("[8] Sequence, [9] End of Act, [0] Summary"));
+            let released = project_center(
+                &editing_session,
+                true,
+                false,
+                false,
+                egui::Modifiers::NONE,
+                platform,
+            );
+            assert!(!released.modifier_list);
+            assert!(released.text.contains("[Tab]"));
+            let rejected = project_center(&editing_session, true, false, false, wrong, platform);
+            assert!(!rejected.modifier_list);
+            assert_eq!(rejected.text, "Ready");
+        }
+        let mac = projection(&editing_session, ShortcutPlatform::MacOS);
+        let windows = projection(&editing_session, ShortcutPlatform::Windows);
+        assert!(mac.text.ends_with("[Cmd] hold for Elements"));
+        assert!(windows.text.ends_with("[Ctrl] hold for Elements"));
+    }
+
+    #[test]
+    fn modifier_list_font_and_center_geometry_remain_bounded_at_narrow_widths() {
+        let base = super::presentation::MODIFIER_HINT_TEXT_SIZE;
+        let minimum = super::presentation::MODIFIER_HINT_MIN_TEXT_SIZE;
+        assert_eq!(fitted_modifier_hint_font_size(100.0, 200.0), base);
+        let reduced = fitted_modifier_hint_font_size(1000.0, 500.0);
+        assert!(reduced < base && reduced >= minimum);
+        assert_eq!(fitted_modifier_hint_font_size(1000.0, 0.0), minimum);
+
+        for width in [1200.0, 480.0, 320.0] {
+            let row = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 20.0));
+            let layout = plan_status_row(row, 4.0, 100.0, 40.0, [27.0; 3], 40.0, 84.0);
+            assert!(layout.center.left() >= row.left());
+            assert!(layout.center.right() <= row.right());
+            assert!(layout.center.width() >= 0.0);
+            for rect in layout.icons.into_iter().chain([layout.slider, layout.percentage]) {
+                assert!(rect.left() >= row.left());
+                assert!(rect.right() <= row.right());
+            }
+        }
     }
 }

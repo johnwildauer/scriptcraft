@@ -2,10 +2,12 @@ use super::{EditingSession, LayoutCache, Project, ScriptCraftApp, Selection};
 use eframe::egui;
 use scriptcraft_commands::{
     execute_editor_command, Appearance, Command, CommandId, CommandOrigin, CommandOutcome,
-    CommandRejection, ImportResolution, PointerPhase, Position as CommandPosition,
-    Selection as CommandSelection, SprintTimerMode, UnavailableReason,
+    CommandRejection, DiagnosticMessage, ImportResolution, PointerPhase,
+    Position as CommandPosition, Selection as CommandSelection, SprintTimerMode,
+    UnavailableReason, MAX_DIAGNOSTIC_MESSAGE_BYTES,
 };
 use super::sprint_timer::NotificationSink;
+use std::collections::VecDeque;
 use std::time::Instant;
 
 /// An activation plus its diagnostic source. Origins never change execution
@@ -133,6 +135,7 @@ impl ScriptCraftApp {
     ) -> DesktopCommandResult {
         let command_id = invocation.command.id();
         let origin = invocation.origin;
+        self.flush_pending_diagnostic_commands(ctx);
         let restore_focus = matches!(
             command_id,
             CommandId::EditUndo
@@ -150,6 +153,7 @@ impl ScriptCraftApp {
                 | CommandId::EditorElementChange
         );
         let outcome = self.dispatch_command_inner(invocation.command, ctx);
+        self.flush_pending_diagnostic_commands(ctx);
         if restore_focus {
             self.restore_editor_focus(ctx);
         }
@@ -173,14 +177,16 @@ impl ScriptCraftApp {
         }
 
         match command {
+            Command::UiStatusSet { message } => {
+                self.diagnostic_message = message;
+                ctx.request_repaint();
+                DesktopCommandOutcome::EffectDispatched
+            }
             Command::FileNew => {
-                match Project::new()
-                    .map_err(|error| format!("new project failed: {error:?}"))
-                    .and_then(|project| {
-                        EditingSession::with_policy(project, self.session.policy())
-                            .map_err(|error| format!("session failed: {error:?}"))
-                    }) {
-                    Ok(session) => {
+                match Project::new().ok().and_then(|project| {
+                    EditingSession::with_policy(project, self.session.policy()).ok()
+                }) {
+                    Some(session) => {
                         self.session = session;
                         self.page_geometry.reset_for_document_replacement();
                         self.layout_cache = LayoutCache::default();
@@ -191,10 +197,11 @@ impl ScriptCraftApp {
                         self.next_cast_list_refresh =
                             Instant::now() + super::CAST_LIST_REFRESH_INTERVAL;
                         self.rendered_revision = None;
-                        self.status = "New in-memory project".into();
                         self.clear_error();
                     }
-                    Err(error) => self.show_error(error),
+                    None => self.show_error(
+                        "NEW_PROJECT_FAILED: active document and session remain unchanged",
+                    ),
                 }
                 DesktopCommandOutcome::EffectDispatched
             }
@@ -235,67 +242,56 @@ impl ScriptCraftApp {
             }
             Command::EditUndo => self.execute_editor(
                 &Command::EditUndo,
-                "Undid last edit",
                 super::RevealIntent::Conditional,
                 ctx,
             ),
             Command::EditRedo => self.execute_editor(
                 &Command::EditRedo,
-                "Redid last edit",
                 super::RevealIntent::Conditional,
                 ctx,
             ),
             Command::EditDelete => self.execute_editor(
                 &Command::EditDelete,
-                "Deleted forward",
                 super::RevealIntent::Conditional,
                 ctx,
             ),
             Command::EditorTextInsert { text } => self.execute_editor(
                 &Command::EditorTextInsert { text },
-                "Edited through EditingSession",
                 super::RevealIntent::Conditional,
                 ctx,
             ),
             Command::EditorTextPaste { text } => self.execute_editor(
                 &Command::EditorTextPaste { text },
-                "Edited through EditingSession",
                 super::RevealIntent::Conditional,
                 ctx,
             ),
             Command::EditorDeleteBackward => self.execute_editor(
                 &Command::EditorDeleteBackward,
-                "Edited through EditingSession",
                 super::RevealIntent::Conditional,
                 ctx,
             ),
             Command::EditorParagraphEnter => self.execute_editor(
                 &Command::EditorParagraphEnter,
-                "Edited through EditingSession",
                 super::RevealIntent::Conditional,
                 ctx,
             ),
             Command::EditorParagraphTab => self.execute_editor(
                 &Command::EditorParagraphTab,
-                "Edited through EditingSession",
                 super::RevealIntent::Conditional,
                 ctx,
             ),
             Command::EditSelectAll => self.execute_editor(
                 &Command::EditSelectAll,
-                "Selected all screenplay text",
                 super::RevealIntent::Conditional,
                 ctx,
             ),
             Command::EditorElementChange { role } => self.execute_editor(
                 &Command::EditorElementChange { role },
-                "Changed focused element role",
                 super::RevealIntent::None,
                 ctx,
             ),
             Command::EditorSelectionSet { selection } => self.execute_editor(
                 &Command::EditorSelectionSet { selection },
-                "Edited through EditingSession",
                 super::RevealIntent::Conditional,
                 ctx,
             ),
@@ -459,7 +455,6 @@ impl ScriptCraftApp {
                 match canonical_selection_text(self.session.project(), self.session.selection()) {
                     Some(text) => match DesktopClipboard::write_text(&text) {
                         Ok(()) => {
-                            self.status = "Copied selection to clipboard".into();
                             self.clear_error();
                         }
                         Err(ClipboardAccessError::Unavailable) => self.set_clipboard_notice(
@@ -484,7 +479,6 @@ impl ScriptCraftApp {
                                     CommandOutcome::Changed | CommandOutcome::NoOp
                                 )
                             ) {
-                                self.status = "Cut selection to clipboard".into();
                                 self.clear_error();
                             }
                             outcome
@@ -525,7 +519,6 @@ impl ScriptCraftApp {
                             CommandOutcome::Changed | CommandOutcome::NoOp
                         )
                     ) {
-                        self.status = "Pasted clipboard text".into();
                         self.clear_error();
                     }
                     outcome
@@ -547,14 +540,13 @@ impl ScriptCraftApp {
     fn execute_editor(
         &mut self,
         command: &Command,
-        success: &str,
         reveal_intent: super::RevealIntent,
         ctx: &egui::Context,
     ) -> DesktopCommandOutcome {
         let outcome = execute_editor_command(&mut self.session, command);
         match &outcome {
             CommandOutcome::Changed | CommandOutcome::NoOp => {
-                self.mutate(Ok(()), success, reveal_intent);
+                self.mutate(Ok(()), reveal_intent);
             }
             CommandOutcome::Unavailable(_) | CommandOutcome::Rejected(_) => {}
             CommandOutcome::Failed(error) => self.show_edit_error(error.clone()),
@@ -612,7 +604,6 @@ impl ScriptCraftApp {
             &Command::EditorSelectionSet {
                 selection: command_selection,
             },
-            "Edited through EditingSession",
             super::RevealIntent::Conditional,
             ctx,
         );
@@ -657,7 +648,6 @@ impl ScriptCraftApp {
             },
             PointerPhase::Release => super::Selection::caret(core_position),
         };
-        let success_status = self.status.clone();
         let outcome = self.execute_navigation_selection(desired, false, ctx);
         if matches!(
             &outcome,
@@ -673,15 +663,57 @@ impl ScriptCraftApp {
             // Pointer selection is authoritative: it must not inherit a reveal
             // request queued by an earlier edit or navigation command.
             self.reveal_intent = super::RevealIntent::None;
-            self.status = success_status;
             self.clear_error();
         }
         outcome
     }
 
     fn set_clipboard_notice(&mut self, message: &str) {
-        self.status = message.into();
-        self.error = Some(message.into());
+        self.show_error(message);
+    }
+
+    pub(super) fn flush_pending_diagnostic_commands(&mut self, ctx: &egui::Context) {
+        if self.flushing_diagnostic_commands {
+            return;
+        }
+        self.flushing_diagnostic_commands = true;
+        while let Some(command) = self.pending_diagnostic_commands.pop_front() {
+            let _ = self.dispatch_command(
+                CommandInvocation::new(command, CommandOrigin::InternalFollowUp),
+                ctx,
+            );
+        }
+        self.flushing_diagnostic_commands = false;
+    }
+
+    pub(super) fn post_diagnostic(&mut self, message: &str) {
+        let mut bounded = String::new();
+        for character in message.chars() {
+            let character = if character.is_control()
+                || matches!(character, '\u{2028}' | '\u{2029}')
+            {
+                ' '
+            } else {
+                character
+            };
+            if bounded.len() + character.len_utf8() > MAX_DIAGNOSTIC_MESSAGE_BYTES {
+                break;
+            }
+            bounded.push(character);
+        }
+        let bounded = bounded.trim();
+        let message = if bounded.is_empty() {
+            "Diagnostic detail unavailable"
+        } else {
+            bounded
+        };
+        let Ok(message) = DiagnosticMessage::new(message.to_owned()) else {
+            return;
+        };
+        self.pending_diagnostic_commands
+            .push_back(Command::UiStatusSet {
+                message: Some(message),
+            });
     }
 
     pub(super) fn request_timer_notification(
@@ -718,6 +750,9 @@ impl AppCommandAvailability {
     /// One command-state projection consumed by both menu presentations and
     /// checked again at dispatch time to reject stale or modal-blocked input.
     pub(super) const fn is_enabled(self, command: CommandId) -> bool {
+        if matches!(command, CommandId::UiStatusSet) {
+            return true;
+        }
         if matches!(command, CommandId::FileImportResolve) {
             return self.modal_blocked;
         }
@@ -754,9 +789,13 @@ impl AppCommandAvailability {
 
 /// The viewport adapter owns native close/restore requests; imported geometry
 /// never becomes semantic screenplay state or a command payload.
-struct DesktopViewportEffects;
+pub(super) struct DesktopViewportEffects;
 
 impl DesktopViewportEffects {
+    pub(super) fn title(ctx: &egui::Context, title: String) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+    }
+
     fn close(ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
@@ -790,6 +829,83 @@ impl DesktopTimerNotificationEffects {
         result: super::sprint_timer::NotificationResult,
     ) -> bool {
         timer.apply_notification_result(generation, result)
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_command_tests {
+    use super::{AppCommandAvailability, CommandInvocation};
+    use crate::ScriptCraftApp;
+    use scriptcraft_commands::{Command, CommandId, CommandOrigin, DiagnosticMessage};
+
+    #[test]
+    fn diagnostic_set_replace_and_clear_are_dispatched_commands() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else {
+            return;
+        };
+        let context = eframe::egui::Context::default();
+        for (text, expected) in [
+            (Some("first diagnostic"), Some("first diagnostic")),
+            (Some("replacement diagnostic"), Some("replacement diagnostic")),
+            (None, None),
+        ] {
+            let message = text.and_then(|text| {
+                let result = DiagnosticMessage::new(text);
+                assert!(result.is_ok());
+                result.ok()
+            });
+            let result = app.dispatch_command(
+                CommandInvocation::new(
+                    Command::UiStatusSet { message },
+                    CommandOrigin::InternalFollowUp,
+                ),
+                &context,
+            );
+            assert_eq!(result.command, CommandId::UiStatusSet);
+            assert_eq!(
+                app.diagnostic_message
+                    .as_ref()
+                    .map(DiagnosticMessage::as_str),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_command_remains_available_during_migration_modal() {
+        let availability = AppCommandAvailability {
+            modal_blocked: true,
+            undo: false,
+            redo: false,
+            delete: false,
+            select_all: false,
+            cut: false,
+            copy: false,
+            paste: false,
+        };
+        assert!(availability.is_enabled(CommandId::UiStatusSet));
+        assert!(!availability.is_enabled(CommandId::EditUndo));
+    }
+
+    #[test]
+    fn queued_diagnostic_reports_preserve_dispatch_order() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else {
+            return;
+        };
+        let context = eframe::egui::Context::default();
+        app.post_diagnostic("earlier");
+        app.post_diagnostic("later");
+        app.flush_pending_diagnostic_commands(&context);
+        assert_eq!(
+            app.diagnostic_message
+                .as_ref()
+                .map(DiagnosticMessage::as_str),
+            Some("later")
+        );
     }
 }
 
