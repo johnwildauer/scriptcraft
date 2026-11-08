@@ -327,6 +327,7 @@ fn session_error_category(error: &EditError) -> &'static str {
         EditError::UnsupportedTransition { .. } => "unsupported role transition",
         EditError::Preservation(_) => "source preservation constraint",
         EditError::CastList(_) => "cast-list reconciliation constraint",
+        EditError::FormattedText(_) => "formatted-text constraint",
         EditError::Model(_) => "model validation constraint",
     }
 }
@@ -523,10 +524,10 @@ fn same_save_projection(expected: &Project, actual: &Project) -> bool {
         actual: &[crate::ScreenplayElement],
     ) -> bool {
         expected.len() == actual.len()
-            && expected.iter().zip(actual).all(|(expected, actual)| {
-                expected.role == actual.role
-                    && expected.text == actual.text
-                    && if expected.runs.is_empty() {
+        && expected.iter().zip(actual).all(|(expected, actual)| {
+            expected.role == actual.role
+                && expected.text == actual.text
+                && if expected.runs.is_empty() {
                         actual.runs.iter().all(|run| run.attributes.is_empty())
                     } else {
                         expected.runs == actual.runs
@@ -534,8 +535,25 @@ fn same_save_projection(expected: &Project, actual: &Project) -> bool {
             })
     }
 
-    same_elements(&expected.title_page, &actual.title_page)
+    same_title_paragraphs(&expected.title_page, &actual.title_page)
         && same_elements(&expected.elements, &actual.elements)
+}
+
+fn same_title_paragraphs(
+    expected: &[crate::TitlePageParagraph],
+    actual: &[crate::TitlePageParagraph],
+) -> bool {
+    expected.len() == actual.len()
+        && expected.iter().zip(actual).all(|(expected, actual)| {
+            expected.role == actual.role
+                && expected.text == actual.text
+                && expected.formatting == actual.formatting
+                && if expected.runs.is_empty() {
+                    actual.runs.iter().all(|run| run.attributes.is_empty())
+                } else {
+                    expected.runs == actual.runs
+                }
+        })
 }
 
 /// Narrow platform seam for deterministic failure injection and filesystem tests.
@@ -922,6 +940,26 @@ mod confirmed_save_as_tests {
         }
     }
 
+    struct MismatchedRereadCodec;
+
+    impl SaveCandidateCodec for MismatchedRereadCodec {
+        fn serialize(
+            &self,
+            project: &Project,
+            context: &mut fdx::SaveContext,
+        ) -> Result<PreparedFdx, TransactionalSaveError> {
+            NativeSaveCandidateCodec.serialize(project, context)
+        }
+
+        fn reread(&self, bytes: &[u8]) -> Result<Project, fdx::FdxError> {
+            let mut project = fdx::read_v6(bytes)?.project;
+            if let Some(first) = project.elements.first_mut() {
+                first.text.push_str(" injected mismatch");
+            }
+            Ok(project)
+        }
+    }
+
     #[test]
     fn failed_candidate_keeps_existing_destination_and_live_save_state() {
         let directory = std::env::temp_dir().join(format!(
@@ -935,8 +973,10 @@ mod confirmed_save_as_tests {
         std::fs::write(&destination, b"prior destination bytes")
             .unwrap_or_else(|_| unreachable!("test destination can be written"));
 
-        let project = Project::new()
+        let mut project = Project::new()
             .unwrap_or_else(|_| unreachable!("new project is valid"));
+        project.title_page[17].text = "unsaved title page edit".to_owned();
+        project.title_page[17].runs[0].text = "unsaved title page edit".to_owned();
         let mut session = EditingSession::new(project)
             .unwrap_or_else(|_| unreachable!("new project session is valid"));
         session
@@ -965,6 +1005,70 @@ mod confirmed_save_as_tests {
         assert_eq!(
             std::fs::read(&destination).ok().as_deref(),
             Some(&b"prior destination bytes"[..])
+        );
+        assert_eq!(session, before);
+        assert!(session.dirty());
+        assert!(target.path().is_none());
+        assert!(target.baseline().is_none());
+
+        std::fs::remove_dir_all(directory)
+            .unwrap_or_else(|_| unreachable!("test directory can be removed"));
+    }
+
+    #[test]
+    fn semantic_reread_mismatch_keeps_existing_destination_and_both_surface_state() {
+        let directory = std::env::temp_dir().join(format!(
+            "scriptcraft-reread-mismatch-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory)
+            .unwrap_or_else(|_| unreachable!("test directory can be created"));
+        let destination = directory.join("existing.fdx");
+        std::fs::write(&destination, b"prior valid destination")
+            .unwrap_or_else(|_| unreachable!("test destination can be written"));
+
+        let mut session = EditingSession::new(
+            Project::new().unwrap_or_else(|_| unreachable!("new project is valid")),
+        )
+        .unwrap_or_else(|_| unreachable!("new project session is valid"));
+        session
+            .insert("unsaved body")
+            .unwrap_or_else(|_| unreachable!("body insertion is valid"));
+        session
+            .set_title_selection(crate::editing::Selection::caret(
+                crate::editing::Position {
+                    element: 17,
+                    offset: 0,
+                },
+            ))
+            .unwrap_or_else(|_| unreachable!("title caret is valid"));
+        session
+            .insert_title("unsaved title")
+            .unwrap_or_else(|_| unreachable!("title insertion is valid"));
+        let before = session.clone();
+        let mut target = FdxSaveTarget::new_unsaved();
+        let text_state = fdx::TextState {
+            scaling: 100,
+            selection: session.selection(),
+        };
+
+        let error = save_session_with_codec_and_view_state(
+            &StdFdxStorageFileSystem,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAsOverwrite(destination.clone()),
+            &MismatchedRereadCodec,
+            fdx::WindowState::DEFAULT,
+            text_state,
+        )
+        .err()
+        .unwrap_or_else(|| unreachable!("semantic reread mismatch must reject candidate"));
+
+        assert!(matches!(error, TransactionalSaveError::Codec(_)));
+        assert_eq!(
+            std::fs::read(&destination).ok().as_deref(),
+            Some(&b"prior valid destination"[..])
         );
         assert_eq!(session, before);
         assert!(session.dirty());

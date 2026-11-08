@@ -88,6 +88,7 @@ pub enum ParagraphAlignment {
     Left,
     Right,
     Center,
+    Justified,
 }
 
 /// Only supported imported fields are populated. `None` deliberately means

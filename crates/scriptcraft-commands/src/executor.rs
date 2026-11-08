@@ -1,25 +1,21 @@
-//! Headless semantic execution over the real transactional editing session.
+//! Headless semantic execution over the shared transactional editing session.
 //!
-//! This boundary intentionally accepts no desktop context and delegates every
-//! supported operation to the existing session API. It does not implement
-//! screenplay transitions or mutate project fields directly.
+//! Native viewport and dialog intents are typed in the command vocabulary but
+//! remain host effects; this executor never performs them.
 
-use scriptcraft_core::editing::{EditError, EditingSession, Selection as CoreSelection};
+use scriptcraft_core::editing::{EditError, EditingSession, Position as CorePosition, Selection as CoreSelection};
 
-use crate::{Command, CommandId, PositionError, SelectionError};
+use crate::{
+    Command, CommandId, EditorSurface, PointerPhase, PositionError, SelectionError,
+};
 
 /// Result of applying a semantic editor command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandOutcome {
-    /// The existing session operation changed observable session state.
     Changed,
-    /// The command was accepted, but the session operation made no change.
     NoOp,
-    /// The command requires a history or selection state that is not available.
     Unavailable(UnavailableReason),
-    /// The command or its parameter is not valid at this editor boundary.
     Rejected(CommandRejection),
-    /// An existing core edit operation failed; the original error is retained.
     Failed(EditError),
 }
 
@@ -37,71 +33,176 @@ pub enum CommandRejection {
     PositionOutOfRange(PositionError),
 }
 
-/// Executes one semantic editor command against an existing session.
-///
-/// Commands outside the headless editing subset are rejected without touching
-/// the session. Selection input is validated before the core setter is called;
-/// all other editor semantics remain owned by `EditingSession`.
+/// Executes with the legacy Body target for generic surface-less commands.
 pub fn execute_editor_command(
     session: &mut EditingSession,
     command: &Command,
 ) -> CommandOutcome {
-    if let Command::EditUndo = command {
-        if !session.can_undo() {
-            return CommandOutcome::Unavailable(UnavailableReason::UndoHistory);
-        }
+    execute_editor_command_on_surface(session, command, EditorSurface::Body)
+}
+
+/// Executes a command using the host's active surface for generic commands
+/// such as Delete and Select All. Explicit surface payloads remain authoritative.
+pub fn execute_editor_command_on_surface(
+    session: &mut EditingSession,
+    command: &Command,
+    active_surface: EditorSurface,
+) -> CommandOutcome {
+    if matches!(command, Command::EditUndo) && !session.can_undo() {
+        return CommandOutcome::Unavailable(UnavailableReason::UndoHistory);
     }
-    if let Command::EditRedo = command {
-        if !session.can_redo() {
-            return CommandOutcome::Unavailable(UnavailableReason::RedoHistory);
+    if matches!(command, Command::EditRedo) && !session.can_redo() {
+        return CommandOutcome::Unavailable(UnavailableReason::RedoHistory);
+    }
+    if matches!(command, Command::EditSelectAll)
+        && match active_surface {
+            EditorSurface::Body => session.project().elements.is_empty(),
+            EditorSurface::TitlePage => session.project().title_page.is_empty(),
         }
+    {
+        return CommandOutcome::Unavailable(UnavailableReason::Selection);
     }
 
     let before = session.clone();
     let result = match command {
-        Command::EditorTextInsert { text } => session.insert(text),
-        Command::EditorTextPaste { text } => session.insert_paste(text),
-        Command::EditorDeleteBackward => session.backspace(),
-        Command::EditDelete => session.delete(),
-        Command::EditorParagraphEnter => session.enter(),
-        Command::EditorParagraphTab => session.tab(),
-        Command::EditorElementChange { role } => session.change_role(role.as_core()),
+        Command::EditorTextInsert { text, surface } => insert(session, *surface, text, false),
+        Command::EditorTextPaste { text, surface } => insert(session, *surface, text, true),
+        Command::EditorDeleteBackward => delete_backward(session, active_surface),
+        Command::EditDelete => delete_forward(session, active_surface),
+        Command::EditorParagraphEnter => enter(session, active_surface),
+        Command::EditorParagraphTab => tab(session, active_surface),
+        Command::EditorElementChange { role, surface } => match surface {
+            EditorSurface::Body => session.change_role(role.as_core()),
+            EditorSurface::TitlePage => {
+                return rejected(command);
+            }
+        },
         Command::EditUndo => session.undo(),
         Command::EditRedo => session.redo(),
-        Command::EditSelectAll => {
-            let Some(last) = session.project().elements.last() else {
-                return CommandOutcome::Unavailable(UnavailableReason::Selection);
-            };
-            session.set_selection(CoreSelection {
-                anchor: scriptcraft_core::editing::Position {
-                    element: 0,
-                    offset: 0,
-                },
-                focus: scriptcraft_core::editing::Position {
-                    element: session.project().elements.len() - 1,
-                    offset: last.text.len(),
-                },
-            })
-        }
-        Command::EditorSelectionSet { selection } => {
-            if let Err(error) = selection.validate_for(session.project()) {
+        Command::EditSelectAll => select_all(session, active_surface),
+        Command::EditorSelectionSet { selection, surface } => {
+            if let Err(error) = selection.validate_for_surface(session.project(), *surface) {
                 return CommandOutcome::Rejected(CommandRejection::InvalidSelection(error));
             }
             match selection.to_core() {
-                Ok(selection) => session.set_selection(selection),
-                Err(error) => {
-                    return CommandOutcome::Rejected(CommandRejection::PositionOutOfRange(error));
-                }
+                Ok(selection) => set_selection(session, *surface, selection),
+                Err(error) => return CommandOutcome::Rejected(CommandRejection::PositionOutOfRange(error)),
             }
         }
-        other => {
-            return CommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id()));
+        Command::EditorSelectionPointer { position, surface, phase } => {
+            let selection = crate::Selection { anchor: *position, focus: *position };
+            if let Err(error) = selection.validate_for_surface(session.project(), *surface) {
+                return CommandOutcome::Rejected(CommandRejection::InvalidSelection(error));
+            }
+            let core_position = match position.to_core() {
+                Ok(position) => position,
+                Err(error) => return CommandOutcome::Rejected(CommandRejection::PositionOutOfRange(error)),
+            };
+            let current = match surface {
+                EditorSurface::Body => session.selection(),
+                EditorSurface::TitlePage => session.title_selection(),
+            };
+            let selection = match phase {
+                PointerPhase::Press | PointerPhase::Release => CoreSelection::caret(core_position),
+                PointerPhase::Drag => CoreSelection { anchor: current.anchor, focus: core_position },
+            };
+            set_selection(session, *surface, selection)
         }
+        Command::EditorStyleToggle { surface, style } => match surface {
+            EditorSurface::Body => session.toggle_body_run_style(style.as_core()),
+            EditorSurface::TitlePage => session.toggle_title_run_style(style.as_core()),
+        },
+        Command::EditorAlignmentSet { surface, alignment } => match surface {
+            EditorSurface::Body => session.set_body_alignment(alignment.as_core()),
+            EditorSurface::TitlePage => session.set_title_alignment(alignment.as_core()),
+        },
+        other => return rejected(other),
     };
 
     match result {
         Ok(()) if *session == before => CommandOutcome::NoOp,
         Ok(()) => CommandOutcome::Changed,
         Err(error) => CommandOutcome::Failed(error),
+    }
+}
+
+fn rejected(command: &Command) -> CommandOutcome {
+    CommandOutcome::Rejected(CommandRejection::UnsupportedCommand(command.id()))
+}
+
+fn insert(session: &mut EditingSession, surface: EditorSurface, text: &str, paste: bool) -> Result<(), EditError> {
+    match (surface, paste) {
+        (EditorSurface::Body, false) => session.insert(text),
+        (EditorSurface::Body, true) => session.insert_paste(text),
+        (EditorSurface::TitlePage, false) => session.insert_title(text),
+        (EditorSurface::TitlePage, true) => session.paste_title(text),
+    }
+}
+
+fn delete_backward(session: &mut EditingSession, surface: EditorSurface) -> Result<(), EditError> {
+    match surface {
+        EditorSurface::Body => session.backspace(),
+        EditorSurface::TitlePage => session.backspace_title(),
+    }
+}
+
+fn delete_forward(session: &mut EditingSession, surface: EditorSurface) -> Result<(), EditError> {
+    match surface {
+        EditorSurface::Body => session.delete(),
+        EditorSurface::TitlePage => session.delete_forward_title(),
+    }
+}
+
+fn enter(session: &mut EditingSession, surface: EditorSurface) -> Result<(), EditError> {
+    match surface {
+        EditorSurface::Body => session.enter(),
+        EditorSurface::TitlePage => session.enter_title(),
+    }
+}
+
+fn tab(session: &mut EditingSession, surface: EditorSurface) -> Result<(), EditError> {
+    match surface {
+        EditorSurface::Body => session.tab(),
+        EditorSurface::TitlePage => session.tab_title(),
+    }
+}
+
+fn set_selection(
+    session: &mut EditingSession,
+    surface: EditorSurface,
+    selection: CoreSelection,
+) -> Result<(), EditError> {
+    match surface {
+        EditorSurface::Body => session.set_selection(selection),
+        EditorSurface::TitlePage => session.set_title_selection(selection),
+    }
+}
+
+fn select_all(session: &mut EditingSession, surface: EditorSurface) -> Result<(), EditError> {
+    match surface {
+        EditorSurface::Body => {
+            let Some(last) = session.project().elements.last() else {
+                return Err(EditError::InvalidSelection);
+            };
+            session.set_selection(CoreSelection {
+                anchor: CorePosition { element: 0, offset: 0 },
+                focus: CorePosition {
+                    element: session.project().elements.len() - 1,
+                    offset: last.text.len(),
+                },
+            })
+        }
+        EditorSurface::TitlePage => {
+            let Some(last) = session.project().title_page.last() else {
+                return Err(EditError::InvalidSelection);
+            };
+            session.set_title_selection(CoreSelection {
+                anchor: CorePosition { element: 0, offset: 0 },
+                focus: CorePosition {
+                    element: session.project().title_page.len() - 1,
+                    offset: last.text.len(),
+                },
+            })
+        }
     }
 }

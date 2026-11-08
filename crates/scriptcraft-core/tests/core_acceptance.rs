@@ -111,6 +111,19 @@ fn failed_save_as_keeps_existing_destination_and_live_unsaved_session() {
 
     let mut session = valid(EditingSession::new(valid(Project::new())));
     valid(session.insert("unsaved screenplay text"));
+    valid(session.set_selection(Selection::caret(Position {
+        element: 0,
+        offset: 5,
+    })));
+    valid(session.set_title_selection(Selection::caret(Position {
+        element: 17,
+        offset: 0,
+    })));
+    valid(session.insert_title("unsaved title text"));
+    valid(session.set_title_selection(Selection::caret(Position {
+        element: 17,
+        offset: "unsaved title text".len(),
+    })));
     let before = session.clone();
     let mut target = FdxSaveTarget::new_unsaved();
 
@@ -134,6 +147,9 @@ fn failed_save_as_keeps_existing_destination_and_live_unsaved_session() {
     );
     assert_eq!(session, before);
     assert!(session.dirty());
+    assert_eq!(session.selection().focus.offset, 5);
+    assert_eq!(session.title_selection().focus.offset, "unsaved title text".len());
+    assert_eq!(session.project().title_page[17].text, "unsaved title textScript Title");
     assert!(target.path().is_none());
     assert!(target.baseline().is_none());
 }
@@ -331,6 +347,19 @@ fn confirmed_save_as_rejects_destination_changed_after_consent_and_rolls_back_se
         .unwrap_or_else(|_| unreachable!("temporary destination can be written"));
     let mut session = valid(EditingSession::new(valid(Project::new())));
     valid(session.insert("unsaved screenplay"));
+    valid(session.set_selection(Selection::caret(Position {
+        element: 0,
+        offset: 4,
+    })));
+    valid(session.set_title_selection(Selection::caret(Position {
+        element: 17,
+        offset: 0,
+    })));
+    valid(session.insert_title("unsaved title"));
+    valid(session.set_title_selection(Selection::caret(Position {
+        element: 17,
+        offset: 8,
+    })));
     let before = session.clone();
     let mut target = FdxSaveTarget::new_unsaved();
     let filesystem = MutateDestinationAfterFirstRead {
@@ -353,6 +382,9 @@ fn confirmed_save_as_rejects_destination_changed_after_consent_and_rolls_back_se
     assert_eq!(valid(fs::read(&destination)), b"external concurrent update");
     assert_eq!(session, before);
     assert!(session.dirty());
+    assert_eq!(session.selection().focus.offset, 4);
+    assert_eq!(session.title_selection().focus.offset, 8);
+    assert_eq!(session.project().title_page[17].text, "unsaved titleScript Title");
     assert!(target.path().is_none());
     assert!(target.baseline().is_none());
 }

@@ -8,12 +8,14 @@ pub mod editing;
 pub mod exports;
 pub mod fdx;
 pub mod fdx_storage;
+pub mod formatted_text;
 pub mod formatting;
 pub mod layout;
 mod paragraph_id;
 pub mod persistence;
 pub mod preservation;
 pub mod scene_metadata;
+pub mod title_page;
 pub mod text_state;
 
 use std::collections::BTreeSet;
@@ -41,6 +43,16 @@ pub use formatting::{
     EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment, PrintVisibility,
     SourceFontSpec, SourceLayoutSettings, SourceParagraphOverrides, SourceParagraphSpec,
 };
+pub use formatted_text::{
+    parse_style_attribute, project_lit_styles, project_paragraph_alignment,
+    set_paragraph_alignments, styled_display_spans, toggle_paragraph_run_style,
+    toggle_paragraph_run_styles, toggle_style_for_range, toggle_style_over_ranges,
+    project_lit_styles_over_ranges, project_style_at_caret, DisplaySourceSegment,
+    FormattedTextError,
+    ParagraphAlignmentProjection, ParagraphTarget, RunStyle, RunStyleEdit, RunStyleFlags,
+    RunBoundaryAffinity, RunStyleProjection, RunStyleRange, StyledDisplaySpan,
+};
+pub use title_page::{TitlePageAlignment, TitlePageParagraph, TitlePageParagraphFormatting};
 
 pub const FOUNDATION_STATUS: &str = "scriptcraft foundation ready";
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -77,6 +89,7 @@ pub enum ModelError {
     TooManyRuns,
     TooManyRunAttributes,
     InvalidRunProjection,
+    InvalidParagraphOverride,
     InvalidUtf8Boundary,
     InvalidNumber,
     InvalidJson,
@@ -480,8 +493,11 @@ impl Default for LayoutInputs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
-    pub title_page: Vec<ScreenplayElement>,
+    pub title_page: Vec<TitlePageParagraph>,
     pub elements: Vec<ScreenplayElement>,
+    /// Direct body paragraph overrides not yet backed by imported FDX source.
+    /// Source-backed projects mirror these values in preservation settings.
+    pub direct_paragraph_overrides: std::collections::BTreeMap<StableId, SourceParagraphOverrides>,
     /// Source-owned state is separate from the semantic projection and is not
     /// representable in transitional JSON.
     pub preservation: Option<preservation::PreservationState>,
@@ -495,14 +511,16 @@ pub struct Project {
 impl Project {
     pub fn new() -> Result<Self, ModelError> {
         let mut ids = StableIdAllocator::new();
+        let title_page = title_page::reference_boilerplate(&mut ids)?;
         let start = ScreenplayElement::new(
             ids.allocate("element")?.as_str().to_owned(),
             Role::SceneHeading,
             "",
         )?;
         Ok(Self {
-            title_page: Vec::new(),
+            title_page,
             elements: vec![start],
+            direct_paragraph_overrides: std::collections::BTreeMap::new(),
             preservation: None,
             legacy_json_state: None,
             layout_identity: Arc::new(()),
@@ -529,12 +547,26 @@ impl Project {
         }
         let mut ids = BTreeSet::new();
         let mut element_ids = BTreeSet::new();
-        for item in self.title_page.iter().chain(self.elements.iter()) {
+        for item in &self.title_page {
+            item.validate()?;
+            if !ids.insert(&item.id) {
+                return Err(ModelError::DuplicateId);
+            }
+            element_ids.insert(item.id.clone());
+        }
+        for item in &self.elements {
             validate_element(item)?;
             if !ids.insert(&item.id) {
                 return Err(ModelError::DuplicateId);
             }
             element_ids.insert(item.id.clone());
+        }
+        if self
+            .direct_paragraph_overrides
+            .keys()
+            .any(|id| !self.elements.iter().any(|element| &element.id == id))
+        {
+            return Err(ModelError::InvalidParagraphOverride);
         }
         if let Some(preservation) = &self.preservation {
             preservation
@@ -612,7 +644,12 @@ impl Project {
             .legacy_json_state
             .as_ref()
             .ok_or(ModelError::UnsupportedJsonState)?;
-        let json = encode_envelope(self, legacy);
+        let legacy_title_page = self
+            .title_page
+            .iter()
+            .map(TitlePageParagraph::legacy_projection)
+            .collect::<Result<Vec<_>, _>>()?;
+        let json = encode_envelope(self, legacy, &legacy_title_page);
         if json.len() > MAX_JSON_BYTES {
             return Err(ModelError::StringTooLong);
         }
@@ -632,7 +669,10 @@ impl Project {
     /// Foreign source IDs intentionally remain a separate namespace.
     pub fn allocate_element_id(&self) -> Result<StableId, ModelError> {
         let mut allocator = StableIdAllocator::new();
-        for element in self.title_page.iter().chain(self.elements.iter()) {
+        for element in &self.title_page {
+            allocator.reserve(element.id.clone())?;
+        }
+        for element in &self.elements {
             allocator.reserve(element.id.clone())?;
         }
         allocator.allocate("element")
@@ -779,11 +819,13 @@ fn ensure_legacy_json_compatible(project: &Project) -> Result<(), ModelError> {
             .iter()
             .any(Option::is_some)
     });
-    let richer_elements = project
+    let title_compatible = project
         .title_page
         .iter()
-        .chain(project.elements.iter())
-        .any(|element| {
+        .all(|element| element.legacy_projection().is_ok());
+    let richer_elements = !title_compatible
+        || !project.direct_paragraph_overrides.is_empty()
+        || project.elements.iter().any(|element| {
             !element.role.is_legacy()
                 || !element.runs.is_empty()
                 || element.source_provenance.is_some()
@@ -823,7 +865,11 @@ fn element_json(e: &ScreenplayElement) -> String {
 fn elements_json(items: &[ScreenplayElement]) -> String {
     items.iter().map(element_json).collect::<Vec<_>>().join(",")
 }
-fn encode_envelope(p: &Project, legacy: &LegacyJsonState) -> String {
+fn encode_envelope(
+    p: &Project,
+    legacy: &LegacyJsonState,
+    legacy_title_page: &[ScreenplayElement],
+) -> String {
     let layout_inputs = &legacy.layout_inputs;
     let role_boxes = layout_inputs
         .role_boxes
@@ -832,7 +878,7 @@ fn encode_envelope(p: &Project, legacy: &LegacyJsonState) -> String {
         .collect::<Vec<_>>()
         .join(",");
     // Emit legacy identity/metadata only for an unchanged JSON-origin session.
-    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"uppercase_cues\":true,\"auto_parenthetical\":true,\"strict_transition_boundaries\":true,\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(legacy.project_id.as_str()), legacy.project_schema_version, quote(&legacy.metadata.title), quote(&legacy.metadata.author), quote(&legacy.metadata.contact), quote(&legacy.metadata.created_at), quote(&legacy.metadata.updated_at), elements_json(&p.title_page), quote(&layout_inputs.name), layout_inputs.format_version, layout_inputs.paper_width, layout_inputs.paper_height, layout_inputs.margin_top, layout_inputs.margin_bottom, layout_inputs.margin_left, layout_inputs.margin_right, layout_inputs.chars_per_line, layout_inputs.lines_per_page, layout_inputs.line_advance, layout_inputs.boundary_gap, quote(&layout_inputs.font_family), layout_inputs.font_size, layout_inputs.char_width, role_boxes, elements_json(&p.elements))
+    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"uppercase_cues\":true,\"auto_parenthetical\":true,\"strict_transition_boundaries\":true,\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(legacy.project_id.as_str()), legacy.project_schema_version, quote(&legacy.metadata.title), quote(&legacy.metadata.author), quote(&legacy.metadata.contact), quote(&legacy.metadata.created_at), quote(&legacy.metadata.updated_at), elements_json(legacy_title_page), quote(&layout_inputs.name), layout_inputs.format_version, layout_inputs.paper_width, layout_inputs.paper_height, layout_inputs.margin_top, layout_inputs.margin_bottom, layout_inputs.margin_left, layout_inputs.margin_right, layout_inputs.chars_per_line, layout_inputs.lines_per_page, layout_inputs.line_advance, layout_inputs.boundary_gap, quote(&layout_inputs.font_family), layout_inputs.font_size, layout_inputs.char_width, role_boxes, elements_json(&p.elements))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1188,8 +1234,12 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
         layout_inputs,
     };
     Ok(Project {
-        title_page: decode_elements(obj(envelope, "title_page")?)?,
+        title_page: decode_elements(obj(envelope, "title_page")?)?
+            .into_iter()
+            .map(TitlePageParagraph::from_legacy_element)
+            .collect::<Result<Vec<_>, _>>()?,
         elements: decode_elements(obj(envelope, "elements")?)?,
+        direct_paragraph_overrides: std::collections::BTreeMap::new(),
         preservation: None,
         legacy_json_state: Some(legacy_json_state),
         layout_identity: Arc::new(()),

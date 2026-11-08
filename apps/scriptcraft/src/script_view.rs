@@ -7,11 +7,14 @@ use super::shortcuts::{editor_command_for_key_event, ShortcutPlatform};
 use eframe::egui::{self, Color32, FontFamily, FontId, Key, Sense, Stroke, Vec2};
 use egui::epaint::text::{Galley, LayoutJob};
 use scriptcraft_commands::{
-    Command, CommandId, CommandOrigin, HorizontalDirection, LineEdge, PointerPhase,
-    VerticalDirection,
+    Command, CommandId, CommandOrigin, EditorSurface, HorizontalDirection, LineEdge,
+    PointerPhase, VerticalDirection,
 };
 use scriptcraft_core::editing::{EditError, Position, Selection};
-use scriptcraft_core::layout::{Caret, FixedRect, InteractionQueryDiagnostics, ScreenplayLayout};
+use scriptcraft_core::formatting::EffectiveTextStyle;
+use scriptcraft_core::layout::{
+    Caret, FixedRect, InteractionQueryDiagnostics, PositionedStyledSpan, ScreenplayLayout,
+};
 use scriptcraft_core::FixedPoint;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -102,24 +105,18 @@ impl ScriptCraftApp {
         result
     }
 
-    fn pointer_body_page(
+    fn pointer_surface_page(
         layout: &ScreenplayLayout,
         page_rects: &[egui::Rect],
         pointer: egui::Pos2,
+        surface: EditorSurface,
     ) -> Option<usize> {
-        if page_rects
-            .iter()
-            .enumerate()
-            .any(|(index, rect)| rect.contains(pointer) && layout.pages[index].title_page)
-        {
-            // Title-page ownership is explicit: a title click never becomes a
-            // body selection, even when a body line is globally nearest.
-            return None;
-        }
         page_rects
             .iter()
             .enumerate()
-            .filter(|(index, _)| !layout.pages[*index].title_page)
+            .filter(|(index, _)| {
+                layout.pages[*index].title_page == (surface == EditorSurface::TitlePage)
+            })
             .min_by_key(|(index, rect)| {
                 let distance = if pointer.y < rect.top() {
                     rect.top() - pointer.y
@@ -138,8 +135,12 @@ impl ScriptCraftApp {
         line_start: usize,
         line_end: usize,
         element: usize,
+        surface: EditorSurface,
     ) -> Option<(usize, usize)> {
-        let selection = self.session.selection();
+        let selection = match surface {
+            EditorSurface::Body => self.session.selection(),
+            EditorSurface::TitlePage => self.session.title_selection(),
+        };
         let (start, end) = ordered_selection(selection);
         if start.element > element || end.element < element {
             return None;
@@ -157,6 +158,41 @@ impl ScriptCraftApp {
         (from < line_end && to > line_start).then_some((from, to))
     }
 
+    fn selected_display_range(
+        span: &PositionedStyledSpan,
+        source_selection: Option<(usize, usize)>,
+    ) -> Option<(usize, usize)> {
+        let (selection_start, selection_end) = source_selection?;
+        let mut selected_start = None;
+        let mut selected_end = None;
+        for segment in span.display_source_map.iter() {
+            if selection_start < segment.source_end && selection_end > segment.source_start {
+                selected_start = Some(selected_start.map_or(segment.display_start, |current: usize| {
+                    current.min(segment.display_start)
+                }));
+                selected_end = Some(selected_end.map_or(segment.display_end, |current: usize| {
+                    current.max(segment.display_end)
+                }));
+            }
+        }
+        selected_start.zip(selected_end)
+    }
+
+    fn span_for_caret<'a>(
+        line: &'a scriptcraft_core::layout::LayoutLine,
+        offset: usize,
+    ) -> Option<&'a PositionedStyledSpan> {
+        line.spans
+            .iter()
+            .find(|span| offset >= span.source.start && offset < span.source.end)
+            .or_else(|| {
+                line.spans
+                    .iter()
+                    .rev()
+                    .find(|span| offset == span.source.end)
+            })
+    }
+
     // Rendering needs these geometry and interaction inputs together; wrapping
     // them in a temporary parameter object would add noise to the paint path.
     #[allow(clippy::too_many_arguments)]
@@ -170,6 +206,7 @@ impl ScriptCraftApp {
         editor_id: egui::Id,
         caret_page_index: Option<usize>,
         caret_geometry: Option<FixedRect>,
+        surface: EditorSurface,
     ) {
         let scale = metrics.scale;
         let paint_started = Instant::now();
@@ -189,85 +226,113 @@ impl ScriptCraftApp {
         );
 
         for line in &layout.pages[page_index].lines {
-            let x = page_rect.left() + line.geometry.x.to_points_f32() * scale;
             let y = page_rect.top() + line.geometry.y.to_points_f32() * scale;
-            let char_width = line.char_width.to_points_f32() * scale;
-            let selection = self.selection_range(line.source.start, line.source.end, line.element);
-            if let Some((from, to)) = selection {
-                add_performance_counter(&mut self.performance.selection_spans_submitted, 1);
-                let display_from = line.display_char_for_source(from, false);
-                let display_to = line.display_char_for_source(to, true);
-                let left = x + display_from as f32 * char_width;
-                let width = display_to.saturating_sub(display_from) as f32 * char_width;
-                painter.rect_filled(
-                    egui::Rect::from_min_size(
-                        egui::pos2(left, y),
-                        Vec2::new(width.max(1.0), line.geometry.height.to_points_f32() * scale),
+            let selection = self.selection_range(
+                line.source.start,
+                line.source.end,
+                line.element,
+                surface,
+            );
+            for span in line.spans.iter() {
+                let span_x = page_rect.left() + span.geometry.x.to_points_f32() * scale;
+                let span_y = page_rect.top() + span.geometry.y.to_points_f32() * scale;
+                let span_height = span.geometry.height.to_points_f32() * scale;
+                let span_width = span.geometry.width.to_points_f32() * scale;
+                let display_count = span.display_text.chars().count();
+                if display_count == 0 {
+                    continue;
+                }
+                let nominal_cell = span.char_width.to_points_f32() * scale;
+                let cell_width = if span_width > nominal_cell * display_count as f32 {
+                    span_width / display_count as f32
+                } else {
+                    nominal_cell
+                };
+                let selected_display = Self::selected_display_range(span, selection);
+                if let Some((from, to)) = selected_display {
+                    add_performance_counter(&mut self.performance.selection_spans_submitted, 1);
+                    let selected_x = span_x + from as f32 * cell_width;
+                    let selected_width = if display_count == 1 {
+                        span_width
+                    } else {
+                        to.saturating_sub(from) as f32 * cell_width
+                    };
+                    let selected_rect = egui::Rect::from_min_size(
+                        egui::pos2(selected_x, span_y),
+                        Vec2::new(selected_width.max(1.0), span_height),
+                    );
+                    painter.rect_filled(selected_rect, 0.0, palette.selection);
+                    painter.rect_stroke(
+                        selected_rect,
+                        0.0,
+                        Stroke::new(1.0, palette.selection_boundary),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                let color = if span.text_style.hidden_text {
+                    palette.subdued_text
+                } else {
+                    palette.text
+                };
+                paint_fixed_metric_text_with_selection(
+                    &painter,
+                    ui.ctx(),
+                    egui::pos2(span_x, span_y),
+                    &span.display_text,
+                    renderer_font_for_style(
+                        span.text_style.bold,
+                        span.text_style.italic,
+                        span.text_style.size as f32 * scale,
                     ),
-                    0.0,
-                    palette.selection,
+                    cell_width,
+                    span_height,
+                    FixedMetricTextStyle {
+                        color,
+                        selected_color: palette.selection_text,
+                        selection: selected_display,
+                    },
+                    &span.text_style,
+                    span_width,
+                    span.underline,
+                    span.strikethrough,
+                    &mut self.performance,
                 );
-                painter.rect_stroke(
-                    egui::Rect::from_min_size(
-                        egui::pos2(left, y),
-                        Vec2::new(width.max(1.0), line.geometry.height.to_points_f32() * scale),
-                    ),
-                    0.0,
-                    Stroke::new(1.0, palette.selection_boundary),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            paint_fixed_metric_text_with_selection(
-                &painter,
-                ui.ctx(),
-                egui::pos2(x, y),
-                &line.display_text,
-                renderer_font_for_style(
-                    line.text_style.bold,
-                    line.text_style.italic,
-                    line.text_style.size as f32 * scale,
-                ),
-                char_width,
-                line.geometry.height.to_points_f32() * scale,
-                FixedMetricTextStyle {
-                    color: if line.text_style.hidden_text {
+                if span.underline || span.strikethrough {
+                    let decoration_color = if span.text_style.hidden_text {
                         palette.subdued_text
                     } else {
                         palette.text
-                    },
-                    selected_color: palette.selection_text,
-                    selection: selection.map(|(start, end)| {
-                        (
-                            line.display_char_for_source(start, false),
-                            line.display_char_for_source(end, true),
-                        )
-                    }),
-                },
-                &mut self.performance,
-            );
-            if line.text_style.underline {
-                let underline_y = y + line.geometry.height.to_points_f32() * scale * 0.88;
-                painter.line_segment(
-                    [
-                        egui::pos2(x, underline_y),
-                        egui::pos2(x + line.geometry.width.to_points_f32() * scale, underline_y),
-                    ],
-                    Stroke::new(
-                        1.0_f32,
-                        if line.text_style.hidden_text {
-                            palette.subdued_text
-                        } else {
-                            palette.text
-                        },
-                    ),
-                );
+                    };
+                    if span.underline {
+                        let underline_y = span_y + span_height * 0.88;
+                        painter.line_segment(
+                            [
+                                egui::pos2(span_x, underline_y),
+                                egui::pos2(span_x + span_width, underline_y),
+                            ],
+                            Stroke::new(1.0_f32, decoration_color),
+                        );
+                    }
+                    if span.strikethrough {
+                        let strike_y = span_y + span_height * 0.52;
+                        painter.line_segment(
+                            [
+                                egui::pos2(span_x, strike_y),
+                                egui::pos2(span_x + span_width, strike_y),
+                            ],
+                            Stroke::new(1.0_f32, decoration_color),
+                        );
+                    }
+                }
             }
         }
 
-        let selection = self.session.selection();
+        let selection = match surface {
+            EditorSurface::Body => self.session.selection(),
+            EditorSurface::TitlePage => self.session.title_selection(),
+        };
         if caret_page_index == Some(page_index)
             && selection.anchor == selection.focus
-            && !layout.pages[page_index].title_page
         {
             if let Some(rect) = caret_geometry {
                 let caret = Caret {
@@ -301,19 +366,18 @@ impl ScriptCraftApp {
                             && caret.offset >= line.source.start
                             && caret.offset <= line.source.end
                     });
-                    let line_char_width =
-                        caret_line.map_or(7.0, |line| line.char_width.to_points_f32()) * scale;
-                    let ime_font = caret_line.map_or_else(
+                    let caret_span = caret_line.and_then(|line| Self::span_for_caret(line, caret.offset));
+                    let ime_font = caret_span.map_or_else(
                         || renderer_font(&layout.inputs.font_family, metrics.font_size),
-                        |line| {
+                        |span| {
                             renderer_font_for_style(
-                                line.text_style.bold,
-                                line.text_style.italic,
-                                line.text_style.size as f32 * scale,
+                                span.text_style.bold,
+                                span.text_style.italic,
+                                span.text_style.size as f32 * scale,
                             )
                         },
                     );
-                    let x = page_rect.left() + rect.x.to_points_f32() * scale + line_char_width;
+                    let x = page_rect.left() + rect.x.to_points_f32() * scale;
                     let y = page_rect.top() + rect.y.to_points_f32() * scale;
                     painter.text(
                         egui::pos2(x, y),
@@ -332,8 +396,8 @@ impl ScriptCraftApp {
             .saturating_add(paint_started.elapsed().as_nanos());
     }
 
-    pub(super) fn live_document_surface(&mut self, ui: &mut egui::Ui) {
-        let layout = match self.layout_for_render() {
+    pub(super) fn live_document_surface(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
+        let layout = match self.layout_for_render(surface) {
             Ok(layout) => layout,
             Err(error) => {
                 self.page_geometry.invalidate();
@@ -368,7 +432,10 @@ impl ScriptCraftApp {
         if zoom_compensation_queued {
             add_performance_counter(&mut self.performance.zoom_compensations_queued, 1);
         }
-        let selection = self.session.selection();
+        let selection = match surface {
+            EditorSurface::Body => self.session.selection(),
+            EditorSurface::TitlePage => self.session.title_selection(),
+        };
         // Temporarily override the current surface Ui style; keep the shared
         // context style and this ScrollArea's persistent identity unchanged.
         let scroll_fade = ui.style().spacing.scroll.fade;
@@ -435,12 +502,18 @@ impl ScriptCraftApp {
             );
             let caret_page_index = if reveal_intent == RevealIntent::Conditional {
                 let mut query_diagnostics = InteractionQueryDiagnostics::default();
-                let page = layout.page_for_position_in_range_with_diagnostics(
-                    selection.focus.element,
-                    selection.focus.offset,
-                    None,
-                    &mut query_diagnostics,
-                );
+                let page = match surface {
+                    EditorSurface::Body => layout.page_for_position_in_range_with_diagnostics(
+                        selection.focus.element,
+                        selection.focus.offset,
+                        None,
+                        &mut query_diagnostics,
+                    ),
+                    EditorSurface::TitlePage => layout.title_page_for_position(
+                        selection.focus.element,
+                        selection.focus.offset,
+                    ),
+                };
                 self.performance.indexed_interaction_queries = self
                     .performance
                     .indexed_interaction_queries
@@ -453,12 +526,18 @@ impl ScriptCraftApp {
             } else if selection.anchor == selection.focus {
                 paint_range.and_then(|(first, last)| {
                     let mut query_diagnostics = InteractionQueryDiagnostics::default();
-                    let page = layout.page_for_position_in_range_with_diagnostics(
-                        selection.focus.element,
-                        selection.focus.offset,
-                        Some((first, last)),
-                        &mut query_diagnostics,
-                    );
+                    let page = match surface {
+                        EditorSurface::Body => layout.page_for_position_in_range_with_diagnostics(
+                            selection.focus.element,
+                            selection.focus.offset,
+                            Some((first, last)),
+                            &mut query_diagnostics,
+                        ),
+                        EditorSurface::TitlePage => layout.title_page_for_position(
+                            selection.focus.element,
+                            selection.focus.offset,
+                        ).filter(|page| *page >= first && *page <= last),
+                    };
                     self.performance.indexed_interaction_queries = self
                         .performance
                         .indexed_interaction_queries
@@ -480,15 +559,17 @@ impl ScriptCraftApp {
                 let caret_started = Instant::now();
                 self.performance.caret_lookups = self.performance.caret_lookups.saturating_add(1);
                 let mut query_diagnostics = InteractionQueryDiagnostics::default();
-                let result = layout
-                    .caret_geometry_with_diagnostics(
-                        Caret {
-                            element: selection.focus.element,
-                            offset: selection.focus.offset,
-                        },
+                let caret = Caret {
+                    element: selection.focus.element,
+                    offset: selection.focus.offset,
+                };
+                let result = match surface {
+                    EditorSurface::Body => layout.caret_geometry_with_diagnostics(
+                        caret,
                         &mut query_diagnostics,
-                    )
-                    .ok();
+                    ),
+                    EditorSurface::TitlePage => layout.title_caret_geometry(caret),
+                }.ok();
                 self.performance.indexed_interaction_queries = self
                     .performance
                     .indexed_interaction_queries
@@ -507,8 +588,7 @@ impl ScriptCraftApp {
             };
             let caret_paint_page_index = (selection.anchor == selection.focus)
                 .then_some(caret_page_index)
-                .flatten()
-                .filter(|page_index| !layout.pages[*page_index].title_page);
+                .flatten();
             if reveal_intent == RevealIntent::Conditional && !zoom_compensation_queued {
                 if let (Some(page_index), Some(caret)) = (caret_page_index, caret_geometry) {
                     let page_rect = page_rects[page_index];
@@ -542,6 +622,7 @@ impl ScriptCraftApp {
                         editor_id,
                         caret_paint_page_index,
                         caret_geometry,
+                        surface,
                     );
                 }
             }
@@ -586,7 +667,10 @@ impl ScriptCraftApp {
 
         // This is the only interactive response in the painted editor. Pages remain
         // source-mapped geometry, not independent focusable widgets.
-        self.editor_surface_id = Some(editor_id);
+        match surface {
+            EditorSurface::Body => self.editor_surface_id = Some(editor_id),
+            EditorSurface::TitlePage => self.title_editor_surface_id = Some(editor_id),
+        }
         let response = ui
             .interact(scroll_output.inner_rect, editor_id, Sense::click_and_drag())
             .on_hover_cursor(document_cursor_icon());
@@ -601,11 +685,14 @@ impl ScriptCraftApp {
                     .native_input_diagnostics
                     .pointer_activations
                     .saturating_add(1);
+                self.set_active_editor_surface(surface);
                 self.dispatch_command(
                     CommandInvocation::new(Command::EditorFocus, CommandOrigin::Pointer),
                     ui.ctx(),
                 );
-                if let Some(page_index) = Self::pointer_body_page(&layout, &page_rects, pointer) {
+                if let Some(page_index) =
+                    Self::pointer_surface_page(&layout, &page_rects, pointer, surface)
+                {
                     if let Some(position) = self.caret_from_pointer(
                         &layout,
                         page_index,
@@ -623,7 +710,7 @@ impl ScriptCraftApp {
                         if let Ok(position) = scriptcraft_commands::Position::from_core(position) {
                             self.dispatch_command(
                                 CommandInvocation::new(
-                                    Command::EditorSelectionPointer { position, phase },
+                                    Command::EditorSelectionPointer { position, phase, surface },
                                     CommandOrigin::Pointer,
                                 ),
                                 ui.ctx(),
@@ -644,6 +731,9 @@ impl ScriptCraftApp {
             self.request_repaint(ui.ctx());
         }
         self.surface_focused = surface_focused;
+        if self.surface_focused {
+            self.set_active_editor_surface(surface);
+        }
         self.native_input_diagnostics.focused = self.surface_focused;
         if self.surface_focused {
             ui.ctx().memory_mut(|memory| {
@@ -668,6 +758,7 @@ impl ScriptCraftApp {
         events: &[egui::Event],
         modifiers: egui::Modifiers,
         ctx: &egui::Context,
+        surface: EditorSurface,
     ) {
         let started = Instant::now();
         let ime_event_in_frame = events.iter().any(|event| matches!(event, egui::Event::Ime(_)));
@@ -687,6 +778,15 @@ impl ScriptCraftApp {
             });
             let mut command = None;
             let result = match event {
+                egui::Event::Zoom(factor) => {
+                    if let Ok(factor) = scriptcraft_commands::ZoomFactor::new(*factor) {
+                        command = Some(CommandInvocation::new(
+                            Command::ViewZoomPinch { factor },
+                            CommandOrigin::InternalFollowUp,
+                        ));
+                    }
+                    None
+                }
                 egui::Event::Text(text)
                     if !text.is_empty()
                         && !self.ime_active
@@ -698,14 +798,14 @@ impl ScriptCraftApp {
                         && text.chars().all(|character| !character.is_control()) =>
                 {
                     command = Some(CommandInvocation::new(
-                        Command::EditorTextInsert { text: text.clone() },
+                        Command::EditorTextInsert { text: text.clone(), surface },
                         CommandOrigin::Keyboard,
                     ));
                     None
                 }
                 egui::Event::Paste(text) if !text.is_empty() => {
                     command = Some(CommandInvocation::new(
-                        Command::EditorTextPaste { text: text.clone() },
+                        Command::EditorTextPaste { text: text.clone(), surface },
                         CommandOrigin::Keyboard,
                     ));
                     None
@@ -721,7 +821,7 @@ impl ScriptCraftApp {
                     self.ime_preedit.clear();
                     if !text.is_empty() {
                         command = Some(CommandInvocation::new(
-                            Command::EditorTextInsert { text: text.clone() },
+                            Command::EditorTextInsert { text: text.clone(), surface },
                             CommandOrigin::ImeCommit,
                         ));
                     }
@@ -744,24 +844,45 @@ impl ScriptCraftApp {
                     ..
                 } => {
                     if !self.ime_active && !ime_event_in_frame {
-                        command = editor_command_for_key_event(
-                            *key,
-                            *physical_key,
-                            *modifiers,
-                            ShortcutPlatform::current(),
-                        )
-                        .map(|command| {
-                            let origin = match command.id() {
-                                CommandId::EditorParagraphEnter
-                                | CommandId::EditorParagraphTab
-                                | CommandId::EditorElementChange => CommandOrigin::Shortcut,
-                                _ => CommandOrigin::Keyboard,
-                            };
-                            CommandInvocation::new(command, origin)
-                        });
+                        if surface == EditorSurface::TitlePage
+                            && self.menu_policy.in_window_shortcuts_owned()
+                        {
+                            command = super::menu::command_for_key_event(*key, *modifiers)
+                                .and_then(super::app_commands::command_for_id)
+                                .map(|command| {
+                                    CommandInvocation::new(command, CommandOrigin::Shortcut)
+                                });
+                        }
+                        if command.is_none() {
+                            command = editor_command_for_key_event(
+                                *key,
+                                *physical_key,
+                                *modifiers,
+                                ShortcutPlatform::current(),
+                            )
+                            .filter(|command| {
+                                surface == EditorSurface::Body
+                                    || !matches!(
+                                        command,
+                                        Command::EditorElementChange { .. }
+                                            | Command::EditorParagraphTab
+                                    )
+                            })
+                            .map(|command| {
+                                let origin = match command.id() {
+                                    CommandId::EditorParagraphEnter
+                                    | CommandId::EditorParagraphTab
+                                    | CommandId::EditorElementChange => CommandOrigin::Shortcut,
+                                    _ => CommandOrigin::Keyboard,
+                                };
+                                CommandInvocation::new(command, origin)
+                            });
+                        }
                     }
                     if command.is_none() {
-                        command = self.navigation_key_event(*key, *modifiers).map(|command| {
+                        command = self
+                            .navigation_key_event(*key, *modifiers, surface)
+                            .map(|command| {
                             CommandInvocation::new(command, CommandOrigin::Keyboard)
                         });
                     }
@@ -786,37 +907,52 @@ impl ScriptCraftApp {
             .saturating_add(started.elapsed().as_nanos());
     }
 
-    fn navigation_key_event(&self, key: Key, modifiers: egui::Modifiers) -> Option<Command> {
+    fn navigation_key_event(
+        &self,
+        key: Key,
+        modifiers: egui::Modifiers,
+        surface: EditorSurface,
+    ) -> Option<Command> {
         match key {
             Key::ArrowLeft => Some(Command::EditorNavigationHorizontal {
                 direction: HorizontalDirection::Left,
                 extend: modifiers.shift,
+                surface,
             }),
             Key::ArrowRight => Some(Command::EditorNavigationHorizontal {
                 direction: HorizontalDirection::Right,
                 extend: modifiers.shift,
+                surface,
             }),
             Key::ArrowUp => Some(Command::EditorNavigationVertical {
                 direction: VerticalDirection::Up,
                 extend: modifiers.shift,
+                surface,
             }),
             Key::ArrowDown => Some(Command::EditorNavigationVertical {
                 direction: VerticalDirection::Down,
                 extend: modifiers.shift,
+                surface,
             }),
             Key::Home => Some(Command::EditorNavigationLineEdge {
                 edge: LineEdge::Start,
                 extend: modifiers.shift,
+                surface,
             }),
             Key::End => Some(Command::EditorNavigationLineEdge {
                 edge: LineEdge::End,
                 extend: modifiers.shift,
+                surface: EditorSurface::Body,
             }),
             _ => None,
         }
     }
 
-    pub(super) fn handle_surface_input(&mut self, ctx: &egui::Context) {
+    pub(super) fn handle_surface_input(
+        &mut self,
+        ctx: &egui::Context,
+        surface: EditorSurface,
+    ) {
         self.native_input_diagnostics.dispatch_enabled = self.surface_focused;
         if ctx.input(|input| has_nonzero_mouse_wheel(&input.raw.events)) {
             // Explicit user scrolling wins over a not-yet-applied zoom request.
@@ -827,7 +963,7 @@ impl ScriptCraftApp {
             self.pending_zoom_anchor = None;
             self.reveal_intent = RevealIntent::None;
         }
-        if !self.surface_focused {
+        if !self.surface_focused || self.active_editor_surface() != surface {
             return;
         }
         self.native_input_diagnostics.dispatched_frames = self
@@ -836,7 +972,7 @@ impl ScriptCraftApp {
             .saturating_add(1);
         let events = ctx.input(|input| input.events.clone());
         let modifiers = ctx.input(|input| input.modifiers);
-        self.dispatch_surface_events(&events, modifiers, ctx);
+        self.dispatch_surface_events(&events, modifiers, ctx, surface);
         if !events.is_empty() || ctx.input(|input| has_nonzero_mouse_wheel(&input.raw.events)) {
             self.request_repaint(ctx);
         }
@@ -911,7 +1047,7 @@ impl ScriptCraftApp {
         let selection = self.session.selection();
         let current = selection.focus;
         let layout = self
-            .layout_for_render()
+            .layout_for_render(self.active_editor_surface())
             .map_err(|_| EditError::InvalidElement)?;
         let interaction_started = Instant::now();
         self.performance.caret_lookups = self.performance.caret_lookups.saturating_add(1);
@@ -1189,8 +1325,12 @@ struct FixedCellGalleyKey {
     text: String,
     font_family: FontFamily,
     font_size_bits: u32,
+    effective_style: EffectiveTextStyle,
     char_width_bits: u32,
     line_height_bits: u32,
+    span_width_bits: u32,
+    underline: bool,
+    strikethrough: bool,
     color: Color32,
     pixels_per_point_bits: u32,
 }
@@ -1199,8 +1339,12 @@ impl FixedCellGalleyKey {
     fn new(
         text: &str,
         font: &FontId,
+        effective_style: &EffectiveTextStyle,
         char_width: f32,
         line_height: f32,
+        span_width: f32,
+        underline: bool,
+        strikethrough: bool,
         color: Color32,
         pixels_per_point: f32,
     ) -> Self {
@@ -1208,8 +1352,12 @@ impl FixedCellGalleyKey {
             text: text.to_owned(),
             font_family: font.family.clone(),
             font_size_bits: font.size.to_bits(),
+            effective_style: effective_style.clone(),
             char_width_bits: char_width.to_bits(),
             line_height_bits: line_height.to_bits(),
+            span_width_bits: span_width.to_bits(),
+            underline,
+            strikethrough,
             color,
             pixels_per_point_bits: pixels_per_point.to_bits(),
         }
@@ -1243,6 +1391,10 @@ fn paint_fixed_metric_text_with_selection(
     char_width: f32,
     line_height: f32,
     style: FixedMetricTextStyle,
+    effective_style: &EffectiveTextStyle,
+    span_width: f32,
+    underline: bool,
+    strikethrough: bool,
     performance: &mut PerformanceDiagnostics,
 ) {
     if text.is_empty() {
@@ -1288,8 +1440,12 @@ fn paint_fixed_metric_text_with_selection(
             ctx,
             span_text,
             &font,
+            effective_style,
             char_width,
             line_height,
+            span_width,
+            underline,
+            strikethrough,
             color,
         );
         if reused {
@@ -1324,12 +1480,27 @@ fn fixed_cell_span_galley(
     ctx: &egui::Context,
     text: &str,
     font: &FontId,
+    effective_style: &EffectiveTextStyle,
     char_width: f32,
     line_height: f32,
+    span_width: f32,
+    underline: bool,
+    strikethrough: bool,
     color: Color32,
 ) -> (std::sync::Arc<Galley>, bool, bool) {
     let pixels_per_point = ctx.pixels_per_point();
-    let key = FixedCellGalleyKey::new(text, font, char_width, line_height, color, pixels_per_point);
+    let key = FixedCellGalleyKey::new(
+        text,
+        font,
+        effective_style,
+        char_width,
+        line_height,
+        span_width,
+        underline,
+        strikethrough,
+        color,
+        pixels_per_point,
+    );
     let cached = ctx.data_mut(|data| {
         data.get_temp_mut_or_default::<FixedCellGalleyCache>(egui::Id::new(
             FIXED_CELL_GALLEY_CACHE_ID,
@@ -1510,6 +1681,184 @@ fn ordered_selection(selection: Selection) -> (Position, Position) {
     }
 }
 
+#[cfg(test)]
+mod styled_renderer_projection_tests {
+    use super::{FixedCellGalleyKey, ScriptCraftApp};
+    use eframe::egui::{Color32, FontFamily, FontId};
+    use scriptcraft_core::formatting::{EffectiveTextStyle, FontFallback};
+    use scriptcraft_core::layout::{
+        DisplaySourceSegment, FixedRect, PositionedStyledSpan, SourceRange,
+    };
+
+    fn effective_style(bold: bool) -> EffectiveTextStyle {
+        EffectiveTextStyle {
+            declared_family: "Courier Final Draft".to_owned(),
+            family: FontFallback::CourierPrime,
+            size: 12,
+            bold,
+            italic: false,
+            underline: false,
+            all_caps: false,
+            hidden_text: false,
+            source_color: None,
+        }
+    }
+
+    fn span(
+        display_text: &str,
+        source: std::ops::Range<usize>,
+        map: Vec<DisplaySourceSegment>,
+        bold: bool,
+    ) -> PositionedStyledSpan {
+        PositionedStyledSpan {
+            display_text: std::sync::Arc::from(display_text),
+            source: SourceRange {
+                element: 0,
+                start: source.start,
+                end: source.end,
+            },
+            display_source_map: map.into(),
+            text_style: effective_style(bold),
+            char_width: scriptcraft_core::FixedPoint::from_points(7),
+            geometry: FixedRect {
+                x: scriptcraft_core::FixedPoint::from_points(10),
+                y: scriptcraft_core::FixedPoint::from_points(20),
+                width: scriptcraft_core::FixedPoint::from_points(14),
+                height: scriptcraft_core::FixedPoint::from_points(12),
+            },
+            underline: false,
+            strikethrough: false,
+        }
+    }
+
+    #[test]
+    fn source_selection_is_clipped_per_span_and_uppercase_expansion_remains_source_mapped() {
+        let expanded = span(
+            "SS",
+            0..2,
+            vec![
+                DisplaySourceSegment {
+                    display_start: 0,
+                    display_end: 1,
+                    source_start: 0,
+                    source_end: 2,
+                },
+                DisplaySourceSegment {
+                    display_start: 1,
+                    display_end: 2,
+                    source_start: 0,
+                    source_end: 2,
+                },
+            ],
+            false,
+        );
+        assert_eq!(ScriptCraftApp::selected_display_range(&expanded, Some((1, 2))), Some((0, 2)));
+        assert_eq!(ScriptCraftApp::selected_display_range(&expanded, Some((2, 3))), None);
+
+        let first = span(
+            "ab",
+            0..2,
+            vec![
+                DisplaySourceSegment { display_start: 0, display_end: 1, source_start: 0, source_end: 1 },
+                DisplaySourceSegment { display_start: 1, display_end: 2, source_start: 1, source_end: 2 },
+            ],
+            false,
+        );
+        assert_eq!(ScriptCraftApp::selected_display_range(&first, Some((1, 2))), Some((1, 2)));
+    }
+
+    #[test]
+    fn caret_at_mixed_span_boundary_resolves_to_following_style_and_final_end_to_last_span() {
+        let regular = span(
+            "a",
+            0..1,
+            vec![DisplaySourceSegment { display_start: 0, display_end: 1, source_start: 0, source_end: 1 }],
+            false,
+        );
+        let bold = span(
+            "b",
+            1..2,
+            vec![DisplaySourceSegment { display_start: 0, display_end: 1, source_start: 1, source_end: 2 }],
+            true,
+        );
+        let line = scriptcraft_core::layout::LayoutLine {
+            page: 0,
+            role: scriptcraft_core::Role::Action,
+            element: 0,
+            source: SourceRange { element: 0, start: 0, end: 2 },
+            text: std::sync::Arc::from("ab"),
+            display_text: std::sync::Arc::from("ab"),
+            display_source_map: std::sync::Arc::from([
+                DisplaySourceSegment { display_start: 0, display_end: 1, source_start: 0, source_end: 1 },
+                DisplaySourceSegment { display_start: 1, display_end: 2, source_start: 1, source_end: 2 },
+            ]),
+            spans: std::sync::Arc::from([regular, bold]),
+            text_style: effective_style(false),
+            char_width: scriptcraft_core::FixedPoint::from_points(7),
+            geometry: FixedRect {
+                x: scriptcraft_core::FixedPoint::from_points(10),
+                y: scriptcraft_core::FixedPoint::from_points(20),
+                width: scriptcraft_core::FixedPoint::from_points(14),
+                height: scriptcraft_core::FixedPoint::from_points(12),
+            },
+            paragraph_bounds: FixedRect {
+                x: scriptcraft_core::FixedPoint::from_points(0),
+                y: scriptcraft_core::FixedPoint::from_points(20),
+                width: scriptcraft_core::FixedPoint::from_points(100),
+                height: scriptcraft_core::FixedPoint::from_points(12),
+            },
+            rect: scriptcraft_core::layout::Rect { x: 0, y: 20, width: 100, height: 12 },
+            keep_with_next: false,
+            oversized: false,
+        };
+        assert!(ScriptCraftApp::span_for_caret(&line, 1).is_some_and(|span| span.text_style.bold));
+        assert!(ScriptCraftApp::span_for_caret(&line, 2).is_some_and(|span| span.text_style.bold));
+    }
+
+    #[test]
+    fn galley_cache_key_separates_effective_span_style_and_justified_geometry() {
+        let font = FontId::new(12.0, FontFamily::Monospace);
+        let regular = FixedCellGalleyKey::new(
+            "word",
+            &font,
+            &effective_style(false),
+            7.0,
+            12.0,
+            28.0,
+            false,
+            false,
+            Color32::BLACK,
+            1.0,
+        );
+        let bold = FixedCellGalleyKey::new(
+            "word",
+            &font,
+            &effective_style(true),
+            7.0,
+            12.0,
+            28.0,
+            false,
+            false,
+            Color32::BLACK,
+            1.0,
+        );
+        let expanded_gap = FixedCellGalleyKey::new(
+            "word",
+            &font,
+            &effective_style(false),
+            7.0,
+            12.0,
+            35.0,
+            false,
+            false,
+            Color32::BLACK,
+            1.0,
+        );
+        assert_ne!(regular, bold);
+        assert_ne!(regular, expanded_gap);
+    }
+}
+
 pub(super) fn chrome_clear_color(palette: theme::ScriptWorkspacePalette) -> [f32; 4] {
     palette.background.to_normalized_gamma_f32()
 }
@@ -1524,4 +1873,83 @@ pub(super) fn central_panel_frame(
 
 fn document_cursor_icon() -> egui::CursorIcon {
     egui::CursorIcon::Text
+}
+
+#[cfg(test)]
+mod title_surface_input_tests {
+    use super::{EditorSurface, ScriptCraftApp};
+    use eframe::egui;
+    use scriptcraft_core::editing::{Position, Selection};
+
+    #[test]
+    fn ime_commit_in_child_targets_title_selection_and_child_ime_state() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else { return };
+        let context = egui::Context::default();
+        let title_index = 17;
+        let original_title = app.session.project().title_page[title_index].text.clone();
+        let title_caret = Position {
+            element: title_index,
+            offset: original_title.len(),
+        };
+        assert!(app
+            .session
+            .set_title_selection(Selection::caret(title_caret))
+            .is_ok());
+        let body_selection = app.session.selection();
+        app.set_active_editor_surface(EditorSurface::TitlePage);
+        app.swap_title_view_state();
+
+        let events = [
+            egui::Event::Ime(egui::ImeEvent::Preedit("draft".to_owned())),
+            egui::Event::Ime(egui::ImeEvent::Commit("X".to_owned())),
+        ];
+        app.dispatch_surface_events(
+            &events,
+            egui::Modifiers::NONE,
+            &context,
+            EditorSurface::TitlePage,
+        );
+
+        assert_eq!(
+            app.session.project().title_page[title_index].text,
+            format!("{original_title}X"),
+        );
+        assert_eq!(app.session.selection(), body_selection);
+        assert_eq!(app.session.title_selection().focus.offset, title_caret.offset + 1);
+        assert!(!app.ime_active);
+        assert!(app.ime_preedit.is_empty());
+        app.swap_title_view_state();
+    }
+
+    #[test]
+    fn body_paragraph_tab_shortcut_is_ignored_in_title_surface() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else { return };
+        let context = egui::Context::default();
+        let project_before = app.session.project().clone();
+        let title_selection_before = app.session.title_selection();
+        app.set_active_editor_surface(EditorSurface::TitlePage);
+        app.swap_title_view_state();
+
+        let events = [egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: Some(egui::Key::Tab),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        app.dispatch_surface_events(
+            &events,
+            egui::Modifiers::NONE,
+            &context,
+            EditorSurface::TitlePage,
+        );
+
+        assert_eq!(app.session.project(), &project_before);
+        assert_eq!(app.session.title_selection(), title_selection_before);
+        app.swap_title_view_state();
+    }
 }

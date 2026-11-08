@@ -2,8 +2,10 @@
 
 use crate::{
     cast_list::{self, CastListError},
-    validate_layout_inputs, LayoutInputs, ModelError, Project, Role, ScreenplayElement, StableId,
-    TextRun, MAX_ELEMENTS, MAX_TEXT_BYTES,
+    project_style_at_caret, set_paragraph_alignments, toggle_paragraph_run_styles,
+    validate_layout_inputs, LayoutInputs, ModelError, ParagraphAlignment, ParagraphTarget, Project,
+    Role, RunBoundaryAffinity, RunStyle, RunStyleFlags, ScreenplayElement, StableId, TextRun,
+    TitlePageParagraph, MAX_ELEMENTS, MAX_TEXT_BYTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -190,6 +192,7 @@ pub enum EditError {
     UnsupportedTransition { from: Role },
     Preservation(crate::preservation::PreservationError),
     CastList(CastListError),
+    FormattedText(crate::FormattedTextError),
     Model(ModelError),
 }
 
@@ -239,12 +242,21 @@ impl From<ModelError> for EditError {
     }
 }
 
+impl From<crate::FormattedTextError> for EditError {
+    fn from(error: crate::FormattedTextError) -> Self {
+        Self::FormattedText(error)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Snapshot {
     // Project includes semantic runs and the complete preservation graph, so
     // undo/redo restores both authorities rather than only the text projection.
     project: Project,
     selection: Selection,
+    title_selection: Selection,
+    title_typing_style: RunStyleFlags,
+    body_typing_style: RunStyleFlags,
     generated_parentheticals: BTreeSet<String>,
 }
 
@@ -257,6 +269,9 @@ pub struct EditingSession {
     policy: EditPolicy,
     layout_inputs: LayoutInputs,
     selection: Selection,
+    title_selection: Selection,
+    title_typing_style: RunStyleFlags,
+    body_typing_style: RunStyleFlags,
     dirty: bool,
     revision: u64,
     clean_project: Project,
@@ -279,6 +294,9 @@ impl PartialEq for EditingSession {
             && self.policy == other.policy
             && self.layout_inputs == other.layout_inputs
             && self.selection == other.selection
+            && self.title_selection == other.title_selection
+            && self.title_typing_style == other.title_typing_style
+            && self.body_typing_style == other.body_typing_style
             && self.dirty == other.dirty
             && self.revision == other.revision
             && self.clean_project == other.clean_project
@@ -341,6 +359,24 @@ impl EditingSession {
             offset: 0,
         });
         validate_selection(&project, selection)?;
+        let body_typing_style = project.elements.first().map_or(Ok(RunStyleFlags::default()), |element| {
+            project_style_at_caret(
+                &element.text,
+                &element.runs,
+                0,
+                RunBoundaryAffinity::Right,
+                RunStyleFlags::default(),
+            ).map_err(EditError::FormattedText)
+        })?;
+        let title_typing_style = project.title_page.first().map_or(Ok(RunStyleFlags::default()), |paragraph| {
+            project_style_at_caret(
+                &paragraph.text,
+                &paragraph.runs,
+                0,
+                RunBoundaryAffinity::Right,
+                RunStyleFlags::default(),
+            ).map_err(EditError::FormattedText)
+        })?;
         Ok(Self {
             clean_project: project.clone(),
             project,
@@ -348,6 +384,9 @@ impl EditingSession {
             policy,
             layout_inputs,
             selection,
+            title_selection: Selection::caret(Position { element: 0, offset: 0 }),
+            title_typing_style,
+            body_typing_style,
             dirty: false,
             revision: 0,
             history: Vec::new(),
@@ -399,6 +438,21 @@ impl EditingSession {
     }
     pub fn selection(&self) -> Selection {
         self.selection
+    }
+    /// Transient typing styles for a collapsed body caret. This state is
+    /// session-only and does not participate in document dirty tracking.
+    pub fn body_typing_style(&self) -> RunStyleFlags {
+        self.body_typing_style
+    }
+    /// Current title-page-local selection. Its paragraph indexes are never
+    /// interpreted against the screenplay body vector.
+    pub fn title_selection(&self) -> Selection {
+        self.title_selection
+    }
+    /// Transient typing styles for a collapsed title-page caret. This state is
+    /// session-only and does not participate in document dirty tracking.
+    pub fn title_typing_style(&self) -> RunStyleFlags {
+        self.title_typing_style
     }
     /// Projects the exact role decisions used by [`Self::enter`] and
     /// [`Self::tab`] without executing edits, touching history, or changing
@@ -499,7 +553,8 @@ impl EditingSession {
     /// Revalidates the live semantic project and selection without mutating it.
     pub fn validate(&self) -> Result<(), EditError> {
         validate_full_candidate(&self.project)?;
-        validate_selection(&self.project, self.selection)
+        validate_selection(&self.project, self.selection)?;
+        validate_title_selection(&self.project, self.title_selection)
     }
 
     pub fn mark_saved(&mut self) {
@@ -584,12 +639,13 @@ impl EditingSession {
         if let Some(preservation) = project.preservation.as_mut() {
             preservation.rebuild_managed_paragraph_index();
         }
-        if project.elements.len() != self.project.elements.len() {
-            return Err(EditError::InvalidSelection);
-        }
-
         let mut rebased = self.clone();
-        let selection = map_selection_to_project(self.selection, &project)?;
+        let selection = map_selection_to_project(self.selection, &self.project, &project);
+        let title_selection = map_title_selection_to_project(
+            self.title_selection,
+            &self.project,
+            &project,
+        );
         let generated_parentheticals = self
             .project
             .elements
@@ -606,6 +662,7 @@ impl EditingSession {
         rebased.project = project.clone();
         rebased.clean_project = project;
         rebased.selection = selection;
+        rebased.title_selection = title_selection;
         rebased.generated_parentheticals = generated_parentheticals;
         rebased.dirty = false;
         rebased.last_validation_was_scoped = false;
@@ -638,18 +695,227 @@ impl EditingSession {
     pub fn set_selection(&mut self, selection: Selection) -> Result<(), EditError> {
         validate_selection(&self.project, selection)?;
         self.selection = selection;
+        if selection.anchor == selection.focus {
+            let element = &self.project.elements[selection.focus.element];
+            self.body_typing_style = project_style_at_caret(
+                &element.text,
+                &element.runs,
+                selection.focus.offset,
+                RunBoundaryAffinity::Right,
+                self.body_typing_style,
+            ).map_err(EditError::FormattedText)?;
+        }
         Ok(())
+    }
+
+    /// Sets a title-page-local selection without affecting the body caret,
+    /// history, revision, or dirty state.
+    pub fn set_title_selection(&mut self, selection: Selection) -> Result<(), EditError> {
+        validate_title_selection(&self.project, selection)?;
+        self.title_selection = selection;
+        if selection.anchor == selection.focus {
+            if let Some(paragraph) = self.project.title_page.get(selection.focus.element) {
+                self.title_typing_style = project_style_at_caret(
+                    &paragraph.text,
+                    &paragraph.runs,
+                    selection.focus.offset,
+                    RunBoundaryAffinity::Right,
+                    self.title_typing_style,
+                ).map_err(EditError::FormattedText)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Inserts or replaces canonical title text in one paragraph. Paste is an
+    /// alias so one clipboard operation always creates one history entry.
+    pub fn insert_title(&mut self, text: &str) -> Result<(), EditError> {
+        self.mutate_title(|project, selection, typing| {
+            let (start, end) = selection.ordered();
+            let insertion_style = if start == end {
+                *typing
+            } else {
+                let paragraph = project.title_page.get(start.element).ok_or(EditError::InvalidElement)?;
+                project_style_at_caret(
+                    &paragraph.text,
+                    &paragraph.runs,
+                    start.offset,
+                    RunBoundaryAffinity::Right,
+                    *typing,
+                ).map_err(EditError::FormattedText)?
+            };
+            replace_title_range(project, start, end, text, insertion_style)?;
+            Ok(Selection::caret(Position {
+                element: start.element,
+                offset: start.offset.saturating_add(text.len()),
+            }))
+        })
+    }
+
+    pub fn paste_title(&mut self, text: &str) -> Result<(), EditError> {
+        self.insert_title(text)
+    }
+
+    /// Deletes a title selection, or the next Unicode scalar at a collapsed
+    /// caret. Structural source reconciliation is staged with the semantic edit.
+    pub fn delete_title(&mut self) -> Result<(), EditError> {
+        self.mutate_title(|project, selection, typing| {
+            let (start, end) = selection.ordered();
+            if start != end {
+                replace_title_range(project, start, end, "", *typing)?;
+                return Ok(Selection::caret(start));
+            }
+            let paragraph_text = project
+                .title_page
+                .get(start.element)
+                .ok_or(EditError::InvalidElement)?
+                .text
+                .clone();
+                if start.offset == paragraph_text.len() {
+                    if start.element + 1 < project.title_page.len() {
+                    join_title_at(project, start.element)?;
+                }
+                return Ok(*selection);
+            }
+            let next = next_boundary(&paragraph_text, start.offset);
+            let finish = Position { offset: next, ..start };
+            replace_title_range(project, start, finish, "", *typing)?;
+            Ok(Selection::caret(start))
+        })
+    }
+
+    pub fn backspace_title(&mut self) -> Result<(), EditError> {
+        self.mutate_title(|project, selection, typing| {
+            let (start, end) = selection.ordered();
+            if start != end {
+                replace_title_range(project, start, end, "", *typing)?;
+                return Ok(Selection::caret(start));
+            }
+            let paragraph_text = project
+                .title_page
+                .get(start.element)
+                .ok_or(EditError::InvalidElement)?
+                .text
+                .clone();
+            if start.offset == 0 {
+                if start.element > 0 {
+                    let left = start.element - 1;
+                    let offset = project.title_page[left].text.len();
+                    join_title_at(project, left)?;
+                    return Ok(Selection::caret(Position { element: left, offset }));
+                }
+                return Ok(*selection);
+            }
+            let previous = previous_boundary(&paragraph_text, start.offset);
+            let from = Position { offset: previous, ..start };
+            replace_title_range(project, from, start, "", *typing)?;
+            Ok(Selection::caret(from))
+        })
+    }
+
+    pub fn delete_forward_title(&mut self) -> Result<(), EditError> {
+        self.delete_title()
+    }
+
+    /// Title Enter inserts a new role-less paragraph. Source-backed structure
+    /// is reconciled transactionally against its preserved TitlePage Content.
+    pub fn split_title(&mut self) -> Result<(), EditError> {
+        self.mutate_title(|project, selection, _typing| {
+            let (start, end) = selection.ordered();
+            if start != end {
+                return Err(EditError::InvalidSelection);
+            }
+            let original = project
+                .title_page
+                .get(start.element)
+                .cloned()
+                .ok_or(EditError::InvalidElement)?;
+            let id = project.allocate_element_id()?;
+            let source_runs = effective_title_runs(&original);
+            let original_len = original.text.len();
+            let mut left = original.clone();
+            let mut right = original;
+            left.text = left.text[..start.offset].to_owned();
+            right.id = id;
+            right.text = right.text[start.offset..].to_owned();
+            left.runs = slice_runs(&source_runs, 0, start.offset);
+            right.runs = slice_runs(&source_runs, start.offset, original_len);
+            right.source_provenance = None;
+            project.title_page[start.element] = left;
+            project.title_page.insert(start.element + 1, right);
+            Ok(Selection::caret(Position { element: start.element + 1, offset: 0 }))
+        })
+    }
+
+    pub fn enter_title(&mut self) -> Result<(), EditError> {
+        self.split_title()
+    }
+
+    /// Title Tab is consumed without inserting a literal tab or changing
+    /// screenplay roles.
+    pub fn tab_title(&self) -> Result<(), EditError> {
+        validate_title_selection(&self.project, self.title_selection)
+    }
+
+    /// Joins the title paragraph before the caret into the paragraph at the
+    /// caret, retaining the preceding stable identity. Source-backed structure
+    /// either reconciles wholly or leaves the live session unchanged.
+    pub fn join_title_with_previous(&mut self) -> Result<(), EditError> {
+        self.mutate_title(|project, selection, _typing| {
+            let (start, end) = selection.ordered();
+            if start != end || start.offset != 0 || start.element == 0 {
+                return Err(EditError::InvalidSelection);
+            }
+            let left_index = start.element - 1;
+            let offset = project.title_page[left_index].text.len();
+            join_title_at(project, left_index)?;
+            Ok(Selection::caret(Position { element: left_index, offset }))
+        })
+    }
+
+    /// Applies a run-style toggle to the body selection through the same
+    /// canonical range engine used by title text.
+    pub fn toggle_body_run_style(&mut self, style: RunStyle) -> Result<(), EditError> {
+        self.toggle_surface_run_style(false, style)
+    }
+
+    pub fn toggle_title_run_style(&mut self, style: RunStyle) -> Result<(), EditError> {
+        self.toggle_surface_run_style(true, style)
+    }
+
+    pub fn set_body_alignment(&mut self, alignment: ParagraphAlignment) -> Result<(), EditError> {
+        self.set_surface_alignment(false, alignment)
+    }
+
+    pub fn set_title_alignment(&mut self, alignment: ParagraphAlignment) -> Result<(), EditError> {
+        self.set_surface_alignment(true, alignment)
     }
 
     /// Inserts or replaces text while retaining the existing element identity.
     /// Mapped source runs and text leaves are transformed in the same candidate;
     /// unsafe inline intersections reject the whole operation.
     pub fn insert(&mut self, text: &str) -> Result<(), EditError> {
+        let typing = self.body_typing_style;
         self.mutate(
             MutationValidationScope::SingleParagraph,
             |project, selection, _generated, _policy| {
                 let (start, end) = selection.ordered();
+                let insertion_style = if start == end {
+                    typing
+                } else {
+                    let element = project.elements.get(start.element).ok_or(EditError::InvalidElement)?;
+                    project_style_at_caret(
+                        &element.text,
+                        &element.runs,
+                        start.offset,
+                        RunBoundaryAffinity::Right,
+                        typing,
+                    ).map_err(EditError::FormattedText)?
+                };
                 replace_range(project, start, end, text)?;
+                if !text.is_empty() {
+                    synchronize_body_typing_style(project, start, text, insertion_style)?;
+                }
                 Ok(Selection::caret(Position {
                     element: start.element,
                     offset: start.offset + text.len(),
@@ -994,15 +1260,22 @@ impl EditingSession {
             preservation.rebuild_managed_paragraph_index();
         }
         validate_selection(&snapshot.project, snapshot.selection)?;
+        validate_title_selection(&snapshot.project, snapshot.title_selection)?;
         let current = Snapshot {
             project: self.project.clone(),
             selection: self.selection,
+            title_selection: self.title_selection,
+            title_typing_style: self.title_typing_style,
+            body_typing_style: self.body_typing_style,
             generated_parentheticals: self.generated_parentheticals.clone(),
         };
         self.history.pop();
         self.redo.push(current);
         self.project = snapshot.project;
         self.selection = snapshot.selection;
+        self.title_selection = snapshot.title_selection;
+        self.title_typing_style = snapshot.title_typing_style;
+        self.body_typing_style = snapshot.body_typing_style;
         self.generated_parentheticals = snapshot.generated_parentheticals;
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
@@ -1023,15 +1296,22 @@ impl EditingSession {
             preservation.rebuild_managed_paragraph_index();
         }
         validate_selection(&snapshot.project, snapshot.selection)?;
+        validate_title_selection(&snapshot.project, snapshot.title_selection)?;
         let current = Snapshot {
             project: self.project.clone(),
             selection: self.selection,
+            title_selection: self.title_selection,
+            title_typing_style: self.title_typing_style,
+            body_typing_style: self.body_typing_style,
             generated_parentheticals: self.generated_parentheticals.clone(),
         };
         self.redo.pop();
         self.push_history(current);
         self.project = snapshot.project;
         self.selection = snapshot.selection;
+        self.title_selection = snapshot.title_selection;
+        self.title_typing_style = snapshot.title_typing_style;
+        self.body_typing_style = snapshot.body_typing_style;
         self.generated_parentheticals = snapshot.generated_parentheticals;
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
@@ -1190,6 +1470,9 @@ impl EditingSession {
         self.push_history(Snapshot {
             project: self.project.clone(),
             selection: self.selection,
+            title_selection: self.title_selection,
+            title_typing_style: self.title_typing_style,
+            body_typing_style: self.body_typing_style,
             generated_parentheticals: self.generated_parentheticals.clone(),
         });
         self.project = project;
@@ -1203,6 +1486,145 @@ impl EditingSession {
         self.pending_derived_invalidation
             .merge(derived_invalidation);
         Ok(())
+    }
+
+    fn mutate_title<F>(&mut self, operation: F) -> Result<(), EditError>
+    where
+        F: FnOnce(
+            &mut Project,
+            &Selection,
+            &mut RunStyleFlags,
+        ) -> Result<Selection, EditError>,
+    {
+        let mut project = self.project.clone();
+        let before_title = self.project.title_page.clone();
+        let mut typing = self.title_typing_style;
+        let selection = operation(&mut project, &self.title_selection, &mut typing)?;
+        let before_ids = before_title.iter().map(|paragraph| &paragraph.id).collect::<Vec<_>>();
+        let after_ids = project.title_page.iter().map(|paragraph| &paragraph.id).collect::<Vec<_>>();
+        if before_ids != after_ids {
+            if let Some(preservation) = project.preservation.as_mut() {
+                preservation
+                    .reconcile_title_structure(&before_title, &mut project.title_page)
+                    .map_err(EditError::Preservation)?;
+            } else if before_title.iter().any(|paragraph| paragraph.source_provenance.is_some())
+                || project.title_page.iter().any(|paragraph| paragraph.source_provenance.is_some())
+            {
+                return Err(EditError::Preservation(
+                    crate::preservation::PreservationError::ManagedAnchorMissing,
+                ));
+            }
+        }
+        if let Some(preservation) = project.preservation.as_mut() {
+            if !preservation.has_source_identity_use_index() {
+                preservation.rebuild_managed_paragraph_index();
+            }
+        }
+        validate_full_candidate(&project)?;
+        validate_title_selection(&project, selection)?;
+        if project == self.project {
+            self.title_selection = selection;
+            self.title_typing_style = typing;
+            self.last_validation_was_scoped = false;
+            return Ok(());
+        }
+        self.push_history(Snapshot {
+            project: self.project.clone(),
+            selection: self.selection,
+            title_selection: self.title_selection,
+            title_typing_style: self.title_typing_style,
+            body_typing_style: self.body_typing_style,
+            generated_parentheticals: self.generated_parentheticals.clone(),
+        });
+        self.project = project;
+        self.title_selection = selection;
+        self.title_typing_style = typing;
+        self.redo.clear();
+        self.revision = self.revision.saturating_add(1);
+        self.dirty = self.project != self.clean_project;
+        self.validated_baseline = true;
+        self.last_validation_was_scoped = false;
+        // Title-only edits cannot affect screenplay scene-derived attachments.
+        Ok(())
+    }
+
+    fn toggle_surface_run_style(
+        &mut self,
+        title_surface: bool,
+        style: RunStyle,
+    ) -> Result<(), EditError> {
+        let selection = if title_surface { self.title_selection } else { self.selection };
+        if selection.anchor == selection.focus {
+            let position = selection.focus;
+            let (text, runs, active) = if title_surface {
+                let paragraph = self
+                    .project
+                    .title_page
+                    .get(position.element)
+                    .ok_or(EditError::InvalidElement)?;
+                (paragraph.text.as_str(), paragraph.runs.as_slice(), self.title_typing_style)
+            } else {
+                let paragraph = self
+                    .project
+                    .elements
+                    .get(position.element)
+                    .ok_or(EditError::InvalidElement)?;
+                (paragraph.text.as_str(), paragraph.runs.as_slice(), self.body_typing_style)
+            };
+            let current = project_style_at_caret(
+                text,
+                runs,
+                position.offset,
+                RunBoundaryAffinity::Right,
+                active,
+            )
+            .map_err(EditError::FormattedText)?;
+            let next = current.toggled(style);
+            if title_surface {
+                self.title_typing_style = next;
+            } else {
+                self.body_typing_style = next;
+            }
+            return Ok(());
+        }
+
+        let active = if title_surface { self.title_typing_style } else { self.body_typing_style };
+        let ranges = selection_run_ranges(&self.project, selection, title_surface)?;
+        if title_surface {
+            self.mutate_title(|project, _, _| {
+                toggle_paragraph_run_styles(project, &ranges, active, style)
+                    .map_err(EditError::FormattedText)?;
+                Ok(selection)
+            })
+        } else {
+            self.mutate(MutationValidationScope::Complete, |project, _, _, _| {
+                toggle_paragraph_run_styles(project, &ranges, active, style)
+                    .map_err(EditError::FormattedText)?;
+                Ok(selection)
+            })
+        }
+    }
+
+    fn set_surface_alignment(
+        &mut self,
+        title_surface: bool,
+        alignment: ParagraphAlignment,
+    ) -> Result<(), EditError> {
+        let selection = if title_surface { self.title_selection } else { self.selection };
+        let targets = selection_paragraph_targets(&self.project, selection, title_surface)?;
+        if title_surface {
+            self.mutate_title(|project, _, _| {
+                set_paragraph_alignments(project, &targets, alignment)
+                    .map_err(EditError::FormattedText)?;
+                Ok(selection)
+            })
+        } else {
+            self.mutate(MutationValidationScope::Complete, |project, _, _, _| {
+                set_paragraph_alignments(project, &targets, alignment)
+                    .map_err(EditError::FormattedText)?;
+                Ok(selection)
+            })
+        }
     }
 
     fn push_history(&mut self, snapshot: Snapshot) {
@@ -1354,24 +1776,106 @@ fn owning_scene_id(elements: &[ScreenplayElement], element_index: usize) -> Opti
 
 fn map_selection_to_project(
     selection: Selection,
-    project: &Project,
-) -> Result<Selection, EditError> {
-    fn map_position(mut position: Position, project: &Project) -> Result<Position, EditError> {
-        let element = project
-            .elements
-            .get(position.element)
-            .ok_or(EditError::InvalidSelection)?;
-        position.offset = position.offset.min(element.text.len());
-        while !element.text.is_char_boundary(position.offset) {
-            position.offset = position.offset.saturating_sub(1);
+    old_project: &Project,
+    new_project: &Project,
+) -> Selection {
+    fn map_position(position: Position, old: &Project, new: &Project) -> Position {
+        if new.elements.is_empty() {
+            return Position { element: 0, offset: 0 };
         }
-        Ok(position)
+        let old_element = old.elements.get(position.element);
+        let source_id = old_element
+            .and_then(|element| element.source_provenance.as_ref())
+            .and_then(|provenance| provenance.foreign_id.as_deref());
+        let unique_source_id = source_id.filter(|source_id| {
+            old.elements.iter().filter(|element| {
+                element.source_provenance.as_ref()
+                    .and_then(|provenance| provenance.foreign_id.as_deref()) == Some(*source_id)
+            }).count() == 1
+                && new.elements.iter().filter(|element| {
+                    element.source_provenance.as_ref()
+                        .and_then(|provenance| provenance.foreign_id.as_deref()) == Some(*source_id)
+                }).count() == 1
+        });
+        let index = unique_source_id
+            .and_then(|source_id| new.elements.iter().position(|element| {
+                element.source_provenance.as_ref()
+                    .and_then(|provenance| provenance.foreign_id.as_deref()) == Some(source_id)
+            }))
+            .or_else(|| {
+                let old_element = old_element?;
+                if old_element.source_provenance.is_some() {
+                    return None;
+                }
+                new.elements.iter().position(|element| {
+                    element.id == old_element.id && element.source_provenance.is_none()
+                })
+            })
+            .unwrap_or_else(|| position.element.min(new.elements.len() - 1));
+        let element = &new.elements[index];
+        let mut offset = position.offset.min(element.text.len());
+        while !element.text.is_char_boundary(offset) {
+            offset = offset.saturating_sub(1);
+        }
+        Position { element: index, offset }
     }
+    Selection {
+        anchor: map_position(selection.anchor, old_project, new_project),
+        focus: map_position(selection.focus, old_project, new_project),
+    }
+}
 
-    Ok(Selection {
-        anchor: map_position(selection.anchor, project)?,
-        focus: map_position(selection.focus, project)?,
-    })
+fn map_title_selection_to_project(
+    selection: Selection,
+    old_project: &Project,
+    new_project: &Project,
+) -> Selection {
+    fn map_position(position: Position, old: &Project, new: &Project) -> Position {
+        if new.title_page.is_empty() {
+            return Position { element: 0, offset: 0 };
+        }
+        let old_paragraph = old.title_page.get(position.element);
+        let source_id = old_paragraph
+            .and_then(|paragraph| paragraph.source_provenance.as_ref())
+            .and_then(|provenance| provenance.foreign_id.as_deref());
+        let unique_source_id = source_id.filter(|source_id| {
+            old.title_page.iter().filter(|paragraph| {
+                paragraph.source_provenance.as_ref()
+                    .and_then(|provenance| provenance.foreign_id.as_deref()) == Some(*source_id)
+            }).count() == 1
+                && new.title_page.iter().filter(|paragraph| {
+                    paragraph.source_provenance.as_ref()
+                        .and_then(|provenance| provenance.foreign_id.as_deref()) == Some(*source_id)
+                }).count() == 1
+        });
+        let index = unique_source_id
+            .and_then(|source_id| new.title_page.iter().position(|paragraph| {
+                paragraph.source_provenance.as_ref()
+                    .and_then(|provenance| provenance.foreign_id.as_deref()) == Some(source_id)
+            }))
+            .or_else(|| {
+                let old_paragraph = old_paragraph?;
+                if old_paragraph.source_provenance.is_some() {
+                    return None;
+                }
+                new.title_page.iter().position(|paragraph| {
+                    paragraph.id == old_paragraph.id
+                        && paragraph.source_provenance.as_ref()
+                            .is_none_or(|provenance| provenance.foreign_id.is_none())
+                })
+            })
+            .unwrap_or_else(|| position.element.min(new.title_page.len() - 1));
+        let paragraph = &new.title_page[index];
+        let mut offset = position.offset.min(paragraph.text.len());
+        while !paragraph.text.is_char_boundary(offset) {
+            offset = offset.saturating_sub(1);
+        }
+        Position { element: index, offset }
+    }
+    Selection {
+        anchor: map_position(selection.anchor, old_project, new_project),
+        focus: map_position(selection.focus, old_project, new_project),
+    }
 }
 
 fn invalidate_changed_generated_parentheticals(
@@ -1419,6 +1923,311 @@ fn validate_position(project: &Project, position: Position) -> Result<(), EditEr
 fn validate_selection(project: &Project, selection: Selection) -> Result<(), EditError> {
     validate_position(project, selection.anchor)?;
     validate_position(project, selection.focus)
+}
+
+fn validate_title_position(project: &Project, position: Position) -> Result<(), EditError> {
+    if project.title_page.is_empty() && position == (Position { element: 0, offset: 0 }) {
+        return Ok(());
+    }
+    let paragraph = project
+        .title_page
+        .get(position.element)
+        .ok_or(EditError::InvalidElement)?;
+    if paragraph.is_boundary(position.offset) {
+        Ok(())
+    } else {
+        Err(EditError::InvalidUtf8Boundary)
+    }
+}
+
+fn validate_title_selection(project: &Project, selection: Selection) -> Result<(), EditError> {
+    validate_title_position(project, selection.anchor)?;
+    validate_title_position(project, selection.focus)
+}
+
+fn selection_run_ranges(
+    project: &Project,
+    selection: Selection,
+    title_surface: bool,
+) -> Result<Vec<(ParagraphTarget, std::ops::Range<usize>)>, EditError> {
+    if title_surface {
+        validate_title_selection(project, selection)?;
+    } else {
+        validate_selection(project, selection)?;
+    }
+    let (start, end) = selection.ordered();
+    let mut ranges = Vec::new();
+    for index in start.element..=end.element {
+        let (text_len, target) = if title_surface {
+            let paragraph = project.title_page.get(index).ok_or(EditError::InvalidElement)?;
+            (paragraph.text.len(), ParagraphTarget::TitlePage(index))
+        } else {
+            let paragraph = project.elements.get(index).ok_or(EditError::InvalidElement)?;
+            (paragraph.text.len(), ParagraphTarget::Body(index))
+        };
+        let from = if index == start.element { start.offset } else { 0 };
+        let to = if index == end.element { end.offset } else { text_len };
+        ranges.push((target, from..to));
+    }
+    Ok(ranges)
+}
+
+fn selection_paragraph_targets(
+    project: &Project,
+    selection: Selection,
+    title_surface: bool,
+) -> Result<Vec<ParagraphTarget>, EditError> {
+    if title_surface {
+        validate_title_selection(project, selection)?;
+    } else {
+        validate_selection(project, selection)?;
+    }
+    let (start, end) = selection.ordered();
+    let last = if start.element < end.element && end.offset == 0 {
+        end.element - 1
+    } else {
+        end.element
+    };
+    (start.element..=last)
+        .map(|index| {
+            if title_surface {
+                project.title_page.get(index).ok_or(EditError::InvalidElement)?;
+                Ok(ParagraphTarget::TitlePage(index))
+            } else {
+                project.elements.get(index).ok_or(EditError::InvalidElement)?;
+                Ok(ParagraphTarget::Body(index))
+            }
+        })
+        .collect()
+}
+
+fn unsupported_title_structure() -> EditError {
+    EditError::Preservation(crate::preservation::PreservationError::UnsupportedTextMapping)
+}
+
+fn effective_title_runs(paragraph: &TitlePageParagraph) -> Vec<TextRun> {
+    if paragraph.runs.is_empty() {
+        if paragraph.text.is_empty() {
+            Vec::new()
+        } else {
+            vec![TextRun { text: paragraph.text.clone(), attributes: Vec::new() }]
+        }
+    } else {
+        paragraph.runs.clone()
+    }
+}
+
+fn join_title_at(project: &mut Project, left_index: usize) -> Result<(), EditError> {
+    let right_index = left_index.checked_add(1).ok_or(EditError::InvalidElement)?;
+    let right = project.title_page.get(right_index).cloned().ok_or(EditError::InvalidElement)?;
+    let mut left = project.title_page.get(left_index).cloned().ok_or(EditError::InvalidElement)?;
+    if left.text.len().saturating_add(right.text.len()) > MAX_TEXT_BYTES {
+        return Err(EditError::TextTooLong);
+    }
+    let mut runs = effective_title_runs(&left);
+    runs.extend(effective_title_runs(&right));
+    left.text.push_str(&right.text);
+    coalesce_runs(&mut runs);
+    left.runs = if left.text.is_empty() { Vec::new() } else { runs };
+    project.title_page[left_index] = left;
+    project.title_page.remove(right_index);
+    Ok(())
+}
+
+fn title_run_attributes_at(runs: &[TextRun], offset: usize, total: usize) -> Vec<crate::RunAttribute> {
+    let mut cursor = 0usize;
+    for run in runs {
+        let limit = cursor.saturating_add(run.text.len());
+        if offset < limit || (offset == total && limit == total) {
+            return run.attributes.clone();
+        }
+        cursor = limit;
+    }
+    Vec::new()
+}
+
+fn apply_typing_styles(
+    mut attributes: Vec<crate::RunAttribute>,
+    typing: RunStyleFlags,
+) -> Vec<crate::RunAttribute> {
+    let mut tokens = attributes
+        .iter()
+        .find(|attribute| attribute.name == "Style")
+        .map(|attribute| attribute.value.split('+').filter(|token| {
+            !matches!(*token, "Bold" | "Italic" | "Underline" | "AllCaps" | "Strikethrough" | "StrikeThrough")
+        }).map(str::to_owned).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for (enabled, token) in [
+        (typing.bold, "Bold"),
+        (typing.italics, "Italic"),
+        (typing.underline, "Underline"),
+        (typing.all_caps, "AllCaps"),
+        (typing.strikethrough, "Strikethrough"),
+    ] {
+        if enabled {
+            tokens.push(token.to_owned());
+        }
+    }
+    if let Some(attribute) = attributes.iter_mut().find(|attribute| attribute.name == "Style") {
+        attribute.value = tokens.join("+");
+    } else if !tokens.is_empty() {
+        attributes.push(crate::RunAttribute { name: "Style".into(), value: tokens.join("+") });
+    }
+    attributes
+}
+
+fn synchronize_body_typing_style(
+    project: &mut Project,
+    start: Position,
+    inserted: &str,
+    typing: RunStyleFlags,
+) -> Result<(), EditError> {
+    let element = project.elements.get(start.element).ok_or(EditError::InvalidElement)?;
+    let current = project_style_at_caret(
+        &element.text,
+        &element.runs,
+        start.offset,
+        RunBoundaryAffinity::Right,
+        RunStyleFlags::default(),
+    ).map_err(EditError::FormattedText)?;
+    let target = ParagraphTarget::Body(start.element);
+    let range = start.offset..start.offset.saturating_add(inserted.len());
+    for style in [
+        RunStyle::Bold,
+        RunStyle::Italics,
+        RunStyle::Underline,
+        RunStyle::AllCaps,
+        RunStyle::Strikethrough,
+    ] {
+        if current.contains(style) != typing.contains(style) {
+            toggle_paragraph_run_styles(
+                project,
+                &[(target, range.clone())],
+                RunStyleFlags::default(),
+                style,
+            ).map_err(EditError::FormattedText)?;
+        }
+    }
+    Ok(())
+}
+
+fn replace_title_range(
+    project: &mut Project,
+    start: Position,
+    end: Position,
+    inserted: &str,
+    typing: RunStyleFlags,
+) -> Result<(), EditError> {
+    validate_title_position(project, start)?;
+    validate_title_position(project, end)?;
+    if (start.element, start.offset) > (end.element, end.offset) {
+        return Err(EditError::InvalidSelection);
+    }
+    if inserted.len() > MAX_TEXT_BYTES {
+        return Err(EditError::TextTooLong);
+    }
+    if project.title_page.is_empty() {
+        if start != end || project.preservation.is_some() {
+            return Err(unsupported_title_structure());
+        }
+        let id = project.allocate_element_id()?;
+        let mut paragraph = TitlePageParagraph::new(
+            id.as_str(),
+            inserted,
+            crate::TitlePageParagraphFormatting::default(),
+        )?;
+        if !inserted.is_empty() && typing != RunStyleFlags::default() {
+            paragraph.runs.push(TextRun {
+                text: inserted.to_owned(),
+                attributes: apply_typing_styles(Vec::new(), typing),
+            });
+        }
+        project.title_page.push(paragraph);
+        return Ok(());
+    }
+    if start.element == end.element {
+        let old = project.title_page[start.element].clone();
+        let combined_len = old.text.len().saturating_sub(end.offset - start.offset)
+            .saturating_add(inserted.len());
+        if combined_len > MAX_TEXT_BYTES {
+            return Err(EditError::TextTooLong);
+        }
+        let has_runs = !old.runs.is_empty();
+        let mut has_source_mapping = false;
+        if let Some(preservation) = project.preservation.as_mut() {
+            if preservation.has_managed_element(&old.id) {
+                has_source_mapping = true;
+                if has_runs {
+                    preservation.ensure_run_range_is_contiguous(&old.id)
+                        .map_err(EditError::Preservation)?;
+                }
+                let expected = old.runs.iter().map(|run| run.text.clone()).collect::<Vec<_>>();
+                preservation.replace_managed_text(
+                    &old.id,
+                    &old.text,
+                    start.offset,
+                    end.offset,
+                    inserted,
+                    has_runs.then_some(expected.as_slice()),
+                ).map_err(EditError::Preservation)?;
+            } else if old.source_provenance.is_some() {
+                return Err(EditError::Preservation(crate::preservation::PreservationError::ManagedAnchorMissing));
+            }
+        } else if old.source_provenance.is_some() {
+            return Err(EditError::Preservation(crate::preservation::PreservationError::ManagedAnchorMissing));
+        }
+        let text = format!("{}{}{}", &old.text[..start.offset], inserted, &old.text[end.offset..]);
+        let mut updated = old;
+        if has_runs {
+            let effective = effective_title_runs(&updated);
+            let mut runs = slice_runs(&effective, 0, start.offset);
+            let inherited = title_run_attributes_at(&effective, start.offset, updated.text.len());
+            push_run(&mut runs, inserted, apply_typing_styles(inherited, typing));
+            runs.extend(slice_runs(&effective, end.offset, updated.text.len()));
+            coalesce_runs(&mut runs);
+            updated.runs = if text.is_empty() { Vec::new() } else { runs };
+        } else if !inserted.is_empty() && typing != RunStyleFlags::default() {
+            let effective = effective_title_runs(&updated);
+            let mut runs = slice_runs(&effective, 0, start.offset);
+            push_run(&mut runs, inserted, apply_typing_styles(
+                title_run_attributes_at(&effective, start.offset, updated.text.len()),
+                typing,
+            ));
+            runs.extend(slice_runs(&effective, end.offset, updated.text.len()));
+            coalesce_runs(&mut runs);
+            updated.runs = runs;
+        }
+        updated.text = text;
+        if has_source_mapping {
+            let sync_text = updated.text.clone();
+            let sync_runs = updated.runs.clone();
+            project.preservation.as_mut()
+                .ok_or(EditError::Preservation(crate::preservation::PreservationError::ManagedAnchorMissing))?
+                .sync_managed_text_runs(&updated.id, &sync_text, &sync_runs)
+                .map_err(EditError::Preservation)?;
+        }
+        project.title_page[start.element] = updated;
+        return Ok(());
+    }
+
+    // Structural replacement is available for detached/new documents only.
+    let left = project.title_page[start.element].clone();
+    let right = project.title_page[end.element].clone();
+    let text = format!("{}{}{}", &left.text[..start.offset], inserted, &right.text[end.offset..]);
+    if text.len() > MAX_TEXT_BYTES {
+        return Err(EditError::TextTooLong);
+    }
+    let mut runs = slice_runs(&effective_title_runs(&left), 0, start.offset);
+    let insertion_attributes = title_run_attributes_at(&effective_title_runs(&left), start.offset, left.text.len());
+    push_run(&mut runs, inserted, apply_typing_styles(insertion_attributes, typing));
+    runs.extend(slice_runs(&effective_title_runs(&right), end.offset, right.text.len()));
+    coalesce_runs(&mut runs);
+    let mut replacement = left;
+    replacement.text = text;
+    replacement.runs = runs;
+    project.title_page[start.element] = replacement;
+    project.title_page.drain(start.element + 1..=end.element);
+    Ok(())
 }
 
 fn replace_range(
@@ -1507,14 +2316,22 @@ fn replace_element_text(
             crate::preservation::PreservationError::ManagedAnchorMissing,
         ));
     }
-    let item = &mut project.elements[element_index];
-    item.text = new_text;
-    if item.text.is_empty() {
-        item.runs.clear();
-    } else if !old_runs.is_empty() {
-        for (run, text) in item.runs.iter_mut().zip(updated_segments) {
-            run.text = text;
+    {
+        let item = &mut project.elements[element_index];
+        item.text = new_text;
+        if item.text.is_empty() {
+            item.runs.clear();
+        } else if !old_runs.is_empty() {
+            for (run, text) in item.runs.iter_mut().zip(updated_segments) {
+                run.text = text;
+            }
         }
+    }
+    if has_source_mapping {
+        project.preservation.as_mut()
+            .ok_or(EditError::Preservation(crate::preservation::PreservationError::ManagedAnchorMissing))?
+            .sync_managed_text_runs(&id, &project.elements[element_index].text, &project.elements[element_index].runs)
+            .map_err(EditError::Preservation)?;
     }
     Ok(())
 }
@@ -1730,6 +2547,90 @@ fn fdx_role_name(role: Role) -> &'static str {
         Role::Outline2 => "Outline 2",
         Role::Outline3 => "Outline 3",
         Role::Summary => "Summary",
+    }
+}
+
+#[cfg(test)]
+mod surface_saved_rebase_tests {
+    use super::{EditingSession, Position, Selection};
+    use crate::fdx::{read_v6, write_v6};
+    use crate::{Project, Role, RunStyle, ScreenplayElement, TextRun};
+
+    fn valid<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| panic!("unexpected error: {error:?}"))
+    }
+
+    #[test]
+    fn saved_rebase_maps_both_selections_by_stable_identity_and_clamps_utf8_carets() {
+        let mut project = valid(Project::new());
+        let second_id = valid(project.allocate_element_id());
+        project.elements.push(valid(ScreenplayElement::new(
+            second_id.as_str(),
+            Role::Action,
+            "second body paragraph",
+        )));
+        let mut session = valid(EditingSession::new(project));
+        valid(session.set_selection(Selection::caret(Position { element: 1, offset: 4 })));
+        valid(session.set_title_selection(Selection::caret(Position { element: 17, offset: 8 })));
+        valid(session.toggle_title_run_style(RunStyle::Bold));
+
+        let mut saved = session.project().clone();
+        saved.elements.swap(0, 1);
+        let title = &mut saved.title_page[17];
+        title.text = "Script".to_owned();
+        if let Some(run) = title.runs.first_mut() {
+            run.text = title.text.clone();
+        }
+        title.runs.truncate(1);
+
+        let rebased = valid(session.prepare_saved_rebase(saved));
+        assert!(!rebased.dirty());
+        assert_eq!(rebased.selection().anchor.element, 0);
+        assert_eq!(rebased.selection().anchor.offset, 4);
+        assert_eq!(rebased.title_selection().anchor.element, 17);
+        assert_eq!(rebased.title_selection().anchor.offset, 6);
+        assert!(rebased.title_typing_style().bold);
+    }
+
+    #[test]
+    fn source_backed_split_selection_rebases_to_the_new_foreign_occurrence() {
+        let mut initial = valid(Project::new());
+        let second_body_id = valid(initial.allocate_element_id());
+        initial.elements.push(valid(ScreenplayElement::new(
+            second_body_id.as_str(),
+            Role::Action,
+            "body selection survives title structure edits",
+        )));
+        let source = valid(write_v6(&initial));
+        let project = valid(read_v6(&source)).project;
+        let mut session = valid(EditingSession::new(project));
+        valid(session.set_selection(Selection::caret(Position { element: 1, offset: 5 })));
+        valid(session.set_title_selection(Selection::caret(Position { element: 17, offset: 6 })));
+        valid(session.split_title());
+        let split_foreign_id = session.project().title_page[18]
+            .source_provenance.as_ref().and_then(|source| source.foreign_id.clone());
+
+        let saved_source = valid(write_v6(session.project()));
+        let reread = valid(read_v6(&saved_source)).project;
+        let rebased = valid(session.prepare_saved_rebase(reread));
+
+        assert_eq!(rebased.title_selection(), Selection::caret(Position { element: 18, offset: 0 }));
+        assert_eq!(rebased.project().title_page[18].source_provenance.as_ref()
+            .and_then(|source| source.foreign_id.clone()), split_foreign_id);
+        assert_eq!(rebased.selection(), Selection::caret(Position { element: 1, offset: 5 }));
+        assert!(!rebased.dirty());
+    }
+
+    #[test]
+    fn cast_refresh_retains_title_selection_and_typing_state() {
+        let mut session = valid(EditingSession::new(valid(Project::new())));
+        valid(session.set_title_selection(Selection::caret(Position { element: 17, offset: 0 })));
+        valid(session.toggle_title_run_style(RunStyle::Bold));
+        let selection = session.title_selection();
+        let typing = session.title_typing_style();
+        let _ = valid(session.refresh_cast_lists());
+        assert_eq!(session.title_selection(), selection);
+        assert_eq!(session.title_typing_style(), typing);
     }
 }
 

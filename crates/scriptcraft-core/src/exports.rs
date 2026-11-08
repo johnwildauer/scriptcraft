@@ -3,8 +3,23 @@
 //! Both adapters consume the shared fixed layout. They only borrow the
 //! project, so exporting cannot change the editing session or its clean state.
 
-use crate::layout::{LayoutError, LayoutPurpose, ScreenplayLayout};
+use crate::layout::{LayoutComposition, LayoutError, LayoutPurpose, ScreenplayLayout};
 use crate::{FixedPoint, LayoutInputs, Project, Role};
+
+/// Transient PDF composition options. These values are consumed by export only
+/// and are never written into the Project or native FDX document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PdfExportOptions {
+    pub include_title_page: bool,
+}
+
+impl Default for PdfExportOptions {
+    fn default() -> Self {
+        Self {
+            include_title_page: true,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LossReport {
@@ -76,15 +91,44 @@ pub fn export_text_with_layout_inputs(
 /// The PDF is an output consumer, never a replacement for the native project.
 pub fn export_pdf(project: &Project) -> Result<Vec<u8>, ExportError> {
     let inputs = project.session_layout_inputs();
-    export_pdf_with_layout_inputs(project, &inputs)
+    export_pdf_with_layout_inputs_and_options(project, &inputs, PdfExportOptions::default())
 }
 
 pub fn export_pdf_with_layout_inputs(
     project: &Project,
     inputs: &LayoutInputs,
 ) -> Result<Vec<u8>, ExportError> {
-    let layout =
-        ScreenplayLayout::build_with_inputs_for_purpose(project, inputs, LayoutPurpose::Print)?;
+    export_pdf_with_layout_inputs_and_options(project, inputs, PdfExportOptions::default())
+}
+
+/// Produces a PDF using the selected title-page composition and shared Print
+/// layout. The borrowed Project and layout inputs are never mutated.
+pub fn export_pdf_with_options(
+    project: &Project,
+    options: PdfExportOptions,
+) -> Result<Vec<u8>, ExportError> {
+    let inputs = project.session_layout_inputs();
+    export_pdf_with_layout_inputs_and_options(project, &inputs, options)
+}
+
+pub fn export_pdf_with_layout_inputs_and_options(
+    project: &Project,
+    inputs: &LayoutInputs,
+    options: PdfExportOptions,
+) -> Result<Vec<u8>, ExportError> {
+    let source_settings = project
+        .preservation
+        .as_ref()
+        .map(|preservation| preservation.source_layout_settings.clone())
+        .unwrap_or_default();
+    let layout = ScreenplayLayout::build_with_composition(
+        project,
+        inputs,
+        &source_settings,
+        LayoutComposition::Print {
+            include_title_page: options.include_title_page,
+        },
+    )?;
     let mut objects = Vec::<Vec<u8>>::new();
     objects.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
     let page_count = layout.pages.len();
@@ -154,47 +198,66 @@ pub fn export_pdf_with_layout_inputs(
 fn page_content(page: &crate::layout::LayoutPage, paper_height: u32) -> Vec<u8> {
     let mut output = String::new();
     for line in &page.lines {
-        let x = line.geometry.x;
-        let y = FixedPoint::from_points(i64::from(paper_height))
-            .raw()
-            .saturating_sub(line.geometry.y.raw())
-            .saturating_sub(line.geometry.height.raw());
-        let font_resource = match (line.text_style.bold, line.text_style.italic) {
-            (true, true) => "F4",
-            (true, false) => "F2",
-            (false, true) => "F3",
-            (false, false) => "F1",
-        };
-        let font_size = line.text_style.size;
-        let horizontal_scale = pdf_fixed_cell_scale(line.char_width, font_size);
-        output.push_str(&format!(
-            "BT /{font_resource} {font_size} Tf {horizontal_scale} Tz\n1 0 0 1 {} {} Tm\n(",
-            x.decimal_string(),
-            FixedPoint::from_raw(y).decimal_string()
-        ));
-        for character in line.display_text.chars() {
-            match character {
-                '(' | ')' | '\\' => {
-                    output.push('\\');
-                    output.push(character);
-                }
-                c if c.is_ascii_graphic() || c == ' ' => output.push(c),
-                // TODO: Preserve non-ASCII text in PDF output instead of substituting it.
-                _ => output.push('?'),
-            }
-        }
-        output.push_str(") Tj\nET\n");
-        if line.text_style.underline && line.geometry.width.raw() > 0 {
-            let underline_y =
-                FixedPoint::from_raw(y.saturating_add((i64::from(font_size) * 12).div_euclid(100)));
-            let right = FixedPoint::from_raw(x.raw().saturating_add(line.geometry.width.raw()));
+        for span in line.spans.iter() {
+            let x = span.geometry.x;
+            let y = FixedPoint::from_points(i64::from(paper_height))
+                .raw()
+                .saturating_sub(span.geometry.y.raw())
+                .saturating_sub(span.geometry.height.raw());
+            let font_resource = match (span.text_style.bold, span.text_style.italic) {
+                (true, true) => "F4",
+                (true, false) => "F2",
+                (false, true) => "F3",
+                (false, false) => "F1",
+            };
+            let font_size = span.text_style.size;
+            let horizontal_scale = pdf_fixed_cell_scale(span.char_width, font_size);
             output.push_str(&format!(
-                "q 0.6 w {} {} m {} {} l S Q\n",
+                "BT /{font_resource} {font_size} Tf {horizontal_scale} Tz\n1 0 0 1 {} {} Tm\n(",
                 x.decimal_string(),
-                underline_y.decimal_string(),
-                right.decimal_string(),
-                underline_y.decimal_string()
+                FixedPoint::from_raw(y).decimal_string()
             ));
+            for character in span.display_text.chars() {
+                match character {
+                    '(' | ')' | '\\' => {
+                        output.push('\\');
+                        output.push(character);
+                    }
+                    c if c.is_ascii_graphic() || c == ' ' => output.push(c),
+                    // TODO: Preserve non-ASCII text in PDF output instead of substituting it.
+                    _ => output.push('?'),
+                }
+            }
+            output.push_str(") Tj\nET\n");
+
+            if span.geometry.width.raw() <= 0 {
+                continue;
+            }
+            let right = FixedPoint::from_raw(x.raw().saturating_add(span.geometry.width.raw()));
+            if span.underline {
+                let underline_y = FixedPoint::from_raw(
+                    y.saturating_add((i64::from(font_size) * 12).div_euclid(100)),
+                );
+                output.push_str(&format!(
+                    "q 0.6 w {} {} m {} {} l S Q\n",
+                    x.decimal_string(),
+                    underline_y.decimal_string(),
+                    right.decimal_string(),
+                    underline_y.decimal_string()
+                ));
+            }
+            if span.strikethrough {
+                let strike_y = FixedPoint::from_raw(
+                    y.saturating_add((i64::from(font_size) * 48).div_euclid(100)),
+                );
+                output.push_str(&format!(
+                    "q 0.6 w {} {} m {} {} l S Q\n",
+                    x.decimal_string(),
+                    strike_y.decimal_string(),
+                    right.decimal_string(),
+                    strike_y.decimal_string()
+                ));
+            }
         }
     }
     output.into_bytes()

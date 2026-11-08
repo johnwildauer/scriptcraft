@@ -60,6 +60,7 @@ pub(super) struct ToolbarPalette {
     pub(super) foreground: Color32,
     pub(super) disabled_foreground: Color32,
     pub(super) hover_fill: Color32,
+    pub(super) selected_fill: Color32,
     pub(super) hover_foreground: Color32,
     pub(super) pressed_fill: Color32,
     pub(super) open_fill: Color32,
@@ -205,6 +206,12 @@ impl ApplicationPalette {
                     Color32::from_rgb(17, 17, 17),
                 ),
             };
+        let toolbar_selected_fill = match appearance {
+            ResolvedAppearance::Day => Color32::from_rgb(214, 214, 214),
+            ResolvedAppearance::Night | ResolvedAppearance::Midnight => {
+                Color32::from_rgb(66, 66, 66)
+            }
+        };
         let (status_background, status_border, status_foreground, center_foreground) =
             match appearance {
                 ResolvedAppearance::Day => (
@@ -239,6 +246,7 @@ impl ApplicationPalette {
                 foreground: toolbar_foreground,
                 disabled_foreground: alpha_color(toolbar_foreground, 0.45),
                 hover_fill: widgets.hovered.bg_fill,
+                selected_fill: toolbar_selected_fill,
                 hover_foreground: hovered_foreground,
                 pressed_fill: widgets.active.bg_fill,
                 open_fill: widgets.open.bg_fill,
@@ -489,4 +497,56 @@ pub(super) fn configure_appearance(
     }
 
     (resolved_theme, applied, palette)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ApplicationPalette, ResolvedAppearance};
+    use eframe::egui::{self, Color32};
+
+    #[test]
+    fn toolbar_selected_fill_has_explicit_values_and_appearance_polarity() {
+        for (appearance, expected_selected, expected_hover) in [
+            (
+                ResolvedAppearance::Day,
+                Color32::from_rgb(214, 214, 214),
+                Color32::from_rgb(220, 220, 220),
+            ),
+            (
+                ResolvedAppearance::Night,
+                Color32::from_rgb(66, 66, 66),
+                Color32::from_rgb(72, 72, 72),
+            ),
+            (
+                ResolvedAppearance::Midnight,
+                Color32::from_rgb(66, 66, 66),
+                Color32::from_rgb(68, 68, 68),
+            ),
+        ] {
+            let visuals = super::visuals_for_appearance(appearance);
+            let palette = ApplicationPalette::from_visuals(appearance, &visuals);
+            let toolbar = palette.toolbar;
+            assert_eq!(toolbar.selected_fill, expected_selected);
+            assert_eq!(toolbar.hover_fill, expected_hover);
+            assert_ne!(toolbar.selected_fill, toolbar.hover_fill);
+            assert_eq!(
+                palette.controls.selection_fill,
+                visuals.selection.bg_fill,
+                "the toolbar-only token does not replace generic control selection",
+            );
+            assert_eq!(
+                palette.status.slider_trailing_fill,
+                visuals.selection.bg_fill,
+                "the toolbar-only token does not recolor the status slider",
+            );
+            match appearance {
+                ResolvedAppearance::Day => {
+                    assert!(toolbar.selected_fill.r() < toolbar.background.r());
+                }
+                ResolvedAppearance::Night | ResolvedAppearance::Midnight => {
+                    assert!(toolbar.selected_fill.r() > toolbar.background.r());
+                }
+            }
+        }
+    }
 }

@@ -1,7 +1,7 @@
 //! Shared logical shortcut definitions plus the focused editor binding resolver.
 
 use eframe::egui;
-use scriptcraft_commands::{Command, RoleValue};
+use scriptcraft_commands::{Command, EditorSurface, RoleValue};
 use scriptcraft_core::Role;
 
 /// Platform is explicit so the focused editor resolver can be exercised for
@@ -355,6 +355,7 @@ pub(super) fn editor_command_for_key_event(
         if shortcut_matches(shortcut, key, modifiers, platform) {
             return Some(Command::EditorElementChange {
                 role: RoleValue::new(binding.role),
+                surface: EditorSurface::Body,
             });
         }
     }
@@ -442,6 +443,7 @@ mod tests {
                     command,
                     Some(Command::EditorElementChange {
                         role: RoleValue::new(binding.role),
+                        surface: EditorSurface::Body,
                     })
                 );
                 assert!(editor_command_for_key_event(

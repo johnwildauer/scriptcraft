@@ -5,11 +5,12 @@
 //! character cell is seven units wide and one line is twelve units high.
 
 use crate::{
+    formatted_text::parse_style_attribute,
     formatting::{
         formatting_for_role, EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment,
     },
-    validate_layout_inputs, LayoutInputs, ModelError, Project, Role, SourceLayoutSettings,
-    StableId,
+    validate_layout_inputs, LayoutInputs, ModelError, Project, Role, RunAttribute, SourceLayoutSettings,
+    StableId, TextRun,
 };
 use std::time::Instant;
 use std::{
@@ -64,6 +65,10 @@ pub struct LayoutLine {
     /// Source-character to display-character spans, relative to this line's
     /// display text and absolute within the canonical element text.
     pub display_source_map: Arc<[DisplaySourceSegment]>,
+    /// Per-run display and fixed-cell geometry. `geometry` and `text_style` are
+    /// retained as line-level compatibility projections; mixed-style consumers
+    /// must use these positioned spans.
+    pub spans: Arc<[PositionedStyledSpan]>,
     pub text_style: EffectiveTextStyle,
     pub char_width: FixedPoint,
     /// Text extent after first-line indent and alignment.
@@ -74,6 +79,36 @@ pub struct LayoutLine {
     pub rect: Rect,
     pub keep_with_next: bool,
     pub oversized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositionedStyledSpan {
+    pub display_text: Arc<str>,
+    pub source: SourceRange,
+    pub display_source_map: Arc<[DisplaySourceSegment]>,
+    pub text_style: EffectiveTextStyle,
+    pub char_width: FixedPoint,
+    pub geometry: FixedRect,
+    pub underline: bool,
+    pub strikethrough: bool,
+}
+
+/// Selects which document surface is laid out. Print's compatibility builders
+/// include the title page by default; callers can explicitly disable it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LayoutComposition {
+    BodyEditor,
+    TitlePageEditor,
+    Print { include_title_page: bool },
+}
+
+impl LayoutComposition {
+    const fn purpose(self) -> LayoutPurpose {
+        match self {
+            Self::Print { .. } => LayoutPurpose::Print,
+            Self::BodyEditor | Self::TitlePageEditor => LayoutPurpose::Editor,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -151,11 +186,14 @@ pub struct ScreenplayLayout {
     pub char_width: u32,
     pub line_height: u32,
     pub purpose: LayoutPurpose,
+    pub composition: LayoutComposition,
     pub pages: Vec<LayoutPage>,
     element_line_index: Vec<Vec<LineLocation>>,
     body_line_index: Vec<BodyLineIndexEntry>,
     body_line_y_order: Vec<usize>,
     body_lines_by_element: Vec<Vec<usize>>,
+    title_line_index: Vec<BodyLineIndexEntry>,
+    title_lines_by_element: Vec<Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +232,8 @@ pub struct LayoutCache {
     inputs: Option<LayoutInputs>,
     source_settings: Option<SourceLayoutSettings>,
     purpose: Option<LayoutPurpose>,
+    composition: Option<LayoutComposition>,
+    project_layout_signature: Option<u64>,
     layout: Option<Arc<ScreenplayLayout>>,
     project_identity: Option<Arc<()>>,
     element_wraps: ElementWrapCache,
@@ -230,6 +270,8 @@ struct ElementWrapContext {
     text_style: EffectiveTextStyle,
     char_width: FixedPoint,
     max_chars: u32,
+    run_signature: String,
+    atomic_signature: Vec<(usize, usize)>,
 }
 
 #[derive(Debug)]
@@ -291,6 +333,8 @@ impl ElementWrapCache {
         text_style: EffectiveTextStyle,
         char_width: FixedPoint,
         max_chars: u32,
+        runs: &[TextRun],
+        atomic_ranges: &[std::ops::Range<usize>],
         purpose: LayoutPurpose,
         title_page: bool,
         diagnostics: Option<&mut LayoutBuildDiagnostics>,
@@ -304,6 +348,8 @@ impl ElementWrapCache {
             text_style: text_style.clone(),
             char_width,
             max_chars,
+            run_signature: format!("{runs:?}"),
+            atomic_signature: atomic_ranges.iter().map(|range| (range.start, range.end)).collect(),
         };
         let fingerprint = self.fingerprint(&context, text);
         if let Some(entry) = self.buckets.get_mut(&fingerprint).and_then(|bucket| {
@@ -329,7 +375,7 @@ impl ElementWrapCache {
 
         let started = diagnostics.as_ref().map(|_| Instant::now());
         let lines = wrap_element(
-            text, element, role, paragraph, text_style, char_width, max_chars,
+            text, element, role, paragraph, text_style, char_width, max_chars, atomic_ranges,
         );
         if let (Some(diagnostics), Some(started)) = (diagnostics, started) {
             diagnostics.record_element_wrap(started);
@@ -439,7 +485,23 @@ impl LayoutCache {
         inputs: &LayoutInputs,
         purpose: LayoutPurpose,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
-        self.get_or_build_with_optional_diagnostics(revision, project, inputs, purpose, None, false)
+        self.get_or_build_with_optional_diagnostics(
+            revision, project, inputs, purpose,
+            match purpose { LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true }, LayoutPurpose::Editor => LayoutComposition::BodyEditor },
+            None, false,
+        )
+    }
+
+    pub fn get_or_build_with_composition(
+        &mut self,
+        revision: u64,
+        project: &Project,
+        inputs: &LayoutInputs,
+        composition: LayoutComposition,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        self.get_or_build_with_optional_diagnostics(
+            revision, project, inputs, composition.purpose(), composition, None, false,
+        )
     }
 
     /// Diagnostic counterpart to the ordinary cache lookup. A cache hit
@@ -459,6 +521,7 @@ impl LayoutCache {
             project,
             inputs,
             purpose,
+            match purpose { LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true }, LayoutPurpose::Editor => LayoutComposition::BodyEditor },
             Some(diagnostics),
             false,
         )
@@ -479,6 +542,7 @@ impl LayoutCache {
             session.project(),
             session.layout_inputs(),
             purpose,
+            match purpose { LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true }, LayoutPurpose::Editor => LayoutComposition::BodyEditor },
             Some(diagnostics),
             true,
         )
@@ -490,6 +554,7 @@ impl LayoutCache {
         project: &Project,
         inputs: &LayoutInputs,
         purpose: LayoutPurpose,
+        composition: LayoutComposition,
         mut diagnostics: Option<&mut LayoutBuildDiagnostics>,
         validated_session: bool,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
@@ -499,20 +564,22 @@ impl LayoutCache {
         if !validated_session {
             project.validate()?;
         }
-        let source_settings_ref = project
+        let mut source_settings = project
             .preservation
             .as_ref()
-            .map(|preservation| &preservation.source_layout_settings);
-        let source_settings_match = match source_settings_ref {
-            Some(source) => self
-                .source_settings
-                .as_ref()
-                .is_some_and(|cached| cached == source),
-            None => self
-                .source_settings
-                .as_ref()
-                .is_some_and(|cached| cached == &SourceLayoutSettings::default()),
-        };
+            .map(|preservation| preservation.source_layout_settings().clone())
+            .unwrap_or_default();
+        source_settings
+            .direct_paragraph_overrides
+            .extend(project.direct_paragraph_overrides.clone());
+        let mut signature_hasher = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}{:?}{:?}", project.elements, project.title_page, project.direct_paragraph_overrides)
+            .hash(&mut signature_hasher);
+        let project_layout_signature = signature_hasher.finish();
+        let source_settings_match = self
+            .source_settings
+            .as_ref()
+            .is_some_and(|cached| cached == &source_settings);
         let same_document = self
             .project_identity
             .as_ref()
@@ -522,6 +589,8 @@ impl LayoutCache {
             self.inputs = None;
             self.source_settings = None;
             self.purpose = None;
+            self.composition = None;
+            self.project_layout_signature = None;
             self.layout = None;
             self.element_wraps.clear();
         }
@@ -530,6 +599,8 @@ impl LayoutCache {
             && source_settings_match
             && same_document
             && self.purpose == Some(purpose)
+            && self.composition == Some(composition)
+            && self.project_layout_signature == Some(project_layout_signature)
         {
             return self
                 .layout
@@ -539,7 +610,6 @@ impl LayoutCache {
                 })
                 .map(|layout| (layout, true));
         }
-        let source_settings = source_settings_ref.cloned().unwrap_or_default();
         self.element_wraps.start_generation();
         let layout = Arc::new(
             ScreenplayLayout::build_with_effective_inputs_for_purpose_internal(
@@ -547,6 +617,7 @@ impl LayoutCache {
                 inputs,
                 &source_settings,
                 purpose,
+                composition,
                 diagnostics,
                 Some(&mut self.element_wraps),
                 true,
@@ -557,6 +628,8 @@ impl LayoutCache {
         self.inputs = Some(inputs.clone());
         self.source_settings = Some(source_settings);
         self.purpose = Some(purpose);
+        self.composition = Some(composition);
+        self.project_layout_signature = Some(project_layout_signature);
         self.layout = Some(layout.clone());
         self.project_identity = Some(project.layout_identity().clone());
         Ok((layout, false))
@@ -640,6 +713,28 @@ impl ScreenplayLayout {
             inputs,
             source_settings,
             purpose,
+            match purpose {
+                LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true },
+                LayoutPurpose::Editor => LayoutComposition::BodyEditor,
+            },
+            None,
+            None,
+            false,
+        )
+    }
+
+    pub fn build_with_composition(
+        project: &Project,
+        inputs: &LayoutInputs,
+        source_settings: &SourceLayoutSettings,
+        composition: LayoutComposition,
+    ) -> Result<Self, LayoutError> {
+        Self::build_with_effective_inputs_for_purpose_internal(
+            project,
+            inputs,
+            source_settings,
+            composition.purpose(),
+            composition,
             None,
             None,
             false,
@@ -662,6 +757,10 @@ impl ScreenplayLayout {
             inputs,
             source_settings,
             purpose,
+            match purpose {
+                LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true },
+                LayoutPurpose::Editor => LayoutComposition::BodyEditor,
+            },
             Some(diagnostics),
             None,
             false,
@@ -673,6 +772,7 @@ impl ScreenplayLayout {
         inputs: &LayoutInputs,
         source_settings: &SourceLayoutSettings,
         purpose: LayoutPurpose,
+        composition: LayoutComposition,
         mut diagnostics: Option<&mut LayoutBuildDiagnostics>,
         mut wrap_cache: Option<&mut ElementWrapCache>,
         validated_session: bool,
@@ -693,25 +793,75 @@ impl ScreenplayLayout {
             char_width,
             line_height: inputs.line_advance,
             purpose,
+            composition,
             pages: Vec::new(),
             element_line_index: Vec::new(),
             body_line_index: Vec::new(),
             body_line_y_order: Vec::new(),
             body_lines_by_element: Vec::new(),
+            title_line_index: Vec::new(),
+            title_lines_by_element: Vec::new(),
         };
-        if !project.title_page.is_empty() {
+        let include_title_page = match composition {
+            LayoutComposition::BodyEditor => false,
+            LayoutComposition::TitlePageEditor => true,
+            LayoutComposition::Print { include_title_page } => include_title_page,
+        };
+        let include_body = !matches!(composition, LayoutComposition::TitlePageEditor);
+        if include_title_page && !project.title_page.is_empty() {
             let mut page = output.new_page(true);
             for (index, element) in project.title_page.iter().enumerate() {
+                if element.formatting.starts_new_page == Some(true) && !page.lines.is_empty() {
+                    output.pages.push(page);
+                    page = output.new_page(true);
+                }
+                let default_left = FixedPoint::from_points(i64::from(output.inputs.margin_left));
+                let default_right = FixedPoint::from_points(i64::from(
+                    output.inputs.paper_width.saturating_sub(output.inputs.margin_right),
+                ));
+                let requested_left = element.formatting.left_indent.unwrap_or(default_left);
+                let requested_right = element.formatting.right_indent.unwrap_or(default_right);
+                let (title_left, title_right) = if requested_left.raw() >= 0
+                    && requested_right > requested_left
+                    && requested_right <= FixedPoint::from_points(i64::from(output.inputs.paper_width))
+                {
+                    (requested_left, requested_right)
+                } else {
+                    (default_left, default_right)
+                };
+                let requested_indent = element.formatting.first_indent.unwrap_or_default();
+                let title_indent = if title_right.raw().saturating_sub(title_left.raw())
+                    .saturating_sub(requested_indent.raw())
+                    >= i64::from(output.inputs.char_width) * FixedPoint::SCALE
+                {
+                    requested_indent
+                } else {
+                    FixedPoint::default()
+                };
                 let paragraph = EffectiveParagraph {
-                    left: FixedPoint::from_points(i64::from(output.inputs.margin_left)),
-                    right: FixedPoint::from_points(i64::from(
-                        output.inputs.paper_width - output.inputs.margin_right,
-                    )),
-                    first_indent: FixedPoint::default(),
-                    alignment: ParagraphAlignment::Left,
-                    space_before: FixedPoint::default(),
-                    line_advance: FixedPoint::from_points(i64::from(output.inputs.line_advance)),
-                    char_width: FixedPoint::from_points(i64::from(output.inputs.char_width)),
+                    left: title_left,
+                    right: title_right,
+                    first_indent: title_indent,
+                    alignment: element
+                        .formatting
+                        .alignment
+                        .map(Into::into)
+                        .unwrap_or(ParagraphAlignment::Left),
+                    space_before: element.formatting.space_before.unwrap_or_default(),
+                    line_advance: FixedPoint::from_raw(
+                        i64::from(output.inputs.line_advance)
+                            .saturating_mul(i64::from(inputs.font_size.clamp(1, 72)))
+                            .saturating_mul(FixedPoint::SCALE)
+                            .saturating_add(6)
+                            .div_euclid(12),
+                    ),
+                    char_width: FixedPoint::from_raw(
+                        i64::from(output.inputs.char_width)
+                            .saturating_mul(i64::from(inputs.font_size.clamp(1, 72)))
+                            .saturating_mul(FixedPoint::SCALE)
+                            .saturating_add(6)
+                            .div_euclid(12),
+                    ),
                 };
                 let style = plain_title_style(inputs);
                 let lines = wrap_for_layout(
@@ -720,30 +870,38 @@ impl ScreenplayLayout {
                     &element.id,
                     &element.text,
                     index,
-                    element.role,
+                    element.role.unwrap_or(Role::General),
                     paragraph,
                     style,
-                    FixedPoint::from_points(i64::from(output.char_width)),
+                    &element.runs,
+                    paragraph.char_width,
                     output.inputs.chars_per_line,
                     purpose,
                     true,
                 );
+                if !page.lines.is_empty() {
+                    page.next_line_y = FixedPoint::from_raw(
+                        page.next_line_y.raw().saturating_add(paragraph.space_before.raw().max(0)),
+                    );
+                }
                 for line in lines {
+                    let line_advance = line.paragraph.line_advance.raw();
                     let laid_out = output.make_line(&page, line, true, page.next_line_y);
                     page.lines.push(laid_out);
                     page.occupied_lines = page.occupied_lines.saturating_add(1);
                     page.next_line_y =
-                        FixedPoint::from_raw(page.next_line_y.raw().saturating_add(
-                            i64::from(output.inputs.line_advance) * FixedPoint::SCALE,
-                        ));
+                        FixedPoint::from_raw(page.next_line_y.raw().saturating_add(line_advance));
                 }
             }
             output.pages.push(page);
         }
-        if output.pages.last().is_some_and(|page| page.title_page) {
+        if include_title_page
+            && include_body
+            && output.pages.last().is_some_and(|page| page.title_page)
+        {
             output.pages.push(output.new_page(false));
         }
-        for (index, element) in project.elements.iter().enumerate() {
+        for (index, element) in project.elements.iter().enumerate().filter(|_| include_body) {
             let text_style = output.source_settings.text_style(element.role);
             if purpose == LayoutPurpose::Print && text_style.hidden_text {
                 continue;
@@ -775,6 +933,7 @@ impl ScreenplayLayout {
                 element.role,
                 paragraph,
                 text_style.clone(),
+                &element.runs,
                 paragraph.char_width,
                 output.inputs.chars_per_line,
                 purpose,
@@ -783,7 +942,7 @@ impl ScreenplayLayout {
             output.place_element(lines, element.role, paragraph);
         }
         if output.pages.is_empty() {
-            output.pages.push(output.new_page(false));
+            output.pages.push(output.new_page(composition == LayoutComposition::TitlePageEditor));
         }
         output.rebuild_interaction_indexes();
         Ok(output)
@@ -799,6 +958,9 @@ impl ScreenplayLayout {
 
     pub fn hit_test_fixed(&self, page: usize, x: FixedPoint, y: FixedPoint) -> Option<Caret> {
         let page = self.pages.get(page)?;
+        if page.title_page && self.composition != LayoutComposition::TitlePageEditor {
+            return None;
+        }
         let line = page.lines.iter().find(|line| {
             let paragraph_left = line.paragraph_bounds.x.raw();
             let paragraph_right = paragraph_left.saturating_add(line.paragraph_bounds.width.raw());
@@ -822,7 +984,9 @@ impl ScreenplayLayout {
     /// compare lines across pages. Horizontal placement is deliberately
     /// clamped to the selected line's source range.
     pub fn nearest_line_hit_test(&self, page: usize, x: i64, y: i64) -> Option<Caret> {
-        if self.pages.get(page)?.title_page {
+        if self.pages.get(page)?.title_page
+            && self.composition != LayoutComposition::TitlePageEditor
+        {
             return None;
         }
         self.nearest_line_hit_test_fixed(
@@ -854,7 +1018,17 @@ impl ScreenplayLayout {
         diagnostics: &mut InteractionQueryDiagnostics,
     ) -> Option<Caret> {
         if self.pages.get(page)?.title_page {
-            return None;
+            if self.composition != LayoutComposition::TitlePageEditor {
+                return None;
+            }
+            let page_height = i64::from(self.inputs.paper_height).saturating_mul(FixedPoint::SCALE);
+            let pointer_y = i64::try_from(page).ok()?.saturating_mul(page_height).saturating_add(y.raw());
+            let entry = self.title_line_index.iter().enumerate().min_by_key(|(_, entry)| {
+                diagnostics.examined();
+                pointer_y.saturating_sub(entry.absolute_y).saturating_abs()
+            })?.1;
+            let line = &self.pages[entry.location.page].lines[entry.location.line];
+            return Some(self.caret_for_line(line, x));
         }
         let page_height = i64::from(self.inputs.paper_height).saturating_mul(FixedPoint::SCALE);
         let pointer_y = i64::try_from(page)
@@ -936,9 +1110,7 @@ impl ScreenplayLayout {
     }
 
     fn caret_for_line(&self, line: &LayoutLine, x: FixedPoint) -> Caret {
-        let cell = line.char_width.raw().max(1);
-        let units = x.raw().saturating_sub(line.geometry.x.raw()).max(0);
-        let cells = (units.saturating_add(cell / 2) / cell) as usize;
+        let cells = display_char_for_x(line, x);
         Caret {
             element: line.element,
             offset: line.source_for_display_char(cells),
@@ -972,12 +1144,7 @@ impl ScreenplayLayout {
             {
                 let columns = line.display_char_for_source(caret.offset, false);
                 return Ok(FixedRect {
-                    x: FixedPoint::from_raw(
-                        line.geometry
-                            .x
-                            .raw()
-                            .saturating_add((columns as i64).saturating_mul(line.char_width.raw())),
-                    ),
+                    x: FixedPoint::from_raw(x_for_display_char(line, columns)),
                     y: line.geometry.y,
                     width: FixedPoint::from_points(1),
                     height: line.geometry.height,
@@ -1053,6 +1220,40 @@ impl ScreenplayLayout {
         self.body_line_index.len()
     }
 
+    /// Surface-local title navigation. It is intentionally unavailable on a
+    /// body editor or a print composition, even when print includes title pages.
+    pub fn title_line_index_for_position(&self, element: usize, offset: usize) -> Option<usize> {
+        if self.composition != LayoutComposition::TitlePageEditor {
+            return None;
+        }
+        self.title_lines_by_element.get(element)?.iter().copied().find(|index| {
+            let entry = self.title_line_index[*index];
+            offset >= entry.source.start && offset <= entry.source.end
+        })
+    }
+
+    pub fn title_line(&self, index: usize) -> Option<&LayoutLine> {
+        if self.composition != LayoutComposition::TitlePageEditor { return None; }
+        let entry = self.title_line_index.get(index)?;
+        self.pages.get(entry.location.page)?.lines.get(entry.location.line)
+    }
+
+    pub fn title_page_for_position(&self, element: usize, offset: usize) -> Option<usize> {
+        if self.composition != LayoutComposition::TitlePageEditor { return None; }
+        self.page_for_position_with_diagnostics(
+            element,
+            offset,
+            &mut InteractionQueryDiagnostics::default(),
+        ).filter(|page| self.pages.get(*page).is_some_and(|page| page.title_page))
+    }
+
+    pub fn title_caret_geometry(&self, caret: Caret) -> Result<FixedRect, LayoutError> {
+        if self.composition != LayoutComposition::TitlePageEditor {
+            return Err(LayoutError { kind: LayoutErrorKind::InvalidPosition });
+        }
+        self.caret_geometry(caret)
+    }
+
     fn rebuild_interaction_indexes(&mut self) {
         let max_element = self
             .pages
@@ -1064,6 +1265,8 @@ impl ScreenplayLayout {
         self.body_line_index.clear();
         self.body_line_y_order.clear();
         self.body_lines_by_element = vec![Vec::new(); count];
+        self.title_line_index.clear();
+        self.title_lines_by_element = vec![Vec::new(); count];
         let page_height = i64::from(self.inputs.paper_height).saturating_mul(FixedPoint::SCALE);
         for (page_index, page) in self.pages.iter().enumerate() {
             for (line_index, line) in page.lines.iter().enumerate() {
@@ -1075,6 +1278,20 @@ impl ScreenplayLayout {
                     element_lines.push(location);
                 }
                 if page.title_page {
+                    let absolute_y = i64::try_from(page_index)
+                        .unwrap_or(i64::MAX)
+                        .saturating_mul(page_height)
+                        .saturating_add(line.geometry.y.raw());
+                    let index = self.title_line_index.len();
+                    self.title_line_index.push(BodyLineIndexEntry {
+                        location,
+                        absolute_y,
+                        element: line.element,
+                        source: line.source,
+                    });
+                    if let Some(element_lines) = self.title_lines_by_element.get_mut(line.element) {
+                        element_lines.push(index);
+                    }
                     continue;
                 }
                 let absolute_y = i64::try_from(page_index)
@@ -1140,10 +1357,34 @@ impl ScreenplayLayout {
             FixedPoint::from_raw(line.paragraph.left.raw().saturating_add(indent.raw()));
         let line_width =
             FixedPoint::from_raw(line.paragraph.right.raw().saturating_sub(line_left.raw()));
+        let mut spans = positioned_spans(&line, FixedRect {
+            x: line_left,
+            y,
+            width: FixedPoint::default(),
+            height: line.paragraph.line_advance,
+        });
         let text_width = FixedPoint::from_raw(
-            (line.display_text.chars().count() as i64).saturating_mul(line.char_width.raw()),
+            spans.iter().map(|span| span.geometry.width.raw()).sum::<i64>(),
         );
         let spare = line_width.raw().saturating_sub(text_width.raw()).max(0);
+        let display_chars = line.display_text.chars().collect::<Vec<_>>();
+        let justified_gaps = if line.paragraph.alignment == ParagraphAlignment::Justified
+            && !line.final_visual_line
+        {
+            (1..display_chars.len().saturating_sub(1))
+                .filter(|index| {
+                    display_chars[*index].is_whitespace()
+                        && !display_chars[*index - 1].is_whitespace()
+                        && !display_chars[*index + 1].is_whitespace()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let distribute = !justified_gaps.is_empty();
+        let distributed_width = if distribute { spare } else { 0 };
+        let gap_width = if distribute { spare.div_euclid(justified_gaps.len() as i64) } else { 0 };
+        let gap_remainder = if distribute { spare.rem_euclid(justified_gaps.len() as i64) as usize } else { 0 };
         let text_x = match line.paragraph.alignment {
             ParagraphAlignment::Left => line_left,
             ParagraphAlignment::Right => {
@@ -1152,7 +1393,12 @@ impl ScreenplayLayout {
             ParagraphAlignment::Center => {
                 FixedPoint::from_raw(line_left.raw().saturating_add(spare / 2))
             }
+            ParagraphAlignment::Justified => line_left,
         };
+        let alignment_shift = text_x.raw().saturating_sub(line_left.raw());
+        for span in &mut spans {
+            span.geometry.x = FixedPoint::from_raw(span.geometry.x.raw().saturating_add(alignment_shift));
+        }
         let height = line.paragraph.line_advance;
         let paragraph_bounds = FixedRect {
             x: line.paragraph.left,
@@ -1168,9 +1414,27 @@ impl ScreenplayLayout {
         let geometry = FixedRect {
             x: text_x,
             y,
-            width: text_width,
+            width: FixedPoint::from_raw(text_width.raw().saturating_add(distributed_width)),
             height,
         };
+        if distribute {
+            let gap_adjustment = |index: usize| {
+                justified_gaps.iter().position(|gap| *gap == index).map(|rank| {
+                    gap_width.saturating_add(if rank < gap_remainder { 1 } else { 0 })
+                }).unwrap_or(0)
+            };
+            let mut display_index = 0usize;
+            let mut shift = 0i64;
+            for span in &mut spans {
+                let count = span.display_text.chars().count();
+                let internal = (display_index..display_index.saturating_add(count))
+                    .map(gap_adjustment).sum::<i64>();
+                span.geometry.x = FixedPoint::from_raw(span.geometry.x.raw().saturating_add(shift));
+                span.geometry.width = FixedPoint::from_raw(span.geometry.width.raw().saturating_add(internal));
+                shift = shift.saturating_add(internal);
+                display_index = display_index.saturating_add(count);
+            }
+        }
         LayoutLine {
             page: page.number,
             role: line.role,
@@ -1183,6 +1447,7 @@ impl ScreenplayLayout {
             text: line.text,
             display_text: line.display_text,
             display_source_map: line.display_source_map,
+            spans: spans.into(),
             text_style: line.text_style,
             char_width: line.char_width,
             geometry,
@@ -1289,6 +1554,150 @@ impl ScreenplayLayout {
     }
 }
 
+fn display_char_for_x(line: &LayoutLine, x: FixedPoint) -> usize {
+    if line.spans.is_empty() {
+        let cell = line.char_width.raw().max(1);
+        let units = x.raw().saturating_sub(line.geometry.x.raw()).max(0);
+        return (units.saturating_add(cell / 2) / cell) as usize;
+    }
+    let mut display_offset = 0usize;
+    for span in line.spans.iter() {
+        let count = span.display_text.chars().count();
+        let cell = if count == 0 { span.char_width.raw().max(1) }
+            else { span.geometry.width.raw().div_euclid(count as i64).max(1) };
+        if x.raw() <= span.geometry.x.raw().saturating_add(span.geometry.width.raw()) {
+            let units = x.raw().saturating_sub(span.geometry.x.raw()).max(0);
+            return display_offset.saturating_add((units.saturating_add(cell / 2).div_euclid(cell)) as usize).min(display_offset.saturating_add(count));
+        }
+        display_offset = display_offset.saturating_add(count);
+    }
+    display_offset
+}
+
+fn x_for_display_char(line: &LayoutLine, display_char: usize) -> i64 {
+    let mut display_offset = 0usize;
+    for span in line.spans.iter() {
+        let count = span.display_text.chars().count();
+        if display_char <= display_offset.saturating_add(count) {
+            let local = display_char.saturating_sub(display_offset).min(count) as i64;
+            let cell = if count == 0 { span.char_width.raw() }
+                else { span.geometry.width.raw().div_euclid(count as i64) };
+            return span.geometry.x.raw().saturating_add(local.saturating_mul(cell));
+        }
+        display_offset = display_offset.saturating_add(count);
+    }
+    line.geometry.x.raw().saturating_add(line.geometry.width.raw())
+}
+
+fn positioned_spans(line: &WrappedLine, line_geometry: FixedRect) -> Vec<PositionedStyledSpan> {
+    let display_chars = line.display_text.chars().collect::<Vec<_>>();
+    if display_chars.is_empty() {
+        return Vec::new();
+    }
+    let mut run_ranges = Vec::with_capacity(line.runs.len());
+    let mut cursor = 0usize;
+    for run in line.runs.iter() {
+        let end = cursor.saturating_add(run.text.len());
+        run_ranges.push((cursor..end, run));
+        cursor = end;
+    }
+    let mapping_for = |display_index: usize| {
+        line.display_source_map.iter().find(|segment| {
+            display_index >= segment.display_start && display_index < segment.display_end
+        })
+    };
+    let mut styled = Vec::with_capacity(display_chars.len());
+    for (index, character) in display_chars.iter().enumerate() {
+        let Some(mapping) = mapping_for(index) else { continue };
+        let run = run_ranges
+            .iter()
+            .find(|(range, _)| mapping.source_start >= range.start && mapping.source_start < range.end)
+            .map(|(_, run)| *run);
+        let flags = run
+            .and_then(|run| parse_style_attribute(&run.attributes).ok())
+            .map(|projection| projection.flags)
+            .unwrap_or_default();
+        let mut style = line.text_style.clone();
+        style.bold |= flags.bold;
+        style.italic |= flags.italics;
+        style.underline |= flags.underline;
+        style.all_caps |= flags.all_caps;
+        if let Some(run) = run {
+            for attribute in &run.attributes {
+                match attribute.name.as_str() {
+                    "Font" if !attribute.value.is_empty() => {
+                        style.declared_family = attribute.value.clone();
+                        style.family = FontFallback::CourierPrime;
+                    }
+                    "Size" => {
+                        if let Ok(size) = attribute.value.parse::<u8>() {
+                            if (1..=72).contains(&size) { style.size = size; }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let underline = style.underline;
+        styled.push((
+            *character,
+            mapping.source_start,
+            mapping.source_end,
+            style,
+            underline,
+            flags.strikethrough,
+        ));
+    }
+    let base_size = i64::from(line.text_style.size.max(1));
+    let mut output: Vec<PositionedStyledSpan> = Vec::new();
+    let mut x = line_geometry.x.raw();
+    for (character, source_start, source_end, style, underline, strikethrough) in styled {
+        let cell = FixedPoint::from_raw(
+            line.char_width.raw().saturating_mul(i64::from(style.size.max(1))).div_euclid(base_size).max(1),
+        );
+        let same = output.last().is_some_and(|span| {
+            span.text_style == style
+                && span.underline == underline
+                && span.strikethrough == strikethrough
+                && !character.is_whitespace()
+                && !span.display_text.chars().last().is_some_and(char::is_whitespace)
+                && (span.source.end == source_start
+                    || (span.source.start == source_start && span.source.end == source_end))
+        });
+        if same {
+            let span = output.last_mut().expect("checked span exists");
+            let mut text = span.display_text.to_string();
+            text.push(character);
+            span.display_text = Arc::from(text);
+            span.source.end = source_end;
+            span.geometry.width = FixedPoint::from_raw(span.geometry.width.raw().saturating_add(cell.raw()));
+            span.char_width = cell;
+            let mut mapping = span.display_source_map.to_vec();
+            let display_start = span.display_text.chars().count().saturating_sub(1);
+            mapping.push(DisplaySourceSegment {
+                display_start,
+                display_end: display_start.saturating_add(1),
+                source_start,
+                source_end,
+            });
+            span.display_source_map = mapping.into();
+        } else {
+            output.push(PositionedStyledSpan {
+                display_text: Arc::from(character.to_string()),
+                source: SourceRange { element: line.element, start: source_start, end: source_end },
+                display_source_map: Arc::from([DisplaySourceSegment { display_start: 0, display_end: 1, source_start, source_end }]),
+                text_style: style,
+                char_width: cell,
+                geometry: FixedRect { x: FixedPoint::from_raw(x), y: line_geometry.y, width: cell, height: line_geometry.height },
+                underline,
+                strikethrough,
+            });
+        }
+        x = x.saturating_add(cell.raw());
+    }
+    output
+}
+
 #[derive(Debug, Clone)]
 struct WrappedLine {
     element: usize,
@@ -1299,8 +1708,10 @@ struct WrappedLine {
     display_text: Arc<str>,
     display_source_map: Arc<[DisplaySourceSegment]>,
     text_style: EffectiveTextStyle,
+    runs: Arc<[TextRun]>,
     char_width: FixedPoint,
     first_visual_line: bool,
+    final_visual_line: bool,
     paragraph: EffectiveParagraph,
     oversized: bool,
 }
@@ -1411,11 +1822,8 @@ fn effective_paragraph(
         .filter(|indent| indent_fits(*indent))
         .unwrap_or(role_indent);
 
-    let default_alignment = match native.alignment {
-        "Right" => ParagraphAlignment::Right,
-        "Center" => ParagraphAlignment::Center,
-        _ => ParagraphAlignment::Left,
-    };
+    let default_alignment = ParagraphAlignment::from_fdx(native.alignment)
+        .unwrap_or(ParagraphAlignment::Left);
     let alignment = direct
         .alignment
         .or(projected.alignment)
@@ -1490,32 +1898,105 @@ fn wrap_for_layout(
     role: Role,
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
+    runs: &[TextRun],
     char_width: FixedPoint,
     max_chars: u32,
     purpose: LayoutPurpose,
     title_page: bool,
 ) -> Vec<WrappedLine> {
-    if let Some(cache) = cache {
-        return cache.wrap(
+    let mut projected_text = String::new();
+    let mut source_map = Vec::<(std::ops::Range<usize>, std::ops::Range<usize>)>::new();
+    let mut run_ranges = Vec::new();
+    let mut source_cursor = 0usize;
+    for run in runs {
+        let end = source_cursor.saturating_add(run.text.len());
+        run_ranges.push((source_cursor..end, run));
+        source_cursor = end;
+    }
+    let base_size = i64::from(text_style.size.max(1));
+    let maximum_run_size = runs.iter().flat_map(|run| run.attributes.iter())
+        .filter(|attribute| attribute.name == "Size")
+        .filter_map(|attribute| attribute.value.parse::<u8>().ok())
+        .filter(|size| (1..=72).contains(size))
+        .map(i64::from)
+        .max()
+        .unwrap_or(base_size)
+        .max(base_size);
+    // Wrapping uses a conservative largest direct run metric; span placement
+    // below restores each run's own fixed-cell width without host font advances.
+    let wrapping_char_width = FixedPoint::from_raw(
+        char_width.raw().saturating_mul(maximum_run_size).div_euclid(base_size).max(1),
+    );
+    for (source_start, scalar) in text.char_indices() {
+        let source_end = source_start + scalar.len_utf8();
+        let flags = run_ranges.iter()
+            .find(|(range, _)| source_start >= range.start && source_start < range.end)
+            .and_then(|(_, run)| parse_style_attribute(&run.attributes).ok())
+            .map(|projection| projection.flags)
+            .unwrap_or_default();
+        let displayed = if text_style.all_caps || flags.all_caps {
+            scalar.to_uppercase().collect::<String>()
+        } else {
+            scalar.to_string()
+        };
+        let start = projected_text.len();
+        projected_text.push_str(&displayed);
+        source_map.push((start..projected_text.len(), source_start..source_end));
+    }
+    let mut lines = if let Some(cache) = cache {
+        cache.wrap(
             element_id,
-            text,
+            &projected_text,
             element,
             role,
             paragraph,
-            text_style,
-            char_width,
+            {
+                let mut wrapping_style = text_style.clone();
+                wrapping_style.all_caps = false;
+                wrapping_style
+            },
+            wrapping_char_width,
             max_chars,
+            runs,
+            &source_map.iter().map(|(display, _)| display.clone()).collect::<Vec<_>>(),
             purpose,
             title_page,
             diagnostics,
+        )
+    } else {
+        let started = diagnostics.as_ref().map(|_| Instant::now());
+        let mut wrapping_style = text_style.clone();
+        wrapping_style.all_caps = false;
+        let lines = wrap_element(
+            &projected_text, element, role, paragraph, wrapping_style, wrapping_char_width, max_chars,
+            &source_map.iter().map(|(display, _)| display.clone()).collect::<Vec<_>>(),
         );
-    }
-    let started = diagnostics.as_ref().map(|_| Instant::now());
-    let lines = wrap_element(
-        text, element, role, paragraph, text_style, char_width, max_chars,
-    );
-    if let (Some(diagnostics), Some(started)) = (diagnostics, started) {
-        diagnostics.record_element_wrap(started);
+        if let (Some(diagnostics), Some(started)) = (diagnostics, started) {
+            diagnostics.record_element_wrap(started);
+        }
+        lines
+    };
+    for line in &mut lines {
+        let projected_start = line.start;
+        let projected_end = line.end;
+        let mapped_start = source_map.iter().find(|(display, _)| projected_start >= display.start && projected_start < display.end)
+            .map(|(_, source)| source.start).unwrap_or(text.len());
+        let mapped_end = source_map.iter().rev().find(|(display, _)| projected_end > display.start && projected_end <= display.end)
+            .map(|(_, source)| source.end).unwrap_or(mapped_start);
+        line.start = mapped_start;
+        line.end = mapped_end;
+        line.text = Arc::from(&text[mapped_start..mapped_end]);
+        for segment in Arc::make_mut(&mut line.display_source_map) {
+            let start = source_map.iter().find(|(display, _)| segment.source_start >= display.start && segment.source_start < display.end)
+                .map(|(_, source)| source.start).unwrap_or(mapped_start);
+            let end = source_map.iter().find(|(display, _)| segment.source_end > display.start && segment.source_end <= display.end)
+                .map(|(_, source)| source.end).unwrap_or(start);
+            segment.source_start = start;
+            segment.source_end = end;
+        }
+        line.text_style = text_style.clone();
+        line.char_width = char_width;
+        line.runs = Arc::from(runs.to_vec());
     }
     lines
 }
@@ -1528,6 +2009,7 @@ fn wrap_element(
     text_style: EffectiveTextStyle,
     char_width: FixedPoint,
     max_chars: u32,
+    atomic_ranges: &[std::ops::Range<usize>],
 ) -> Vec<WrappedLine> {
     let cell = char_width.raw().max(1);
     let first_left = paragraph
@@ -1566,6 +2048,7 @@ fn wrap_element(
             paragraph,
             &text_style,
             char_width,
+            atomic_ranges,
             &mut first_visual_line,
             &mut output,
         );
@@ -1583,9 +2066,10 @@ fn wrap_element(
         first_limit,
         rest_limit,
         paragraph,
-        &text_style,
-        char_width,
-        &mut first_visual_line,
+            &text_style,
+            char_width,
+            atomic_ranges,
+            &mut first_visual_line,
         &mut output,
     );
     if output.is_empty() {
@@ -1594,12 +2078,14 @@ fn wrap_element(
             role,
             start: 0,
             end: 0,
-            text: Arc::from(""),
-            display_text: Arc::from(""),
-            display_source_map: Arc::from([]),
-            text_style,
-            char_width,
+        text: Arc::from(""),
+        display_text: Arc::from(""),
+        display_source_map: Arc::from([]),
+        text_style,
+        runs: Arc::from([]),
+        char_width,
             first_visual_line: true,
+            final_visual_line: true,
             paragraph,
             oversized: false,
         });
@@ -1629,6 +2115,7 @@ fn wrap_segment(
     paragraph: EffectiveParagraph,
     text_style: &EffectiveTextStyle,
     char_width: FixedPoint,
+    atomic_ranges: &[std::ops::Range<usize>],
     first_visual_line: &mut bool,
     output: &mut Vec<WrappedLine>,
 ) {
@@ -1642,8 +2129,10 @@ fn wrap_segment(
             display_text: Arc::from(""),
             display_source_map: Arc::from([]),
             text_style: text_style.clone(),
+            runs: Arc::from([]),
             char_width,
             first_visual_line: *first_visual_line,
+            final_visual_line: true,
             paragraph,
             oversized: false,
         });
@@ -1687,6 +2176,14 @@ fn wrap_segment(
             && cells[hard_end - 1].source_start == cells[hard_end].source_start
         {
             hard_end += 1;
+        }
+        while hard_end < cells.len() && hard_end > start {
+            let boundary = base.saturating_add(cells[hard_end].local_start);
+            if atomic_ranges.iter().any(|range| boundary > range.start && boundary < range.end) {
+                hard_end += 1;
+            } else {
+                break;
+            }
         }
         let mut end = hard_end;
         if hard_end < cells.len() {
@@ -1739,8 +2236,10 @@ fn wrap_segment(
             display_text: Arc::from(display_text),
             display_source_map: display_source_map.into(),
             text_style: text_style.clone(),
+            runs: Arc::from([]),
             char_width,
             first_visual_line: first_line,
+            final_visual_line: end == cells.len(),
             paragraph,
             oversized: selected.len() > limit,
         });

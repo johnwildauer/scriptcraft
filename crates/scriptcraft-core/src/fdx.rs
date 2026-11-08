@@ -21,7 +21,7 @@ pub use crate::text_state::TextState;
 use crate::text_state::{self};
 use crate::{
     ModelError, PrintVisibility, Project, Role, RunAttribute, ScreenplayElement, SourceFormat,
-    SourceLayoutSettings, SourceProvenance, SourceSection, TextRun,
+    SourceLayoutSettings, SourceProvenance, SourceSection, TextRun, TitlePageParagraph,
 };
 use quick_xml::escape::unescape;
 use quick_xml::events::{BytesStart, Event};
@@ -585,6 +585,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     let mut project = Project {
         title_page: Vec::new(),
         elements: Vec::new(),
+        direct_paragraph_overrides: std::collections::BTreeMap::new(),
         preservation: None,
         legacy_json_state: None,
         layout_identity: std::sync::Arc::new(()),
@@ -602,6 +603,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         &mut root_owned,
         0,
         SectionKind::Other,
+        false,
         root_namespace,
         &mut project,
         &mut source_layout_settings,
@@ -648,6 +650,10 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         source_identity_use_index: None,
         source_text_bytes: 0,
     };
+    project.direct_paragraph_overrides = preservation
+        .source_layout_settings()
+        .direct_paragraph_overrides
+        .clone();
     preservation.rebuild_managed_paragraph_index();
     project.preservation = Some(preservation);
     project.validate().map_err(map_model_error)?;
@@ -832,7 +838,7 @@ fn write_v6_inner(
         save_diagnostic_at(error, SaveDiagnosticCode::WriteOutputRereadPropagation)
     })?;
     *stage = WriterStage::SemanticComparison;
-    if !same_semantic_elements(&project.title_page, &written.project.title_page)
+    if !same_semantic_title_paragraphs(&project.title_page, &written.project.title_page)
         || !same_semantic_elements(&project.elements, &written.project.elements)
     {
         return Err(SaveDiagnosticCode::WriteSemanticRereadMismatch.error());
@@ -930,6 +936,23 @@ fn same_semantic_elements(left: &[ScreenplayElement], right: &[ScreenplayElement
         && left.iter().zip(right).all(|(left, right)| {
             left.role == right.role
                 && left.text == right.text
+                && if left.runs.is_empty() {
+                    right.runs.iter().all(|run| run.attributes.is_empty())
+                } else {
+                    left.runs == right.runs
+                }
+        })
+}
+
+fn same_semantic_title_paragraphs(
+    left: &[TitlePageParagraph],
+    right: &[TitlePageParagraph],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.role == right.role
+                && left.text == right.text
+                && left.formatting == right.formatting
                 && if left.runs.is_empty() {
                     right.runs.iter().all(|run| run.attributes.is_empty())
                 } else {
@@ -1278,15 +1301,25 @@ fn lineage_xref_insert_index(document_ref: &PreservedElement) -> Result<usize, F
 fn validate_project_output_budgets(project: &Project) -> Result<(), FdxError> {
     let mut text_bytes = 0usize;
     let mut event_count = 3usize;
-    for element in project.title_page.iter().chain(&project.elements) {
+    for (text, runs) in project
+        .title_page
+        .iter()
+        .map(|element| (element.text.as_str(), element.runs.as_slice()))
+        .chain(
+            project
+                .elements
+                .iter()
+                .map(|element| (element.text.as_str(), element.runs.as_slice())),
+        )
+    {
         event_count = event_count.saturating_add(1);
-        text_bytes = text_bytes.saturating_add(element.text.len());
-        let run_count = element.runs.len().max(usize::from(element.runs.is_empty()));
+        text_bytes = text_bytes.saturating_add(text.len());
+        let run_count = runs.len().max(usize::from(runs.is_empty()));
         event_count = event_count.saturating_add(run_count);
-        if element.runs.is_empty() && !element.text.is_empty() {
+        if runs.is_empty() && !text.is_empty() {
             event_count = event_count.saturating_add(1);
         }
-        for run in &element.runs {
+        for run in runs {
             if !run.text.is_empty() {
                 event_count = event_count.saturating_add(1);
             }
@@ -2265,6 +2298,7 @@ fn reconcile_project_elements(
                 root_namespace.as_deref(),
                 &body,
                 &title,
+                false,
                 &mut body_order,
                 &mut title_order,
                 &mut seen,
@@ -2301,7 +2335,8 @@ fn reconcile_node(
     depth: usize,
     root_namespace: Option<&str>,
     body: &BTreeMap<crate::StableId, &ScreenplayElement>,
-    title: &BTreeMap<crate::StableId, &ScreenplayElement>,
+    title: &BTreeMap<crate::StableId, &TitlePageParagraph>,
+    in_title_content: bool,
     body_order: &mut Vec<crate::StableId>,
     title_order: &mut Vec<crate::StableId>,
     seen: &mut BTreeSet<crate::StableId>,
@@ -2321,31 +2356,54 @@ fn reconcile_node(
     } else {
         section
     };
+    let current_title_content = current_section == SectionKind::TitlePage
+        && (in_title_content
+            || (depth == 2 && is_fdx_element && element.name.local_name == "Content"));
     if let SourceOwnership::Managed(id) = &element.ownership {
         if !seen.insert(id.clone()) {
             return Err(SaveDiagnosticCode::ReconcileNodeDuplicateManagedIdentity.error());
         }
-        let semantic = match current_section {
+        match current_section {
             SectionKind::Content => {
+                if depth != 2 || !is_fdx_element || element.name.local_name != "Paragraph" {
+                    return Err(SaveDiagnosticCode::ReconcileNodeManagedOutsideSection.error());
+                }
                 body_order.push(id.clone());
-                body.get(id)
+                let semantic = body
+                    .get(id)
+                    .copied()
+                    .ok_or_else(|| SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error())?;
+                reconcile_managed_paragraph(element, semantic).map_err(|error| {
+                    save_diagnostic_at(
+                        error,
+                        SaveDiagnosticCode::ReconcileManagedParagraphPropagation,
+                    )
+                })?;
             }
             SectionKind::TitlePage => {
+                let exact_title_paragraph = is_fdx_element
+                    && element.name.local_name == "Paragraph"
+                    && ((depth == 2 && !in_title_content)
+                        || (depth == 3 && in_title_content));
+                if !exact_title_paragraph {
+                    return Err(SaveDiagnosticCode::ReconcileNodeManagedOutsideSection.error());
+                }
                 title_order.push(id.clone());
-                title.get(id)
+                let semantic = title
+                    .get(id)
+                    .copied()
+                    .ok_or_else(|| SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error())?;
+                reconcile_managed_title_paragraph(element, semantic).map_err(|error| {
+                    save_diagnostic_at(
+                        error,
+                        SaveDiagnosticCode::ReconcileManagedParagraphPropagation,
+                    )
+                })?;
             }
             SectionKind::Other => {
                 return Err(SaveDiagnosticCode::ReconcileNodeManagedOutsideSection.error())
             }
         }
-        .copied()
-        .ok_or_else(|| SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error())?;
-        reconcile_managed_paragraph(element, semantic).map_err(|error| {
-            save_diagnostic_at(
-                error,
-                SaveDiagnosticCode::ReconcileManagedParagraphPropagation,
-            )
-        })?;
         return Ok(());
     }
     for child in &mut element.children {
@@ -2356,6 +2414,7 @@ fn reconcile_node(
             root_namespace,
             body,
             title,
+            current_title_content,
             body_order,
             title_order,
             seen,
@@ -2387,8 +2446,44 @@ fn reconcile_managed_paragraph(
         return Err(SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch.error());
     }
 
-    if semantic.text.is_empty() {
-        if !semantic.runs.is_empty() {
+    reconcile_managed_text_runs(paragraph, &semantic.text, &semantic.runs)
+}
+
+fn reconcile_managed_title_paragraph(
+    paragraph: &mut PreservedElement,
+    semantic: &TitlePageParagraph,
+) -> Result<(), FdxError> {
+    let type_attributes = paragraph
+        .attributes
+        .iter()
+        .filter(|attribute| {
+            attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type"
+        })
+        .collect::<Vec<_>>();
+    match (semantic.role, paragraph.source_type.as_deref()) {
+        (None, None) if type_attributes.is_empty() => {}
+        (Some(role), Some(source_type))
+            if type_attributes.len() == 1
+                && type_attributes[0].value == source_type
+                && role_from_fdx(source_type) == Some(role) => {}
+        (None, _) => {
+            return Err(SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch.error())
+        }
+        (Some(_), _) => {
+            return Err(SaveDiagnosticCode::ReconcileParagraphRoleMismatch.error())
+        }
+    }
+
+    reconcile_managed_text_runs(paragraph, &semantic.text, &semantic.runs)
+}
+
+fn reconcile_managed_text_runs(
+    paragraph: &mut PreservedElement,
+    canonical_text: &str,
+    semantic_runs: &[TextRun],
+) -> Result<(), FdxError> {
+    if canonical_text.is_empty() {
+        if !semantic_runs.is_empty() {
             return Err(SaveDiagnosticCode::ReconcileParagraphEmptyRunsMismatch.error());
         }
         for child in &paragraph.children {
@@ -2400,24 +2495,14 @@ fn reconcile_managed_paragraph(
             {
                 continue;
             }
-            let mut text = String::new();
-            for inline in &text_element.children {
-                match inline {
-                    PreservedNode::Text(value) => text.push_str(value),
-                    // CDATA has explicit serialized syntax and is not an
-                    // interchangeable serializer-invisible text leaf.
-                    PreservedNode::CData(_) => {
-                        return Err(SaveDiagnosticCode::ReconcileParagraphCdataInEmptyText.error())
-                    }
-                    _ => {
-                        return Err(
-                            SaveDiagnosticCode::ReconcileParagraphUnsupportedEmptyChild.error()
-                        )
-                    }
-                }
-            }
-            if !text.is_empty() {
-                return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedEmptyText.error());
+            if text_element
+                .children
+                .iter()
+                .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
+            {
+                return Err(
+                    SaveDiagnosticCode::ReconcileParagraphUnsupportedEmptyChild.error(),
+                );
             }
         }
         paragraph.children.retain(|child| {
@@ -2429,80 +2514,180 @@ fn reconcile_managed_paragraph(
         return Ok(());
     }
 
-    let mut text_elements = paragraph
+    let mut runs = semantic_runs
+        .iter()
+        .filter(|run| !run.text.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    if runs.is_empty() {
+        runs.push(TextRun {
+            text: canonical_text.to_owned(),
+            attributes: Vec::new(),
+        });
+    }
+    if runs.iter().map(|run| run.text.as_str()).collect::<String>() != canonical_text {
+        return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
+    }
+
+    let source_indexes = paragraph
         .children
-        .iter_mut()
-        .filter_map(|node| match node {
+        .iter()
+        .enumerate()
+        .filter_map(|(index, child)| match child {
             PreservedNode::Element(element)
                 if element.name.local_name == "Text"
                     && element.name.namespace_uri == paragraph.name.namespace_uri =>
             {
-                Some(element)
+                Some(index)
             }
             _ => None,
         })
         .collect::<Vec<_>>();
-    let plain_run;
-    let semantic_runs = if semantic.runs.is_empty() && !semantic.text.is_empty() {
-        plain_run = vec![TextRun {
-            text: semantic.text.clone(),
-            attributes: Vec::new(),
-        }];
-        plain_run.as_slice()
-    } else {
-        semantic.runs.as_slice()
-    };
-    if text_elements.len() != semantic_runs.len() {
-        if text_elements.is_empty() && semantic_runs.is_empty() && semantic.text.is_empty() {
-            return Ok(());
-        }
-        return Err(SaveDiagnosticCode::ReconcileParagraphRunCountMismatch.error());
-    }
-    for (text_element, run) in text_elements.iter_mut().zip(semantic_runs) {
-        let source_attributes = text_element
-            .attributes
+    let mut templates = Vec::with_capacity(source_indexes.len());
+    for index in &source_indexes {
+        let PreservedNode::Element(element) = &paragraph.children[*index] else {
+            return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
+        };
+        if element
+            .children
             .iter()
-            .map(|attribute| RunAttribute {
-                name: attribute
-                    .name
-                    .qualified_name
-                    .clone()
-                    .unwrap_or_else(|| attribute.name.local_name.clone()),
-                value: attribute.value.clone(),
-            })
-            .collect::<Vec<_>>();
-        if source_attributes != run.attributes
-            || text_element
-                .children
-                .iter()
-                .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
+            .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
         {
             return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
         }
-        if let Some(first) = text_element.children.first_mut() {
-            match first {
-                PreservedNode::Text(value) | PreservedNode::CData(value) => {
-                    *value = run.text.clone().into();
-                }
-                _ => return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedFirstChild.error()),
+        templates.push(element.clone());
+    }
+
+    let mut reconciled = Vec::with_capacity(runs.len());
+    for (index, run) in runs.iter().enumerate() {
+        validate_xml_chars(&run.text)?;
+        let template = templates
+            .get(index)
+            .or_else(|| templates.last())
+            .cloned()
+            .unwrap_or_else(|| new_text_element_for_paragraph(paragraph));
+        reconciled.push(PreservedNode::Element(reconcile_text_element(
+            template, run,
+        )?));
+    }
+
+    if source_indexes.is_empty() {
+        paragraph.children.extend(reconciled);
+        return Ok(());
+    }
+
+    let insertion_after = source_indexes.last().copied().unwrap_or_default() + 1;
+    let mut replacements = reconciled.into_iter();
+    let mut next_source = source_indexes.iter().copied().peekable();
+    let mut children = Vec::with_capacity(
+        paragraph
+            .children
+            .len()
+            .saturating_add(runs.len().saturating_sub(source_indexes.len())),
+    );
+    for (index, child) in std::mem::take(&mut paragraph.children)
+        .into_iter()
+        .enumerate()
+    {
+        if next_source.peek().copied() == Some(index) {
+            next_source.next();
+            if let Some(replacement) = replacements.next() {
+                children.push(replacement);
             }
-            for child in text_element.children.iter_mut().skip(1) {
-                match child {
-                    PreservedNode::Text(value) | PreservedNode::CData(value) => value.clear(),
-                    _ => {
-                        return Err(
-                            SaveDiagnosticCode::ReconcileParagraphUnexpectedLaterChild.error()
-                        )
-                    }
-                }
-            }
-        } else if !run.text.is_empty() {
-            text_element
-                .children
-                .push(PreservedNode::Text(run.text.clone().into()));
+        } else {
+            children.push(child);
+        }
+        if index + 1 == insertion_after {
+            children.extend(replacements.by_ref());
         }
     }
+    paragraph.children = children.into();
     Ok(())
+}
+
+fn reconcile_text_element(
+    mut element: PreservedElement,
+    run: &TextRun,
+) -> Result<PreservedElement, FdxError> {
+    let mut attributes = Vec::with_capacity(run.attributes.len());
+    for attribute in &run.attributes {
+        validate_qname(&attribute.name)?;
+        validate_xml_chars(&attribute.value)?;
+        let name = if let Some(existing) = element.attributes.iter().find(|candidate| {
+            candidate
+                .name
+                .qualified_name
+                .as_deref()
+                .unwrap_or(candidate.name.local_name.as_str())
+                == attribute.name
+        }) {
+            existing.name.clone()
+        } else if attribute.name.contains(':') {
+            return Err(SaveDiagnosticCode::NewParagraphNamespacedRunAttribute.error());
+        } else {
+            SourceName {
+                namespace_uri: None,
+                local_name: attribute.name.clone(),
+                qualified_name: Some(attribute.name.clone()),
+            }
+        };
+        attributes.push(PreservedAttribute {
+            name,
+            value: attribute.value.clone(),
+        });
+    }
+    element.attributes = attributes;
+
+    let mut text_children = Vec::new();
+    if let Some(first) = element.children.first() {
+        match first {
+            PreservedNode::CData(_) if run.text.contains("]]> ") => {
+                return Err(FdxError::UnsupportedConstruct)
+            }
+            PreservedNode::CData(_) if run.text.contains("]]>") => {
+                return Err(FdxError::UnsupportedConstruct)
+            }
+            PreservedNode::CData(_) => {
+                text_children.push(PreservedNode::CData(run.text.clone().into()))
+            }
+            PreservedNode::Text(_) => text_children.push(PreservedNode::Text(run.text.clone().into())),
+            _ => return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedFirstChild.error()),
+        }
+        for child in element.children.iter().skip(1) {
+            match child {
+                PreservedNode::CData(_) => text_children.push(PreservedNode::CData("".into())),
+                PreservedNode::Text(_) => text_children.push(PreservedNode::Text("".into())),
+                _ => return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedLaterChild.error()),
+            }
+        }
+    } else if !run.text.is_empty() {
+        text_children.push(PreservedNode::Text(run.text.clone().into()));
+    }
+    element.children = text_children.into();
+    Ok(element)
+}
+
+fn new_text_element_for_paragraph(paragraph: &PreservedElement) -> PreservedElement {
+    let prefix = paragraph
+        .name
+        .qualified_name
+        .as_deref()
+        .and_then(|name| name.split_once(':').map(|(prefix, _)| prefix));
+    let qualified_name = prefix.map_or_else(|| "Text".to_owned(), |prefix| format!("{prefix}:Text"));
+    PreservedElement {
+        name: SourceName {
+            namespace_uri: paragraph.name.namespace_uri.clone(),
+            local_name: "Text".to_owned(),
+            qualified_name: Some(qualified_name),
+        },
+        attributes: Vec::new(),
+        namespace_bindings: Vec::new(),
+        source_type: None,
+        ownership: SourceOwnership::Opaque,
+        dependency_confidence: DependencyConfidence::Unknown,
+        anchor: None,
+        children: SharedVec::default(),
+    }
 }
 
 fn make_new_document_nodes(
@@ -2547,9 +2732,15 @@ fn make_new_document_nodes(
     }
     root.children.push(PreservedNode::Element(document_ref));
     let mut content = preserved_element("Content", Vec::new());
-    let mut paragraph_ids = ParagraphIdAllocator::new(lineage_ids);
+    let mut reserved_paragraph_ids = lineage_ids;
+    reserved_paragraph_ids.extend(project_source_paragraph_ids(project));
+    let mut paragraph_ids = ParagraphIdAllocator::new(reserved_paragraph_ids);
     for (index, element) in project.elements.iter().enumerate() {
-        let mut paragraph = new_paragraph(element, &mut paragraph_ids)?;
+        let direct_alignment = project
+            .direct_paragraph_overrides
+            .get(&element.id)
+            .and_then(|overrides| overrides.paragraph.alignment);
+        let mut paragraph = new_paragraph(element, direct_alignment, &mut paragraph_ids)?;
         if element.role == Role::SceneHeading {
             let scene_end = project.elements[index + 1..]
                 .iter()
@@ -2604,16 +2795,272 @@ fn make_new_document_nodes(
         root.children
             .push(PreservedNode::Element(new_element_settings(formatting)));
     }
-    if !project.title_page.is_empty() {
-        let mut title_page = preserved_element("TitlePage", Vec::new());
-        for element in &project.title_page {
-            title_page
-                .children
-                .push(new_paragraph(element, &mut paragraph_ids)?);
-        }
-        root.children.push(PreservedNode::Element(title_page));
+    let mut title_page = preserved_element("TitlePage", Vec::new());
+    title_page.children.push(PreservedNode::Element(
+        new_title_page_header_and_footer(&mut paragraph_ids)?,
+    ));
+    let mut title_content = preserved_element("Content", Vec::new());
+    for element in &project.title_page {
+        title_content
+            .children
+            .push(new_title_page_paragraph(element, &mut paragraph_ids)?);
     }
+    title_page
+        .children
+        .push(PreservedNode::Element(title_content));
+    title_page.children.push(PreservedNode::Element(preserved_element(
+        "TextState",
+        vec![("Scaling", "100"), ("Selection", "0,0"), ("ShowInvisibles", "No")],
+    )));
+    root.children.push(PreservedNode::Element(title_page));
     Ok(vec![PreservedNode::Element(root)])
+}
+
+fn project_source_paragraph_ids(project: &Project) -> BTreeSet<String> {
+    fn collect_source_attributes(nodes: &[PreservedNode], reserved: &mut BTreeSet<String>) {
+        for node in nodes {
+            let PreservedNode::Element(element) = node else {
+                continue;
+            };
+            if element.name.local_name == "Paragraph" {
+                if let Some(id) = element
+                    .attributes
+                    .iter()
+                    .find(|attribute| attribute.name.local_name.eq_ignore_ascii_case("id"))
+                {
+                    reserved.insert(id.value.clone());
+                }
+            }
+            collect_source_attributes(&element.children, reserved);
+        }
+    }
+
+    let mut reserved = BTreeSet::new();
+    for provenance in project
+        .elements
+        .iter()
+        .filter_map(|element| element.source_provenance.as_ref())
+        .chain(
+            project
+                .title_page
+                .iter()
+                .filter_map(|element| element.source_provenance.as_ref()),
+        )
+    {
+        if let Some(id) = &provenance.foreign_id {
+            reserved.insert(id.clone());
+        }
+    }
+    if let Some(preservation) = &project.preservation {
+        reserved.extend(
+            preservation
+                .identities
+                .iter()
+                .filter(|identity| identity.domain == ForeignIdDomain::Paragraph)
+                .map(|identity| identity.value.clone()),
+        );
+        for section in preservation.sections.iter() {
+            collect_source_attributes(&section.children, &mut reserved);
+        }
+    }
+    reserved
+}
+
+fn new_title_page_header_and_footer(
+    paragraph_ids: &mut ParagraphIdAllocator,
+) -> Result<PreservedElement, FdxError> {
+    let mut header_and_footer = preserved_element(
+        "HeaderAndFooter",
+        vec![
+            ("FooterFirstPage", "Yes"),
+            ("FooterVisible", "No"),
+            ("HeaderFirstPage", "No"),
+            ("HeaderVisible", "Yes"),
+            ("StartingPage", "1"),
+        ],
+    );
+
+    let mut header = preserved_element("Header", Vec::new());
+    let header_id = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
+    let mut header_paragraph = preserved_element(
+        "Paragraph",
+        vec![
+            ("Alignment", "Right"),
+            ("FirstIndent", "0.00"),
+            ("Leading", "Regular"),
+            ("LeftIndent", "1.25"),
+            ("OutlineLevel", "1"),
+            ("RightIndent", "-1.25"),
+            ("SpaceBefore", "0"),
+            ("Spacing", "1"),
+            ("StartsNewPage", "No"),
+            ("id", &header_id),
+        ],
+    );
+    header_paragraph
+        .children
+        .push(PreservedNode::Element(preserved_element(
+            "DynamicLabel",
+            vec![
+                ("AdornmentStyle", "0"),
+                ("Font", "Courier Final Draft"),
+                ("RevisionID", "0"),
+                ("Size", "12"),
+                ("Style", ""),
+                ("Type", "Page #"),
+            ],
+        )));
+    let mut header_text = preserved_element(
+        "Text",
+        vec![
+            ("AdornmentStyle", "0"),
+            ("Font", "Courier Final Draft"),
+            ("RevisionID", "0"),
+            ("Size", "12"),
+            ("Style", ""),
+        ],
+    );
+    header_text.children.push(PreservedNode::Text(".".into()));
+    header_paragraph
+        .children
+        .push(PreservedNode::Element(header_text));
+    header
+        .children
+        .push(PreservedNode::Element(header_paragraph));
+
+    let mut footer = preserved_element("Footer", Vec::new());
+    let footer_id = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
+    footer.children.push(PreservedNode::Element(preserved_element(
+        "Paragraph",
+        vec![
+            ("Alignment", "Right"),
+            ("FirstIndent", "0.00"),
+            ("Leading", "Regular"),
+            ("LeftIndent", "1.25"),
+            ("OutlineLevel", "1"),
+            ("RightIndent", "-1.25"),
+            ("SpaceBefore", "0"),
+            ("Spacing", "1"),
+            ("StartsNewPage", "No"),
+            ("id", &footer_id),
+        ],
+    )));
+    header_and_footer
+        .children
+        .push(PreservedNode::Element(header));
+    header_and_footer
+        .children
+        .push(PreservedNode::Element(footer));
+    Ok(header_and_footer)
+}
+
+fn new_title_page_paragraph(
+    semantic: &TitlePageParagraph,
+    paragraph_ids: &mut ParagraphIdAllocator,
+) -> Result<PreservedNode, FdxError> {
+    let formatting = semantic.formatting;
+    if formatting.leading_regular == Some(false) || formatting.spacing_single == Some(false) {
+        return Err(FdxError::UnsupportedConstruct);
+    }
+    let mut attributes = Vec::with_capacity(12);
+    if let Some(alignment) = formatting.alignment {
+        let value = match alignment {
+            crate::TitlePageAlignment::Left => "Left",
+            crate::TitlePageAlignment::Right => "Right",
+            crate::TitlePageAlignment::Center => "Center",
+            crate::TitlePageAlignment::Justified => "Full",
+        };
+        attributes.push(("Alignment", value.to_owned()));
+    }
+    if let Some(value) = formatting.first_indent {
+        attributes.push(("FirstIndent", format_inches_attribute(value)));
+    }
+    if formatting.leading_regular == Some(true) {
+        attributes.push(("Leading", "Regular".to_owned()));
+    }
+    if let Some(value) = formatting.left_indent {
+        attributes.push(("LeftIndent", format_inches_attribute(value)));
+    }
+    attributes.push(("OutlineLevel", "1".to_owned()));
+    if let Some(value) = formatting.right_indent {
+        attributes.push(("RightIndent", format_inches_attribute(value)));
+    }
+    if let Some(value) = formatting.space_before {
+        attributes.push(("SpaceBefore", value.decimal_string()));
+    }
+    if formatting.spacing_single == Some(true) {
+        attributes.push(("Spacing", "1".to_owned()));
+    }
+    if let Some(value) = formatting.starts_new_page {
+        attributes.push((
+            "StartsNewPage",
+            if value { "Yes" } else { "No" }.to_owned(),
+        ));
+    }
+    if let Some(role) = semantic.role {
+        attributes.push(("Type", role_to_fdx(role).to_owned()));
+    }
+    validate_xml_chars(&semantic.text)?;
+    let paragraph_id = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
+    attributes.push(("id", paragraph_id));
+    let mut paragraph = preserved_element_owned(
+        "Paragraph",
+        attributes
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect(),
+    );
+    let runs = if semantic.runs.is_empty() && !semantic.text.is_empty() {
+        vec![TextRun {
+            text: semantic.text.clone(),
+            attributes: Vec::new(),
+        }]
+    } else {
+        semantic.runs.clone()
+    };
+    if semantic.text.is_empty() {
+        if !runs.is_empty() {
+            return Err(SaveDiagnosticCode::NewParagraphEmptyRunsMismatch.error());
+        }
+        return Ok(PreservedNode::Element(paragraph));
+    }
+    if runs.iter().map(|run| run.text.as_str()).collect::<String>() != semantic.text {
+        return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
+    }
+    for run in runs.into_iter().filter(|run| !run.text.is_empty()) {
+        validate_xml_chars(&run.text)?;
+        let mut text = preserved_element("Text", Vec::new());
+        for attribute in run.attributes {
+            validate_qname(&attribute.name)?;
+            if attribute.name.contains(':') {
+                return Err(SaveDiagnosticCode::NewParagraphNamespacedRunAttribute.error());
+            }
+            validate_xml_chars(&attribute.value)?;
+            text.attributes.push(PreservedAttribute {
+                name: SourceName {
+                    namespace_uri: None,
+                    local_name: attribute.name.clone(),
+                    qualified_name: Some(attribute.name),
+                },
+                value: attribute.value,
+            });
+        }
+        text.children.push(PreservedNode::Text(run.text.into()));
+        paragraph.children.push(PreservedNode::Element(text));
+    }
+    Ok(PreservedNode::Element(paragraph))
+}
+
+fn format_inches_attribute(value: crate::FixedPoint) -> String {
+    let hundredths = value.raw().div_euclid(72);
+    let negative = hundredths < 0;
+    let magnitude = hundredths.unsigned_abs();
+    format!(
+        "{}{}.{}",
+        if negative { "-" } else { "" },
+        magnitude / 100,
+        magnitude % 100
+    )
 }
 
 fn window_state_element(parent: &SourceName, state: WindowState) -> PreservedElement {
@@ -2945,13 +3392,32 @@ fn preserved_element_owned(name: &str, attributes: Vec<(String, String)>) -> Pre
 
 fn new_paragraph(
     semantic: &ScreenplayElement,
+    direct_alignment: Option<crate::ParagraphAlignment>,
     paragraph_ids: &mut ParagraphIdAllocator,
 ) -> Result<PreservedNode, FdxError> {
     let mut paragraph = preserved_element(
         "Paragraph",
         vec![("Type", role_to_fdx(semantic.role)), ("id", "")],
     );
-    paragraph.attributes[1].value = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
+    if let Some(alignment) = direct_alignment {
+        paragraph.attributes.insert(
+            1,
+            PreservedAttribute {
+                name: SourceName {
+                    namespace_uri: None,
+                    local_name: "Alignment".to_owned(),
+                    qualified_name: Some("Alignment".to_owned()),
+                },
+                value: alignment.fdx_value().to_owned(),
+            },
+        );
+    }
+    let id_attribute = paragraph
+        .attributes
+        .iter_mut()
+        .find(|attribute| attribute.name.namespace_uri.is_none() && attribute.name.local_name == "id")
+        .ok_or(FdxError::UnsupportedConstruct)?;
+    id_attribute.value = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
     if semantic.text.is_empty() {
         if !semantic.runs.is_empty() {
             return Err(SaveDiagnosticCode::NewParagraphEmptyRunsMismatch.error());
@@ -3854,6 +4320,7 @@ fn preserve_node(
     node: &mut RawNode,
     depth: usize,
     section: SectionKind,
+    in_title_content: bool,
     root_ns: Option<&str>,
     project: &mut Project,
     source_layout_settings: &mut SourceLayoutSettings,
@@ -3871,25 +4338,34 @@ fn preserve_node(
     } else {
         section
     };
-    let managed_role = if depth == 2
-        && matches!(
-            current_section,
-            SectionKind::Content | SectionKind::TitlePage
-        )
-        && is_fdx_element(element, "Paragraph", root_ns)
-    {
-        attribute(element, "Type").and_then(role_from_fdx)
-    } else {
-        None
-    };
+    let paragraph = is_fdx_element(element, "Paragraph", root_ns);
+    let title_content_paragraph = current_section == SectionKind::TitlePage
+        && in_title_content
+        && depth == 3
+        && paragraph;
+    let legacy_title_paragraph = current_section == SectionKind::TitlePage
+        && depth == 2
+        && paragraph
+        && attribute(element, "Type").and_then(role_from_fdx).is_some();
+    let body_paragraph = current_section == SectionKind::Content && depth == 2 && paragraph;
 
-    let managed = if let Some(role) = managed_role {
-        Some(make_semantic_element(
+    let managed = if title_content_paragraph || legacy_title_paragraph {
+        Some(ImportedSemanticParagraph::Title(make_title_page_paragraph(
             element,
-            role,
-            current_section,
+            u32::try_from(project.title_page.len()).map_err(|_| FdxError::ResourceLimit)?,
             next_id,
-        )?)
+        )?))
+    } else if body_paragraph {
+        if let Some(role) = attribute(element, "Type").and_then(role_from_fdx) {
+            Some(ImportedSemanticParagraph::Body(make_semantic_element(
+                element,
+                role,
+                current_section,
+                next_id,
+            )?))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -3902,14 +4378,19 @@ fn preserve_node(
     };
     let ownership = managed
         .as_ref()
-        .map(|semantic| SourceOwnership::Managed(semantic.id.clone()))
+        .map(|semantic| SourceOwnership::Managed(semantic.id().clone()))
         .unwrap_or(SourceOwnership::Opaque);
     let mut children = Vec::with_capacity(element.children.len());
+    let child_in_title_content = in_title_content
+        || (depth == 2
+            && current_section == SectionKind::TitlePage
+            && is_fdx_element(element, "Content", root_ns));
     for child in &mut element.children {
         children.push(preserve_node(
             child,
             depth.saturating_add(1),
             current_section,
+            child_in_title_content,
             root_ns,
             project,
             source_layout_settings,
@@ -3937,25 +4418,38 @@ fn preserve_node(
         children: children.into(),
     };
     if let (Some(semantic), Some(anchor_id)) = (managed, anchor_id) {
-        if current_section == SectionKind::Content {
+        if let ImportedSemanticParagraph::Body(body) = &semantic {
             if let Some(overrides) = direct_paragraph_overrides(element) {
                 source_layout_settings
                     .direct_paragraph_overrides
-                    .insert(semantic.id.clone(), overrides);
+                    .insert(body.id.clone(), overrides);
             }
         }
         anchors.push(SourceAnchor {
             id: anchor_id,
-            target: crate::preservation::AnchorTarget::ProjectElement(semantic.id.clone()),
+            target: crate::preservation::AnchorTarget::ProjectElement(semantic.id().clone()),
             relation: crate::preservation::AnchorRelation::Represents,
         });
-        match current_section {
-            SectionKind::Content => project.elements.push(semantic),
-            SectionKind::TitlePage => project.title_page.push(semantic),
-            SectionKind::Other => return Err(FdxError::UnsupportedConstruct),
+        match semantic {
+            ImportedSemanticParagraph::Body(body) => project.elements.push(body),
+            ImportedSemanticParagraph::Title(title) => project.title_page.push(title),
         }
     }
     Ok(PreservedNode::Element(preserved))
+}
+
+enum ImportedSemanticParagraph {
+    Body(ScreenplayElement),
+    Title(TitlePageParagraph),
+}
+
+impl ImportedSemanticParagraph {
+    fn id(&self) -> &crate::StableId {
+        match self {
+            Self::Body(element) => &element.id,
+            Self::Title(paragraph) => &paragraph.id,
+        }
+    }
 }
 
 fn direct_paragraph_overrides(
@@ -3963,12 +4457,8 @@ fn direct_paragraph_overrides(
 ) -> Option<crate::formatting::SourceParagraphOverrides> {
     let mut overrides = crate::formatting::SourceParagraphOverrides::default();
     let paragraph = &mut overrides.paragraph;
-    paragraph.alignment = attribute(element, "Alignment").and_then(|alignment| match alignment {
-        "Right" => Some(crate::ParagraphAlignment::Right),
-        "Center" => Some(crate::ParagraphAlignment::Center),
-        "Left" => Some(crate::ParagraphAlignment::Left),
-        _ => None,
-    });
+    paragraph.alignment = attribute(element, "Alignment")
+        .and_then(crate::ParagraphAlignment::from_fdx);
     paragraph.first_indent =
         attribute(element, "FirstIndent").and_then(|value| bounded_inches(value, true));
     paragraph.left_indent =
@@ -4016,15 +4506,93 @@ fn make_semantic_element(
         foreign_id: identity_attribute(element).map(str::to_owned),
         foreign_role: attribute(element, "Type").map(str::to_owned),
     };
+    let runs = semantic_text_runs(
+        element,
+        section == SectionKind::Content && role == Role::SceneHeading,
+    )?;
+    ScreenplayElement::with_runs(id, role, runs, Some(source_provenance)).map_err(map_model_error)
+}
+
+fn make_title_page_paragraph(
+    element: &RawElement,
+    ordinal: u32,
+    next_id: &mut usize,
+) -> Result<TitlePageParagraph, FdxError> {
+    let id = format!("fdx-element-{}", *next_id);
+    *next_id = next_id.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+    let source_provenance = SourceProvenance {
+        format: SourceFormat::Fdx,
+        section: SourceSection::TitlePage,
+        ordinal,
+        foreign_id: identity_attribute(element).map(str::to_owned),
+        foreign_role: attribute(element, "Type").map(str::to_owned),
+    };
+    let role = attribute(element, "Type").and_then(role_from_fdx);
+    TitlePageParagraph::with_runs(
+        id,
+        role,
+        semantic_text_runs(element, false)?,
+        Some(source_provenance),
+        direct_title_page_formatting(element),
+    )
+    .map_err(map_model_error)
+}
+
+fn direct_title_page_formatting(element: &RawElement) -> crate::TitlePageParagraphFormatting {
+    use crate::{TitlePageAlignment, TitlePageParagraphFormatting};
+
+    TitlePageParagraphFormatting {
+        alignment: attribute(element, "Alignment").and_then(|alignment| match alignment {
+            "Left" => Some(TitlePageAlignment::Left),
+            "Center" => Some(TitlePageAlignment::Center),
+            "Right" => Some(TitlePageAlignment::Right),
+            "Full" => Some(TitlePageAlignment::Justified),
+            _ => None,
+        }),
+        first_indent: attribute(element, "FirstIndent")
+            .and_then(|value| bounded_inches(value, true)),
+        left_indent: attribute(element, "LeftIndent")
+            .and_then(|value| bounded_inches(value, false)),
+        right_indent: attribute(element, "RightIndent")
+            .and_then(|value| bounded_inches(value, false)),
+        leading_regular: (attribute(element, "Leading") == Some("Regular")).then_some(true),
+        space_before: attribute(element, "SpaceBefore")
+            .and_then(crate::FixedPoint::parse_points)
+            .filter(|value| (0..=79_200).contains(&value.raw())),
+        spacing_single: (attribute(element, "Spacing") == Some("1")).then_some(true),
+        starts_new_page: attribute(element, "StartsNewPage").and_then(|value| match value {
+            "Yes" => Some(true),
+            "No" => Some(false),
+            _ => None,
+        }),
+    }
+}
+
+fn semantic_text_runs(
+    element: &RawElement,
+    allow_scene_properties: bool,
+) -> Result<Vec<TextRun>, FdxError> {
     let mut runs = Vec::new();
     for child in &element.children {
         let RawNode::Element(text_element) = child else {
             continue;
         };
+        if allow_scene_properties
+            && is_fdx_element(
+                text_element,
+                "SceneProperties",
+                element.name.namespace_uri.as_deref(),
+            )
+        {
+            // Scene metadata is source-owned and retained in the preservation
+            // tree. It is not inline text, but is a valid direct child of a
+            // Scene Heading paragraph emitted by the new-document writer.
+            continue;
+        }
         if text_element.name.local_name != "Text"
             || text_element.name.namespace_uri != element.name.namespace_uri
         {
-            continue;
+            return Err(FdxError::UnsupportedConstruct);
         }
         let mut text = String::new();
         for inline in &text_element.children {
@@ -4035,6 +4603,9 @@ fn make_semantic_element(
                     return Err(FdxError::UnsupportedConstruct)
                 }
             }
+        }
+        if text.is_empty() {
+            continue;
         }
         let attributes = text_element
             .attributes
@@ -4050,13 +4621,7 @@ fn make_semantic_element(
             .collect();
         runs.push(TextRun { text, attributes });
     }
-    if runs.iter().all(|run| run.text.is_empty()) {
-        // Empty Text elements have no canonical semantic contribution, regardless
-        // of their formatting attributes. The preservation tree retains them
-        // until managed writer reconciliation.
-        runs.clear();
-    }
-    ScreenplayElement::with_runs(id, role, runs, Some(source_provenance)).map_err(map_model_error)
+    Ok(runs)
 }
 
 /// Apply only explicit source settings that have direct counterparts in the
@@ -4215,7 +4780,9 @@ fn collect_identities(
     let mut seen = BTreeSet::new();
     let mut scoped_title_page_paragraphs = BTreeMap::new();
     let mut definitions = Vec::new();
-    walk_elements(root, &mut |element, nearest_board, in_title_page, depth| {
+    walk_elements(
+        root,
+        &mut |element, nearest_board, in_title_page, in_title_content, depth| {
         if identity_attribute_count(element) > 1 {
             return Err(FdxError::AmbiguousIdentity);
         }
@@ -4242,14 +4809,14 @@ fn collect_identities(
         let domain = identity_domain(&element.name.local_name);
         let identity = ForeignIdentity::new(domain.clone(), value.to_owned())
             .map_err(map_preservation_error)?;
-        // Paragraphs in TitlePage source content are opaque unless they are
-        // direct, recognized title-page roles managed by preserve_node. Count
-        // those raw ID occurrences separately so only repetitions that have no
-        // global consumer are omitted from the global Paragraph definitions.
-        let opaque_title_page_paragraph = in_title_page
+        // Exact TitlePage -> Content Paragraph occurrences are scoped identities.
+        // Repeated source IDs among those editable occurrences stay distinct via
+        // transient semantic IDs; they cannot shadow any globally defined ID.
+        let scoped_title_page_paragraph = in_title_page
+            && in_title_content
             && element.name.local_name == "Paragraph"
-            && !(depth == 2 && attribute(element, "Type").and_then(role_from_fdx).is_some());
-        if opaque_title_page_paragraph {
+            && depth == 3;
+        if scoped_title_page_paragraph {
             *scoped_title_page_paragraphs
                 .entry(identity.clone())
                 .or_insert(0usize) += 1;
@@ -4271,11 +4838,14 @@ fn collect_identities(
             false,
         ));
         Ok(())
-    })?;
+        },
+    )?;
 
-    // Repeated scoped occurrences are deliberately not global definitions, but
-    // they may not shadow an identity that is globally registered elsewhere.
-    // A single opaque title-page Paragraph retains its existing global identity.
+    // Repeated scoped occurrences are not usable as global definitions, but one
+    // registry entry keeps their foreign ID in the source-use scanner. This
+    // prevents an external attribute/text consumer from being mistaken for an
+    // unreferenced ID during later preservation edits. They may not shadow an
+    // identity that is globally registered elsewhere.
     for (identity, count) in &scoped_title_page_paragraphs {
         if seen.contains(identity) {
             return Err(FdxError::AmbiguousIdentity);
@@ -4286,11 +4856,17 @@ fn collect_identities(
     }
 
     let mut source_order = 0u32;
+    let mut registered_repeated_title_identities = BTreeSet::new();
     for (name, identity, attributes, scoped_title_page) in &definitions {
         let repeated_scoped_title_page = *scoped_title_page
             && scoped_title_page_paragraphs
                 .get(identity)
                 .is_some_and(|count| *count > 1);
+        if repeated_scoped_title_page
+            && !registered_repeated_title_identities.insert(identity.clone())
+        {
+            continue;
+        }
         let kind = match name.as_str() {
             "ListItem" => Some(BoardEntityKind::ListItem),
             "DisplayBoard" => Some(BoardEntityKind::DisplayBoard),
@@ -4322,9 +4898,7 @@ fn collect_identities(
                 source_path,
             });
         } else {
-            if !repeated_scoped_title_page {
-                identities.push(identity.clone());
-            }
+            identities.push(identity.clone());
         }
     }
 
@@ -4342,6 +4916,7 @@ fn collect_identities(
     walk_elements(root, &mut |element,
                               nearest_board,
                               _in_title_page,
+                              _in_title_content,
                               _depth| {
         let board = if element.name.local_name == "DisplayBoard" {
             identity_attribute(element)
@@ -4382,18 +4957,19 @@ fn collect_identities(
 
 fn walk_elements<F>(element: &RawElement, visitor: &mut F) -> Result<(), FdxError>
 where
-    F: FnMut(&RawElement, Option<&ForeignIdentity>, bool, usize) -> Result<(), FdxError>,
+    F: FnMut(&RawElement, Option<&ForeignIdentity>, bool, bool, usize) -> Result<(), FdxError>,
 {
     fn visit<F>(
         element: &RawElement,
         nearest_board: Option<&ForeignIdentity>,
         in_title_page: bool,
+        in_title_content: bool,
         depth: usize,
         root_namespace: Option<&str>,
         visitor: &mut F,
     ) -> Result<(), FdxError>
     where
-        F: FnMut(&RawElement, Option<&ForeignIdentity>, bool, usize) -> Result<(), FdxError>,
+        F: FnMut(&RawElement, Option<&ForeignIdentity>, bool, bool, usize) -> Result<(), FdxError>,
     {
         let local_board = if element.name.local_name == "DisplayBoard" {
             identity_attribute(element)
@@ -4404,15 +4980,21 @@ where
             None
         };
         let active_board = local_board.as_ref().or(nearest_board);
-        visitor(element, active_board, in_title_page, depth)?;
+        visitor(element, active_board, in_title_page, in_title_content, depth)?;
         for child in &element.children {
             if let RawNode::Element(child) = child {
                 let child_in_title_page = in_title_page
                     || (depth == 0 && is_fdx_element(child, "TitlePage", root_namespace));
+                let child_in_title_content = in_title_content
+                    || (in_title_page
+                        && depth == 1
+                        && is_fdx_element(element, "TitlePage", root_namespace)
+                        && is_fdx_element(child, "Content", root_namespace));
                 visit(
                     child,
                     active_board,
                     child_in_title_page,
+                    child_in_title_content,
                     depth.saturating_add(1),
                     root_namespace,
                     visitor,
@@ -4424,6 +5006,7 @@ where
     visit(
         element,
         None,
+        false,
         false,
         0,
         element.name.namespace_uri.as_deref(),

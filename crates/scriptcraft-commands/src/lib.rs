@@ -10,11 +10,14 @@
 use std::{fmt, path::Path, str::FromStr};
 
 use scriptcraft_core::editing::{Position as CorePosition, Selection as CoreSelection};
-use scriptcraft_core::{Project, Role};
+use scriptcraft_core::{ParagraphAlignment, Project, Role, RunStyle};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 pub mod executor;
-pub use executor::{execute_editor_command, CommandOutcome, CommandRejection, UnavailableReason};
+pub use executor::{
+    execute_editor_command, execute_editor_command_on_surface, CommandOutcome, CommandRejection,
+    UnavailableReason,
+};
 
 /// Current version of the command-envelope contract.
 pub const COMMAND_WIRE_VERSION: u16 = 1;
@@ -51,6 +54,11 @@ pub enum CommandId {
     EditorNavigationVertical,
     EditorNavigationLineEdge,
     EditorFocus,
+    WindowTitlePageOpen,
+    WindowTitlePageClose,
+    EditorStyleToggle,
+    EditorAlignmentSet,
+    PdfIncludeTitlePageResolve,
     ViewZoomSet,
     ViewZoomPinch,
     ViewAppearanceSet,
@@ -69,7 +77,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 47] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -98,6 +106,11 @@ impl CommandId {
         Self::EditorNavigationVertical,
         Self::EditorNavigationLineEdge,
         Self::EditorFocus,
+        Self::WindowTitlePageOpen,
+        Self::WindowTitlePageClose,
+        Self::EditorStyleToggle,
+        Self::EditorAlignmentSet,
+        Self::PdfIncludeTitlePageResolve,
         Self::ViewZoomSet,
         Self::ViewZoomPinch,
         Self::ViewAppearanceSet,
@@ -144,6 +157,11 @@ impl CommandId {
             Self::EditorNavigationVertical => "editor.navigation.vertical",
             Self::EditorNavigationLineEdge => "editor.navigation.line-edge",
             Self::EditorFocus => "editor.focus",
+            Self::WindowTitlePageOpen => "window.title-page.open",
+            Self::WindowTitlePageClose => "window.title-page.close",
+            Self::EditorStyleToggle => "editor.style.toggle",
+            Self::EditorAlignmentSet => "editor.alignment.set",
+            Self::PdfIncludeTitlePageResolve => "pdf.include-title-page.resolve",
             Self::ViewZoomSet => "view.zoom.set",
             Self::ViewZoomPinch => "view.zoom.pinch",
             Self::ViewAppearanceSet => "view.appearance.set",
@@ -246,6 +264,139 @@ impl<'de> Deserialize<'de> for RoleValue {
     }
 }
 
+/// Semantic editing surface. Body is the compatibility default for payloads
+/// written before surface-aware commands were introduced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorSurface {
+    #[default]
+    Body,
+    TitlePage,
+}
+
+impl<'de> Deserialize<'de> for EditorSurface {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "body" => Ok(Self::Body),
+            "title_page" => Ok(Self::TitlePage),
+            value => Err(de::Error::custom(format!("unknown editor surface: {value}"))),
+        }
+    }
+}
+
+impl EditorSurface {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Body => "body",
+            Self::TitlePage => "title_page",
+        }
+    }
+}
+
+/// Bounded, typed inline Text style accepted by title and body commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleTextStyle {
+    Bold,
+    Italics,
+    Underline,
+    AllCaps,
+    Strikethrough,
+}
+
+impl<'de> Deserialize<'de> for TitleTextStyle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "bold" => Ok(Self::Bold),
+            "italics" => Ok(Self::Italics),
+            "underline" => Ok(Self::Underline),
+            "all_caps" => Ok(Self::AllCaps),
+            "strikethrough" => Ok(Self::Strikethrough),
+            value => Err(de::Error::custom(format!("unknown title text style: {value}"))),
+        }
+    }
+}
+
+impl TitleTextStyle {
+    pub const fn as_core(self) -> RunStyle {
+        match self {
+            Self::Bold => RunStyle::Bold,
+            Self::Italics => RunStyle::Italics,
+            Self::Underline => RunStyle::Underline,
+            Self::AllCaps => RunStyle::AllCaps,
+            Self::Strikethrough => RunStyle::Strikethrough,
+        }
+    }
+}
+
+/// Bounded direct paragraph alignment value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParagraphAlignmentValue {
+    Left,
+    Right,
+    Center,
+    Justified,
+}
+
+impl<'de> Deserialize<'de> for ParagraphAlignmentValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            "center" => Ok(Self::Center),
+            "justified" => Ok(Self::Justified),
+            value => Err(de::Error::custom(format!("unknown paragraph alignment: {value}"))),
+        }
+    }
+}
+
+impl ParagraphAlignmentValue {
+    pub const fn as_core(self) -> ParagraphAlignment {
+        match self {
+            Self::Left => ParagraphAlignment::Left,
+            Self::Right => ParagraphAlignment::Right,
+            Self::Center => ParagraphAlignment::Center,
+            Self::Justified => ParagraphAlignment::Justified,
+        }
+    }
+}
+
+/// Transient PDF request options; never serialized into a native document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PdfExportOptions {
+    pub include_title_page: bool,
+}
+
+impl Default for PdfExportOptions {
+    fn default() -> Self {
+        Self { include_title_page: true }
+    }
+}
+
+/// Descriptions for effects that require the desktop host. The semantic
+/// executor does not perform any of these operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostEffectDescription {
+    OpenTitlePageWindow,
+    FocusTitlePageWindow,
+    CloseTitlePageWindow,
+    FocusActiveEditor,
+    OpenPdfDestinationPicker,
+    ToggleFocusModeViewport,
+    ResolvePdfIncludeTitlePage(PdfExportOptions),
+}
+
 /// UTF-8 byte position in the semantic screenplay model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -296,21 +447,35 @@ impl Selection {
     /// Validates element indexes and UTF-8 byte boundaries against the active
     /// semantic project before a host passes this selection to an executor.
     pub fn validate_for(self, project: &Project) -> Result<(), SelectionError> {
-        validate_position(self.anchor, project)?;
-        validate_position(self.focus, project)
+        self.validate_for_surface(project, EditorSurface::Body)
+    }
+
+    pub fn validate_for_surface(
+        self,
+        project: &Project,
+        surface: EditorSurface,
+    ) -> Result<(), SelectionError> {
+        validate_position(self.anchor, project, surface)?;
+        validate_position(self.focus, project, surface)
     }
 }
 
-fn validate_position(position: Position, project: &Project) -> Result<(), SelectionError> {
-    let element = project
-        .elements
-        .get(usize::try_from(position.element).map_err(|_| SelectionError::ElementOutOfRange)?)
-        .ok_or(SelectionError::ElementOutOfRange)?;
+fn validate_position(
+    position: Position,
+    project: &Project,
+    surface: EditorSurface,
+) -> Result<(), SelectionError> {
+    let index = usize::try_from(position.element).map_err(|_| SelectionError::ElementOutOfRange)?;
+    let text = match surface {
+        EditorSurface::Body => project.elements.get(index).map(|element| element.text.as_str()),
+        EditorSurface::TitlePage => project.title_page.get(index).map(|paragraph| paragraph.text.as_str()),
+    }
+    .ok_or(SelectionError::ElementOutOfRange)?;
     let offset = usize::try_from(position.offset).map_err(|_| SelectionError::OffsetOutOfRange)?;
-    if offset > element.text.len() {
+    if offset > text.len() {
         return Err(SelectionError::OffsetOutOfRange);
     }
-    if !element.text.is_char_boundary(offset) {
+    if !text.is_char_boundary(offset) {
         return Err(SelectionError::InvalidUtf8Boundary);
     }
     Ok(())
@@ -632,9 +797,9 @@ pub enum Command {
     #[serde(rename = "edit.select-all")]
     EditSelectAll,
     #[serde(rename = "editor.text.insert")]
-    EditorTextInsert { text: String },
+    EditorTextInsert { text: String, #[serde(default)] surface: EditorSurface },
     #[serde(rename = "editor.text.paste")]
-    EditorTextPaste { text: String },
+    EditorTextPaste { text: String, #[serde(default)] surface: EditorSurface },
     #[serde(rename = "editor.delete.backward")]
     EditorDeleteBackward,
     #[serde(rename = "editor.paragraph.enter")]
@@ -642,19 +807,29 @@ pub enum Command {
     #[serde(rename = "editor.paragraph.tab")]
     EditorParagraphTab,
     #[serde(rename = "editor.element.change")]
-    EditorElementChange { role: RoleValue },
+    EditorElementChange { role: RoleValue, #[serde(default)] surface: EditorSurface },
     #[serde(rename = "editor.selection.set")]
-    EditorSelectionSet { selection: Selection },
+    EditorSelectionSet { selection: Selection, #[serde(default)] surface: EditorSurface },
     #[serde(rename = "editor.selection.pointer")]
-    EditorSelectionPointer { position: Position, phase: PointerPhase },
+    EditorSelectionPointer { position: Position, phase: PointerPhase, #[serde(default)] surface: EditorSurface },
     #[serde(rename = "editor.navigation.horizontal")]
-    EditorNavigationHorizontal { direction: HorizontalDirection, extend: bool },
+    EditorNavigationHorizontal { direction: HorizontalDirection, extend: bool, #[serde(default)] surface: EditorSurface },
     #[serde(rename = "editor.navigation.vertical")]
-    EditorNavigationVertical { direction: VerticalDirection, extend: bool },
+    EditorNavigationVertical { direction: VerticalDirection, extend: bool, #[serde(default)] surface: EditorSurface },
     #[serde(rename = "editor.navigation.line-edge")]
-    EditorNavigationLineEdge { edge: LineEdge, extend: bool },
+    EditorNavigationLineEdge { edge: LineEdge, extend: bool, #[serde(default)] surface: EditorSurface },
     #[serde(rename = "editor.focus")]
     EditorFocus,
+    #[serde(rename = "window.title-page.open")]
+    WindowTitlePageOpen,
+    #[serde(rename = "window.title-page.close")]
+    WindowTitlePageClose,
+    #[serde(rename = "editor.style.toggle")]
+    EditorStyleToggle { surface: EditorSurface, style: TitleTextStyle },
+    #[serde(rename = "editor.alignment.set")]
+    EditorAlignmentSet { surface: EditorSurface, alignment: ParagraphAlignmentValue },
+    #[serde(rename = "pdf.include-title-page.resolve")]
+    PdfIncludeTitlePageResolve { options: PdfExportOptions },
     #[serde(rename = "view.zoom.set")]
     ViewZoomSet { percent: ZoomPercent },
     #[serde(rename = "view.zoom.pinch")]
@@ -686,6 +861,20 @@ pub enum Command {
 }
 
 impl Command {
+    pub const fn host_effect_description(&self) -> Option<HostEffectDescription> {
+        match self {
+            Self::FileSaveAsPdf => Some(HostEffectDescription::OpenPdfDestinationPicker),
+            Self::ViewFocusModeToggle => Some(HostEffectDescription::ToggleFocusModeViewport),
+            Self::EditorFocus => Some(HostEffectDescription::FocusActiveEditor),
+            Self::WindowTitlePageOpen => Some(HostEffectDescription::OpenTitlePageWindow),
+            Self::WindowTitlePageClose => Some(HostEffectDescription::CloseTitlePageWindow),
+            Self::PdfIncludeTitlePageResolve { options } => {
+                Some(HostEffectDescription::ResolvePdfIncludeTitlePage(*options))
+            }
+            _ => None,
+        }
+    }
+
     pub const fn id(&self) -> CommandId {
         match self {
             Self::FileNew => CommandId::FileNew,
@@ -716,6 +905,11 @@ impl Command {
             Self::EditorNavigationVertical { .. } => CommandId::EditorNavigationVertical,
             Self::EditorNavigationLineEdge { .. } => CommandId::EditorNavigationLineEdge,
             Self::EditorFocus => CommandId::EditorFocus,
+            Self::WindowTitlePageOpen => CommandId::WindowTitlePageOpen,
+            Self::WindowTitlePageClose => CommandId::WindowTitlePageClose,
+            Self::EditorStyleToggle { .. } => CommandId::EditorStyleToggle,
+            Self::EditorAlignmentSet { .. } => CommandId::EditorAlignmentSet,
+            Self::PdfIncludeTitlePageResolve { .. } => CommandId::PdfIncludeTitlePageResolve,
             Self::ViewZoomSet { .. } => CommandId::ViewZoomSet,
             Self::ViewZoomPinch { .. } => CommandId::ViewZoomPinch,
             Self::ViewAppearanceSet { .. } => CommandId::ViewAppearanceSet,
@@ -764,14 +958,14 @@ impl CommandEnvelope {
     pub fn validate_for_project(&self, project: &Project) -> Result<(), EnvelopeError> {
         self.validate()?;
         match &self.command {
-            Command::EditorSelectionSet { selection } => selection
-                .validate_for(project)
+            Command::EditorSelectionSet { selection, surface } => selection
+                .validate_for_surface(project, *surface)
                 .map_err(EnvelopeError::InvalidSelection),
-            Command::EditorSelectionPointer { position, .. } => Selection {
+            Command::EditorSelectionPointer { position, surface, .. } => Selection {
                 anchor: *position,
                 focus: *position,
             }
-            .validate_for(project)
+            .validate_for_surface(project, *surface)
             .map_err(EnvelopeError::InvalidSelection),
             _ => Ok(()),
         }
@@ -824,7 +1018,7 @@ const fn descriptor(id: CommandId, family: &'static str, parameters: &'static st
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 42] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 47] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -845,18 +1039,23 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 42] = [
     descriptor(CommandId::EditPaste, "edit", "none"),
     descriptor(CommandId::EditDelete, "edit", "none"),
     descriptor(CommandId::EditSelectAll, "edit", "none"),
-    descriptor(CommandId::EditorTextInsert, "editor", "text: string"),
-    descriptor(CommandId::EditorTextPaste, "editor", "text: string"),
-    descriptor(CommandId::EditorDeleteBackward, "editor", "none"),
-    descriptor(CommandId::EditorParagraphEnter, "editor", "none"),
-    descriptor(CommandId::EditorParagraphTab, "editor", "none"),
-    descriptor(CommandId::EditorElementChange, "editor", "role: screenplay_role"),
-    descriptor(CommandId::EditorSelectionSet, "editor", "selection: utf8_byte_positions"),
-    descriptor(CommandId::EditorSelectionPointer, "editor", "position, phase"),
-    descriptor(CommandId::EditorNavigationHorizontal, "editor", "direction, extend"),
-    descriptor(CommandId::EditorNavigationVertical, "editor", "direction, extend"),
-    descriptor(CommandId::EditorNavigationLineEdge, "editor", "edge, extend"),
+    descriptor(CommandId::EditorTextInsert, "editor", "text: string, surface: editor_surface (default body)"),
+    descriptor(CommandId::EditorTextPaste, "editor", "text: string, surface: editor_surface (default body)"),
+    descriptor(CommandId::EditorDeleteBackward, "editor", "none; host active surface"),
+    descriptor(CommandId::EditorParagraphEnter, "editor", "none; host active surface"),
+    descriptor(CommandId::EditorParagraphTab, "editor", "none; host active surface"),
+    descriptor(CommandId::EditorElementChange, "editor", "role: screenplay_role, surface: editor_surface (default body)"),
+    descriptor(CommandId::EditorSelectionSet, "editor", "selection: utf8_byte_positions, surface: editor_surface (default body)"),
+    descriptor(CommandId::EditorSelectionPointer, "editor", "position, phase, surface: editor_surface (default body)"),
+    descriptor(CommandId::EditorNavigationHorizontal, "editor", "direction, extend, surface: editor_surface (default body)"),
+    descriptor(CommandId::EditorNavigationVertical, "editor", "direction, extend, surface: editor_surface (default body)"),
+    descriptor(CommandId::EditorNavigationLineEdge, "editor", "edge, extend, surface: editor_surface (default body)"),
     descriptor(CommandId::EditorFocus, "editor", "none"),
+    descriptor(CommandId::WindowTitlePageOpen, "window", "none; host viewport effect"),
+    descriptor(CommandId::WindowTitlePageClose, "window", "none; host viewport effect"),
+    descriptor(CommandId::EditorStyleToggle, "editor", "surface, style: bounded_text_style"),
+    descriptor(CommandId::EditorAlignmentSet, "editor", "surface, alignment: bounded_alignment"),
+    descriptor(CommandId::PdfIncludeTitlePageResolve, "pdf", "options: pdf_export_options; host dialog effect"),
     descriptor(CommandId::ViewZoomSet, "view", "percent: 75..=300"),
     descriptor(CommandId::ViewZoomPinch, "view", "factor: finite_positive_f32"),
     descriptor(CommandId::ViewAppearanceSet, "view", "appearance: appearance"),
@@ -921,7 +1120,7 @@ pub fn validate_descriptor_catalog() -> Result<(), CatalogError> {
 
 #[cfg(test)]
 mod save_as_wire_compatibility_tests {
-    use super::{Command, CommandId};
+    use super::{Command, CommandId, EditorSurface};
     use serde::de::value::{Error as ValueError, MapDeserializer};
     use serde::de::{IntoDeserializer, Visitor};
     use serde::{Deserialize, Deserializer};
@@ -972,6 +1171,20 @@ mod save_as_wire_compatibility_tests {
         ])
     }
 
+    fn insert_wire(params: Vec<(&'static str, WireValue)>) -> WireValue {
+        WireValue::Map(vec![
+            ("id", WireValue::String("editor.text.insert")),
+            ("params", WireValue::Map(params)),
+        ])
+    }
+
+    fn command_wire(id: &'static str, params: Vec<(&'static str, WireValue)>) -> WireValue {
+        WireValue::Map(vec![
+            ("id", WireValue::String(id)),
+            ("params", WireValue::Map(params)),
+        ])
+    }
+
     #[test]
     fn omitted_overwrite_consent_deserializes_as_false_and_preserves_command_id() {
         let command = Command::deserialize(save_as_wire(vec![(
@@ -1005,5 +1218,73 @@ mod save_as_wire_compatibility_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn legacy_text_insert_payload_defaults_to_body_and_explicit_surface_is_typed() {
+        let legacy = Command::deserialize(insert_wire(vec![("text", WireValue::String("old"))]))
+            .unwrap_or_else(|_| unreachable!("legacy body editor payload remains decodable"));
+        assert_eq!(legacy.id().as_str(), "editor.text.insert");
+        assert!(matches!(legacy, Command::EditorTextInsert { surface: EditorSurface::Body, .. }));
+
+        let title = Command::deserialize(insert_wire(vec![
+            ("text", WireValue::String("title")),
+            ("surface", WireValue::String("title_page")),
+        ]))
+        .unwrap_or_else(|_| unreachable!("explicit title-page surface is a stable value"));
+        assert!(matches!(title, Command::EditorTextInsert { surface: EditorSurface::TitlePage, .. }));
+    }
+
+    #[test]
+    fn unknown_surface_and_payload_fields_are_rejected() {
+        assert!(Command::deserialize(insert_wire(vec![
+            ("text", WireValue::String("bad")),
+            ("surface", WireValue::String("canvas")),
+        ]))
+        .is_err());
+        assert!(Command::deserialize(insert_wire(vec![
+            ("text", WireValue::String("bad")),
+            ("mystery", WireValue::Bool(true)),
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn formatting_and_pdf_option_payloads_decode_to_bounded_typed_values() {
+        let style = Command::deserialize(command_wire(
+            "editor.style.toggle",
+            vec![
+                ("surface", WireValue::String("title_page")),
+                ("style", WireValue::String("strikethrough")),
+            ],
+        ))
+        .unwrap_or_else(|_| unreachable!("bounded style command payload is valid"));
+        assert_eq!(style.id(), CommandId::EditorStyleToggle);
+
+        let alignment = Command::deserialize(command_wire(
+            "editor.alignment.set",
+            vec![
+                ("surface", WireValue::String("body")),
+                ("alignment", WireValue::String("justified")),
+            ],
+        ))
+        .unwrap_or_else(|_| unreachable!("bounded alignment command payload is valid"));
+        assert_eq!(alignment.id(), CommandId::EditorAlignmentSet);
+
+        let pdf = Command::deserialize(command_wire(
+            "pdf.include-title-page.resolve",
+            vec![("options", WireValue::Map(vec![("include_title_page", WireValue::Bool(false))]))],
+        ))
+        .unwrap_or_else(|_| unreachable!("bounded PDF options payload is valid"));
+        assert!(matches!(pdf, Command::PdfIncludeTitlePageResolve { options: super::PdfExportOptions { include_title_page: false } }));
+
+        assert!(Command::deserialize(command_wire(
+            "editor.alignment.set",
+            vec![
+                ("surface", WireValue::String("body")),
+                ("alignment", WireValue::String("diagonal")),
+            ],
+        ))
+        .is_err());
     }
 }

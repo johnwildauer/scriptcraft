@@ -10,9 +10,7 @@ use scriptcraft_core::fdx::{self, FdxImportOutcome, FdxMigrationConsent, FdxVers
 use scriptcraft_core::fdx_storage::{
     self, FdxBaseline, FdxSaveMode, FdxSaveTarget, OpenedFdxSource, StdFdxStorageFileSystem,
 };
-use scriptcraft_core::layout::{
-    LayoutBuildDiagnostics, LayoutCache, LayoutPurpose, ScreenplayLayout,
-};
+use scriptcraft_core::layout::{LayoutCache, LayoutComposition, ScreenplayLayout};
 use scriptcraft_core::persistence::{FileSystem, StdFileSystem};
 use scriptcraft_core::{Project, Role};
 use scriptcraft_commands::DiagnosticMessage;
@@ -32,6 +30,7 @@ mod macos_menu;
 mod macos_sf_symbols;
 mod menu;
 mod menu_items;
+mod pdf_export;
 mod runtime_icon;
 mod script_view;
 mod shortcuts;
@@ -40,18 +39,20 @@ mod status_bar;
 mod theme;
 mod toolbar;
 mod toolbar_items;
+mod title_page_window;
 use sprint_timer::NotificationResult;
 use status_bar::{DiagnosticProjection, ViewportCenterAnchor, ViewportPageTracker};
 use toolbar::toolbar_content_height;
 use app_commands::CommandInvocation;
-use scriptcraft_commands::{Command, CommandOrigin, DocumentPath, ImportResolution, ZoomFactor};
+use scriptcraft_commands::{Command, CommandOrigin, DocumentPath, EditorSurface, ImportResolution, ZoomFactor};
 
 const UNTITLED_DOCUMENT_TITLE: &str = "Untitled Screenplay";
 const UNTITLED_PDF_FILENAME: &str = "Untitled Screenplay.pdf";
-const STARTUP_USAGE: &str = "usage: scriptcraft [--menu-platform=auto|macos|windows] [--document-path=<UTF-8 FDX path>]";
+const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--menu-platform=auto|macos|windows] [--document-path=<UTF-8 FDX path>]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StartupConfig {
+    development: bool,
     menu_platform: menu::MenuPlatformChoice,
     document_path: Option<PathBuf>,
 }
@@ -59,8 +60,10 @@ struct StartupConfig {
 fn parse_startup_args(
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<StartupConfig, String> {
+    let mut seen_development = false;
     let mut seen_menu_platform = false;
     let mut seen_document_path = false;
+    let mut development = false;
     let mut menu_platform = menu::MenuPlatformChoice::Auto;
     let mut document_path = None;
 
@@ -68,7 +71,15 @@ fn parse_startup_args(
         let Some(argument) = argument.to_str() else {
             return Err(format!("arguments must be valid UTF-8\n{STARTUP_USAGE}"));
         };
-        if argument == "--menu-platform" {
+        if argument == "--dev" {
+            if seen_development {
+                return Err(format!("duplicate --dev option\n{STARTUP_USAGE}"));
+            }
+            seen_development = true;
+            development = true;
+        } else if argument.starts_with("--dev=") {
+            return Err(format!("--dev does not accept a value\n{STARTUP_USAGE}"));
+        } else if argument == "--menu-platform" {
             if seen_menu_platform {
                 return Err(format!("duplicate --menu-platform option\n{STARTUP_USAGE}"));
             }
@@ -115,6 +126,7 @@ fn parse_startup_args(
     }
 
     Ok(StartupConfig {
+        development,
         menu_platform,
         document_path,
     })
@@ -137,10 +149,14 @@ enum ChildLaunchError {
 }
 
 fn child_arguments(
+    development: bool,
     menu_platform: menu::MenuPlatformChoice,
     document_path: Option<&Path>,
 ) -> Result<Vec<OsString>, ChildLaunchError> {
     let mut arguments = vec![menu_platform_argument(menu_platform)];
+    if development {
+        arguments.push(OsString::from("--dev"));
+    }
     if let Some(path) = document_path {
         let Some(path) = path.to_str().filter(|path| !path.is_empty()) else {
             return Err(ChildLaunchError::InvalidDocumentPath);
@@ -164,7 +180,7 @@ fn launch_child_for_app(
     document_path: Option<&Path>,
     spawn: impl FnOnce(&Path, &[OsString]) -> std::io::Result<()>,
 ) -> Result<(), ChildLaunchError> {
-    let arguments = child_arguments(app.menu_platform_choice, document_path)?;
+    let arguments = child_arguments(app.development_mode, app.menu_platform_choice, document_path)?;
     launch_child_with(executable, &arguments, spawn)
 }
 
@@ -197,10 +213,15 @@ fn show_native_lifecycle_error(title: &str, message: &str) {
 }
 
 fn show_child_startup_open_failure() {
-    show_native_lifecycle_error(
+    let (title, message) = child_startup_open_failure_copy();
+    show_native_lifecycle_error(title, message);
+}
+
+fn child_startup_open_failure_copy() -> (&'static str, &'static str) {
+    (
         "Unable to Open Document",
         "The selected document could not be opened in this new instance. This instance remains untitled.",
-    );
+    )
 }
 
 fn status_modifiers_changed(previous: egui::Modifiers, current: egui::Modifiers) -> bool {
@@ -223,18 +244,18 @@ mod menu_platform_cli_tests {
 
     #[test]
     fn menu_platform_option_defaults_to_auto_and_accepts_each_value() {
-        assert_eq!(parse(&[]), Ok(StartupConfig { menu_platform: MenuPlatformChoice::Auto, document_path: None }));
+        assert_eq!(parse(&[]), Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::Auto, document_path: None }));
         assert_eq!(
             parse(&["--menu-platform=auto"]),
-            Ok(StartupConfig { menu_platform: MenuPlatformChoice::Auto, document_path: None })
+            Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::Auto, document_path: None })
         );
         assert_eq!(
             parse(&["--menu-platform=macos"]),
-            Ok(StartupConfig { menu_platform: MenuPlatformChoice::MacOS, document_path: None })
+            Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::MacOS, document_path: None })
         );
         assert_eq!(
             parse(&["--menu-platform=windows"]),
-            Ok(StartupConfig { menu_platform: MenuPlatformChoice::Windows, document_path: None })
+            Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::Windows, document_path: None })
         );
     }
 
@@ -243,6 +264,7 @@ mod menu_platform_cli_tests {
         assert_eq!(
             parse(&["--document-path=/drafts/Été draft.fdx", "--menu-platform=windows"]),
             Ok(StartupConfig {
+                development: false,
                 menu_platform: MenuPlatformChoice::Windows,
                 document_path: Some(std::path::PathBuf::from("/drafts/Été draft.fdx")),
             })
@@ -289,6 +311,10 @@ mod menu_platform_cli_tests {
                 &["--document-path"][..],
                 "--document-path requires an equals-form value",
             ),
+            (&["--dev", "--dev"][..], "duplicate --dev option"),
+            (&["--dev=true"][..], "--dev does not accept a value"),
+            (&["--dev="][..], "--dev does not accept a value"),
+            (&["--devx"][..], "unknown option"),
             (&["--unknown"][..], "unknown option"),
             (&["draft.fdx"][..], "unexpected positional argument"),
         ] {
@@ -299,6 +325,30 @@ mod menu_platform_cli_tests {
                 assert!(error.ends_with(STARTUP_USAGE));
             }
         }
+    }
+
+    #[test]
+    fn development_flag_is_exact_and_order_independent_with_existing_options() {
+        assert_eq!(
+            parse(&["--dev"]),
+            Ok(StartupConfig {
+                development: true,
+                menu_platform: MenuPlatformChoice::Auto,
+                document_path: None,
+            })
+        );
+        assert_eq!(
+            parse(&["--document-path=/drafts/test.fdx", "--dev", "--menu-platform=windows"]),
+            Ok(StartupConfig {
+                development: true,
+                menu_platform: MenuPlatformChoice::Windows,
+                document_path: Some(std::path::PathBuf::from("/drafts/test.fdx")),
+            })
+        );
+        assert_eq!(
+            parse(&["--menu-platform=windows", "--dev", "--document-path=/drafts/test.fdx"]),
+            parse(&["--document-path=/drafts/test.fdx", "--dev", "--menu-platform=windows"])
+        );
     }
 
     #[cfg(unix)]
@@ -375,7 +425,7 @@ mod process_lifecycle_tests {
     };
     use crate::menu::MenuPlatformChoice;
     use crate::{fdx, ScriptCraftApp, UNTITLED_DOCUMENT_TITLE};
-    use scriptcraft_commands::{execute_editor_command, Command, CommandOutcome};
+    use scriptcraft_commands::{execute_editor_command, Command, CommandOutcome, EditorSurface};
     use std::cell::Cell;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -383,6 +433,7 @@ mod process_lifecycle_tests {
     #[test]
     fn child_arguments_forward_menu_selection_and_one_utf8_path_argument() {
         let arguments = child_arguments(
+            true,
             MenuPlatformChoice::Windows,
             Some(Path::new("/drafts/Été draft.fdx")),
         );
@@ -390,12 +441,17 @@ mod process_lifecycle_tests {
             arguments,
             Ok(vec![
                 OsString::from("--menu-platform=windows"),
+                OsString::from("--dev"),
                 OsString::from("--document-path=/drafts/Été draft.fdx"),
             ])
         );
         assert_eq!(
-            child_arguments(MenuPlatformChoice::Auto, None),
+            child_arguments(false, MenuPlatformChoice::Auto, None),
             Ok(vec![OsString::from("--menu-platform=auto")])
+        );
+        assert_eq!(
+            child_arguments(true, MenuPlatformChoice::Auto, None),
+            Ok(vec![OsString::from("--menu-platform=auto"), OsString::from("--dev")])
         );
     }
 
@@ -405,7 +461,7 @@ mod process_lifecycle_tests {
         use std::os::unix::ffi::OsStrExt;
 
         let path = Path::new(std::ffi::OsStr::from_bytes(b"/drafts/\xff.fdx"));
-        assert!(child_arguments(MenuPlatformChoice::Auto, Some(path)).is_err());
+        assert!(child_arguments(false, MenuPlatformChoice::Auto, Some(path)).is_err());
     }
 
     #[test]
@@ -427,6 +483,38 @@ mod process_lifecycle_tests {
             Err(std::io::Error::other("test-only spawn failure"))
         });
         assert!(failed.is_err());
+    }
+
+    #[test]
+    fn app_child_adapter_inherits_development_flag_once_with_open_path() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else {
+            return;
+        };
+        assert!(!app.development_mode);
+        app.development_mode = true;
+        let executable = Path::new("/current/scriptcraft");
+        let mut forwarded = None;
+        let result = launch_child_for_app(
+            &app,
+            executable,
+            Some(Path::new("/drafts/open.fdx")),
+            |_, arguments| {
+                forwarded = Some(arguments.to_vec());
+                Ok(())
+            },
+        );
+        assert_eq!(result, Ok(()));
+        let arguments = forwarded.unwrap_or_default();
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| argument == &&OsString::from("--dev"))
+                .count(),
+            1
+        );
+        assert!(arguments.contains(&OsString::from("--document-path=/drafts/open.fdx")));
     }
 
     #[test]
@@ -472,6 +560,7 @@ mod process_lifecycle_tests {
                     &mut app.session,
                     &Command::EditorTextInsert {
                         text: "origin edit".to_owned(),
+                        surface: EditorSurface::Body,
                     },
                 );
                 assert_eq!(edit, CommandOutcome::Changed);
@@ -592,6 +681,7 @@ fn pdf_export_filename(active_path: Option<&Path>) -> String {
 
 #[derive(Debug)]
 enum PdfExportAdapterError {
+    Path,
     Export(exports::ExportError),
     Write(scriptcraft_core::persistence::PersistenceError),
 }
@@ -604,6 +694,9 @@ fn export_pdf_to_selected_path<F: FileSystem>(
     let Some(path) = selected_path else {
         return Ok(false);
     };
+    if path.to_str().is_none() {
+        return Err(PdfExportAdapterError::Path);
+    }
     let bytes = build_pdf().map_err(PdfExportAdapterError::Export)?;
     filesystem
         .write(path, &bytes)
@@ -969,15 +1062,24 @@ struct ScriptCraftApp {
     pending_commands: menu::PendingDesktopCommands,
     menu_policy: menu::RuntimeMenuPolicy,
     menu_platform_choice: menu::MenuPlatformChoice,
+    development_mode: bool,
     #[cfg(target_os = "macos")]
     native_menu: Option<macos_menu::NativeMenuController>,
     focus_mode: focus_mode::FocusModeController,
     sprint_timer: sprint_timer::SprintTimer,
+    timer_popup_surface: EditorSurface,
     timer_clock_origin: Instant,
     next_cast_list_refresh: Instant,
     notification_sink: sprint_timer::NativeNotificationSink,
     notification_results: Receiver<(u64, NotificationResult)>,
     surface_focused: bool,
+    active_editor_surface: EditorSurface,
+    title_page_window_open: bool,
+    title_page_focus_requested: bool,
+    title_viewport_unsupported: bool,
+    title_view_reset_pending: bool,
+    title_view_state_swapped: bool,
+    title_view: TitlePageViewState,
     last_status_modifiers: egui::Modifiers,
     drag_anchor: Option<Position>,
     ime_preedit: String,
@@ -992,9 +1094,11 @@ struct ScriptCraftApp {
     pending_window_restore: Option<fdx::WindowState>,
     latest_window_state: Option<fdx::WindowState>,
     pending_fdx_open: Option<PendingFdxOpen>,
+    pdf_export_options: pdf_export::PdfExportController,
     startup_document_path: Option<PathBuf>,
     native_input_diagnostics: NativeInputDiagnostics,
     editor_surface_id: Option<egui::Id>,
+    title_editor_surface_id: Option<egui::Id>,
     editor_surface_rect: Option<egui::Rect>,
     reveal_intent: RevealIntent,
     preferred_vertical_x: Option<i64>,
@@ -1010,8 +1114,52 @@ struct ScriptCraftApp {
     caret_blink_focus_generation: u64,
     caret_blink_reset_time: f64,
     layout_cache: LayoutCache,
+    title_layout_cache: LayoutCache,
     performance: PerformanceDiagnostics,
     last_layout_identity: Option<std::sync::Weak<ScreenplayLayout>>,
+}
+
+/// Transient title-window presentation state. Semantic selection and all edits
+/// remain in the shared EditingSession; only viewport-local interaction state is
+/// separate from the body window.
+struct TitlePageViewState {
+    surface_focused: bool,
+    drag_anchor: Option<Position>,
+    ime_preedit: String,
+    ime_active: bool,
+    rendered_revision: Option<u64>,
+    reveal_intent: RevealIntent,
+    preferred_vertical_x: Option<i64>,
+    page_geometry: ViewportPageTracker,
+    pending_zoom_anchor: Option<ViewportCenterAnchor>,
+    page_scale: Option<f32>,
+    effective_pixels_per_point: Option<f32>,
+    zoom_percent: u16,
+    pinch_zoom_percent: f64,
+    caret_blink_focus_generation: u64,
+    caret_blink_reset_time: f64,
+}
+
+impl Default for TitlePageViewState {
+    fn default() -> Self {
+        Self {
+            surface_focused: false,
+            drag_anchor: None,
+            ime_preedit: String::new(),
+            ime_active: false,
+            rendered_revision: None,
+            reveal_intent: RevealIntent::None,
+            preferred_vertical_x: None,
+            page_geometry: ViewportPageTracker::default(),
+            pending_zoom_anchor: None,
+            page_scale: None,
+            effective_pixels_per_point: None,
+            zoom_percent: 100,
+            pinch_zoom_percent: 100.0,
+            caret_blink_focus_generation: 0,
+            caret_blink_reset_time: 0.0,
+        }
+    }
 }
 
 fn scheduled_refresh_failure_status(category: &'static str) -> String {
@@ -1020,12 +1168,240 @@ fn scheduled_refresh_failure_status(category: &'static str) -> String {
     )
 }
 
+fn session_activation_failure_code(error: &EditError) -> &'static str {
+    match error {
+        EditError::InvalidElement => "EDIT_INVALID_ELEMENT",
+        EditError::InvalidUtf8Boundary => "EDIT_INVALID_TEXT_BOUNDARY",
+        EditError::InvalidSelection => "EDIT_INVALID_SELECTION",
+        EditError::EmptyHistory => "EDIT_EMPTY_HISTORY",
+        EditError::TextTooLong => "EDIT_TEXT_LIMIT",
+        EditError::TooManyElements => "EDIT_ELEMENT_LIMIT",
+        EditError::UnsupportedTransition { .. } => "EDIT_UNSUPPORTED_TRANSITION",
+        EditError::Preservation(_) => "EDIT_PRESERVATION_CONSTRAINT",
+        EditError::CastList(_) => "EDIT_CAST_LIST_CONSTRAINT",
+        EditError::FormattedText(_) => "EDIT_FORMATTING_CONSTRAINT",
+        EditError::Model(_) => "EDIT_MODEL_VALIDATION",
+    }
+}
+
+fn open_read_failure_message(error: &fdx_storage::FdxStorageError) -> String {
+    format!("FDX_OPEN_FAILED: {error}; active document unchanged")
+}
+
+fn open_import_failure_message(error: &fdx::FdxError) -> String {
+    format!("FDX_IMPORT_FAILED: {error}; active document unchanged")
+}
+
+fn session_activation_failure_message(error: &EditError) -> String {
+    format!(
+        "FDX_SESSION_ACTIVATION_FAILED: {}; active document unchanged",
+        session_activation_failure_code(error)
+    )
+}
+
 impl ScriptCraftApp {
+    fn set_active_editor_surface(&mut self, surface: EditorSurface) {
+        if self.active_editor_surface != surface {
+            if self.active_editor_surface == EditorSurface::TitlePage
+                && !self.title_view_state_swapped
+            {
+                self.title_view.drag_anchor = None;
+                self.title_view.preferred_vertical_x = None;
+                self.title_view.reveal_intent = RevealIntent::None;
+            }
+            self.active_editor_surface = surface;
+            self.drag_anchor = None;
+            self.preferred_vertical_x = None;
+            self.reveal_intent = RevealIntent::None;
+        }
+    }
+
+    fn active_editor_surface(&self) -> EditorSurface {
+        self.active_editor_surface
+    }
+
+    fn set_title_page_window_open(&mut self, open: bool) {
+        self.title_page_window_open = open;
+        if !open && self.active_editor_surface == EditorSurface::TitlePage {
+            self.set_active_editor_surface(EditorSurface::Body);
+        }
+    }
+
+    fn open_title_page_window(&mut self, ctx: &egui::Context) {
+        if self.title_viewport_unsupported {
+            return;
+        }
+        if self.title_view_reset_pending {
+            self.title_view = TitlePageViewState::default();
+            self.title_view_reset_pending = false;
+        }
+        self.title_page_focus_requested = true;
+        self.set_title_page_window_open(true);
+        ctx.request_repaint();
+    }
+
+    fn close_title_page_window(&mut self, ctx: &egui::Context) {
+        if self.title_page_window_open {
+            title_page_window::send_close(ctx);
+        }
+        if self.timer_popup_surface == EditorSurface::TitlePage {
+            self.sprint_timer.popup_open = false;
+            self.sprint_timer.close_popup();
+        }
+        self.set_title_page_window_open(false);
+        self.title_page_focus_requested = false;
+        self.title_view_reset_pending = true;
+        self.set_active_editor_surface(EditorSurface::Body);
+        self.restore_editor_focus(ctx);
+        ctx.request_repaint();
+    }
+
+    /// Temporarily install child-local view state while the shared Script View
+    /// renderer runs. The original body fields are restored before returning to
+    /// root composition; the two windows never own separate sessions.
+    fn swap_title_view_state(&mut self) {
+        std::mem::swap(&mut self.surface_focused, &mut self.title_view.surface_focused);
+        std::mem::swap(&mut self.drag_anchor, &mut self.title_view.drag_anchor);
+        std::mem::swap(&mut self.ime_preedit, &mut self.title_view.ime_preedit);
+        std::mem::swap(&mut self.ime_active, &mut self.title_view.ime_active);
+        std::mem::swap(&mut self.rendered_revision, &mut self.title_view.rendered_revision);
+        std::mem::swap(&mut self.reveal_intent, &mut self.title_view.reveal_intent);
+        std::mem::swap(&mut self.preferred_vertical_x, &mut self.title_view.preferred_vertical_x);
+        std::mem::swap(&mut self.page_geometry, &mut self.title_view.page_geometry);
+        std::mem::swap(&mut self.pending_zoom_anchor, &mut self.title_view.pending_zoom_anchor);
+        std::mem::swap(&mut self.page_scale, &mut self.title_view.page_scale);
+        std::mem::swap(
+            &mut self.effective_pixels_per_point,
+            &mut self.title_view.effective_pixels_per_point,
+        );
+        std::mem::swap(&mut self.zoom_percent, &mut self.title_view.zoom_percent);
+        std::mem::swap(&mut self.pinch_zoom_percent, &mut self.title_view.pinch_zoom_percent);
+        std::mem::swap(
+            &mut self.caret_blink_focus_generation,
+            &mut self.title_view.caret_blink_focus_generation,
+        );
+        std::mem::swap(
+            &mut self.caret_blink_reset_time,
+            &mut self.title_view.caret_blink_reset_time,
+        );
+        self.title_view_state_swapped = !self.title_view_state_swapped;
+    }
+
+    fn invalidate_surface(&mut self, surface: EditorSurface) {
+        match surface {
+            EditorSurface::Body => {
+                self.rendered_revision = None;
+                self.page_geometry.invalidate();
+                self.page_scale = None;
+            }
+            EditorSurface::TitlePage => {
+                if self.title_view_state_swapped {
+                    self.rendered_revision = None;
+                    self.page_geometry.invalidate();
+                    self.page_scale = None;
+                } else {
+                    self.title_view.rendered_revision = None;
+                    self.title_view.page_geometry.invalidate();
+                    self.title_view.page_scale = None;
+                }
+            }
+        }
+    }
+
+    fn zoom_for_surface(&self, surface: EditorSurface) -> u16 {
+        match surface {
+            EditorSurface::Body => self.zoom_percent,
+            EditorSurface::TitlePage if self.title_view_state_swapped => self.zoom_percent,
+            EditorSurface::TitlePage => self.title_view.zoom_percent,
+        }
+    }
+
+    fn pinch_zoom_for_surface(&self, surface: EditorSurface) -> f64 {
+        match surface {
+            EditorSurface::Body => self.pinch_zoom_percent,
+            EditorSurface::TitlePage if self.title_view_state_swapped => self.pinch_zoom_percent,
+            EditorSurface::TitlePage => self.title_view.pinch_zoom_percent,
+        }
+    }
+
+    fn set_zoom_for_surface(&mut self, surface: EditorSurface, zoom: u16, ctx: &egui::Context) {
+        if self.zoom_for_surface(surface) == zoom {
+            return;
+        }
+        self.capture_pending_zoom_anchor_for(surface, ctx);
+        match surface {
+            EditorSurface::Body => {
+                self.zoom_percent = zoom;
+                self.pinch_zoom_percent = f64::from(zoom);
+            }
+            EditorSurface::TitlePage if self.title_view_state_swapped => {
+                self.zoom_percent = zoom;
+                self.pinch_zoom_percent = f64::from(zoom);
+            }
+            EditorSurface::TitlePage => {
+                self.title_view.zoom_percent = zoom;
+                self.title_view.pinch_zoom_percent = f64::from(zoom);
+            }
+        }
+        self.invalidate_surface(surface);
+        ctx.request_repaint();
+    }
+
+    fn capture_pending_zoom_anchor_for(&mut self, surface: EditorSurface, ctx: &egui::Context) {
+        match surface {
+            EditorSurface::Body => self.capture_pending_zoom_anchor(ctx),
+            EditorSurface::TitlePage if self.title_view_state_swapped => {
+                self.capture_pending_zoom_anchor(ctx)
+            }
+            EditorSurface::TitlePage => {
+                if self.title_view.pending_zoom_anchor.is_none() {
+                    self.title_view.pending_zoom_anchor = self.title_view.page_geometry.capture_center_anchor(
+                        self.performance.frames,
+                        self.session.revision(),
+                        ctx.content_rect(),
+                        self.title_view.page_scale.unwrap_or(f32::NAN),
+                    );
+                }
+            }
+        }
+    }
+
+    fn set_pinch_zoom_for_surface(&mut self, surface: EditorSurface, value: f64) {
+        match surface {
+            EditorSurface::Body => self.pinch_zoom_percent = value,
+            EditorSurface::TitlePage if self.title_view_state_swapped => {
+                self.pinch_zoom_percent = value
+            }
+            EditorSurface::TitlePage => self.title_view.pinch_zoom_percent = value,
+        }
+    }
+
+    fn preferred_vertical_x_for(&self, surface: EditorSurface) -> Option<i64> {
+        match surface {
+            EditorSurface::Body => self.preferred_vertical_x,
+            EditorSurface::TitlePage if self.title_view_state_swapped => {
+                self.preferred_vertical_x
+            }
+            EditorSurface::TitlePage => self.title_view.preferred_vertical_x,
+        }
+    }
+
+    fn set_preferred_vertical_x_for(&mut self, surface: EditorSurface, value: Option<i64>) {
+        match surface {
+            EditorSurface::Body => self.preferred_vertical_x = value,
+            EditorSurface::TitlePage if self.title_view_state_swapped => {
+                self.preferred_vertical_x = value
+            }
+            EditorSurface::TitlePage => self.title_view.preferred_vertical_x = value,
+        }
+    }
+
     fn new() -> Result<Self, String> {
         Self::new_with_startup(
             menu::RuntimeMenuPolicy::for_current_target(),
             menu::MenuPlatformChoice::Auto,
             None,
+            false,
         )
     }
 
@@ -1033,6 +1409,7 @@ impl ScriptCraftApp {
         menu_policy: menu::RuntimeMenuPolicy,
         menu_platform_choice: menu::MenuPlatformChoice,
         startup_document_path: Option<PathBuf>,
+        development_mode: bool,
     ) -> Result<Self, String> {
         let project = Project::new().map_err(|error| format!("new project failed: {error:?}"))?;
         let session = EditingSession::with_policy(project, EditPolicy::default())
@@ -1043,15 +1420,24 @@ impl ScriptCraftApp {
             pending_commands: menu::PendingDesktopCommands::default(),
             menu_policy,
             menu_platform_choice,
+            development_mode,
             #[cfg(target_os = "macos")]
             native_menu: None,
             focus_mode: focus_mode::FocusModeController::default(),
             sprint_timer: sprint_timer::SprintTimer::default(),
+            timer_popup_surface: EditorSurface::Body,
             timer_clock_origin: Instant::now(),
             next_cast_list_refresh: Instant::now() + CAST_LIST_REFRESH_INTERVAL,
             notification_sink,
             notification_results,
             surface_focused: false,
+            active_editor_surface: EditorSurface::Body,
+            title_page_window_open: false,
+            title_page_focus_requested: false,
+            title_viewport_unsupported: false,
+            title_view_reset_pending: false,
+            title_view_state_swapped: false,
+            title_view: TitlePageViewState::default(),
             last_status_modifiers: egui::Modifiers::NONE,
             drag_anchor: None,
             ime_preedit: String::new(),
@@ -1066,9 +1452,11 @@ impl ScriptCraftApp {
             pending_window_restore: None,
             latest_window_state: None,
             pending_fdx_open: None,
+            pdf_export_options: pdf_export::PdfExportController::default(),
             startup_document_path,
             native_input_diagnostics: NativeInputDiagnostics::default(),
             editor_surface_id: None,
+            title_editor_surface_id: None,
             editor_surface_rect: None,
             reveal_intent: RevealIntent::None,
             preferred_vertical_x: None,
@@ -1087,6 +1475,7 @@ impl ScriptCraftApp {
             caret_blink_focus_generation: 0,
             caret_blink_reset_time: 0.0,
             layout_cache: LayoutCache::default(),
+            title_layout_cache: LayoutCache::default(),
             performance: PerformanceDiagnostics::default(),
             last_layout_identity: None,
         })
@@ -1277,18 +1666,21 @@ impl ScriptCraftApp {
 
     fn layout_for_render(
         &mut self,
+        surface: EditorSurface,
     ) -> Result<std::sync::Arc<ScreenplayLayout>, scriptcraft_core::layout::LayoutError> {
         let revision = self.session.revision();
         let started = Instant::now();
-        let mut build_diagnostics = LayoutBuildDiagnostics::default();
-        let (layout, hit) = self
-            .layout_cache
-            .get_or_build_for_session_with_diagnostics(
-                revision,
-                &self.session,
-                LayoutPurpose::Editor,
-                &mut build_diagnostics,
-            )?;
+        let composition = editor_layout_composition(surface);
+        let cache = match surface {
+            EditorSurface::Body => &mut self.layout_cache,
+            EditorSurface::TitlePage => &mut self.title_layout_cache,
+        };
+        let (layout, hit) = cache.get_or_build_with_composition(
+            revision,
+            self.session.project(),
+            self.session.layout_inputs(),
+            composition,
+        )?;
         add_performance_nanos(
             &mut self.performance.layout_lookup_nanos,
             started.elapsed().as_nanos(),
@@ -1302,18 +1694,6 @@ impl ScriptCraftApp {
                 .performance
                 .layout_nanos
                 .saturating_add(started.elapsed().as_nanos());
-            self.performance.element_wraps_built = self
-                .performance
-                .element_wraps_built
-                .saturating_add(build_diagnostics.element_wraps_built);
-            self.performance.element_wraps_reused = self
-                .performance
-                .element_wraps_reused
-                .saturating_add(build_diagnostics.element_wraps_reused);
-            self.performance.element_wrap_nanos = self
-                .performance
-                .element_wrap_nanos
-                .saturating_add(build_diagnostics.element_wrap_nanos);
         }
         let identity_changed = self.last_layout_identity.as_ref().is_some_and(|previous| {
             previous
@@ -1395,13 +1775,7 @@ impl ScriptCraftApp {
             .clone()
             .map(FdxSaveTarget::from_baseline)
             .unwrap_or_else(FdxSaveTarget::new_unsaved);
-        let text_state = fdx::TextState {
-            scaling: self.zoom_percent.clamp(
-                scriptcraft_core::text_state::MIN_TEXT_SCALING,
-                scriptcraft_core::text_state::MAX_TEXT_SCALING,
-            ),
-            selection: self.session.selection(),
-        };
+        let text_state = self.root_text_state();
         match fdx_storage::save_session_with_view_state(
             &StdFdxStorageFileSystem,
             &mut self.session,
@@ -1418,10 +1792,7 @@ impl ScriptCraftApp {
                 // data. The session's pending-work state, not a revision marker,
                 // keeps the timer from repeating that work.
                 self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
-                self.layout_cache = LayoutCache::default();
-                self.page_geometry.invalidate();
-                self.rendered_revision = None;
-                self.preferred_vertical_x = None;
+                self.invalidate_after_save_rebase();
                 if outcome.temporary_cleanup_warning {
                     self.show_error(
                         "FDX_SAVE_CLEANUP_WARNING: save completed, but temporary-file cleanup failed; the document is saved",
@@ -1432,6 +1803,35 @@ impl ScriptCraftApp {
             }
             Err(error) => self.show_fdx_save_error(error),
         }
+    }
+
+    fn root_text_state(&self) -> fdx::TextState {
+        // The immediate title viewport temporarily swaps child-local renderer
+        // state into the root fields. Persist the body's zoom in either phase.
+        let body_zoom = if self.title_view_state_swapped {
+            self.title_view.zoom_percent
+        } else {
+            self.zoom_percent
+        };
+        fdx::TextState {
+            scaling: body_zoom.clamp(
+                scriptcraft_core::text_state::MIN_TEXT_SCALING,
+                scriptcraft_core::text_state::MAX_TEXT_SCALING,
+            ),
+            selection: self.session.selection(),
+        }
+    }
+
+    fn invalidate_after_save_rebase(&mut self) {
+        self.layout_cache = LayoutCache::default();
+        self.title_layout_cache = LayoutCache::default();
+        self.page_geometry.invalidate();
+        self.rendered_revision = None;
+        self.preferred_vertical_x = None;
+        self.title_view.page_geometry.invalidate();
+        self.title_view.rendered_revision = None;
+        self.title_view.pending_zoom_anchor = None;
+        self.title_view.preferred_vertical_x = None;
     }
 
     fn show_fdx_save_error(&mut self, error: fdx_storage::TransactionalSaveError) {
@@ -1461,8 +1861,8 @@ impl ScriptCraftApp {
         }
         let source = match fdx_storage::open_source(&StdFdxStorageFileSystem, path) {
             Ok(source) => source,
-            Err(_) => {
-                self.show_error("FDX_OPEN_FAILED: unable to read selected document; active document unchanged");
+            Err(error) => {
+                self.show_error(open_read_failure_message(&error));
                 return false;
             }
         };
@@ -1540,8 +1940,8 @@ impl ScriptCraftApp {
                 self.clear_error();
                 false
             }
-            Err(_) => {
-                self.show_error("FDX_IMPORT_FAILED: selected document could not be imported; active document unchanged");
+            Err(error) => {
+                self.show_error(open_import_failure_message(&error));
                 false
             }
         }
@@ -1558,14 +1958,14 @@ impl ScriptCraftApp {
     ) -> bool {
         let mut replacement = match EditingSession::with_policy(project, self.session.policy()) {
             Ok(replacement) => replacement,
-            Err(_) => {
-                self.show_error("FDX_SESSION_ACTIVATION_FAILED: active document unchanged");
+            Err(error) => {
+                self.show_error(session_activation_failure_message(&error));
                 return false;
             }
         };
         let restored_selection = scriptcraft_commands::Selection::from_core(text_state.selection)
             .ok()
-            .map(|selection| Command::EditorSelectionSet { selection })
+            .map(|selection| Command::EditorSelectionSet { selection, surface: EditorSurface::Body })
             .is_some_and(|command| {
                 matches!(
                     scriptcraft_commands::execute_editor_command(&mut replacement, &command),
@@ -1582,7 +1982,7 @@ impl ScriptCraftApp {
             )) {
                 let _ = scriptcraft_commands::execute_editor_command(
                     &mut replacement,
-                    &Command::EditorSelectionSet { selection },
+                    &Command::EditorSelectionSet { selection, surface: EditorSurface::Body },
                 );
             }
         }
@@ -1599,8 +1999,17 @@ impl ScriptCraftApp {
         self.pending_fdx_open = None;
         self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
         self.page_geometry.reset_for_document_replacement();
+        self.title_view.page_geometry.reset_for_document_replacement();
         self.layout_cache = LayoutCache::default();
+        self.title_layout_cache = LayoutCache::default();
         self.rendered_revision = None;
+        self.title_view.rendered_revision = None;
+        self.title_view.pending_zoom_anchor = None;
+        self.title_view.preferred_vertical_x = None;
+        self.title_view.reveal_intent = RevealIntent::None;
+        self.title_view.drag_anchor = None;
+        self.title_view.ime_preedit.clear();
+        self.title_view.ime_active = false;
         self.preferred_vertical_x = None;
         self.drag_anchor = None;
         self.ime_preedit.clear();
@@ -1667,6 +2076,13 @@ impl ScriptCraftApp {
     }
 
     fn export_pdf(&mut self) {
+        self.pdf_export_options.begin();
+    }
+
+    fn export_pdf_with_options(
+        &mut self,
+        options: scriptcraft_commands::PdfExportOptions,
+    ) {
         let default_filename = pdf_export_filename(self.native_path.as_deref());
         let selected_path = rfd::FileDialog::new()
             .add_filter("PDF document", &["pdf"])
@@ -1676,15 +2092,13 @@ impl ScriptCraftApp {
         match export_pdf_to_selected_path(
             selected_path.as_deref(),
             &StdFileSystem,
-            || {
-                exports::export_pdf_with_layout_inputs(
-                    self.session.project(),
-                    self.session.layout_inputs(),
-                )
-            },
+            || self.build_pdf_with_options(options),
         ) {
             Ok(false) => {}
             Ok(true) => self.clear_error(),
+            Err(PdfExportAdapterError::Path) => self.show_error(
+                "PDF_EXPORT_PATH_REJECTED: selected path is not valid UTF-8; screenplay unchanged",
+            ),
             Err(PdfExportAdapterError::Write(_)) => self.show_error(
                 "PDF_EXPORT_WRITE_FAILED: filesystem write failed; screenplay unchanged; export output may be incomplete",
             ),
@@ -1695,6 +2109,19 @@ impl ScriptCraftApp {
                 ));
             }
         }
+    }
+
+    fn build_pdf_with_options(
+        &self,
+        options: scriptcraft_commands::PdfExportOptions,
+    ) -> Result<Vec<u8>, exports::ExportError> {
+        exports::export_pdf_with_layout_inputs_and_options(
+            self.session.project(),
+            self.session.layout_inputs(),
+            exports::PdfExportOptions {
+                include_title_page: options.include_title_page,
+            },
+        )
     }
 
     fn show_error(&mut self, detail: impl AsRef<str>) {
@@ -1718,6 +2145,7 @@ impl ScriptCraftApp {
                 EditError::UnsupportedTransition { .. } => "EDIT_UNSUPPORTED_TRANSITION",
                 EditError::Preservation(_) => "EDIT_PRESERVATION_CONSTRAINT",
                 EditError::CastList(_) => "EDIT_CAST_LIST_CONSTRAINT",
+                EditError::FormattedText(_) => "EDIT_FORMATTING_CONSTRAINT",
                 EditError::Model(_) => "EDIT_MODEL_VALIDATION",
             };
             self.show_error(format!("{code}; document unchanged"));
@@ -1767,16 +2195,29 @@ impl ScriptCraftApp {
     ) {
         match result {
             Ok(()) => {
-                self.preferred_vertical_x = None;
+                let surface = self.active_editor_surface();
+                if surface == EditorSurface::TitlePage && !self.title_view_state_swapped {
+                    self.title_view.preferred_vertical_x = None;
+                    self.title_view.reveal_intent = reveal_intent;
+                } else {
+                    self.preferred_vertical_x = None;
+                    self.reveal_intent = reveal_intent;
+                }
                 self.clear_error();
-                self.rendered_revision = None;
-                self.reveal_intent = reveal_intent;
+                self.invalidate_surface(surface);
             }
             Err(error) => self.show_edit_error(error),
         }
     }
 
 
+}
+
+fn editor_layout_composition(surface: EditorSurface) -> LayoutComposition {
+    match surface {
+        EditorSurface::Body => LayoutComposition::BodyEditor,
+        EditorSurface::TitlePage => LayoutComposition::TitlePageEditor,
+    }
 }
 
 fn chrome_frame(palette: theme::ToolbarPalette) -> egui::Frame {
@@ -1852,7 +2293,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         modifiers,
         shortcuts::ShortcutPlatform::current(),
     );
-    let performance_summary = if status_bar::diagnostics_enabled() {
+    let performance_summary = if app.development_mode {
         let derived_work = app.session.pending_derived_work_summary();
         Some(format!(
             "{} derived-pending={} derived-pending-complete={} derived-pending-scenes={} derived-retryable={} derived-pending-deferred-scenes={} derived-failed-complete={} derived-failed-scenes={}",
@@ -1868,7 +2309,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     } else {
         None
     };
-    let diagnostic_message = if status_bar::diagnostics_enabled() {
+    let diagnostic_message = if app.development_mode {
         app.diagnostic_message
             .as_ref()
             .map(|message| message.as_str().to_owned())
@@ -1908,6 +2349,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                 page_number,
                 &center,
                 diagnostics,
+                app.development_mode,
                 app.zoom_percent,
                 app.appearance_mode,
                 &focus_view,
@@ -1922,6 +2364,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
             );
             if opening_timer {
                 app.sprint_timer.popup_anchor = timer_button_rect.unwrap_or(egui::Rect::NOTHING);
+                app.timer_popup_surface = EditorSurface::Body;
             }
         }
         });
@@ -1930,10 +2373,14 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         status_panel.response.rect,
         app.theme_palette.status,
     );
-    let central = egui::CentralPanel::default()
-        .frame(script_view::central_panel_frame(&ctx, app.theme_palette.script_workspace))
-        .show_inside(ui, |ui| app.live_document_surface(ui));
-    let timer_commands = sprint_timer::show_popup(&ctx, &mut app.sprint_timer, now);
+        let central = egui::CentralPanel::default()
+            .frame(script_view::central_panel_frame(&ctx, app.theme_palette.script_workspace))
+        .show_inside(ui, |ui| app.live_document_surface(ui, EditorSurface::Body));
+    let timer_commands = if app.timer_popup_surface == EditorSurface::Body {
+        sprint_timer::show_popup(&ctx, &mut app.sprint_timer, now)
+    } else {
+        Vec::new()
+    };
         for command in timer_commands {
         app.dispatch_command(
             CommandInvocation::new(command, CommandOrigin::Pointer),
@@ -2100,6 +2547,9 @@ impl ScriptCraftApp {
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
         self.update_native_window_state(&ctx);
+        if ctx.input(|input| input.viewport().focused) == Some(true) {
+            self.set_active_editor_surface(EditorSurface::Body);
+        }
         if let Some(opened) = self.consume_startup_document_handoff() {
             if !opened {
                 show_child_startup_open_failure();
@@ -2116,10 +2566,15 @@ impl ScriptCraftApp {
         self.dispatch_pending_commands(&ctx);
         self.notification_sink.set_repaint_context(&ctx);
         let migration_pending = self.pending_fdx_open.is_some();
-        if !migration_pending {
+        if migration_pending {
+            // Migration consent owns the modal surface. Dismiss a pending PDF
+            // request without opening a picker or building export output.
+            self.pdf_export_options.cancel();
+        }
+        if !migration_pending && !self.pdf_export_options.is_open() {
             // Route events using the editor-focus state established by the prior
             // surface frame, then let this frame's layout and paint observe edits.
-            self.handle_surface_input(&ctx);
+            self.handle_surface_input(&ctx, EditorSurface::Body);
             // Scheduled derived work sees every accepted same-frame edit and
             // never delays already-queued editor input on its deadline frame.
             self.refresh_cast_lists_on_schedule(&ctx, Instant::now());
@@ -2143,8 +2598,31 @@ impl ScriptCraftApp {
                 let _ = ui.allocate_space(ui.available_size());
             });
             show_fdx_migration_dialog(self, &ctx);
+        } else if self.pdf_export_options.is_open() {
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                let _ = ui.allocate_space(ui.available_size());
+            });
+            if let Some(action) = self.pdf_export_options.show(&ctx) {
+                match action {
+                    pdf_export::PdfExportAction::Continue(options) => {
+                        self.dispatch_command(
+                            CommandInvocation::new(
+                                Command::PdfIncludeTitlePageResolve { options },
+                                CommandOrigin::Pointer,
+                            ),
+                            &ctx,
+                        );
+                    }
+                    pdf_export::PdfExportAction::Cancel => ctx.request_repaint(),
+                }
+            }
         } else {
             show_application_panels(self, ui);
+        }
+        if ctx.input(|input| input.viewport().close_requested()) {
+            self.close_title_page_window(&ctx);
+        } else {
+            title_page_window::show_if_open(self, &ctx);
         }
         self.flush_pending_diagnostic_commands(&ctx);
         self.schedule_sprint_timer_repaint(&ctx, self.timer_now());
@@ -2250,6 +2728,25 @@ fn native_options() -> Result<eframe::NativeOptions, String> {
     })
 }
 
+#[cfg(test)]
+mod title_surface_layout_routing_tests {
+    use super::editor_layout_composition;
+    use scriptcraft_commands::EditorSurface;
+    use scriptcraft_core::layout::LayoutComposition;
+
+    #[test]
+    fn body_and_title_views_select_disjoint_editor_compositions() {
+        assert_eq!(
+            editor_layout_composition(EditorSurface::Body),
+            LayoutComposition::BodyEditor,
+        );
+        assert_eq!(
+            editor_layout_composition(EditorSurface::TitlePage),
+            LayoutComposition::TitlePageEditor,
+        );
+    }
+}
+
 struct StartupPresentation {
     options: eframe::NativeOptions,
     menu_policy: menu::RuntimeMenuPolicy,
@@ -2327,6 +2824,7 @@ fn main() -> eframe::Result {
                 menu_policy,
                 startup.menu_platform,
                 startup.document_path,
+                startup.development,
             )
                 .and_then(|mut app| {
                     #[cfg(target_os = "macos")]
@@ -2350,6 +2848,59 @@ fn main() -> eframe::Result {
                 .map_err(|error| error.into())
         }),
     )
+}
+
+#[cfg(test)]
+mod open_diagnostic_tests {
+    use super::{
+        child_startup_open_failure_copy, open_import_failure_message, open_read_failure_message,
+        session_activation_failure_message,
+    };
+    use scriptcraft_core::editing::EditError;
+    use scriptcraft_core::fdx::FdxError;
+    use scriptcraft_core::fdx_storage::{FdxStorageError, FdxStorageErrorKind, StorageOperation};
+
+    #[test]
+    fn open_stage_errors_retain_safe_causes_without_paths_or_document_content() {
+        let read = open_read_failure_message(&FdxStorageError {
+            kind: FdxStorageErrorKind::Io(StorageOperation::Read),
+            temporary_cleanup_failed: false,
+        });
+        assert_eq!(
+            read,
+            "FDX_OPEN_FAILED: FDX file read failed; active document unchanged"
+        );
+
+        let import = open_import_failure_message(&FdxError::MalformedXml);
+        assert_eq!(
+            import,
+            "FDX_IMPORT_FAILED: FDX XML is malformed or unsupported; active document unchanged"
+        );
+
+        let activation = session_activation_failure_message(&EditError::InvalidSelection);
+        assert_eq!(
+            activation,
+            "FDX_SESSION_ACTIVATION_FAILED: EDIT_INVALID_SELECTION; active document unchanged"
+        );
+
+        for message in [read, import, activation] {
+            assert!(!message.contains('/'));
+            assert!(!message.contains("screenplay"));
+            assert!(!message.contains('\n'));
+            assert!(message.len() <= 512);
+        }
+    }
+
+    #[test]
+    fn child_open_failure_keeps_the_generic_native_dialog_copy() {
+        assert_eq!(
+            child_startup_open_failure_copy(),
+            (
+                "Unable to Open Document",
+                "The selected document could not be opened in this new instance. This instance remains untitled."
+            )
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2447,6 +2998,7 @@ mod pdf_export_adapter_tests {
     #[derive(Default)]
     struct RecordingFileSystem {
         writes: RefCell<Vec<(PathBuf, Vec<u8>)>>,
+        fail_write: Cell<bool>,
     }
 
     impl FileSystem for RecordingFileSystem {
@@ -2455,6 +3007,9 @@ mod pdf_export_adapter_tests {
         }
 
         fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), PersistenceError> {
+            if self.fail_write.get() {
+                return Err(PersistenceError::Io("private test destination".to_owned()));
+            }
             self.writes
                 .borrow_mut()
                 .push((path.to_owned(), bytes.to_vec()));
@@ -2523,6 +3078,25 @@ mod pdf_export_adapter_tests {
         assert!(filesystem.writes.borrow().is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_pdf_picker_path_is_rejected_before_build_or_write() {
+        use super::PdfExportAdapterError;
+        use std::os::unix::ffi::OsStrExt;
+
+        let filesystem = RecordingFileSystem::default();
+        let built = Cell::new(false);
+        let selected_path = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/invalid-\xff.pdf"));
+        let outcome = export_pdf_to_selected_path(Some(selected_path), &filesystem, || {
+            built.set(true);
+            Ok(b"%PDF-1.4".to_vec())
+        });
+
+        assert!(matches!(outcome, Err(PdfExportAdapterError::Path)));
+        assert!(!built.get());
+        assert!(filesystem.writes.borrow().is_empty());
+    }
+
     #[test]
     fn pdf_export_writes_generated_bytes_only_to_selected_path() {
         let filesystem = RecordingFileSystem::default();
@@ -2538,5 +3112,39 @@ mod pdf_export_adapter_tests {
             filesystem.writes.borrow().as_slice(),
             &[(selected_path.to_owned(), bytes)]
         );
+    }
+
+    #[test]
+    fn pdf_layout_failure_does_not_write_output() {
+        let filesystem = RecordingFileSystem::default();
+        let selected_path = Path::new("/selected/output.pdf");
+        let outcome = export_pdf_to_selected_path(Some(selected_path), &filesystem, || {
+            Err(scriptcraft_core::exports::ExportError::Layout(
+                scriptcraft_core::layout::LayoutError {
+                    kind: scriptcraft_core::layout::LayoutErrorKind::NoGeometry,
+                },
+            ))
+        });
+
+        assert!(matches!(
+            outcome,
+            Err(super::PdfExportAdapterError::Export(
+                scriptcraft_core::exports::ExportError::Layout(_)
+            ))
+        ));
+        assert!(filesystem.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn pdf_write_failure_is_reported_without_retargeting_output() {
+        let filesystem = RecordingFileSystem::default();
+        filesystem.fail_write.set(true);
+        let selected_path = Path::new("/selected/output.pdf");
+        let outcome = export_pdf_to_selected_path(Some(selected_path), &filesystem, || {
+            Ok(b"%PDF-1.4 test bytes".to_vec())
+        });
+
+        assert!(matches!(outcome, Err(super::PdfExportAdapterError::Write(_))));
+        assert!(filesystem.writes.borrow().is_empty());
     }
 }

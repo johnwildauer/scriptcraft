@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use scriptcraft_commands::{
+use scriptcraft_commands::{EditorSurface, 
     execute_editor_command, validate_descriptor_catalog, Command, CommandId, CommandOutcome,
     CommandRejection, DiagnosticMessage, Position, RoleValue, Selection, UnavailableReason,
     COMMAND_DESCRIPTORS, MAX_DIAGNOSTIC_MESSAGE_BYTES,
@@ -20,8 +20,8 @@ fn new_session() -> EditingSession {
 #[test]
 fn diagnostic_status_is_bounded_catalogued_and_rejected_by_headless_execution() {
     let message = valid(DiagnosticMessage::new("SAVE_FAILED: destination conflict"));
-    assert_eq!(CommandId::ALL.len(), 42);
-    assert_eq!(COMMAND_DESCRIPTORS.len(), 42);
+    assert_eq!(CommandId::ALL.len(), 47);
+    assert_eq!(COMMAND_DESCRIPTORS.len(), 47);
     assert_eq!(validate_descriptor_catalog(), Ok(()));
     assert_eq!(CommandId::UiStatusSet.as_str(), "ui.status.set");
     assert_eq!(
@@ -80,7 +80,7 @@ fn semantic_editing_preserves_roles_unicode_history_and_dirty_state_through_comm
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorTextInsert {
+            &Command::EditorTextInsert { surface: EditorSurface::Body, 
                 text: "INT. CAFÉ — NUIT".into(),
             },
         ),
@@ -97,7 +97,7 @@ fn semantic_editing_preserves_roles_unicode_history_and_dirty_state_through_comm
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorElementChange {
+            &Command::EditorElementChange { surface: EditorSurface::Body, 
                 role: RoleValue::new(Role::Character),
             },
         ),
@@ -106,7 +106,7 @@ fn semantic_editing_preserves_roles_unicode_history_and_dirty_state_through_comm
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorTextInsert {
+            &Command::EditorTextInsert { surface: EditorSurface::Body, 
                 text: "MARA".into(),
             },
         ),
@@ -119,7 +119,7 @@ fn semantic_editing_preserves_roles_unicode_history_and_dirty_state_through_comm
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorTextInsert {
+            &Command::EditorTextInsert { surface: EditorSurface::Body, 
                 text: "こんにちは、🌙".into(),
             },
         ),
@@ -157,7 +157,7 @@ fn every_role_parameter_reaches_the_existing_role_change_operation() {
         assert_eq!(
             execute_editor_command(
                 &mut session,
-                &Command::EditorElementChange {
+                &Command::EditorElementChange { surface: EditorSurface::Body, 
                     role: RoleValue::new(role),
                 },
             ),
@@ -184,14 +184,14 @@ fn text_and_paste_are_separate_commands_and_paste_keeps_newlines_in_the_element(
     assert_eq!(
         execute_editor_command(
             &mut typed,
-            &Command::EditorTextInsert { text: text.into() },
+            &Command::EditorTextInsert { surface: EditorSurface::Body,  text: text.into() },
         ),
         CommandOutcome::Changed
     );
     assert_eq!(
         execute_editor_command(
             &mut pasted,
-            &Command::EditorTextPaste { text: text.into() },
+            &Command::EditorTextPaste { surface: EditorSurface::Body,  text: text.into() },
         ),
         CommandOutcome::Changed
     );
@@ -209,7 +209,7 @@ fn backspace_and_forward_delete_delegate_to_distinct_session_operations() {
         assert_eq!(
             execute_editor_command(
                 session,
-                &Command::EditorTextInsert { text: "AB".into() },
+                &Command::EditorTextInsert { surface: EditorSurface::Body,  text: "AB".into() },
             ),
             CommandOutcome::Changed
         );
@@ -259,7 +259,7 @@ fn invalid_utf8_selection_is_rejected_without_session_mutation() {
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorTextInsert { text: "é".into() },
+            &Command::EditorTextInsert { surface: EditorSurface::Body,  text: "é".into() },
         ),
         CommandOutcome::Changed
     );
@@ -268,7 +268,7 @@ fn invalid_utf8_selection_is_rejected_without_session_mutation() {
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorSelectionSet {
+            &Command::EditorSelectionSet { surface: EditorSurface::Body, 
                 selection: selection(position(0, 1), position(0, 1)),
             },
         ),
@@ -285,7 +285,7 @@ fn cross_element_role_change_preserves_the_original_core_error_and_session() {
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorTextInsert { text: "A".into() },
+            &Command::EditorTextInsert { surface: EditorSurface::Body,  text: "A".into() },
         ),
         CommandOutcome::Changed
     );
@@ -296,7 +296,7 @@ fn cross_element_role_change_preserves_the_original_core_error_and_session() {
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorSelectionSet {
+            &Command::EditorSelectionSet { surface: EditorSurface::Body, 
                 selection: selection(position(0, 0), position(1, 0)),
             },
         ),
@@ -307,7 +307,7 @@ fn cross_element_role_change_preserves_the_original_core_error_and_session() {
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorElementChange {
+            &Command::EditorElementChange { surface: EditorSurface::Body, 
                 role: RoleValue::new(Role::Dialogue),
             },
         ),
@@ -325,7 +325,7 @@ fn failed_oversized_insert_and_non_editor_command_leave_session_unchanged() {
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorTextInsert { text: oversized },
+            &Command::EditorTextInsert { surface: EditorSurface::Body,  text: oversized },
         ),
         CommandOutcome::Failed(EditError::TextTooLong)
     );
@@ -345,7 +345,7 @@ fn select_all_uses_a_direct_session_selection_update() {
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorTextInsert { text: "scene".into() },
+            &Command::EditorTextInsert { surface: EditorSurface::Body,  text: "scene".into() },
         ),
         CommandOutcome::Changed
     );
@@ -356,7 +356,7 @@ fn select_all_uses_a_direct_session_selection_update() {
     assert_eq!(
         execute_editor_command(
             &mut session,
-            &Command::EditorTextInsert { text: "action".into() },
+            &Command::EditorTextInsert { surface: EditorSurface::Body,  text: "action".into() },
         ),
         CommandOutcome::Changed
     );

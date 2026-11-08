@@ -65,11 +65,6 @@ mod presentation {
     /// Status zoom slider rail thickness, inherited as 8 logical points.
     /// Adjust this status-only value manually if a thinner rail is desired.
     pub(super) const ZOOM_SLIDER_RAIL_HEIGHT: f32 = 4.0;
-    /// Production default: keep the detailed Diagnostics presentation disabled.
-    /// Set to `true` only for explicit local development; changing this source
-    /// constant requires rebuilding and relaunching the application.
-    pub(super) const ENABLE_DIAGNOSTICS: bool = false;
-
     /// Optional app override for every status-owned default/idle text and icon.
     /// Leave `None` to follow the active Appearance theme's text foreground.
     pub(super) const DEFAULT_FOREGROUND_OVERRIDE: Option<Color32> = None;
@@ -130,10 +125,6 @@ pub(super) fn apply_status_palette(ui: &mut egui::Ui, palette: StatusPalette) {
     visuals.widgets.hovered.bg_fill = palette.hover_fill;
     visuals.widgets.hovered.weak_bg_fill = palette.hover_fill;
     visuals.widgets.hovered.fg_stroke.color = palette.hover_foreground;
-}
-
-pub(super) const fn diagnostics_enabled() -> bool {
-    presentation::ENABLE_DIAGNOSTICS
 }
 
 fn status_font_id(ui: &egui::Ui, text_style: egui::TextStyle) -> egui::FontId {
@@ -1338,6 +1329,33 @@ pub(super) struct StatusCommandIntents {
     pub(super) timer_button_rect: Option<Rect>,
 }
 
+/// Surface-specific status projection. False options suppress the corresponding
+/// widget and accessibility node while retaining the existing row geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct StatusSurfaceOptions {
+    pub(super) show_center: bool,
+    pub(super) show_focus_mode: bool,
+    show_diagnostics: bool,
+}
+
+fn diagnostics_disclosure_enabled(development_mode: bool, options: StatusSurfaceOptions) -> bool {
+    development_mode && options.show_diagnostics
+}
+
+impl StatusSurfaceOptions {
+    pub(super) const BODY: Self = Self {
+        show_center: true,
+        show_focus_mode: true,
+        show_diagnostics: true,
+    };
+
+    pub(super) const TITLE_PAGE: Self = Self {
+        show_center: false,
+        show_focus_mode: false,
+        show_diagnostics: false,
+    };
+}
+
 #[allow(clippy::too_many_arguments)] // Keep transient timer ownership at the app caller.
 pub(super) fn show_with_focus_mode(
     ui: &mut egui::Ui,
@@ -1345,6 +1363,7 @@ pub(super) fn show_with_focus_mode(
     page: VisiblePage,
     center: &CenterProjection,
     diagnostics: Option<DiagnosticProjection<'_>>,
+    development_mode: bool,
     zoom_percent: u16,
     appearance: AppearanceMode,
     focus_view: &FocusModeView,
@@ -1355,10 +1374,35 @@ pub(super) fn show_with_focus_mode(
         page,
         center,
         diagnostics,
+        development_mode,
         zoom_percent,
         appearance,
         None,
         Some(focus_view),
+        StatusSurfaceOptions::BODY,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn show_title_page(
+    ui: &mut egui::Ui,
+    palette: StatusPalette,
+    page: VisiblePage,
+    zoom_percent: u16,
+    appearance: AppearanceMode,
+) -> StatusCommandIntents {
+    show_impl_with_appearance(
+        ui,
+        palette,
+        page,
+        &ready_center(),
+        None,
+        false,
+        zoom_percent,
+        appearance,
+        None,
+        None,
+        StatusSurfaceOptions::TITLE_PAGE,
     )
 }
 
@@ -1445,10 +1489,12 @@ fn show_impl_with_appearance(
     page: VisiblePage,
     center: &CenterProjection,
     diagnostics: Option<DiagnosticProjection<'_>>,
+    development_mode: bool,
     zoom_value: u16,
     appearance_value: AppearanceMode,
     diagnostics_open: Option<bool>,
     focus_view: Option<&FocusModeView>,
+    options: StatusSurfaceOptions,
  ) -> StatusCommandIntents {
     let mut zoom_percent = zoom_value;
     let mut appearance = appearance_value;
@@ -1538,7 +1584,8 @@ fn show_impl_with_appearance(
                         right_ui,
                         Vec2::new(layout.icons[1].width(), row_height),
                         |icon_ui| {
-                            if let Some(view) = focus_view {
+                            if options.show_focus_mode {
+                                if let Some(view) = focus_view {
                                 let accessible_name = view.accessible_name();
                                 let rendered = status_icon_control(
                                     icon_ui,
@@ -1553,6 +1600,7 @@ fn show_impl_with_appearance(
                                     .on_hover_text("Focus Mode");
                                 if rendered.activated {
                                     commands.push(Command::ViewFocusModeToggle);
+                                }
                                 }
                             }
                         },
@@ -1592,24 +1640,26 @@ fn show_impl_with_appearance(
                 },
             );
         });
-        one_line_region_at(row_ui, layout.center, |region| {
-            let status_rect = region.max_rect().intersect(region.clip_rect());
-            let text_size = if center.modifier_list {
-                modifier_hint_font_size(region, &center.text, status_rect.width())
-            } else {
-                presentation::CENTER_TEXT_SIZE
-            };
-            with_center_text_style(region, palette.center_foreground, text_size, |region| {
-                paint_clipped_single_line(
-                    region,
-                    "status-center",
-                    &center.text,
-                    &center.text,
-                    presentation::center_foreground(region),
-                    status_rect,
-                );
+        if options.show_center {
+            one_line_region_at(row_ui, layout.center, |region| {
+                let status_rect = region.max_rect().intersect(region.clip_rect());
+                let text_size = if center.modifier_list {
+                    modifier_hint_font_size(region, &center.text, status_rect.width())
+                } else {
+                    presentation::CENTER_TEXT_SIZE
+                };
+                with_center_text_style(region, palette.center_foreground, text_size, |region| {
+                    paint_clipped_single_line(
+                        region,
+                        "status-center",
+                        &center.text,
+                        &center.text,
+                        presentation::center_foreground(region),
+                        status_rect,
+                    );
+                });
             });
-        });
+        }
 
         one_line_region_at(row_ui, layout.page, |page_ui| {
             let label = page.label();
@@ -1626,8 +1676,9 @@ fn show_impl_with_appearance(
             });
         });
     });
-    if presentation::ENABLE_DIAGNOSTICS {
-        let diagnostics = diagnostics.expect("enabled Diagnostics require a projection");
+    if let (true, Some(diagnostics)) =
+        (diagnostics_disclosure_enabled(development_mode, options), diagnostics)
+    {
         with_status_text_style(ui, |ui| {
             let default_foreground = presentation::default_foreground(ui);
             ui.visuals_mut().override_text_color = Some(default_foreground);
@@ -1691,9 +1742,9 @@ fn show_impl_with_appearance(
 #[cfg(test)]
 mod diagnostic_status_tests {
     use super::{
-        diagnostics_enabled, element_hint_bindings, fitted_modifier_hint_font_size,
+        diagnostics_disclosure_enabled, element_hint_bindings, fitted_modifier_hint_font_size,
         modifier_list_text, plan_status_row, project_center, ready_center, CenterProjection,
-        ElementHintChord,
+        ElementHintChord, StatusSurfaceOptions,
     };
     use crate::shortcuts::ShortcutPlatform;
     use eframe::egui;
@@ -1739,9 +1790,11 @@ mod diagnostic_status_tests {
     }
 
     #[test]
-    fn ready_fallback_and_disabled_diagnostics_are_preserved() {
+    fn ready_fallback_and_runtime_diagnostics_gate_preserve_body_and_title_page_contracts() {
         assert_eq!(ready_center().text, "Ready");
-        assert!(!diagnostics_enabled());
+        assert!(!diagnostics_disclosure_enabled(false, StatusSurfaceOptions::BODY));
+        assert!(diagnostics_disclosure_enabled(true, StatusSurfaceOptions::BODY));
+        assert!(!diagnostics_disclosure_enabled(true, StatusSurfaceOptions::TITLE_PAGE));
     }
 
     #[test]
@@ -1930,5 +1983,30 @@ mod diagnostic_status_tests {
                 assert!(rect.right() <= row.right());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod title_status_surface_tests {
+    use super::StatusSurfaceOptions;
+
+    #[test]
+    fn title_status_keeps_diagnostics_excluded_while_body_status_allows_runtime_gate() {
+        assert_eq!(
+            StatusSurfaceOptions::TITLE_PAGE,
+            StatusSurfaceOptions {
+                show_center: false,
+                show_focus_mode: false,
+                show_diagnostics: false,
+            },
+        );
+        assert_eq!(
+            StatusSurfaceOptions::BODY,
+            StatusSurfaceOptions {
+                show_center: true,
+                show_focus_mode: true,
+                show_diagnostics: true,
+            },
+        );
     }
 }
