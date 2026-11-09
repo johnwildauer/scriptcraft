@@ -547,6 +547,8 @@ pub enum DependencyConfidence {
 pub enum SourceOwnership {
     Opaque,
     Managed(StableId),
+    /// Outer dual-dialogue wrapper ownership; never enters paragraph indexes.
+    DualDialogueWrapper(StableId),
     Attached(ForeignIdentity),
 }
 
@@ -675,6 +677,7 @@ impl ForeignIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnchorTarget {
     ProjectElement(StableId),
+    DualDialogueWrapper(StableId),
     Foreign(ForeignIdentity),
 }
 
@@ -924,6 +927,8 @@ impl SourceIdentityUseIndex {
             nodes: &[PreservedNode],
             section_index: usize,
             path: &mut Vec<usize>,
+            parent: Option<&PreservedElement>,
+            grandparent: Option<&PreservedElement>,
             automaton: &SubstringAutomaton,
             index: &mut SourceIdentityUseIndex,
             managed_index: &mut BTreeMap<StableId, Vec<ManagedParagraphLocation>>,
@@ -935,6 +940,15 @@ impl SourceIdentityUseIndex {
                 match node {
                     PreservedNode::Element(element) => {
                         path.push(node_index);
+                        let exact_alternate_copy = element.name.local_name == "Paragraph"
+                            && parent.is_some_and(|parent| {
+                                parent.name.local_name == "Alt"
+                                    && parent.name.namespace_uri == element.name.namespace_uri
+                            })
+                            && grandparent.is_some_and(|grandparent| {
+                                grandparent.name.local_name == "AltCollection"
+                                    && grandparent.name.namespace_uri == element.name.namespace_uri
+                            });
                         if let SourceOwnership::Managed(id) = &element.ownership {
                             managed_index.entry(id.clone()).or_default().push(
                                 ManagedParagraphLocation {
@@ -951,7 +965,7 @@ impl SourceIdentityUseIndex {
                             .next()
                             .map(|attribute| attribute.value.as_str())
                             .filter(|_| unqualified_ids.next().is_none());
-                        if element.name.local_name == "Paragraph" {
+                        if element.name.local_name == "Paragraph" && !exact_alternate_copy {
                             if let Some(value) = unique_id {
                                 *index
                                     .paragraph_source_identity_counts
@@ -965,7 +979,9 @@ impl SourceIdentityUseIndex {
                             {
                                 index.source_id_values.insert(attribute.value.clone());
                             }
-                            let exempt = (element.name.local_name == "Paragraph"
+                            let exempt = ((exact_alternate_copy
+                                || (element.name.local_name == "Paragraph"
+                                    && matches!(&element.ownership, SourceOwnership::Managed(_))))
                                 && attribute.name.namespace_uri.is_none()
                                 && attribute.name.local_name.eq_ignore_ascii_case("id"))
                             .then_some(unique_id)
@@ -981,6 +997,8 @@ impl SourceIdentityUseIndex {
                             &element.children,
                             section_index,
                             path,
+                            Some(element),
+                            parent,
                             automaton,
                             index,
                             managed_index,
@@ -1008,6 +1026,8 @@ impl SourceIdentityUseIndex {
                 &section.children,
                 section_index,
                 &mut Vec::new(),
+                None,
+                None,
                 &automaton,
                 &mut index,
                 managed_index,
@@ -1039,6 +1059,72 @@ impl PartialEq for PreservationState {
 }
 
 impl Eq for PreservationState {}
+
+fn source_element(local_name: &str, namespace_uri: &Option<String>, prefix: Option<&str>) -> PreservedElement {
+    let qualified_name = prefix.map_or_else(
+        || local_name.to_owned(),
+        |prefix| format!("{prefix}:{local_name}"),
+    );
+    PreservedElement {
+        name: SourceName {
+            namespace_uri: namespace_uri.clone(),
+            local_name: local_name.to_owned(),
+            qualified_name: Some(qualified_name),
+        },
+        attributes: Vec::new(),
+        namespace_bindings: Vec::new(),
+        source_type: None,
+        ownership: SourceOwnership::Opaque,
+        dependency_confidence: DependencyConfidence::Unknown,
+        anchor: None,
+        children: SharedVec::default(),
+    }
+}
+
+fn push_source_attribute(element: &mut PreservedElement, local_name: &str, value: &str) {
+    element.attributes.push(PreservedAttribute {
+        name: SourceName {
+            namespace_uri: None,
+            local_name: local_name.to_owned(),
+            qualified_name: Some(local_name.to_owned()),
+        },
+        value: value.to_owned(),
+    });
+}
+
+fn push_wrapper_overrides(
+    element: &mut PreservedElement,
+    overrides: crate::formatting::SourceParagraphOverrides,
+) {
+    if let Some(value) = overrides.paragraph.left_indent {
+        push_source_attribute(element, "LeftIndent", &fixed_inches_string(value));
+    }
+    if let Some(value) = overrides.paragraph.right_indent {
+        push_source_attribute(element, "RightIndent", &fixed_inches_string(value));
+    }
+    if let Some(value) = overrides.paragraph.space_before {
+        push_source_attribute(element, "SpaceBefore", &value.decimal_string());
+    }
+    if let Some(value) = overrides.starts_new_page {
+        push_source_attribute(element, "StartsNewPage", if value { "Yes" } else { "No" });
+    }
+}
+
+fn fixed_inches_string(value: crate::FixedPoint) -> String {
+    let raw = value.raw();
+    const PER_INCH: u64 = 7_200;
+    let magnitude = raw.unsigned_abs();
+    let whole = magnitude / PER_INCH;
+    let remainder = magnitude % PER_INCH;
+    if remainder == 0 {
+        return format!("{}{whole}", if raw < 0 { "-" } else { "" });
+    }
+    let mut fraction = format!("{remainder:06}");
+    while fraction.ends_with('0') {
+        fraction.pop();
+    }
+    format!("{}{whole}.{fraction}", if raw < 0 { "-" } else { "" })
+}
 
 impl PreservationState {
     pub fn source_layout_settings(&self) -> &SourceLayoutSettings {
@@ -1094,6 +1180,7 @@ impl PreservationState {
     pub(crate) fn ensure_run_range_is_contiguous(
         &self,
         id: &StableId,
+        range: std::ops::Range<usize>,
     ) -> Result<(), PreservationError> {
         let paragraph = self
             .managed_element(id)?
@@ -1111,10 +1198,24 @@ impl PreservationState {
                 }
             }
         }
+        let mut boundary = 0usize;
         for pair in text_indexes.windows(2) {
-            if paragraph.children[pair[0] + 1..pair[1]].iter().any(|node| {
-                !matches!(node, PreservedNode::Element(element) if is_text_element(element, paragraph))
-            }) {
+            let PreservedNode::Element(previous) = &paragraph.children[pair[0]] else {
+                return Err(PreservationError::UnsupportedRunTopology);
+            };
+            boundary = boundary.saturating_add(previous.children.iter().filter_map(|node| match node {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.len()),
+                _ => None,
+            }).sum::<usize>());
+            let gap = &paragraph.children[pair[0] + 1..pair[1]];
+            let has_unsupported_barrier = gap.iter().any(|node| match node {
+                PreservedNode::Element(element) => !(element.name.local_name == "Alts"
+                    && element.name.namespace_uri == paragraph.name.namespace_uri),
+                PreservedNode::Text(text) | PreservedNode::CData(text) => !text.trim().is_empty(),
+                _ => true,
+            });
+            if has_unsupported_barrier || (range.start < boundary && range.end > boundary
+                && !gap.is_empty()) {
                 return Err(PreservationError::UnsupportedRunTopology);
             }
         }
@@ -1156,13 +1257,6 @@ impl PreservationState {
                 _ => None,
             }
         }).collect::<Vec<_>>();
-        for pair in text_elements.windows(2) {
-            if paragraph.children[pair[0].0 + 1..pair[1].0].iter().any(|node| {
-                !matches!(node, PreservedNode::Element(element) if is_text_element(element, paragraph))
-            }) {
-                return Err(PreservationError::UnsupportedRunTopology);
-            }
-        }
         let source_text = text_elements.iter().flat_map(|(_, element)| element.children.iter()).filter_map(|node| {
             match node {
                 PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.as_str()),
@@ -1177,8 +1271,7 @@ impl PreservationState {
         })) {
             return Err(PreservationError::UnsupportedRunTopology);
         }
-        let templates = text_elements.iter().map(|(_, element)| (*element).clone()).collect::<Vec<_>>();
-        if templates.is_empty() {
+        if text_elements.is_empty() {
             return Err(PreservationError::UnsupportedTextMapping);
         }
         let effective = if runs.is_empty() {
@@ -1189,26 +1282,35 @@ impl PreservationState {
         if effective.iter().map(|run| run.text.as_str()).collect::<String>() != expected_text {
             return Err(PreservationError::UnsupportedTextMapping);
         }
+        let mut replacements = BTreeMap::<usize, Vec<PreservedNode>>::new();
+        let mut text_offset = 0usize;
+        for (index, template) in &text_elements {
+            let segment_text = template.children.iter().filter_map(|node| match node {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.as_str()),
+                _ => None,
+            }).collect::<String>();
+            let end = text_offset.saturating_add(segment_text.len());
+            let mut segment_runs = slice_text_runs(&effective, text_offset..end)?;
+            if segment_runs.is_empty() && !segment_text.is_empty() {
+                return Err(PreservationError::UnsupportedTextMapping);
+            }
+            let mut replacement = Vec::with_capacity(segment_runs.len());
+            for run in segment_runs.drain(..) {
+                replacement.push(PreservedNode::Element(sync_text_element_attributes(template, &run)?));
+            }
+            replacements.insert(*index, replacement);
+            text_offset = end;
+        }
+        if text_offset != expected_text.len() {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
         let mut rebuilt = Vec::with_capacity(paragraph.children.len().saturating_add(effective.len()));
-        let mut inserted = false;
         for (index, child) in paragraph.children.iter().enumerate() {
-            if text_elements.iter().any(|(text_index, _)| *text_index == index) {
-                if !inserted {
-                    for (run_index, run) in effective.iter().enumerate() {
-                        let template = templates.iter().find(|candidate| text_element_matches_run(candidate, run))
-                            .unwrap_or(&templates[run_index.min(templates.len() - 1)]);
-                        rebuilt.push(PreservedNode::Element(
-                            sync_text_element_attributes(template, run)?,
-                        ));
-                    }
-                    inserted = true;
-                }
+            if let Some(replacement) = replacements.remove(&index) {
+                rebuilt.extend(replacement);
             } else {
                 rebuilt.push(child.clone());
             }
-        }
-        if !inserted {
-            return Err(PreservationError::UnsupportedTextMapping);
         }
         paragraph.children = rebuilt.into();
         Ok(())
@@ -1255,6 +1357,237 @@ impl PreservationState {
         increment_counter(&SOURCE_USE_INDEX_REBUILDS);
         add_counter(&SOURCE_USE_INDEX_SOURCE_NODES, visited);
         self.source_identity_use_index = Some(source_index);
+    }
+
+    /// Moves the exact existing managed body Paragraph nodes under a generated
+    /// General/DualDialogue wrapper. This runs only on a detached transaction
+    /// candidate; all indexes are rebuilt before the candidate can be published.
+    pub(crate) fn wrap_dual_dialogue_members(
+        &mut self,
+        group_id: &StableId,
+        member_ids: &[StableId],
+        overrides: Option<crate::formatting::SourceParagraphOverrides>,
+    ) -> Result<(String, SourceAnchorId, u32), PreservationError> {
+        if self.source.format != SourceFormat::Fdx || member_ids.len() < 2 {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        self.ensure_managed_paragraph_index();
+        self.ensure_source_identity_use_index();
+        let mut locations = Vec::with_capacity(member_ids.len());
+        for id in member_ids {
+            let location = self
+                .indexed_location(id)?
+                .cloned()
+                .ok_or(PreservationError::ManagedAnchorMissing)?;
+            if location.node_path.len() != 3 {
+                return Err(PreservationError::UnsupportedTextMapping);
+            }
+            locations.push(location);
+        }
+        let first = locations.first().ok_or(PreservationError::UnsupportedTextMapping)?;
+        if locations.iter().any(|location| {
+            location.section_index != first.section_index
+                || location.node_path[..2] != first.node_path[..2]
+        }) {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let root_index = first.node_path[0];
+        let content_index = first.node_path[1];
+        let child_indexes = locations
+            .iter()
+            .map(|location| location.node_path[2])
+            .collect::<Vec<_>>();
+        if child_indexes.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(PreservationError::ManagedAnchorMissing);
+        }
+        let section = self.sections.get(first.section_index)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let root = match section.children.get(root_index) {
+            Some(PreservedNode::Element(root)) if root.name.local_name == "FinalDraft" => root,
+            _ => return Err(PreservationError::UnsupportedTextMapping),
+        };
+        let content = match root.children.get(content_index) {
+            Some(PreservedNode::Element(content))
+                if content.name.local_name == "Content"
+                    && content.name.namespace_uri == root.name.namespace_uri => content,
+            _ => return Err(PreservationError::UnsupportedTextMapping),
+        };
+        for (id, child_index) in member_ids.iter().zip(&child_indexes) {
+            if !matches!(content.children.get(*child_index), Some(PreservedNode::Element(paragraph))
+                if paragraph.name.local_name == "Paragraph"
+                    && matches!(&paragraph.ownership, SourceOwnership::Managed(owner) if owner == id))
+            {
+                return Err(PreservationError::ManagedAnchorMissing);
+            }
+        }
+        for pair in child_indexes.windows(2) {
+            if content.children[pair[0] + 1..pair[1]].iter().any(|node| {
+                !matches!(node, PreservedNode::Text(text) if text.chars().all(char::is_whitespace))
+            }) {
+                return Err(PreservationError::UnsupportedTextMapping);
+            }
+        }
+        let root_namespace = content.name.namespace_uri.clone();
+        let prefix = content.name.qualified_name.as_deref()
+            .and_then(|name| name.split_once(':').map(|(prefix, _)| prefix.to_owned()));
+        let source_ordinal = u32::try_from(child_indexes[0])
+            .map_err(|_| PreservationError::TooManyEvents)?;
+        let foreign_id = self.fresh_foreign_paragraph_id()?;
+        let anchor_id = self.fresh_anchor_id()?;
+        let mut outer = source_element("Paragraph", &root_namespace, prefix.as_deref());
+        outer.source_type = Some("General".to_owned());
+        outer.ownership = SourceOwnership::DualDialogueWrapper(group_id.clone());
+        outer.anchor = Some(anchor_id.clone());
+        push_source_attribute(&mut outer, "Type", "General");
+        push_source_attribute(&mut outer, "id", &foreign_id);
+        if let Some(overrides) = overrides {
+            push_wrapper_overrides(&mut outer, overrides);
+        }
+        let mut dual = source_element("DualDialogue", &root_namespace, prefix.as_deref());
+        dual.ownership = SourceOwnership::Opaque;
+        let mut spell = source_element("SpellCheckIgnoreLists", &root_namespace, prefix.as_deref());
+        spell.ownership = SourceOwnership::Opaque;
+        for name in ["IgnoredRanges", "IgnoredWords"] {
+            let mut list = source_element(name, &root_namespace, prefix.as_deref());
+            list.ownership = SourceOwnership::Opaque;
+            spell.children.push(PreservedNode::Element(list));
+        }
+        dual.children.push(PreservedNode::Element(spell));
+
+        let section = self.sections.get_mut(first.section_index)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let root = match section.children.get_mut(root_index) {
+            Some(PreservedNode::Element(root)) => root,
+            _ => return Err(PreservationError::ManagedAnchorMissing),
+        };
+        let content = match root.children.get_mut(content_index) {
+            Some(PreservedNode::Element(content)) => content,
+            _ => return Err(PreservationError::ManagedAnchorMissing),
+        };
+        let mut moved = Vec::with_capacity(child_indexes.len());
+        for child_index in child_indexes.iter().rev() {
+            moved.push(content.children.remove(*child_index));
+        }
+        moved.reverse();
+        dual.children.extend(moved);
+        outer.children.push(PreservedNode::Element(dual));
+        content.children.insert(child_indexes[0], PreservedNode::Element(outer));
+        self.identities.push(ForeignIdentity::new(
+            ForeignIdDomain::Paragraph,
+            foreign_id.clone(),
+        )?);
+        self.anchors.push(SourceAnchor {
+            id: anchor_id.clone(),
+            target: AnchorTarget::DualDialogueWrapper(group_id.clone()),
+            relation: AnchorRelation::Represents,
+        });
+        self.invalidate_source_identity_use_index();
+        self.rebuild_managed_paragraph_index();
+        Ok((foreign_id, anchor_id, source_ordinal))
+    }
+
+    /// Removes only the resolved wrapper and its nested spell-check subtree,
+    /// restoring the exact managed member Paragraph nodes at the wrapper slot.
+    pub(crate) fn unwrap_dual_dialogue_members(
+        &mut self,
+        group_id: &StableId,
+        member_ids: &[StableId],
+        wrapper_anchor: &SourceAnchorId,
+        foreign_id: Option<&str>,
+    ) -> Result<(), PreservationError> {
+        if self.source.format != SourceFormat::Fdx || member_ids.len() < 2 {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        self.ensure_managed_paragraph_index();
+        self.ensure_source_identity_use_index();
+        let mut wrapper_locations = Vec::new();
+        for (section_index, section) in self.sections.iter().enumerate() {
+            for (root_index, root_node) in section.children.iter().enumerate() {
+                let PreservedNode::Element(root) = root_node else { continue };
+                if root.name.local_name != "FinalDraft" { continue }
+                for (content_index, content_node) in root.children.iter().enumerate() {
+                    let PreservedNode::Element(content) = content_node else { continue };
+                    if content.name.local_name != "Content" { continue }
+                    for (outer_index, outer_node) in content.children.iter().enumerate() {
+                        if matches!(outer_node, PreservedNode::Element(outer)
+                            if matches!(&outer.ownership, SourceOwnership::DualDialogueWrapper(owner) if owner == group_id)
+                                && outer.anchor.as_ref() == Some(wrapper_anchor))
+                        {
+                            wrapper_locations.push((section_index, root_index, content_index, outer_index));
+                        }
+                    }
+                }
+            }
+        }
+        let [(section_index, root_index, content_index, outer_index)] = wrapper_locations.as_slice()
+            else { return Err(PreservationError::ManagedAnchorMissing) };
+        if let Some(foreign_id) = foreign_id {
+            if !self.paragraph_identity_safely_removable(foreign_id) {
+                return Err(PreservationError::PotentialReferenceConflict);
+            }
+        }
+        let section = self.sections.get(*section_index).ok_or(PreservationError::ManagedAnchorMissing)?;
+        let PreservedNode::Element(root) = section.children.get(*root_index).ok_or(PreservationError::ManagedAnchorMissing)?
+            else { return Err(PreservationError::ManagedAnchorMissing) };
+        let PreservedNode::Element(content) = root.children.get(*content_index).ok_or(PreservationError::ManagedAnchorMissing)?
+            else { return Err(PreservationError::ManagedAnchorMissing) };
+        let PreservedNode::Element(outer) = content.children.get(*outer_index).ok_or(PreservationError::ManagedAnchorMissing)?
+            else { return Err(PreservationError::ManagedAnchorMissing) };
+        let duals = outer.children.iter().filter_map(|node| match node {
+            PreservedNode::Element(element) if element.name.local_name == "DualDialogue" => Some(element),
+            PreservedNode::Text(text) if text.chars().all(char::is_whitespace) => None,
+            _ => None,
+        }).collect::<Vec<_>>();
+        if duals.len() != 1 || outer.children.iter().any(|node| match node {
+            PreservedNode::Element(element) => element.name.local_name != "DualDialogue",
+            PreservedNode::Text(text) => !text.chars().all(char::is_whitespace),
+            _ => true,
+        }) {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let dual = duals[0];
+        let mut spell_count = 0usize;
+        let mut found_members = Vec::with_capacity(member_ids.len());
+        for node in dual.children.iter() {
+            match node {
+                PreservedNode::Element(element) if element.name.local_name == "SpellCheckIgnoreLists" => spell_count += 1,
+                PreservedNode::Element(element) if element.name.local_name == "Paragraph" => {
+                    if let SourceOwnership::Managed(id) = &element.ownership {
+                        found_members.push(id.clone());
+                    } else {
+                        return Err(PreservationError::UnsupportedTextMapping);
+                    }
+                }
+                PreservedNode::Text(text) if text.chars().all(char::is_whitespace) => {}
+                _ => return Err(PreservationError::UnsupportedTextMapping),
+            }
+        }
+        if spell_count != 1 || found_members != member_ids {
+            return Err(PreservationError::ManagedAnchorMissing);
+        }
+        let member_nodes = dual.children.iter().filter_map(|node| match node {
+            PreservedNode::Element(element) if matches!(&element.ownership, SourceOwnership::Managed(_)) => Some(node.clone()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        let section = self.sections.get_mut(*section_index).ok_or(PreservationError::ManagedAnchorMissing)?;
+        let PreservedNode::Element(root) = section.children.get_mut(*root_index).ok_or(PreservationError::ManagedAnchorMissing)?
+            else { return Err(PreservationError::ManagedAnchorMissing) };
+        let PreservedNode::Element(content) = root.children.get_mut(*content_index).ok_or(PreservationError::ManagedAnchorMissing)?
+            else { return Err(PreservationError::ManagedAnchorMissing) };
+        content.children.remove(*outer_index);
+        for (offset, member) in member_nodes.into_iter().enumerate() {
+            content.children.insert(*outer_index + offset, member);
+        }
+        if let Some(foreign_id) = foreign_id {
+            self.identities.retain(|identity| {
+                !(identity.domain == ForeignIdDomain::Paragraph && identity.value == foreign_id)
+            });
+        }
+        self.anchors.retain(|anchor| anchor.id != *wrapper_anchor);
+        self.source_layout_settings.direct_paragraph_overrides.remove(group_id);
+        self.invalidate_source_identity_use_index();
+        self.rebuild_managed_paragraph_index();
+        Ok(())
     }
 
     pub(crate) fn invalidate_source_identity_use_index(&mut self) {
@@ -1399,6 +1732,86 @@ impl PreservationState {
         )
     }
 
+    fn is_supported_managed_body_location(
+        &self,
+        location: &ManagedParagraphLocation,
+        id: &StableId,
+    ) -> bool {
+        let Some(section) = self.sections.get(location.section_index) else {
+            return false;
+        };
+        let mut nodes = section.children.as_ref();
+        let mut chain = Vec::with_capacity(location.node_path.len());
+        for index in &location.node_path {
+            let Some(PreservedNode::Element(element)) = nodes.get(*index) else {
+                return false;
+            };
+            chain.push(element);
+            nodes = &element.children;
+        }
+        let Some(root) = chain.first() else {
+            return false;
+        };
+        if root.name.local_name != "FinalDraft" {
+            return false;
+        }
+        let namespace = root.name.namespace_uri.as_deref();
+        if chain
+            .iter()
+            .any(|element| element.name.namespace_uri.as_deref() != namespace)
+        {
+            return false;
+        }
+        match chain.as_slice() {
+            [_, content, paragraph]
+                if content.name.local_name == "Content"
+                    && paragraph.name.local_name == "Paragraph"
+                    && matches!(&paragraph.ownership, SourceOwnership::Managed(target) if target == id) =>
+            {
+                true
+            }
+            [_, content, wrapper, dual, paragraph]
+                if content.name.local_name == "Content"
+                    && wrapper.name.local_name == "Paragraph"
+                    && wrapper.source_type.as_deref() == Some("General")
+                    && matches!(&wrapper.ownership, SourceOwnership::DualDialogueWrapper(_))
+                    && dual.name.local_name == "DualDialogue"
+                    && paragraph.name.local_name == "Paragraph"
+                    && matches!(&paragraph.ownership, SourceOwnership::Managed(target) if target == id) =>
+            {
+                let Some(dual_index) = location.node_path.get(3) else {
+                    return false;
+                };
+                let Some(member_index) = location.node_path.get(4) else {
+                    return false;
+                };
+                let Some(PreservedNode::Element(wrapper_dual)) = wrapper.children.get(*dual_index)
+                else {
+                    return false;
+                };
+                if wrapper_dual.name.local_name != "DualDialogue"
+                    || wrapper_dual.children.get(*member_index).is_none_or(|node| {
+                        !matches!(node, PreservedNode::Element(member) if matches!(&member.ownership, SourceOwnership::Managed(target) if target == id))
+                    })
+                {
+                    return false;
+                }
+                let spell_blocks = wrapper_dual
+                    .children
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, node)| match node {
+                        PreservedNode::Element(element)
+                            if element.name.local_name == "SpellCheckIgnoreLists" => Some(index),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                spell_blocks.len() == 1 && spell_blocks[0] < *member_index
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn has_managed_paragraph_index(&self) -> bool {
         self.managed_paragraph_index.is_some()
     }
@@ -1432,7 +1845,10 @@ impl PreservationState {
             .indexed_location(&semantic.id)?
             .cloned()
             .ok_or(PreservationError::ManagedAnchorMissing)?;
-        if baseline_location != candidate_location {
+        if baseline_location != candidate_location
+            || !baseline.is_supported_managed_body_location(&baseline_location, &semantic.id)
+            || !self.is_supported_managed_body_location(&candidate_location, &semantic.id)
+        {
             return Err(PreservationError::ManagedAnchorMissing);
         }
         if !same_sections_except_managed_location(
@@ -1665,6 +2081,17 @@ impl PreservationState {
                         return Err(PreservationError::InvalidAnchor);
                     }
                 }
+                SourceOwnership::DualDialogueWrapper(id) => {
+                    if !anchor.as_ref().is_some_and(|anchor| {
+                        matches!(
+                            anchor_targets.get(anchor),
+                            Some((AnchorTarget::DualDialogueWrapper(target), AnchorRelation::Represents))
+                                if target == id
+                        )
+                    }) {
+                        return Err(PreservationError::InvalidAnchor);
+                    }
+                }
                 SourceOwnership::Attached(identity) => {
                     if !defined.contains(identity)
                         || !anchor.as_ref().is_some_and(|anchor| {
@@ -1750,13 +2177,18 @@ impl PreservationState {
     pub(crate) fn validate_project_elements(
         &self,
         project_element_ids: &BTreeSet<StableId>,
+        dual_dialogue_group_ids: &BTreeSet<StableId>,
     ) -> Result<(), PreservationError> {
         self.validate()?;
         for anchor in &self.anchors {
-            if let AnchorTarget::ProjectElement(id) = &anchor.target {
-                if !project_element_ids.contains(id) {
+            match &anchor.target {
+                AnchorTarget::ProjectElement(id) if !project_element_ids.contains(id) => {
                     return Err(PreservationError::AnchorTargetMissing);
                 }
+                AnchorTarget::DualDialogueWrapper(id) if !dual_dialogue_group_ids.contains(id) => {
+                    return Err(PreservationError::AnchorTargetMissing);
+                }
+                _ => {}
             }
         }
         let mut stack = self
@@ -1771,10 +2203,28 @@ impl PreservationState {
                         return Err(PreservationError::AnchorTargetMissing);
                     }
                 }
+                if let SourceOwnership::DualDialogueWrapper(id) = &element.ownership {
+                    if !dual_dialogue_group_ids.contains(id) {
+                        return Err(PreservationError::AnchorTargetMissing);
+                    }
+                }
                 stack.extend(element.children.iter());
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn dual_dialogue_wrapper_anchor(&self, id: &StableId) -> Option<SourceAnchorId> {
+        let mut stack = self.sections.iter().flat_map(|section| section.children.iter()).collect::<Vec<_>>();
+        while let Some(node) = stack.pop() {
+            if let PreservedNode::Element(element) = node {
+                if matches!(&element.ownership, SourceOwnership::DualDialogueWrapper(owner) if owner == id) {
+                    return element.anchor.clone();
+                }
+                stack.extend(element.children.iter());
+            }
+        }
+        None
     }
 
     pub(crate) fn has_managed_element(&self, id: &StableId) -> bool {
@@ -1787,6 +2237,105 @@ impl PreservationState {
         self.sections
             .iter()
             .any(|section| contains_managed_element_counted(&section.children, id))
+    }
+
+    /// Returns whether the exact managed Paragraph owns a direct inline Alts
+    /// child. The codec has already validated its role, namespace, and
+    /// multiplicity; callers use this only to guard role transitions.
+    pub(crate) fn has_inline_alts(&self, id: &StableId) -> bool {
+        let paragraph = match self.indexed_location(id) {
+            Ok(Some(location)) => self.managed_element_at(location),
+            Ok(None) if self.managed_paragraph_index.is_none() => {
+                find_managed_element_counted(&self.sections, id)
+            }
+            _ => None,
+        };
+        paragraph.is_some_and(|paragraph| {
+            paragraph.children.iter().any(|node| matches!(node,
+                PreservedNode::Element(element)
+                    if element.name.local_name == "Alts"
+                        && element.name.namespace_uri == paragraph.name.namespace_uri
+            ))
+        })
+    }
+
+    /// Reconciles a join or cross-paragraph deletion while retaining the
+    /// surviving owner's Alts in place. The left source is trimmed through its
+    /// mapped Text runs, and only the retained suffix Text runs of the final
+    /// removed Paragraph are copied; removed Alts and AltCollection are never
+    /// transferred or pruned.
+    fn reconcile_joined_text_nodes(
+        &mut self,
+        survivor_id: &StableId,
+        original_survivor_text: &str,
+        survivor_prefix_len: usize,
+        final_removed_id: &StableId,
+        final_removed_text: &str,
+        final_suffix_start: usize,
+        expected_result: &str,
+        expected_runs: Option<&[String]>,
+    ) -> Result<(), PreservationError> {
+        let survivor_location = self.indexed_location(survivor_id)?
+            .cloned().ok_or(PreservationError::ManagedAnchorMissing)?;
+        let removed_location = self.indexed_location(final_removed_id)?
+            .cloned().ok_or(PreservationError::ManagedAnchorMissing)?;
+        let survivor = self.managed_element_at(&survivor_location)
+            .filter(|element| matches!(&element.ownership, SourceOwnership::Managed(id) if id == survivor_id))
+            .ok_or(PreservationError::ManagedAnchorMissing)?
+            .clone();
+        let removed = self.managed_element_at(&removed_location)
+            .filter(|element| matches!(&element.ownership, SourceOwnership::Managed(id) if id == final_removed_id))
+            .ok_or(PreservationError::ManagedAnchorMissing)?
+            .clone();
+        let survivor_runs = paragraph_text_nodes_with_direct_alts(&survivor)?;
+        let removed_runs = paragraph_text_nodes_with_direct_alts(&removed)?;
+        if text_of_nodes(&survivor_runs) != original_survivor_text
+            || text_of_nodes(&removed_runs) != final_removed_text
+            || survivor_prefix_len > original_survivor_text.len()
+            || final_suffix_start > final_removed_text.len()
+            || !original_survivor_text.is_char_boundary(survivor_prefix_len)
+            || !final_removed_text.is_char_boundary(final_suffix_start)
+        {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let suffix_runs = slice_source_text_nodes(&removed_runs, final_suffix_start)?;
+        let suffix_text = text_of_nodes(&suffix_runs);
+        if format!("{}{}", &original_survivor_text[..survivor_prefix_len], suffix_text)
+            != expected_result
+        {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        self.replace_managed_text(
+            survivor_id,
+            original_survivor_text,
+            survivor_prefix_len,
+            original_survivor_text.len(),
+            "",
+            expected_runs,
+        )?;
+        let target = self.managed_element_mut(survivor_id)?;
+        target.children.extend(suffix_runs);
+        Ok(())
+    }
+
+    /// Trims the right part of a split from the original Paragraph's mapped
+    /// Text nodes. Opaque children, including Alts, stay on the original/left
+    /// owner and are never copied to the new Paragraph.
+    fn trim_split_text(
+        &mut self,
+        id: &StableId,
+        original_text: &str,
+        split_offset: usize,
+        expected_runs: Option<&[String]>,
+    ) -> Result<(), PreservationError> {
+        self.replace_managed_text(
+            id,
+            original_text,
+            split_offset,
+            original_text.len(),
+            "",
+            expected_runs,
+        )
     }
 
     pub(crate) fn has_direct_paragraph_formatting(&self, id: &StableId) -> bool {
@@ -1884,6 +2433,7 @@ impl PreservationState {
             return Err(PreservationError::UnsupportedTextMapping);
         }
         let mut boundary = 0usize;
+        let clear_all_text = start == 0 && end == old_text.len() && inserted.is_empty();
         for pair in indexes.windows(2) {
             let previous = pair[0];
             let next = pair[1];
@@ -1895,7 +2445,7 @@ impl PreservationState {
                     PreservedNode::Text(text) | PreservedNode::CData(text) => text.len(),
                     _ => unreachable!(),
                 });
-                if start < boundary && end > boundary {
+                if start < boundary && end > boundary && !clear_all_text {
                     return Err(PreservationError::UnsupportedTextMapping);
                 }
             } else {
@@ -2058,6 +2608,7 @@ impl PreservationState {
         before: &[ScreenplayElement],
         after: &mut [ScreenplayElement],
         generated_scene_heading_deletions: &BTreeSet<StableId>,
+        groups: &[crate::dual_dialogue::DualDialogueGroup],
     ) -> Result<(), PreservationError> {
         self.ensure_managed_paragraph_index();
         self.ensure_source_identity_use_index();
@@ -2092,6 +2643,70 @@ impl PreservationState {
             }
         }
 
+        let mut structurally_reconciled_text = BTreeSet::new();
+        // Preserve retained owner attachments across joins and ranged deletion.
+        // Only the survivor's left prefix and the final removed Paragraph's
+        // right suffix may contribute canonical text; all removed Alts remain
+        // attached to their deleted owners and are discarded with those nodes.
+        for (index, previous) in before.iter().enumerate() {
+            let end = (index + 1..before.len())
+                .find(|next| after_ids.contains(&before[*next].id))
+                .unwrap_or(before.len());
+            if end == index + 1 {
+                continue;
+            }
+            let removed = &before[index + 1..end];
+            let Some(updated) = after.iter().find(|item| item.id == previous.id) else {
+                continue;
+            };
+            let final_removed = &removed[removed.len() - 1];
+            let has_inline_attachment = self.has_inline_alts(&previous.id)
+                || removed.iter().any(|item| self.has_inline_alts(&item.id));
+            if !has_inline_attachment
+            {
+                continue;
+            }
+            if (self.has_inline_alts(&previous.id) && previous.role != Role::Dialogue)
+                || removed.iter().any(|item| {
+                    self.has_inline_alts(&item.id) && item.role != Role::Dialogue
+                })
+            {
+                return Err(PreservationError::StructuralAttachmentConflict);
+            }
+            let mut partitions = Vec::new();
+            for (prefix_len, _) in previous.text.char_indices().chain(
+                std::iter::once((previous.text.len(), '\0')),
+            ) {
+                if !updated.text.starts_with(&previous.text[..prefix_len]) {
+                    continue;
+                }
+                let suffix_len = updated.text.len().saturating_sub(prefix_len);
+                let Some(suffix_start) = final_removed.text.len().checked_sub(suffix_len) else {
+                    continue;
+                };
+                if final_removed.text.is_char_boundary(suffix_start)
+                    && updated.text[prefix_len..] == final_removed.text[suffix_start..]
+                {
+                    partitions.push((prefix_len, suffix_start));
+                }
+            }
+            let [(prefix_len, suffix_start)] = partitions.as_slice() else {
+                return Err(PreservationError::UnsupportedTextMapping);
+            };
+            let expected_runs = previous.runs.iter().map(|run| run.text.clone()).collect::<Vec<_>>();
+            self.reconcile_joined_text_nodes(
+                &previous.id,
+                &previous.text,
+                *prefix_len,
+                &final_removed.id,
+                &final_removed.text,
+                *suffix_start,
+                &updated.text,
+                (!previous.runs.is_empty()).then_some(expected_runs.as_slice()),
+            )?;
+            structurally_reconciled_text.insert(previous.id.clone());
+        }
+
         for element in before {
             if !after_ids.contains(&element.id) && self.has_managed_element(&element.id) {
                 self.remove_managed_paragraph(
@@ -2103,19 +2718,6 @@ impl PreservationState {
             }
         }
 
-        // A retained identity may have acquired the left or joined text of a
-        // structural operation. Rebuild only simple, explicitly mapped Text
-        // runs; ordinary in-paragraph edits continue to use the finer-grained
-        // source-child transform above.
-        for element in after.iter() {
-            let Some(previous) = before.iter().find(|item| item.id == element.id) else {
-                continue;
-            };
-            if previous.text != element.text && self.has_managed_element(&element.id) {
-                self.replace_managed_projection(element)?;
-            }
-        }
-
         let ordered_ids = after
             .iter()
             .map(|element| element.id.clone())
@@ -2124,9 +2726,50 @@ impl PreservationState {
             if before_ids.contains(&element.id) || self.has_managed_element(&element.id) {
                 continue;
             }
-            let provenance = self.insert_managed_paragraph(element, index, &ordered_ids)?;
+            let provenance = self.insert_managed_paragraph(element, index, &ordered_ids, groups)?;
             element.source_provenance = Some(provenance);
             self.rebuild_managed_paragraph_index();
+        }
+
+        // A newly inserted right Paragraph after an existing owner is a split
+        // only when its two canonical texts exactly partition the old text.
+        // Trim the original owner's mapped Text nodes; its opaque Alts remains
+        // attached there and the fresh Paragraph has no copied attachment.
+        for index in 1..after.len() {
+            let right = &after[index];
+            let left = &after[index - 1];
+            let Some(original) = before.iter().find(|item| item.id == left.id) else {
+                continue;
+            };
+            if before_ids.contains(&right.id)
+                || original.text != format!("{}{}", left.text, right.text)
+                || !self.has_inline_alts(&original.id)
+            {
+                continue;
+            }
+            let expected = original.runs.iter().map(|run| run.text.clone()).collect::<Vec<_>>();
+            self.trim_split_text(
+                &original.id,
+                &original.text,
+                left.text.len(),
+                (!original.runs.is_empty()).then_some(expected.as_slice()),
+            )?;
+            structurally_reconciled_text.insert(original.id.clone());
+        }
+
+        // Other structural text projections continue through the existing
+        // strict path. In particular, arbitrary attachments and unsupported
+        // run mappings are not rewritten to make a candidate pass.
+        for element in after.iter() {
+            let Some(previous) = before.iter().find(|item| item.id == element.id) else {
+                continue;
+            };
+            if previous.text != element.text
+                && self.has_managed_element(&element.id)
+                && !structurally_reconciled_text.contains(&element.id)
+            {
+                self.replace_managed_projection(element)?;
+            }
         }
         self.rebuild_managed_paragraph_index();
         Ok(())
@@ -2411,7 +3054,13 @@ impl PreservationState {
         semantic: &ScreenplayElement,
         index: usize,
         ordered: &[StableId],
+        groups: &[crate::dual_dialogue::DualDialogueGroup],
     ) -> Result<SourceProvenance, PreservationError> {
+        if let Some(group) = groups.iter().find(|group| {
+            group.member_ids().any(|member| member == &semantic.id)
+        }) {
+            return self.insert_nested_managed_paragraph(semantic, index, group);
+        }
         let ManagedParagraphTemplate {
             paragraph_name,
             paragraph_bindings,
@@ -2470,6 +3119,17 @@ impl PreservationState {
         }
 
         self.invalidate_source_identity_use_index();
+        let mut wrapped_member_slots = BTreeMap::new();
+        for group in groups {
+            for member in group.member_ids() {
+                let Some(location) = self.indexed_location(member)?.cloned() else {
+                    continue;
+                };
+                if is_exact_dual_dialogue_member_location(&self.sections, &location, &group.id) {
+                    wrapped_member_slots.insert(member.clone(), location.node_path[2]);
+                }
+            }
+        }
         let children = content_children_mut(&mut self.sections)
             .ok_or(PreservationError::ManagedAnchorMissing)?;
         let mut insert_at = None;
@@ -2478,11 +3138,19 @@ impl PreservationState {
                 insert_at = Some(position);
                 break;
             }
+            if let Some(position) = wrapped_member_slots.get(following) {
+                insert_at = Some(*position);
+                break;
+            }
         }
         if insert_at.is_none() {
             for preceding in ordered[..index].iter().rev() {
                 if let Some(position) = managed_child_index(children, preceding) {
                     insert_at = Some(position + 1);
+                    break;
+                }
+                if let Some(position) = wrapped_member_slots.get(preceding) {
+                    insert_at = Some(*position + 1);
                     break;
                 }
             }
@@ -2498,6 +3166,126 @@ impl PreservationState {
             ForeignIdDomain::Paragraph,
             foreign_id.clone(),
         )?);
+        Ok(SourceProvenance {
+            format: SourceFormat::Fdx,
+            section: SourceSection::Content,
+            ordinal: u32::try_from(index).map_err(|_| PreservationError::TooManyEvents)?,
+            foreign_id: Some(foreign_id),
+            foreign_role: Some(fdx_role_name(semantic.role).to_owned()),
+        })
+    }
+
+    fn insert_nested_managed_paragraph(
+        &mut self,
+        semantic: &ScreenplayElement,
+        index: usize,
+        group: &crate::dual_dialogue::DualDialogueGroup,
+    ) -> Result<SourceProvenance, PreservationError> {
+        self.ensure_managed_paragraph_index();
+        let member_ids = group.member_ids().cloned().collect::<Vec<_>>();
+        let template_location = member_ids.iter()
+            .filter(|id| *id != &semantic.id)
+            .find_map(|id| self.indexed_location(id).ok().flatten().cloned())
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        if !is_exact_dual_dialogue_member_location(&self.sections, &template_location, &group.id) {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        for member_id in member_ids.iter().filter(|id| *id != &semantic.id) {
+            let location = self.indexed_location(member_id)?
+                .cloned()
+                .ok_or(PreservationError::ManagedAnchorMissing)?;
+            if !is_exact_dual_dialogue_member_location(&self.sections, &location, &group.id)
+                || location.section_index != template_location.section_index
+                || location.node_path[..4] != template_location.node_path[..4]
+            {
+                return Err(PreservationError::UnsupportedTextMapping);
+            }
+        }
+        let template = self.managed_element_at(&template_location)
+            .ok_or(PreservationError::ManagedAnchorMissing)?
+            .clone();
+        let ManagedParagraphTemplate {
+            paragraph_name,
+            paragraph_bindings,
+            text_name,
+            text_bindings,
+            id_spelling,
+        } = paragraph_template(&template)?;
+        let foreign_id = self.fresh_foreign_paragraph_id()?;
+        let anchor_id = self.fresh_anchor_id()?;
+        let mut paragraph = PreservedElement {
+            name: paragraph_name,
+            attributes: vec![
+                PreservedAttribute {
+                    name: plain_source_name("Type"),
+                    value: fdx_role_name(semantic.role).to_owned(),
+                },
+                PreservedAttribute {
+                    name: plain_source_name(&id_spelling),
+                    value: foreign_id.clone(),
+                },
+            ],
+            namespace_bindings: paragraph_bindings,
+            source_type: Some(fdx_role_name(semantic.role).to_owned()),
+            ownership: SourceOwnership::Managed(semantic.id.clone()),
+            dependency_confidence: DependencyConfidence::Unknown,
+            anchor: Some(anchor_id.clone()),
+            children: SharedVec::default(),
+        };
+        for run in semantic_text_runs(semantic) {
+            paragraph.children.push(PreservedNode::Element(PreservedElement {
+                name: text_name.clone(),
+                attributes: run.attributes.iter().map(|attribute| PreservedAttribute {
+                    name: source_name_from_qname(&attribute.name),
+                    value: attribute.value.clone(),
+                }).collect(),
+                namespace_bindings: text_bindings.clone(),
+                source_type: None,
+                ownership: SourceOwnership::Opaque,
+                dependency_confidence: DependencyConfidence::Unknown,
+                anchor: None,
+                children: vec![PreservedNode::Text(run.text.into())].into(),
+            }));
+        }
+
+        let member_position = member_ids.iter().position(|id| id == &semantic.id)
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let parent_path = &template_location.node_path[..4];
+        let nodes = {
+            let section = self.sections.get_mut(template_location.section_index)
+                .ok_or(PreservationError::ManagedAnchorMissing)?;
+            let parent = element_at_path_mut(&mut section.children, parent_path)
+                .ok_or(PreservationError::ManagedAnchorMissing)?;
+            &mut parent.children
+        };
+        let mut insert_at = None;
+        for following in member_ids.iter().skip(member_position + 1) {
+            if let Some(position) = managed_child_index(nodes, following) {
+                insert_at = Some(position);
+                break;
+            }
+        }
+        if insert_at.is_none() {
+            for preceding in member_ids[..member_position].iter().rev() {
+                if let Some(position) = managed_child_index(nodes, preceding) {
+                    insert_at = Some(position + 1);
+                    break;
+                }
+            }
+        }
+        let position = insert_at.ok_or(PreservationError::ManagedAnchorMissing)?;
+        nodes.insert(position, PreservedNode::Element(paragraph));
+        self.anchors.push(SourceAnchor {
+            id: anchor_id,
+            target: AnchorTarget::ProjectElement(semantic.id.clone()),
+            relation: AnchorRelation::Represents,
+        });
+        self.identities.push(ForeignIdentity::new(
+            ForeignIdDomain::Paragraph,
+            foreign_id.clone(),
+        )?);
+        self.invalidate_source_identity_use_index();
+        self.rebuild_managed_paragraph_index();
         Ok(SourceProvenance {
             format: SourceFormat::Fdx,
             section: SourceSection::Content,
@@ -2523,6 +3311,15 @@ impl PreservationState {
                 .managed_element_at(&location)
                 .ok_or(PreservationError::ManagedAnchorMissing)?;
             if is_plain_managed_paragraph(target) {
+                (
+                    paragraph_foreign_id(target).map(str::to_owned),
+                    Vec::new(),
+                    false,
+                )
+            } else if role == Role::Dialogue && is_managed_paragraph_with_direct_alts(target) {
+                // The complete owner node (including Alts) is removed as one
+                // unit. AltCollection is outside this managed subtree and is
+                // intentionally never pruned, even when this creates orphans.
                 (
                     paragraph_foreign_id(target).map(str::to_owned),
                     Vec::new(),
@@ -2557,6 +3354,13 @@ impl PreservationState {
             if !removed_foreign_ids.insert(nested_id) {
                 return Err(PreservationError::StructuralAttachmentConflict);
             }
+        }
+        self.ensure_source_identity_use_index();
+        if removed_foreign_ids.iter().any(|value| {
+            !self.paragraph_identity_safely_removable(value)
+                || !self.paragraph_identity_has_unique_source_definition(value)
+        }) {
+            return Err(PreservationError::PotentialReferenceConflict);
         }
         if is_generated_scene_heading && !removed_foreign_ids.is_empty() {
             self.ensure_source_identity_use_index();
@@ -2989,6 +3793,37 @@ fn element_at_path<'a>(nodes: &'a [PreservedNode], path: &[usize]) -> Option<&'a
     } else {
         element_at_path(&element.children, rest)
     }
+}
+
+fn is_exact_dual_dialogue_member_location(
+    sections: &[PreservedSection],
+    location: &ManagedParagraphLocation,
+    group_id: &StableId,
+) -> bool {
+    let [root_index, content_index, wrapper_index, dual_index, paragraph_index] =
+        location.node_path.as_slice() else { return false };
+    let Some(section) = sections.get(location.section_index) else { return false };
+    let Some(PreservedNode::Element(root)) = section.children.get(*root_index) else { return false };
+    let Some(PreservedNode::Element(content)) = root.children.get(*content_index) else { return false };
+    let Some(PreservedNode::Element(wrapper)) = content.children.get(*wrapper_index) else { return false };
+    let Some(PreservedNode::Element(dual)) = wrapper.children.get(*dual_index) else { return false };
+    let Some(PreservedNode::Element(paragraph)) = dual.children.get(*paragraph_index) else { return false };
+    let dual_count = wrapper.children.iter().filter(|node| matches!(node,
+        PreservedNode::Element(element) if element.name.local_name == "DualDialogue"
+            && element.name.namespace_uri == wrapper.name.namespace_uri
+    )).count();
+    root.name.local_name == "FinalDraft"
+        && content.name.local_name == "Content"
+        && root.name.namespace_uri == content.name.namespace_uri
+        && wrapper.name.local_name == "Paragraph"
+        && wrapper.name.namespace_uri == content.name.namespace_uri
+        && matches!(&wrapper.ownership, SourceOwnership::DualDialogueWrapper(owner) if owner == group_id)
+        && dual.name.local_name == "DualDialogue"
+        && dual.name.namespace_uri == wrapper.name.namespace_uri
+        && dual_count == 1
+        && paragraph.name.local_name == "Paragraph"
+        && paragraph.name.namespace_uri == dual.name.namespace_uri
+        && matches!(&paragraph.ownership, SourceOwnership::Managed(_))
 }
 
 fn indexed_element_context(mut nodes: &[PreservedNode], path: &[usize]) -> Option<(usize, bool)> {
@@ -3710,6 +4545,139 @@ fn is_plain_managed_paragraph(paragraph: &PreservedElement) -> bool {
         })
 }
 
+fn paragraph_text_nodes_with_direct_alts(
+    paragraph: &PreservedElement,
+) -> Result<Vec<PreservedNode>, PreservationError> {
+    let mut alts_count = 0usize;
+    let mut text_nodes = Vec::new();
+    for node in &paragraph.children {
+        match node {
+            PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => {}
+            PreservedNode::Element(element)
+                if element.name.local_name == "Text"
+                    && element.name.namespace_uri == paragraph.name.namespace_uri
+                    && element.children.iter().all(|child| matches!(
+                        child,
+                        PreservedNode::Text(_) | PreservedNode::CData(_)
+                    )) => text_nodes.push(node.clone()),
+            PreservedNode::Element(element)
+                if element.name.local_name == "Alts"
+                    && element.name.namespace_uri == paragraph.name.namespace_uri =>
+            {
+                alts_count = alts_count.saturating_add(1);
+                if alts_count > 1 {
+                    return Err(PreservationError::StructuralAttachmentConflict);
+                }
+            }
+            _ => return Err(PreservationError::StructuralAttachmentConflict),
+        }
+    }
+    Ok(text_nodes)
+}
+
+fn text_of_nodes(nodes: &[PreservedNode]) -> String {
+    nodes.iter().filter_map(|node| match node {
+        PreservedNode::Element(element) if element.name.local_name == "Text" => Some(
+            element.children.iter().filter_map(|child| match child {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.as_str()),
+                _ => None,
+            }).collect::<String>(),
+        ),
+        _ => None,
+    }).fold(String::new(), |mut value, text| {
+        value.push_str(&text);
+        value
+    })
+}
+
+fn slice_source_text_nodes(
+    nodes: &[PreservedNode],
+    start: usize,
+) -> Result<Vec<PreservedNode>, PreservationError> {
+    let total = text_of_nodes(nodes);
+    if start > total.len() || !total.is_char_boundary(start) {
+        return Err(PreservationError::UnsupportedTextMapping);
+    }
+    let mut offset = 0usize;
+    let mut result = Vec::new();
+    for node in nodes {
+        let PreservedNode::Element(original) = node else { continue };
+        let segment = original.children.iter().filter_map(|child| match child {
+            PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.as_str()),
+            _ => None,
+        }).collect::<String>();
+        let segment_end = offset.saturating_add(segment.len());
+        if segment_end > start {
+            let local_start = start.saturating_sub(offset);
+            if !segment.is_char_boundary(local_start) {
+                return Err(PreservationError::UnsupportedTextMapping);
+            }
+            let mut clone = original.clone();
+            let mut child_offset = 0usize;
+            let mut children = Vec::new();
+            for child in &original.children {
+                match child {
+                    PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                        let child_end = child_offset.saturating_add(text.len());
+                        let keep_from = local_start.max(child_offset);
+                        if child_end > keep_from {
+                            let local_from = keep_from - child_offset;
+                            if !text.is_char_boundary(local_from) {
+                                return Err(PreservationError::UnsupportedTextMapping);
+                            }
+                            let sliced = &text[local_from..];
+                            children.push(match child {
+                                PreservedNode::Text(_) => PreservedNode::Text(sliced.to_owned().into()),
+                                PreservedNode::CData(_) => PreservedNode::CData(sliced.to_owned().into()),
+                                _ => return Err(PreservationError::UnsupportedTextMapping),
+                            });
+                        }
+                        child_offset = child_end;
+                    }
+                    _ => return Err(PreservationError::UnsupportedTextMapping),
+                }
+            }
+            let retained_text = children.iter().filter_map(|child| match child {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.as_str()),
+                _ => None,
+            }).collect::<String>();
+            clone.children = children.into();
+            if !retained_text.is_empty() {
+                result.push(PreservedNode::Element(clone));
+            }
+        }
+        offset = segment_end;
+    }
+    Ok(result)
+}
+
+fn is_managed_paragraph_with_direct_alts(paragraph: &PreservedElement) -> bool {
+    if paragraph.name.local_name != "Paragraph" {
+        return false;
+    }
+    let mut alts_count = 0usize;
+    for node in &paragraph.children {
+        match node {
+            PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => {}
+            PreservedNode::Element(element)
+                if element.name.local_name == "Text"
+                    && element.name.namespace_uri == paragraph.name.namespace_uri
+                    && element.children.iter().all(|child| matches!(
+                        child,
+                        PreservedNode::Text(_) | PreservedNode::CData(_)
+                    )) => {}
+            PreservedNode::Element(element)
+                if element.name.local_name == "Alts"
+                    && element.name.namespace_uri == paragraph.name.namespace_uri =>
+            {
+                alts_count = alts_count.saturating_add(1);
+            }
+            _ => return false,
+        }
+    }
+    alts_count == 1
+}
+
 fn paragraph_foreign_id(paragraph: &PreservedElement) -> Option<&str> {
     let mut ids = paragraph.attributes.iter().filter(|attribute| {
         attribute.name.namespace_uri.is_none()
@@ -3738,6 +4706,41 @@ fn text_element_matches_run(element: &PreservedElement, run: &TextRun) -> bool {
                     == model.name
                     && source.value == model.value
             })
+}
+
+fn slice_text_runs(
+    runs: &[TextRun],
+    range: std::ops::Range<usize>,
+) -> Result<Vec<TextRun>, PreservationError> {
+    let total = runs.iter().map(|run| run.text.len()).sum::<usize>();
+    if range.start > range.end || range.end > total {
+        return Err(PreservationError::UnsupportedTextMapping);
+    }
+    let mut result = Vec::new();
+    let mut offset = 0usize;
+    for run in runs {
+        let end = offset.saturating_add(run.text.len());
+        let start = range.start.max(offset);
+        let finish = range.end.min(end);
+        if start < finish {
+            let from = start - offset;
+            let to = finish - offset;
+            if !run.text.is_char_boundary(from) || !run.text.is_char_boundary(to) {
+                return Err(PreservationError::UnsupportedTextMapping);
+            }
+            result.push(TextRun {
+                text: run.text[from..to].to_owned(),
+                attributes: run.attributes.clone(),
+            });
+        }
+        offset = end;
+    }
+    if range.is_empty() && total == 0 {
+        if let Some(run) = runs.first() {
+            result.push(run.clone());
+        }
+    }
+    Ok(result)
 }
 
 fn text_element_for_run(template: &PreservedElement, run: &TextRun) -> PreservedElement {
@@ -3797,7 +4800,13 @@ fn has_potential_reference(
     value: &str,
     excluded_element: &StableId,
 ) -> bool {
-    fn scan(nodes: &[PreservedNode], value: &str, excluded: &StableId) -> bool {
+    fn scan(
+        nodes: &[PreservedNode],
+        value: &str,
+        excluded: &StableId,
+        parent: Option<&PreservedElement>,
+        grandparent: Option<&PreservedElement>,
+    ) -> bool {
         nodes.iter().any(|node| {
             let PreservedNode::Element(element) = node else {
                 return false;
@@ -3810,17 +4819,26 @@ fn has_potential_reference(
             }
             let is_excluded =
                 matches!(&element.ownership, SourceOwnership::Managed(id) if id == excluded);
+            let exact_alternate_copy = element.name.local_name == "Paragraph"
+                && parent.is_some_and(|parent| {
+                    parent.name.local_name == "Alt"
+                        && parent.name.namespace_uri == element.name.namespace_uri
+                })
+                && grandparent.is_some_and(|grandparent| {
+                    grandparent.name.local_name == "AltCollection"
+                        && grandparent.name.namespace_uri == element.name.namespace_uri
+                });
             element.attributes.iter().any(|attribute| {
-                !(is_excluded
+                !((is_excluded || exact_alternate_copy)
                     && attribute.name.namespace_uri.is_none()
                     && attribute.name.local_name.eq_ignore_ascii_case("id"))
                     && attribute.value == value
-            }) || scan(&element.children, value, excluded)
+            }) || scan(&element.children, value, excluded, Some(element), parent)
         })
     }
     sections
         .iter()
-        .any(|section| scan(&section.children, value, excluded_element))
+        .any(|section| scan(&section.children, value, excluded_element, None, None))
 }
 
 fn contains_attached_data(nodes: &[PreservedNode]) -> bool {
@@ -4115,7 +5133,7 @@ fn is_board_domain(domain: &ForeignIdDomain) -> bool {
 
 fn validate_ownership(ownership: &SourceOwnership) -> Result<(), PreservationError> {
     match ownership {
-        SourceOwnership::Opaque | SourceOwnership::Managed(_) => Ok(()),
+        SourceOwnership::Opaque | SourceOwnership::Managed(_) | SourceOwnership::DualDialogueWrapper(_) => Ok(()),
         SourceOwnership::Attached(identity) => validate_identity(identity),
     }
 }

@@ -44,7 +44,7 @@ pub(super) struct MenuItemSpec {
     pub(super) accessibility_name: &'static str,
     pub(super) icon: Option<SemanticIcon>,
     pub(super) shortcut: Option<LogicalShortcut>,
-    /// Windows-only Redo alias. It is never shown as shortcut text.
+    /// Platform-specific alternate chord where the primary shortcut differs.
     pub(super) windows_alias: Option<LogicalShortcut>,
     pub(super) behavior: MenuItemBehavior,
 }
@@ -190,7 +190,15 @@ const FORMAT_ENTRIES: &[MenuEntrySpec] = &[
     placeholder("format.space-before", "Space Before", "Space Before submenu placeholder", DISCLOSURE, None),
     placeholder("format.leading", "Leading", "Leading submenu placeholder", DISCLOSURE, None), SEP,
     placeholder("format.beat-board", "Beat Board", "Beat Board submenu placeholder", DISCLOSURE, None), SEP,
-    placeholder("format.dual-dialogue", "Dual Dialogue", "Dual Dialogue (disabled placeholder)", ITEM, Some(primary_shortcut(ShortcutKey::D, false))),
+    command_item(
+        "format.dual-dialogue",
+        "Dual Dialogue",
+        "Toggle Dual Dialogue",
+        None,
+        Some(primary_shortcut(ShortcutKey::D, false)),
+        Some(display_shortcut(ShortcutKey::D, true, false, true, false)),
+        CommandId::EditorDualDialogueToggle,
+    ),
     placeholder("format.edit-dual-dialogue", "Edit Dual Dialogue", "Edit Dual Dialogue (disabled placeholder)", ITEM, Some(primary_shortcut(ShortcutKey::D, true))),
 ];
 

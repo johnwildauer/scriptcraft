@@ -24,6 +24,7 @@ pub enum UnavailableReason {
     UndoHistory,
     RedoHistory,
     Selection,
+    DualDialogueTarget,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +63,11 @@ pub fn execute_editor_command_on_surface(
     {
         return CommandOutcome::Unavailable(UnavailableReason::Selection);
     }
+    if matches!(command, Command::EditorDualDialogueToggle) {
+        if active_surface != EditorSurface::Body {
+            return CommandOutcome::Unavailable(UnavailableReason::DualDialogueTarget);
+        }
+    }
 
     let before = session.clone();
     let result = match command {
@@ -71,6 +77,7 @@ pub fn execute_editor_command_on_surface(
         Command::EditDelete => delete_forward(session, active_surface),
         Command::EditorParagraphEnter => enter(session, active_surface),
         Command::EditorParagraphTab => tab(session, active_surface),
+        Command::EditorDualDialogueToggle => session.toggle_dual_dialogue(),
         Command::EditorElementChange { role, surface } => match surface {
             EditorSurface::Body => session.change_role(role.as_core()),
             EditorSurface::TitlePage => {
@@ -119,8 +126,15 @@ pub fn execute_editor_command_on_surface(
         other => return rejected(other),
     };
 
+    outcome_from_edit_result(result, *session != before)
+}
+
+fn outcome_from_edit_result(
+    result: Result<(), EditError>,
+    session_changed: bool,
+) -> CommandOutcome {
     match result {
-        Ok(()) if *session == before => CommandOutcome::NoOp,
+        Ok(()) if !session_changed => CommandOutcome::NoOp,
         Ok(()) => CommandOutcome::Changed,
         Err(error) => CommandOutcome::Failed(error),
     }
@@ -204,5 +218,20 @@ fn select_all(session: &mut EditingSession, surface: EditorSurface) -> Result<()
                 },
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod dual_dialogue_error_mapping_tests {
+    use super::{outcome_from_edit_result, CommandOutcome};
+    use scriptcraft_core::editing::EditError;
+
+    #[test]
+    fn core_edit_errors_are_returned_without_executor_reclassification() {
+        let core_error = EditError::InvalidElement;
+        assert_eq!(
+            outcome_from_edit_result(Err(core_error.clone()), false),
+            CommandOutcome::Failed(core_error),
+        );
     }
 }

@@ -31,6 +31,24 @@ const FIXED_CELL_GALLEY_CACHE_ID: &str = "scriptcraft-fixed-cell-galley-cache-v1
 const FIXED_CELL_GALLEY_CACHE_LIMIT: usize = 16_384;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
+fn dual_group_navigation_edge(
+    project: &scriptcraft_core::Project,
+    group: &scriptcraft_core::dual_dialogue::DualDialogueGroup,
+    forward: bool,
+) -> Option<Position> {
+    let element = if forward {
+        scriptcraft_core::dual_dialogue::first_member(project, group)?
+    } else {
+        scriptcraft_core::dual_dialogue::last_member(project, group)?
+    };
+    let offset = if forward {
+        0
+    } else {
+        project.elements.get(element)?.text.len()
+    };
+    Some(Position { element, offset })
+}
+
 fn viewport_paint_page_range(
     page_rects: &[egui::Rect],
     editor_clip: egui::Rect,
@@ -224,6 +242,37 @@ impl ScriptCraftApp {
             Stroke::new(PAGE_BORDER_WIDTH, palette.border),
             egui::StrokeKind::Middle,
         );
+
+        if surface == EditorSurface::Body
+            && layout.purpose == scriptcraft_core::layout::LayoutPurpose::Editor
+        {
+            if let Some(active_group_id) = layout.active_group_id.as_ref() {
+                for boundary in layout
+                    .editor_group_boundaries
+                    .iter()
+                    .filter(|boundary| &boundary.group_id == active_group_id)
+                {
+                    for (boundary_page, geometry) in [
+                        (boundary.upper_page, boundary.upper),
+                        (boundary.lower_page, boundary.lower),
+                    ] {
+                        if boundary_page != page_index {
+                            continue;
+                        }
+                        let (start_x, end_x, y) =
+                            boundary_screen_geometry(page_rect, geometry, scale);
+                        paint_dotted_boundary(
+                            &painter,
+                            start_x,
+                            end_x,
+                            y,
+                            ui.ctx().pixels_per_point(),
+                            palette.dual_dialogue_boundary,
+                        );
+                    }
+                }
+            }
+        }
 
         for line in &layout.pages[page_index].lines {
             let y = page_rect.top() + line.geometry.y.to_points_f32() * scale;
@@ -675,6 +724,20 @@ impl ScriptCraftApp {
             .interact(scroll_output.inner_rect, editor_id, Sense::click_and_drag())
             .on_hover_cursor(document_cursor_icon());
         self.editor_surface_rect = Some(response.rect);
+        let surface_focused = response.has_focus();
+        if surface_focused != self.surface_focused {
+            self.caret_blink_focus_generation = self.caret_blink_focus_generation.wrapping_add(1);
+            if surface_focused {
+                self.caret_blink_reset_time = ui.ctx().input(|input| input.time.max(0.0));
+            }
+            self.request_repaint(ui.ctx());
+        }
+        self.surface_focused = surface_focused;
+        if surface_focused {
+            self.set_active_editor_surface(surface);
+        } else {
+            self.reconcile_body_active_group();
+        }
         if let Some(pointer) = response.interact_pointer_pos() {
             let pointer_active = response.clicked()
                 || response.drag_started()
@@ -719,20 +782,6 @@ impl ScriptCraftApp {
                     }
                 }
             }
-        }
-        let surface_focused = response.has_focus();
-        if surface_focused != self.surface_focused {
-            self.caret_blink_focus_generation = self.caret_blink_focus_generation.wrapping_add(1);
-            if surface_focused {
-                self.caret_blink_reset_time = ui.ctx().input(|input| input.time.max(0.0));
-            }
-            // The next frame must use the new focus-generation identity. This is
-            // a transition-only repaint, not an unfocused blink loop.
-            self.request_repaint(ui.ctx());
-        }
-        self.surface_focused = surface_focused;
-        if self.surface_focused {
-            self.set_active_editor_surface(surface);
         }
         self.native_input_diagnostics.focused = self.surface_focused;
         if self.surface_focused {
@@ -843,7 +892,10 @@ impl ScriptCraftApp {
                     modifiers,
                     ..
                 } => {
-                    if !self.ime_active && !ime_event_in_frame {
+                    if super::shortcuts::shortcut_input_allowed(
+                        self.ime_active,
+                        ime_event_in_frame,
+                    ) {
                         if surface == EditorSurface::TitlePage
                             && self.menu_policy.in_window_shortcuts_owned()
                         {
@@ -852,6 +904,19 @@ impl ScriptCraftApp {
                                 .map(|command| {
                                     CommandInvocation::new(command, CommandOrigin::Shortcut)
                                 });
+                        }
+                        if command.is_none() {
+                            command = super::shortcuts::dual_dialogue_toggle_for_focused_key_event(
+                                *key,
+                                *physical_key,
+                                *modifiers,
+                                ShortcutPlatform::current(),
+                                self.menu_policy.in_window_shortcuts_owned(),
+                            )
+                            .filter(|_| surface == EditorSurface::Body)
+                            .map(|command| {
+                                CommandInvocation::new(command, CommandOrigin::Shortcut)
+                            });
                         }
                         if command.is_none() {
                             command = editor_command_for_key_event(
@@ -963,7 +1028,11 @@ impl ScriptCraftApp {
             self.pending_zoom_anchor = None;
             self.reveal_intent = RevealIntent::None;
         }
-        if !self.surface_focused || self.active_editor_surface() != surface {
+        if !surface_input_is_dispatchable(
+            self.surface_focused,
+            self.active_editor_surface(),
+            surface,
+        ) {
             return;
         }
         self.native_input_diagnostics.dispatched_frames = self
@@ -994,7 +1063,12 @@ impl ScriptCraftApp {
             return Selection::caret(position);
         }
         let position = selection.focus;
-        let item = &self.session.project().elements[position.element];
+        let project = self.session.project();
+        let origin_group = scriptcraft_core::dual_dialogue::group_at_element_index(
+            project,
+            position.element,
+        );
+        let item = &project.elements[position.element];
         let next = if direction == HorizontalDirection::Right {
             if position.offset < item.text.len() {
                 Position {
@@ -1004,7 +1078,7 @@ impl ScriptCraftApp {
                         .map_or(position.offset, |c| position.offset + c.len_utf8()),
                     ..position
                 }
-            } else if position.element + 1 < self.session.project().elements.len() {
+            } else if position.element + 1 < project.elements.len() {
                 Position {
                     element: position.element + 1,
                     offset: 0,
@@ -1021,13 +1095,29 @@ impl ScriptCraftApp {
                 ..position
             }
         } else if position.element > 0 {
-            let previous = &self.session.project().elements[position.element - 1];
+            let previous = &project.elements[position.element - 1];
             Position {
                 element: position.element - 1,
                 offset: previous.text.len(),
             }
         } else {
             position
+        };
+        let target_group = scriptcraft_core::dual_dialogue::group_at_element_index(
+            project,
+            next.element,
+        );
+        let next = if let Some(group) = target_group.filter(|group| {
+            origin_group.map_or(true, |origin| origin.id != group.id)
+        }) {
+            dual_group_navigation_edge(
+                project,
+                group,
+                direction == HorizontalDirection::Right,
+            )
+            .unwrap_or(next)
+        } else {
+            next
         };
         if extend {
             Selection {
@@ -1046,9 +1136,13 @@ impl ScriptCraftApp {
     ) -> Result<Selection, EditError> {
         let selection = self.session.selection();
         let current = selection.focus;
-        let layout = self
-            .layout_for_render(self.active_editor_surface())
-            .map_err(|_| EditError::InvalidElement)?;
+        let layout = match self.layout_for_render(self.active_editor_surface()) {
+            Ok(layout) => layout,
+            Err(_) => {
+                self.preferred_vertical_x = None;
+                return Err(EditError::InvalidElement);
+            }
+        };
         let interaction_started = Instant::now();
         self.performance.caret_lookups = self.performance.caret_lookups.saturating_add(1);
         let mut query_diagnostics = InteractionQueryDiagnostics::default();
@@ -1104,23 +1198,52 @@ impl ScriptCraftApp {
                 Selection::caret(next)
             });
         };
-        let goal = self.preferred_vertical_x.unwrap_or_else(|| {
-            let columns = current_line.display_char_for_source(current.offset, false) as i64;
-            current_line.geometry.x.raw() + columns.saturating_mul(current_line.char_width.raw())
-        });
-        self.preferred_vertical_x = Some(goal);
         let Some(target_line) = layout.body_line(target_index) else {
             self.preferred_vertical_x = None;
             return Ok(selection);
         };
-        let cell = target_line.char_width.raw().max(1);
-        let columns = (goal
-            .saturating_sub(target_line.geometry.x.raw())
-            .saturating_add(cell / 2)
-            / cell) as u32;
-        let next = Position {
-            element: target_line.element,
-            offset: target_line.source_for_display_char(columns as usize),
+        let project = self.session.project();
+        let origin_group = scriptcraft_core::dual_dialogue::group_at_element_index(
+            project,
+            current.element,
+        );
+        let target_group = scriptcraft_core::dual_dialogue::group_at_element_index(
+            project,
+            target_line.element,
+        );
+        let mode_transition = match (origin_group, target_group) {
+            (Some(origin), Some(target)) => origin.id != target.id,
+            (None, Some(_)) | (Some(_), None) => true,
+            (None, None) => false,
+        };
+        let existing_goal = self.preferred_vertical_x;
+        let next = if let Some(group) = target_group.filter(|_| mode_transition) {
+            self.preferred_vertical_x = None;
+            dual_group_navigation_edge(
+                project,
+                group,
+                direction == VerticalDirection::Down,
+            )
+            .unwrap_or(Position {
+                element: target_line.element,
+                offset: target_line.source.start,
+            })
+        } else {
+            let goal = existing_goal.unwrap_or_else(|| {
+                let columns = current_line.display_char_for_source(current.offset, false) as i64;
+                current_line.geometry.x.raw()
+                    + columns.saturating_mul(current_line.char_width.raw())
+            });
+            self.preferred_vertical_x = (!mode_transition).then_some(goal);
+            let cell = target_line.char_width.raw().max(1);
+            let columns = (goal
+                .saturating_sub(target_line.geometry.x.raw())
+                .saturating_add(cell / 2)
+                / cell) as u32;
+            Position {
+                element: target_line.element,
+                offset: target_line.source_for_display_char(columns as usize),
+            }
         };
         Ok(if extend {
             Selection {
@@ -1160,6 +1283,38 @@ impl ScriptCraftApp {
         } else {
             Selection::caret(position)
         }
+    }
+}
+
+fn surface_input_is_dispatchable(
+    surface_focused: bool,
+    active_surface: EditorSurface,
+    requested_surface: EditorSurface,
+) -> bool {
+    surface_focused && active_surface == requested_surface
+}
+
+#[cfg(test)]
+mod focused_input_gate_tests {
+    use super::{surface_input_is_dispatchable, EditorSurface};
+
+    #[test]
+    fn lost_focus_and_inactive_surface_do_not_dispatch_editor_input() {
+        assert!(!surface_input_is_dispatchable(
+            false,
+            EditorSurface::Body,
+            EditorSurface::Body,
+        ));
+        assert!(!surface_input_is_dispatchable(
+            true,
+            EditorSurface::TitlePage,
+            EditorSurface::Body,
+        ));
+        assert!(surface_input_is_dispatchable(
+            true,
+            EditorSurface::Body,
+            EditorSurface::Body,
+        ));
     }
 }
 
@@ -1242,6 +1397,57 @@ struct PageScrollGeometry {
     content_width: f32,
     leading_padding: f32,
     horizontal_overflow: bool,
+}
+
+fn paint_dotted_boundary(
+    painter: &egui::Painter,
+    start_x: f32,
+    end_x: f32,
+    y: f32,
+    pixels_per_point: f32,
+    color: Color32,
+) {
+    let physical_pixel = boundary_stroke_width(pixels_per_point);
+    for [start, end] in dotted_boundary_segments(start_x, end_x, y, pixels_per_point) {
+        painter.line_segment(
+            [start, end],
+            Stroke::new(physical_pixel, color),
+        );
+    }
+}
+
+fn boundary_stroke_width(pixels_per_point: f32) -> f32 {
+    1.0 / pixels_per_point.max(f32::MIN_POSITIVE)
+}
+
+fn boundary_screen_geometry(
+    page_rect: egui::Rect,
+    geometry: FixedRect,
+    scale: f32,
+) -> (f32, f32, f32) {
+    let start_x = page_rect.left() + geometry.x.to_points_f32() * scale;
+    let end_x = start_x + geometry.width.to_points_f32() * scale;
+    let y = page_rect.top() + geometry.y.to_points_f32() * scale;
+    (start_x, end_x, y)
+}
+
+fn dotted_boundary_segments(
+    start_x: f32,
+    end_x: f32,
+    y: f32,
+    pixels_per_point: f32,
+) -> Vec<[egui::Pos2; 2]> {
+    let physical_pixel = 1.0 / pixels_per_point.max(f32::MIN_POSITIVE);
+    let dash = physical_pixel * 2.0;
+    let gap = physical_pixel * 2.0;
+    let mut segments = Vec::new();
+    let mut x = start_x;
+    while x < end_x {
+        let next = (x + dash).min(end_x);
+        segments.push([egui::pos2(x, y), egui::pos2(next, y)]);
+        x = next + gap;
+    }
+    segments
 }
 
 fn page_scroll_geometry(viewport_width: f32, page_width: f32) -> PageScrollGeometry {
@@ -1951,5 +2157,283 @@ mod title_surface_input_tests {
         assert_eq!(app.session.project(), &project_before);
         assert_eq!(app.session.title_selection(), title_selection_before);
         app.swap_title_view_state();
+    }
+}
+
+#[cfg(test)]
+mod dual_dialogue_boundary_paint_tests {
+    use super::{
+        boundary_screen_geometry, boundary_stroke_width, dotted_boundary_segments,
+        viewport_paint_page_range,
+    };
+    use eframe::egui;
+    use scriptcraft_core::layout::FixedRect;
+    use scriptcraft_core::FixedPoint;
+
+    #[test]
+    fn boundary_spans_page_interior_and_tracks_zoomed_page_geometry() {
+        let geometry = FixedRect {
+            x: FixedPoint::from_points(10),
+            y: FixedPoint::from_points(20),
+            width: FixedPoint::from_points(100),
+            height: FixedPoint::default(),
+        };
+        let page = egui::Rect::from_min_size(egui::pos2(50.0, 100.0), egui::vec2(500.0, 700.0));
+        for (scale, expected) in [
+            (0.75, (57.5, 132.5, 115.0)),
+            (1.0, (60.0, 160.0, 120.0)),
+            (2.0, (70.0, 270.0, 140.0)),
+        ] {
+            let actual = boundary_screen_geometry(page, geometry, scale);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn dotted_segments_are_subpixel_zoom_independent_and_one_physical_pixel_stroke() {
+        for pixels_per_point in [1.0, 2.0, 3.0] {
+            let segments = dotted_boundary_segments(0.0, 12.0, 7.0, pixels_per_point);
+            assert!(!segments.is_empty());
+            let expected_dash = 2.0 / pixels_per_point;
+            assert!((segments[0][1].x - segments[0][0].x - expected_dash).abs() < 0.001);
+            assert!((boundary_stroke_width(pixels_per_point) * pixels_per_point - 1.0).abs() < 0.001);
+            assert!(segments.iter().all(|segment| segment[0].y == 7.0 && segment[1].y == 7.0));
+        }
+    }
+
+    #[test]
+    fn page_boundary_paint_range_is_culled_and_keeps_only_bounded_overscan() {
+        let pages = (0..5)
+            .map(|index| {
+                egui::Rect::from_min_size(
+                    egui::pos2(0.0, index as f32 * 120.0),
+                    egui::vec2(400.0, 100.0),
+                )
+            })
+            .collect::<Vec<_>>();
+        let clip = egui::Rect::from_min_max(egui::pos2(0.0, 245.0), egui::pos2(400.0, 335.0));
+        let range = viewport_paint_page_range(&pages, clip);
+        assert_eq!(range, Some((1, 3)));
+        assert!(pages[2].intersects(clip));
+        assert!(!pages[0].intersects(clip));
+        assert!(!pages[4].intersects(clip));
+    }
+}
+
+#[cfg(test)]
+mod dual_dialogue_pointer_entry_tests {
+    use super::ScriptCraftApp;
+    use crate::app_commands::CommandInvocation;
+    use eframe::egui;
+    use scriptcraft_commands::{
+        Command, CommandOrigin, EditorSurface, PointerPhase, Position as CommandPosition,
+    };
+    use scriptcraft_core::editing::{EditingSession, Position};
+    use scriptcraft_core::dual_dialogue::{DualDialogueGroup, DualDialogueSide, DualDialogueWrapperProvenance};
+    use scriptcraft_core::layout::{BodyEditorPresentation, LayoutCache};
+    use scriptcraft_core::{FixedPoint, Project, Role, ScreenplayElement};
+
+    fn app_with_inactive_group() -> Option<(ScriptCraftApp, std::sync::Arc<super::ScreenplayLayout>)> {
+        let mut app = ScriptCraftApp::new().ok()?;
+        let mut project = Project::new().ok()?;
+        project.elements = [
+            Role::Character,
+            Role::Dialogue,
+            Role::Character,
+            Role::Dialogue,
+            Role::Action,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, role)| {
+            ScreenplayElement::new(format!("pointer-entry-{index}"), role, "same-y line").ok()
+        })
+        .collect::<Option<Vec<_>>>()?;
+        app.session = EditingSession::new(project).ok()?;
+        let context = egui::Context::default();
+        let toggled = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorDualDialogueToggle,
+                CommandOrigin::Menu,
+            ),
+            &context,
+        );
+        if !matches!(
+            toggled.outcome,
+            super::super::app_commands::DesktopCommandOutcome::Editor(
+                scriptcraft_commands::CommandOutcome::Changed
+            )
+        ) {
+            return None;
+        }
+        let mut cache = LayoutCache::default();
+        let presentation = BodyEditorPresentation::for_project(
+            app.session.project(),
+            None,
+        );
+        let (layout, _) = cache
+            .get_or_build_body_editor(
+                app.session.revision(),
+                app.session.project(),
+                app.session.layout_inputs(),
+                &presentation,
+            )
+            .ok()?;
+        Some((app, layout))
+    }
+
+    fn app_with_cue_only_group() -> Option<(ScriptCraftApp, std::sync::Arc<super::ScreenplayLayout>)> {
+        let mut app = ScriptCraftApp::new().ok()?;
+        let mut project = Project::new().ok()?;
+        project.elements = ["LEFT CUE", "RIGHT CUE"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| ScreenplayElement::new(format!("cue-only-pointer-{index}"), Role::Character, text).ok())
+            .collect::<Option<Vec<_>>>()?;
+        project.dual_dialogue_groups.push(DualDialogueGroup {
+            id: scriptcraft_core::StableId::new("cue-only-pointer-group").ok()?,
+            left: DualDialogueSide { character: project.elements[0].id.clone(), paragraphs: Vec::new() },
+            right: DualDialogueSide { character: project.elements[1].id.clone(), paragraphs: Vec::new() },
+            wrapper: DualDialogueWrapperProvenance::default(),
+        });
+        app.session = EditingSession::new(project).ok()?;
+        let mut cache = LayoutCache::default();
+        let presentation = BodyEditorPresentation::for_project(app.session.project(), None);
+        let (layout, _) = cache.get_or_build_body_editor(
+            app.session.revision(),
+            app.session.project(),
+            app.session.layout_inputs(),
+            &presentation,
+        ).ok()?;
+        Some((app, layout))
+    }
+
+    #[test]
+    fn clicking_either_equal_y_column_dispatches_that_side_and_activates_before_next_layout() {
+        for clicked_element in [0usize, 2usize] {
+            let Some((mut app, layout)) = app_with_inactive_group() else { return };
+            let Some((page_index, clicked_line)) = layout
+                .pages
+                .iter()
+                .enumerate()
+                .find_map(|(page, layout_page)| {
+                    layout_page
+                        .lines
+                        .iter()
+                        .find(|line| line.element == clicked_element)
+                        .map(|line| (page, line))
+                }) else { continue };
+            let peer_element = if clicked_element == 0 { 2 } else { 0 };
+            let Some(peer_line) = layout.pages[page_index]
+                .lines
+                .iter()
+                .find(|line| line.element == peer_element)
+            else { continue };
+            assert_eq!(clicked_line.geometry.y, peer_line.geometry.y);
+            let bounds = clicked_line.paragraph_bounds;
+            let x = FixedPoint::from_raw(bounds.x.raw() + bounds.width.raw() / 2);
+            let y = FixedPoint::from_raw(
+                clicked_line.geometry.y.raw() + clicked_line.geometry.height.raw() / 2,
+            );
+            let Some(caret) = layout.nearest_line_hit_test_fixed(page_index, x, y) else {
+                continue;
+            };
+            assert_eq!(caret.element, clicked_element);
+            let caret_lookups_before = app.performance.caret_lookups;
+            let indexed_queries_before = app.performance.indexed_interaction_queries;
+            let page_rect = egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(612.0, 792.0),
+            );
+            let Some(adapter_caret) = app.caret_from_pointer(
+                &layout,
+                page_index,
+                page_rect,
+                1.0,
+                egui::pos2(x.to_points_f32(), y.to_points_f32()),
+            ) else { continue };
+            assert_eq!(adapter_caret.element, clicked_element);
+            assert_eq!(app.performance.caret_lookups, caret_lookups_before.saturating_add(1));
+            assert_eq!(
+                app.performance.indexed_interaction_queries,
+                indexed_queries_before.saturating_add(1),
+            );
+
+            app.surface_focused = true;
+            let Ok(position) = CommandPosition::from_core(Position {
+                element: caret.element,
+                offset: caret.offset,
+            }) else { continue };
+            let result = app.dispatch_command(
+                CommandInvocation::new(
+                    Command::EditorSelectionPointer {
+                        position,
+                        phase: PointerPhase::Release,
+                        surface: EditorSurface::Body,
+                    },
+                    CommandOrigin::Pointer,
+                ),
+                &egui::Context::default(),
+            );
+            assert!(matches!(
+                result.outcome,
+                super::super::app_commands::DesktopCommandOutcome::Editor(
+                    scriptcraft_commands::CommandOutcome::Changed
+                        | scriptcraft_commands::CommandOutcome::NoOp
+                )
+            ));
+            let active_id = app.active_body_dual_dialogue_group.clone();
+            assert!(active_id.is_some());
+            let semantic_snapshot = app.session.project().clone();
+            let builds_before_active = app.performance.layout_builds;
+            let Ok(active_layout) = app.layout_for_render(EditorSurface::Body) else {
+                continue;
+            };
+            assert_eq!(active_layout.active_group_id, active_id);
+            assert!(!active_layout.editor_group_boundaries.is_empty());
+            assert_eq!(app.performance.layout_builds, builds_before_active.saturating_add(1));
+            let cache_hits_before_repeat = app.performance.layout_cache_hits;
+            let Ok(repeated_active_layout) = app.layout_for_render(EditorSurface::Body) else {
+                continue;
+            };
+            assert!(std::sync::Arc::ptr_eq(&active_layout, &repeated_active_layout));
+            assert_eq!(app.performance.layout_builds, builds_before_active.saturating_add(1));
+            assert_eq!(
+                app.performance.layout_cache_hits,
+                cache_hits_before_repeat.saturating_add(1),
+            );
+            assert_eq!(app.session.project(), &semantic_snapshot);
+        }
+    }
+
+    #[test]
+    fn cue_only_pointer_selection_targets_each_real_cue_before_sequential_activation() {
+        for clicked_element in [0usize, 1usize] {
+            let Some((mut app, layout)) = app_with_cue_only_group() else { return };
+            let Some(clicked_line) = layout.pages.iter().flat_map(|page| &page.lines).find(|line| line.element == clicked_element) else { continue };
+            let Some(peer_line) = layout.pages.iter().flat_map(|page| &page.lines).find(|line| line.element != clicked_element) else { continue };
+            assert_eq!(clicked_line.geometry.y, peer_line.geometry.y);
+            let bounds = clicked_line.paragraph_bounds;
+            let x = FixedPoint::from_raw(bounds.x.raw() + bounds.width.raw() / 2);
+            let y = clicked_line.geometry.y;
+            let Some(caret) = layout.nearest_line_hit_test_fixed(0, x, y) else { continue };
+            assert_eq!(caret.element, clicked_element);
+            assert!(matches!(caret.offset, 0..=10), "cue caret remains within canonical UTF-8 text");
+            app.surface_focused = true;
+            let Ok(position) = CommandPosition::from_core(Position { element: caret.element, offset: caret.offset }) else { continue };
+            let dispatched = app.dispatch_command(
+                CommandInvocation::new(
+                    Command::EditorSelectionPointer { position, phase: PointerPhase::Release, surface: EditorSurface::Body },
+                    CommandOrigin::Pointer,
+                ),
+                &egui::Context::default(),
+            );
+            assert!(matches!(dispatched.outcome, super::super::app_commands::DesktopCommandOutcome::Editor(scriptcraft_commands::CommandOutcome::Changed | scriptcraft_commands::CommandOutcome::NoOp)));
+            let group_id = app.session.project().dual_dialogue_groups[0].id.clone();
+            assert_eq!(app.active_body_dual_dialogue_group.as_ref(), Some(&group_id));
+            let sequential = app.layout_for_render(EditorSurface::Body);
+            assert!(sequential.is_ok_and(|layout| layout.active_group_id.as_ref() == Some(&group_id) && layout.editor_group_boundaries.len() == 1));
+            assert_eq!(app.session.project().elements.len(), 2, "pointer selection changes no semantic membership");
+        }
     }
 }

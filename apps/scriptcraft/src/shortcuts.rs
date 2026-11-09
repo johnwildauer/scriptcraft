@@ -362,6 +362,30 @@ pub(super) fn editor_command_for_key_event(
     None
 }
 
+/// Focused fallback for the Windows-owned in-window dual-dialogue accelerator.
+/// macOS deliberately declines here because its native menu is the sole owner.
+pub(super) fn dual_dialogue_toggle_for_focused_key_event(
+    key: egui::Key,
+    physical_key: Option<egui::Key>,
+    modifiers: egui::Modifiers,
+    platform: ShortcutPlatform,
+    in_window_shortcuts_owned: bool,
+) -> Option<Command> {
+    if !in_window_shortcuts_owned || key != egui::Key::D || physical_key != Some(key) {
+        return None;
+    }
+    let shortcut = match platform {
+        ShortcutPlatform::MacOS => primary_shortcut(ShortcutKey::D, false),
+        ShortcutPlatform::Windows => LogicalShortcut {
+            option: true,
+            ..primary_shortcut(ShortcutKey::D, false)
+        },
+        ShortcutPlatform::Other => return None,
+    };
+    shortcut_matches(shortcut, key, modifiers, platform)
+        .then_some(Command::EditorDualDialogueToggle)
+}
+
 fn logical_digit(key: egui::Key) -> Option<ShortcutKey> {
     Some(match key {
         egui::Key::Num0 => ShortcutKey::Digit0,
@@ -384,6 +408,10 @@ pub(super) fn modifiers_are_none(modifiers: egui::Modifiers) -> bool {
         && !modifiers.command
         && !modifiers.mac_cmd
         && !modifiers.shift
+}
+
+pub(super) const fn shortcut_input_allowed(ime_active: bool, ime_event_in_frame: bool) -> bool {
+    !ime_active && !ime_event_in_frame
 }
 
 #[cfg(test)]
@@ -554,5 +582,93 @@ mod tests {
             ShortcutPlatform::MacOS,
         )
         .is_none());
+    }
+
+    #[test]
+    fn dual_dialogue_focused_fallback_requires_exact_host_chord_and_in_window_ownership() {
+        let mac = egui::Modifiers {
+            command: true,
+            ..egui::Modifiers::NONE
+        };
+        assert_eq!(
+            dual_dialogue_toggle_for_focused_key_event(
+                egui::Key::D,
+                Some(egui::Key::D),
+                mac,
+                ShortcutPlatform::MacOS,
+                true,
+            ),
+            Some(Command::EditorDualDialogueToggle),
+        );
+        assert!(dual_dialogue_toggle_for_focused_key_event(
+            egui::Key::D,
+            Some(egui::Key::D),
+            mac,
+            ShortcutPlatform::MacOS,
+            false,
+        )
+        .is_none());
+
+        let windows = egui::Modifiers {
+            command: true,
+            ctrl: true,
+            alt: true,
+            ..egui::Modifiers::NONE
+        };
+        assert_eq!(
+            dual_dialogue_toggle_for_focused_key_event(
+                egui::Key::D,
+                Some(egui::Key::D),
+                windows,
+                ShortcutPlatform::Windows,
+                true,
+            ),
+            Some(Command::EditorDualDialogueToggle),
+        );
+        for mut wrong in [windows, mac] {
+            wrong.shift = true;
+            assert!(dual_dialogue_toggle_for_focused_key_event(
+                egui::Key::D,
+                Some(egui::Key::D),
+                wrong,
+                if wrong.ctrl { ShortcutPlatform::Windows } else { ShortcutPlatform::MacOS },
+                true,
+            )
+            .is_none());
+        }
+        let mut missing_alt = windows;
+        missing_alt.alt = false;
+        assert!(dual_dialogue_toggle_for_focused_key_event(
+            egui::Key::D,
+            Some(egui::Key::D),
+            missing_alt,
+            ShortcutPlatform::Windows,
+            true,
+        )
+        .is_none());
+        assert!(dual_dialogue_toggle_for_focused_key_event(
+            egui::Key::D,
+            Some(egui::Key::K),
+            windows,
+            ShortcutPlatform::Windows,
+            true,
+        )
+        .is_none());
+        assert!(dual_dialogue_toggle_for_focused_key_event(
+            egui::Key::D,
+            Some(egui::Key::D),
+            windows,
+            ShortcutPlatform::Other,
+            true,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn ime_state_or_same_frame_ime_event_suppresses_shortcut_dispatch() {
+        assert!(shortcut_input_allowed(false, false));
+        assert!(!shortcut_input_allowed(true, false));
+        assert!(!shortcut_input_allowed(false, true));
+        assert!(!shortcut_input_allowed(true, true));
     }
 }

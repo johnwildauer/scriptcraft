@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FinalDraft DocumentType="Script" Version="6">
+  <Content>
+    <Paragraph Type="General" id="empty-cc-outer" LeftIndent="1.50" RightIndent="7.50" SpaceBefore="12" StartsNewPage="No" vendor-wrapper="cc">
+      <DualDialogue vendor-dual="cc">
+        <SpellCheckIgnoreLists vendor-scope="empty-cc"><IgnoredRanges/><IgnoredWords/></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="empty-cc-left"><Text/></Paragraph>
+        <Paragraph Type="Character" id="empty-cc-right"><Text/></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+    <Paragraph Type="General" id="empty-ccd-outer" vendor-wrapper="ccd">
+      <DualDialogue vendor-dual="ccd">
+        <SpellCheckIgnoreLists vendor-scope="empty-ccd"><IgnoredRanges/><IgnoredWords/></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="empty-ccd-left"><Text/></Paragraph>
+        <Paragraph Type="Character" id="empty-ccd-right"><Text/></Paragraph>
+        <Paragraph Type="Dialogue" id="empty-ccd-dialogue"><Text/></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+    <Paragraph Type="General" id="empty-cdc-outer" vendor-wrapper="cdc">
+      <DualDialogue vendor-dual="cdc">
+        <SpellCheckIgnoreLists vendor-scope="empty-cdc"><IgnoredRanges/><IgnoredWords/></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="empty-cdc-left"><Text/></Paragraph>
+        <Paragraph Type="Dialogue" id="empty-cdc-dialogue"><Text/></Paragraph>
+        <Paragraph Type="Character" id="empty-cdc-right"><Text/></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+    <Paragraph Type="General" id="empty-ccp-outer" vendor-wrapper="ccp">
+      <DualDialogue vendor-dual="ccp">
+        <SpellCheckIgnoreLists vendor-scope="empty-ccp"><IgnoredRanges/><IgnoredWords/></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="empty-ccp-left"><Text/></Paragraph>
+        <Paragraph Type="Character" id="empty-ccp-right"><Text/></Paragraph>
+        <Paragraph Type="Parenthetical" id="empty-ccp-parenthetical"><Text/></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+    <Paragraph Type="General" id="empty-cpc-outer" vendor-wrapper="cpc">
+      <DualDialogue vendor-dual="cpc">
+        <SpellCheckIgnoreLists vendor-scope="empty-cpc"><IgnoredRanges/><IgnoredWords/></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="empty-cpc-left"><Text/></Paragraph>
+        <Paragraph Type="Parenthetical" id="empty-cpc-parenthetical"><Text/></Paragraph>
+        <Paragraph Type="Character" id="empty-cpc-right"><Text/></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+    <Paragraph Type="General" id="valid-cdcd-outer" vendor-wrapper="valid">
+      <DualDialogue vendor-dual="valid">
+        <SpellCheckIgnoreLists vendor-scope="valid"><IgnoredRanges/><IgnoredWords/></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="valid-cdcd-left"><Text/></Paragraph>
+        <Paragraph Type="Dialogue" id="valid-cdcd-left-dialogue"><Text/></Paragraph>
+        <Paragraph Type="Character" id="valid-cdcd-right"><Text/></Paragraph>
+        <Paragraph Type="Dialogue" id="valid-cdcd-right-dialogue"><Text/></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+  </Content>
+  <SpellCheckIgnoreLists vendor-scope="document"><IgnoredRanges/><IgnoredWords/></SpellCheckIgnoreLists>
+</FinalDraft>

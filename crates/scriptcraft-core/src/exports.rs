@@ -3,7 +3,7 @@
 //! Both adapters consume the shared fixed layout. They only borrow the
 //! project, so exporting cannot change the editing session or its clean state.
 
-use crate::layout::{LayoutComposition, LayoutError, LayoutPurpose, ScreenplayLayout};
+use crate::layout::{LayoutComposition, LayoutError, LayoutLine, LayoutPurpose, ScreenplayLayout};
 use crate::{FixedPoint, LayoutInputs, Project, Role};
 
 /// Transient PDF composition options. These values are consumed by export only
@@ -78,11 +78,24 @@ pub fn export_text_with_layout_inputs(
     text.push_str("# Fixed-layout pages: ");
     text.push_str(&layout.pages.len().to_string());
     text.push_str("\n\n");
+    // Print pages place the two columns in parallel. An oversized dual block
+    // can therefore put right-side lines on an earlier page than the final
+    // left-side line. Plain text is intentionally linear: retain title-page
+    // order, then emit body lines by their real flat member/source order.
+    let mut title_lines = Vec::<&LayoutLine>::new();
+    let mut body_lines = Vec::<&LayoutLine>::new();
     for page in &layout.pages {
-        for line in &page.lines {
-            text.push_str(&line.display_text);
-            text.push('\n');
-        }
+        let destination = if page.title_page {
+            &mut title_lines
+        } else {
+            &mut body_lines
+        };
+        destination.extend(page.lines.iter());
+    }
+    body_lines.sort_by_key(|line| (line.element, line.source.start, line.source.end));
+    for line in title_lines.into_iter().chain(body_lines) {
+        text.push_str(&line.display_text);
+        text.push('\n');
     }
     Ok(TextExport { text, loss })
 }

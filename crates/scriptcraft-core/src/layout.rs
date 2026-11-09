@@ -102,6 +102,63 @@ pub enum LayoutComposition {
     Print { include_title_page: bool },
 }
 
+/// Transient presentation choice for one Body-editor layout request. This is
+/// deliberately separate from `Project` and is not accepted by Print builders.
+#[derive(Debug, Clone, Default)]
+pub struct BodyEditorPresentation {
+    pub active_group_id: Option<StableId>,
+    project_identity: Option<Arc<()>>,
+}
+
+impl BodyEditorPresentation {
+    /// Binds a transient active-group choice to the current document instance.
+    /// Reusing it after document replacement safely resolves to inactive mode.
+    pub fn for_project(project: &Project, active_group_id: Option<StableId>) -> Self {
+        Self {
+            active_group_id,
+            project_identity: Some(project.layout_identity().clone()),
+        }
+    }
+
+    pub fn active_group_id(&self) -> Option<&StableId> {
+        self.active_group_id.as_ref()
+    }
+}
+
+impl PartialEq for BodyEditorPresentation {
+    fn eq(&self, other: &Self) -> bool {
+        self.active_group_id == other.active_group_id
+            && match (&self.project_identity, &other.project_identity) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for BodyEditorPresentation {}
+
+impl Hash for BodyEditorPresentation {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.active_group_id.hash(state);
+        self.project_identity
+            .as_ref()
+            .map(|identity| Arc::as_ptr(identity) as usize)
+            .hash(state);
+    }
+}
+
+/// Editor-only page geometry for the active group's upper and lower boundary.
+/// The zero-height rectangles are metadata for desktop painting, not lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorGroupBoundary {
+    pub group_id: StableId,
+    pub upper_page: usize,
+    pub upper: FixedRect,
+    pub lower_page: usize,
+    pub lower: FixedRect,
+}
+
 impl LayoutComposition {
     const fn purpose(self) -> LayoutPurpose {
         match self {
@@ -187,6 +244,11 @@ pub struct ScreenplayLayout {
     pub line_height: u32,
     pub purpose: LayoutPurpose,
     pub composition: LayoutComposition,
+    /// The identity resolved against this project's current group records.
+    /// Print and stale Body identities always expose `None`.
+    pub active_group_id: Option<StableId>,
+    /// Editor-only boundary metadata; always empty for Print and inactive Body.
+    pub editor_group_boundaries: Vec<EditorGroupBoundary>,
     pub pages: Vec<LayoutPage>,
     element_line_index: Vec<Vec<LineLocation>>,
     body_line_index: Vec<BodyLineIndexEntry>,
@@ -215,11 +277,22 @@ struct BodyLineIndexEntry {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct InteractionQueryDiagnostics {
     pub index_entries_examined: u64,
+    pub index_queries: u64,
+    pub equal_y_candidates_examined: u64,
 }
 
 impl InteractionQueryDiagnostics {
+    fn query(&mut self) {
+        self.index_queries = self.index_queries.saturating_add(1);
+    }
+
     fn examined(&mut self) {
         self.index_entries_examined = self.index_entries_examined.saturating_add(1);
+    }
+
+    fn equal_y_candidate(&mut self) {
+        self.equal_y_candidates_examined = self.equal_y_candidates_examined.saturating_add(1);
+        self.examined();
     }
 }
 
@@ -233,6 +306,7 @@ pub struct LayoutCache {
     source_settings: Option<SourceLayoutSettings>,
     purpose: Option<LayoutPurpose>,
     composition: Option<LayoutComposition>,
+    body_presentation: Option<BodyEditorPresentation>,
     project_layout_signature: Option<u64>,
     layout: Option<Arc<ScreenplayLayout>>,
     project_identity: Option<Arc<()>>,
@@ -246,7 +320,9 @@ pub struct LayoutCache {
 pub struct LayoutBuildDiagnostics {
     /// Complete Project validations performed by this layout request.
     pub complete_project_validations: u64,
+    pub layout_builds: u64,
     pub element_wraps_built: u64,
+    pub element_wrap_misses: u64,
     pub element_wraps_reused: u64,
     pub element_wrap_nanos: u128,
 }
@@ -254,6 +330,7 @@ pub struct LayoutBuildDiagnostics {
 impl LayoutBuildDiagnostics {
     fn record_element_wrap(&mut self, started: Instant) {
         self.element_wraps_built = self.element_wraps_built.saturating_add(1);
+        self.element_wrap_misses = self.element_wrap_misses.saturating_add(1);
         self.element_wrap_nanos = self
             .element_wrap_nanos
             .saturating_add(started.elapsed().as_nanos());
@@ -266,12 +343,19 @@ struct ElementWrapContext {
     role: Role,
     purpose: LayoutPurpose,
     title_page: bool,
+    geometry_mode: EffectiveGeometryMode,
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
     char_width: FixedPoint,
     max_chars: u32,
     run_signature: String,
     atomic_signature: Vec<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum EffectiveGeometryMode {
+    Sequential,
+    DualColumn,
 }
 
 #[derive(Debug)]
@@ -337,6 +421,7 @@ impl ElementWrapCache {
         atomic_ranges: &[std::ops::Range<usize>],
         purpose: LayoutPurpose,
         title_page: bool,
+        geometry_mode: EffectiveGeometryMode,
         diagnostics: Option<&mut LayoutBuildDiagnostics>,
     ) -> Vec<WrappedLine> {
         let context = ElementWrapContext {
@@ -344,6 +429,7 @@ impl ElementWrapCache {
             role,
             purpose,
             title_page,
+            geometry_mode,
             paragraph,
             text_style: text_style.clone(),
             char_width,
@@ -488,7 +574,7 @@ impl LayoutCache {
         self.get_or_build_with_optional_diagnostics(
             revision, project, inputs, purpose,
             match purpose { LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true }, LayoutPurpose::Editor => LayoutComposition::BodyEditor },
-            None, false,
+            None, false, BodyEditorPresentation::default(),
         )
     }
 
@@ -501,6 +587,46 @@ impl LayoutCache {
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
         self.get_or_build_with_optional_diagnostics(
             revision, project, inputs, composition.purpose(), composition, None, false,
+            BodyEditorPresentation::default(),
+        )
+    }
+
+    /// Builds or reuses a Body-editor layout for a transient active-group
+    /// presentation. There is intentionally no corresponding Print overload.
+    pub fn get_or_build_body_editor(
+        &mut self,
+        revision: u64,
+        project: &Project,
+        inputs: &LayoutInputs,
+        presentation: &BodyEditorPresentation,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        self.get_or_build_body_editor_with_diagnostics(
+            revision,
+            project,
+            inputs,
+            presentation,
+            &mut LayoutBuildDiagnostics::default(),
+        )
+    }
+
+    pub fn get_or_build_body_editor_with_diagnostics(
+        &mut self,
+        revision: u64,
+        project: &Project,
+        inputs: &LayoutInputs,
+        presentation: &BodyEditorPresentation,
+        diagnostics: &mut LayoutBuildDiagnostics,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        *diagnostics = LayoutBuildDiagnostics::default();
+        self.get_or_build_with_optional_diagnostics(
+            revision,
+            project,
+            inputs,
+            LayoutPurpose::Editor,
+            LayoutComposition::BodyEditor,
+            Some(diagnostics),
+            false,
+            presentation.clone(),
         )
     }
 
@@ -524,6 +650,7 @@ impl LayoutCache {
             match purpose { LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true }, LayoutPurpose::Editor => LayoutComposition::BodyEditor },
             Some(diagnostics),
             false,
+            BodyEditorPresentation::default(),
         )
     }
 
@@ -545,6 +672,7 @@ impl LayoutCache {
             match purpose { LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true }, LayoutPurpose::Editor => LayoutComposition::BodyEditor },
             Some(diagnostics),
             true,
+            BodyEditorPresentation::default(),
         )
     }
 
@@ -557,6 +685,7 @@ impl LayoutCache {
         composition: LayoutComposition,
         mut diagnostics: Option<&mut LayoutBuildDiagnostics>,
         validated_session: bool,
+        body_presentation: BodyEditorPresentation,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             diagnostics.complete_project_validations = if validated_session { 0 } else { 1 };
@@ -573,7 +702,14 @@ impl LayoutCache {
             .direct_paragraph_overrides
             .extend(project.direct_paragraph_overrides.clone());
         let mut signature_hasher = std::collections::hash_map::DefaultHasher::new();
-        format!("{:?}{:?}{:?}", project.elements, project.title_page, project.direct_paragraph_overrides)
+        format!(
+            "{:?}{:?}{:?}{:?}{:?}",
+            project.elements,
+            project.title_page,
+            project.direct_paragraph_overrides,
+            project.dual_dialogue_groups,
+            project.dual_dialogue_paragraph_overrides,
+        )
             .hash(&mut signature_hasher);
         let project_layout_signature = signature_hasher.finish();
         let source_settings_match = self
@@ -590,6 +726,7 @@ impl LayoutCache {
             self.source_settings = None;
             self.purpose = None;
             self.composition = None;
+            self.body_presentation = None;
             self.project_layout_signature = None;
             self.layout = None;
             self.element_wraps.clear();
@@ -600,6 +737,7 @@ impl LayoutCache {
             && same_document
             && self.purpose == Some(purpose)
             && self.composition == Some(composition)
+            && self.body_presentation.as_ref() == Some(&body_presentation)
             && self.project_layout_signature == Some(project_layout_signature)
         {
             return self
@@ -621,6 +759,7 @@ impl LayoutCache {
                 diagnostics,
                 Some(&mut self.element_wraps),
                 true,
+                &body_presentation,
             )?,
         );
         self.element_wraps.evict_if_needed();
@@ -629,6 +768,7 @@ impl LayoutCache {
         self.source_settings = Some(source_settings);
         self.purpose = Some(purpose);
         self.composition = Some(composition);
+        self.body_presentation = Some(body_presentation);
         self.project_layout_signature = Some(project_layout_signature);
         self.layout = Some(layout.clone());
         self.project_identity = Some(project.layout_identity().clone());
@@ -720,6 +860,7 @@ impl ScreenplayLayout {
             None,
             None,
             false,
+            &BodyEditorPresentation::default(),
         )
     }
 
@@ -738,6 +879,31 @@ impl ScreenplayLayout {
             None,
             None,
             false,
+            &BodyEditorPresentation::default(),
+        )
+    }
+
+    /// Builds Body-editor geometry with one optional, transient active group.
+    pub fn build_with_body_presentation(
+        project: &Project,
+        inputs: &LayoutInputs,
+        source_settings: &SourceLayoutSettings,
+        presentation: &BodyEditorPresentation,
+    ) -> Result<Self, LayoutError> {
+        let mut effective_settings = source_settings.clone();
+        effective_settings
+            .direct_paragraph_overrides
+            .extend(project.direct_paragraph_overrides.clone());
+        Self::build_with_effective_inputs_for_purpose_internal(
+            project,
+            inputs,
+            &effective_settings,
+            LayoutPurpose::Editor,
+            LayoutComposition::BodyEditor,
+            None,
+            None,
+            false,
+            presentation,
         )
     }
 
@@ -764,6 +930,7 @@ impl ScreenplayLayout {
             Some(diagnostics),
             None,
             false,
+            &BodyEditorPresentation::default(),
         )
     }
 
@@ -776,6 +943,7 @@ impl ScreenplayLayout {
         mut diagnostics: Option<&mut LayoutBuildDiagnostics>,
         mut wrap_cache: Option<&mut ElementWrapCache>,
         validated_session: bool,
+        body_presentation: &BodyEditorPresentation,
     ) -> Result<Self, LayoutError> {
         if !validated_session {
             project.validate()?;
@@ -784,6 +952,19 @@ impl ScreenplayLayout {
             kind: LayoutErrorKind::InvalidProfile,
         })?;
         validate_profile(inputs)?;
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.layout_builds = diagnostics.layout_builds.saturating_add(1);
+        }
+        let active_group_id = if composition == LayoutComposition::BodyEditor {
+            body_presentation
+                .active_group_id
+                .as_ref()
+                .filter(|_| body_presentation.project_identity.as_ref().is_none_or(|identity| Arc::ptr_eq(identity, project.layout_identity())))
+                .filter(|requested| project.dual_dialogue_groups.iter().any(|group| &group.id == *requested))
+                .cloned()
+        } else {
+            None
+        };
         let char_width = inputs.char_width;
         let font_family = inputs.font_family.clone();
         let mut output = Self {
@@ -794,6 +975,8 @@ impl ScreenplayLayout {
             line_height: inputs.line_advance,
             purpose,
             composition,
+            active_group_id,
+            editor_group_boundaries: Vec::new(),
             pages: Vec::new(),
             element_line_index: Vec::new(),
             body_line_index: Vec::new(),
@@ -878,6 +1061,7 @@ impl ScreenplayLayout {
                     output.inputs.chars_per_line,
                     purpose,
                     true,
+                    EffectiveGeometryMode::Sequential,
                 );
                 if !page.lines.is_empty() {
                     page.next_line_y = FixedPoint::from_raw(
@@ -901,9 +1085,97 @@ impl ScreenplayLayout {
         {
             output.pages.push(output.new_page(false));
         }
-        for (index, element) in project.elements.iter().enumerate().filter(|_| include_body) {
+        let mut index = 0;
+        while include_body && index < project.elements.len() {
+            let element = &project.elements[index];
+            if let Some(group) = crate::dual_dialogue::group_at_element_index(project, index)
+                .filter(|group| crate::dual_dialogue::first_member(project, group) == Some(index))
+            {
+                if output.active_group_id.as_ref() != Some(&group.id) {
+                let (outer_left, outer_right) = dual_outer_extent(
+                    &output.inputs,
+                    source_settings,
+                    project,
+                    group,
+                )?;
+                let gap = FixedPoint::from_points(36);
+                let column_width = FixedPoint::from_raw(
+                    outer_right
+                        .raw()
+                        .saturating_sub(outer_left.raw())
+                        .saturating_sub(gap.raw())
+                        .div_euclid(2),
+                );
+                if column_width.raw() <= 0 {
+                    return Err(LayoutError {
+                        kind: LayoutErrorKind::InvalidProfile,
+                    });
+                }
+                let left_box = (outer_left, FixedPoint::from_raw(
+                    outer_left.raw().saturating_add(column_width.raw()),
+                ));
+                let right_box = (
+                    FixedPoint::from_raw(left_box.1.raw().saturating_add(gap.raw())),
+                    FixedPoint::from_raw(
+                        left_box
+                            .1
+                            .raw()
+                            .saturating_add(gap.raw())
+                            .saturating_add(column_width.raw()),
+                    ),
+                );
+                let left = wrap_dual_side(
+                    project,
+                    &group.left,
+                    left_box,
+                    &output.inputs,
+                    source_settings,
+                    project.legacy_json_state.is_some(),
+                    purpose,
+                    &mut wrap_cache,
+                    &mut diagnostics,
+                );
+                let right = wrap_dual_side(
+                    project,
+                    &group.right,
+                    right_box,
+                    &output.inputs,
+                    source_settings,
+                    project.legacy_json_state.is_some(),
+                    purpose,
+                    &mut wrap_cache,
+                    &mut diagnostics,
+                );
+
+                // Print-hidden members remain semantic group members but do not
+                // create a visible block or apply wrapper-owned vertical fields.
+                if left.line_count > 0 || right.line_count > 0 {
+                    let wrapper = wrapper_overrides(project, source_settings, &group.id);
+                    let starts_new_page = wrapper
+                        .starts_new_page
+                        .unwrap_or_else(|| source_settings.starts_new_page(Role::General));
+                    let native_general = formatting_for_role(Role::General).paragraph;
+                    let space_before = wrapper
+                        .paragraph
+                        .space_before
+                        .or(source_settings.paragraph_spec(Role::General).space_before)
+                        .unwrap_or_else(|| FixedPoint::from_points(i64::from(native_general.space_before)));
+                    output.place_dual_block(
+                        &left,
+                        &right,
+                        starts_new_page,
+                        space_before,
+                    );
+                }
+                index = crate::dual_dialogue::last_member(project, group)
+                    .map_or(index.saturating_add(1), |last| last.saturating_add(1));
+                continue;
+                }
+            }
+
             let text_style = output.source_settings.text_style(element.role);
             if purpose == LayoutPurpose::Print && text_style.hidden_text {
+                index = index.saturating_add(1);
                 continue;
             }
             if output
@@ -938,11 +1210,18 @@ impl ScreenplayLayout {
                 output.inputs.chars_per_line,
                 purpose,
                 false,
+                EffectiveGeometryMode::Sequential,
             );
             output.place_element(lines, element.role, paragraph);
+            index = index.saturating_add(1);
         }
         if output.pages.is_empty() {
             output.pages.push(output.new_page(composition == LayoutComposition::TitlePageEditor));
+        }
+        if let Some(active_group_id) = output.active_group_id.clone() {
+            if let Some(group) = project.dual_dialogue_groups.iter().find(|group| group.id == active_group_id) {
+                output.editor_group_boundaries = active_group_boundaries(&output, project, group);
+            }
         }
         output.rebuild_interaction_indexes();
         Ok(output)
@@ -1017,6 +1296,7 @@ impl ScreenplayLayout {
         y: FixedPoint,
         diagnostics: &mut InteractionQueryDiagnostics,
     ) -> Option<Caret> {
+        diagnostics.query();
         if self.pages.get(page)?.title_page {
             if self.composition != LayoutComposition::TitlePageEditor {
                 return None;
@@ -1039,70 +1319,56 @@ impl ScreenplayLayout {
             diagnostics.examined();
             self.body_line_index[*index].absolute_y < pointer_y
         });
-        let mut candidates: [Option<usize>; 2] = [None, None];
-        let mut candidate_count = 0;
-        for coordinate_index in [
-            insertion.checked_sub(1),
-            (insertion < self.body_line_y_order.len()).then_some(insertion),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let index = self.body_line_y_order[coordinate_index];
+        let neighbor_coordinates = [insertion.checked_sub(1), (insertion < self.body_line_y_order.len()).then_some(insertion)];
+        let mut nearest_y_distance = i64::MAX;
+        let mut candidate_ys = [None, None];
+        let mut candidate_y_count = 0usize;
+        for coordinate_index in neighbor_coordinates.into_iter().flatten() {
             diagnostics.examined();
-            let y = self.body_line_index[index].absolute_y;
-            let first_coordinate =
-                self.body_line_y_order[..coordinate_index].partition_point(|prior| {
-                    diagnostics.examined();
-                    self.body_line_index[*prior].absolute_y < y
-                });
-            let first = self.body_line_y_order[first_coordinate];
-            if !candidates[..candidate_count]
-                .iter()
-                .flatten()
-                .any(|candidate| {
-                    diagnostics.examined();
-                    self.body_line_index[*candidate].absolute_y == y
-                })
+            let y = self.body_line_index[self.body_line_y_order[coordinate_index]].absolute_y;
+            let distance = pointer_y.saturating_sub(y).saturating_abs();
+            if distance < nearest_y_distance {
+                nearest_y_distance = distance;
+                candidate_ys = [Some(y), None];
+                candidate_y_count = 1;
+            } else if distance == nearest_y_distance
+                && !candidate_ys[..candidate_y_count].contains(&Some(y))
+                && candidate_y_count < candidate_ys.len()
             {
-                candidates[candidate_count] = Some(first);
-                candidate_count += 1;
+                candidate_ys[candidate_y_count] = Some(y);
+                candidate_y_count += 1;
             }
         }
-        let distance_key = |index: usize| {
-            let entry = self.body_line_index[index];
-            let distance = pointer_y.saturating_sub(entry.absolute_y).saturating_abs();
-            (distance, entry.location.page, entry.location.line)
+        let horizontal_distance = |line: &LayoutLine| {
+            let left = line.paragraph_bounds.x.raw();
+            let right = left.saturating_add(line.paragraph_bounds.width.raw());
+            if x.raw() < left { left.saturating_sub(x.raw()) }
+            else if x.raw() > right { x.raw().saturating_sub(right) }
+            else { 0 }
         };
-        let mut best = None;
-        for index in candidates[..candidate_count].iter().flatten().copied() {
-            diagnostics.examined();
-            if best.is_none_or(|current| distance_key(index) < distance_key(current)) {
-                best = Some(index);
-            }
-        }
-        let best = best?;
-        diagnostics.examined();
-        let best_distance = pointer_y
-            .saturating_sub(self.body_line_index[best].absolute_y)
-            .saturating_abs();
-        // The legacy distance saturates at i64::MAX. If that makes all lines
-        // tie, document order still wins even though the geometrically nearest
-        // candidate was found by the ordered index.
-        if best_distance == i64::MAX {
-            diagnostics.examined();
-            let first = self.body_line_index.first()?;
-            let first_distance = pointer_y.saturating_sub(first.absolute_y).saturating_abs();
-            if first_distance == i64::MAX {
+        let mut best: Option<(i64, usize)> = None;
+        for y in candidate_ys[..candidate_y_count].iter().flatten().copied() {
+            let start = self.body_line_y_order.partition_point(|index| {
                 diagnostics.examined();
-                return Some(self.caret_for_line(
-                    &self.pages[first.location.page].lines[first.location.line],
-                    x,
-                ));
+                self.body_line_index[*index].absolute_y < y
+            });
+            let end = self.body_line_y_order.partition_point(|index| {
+                diagnostics.examined();
+                self.body_line_index[*index].absolute_y <= y
+            });
+            for coordinate_index in start..end {
+                let index = self.body_line_y_order[coordinate_index];
+                diagnostics.equal_y_candidate();
+                let entry = self.body_line_index[index];
+                let line = &self.pages[entry.location.page].lines[entry.location.line];
+                let candidate = (horizontal_distance(line), index);
+                if best.is_none_or(|current| candidate < current) {
+                    best = Some(candidate);
+                }
             }
         }
-        diagnostics.examined();
-        let entry = self.body_line_index[best];
+        let (_, best_index) = best?;
+        let entry = self.body_line_index[best_index];
         Some(self.caret_for_line(
             &self.pages[entry.location.page].lines[entry.location.line],
             x,
@@ -1130,6 +1396,7 @@ impl ScreenplayLayout {
         caret: Caret,
         diagnostics: &mut InteractionQueryDiagnostics,
     ) -> Result<FixedRect, LayoutError> {
+        diagnostics.query();
         let Some(locations) = self.element_line_index.get(caret.element) else {
             return Err(LayoutError {
                 kind: LayoutErrorKind::InvalidPosition,
@@ -1174,6 +1441,7 @@ impl ScreenplayLayout {
         page_range: Option<(usize, usize)>,
         diagnostics: &mut InteractionQueryDiagnostics,
     ) -> Option<usize> {
+        diagnostics.query();
         self.element_line_index
             .get(element)?
             .iter()
@@ -1197,6 +1465,7 @@ impl ScreenplayLayout {
         offset: usize,
         diagnostics: &mut InteractionQueryDiagnostics,
     ) -> Option<usize> {
+        diagnostics.query();
         self.body_lines_by_element
             .get(element)?
             .iter()
@@ -1455,6 +1724,180 @@ impl ScreenplayLayout {
             rect: compat_rect(paragraph_bounds),
             keep_with_next: !title_page && keep_with_next(line.role),
             oversized: line.oversized,
+        }
+    }
+
+    fn place_dual_side(
+        &self,
+        page: &LayoutPage,
+        side: &WrappedDualSide,
+        block_top: FixedPoint,
+    ) -> Vec<LayoutLine> {
+        let mut y = block_top;
+        let mut placed = Vec::with_capacity(side.line_count);
+        for (paragraph_index, paragraph_lines) in side.paragraphs.iter().enumerate() {
+            if paragraph_index > 0 {
+                if let Some(first_line) = paragraph_lines.first() {
+                    y = FixedPoint::from_raw(
+                        y.raw()
+                            .saturating_add(first_line.paragraph.space_before.raw().max(0)),
+                    );
+                }
+            }
+            for wrapped in paragraph_lines {
+                let advance = wrapped.paragraph.line_advance;
+                let mut line = self.make_line(page, wrapped.clone(), false, y);
+                line.keep_with_next = false;
+                placed.push(line);
+                y = FixedPoint::from_raw(y.raw().saturating_add(advance.raw()));
+            }
+        }
+        placed
+    }
+
+    fn place_dual_block(
+        &mut self,
+        left: &WrappedDualSide,
+        right: &WrappedDualSide,
+        starts_new_page: bool,
+        space_before: FixedPoint,
+    ) {
+        if self.pages.is_empty() || self.pages.last().is_some_and(|page| page.title_page) {
+            self.pages.push(self.new_page(false));
+        }
+        if starts_new_page
+            && self.pages.last().is_some_and(|page| !page.lines.is_empty())
+        {
+            self.pages.push(self.new_page(false));
+        }
+
+        let content_bottom = FixedPoint::from_points(i64::from(
+            self.inputs
+                .paper_height
+                .saturating_sub(self.inputs.margin_bottom),
+        ));
+        let page_top = FixedPoint::from_points(i64::from(self.inputs.margin_top));
+        let content_height = content_bottom.raw().saturating_sub(page_top.raw());
+        let capacity = self.inputs.lines_per_page as usize;
+        let block_height = left.height.raw().max(right.height.raw()).max(0);
+        let required_lines = left.line_count.max(right.line_count);
+        // A saturated sum remains larger than any validated printable extent,
+        // so overflow cannot be mistaken for a fitting block.
+        let fits_empty_page = block_height <= content_height
+            && required_lines <= capacity;
+
+        let current_page = self.pages.len() - 1;
+        let has_boundary = !self.pages[current_page].lines.is_empty();
+        let applied_gap = if has_boundary {
+            space_before.raw().max(0)
+        } else {
+            0
+        };
+        let block_top = FixedPoint::from_raw(
+            self.pages[current_page]
+                .next_line_y
+                .raw()
+                .saturating_add(applied_gap),
+        );
+        let vertical_end = block_top.raw().saturating_add(block_height);
+        let line_end = (self.pages[current_page].occupied_lines as usize)
+            .saturating_add(required_lines);
+        let fits_remaining = line_end <= capacity && vertical_end <= content_bottom.raw();
+
+        if !fits_empty_page {
+            // The exception is limited to a block that cannot fit on a fresh
+            // page. Start it there once; each fallback line is consumed exactly
+            // once and a page is advanced only after a prior line made progress.
+            if !self.pages[current_page].lines.is_empty() {
+                self.pages.push(self.new_page(false));
+            }
+            self.spill_oversized_dual_block(left, right);
+            return;
+        }
+
+        let page_index = if !fits_remaining && !self.pages[current_page].lines.is_empty() {
+            self.pages.push(self.new_page(false));
+            self.pages.len() - 1
+        } else {
+            current_page
+        };
+        let applied_gap = if self.pages[page_index].lines.is_empty() {
+            0
+        } else {
+            applied_gap
+        };
+        let block_top = FixedPoint::from_raw(
+            self.pages[page_index]
+                .next_line_y
+                .raw()
+                .saturating_add(applied_gap),
+        );
+        let page = self.pages[page_index].clone();
+        let left_lines = self.place_dual_side(&page, left, block_top);
+        let right_lines = self.place_dual_side(&page, right, block_top);
+        self.pages[page_index].lines.extend(left_lines);
+        self.pages[page_index].lines.extend(right_lines);
+        self.pages[page_index].occupied_lines = self.pages[page_index]
+            .occupied_lines
+            .saturating_add(required_lines.min(u32::MAX as usize) as u32);
+        self.pages[page_index].next_line_y = FixedPoint::from_raw(
+            block_top.raw().saturating_add(block_height),
+        );
+    }
+
+    fn spill_oversized_dual_block(
+        &mut self,
+        left: &WrappedDualSide,
+        right: &WrappedDualSide,
+    ) {
+        let start_page = self.pages.len() - 1;
+        let capacity = self.inputs.lines_per_page as usize;
+        let page_top = FixedPoint::from_points(i64::from(self.inputs.margin_top));
+        let content_bottom = FixedPoint::from_points(i64::from(
+            self.inputs
+                .paper_height
+                .saturating_sub(self.inputs.margin_bottom),
+        ));
+        let left_placements = spill_side_lines(left, page_top, content_bottom, capacity);
+        let right_placements = spill_side_lines(right, page_top, content_bottom, capacity);
+        let page_count = left_placements
+            .page_count
+            .max(right_placements.page_count)
+            .max(1);
+        while self.pages.len() < start_page.saturating_add(page_count) {
+            self.pages.push(self.new_page(false));
+        }
+
+        let mut occupied = vec![0usize; page_count];
+        let mut bottoms = vec![page_top.raw(); page_count];
+        for placements in [&left_placements, &right_placements] {
+            for (page_offset, count) in placements.lines_per_page.iter().enumerate() {
+                occupied[page_offset] = occupied[page_offset].max(*count);
+            }
+            for (page_offset, bottom) in placements.bottoms.iter().enumerate() {
+                bottoms[page_offset] = bottoms[page_offset].max(*bottom);
+            }
+        }
+
+        // Append every left line before every right line, including pages where
+        // an oversized side has spilled forward.
+        for placements in [&left_placements, &right_placements] {
+            for placement in &placements.lines {
+                let page_index = start_page.saturating_add(placement.page_offset);
+                let page = self.pages[page_index].clone();
+                let mut wrapped = placement.line.clone();
+                wrapped.oversized = true;
+                let mut line = self.make_line(&page, wrapped, false, placement.y);
+                line.keep_with_next = false;
+                self.pages[page_index].lines.push(line);
+            }
+        }
+        for page_offset in 0..page_count {
+            let page = &mut self.pages[start_page + page_offset];
+            page.occupied_lines = page
+                .occupied_lines
+                .saturating_add(occupied[page_offset].min(u32::MAX as usize) as u32);
+            page.next_line_y = FixedPoint::from_raw(bottoms[page_offset]);
         }
     }
 
@@ -1727,6 +2170,259 @@ struct EffectiveParagraph {
     char_width: FixedPoint,
 }
 
+struct WrappedDualSide {
+    paragraphs: Vec<Vec<WrappedLine>>,
+    height: FixedPoint,
+    line_count: usize,
+}
+
+struct SpilledDualLine {
+    line: WrappedLine,
+    page_offset: usize,
+    y: FixedPoint,
+}
+
+struct SpilledDualSide {
+    lines: Vec<SpilledDualLine>,
+    lines_per_page: Vec<usize>,
+    bottoms: Vec<i64>,
+    page_count: usize,
+}
+
+fn spill_side_lines(
+    side: &WrappedDualSide,
+    page_top: FixedPoint,
+    content_bottom: FixedPoint,
+    capacity: usize,
+) -> SpilledDualSide {
+    let mut result = SpilledDualSide {
+        lines: Vec::with_capacity(side.line_count),
+        lines_per_page: vec![0],
+        bottoms: vec![page_top.raw()],
+        page_count: 1,
+    };
+    let mut page_offset = 0usize;
+    let mut y = page_top;
+
+    for (paragraph_index, paragraph_lines) in side.paragraphs.iter().enumerate() {
+        let mut gap_pending = paragraph_index > 0;
+        for wrapped in paragraph_lines {
+            let advance = wrapped.paragraph.line_advance.raw().max(0);
+            let current_count = result.lines_per_page[page_offset];
+            let gap = if gap_pending && current_count > 0 {
+                wrapped.paragraph.space_before.raw().max(0)
+            } else {
+                0
+            };
+            let proposed_y = FixedPoint::from_raw(y.raw().saturating_add(gap));
+            let proposed_end = proposed_y.raw().saturating_add(advance);
+            let fits_page = current_count < capacity && proposed_end <= content_bottom.raw();
+
+            if !fits_page && current_count > 0 {
+                page_offset = page_offset.saturating_add(1);
+                if result.lines_per_page.len() <= page_offset {
+                    result.lines_per_page.push(0);
+                    result.bottoms.push(page_top.raw());
+                }
+                result.page_count = page_offset.saturating_add(1);
+                y = page_top;
+                gap_pending = false;
+            }
+
+            let count = result.lines_per_page[page_offset];
+            let line_gap = if gap_pending && count > 0 {
+                wrapped.paragraph.space_before.raw().max(0)
+            } else {
+                0
+            };
+            let line_y = FixedPoint::from_raw(y.raw().saturating_add(line_gap));
+            let line_bottom = line_y.raw().saturating_add(advance);
+            result.lines.push(SpilledDualLine {
+                line: wrapped.clone(),
+                page_offset,
+                y: line_y,
+            });
+            result.lines_per_page[page_offset] = count.saturating_add(1);
+            result.bottoms[page_offset] = result.bottoms[page_offset].max(line_bottom);
+            y = FixedPoint::from_raw(line_bottom);
+            gap_pending = false;
+        }
+    }
+
+    result
+}
+
+fn wrapper_overrides(
+    project: &Project,
+    source: &SourceLayoutSettings,
+    group_id: &StableId,
+) -> crate::formatting::SourceParagraphOverrides {
+    project
+        .dual_dialogue_paragraph_overrides
+        .get(group_id)
+        .copied()
+        .or_else(|| source.direct_paragraph_overrides.get(group_id).copied())
+        .unwrap_or_default()
+}
+
+fn active_group_boundaries(
+    layout: &ScreenplayLayout,
+    project: &Project,
+    group: &crate::dual_dialogue::DualDialogueGroup,
+) -> Vec<EditorGroupBoundary> {
+    let Some(first_element) = crate::dual_dialogue::first_member(project, group) else {
+        return Vec::new();
+    };
+    let Some(last_element) = crate::dual_dialogue::last_member(project, group) else {
+        return Vec::new();
+    };
+    let first = layout.pages.iter().enumerate().find_map(|(page_index, page)| {
+        page.lines.iter().find(|line| line.element == first_element).map(|line| (page_index, line))
+    });
+    let last = layout.pages.iter().enumerate().rev().find_map(|(page_index, page)| {
+        page.lines.iter().rev().find(|line| line.element == last_element).map(|line| (page_index, line))
+    });
+    let (Some((upper_page, first_line)), Some((lower_page, last_line))) = (first, last) else {
+        return Vec::new();
+    };
+    let content = &layout.pages[upper_page].content_bounds;
+    let x = FixedPoint::from_points(i64::from(content.x));
+    let width = FixedPoint::from_points(i64::from(content.width));
+    let upper = FixedRect {
+        x,
+        y: first_line.paragraph_bounds.y,
+        width,
+        height: FixedPoint::default(),
+    };
+    let lower = FixedRect {
+        x,
+        y: FixedPoint::from_raw(
+            last_line.paragraph_bounds.y.raw().saturating_add(last_line.paragraph_bounds.height.raw()),
+        ),
+        width,
+        height: FixedPoint::default(),
+    };
+    vec![EditorGroupBoundary {
+        group_id: group.id.clone(),
+        upper_page,
+        upper,
+        lower_page,
+        lower,
+    }]
+}
+
+fn dual_outer_extent(
+    inputs: &LayoutInputs,
+    source: &SourceLayoutSettings,
+    project: &Project,
+    group: &crate::dual_dialogue::DualDialogueGroup,
+) -> Result<(FixedPoint, FixedPoint), LayoutError> {
+    let native = formatting_for_role(Role::General).paragraph;
+    let app_left = FixedPoint::from_points(i64::from(inputs.margin_left));
+    let app_right = FixedPoint::from_points(i64::from(
+        inputs.paper_width.saturating_sub(inputs.margin_right),
+    ));
+    let general = source.paragraph_spec(Role::General);
+    let role_left = general
+        .left_indent
+        .unwrap_or_else(|| FixedPoint::parse_inches(native.left_indent).unwrap_or(app_left));
+    let role_right = general
+        .right_indent
+        .unwrap_or_else(|| FixedPoint::parse_inches(native.right_indent).unwrap_or(app_right));
+    let wrapper = wrapper_overrides(project, source, &group.id).paragraph;
+    let left = wrapper.left_indent.unwrap_or(role_left);
+    let right = wrapper.right_indent.unwrap_or(role_right);
+    let page_right = FixedPoint::from_points(i64::from(inputs.paper_width));
+    let gap = FixedPoint::from_points(36);
+    if left.raw() < 0
+        || right <= left
+        || right > page_right
+        || right.raw().saturating_sub(left.raw()) <= gap.raw()
+    {
+        return Err(LayoutError {
+            kind: LayoutErrorKind::InvalidProfile,
+        });
+    }
+    Ok((left, right))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wrap_dual_side(
+    project: &Project,
+    side: &crate::dual_dialogue::DualDialogueSide,
+    column: (FixedPoint, FixedPoint),
+    inputs: &LayoutInputs,
+    source: &SourceLayoutSettings,
+    legacy_json_profile: bool,
+    purpose: LayoutPurpose,
+    cache: &mut Option<&mut ElementWrapCache>,
+    diagnostics: &mut Option<&mut LayoutBuildDiagnostics>,
+) -> WrappedDualSide {
+    let mut paragraphs = Vec::new();
+    let mut height = 0i64;
+    let mut line_count = 0usize;
+    for id in side.member_ids() {
+        let Some((index, element)) = project
+            .elements
+            .iter()
+            .enumerate()
+            .find(|(_, element)| &element.id == id)
+        else {
+            continue;
+        };
+        let text_style = source.text_style(element.role);
+        if purpose == LayoutPurpose::Print && text_style.hidden_text {
+            continue;
+        }
+        let mut paragraph = effective_paragraph(
+            inputs,
+            source,
+            element.role,
+            &element.id,
+            legacy_json_profile,
+            &text_style,
+        );
+        paragraph.left = column.0;
+        paragraph.right = column.1;
+        paragraph.first_indent = FixedPoint::default();
+        if element.role == Role::Character {
+            paragraph.alignment = ParagraphAlignment::Center;
+        }
+        let lines = wrap_for_layout(
+            cache.as_deref_mut(),
+            diagnostics.as_deref_mut(),
+            &element.id,
+            &element.text,
+            index,
+            element.role,
+            paragraph,
+            text_style,
+            &element.runs,
+            paragraph.char_width,
+            inputs.chars_per_line,
+            purpose,
+            false,
+            EffectiveGeometryMode::DualColumn,
+        );
+        if !paragraphs.is_empty() {
+            height = height.saturating_add(paragraph.space_before.raw().max(0));
+        }
+        height = height.saturating_add(
+            paragraph
+                .line_advance
+                .raw()
+                .saturating_mul(lines.len().min(i64::MAX as usize) as i64),
+        );
+        line_count = line_count.saturating_add(lines.len());
+        paragraphs.push(lines);
+    }
+    WrappedDualSide {
+        paragraphs,
+        height: FixedPoint::from_raw(height),
+        line_count,
+    }
+}
+
 fn validate_profile(inputs: &LayoutInputs) -> Result<(), LayoutError> {
     if inputs.margin_left.saturating_add(inputs.margin_right) >= inputs.paper_width
         || inputs.margin_top.saturating_add(inputs.margin_bottom) >= inputs.paper_height
@@ -1903,6 +2599,7 @@ fn wrap_for_layout(
     max_chars: u32,
     purpose: LayoutPurpose,
     title_page: bool,
+    geometry_mode: EffectiveGeometryMode,
 ) -> Vec<WrappedLine> {
     let mut projected_text = String::new();
     let mut source_map = Vec::<(std::ops::Range<usize>, std::ops::Range<usize>)>::new();
@@ -1961,6 +2658,7 @@ fn wrap_for_layout(
             &source_map.iter().map(|(display, _)| display.clone()).collect::<Vec<_>>(),
             purpose,
             title_page,
+            geometry_mode,
             diagnostics,
         )
     } else {

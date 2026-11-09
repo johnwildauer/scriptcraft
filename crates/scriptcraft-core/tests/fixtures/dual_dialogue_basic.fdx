@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FinalDraft DocumentType="Script" Version="6">
+  <Content>
+    <Paragraph Type="Action" id="before-1"><Text>Before the exchange.</Text></Paragraph>
+    <Paragraph Type="General" id="outer-dual-001" LeftIndent="1.50" RightIndent="7.50" SpaceBefore="12" StartsNewPage="No" vendor-outer="retained">
+      <DualDialogue vendor-container="retained">
+        <SpellCheckIgnoreLists vendor-scope="group">
+          <IgnoredRanges vendor-ranges="retained">
+            <Range Start="2" End="5" vendor-range="retained"><Position Value="4"/></Range>
+          </IgnoredRanges>
+          <IgnoredWords vendor-words="retained">
+            <Word vendor-word="retained">teh</Word>
+          </IgnoredWords>
+        </SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="left-cue-001"><Text Style="AllCaps">MARA</Text></Paragraph>
+        <Paragraph Type="Dialogue" id="left-dialogue-001"><Text Style="">First half—</Text><Text Style="Italic" vendor-run="kept">then the rest.</Text></Paragraph>
+        <Paragraph Type="Parenthetical" id="left-parenthetical-001"><Text>(quietly)</Text></Paragraph>
+        <Paragraph Type="Character" id="right-cue-001"><Text>NOAH</Text></Paragraph>
+        <Paragraph Type="Dialogue" id="right-dialogue-001"><Text>你好, world.</Text></Paragraph>
+        <Paragraph Type="Parenthetical" id="right-parenthetical-001"/>
+      </DualDialogue>
+    </Paragraph>
+    <Paragraph Type="Action" id="after-001"><Text>After the exchange.</Text></Paragraph>
+  </Content>
+  <SpellCheckIgnoreLists vendor-scope="document">
+    <IgnoredRanges vendor-document-ranges="retained"><Range Start="7" End="8"/></IgnoredRanges>
+    <IgnoredWords vendor-document-words="retained"><Word>colour</Word></IgnoredWords>
+  </SpellCheckIgnoreLists>
+</FinalDraft>

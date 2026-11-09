@@ -73,11 +73,12 @@ pub enum CommandId {
     ToolsSprintTimerReset,
     ToolsSprintTimerEnd,
     UiStatusSet,
+    EditorDualDialogueToggle,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 47] = [
+    pub const ALL: [Self; 48] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -125,6 +126,7 @@ impl CommandId {
         Self::ToolsSprintTimerReset,
         Self::ToolsSprintTimerEnd,
         Self::UiStatusSet,
+        Self::EditorDualDialogueToggle,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -176,6 +178,7 @@ impl CommandId {
             Self::ToolsSprintTimerReset => "tools.sprint-timer.reset",
             Self::ToolsSprintTimerEnd => "tools.sprint-timer.end",
             Self::UiStatusSet => "ui.status.set",
+            Self::EditorDualDialogueToggle => "editor.dual-dialogue.toggle",
         }
     }
 }
@@ -858,6 +861,8 @@ pub enum Command {
     ToolsSprintTimerEnd,
     #[serde(rename = "ui.status.set")]
     UiStatusSet { message: Option<DiagnosticMessage> },
+    #[serde(rename = "editor.dual-dialogue.toggle")]
+    EditorDualDialogueToggle,
 }
 
 impl Command {
@@ -924,6 +929,7 @@ impl Command {
             Self::ToolsSprintTimerReset => CommandId::ToolsSprintTimerReset,
             Self::ToolsSprintTimerEnd => CommandId::ToolsSprintTimerEnd,
             Self::UiStatusSet { .. } => CommandId::UiStatusSet,
+            Self::EditorDualDialogueToggle => CommandId::EditorDualDialogueToggle,
         }
     }
 }
@@ -1018,7 +1024,7 @@ const fn descriptor(id: CommandId, family: &'static str, parameters: &'static st
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 47] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 48] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -1070,6 +1076,7 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 47] = [
     descriptor(CommandId::ToolsSprintTimerReset, "tools", "none"),
     descriptor(CommandId::ToolsSprintTimerEnd, "tools", "none"),
     descriptor(CommandId::UiStatusSet, "ui", "message: optional diagnostic_message (<=512 UTF-8 bytes, single-line)"),
+    descriptor(CommandId::EditorDualDialogueToggle, "editor", "none; Body only; host active surface"),
 ];
 
 pub fn descriptor_for(id: CommandId) -> Option<&'static CommandDescriptor> {
@@ -1183,6 +1190,23 @@ mod save_as_wire_compatibility_tests {
             ("id", WireValue::String(id)),
             ("params", WireValue::Map(params)),
         ])
+    }
+
+    fn parameterless_command_wire(id: &'static str) -> WireValue {
+        WireValue::Map(vec![("id", WireValue::String(id))])
+    }
+
+    #[test]
+    fn dual_dialogue_command_uses_an_id_only_serde_shape() {
+        fn assert_serializable<T: serde::Serialize>() {}
+        assert_serializable::<Command>();
+
+        let command = Command::deserialize(parameterless_command_wire(
+            "editor.dual-dialogue.toggle",
+        ))
+        .unwrap_or_else(|_| unreachable!("parameterless dual-dialogue command is decodable"));
+        assert_eq!(command, Command::EditorDualDialogueToggle);
+        assert_eq!(command.id(), CommandId::EditorDualDialogueToggle);
     }
 
     #[test]

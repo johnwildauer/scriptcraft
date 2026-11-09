@@ -1378,6 +1378,7 @@ mod toolbar_contract_tests {
             copy: true,
             paste: true,
             body_only: true,
+            dual_dialogue_toggle: true,
             title_open: !modal_blocked,
             title_close: !modal_blocked,
         }

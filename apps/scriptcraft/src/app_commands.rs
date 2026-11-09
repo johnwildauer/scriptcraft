@@ -44,6 +44,7 @@ pub(super) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::EditSelectAll => Command::EditSelectAll,
         CommandId::WindowTitlePageOpen => Command::WindowTitlePageOpen,
         CommandId::WindowTitlePageClose => Command::WindowTitlePageClose,
+        CommandId::EditorDualDialogueToggle => Command::EditorDualDialogueToggle,
         _ => return None,
     })
 }
@@ -60,6 +61,7 @@ pub(super) struct AppCommandAvailability {
     pub(super) copy: bool,
     pub(super) paste: bool,
     pub(super) body_only: bool,
+    pub(super) dual_dialogue_toggle: bool,
     pub(super) title_open: bool,
     pub(super) title_close: bool,
 }
@@ -299,6 +301,13 @@ impl ScriptCraftApp {
             // Clipboard state is read only when Paste is activated, never per frame.
             paste: !migration_pending,
             body_only: self.active_editor_surface == EditorSurface::Body,
+            dual_dialogue_toggle: self.active_editor_surface == EditorSurface::Body
+                && self
+                    .session
+                    .dual_dialogue_toggle_target(
+                        scriptcraft_core::dual_dialogue::SelectionSurface::Body,
+                    )
+                    .is_ok_and(|target| target.is_some()),
             // The same open command focuses/raises the singleton child when it
             // already exists; modal state, not open state, blocks activation.
             title_open: !migration_pending && !self.title_viewport_unsupported,
@@ -338,6 +347,7 @@ impl ScriptCraftApp {
                 | CommandId::EditorNavigationLineEdge
                 | CommandId::EditorStyleToggle
                 | CommandId::EditorAlignmentSet
+                | CommandId::EditorDualDialogueToggle
         );
         let command = route_to_focused_surface(
             invocation.command,
@@ -442,6 +452,11 @@ impl ScriptCraftApp {
             Command::EditorAlignmentSet { surface, alignment } => self.execute_editor(
                 &Command::EditorAlignmentSet { surface, alignment },
                 super::RevealIntent::Conditional,
+                ctx,
+            ),
+            Command::EditorDualDialogueToggle => self.execute_editor(
+                &Command::EditorDualDialogueToggle,
+                super::RevealIntent::None,
                 ctx,
             ),
             Command::EditUndo => self.execute_editor(
@@ -745,11 +760,23 @@ impl ScriptCraftApp {
             active_surface,
         );
         match &outcome {
-            CommandOutcome::Changed | CommandOutcome::NoOp => {
+            CommandOutcome::Changed => {
                 self.mutate(Ok(()), reveal_intent);
             }
+            CommandOutcome::NoOp if command.id() != CommandId::EditorDualDialogueToggle => {
+                self.mutate(Ok(()), reveal_intent);
+            }
+            CommandOutcome::NoOp => {}
             CommandOutcome::Unavailable(_) | CommandOutcome::Rejected(_) => {}
             CommandOutcome::Failed(error) => self.show_edit_error(error.clone()),
+        }
+        if matches!(
+            &outcome,
+            CommandOutcome::Changed | CommandOutcome::NoOp
+        ) && !(command.id() == CommandId::EditorDualDialogueToggle
+            && matches!(&outcome, CommandOutcome::NoOp))
+        {
+            self.reconcile_body_active_group();
         }
         ctx.request_repaint();
         match outcome {
@@ -758,6 +785,7 @@ impl ScriptCraftApp {
                     UnavailableReason::UndoHistory => DesktopUnavailableReason::UndoHistory,
                     UnavailableReason::RedoHistory => DesktopUnavailableReason::RedoHistory,
                     UnavailableReason::Selection => DesktopUnavailableReason::Selection,
+                    UnavailableReason::DualDialogueTarget => DesktopUnavailableReason::Selection,
                 })
             }
             CommandOutcome::Rejected(rejection) => DesktopCommandOutcome::Rejected(rejection),
@@ -971,6 +999,7 @@ impl AppCommandAvailability {
             CommandId::EditCopy => self.copy,
             CommandId::EditPaste => self.paste,
             CommandId::EditorElementChange => self.body_only,
+            CommandId::EditorDualDialogueToggle => self.dual_dialogue_toggle,
             CommandId::WindowTitlePageOpen => self.title_open,
             CommandId::WindowTitlePageClose => self.title_close,
             _ => true,
@@ -988,6 +1017,7 @@ impl AppCommandAvailability {
             CommandId::EditSelectAll | CommandId::EditCut | CommandId::EditCopy => {
                 DesktopUnavailableReason::Selection
             }
+            CommandId::EditorDualDialogueToggle => DesktopUnavailableReason::Selection,
             _ => DesktopUnavailableReason::ModalBlocked,
         }
     }
@@ -1129,6 +1159,7 @@ mod diagnostic_command_tests {
             copy: false,
             paste: false,
             body_only: false,
+            dual_dialogue_toggle: false,
             title_open: false,
             title_close: false,
         };
@@ -1406,10 +1437,12 @@ mod title_page_window_command_tests {
             copy: false,
             paste: false,
             body_only: true,
+            dual_dialogue_toggle: false,
             title_open: false,
             title_close: false,
         };
         assert!(!modal_availability.is_enabled(CommandId::WindowTitlePageOpen));
+        assert!(!modal_availability.is_enabled(CommandId::EditorDualDialogueToggle));
 
         let opened_options = app.dispatch_command(
             CommandInvocation::new(Command::FileSaveAsPdf, CommandOrigin::Toolbar),
@@ -1811,4 +1844,1038 @@ fn canonical_selection_text(
         }
     }
     Some(text)
+}
+
+#[cfg(test)]
+mod dual_dialogue_dispatch_tests {
+    use super::{CommandInvocation, DesktopCommandOutcome};
+    use crate::{menu::PendingDesktopCommands, ScriptCraftApp};
+    use eframe::egui;
+    use scriptcraft_commands::{Command, CommandId, CommandOrigin, CommandOutcome, EditorSurface};
+    use scriptcraft_core::editing::{EditingSession, Position, Selection};
+    use scriptcraft_core::{fdx::read_v6, Project, Role, ScreenplayElement};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn app_with_toggle_target() -> Option<ScriptCraftApp> {
+        let mut app = ScriptCraftApp::new().ok()?;
+        let mut project = Project::new().ok()?;
+        project.elements = [Role::Character, Role::Dialogue, Role::Character, Role::Dialogue]
+            .into_iter()
+            .enumerate()
+            .map(|(index, role)| {
+                ScreenplayElement::new(format!("desktop-toggle-{index}"), role, "line").ok()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        app.session = EditingSession::new(project).ok()?;
+        Some(app)
+    }
+
+    fn app_with_toggle_target_and_outside_action() -> Option<ScriptCraftApp> {
+        let mut app = app_with_toggle_target()?;
+        let mut project = app.session.project().clone();
+        project
+            .elements
+            .push(ScreenplayElement::new("desktop-outside-action", Role::Action, "outside").ok()?);
+        app.session = EditingSession::with_policy(project, app.session.policy()).ok()?;
+        Some(app)
+    }
+
+    fn app_with_imported_dual_group() -> Option<ScriptCraftApp> {
+        let mut app = ScriptCraftApp::new().ok()?;
+        let source = include_str!("../../../crates/scriptcraft-core/tests/fixtures/dual_dialogue_basic.fdx");
+        let project = read_v6(source.as_bytes()).ok()?.project;
+        app.session = EditingSession::new(project).ok()?;
+        app.surface_focused = true;
+        app.session.set_selection(Selection::caret(Position { element: 1, offset: 0 })).ok()?;
+        app.reconcile_body_active_group();
+        Some(app)
+    }
+
+    fn app_with_imported_cue_only_group() -> Option<ScriptCraftApp> {
+        let mut app = ScriptCraftApp::new().ok()?;
+        let source = include_str!("../../../crates/scriptcraft-core/tests/fixtures/dual_dialogue_empty_sides.fdx");
+        let mut project = read_v6(source.as_bytes()).ok()?.project;
+        let group = project.dual_dialogue_groups.iter().find(|group| group.left.paragraphs.is_empty() && group.right.paragraphs.is_empty())?.clone();
+        let member_index = project.elements.iter().position(|element| element.id == group.left.character)?;
+        app.session = EditingSession::new(project).ok()?;
+        app.surface_focused = true;
+        app.session.set_selection(Selection::caret(Position { element: member_index, offset: 0 })).ok()?;
+        app.reconcile_body_active_group();
+        Some(app)
+    }
+
+    #[test]
+    fn scheduled_derived_refresh_uses_flat_dual_cues_without_wrapper_participation() {
+        let source = include_str!("../../../crates/scriptcraft-core/tests/fixtures/dual_dialogue_basic.fdx")
+            .replace(
+                "  <Content>",
+                "  <Content>\n    <Paragraph Type=\"Scene Heading\" id=\"scheduled-scene\"><Text>INT. ROOM - DAY</Text><SceneProperties Length=\"1/8\" Page=\"1\" Title=\"\"><SceneArcBeats/></SceneProperties></Paragraph>\n    <Paragraph Type=\"Cast List\" id=\"scheduled-cast\"><Text>(STALE)</Text></Paragraph>",
+            );
+        let imported = read_v6(source.as_bytes());
+        assert!(imported.is_ok(), "scheduled refresh fixture imports");
+        let Ok(imported) = imported else { return };
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        let Ok(session) = EditingSession::new(imported.project) else { return };
+        app.session = session;
+        let original_group = app.session.project().dual_dialogue_groups[0].clone();
+        let now = Instant::now() + Duration::from_secs(2);
+        app.next_cast_list_refresh = now;
+
+        app.refresh_cast_lists_on_schedule(&egui::Context::default(), now);
+
+        assert_eq!(app.performance.derived_refresh_attempts, 1);
+        assert_eq!(app.performance.derived_refresh_completed, 1);
+        assert_eq!(app.session.project().dual_dialogue_groups, vec![original_group]);
+        assert_eq!(
+            app.session.project().elements.iter()
+                .filter(|element| element.role == Role::Character).count(),
+            2,
+        );
+        assert_eq!(
+            app.session.project().elements.iter()
+                .find(|element| element.role == Role::CastList)
+                .map(|element| element.text.as_str()),
+            Some("(MARA, NOAH)"),
+        );
+    }
+
+    #[test]
+    fn save_rebase_maps_active_group_and_failed_open_keeps_current_instance_isolated() {
+        let Some(mut app) = app_with_imported_dual_group() else { return };
+        let original_active = app.active_body_dual_dialogue_group.clone();
+        assert!(original_active.is_some());
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos()).unwrap_or_default();
+        let first = std::env::temp_dir().join(format!("scriptcraft-wo014-{nonce}-first.fdx"));
+        let second = std::env::temp_dir().join(format!("scriptcraft-wo014-{nonce}-second.fdx"));
+
+        app.save_fdx_as_at(&first, false);
+        assert_eq!(app.native_path.as_deref(), Some(first.as_path()));
+        assert_eq!(app.session.selection().focus.element, 1);
+        let active_after_first = app.active_body_dual_dialogue_group.clone();
+        assert!(active_after_first.is_some());
+        assert!(app.session.project().dual_dialogue_groups.iter()
+            .any(|group| Some(&group.id) == active_after_first.as_ref()));
+        assert!(!app.session.dirty());
+
+        app.save_native_at(&first);
+        assert_eq!(app.active_body_dual_dialogue_group, active_after_first);
+        let failed_save_session = app.session.clone();
+        let failed_save_active = app.active_body_dual_dialogue_group.clone();
+        let failed_save_path = app.native_path.clone();
+        app.save_fdx_as_at(&first, false);
+        assert_eq!(app.session, failed_save_session);
+        assert_eq!(app.active_body_dual_dialogue_group, failed_save_active);
+        assert_eq!(app.native_path, failed_save_path);
+        app.save_fdx_as_at(&second, false);
+        assert_eq!(app.native_path.as_deref(), Some(second.as_path()));
+        assert!(app.active_body_dual_dialogue_group.as_ref().is_some_and(|id| {
+            app.session.project().dual_dialogue_groups.iter().any(|group| &group.id == id)
+        }));
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+
+        let preserved_session = app.session.clone();
+        let preserved_active = app.active_body_dual_dialogue_group.clone();
+        let preserved_path = app.native_path.clone();
+        let missing = std::env::temp_dir().join(format!("scriptcraft-wo014-{nonce}-missing.fdx"));
+        assert!(!app.open_staged_native_at(&missing));
+        assert_eq!(app.session, preserved_session);
+        assert_eq!(app.active_body_dual_dialogue_group, preserved_active);
+        assert_eq!(app.native_path, preserved_path);
+        assert_eq!(app.session.project().dual_dialogue_groups.len(), 1);
+        assert!(!app.session.dirty());
+    }
+
+    #[test]
+    fn save_as_rebase_maps_active_cue_only_group_from_complete_real_member_evidence() {
+        let Some(mut app) = app_with_imported_cue_only_group() else { return };
+        let before = app.session.project().clone();
+        let old_group = before.dual_dialogue_groups.iter().find(|group| group.left.paragraphs.is_empty() && group.right.paragraphs.is_empty()).cloned();
+        assert!(old_group.is_some());
+        let Some(old_group) = old_group else { return };
+        assert_eq!(old_group.member_ids().count(), 2);
+        assert_eq!(app.active_body_dual_dialogue_group.as_ref(), Some(&old_group.id));
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or_default();
+        let destination = std::env::temp_dir().join(format!("scriptcraft-cue-only-rebase-{nonce}.fdx"));
+        app.save_fdx_as_at(&destination, false);
+        assert_eq!(app.native_path.as_deref(), Some(destination.as_path()));
+        let active_after = app.active_body_dual_dialogue_group.clone();
+        assert!(active_after.is_some());
+        assert!(app.session.project().dual_dialogue_groups.iter().any(|group| {
+            Some(&group.id) == active_after.as_ref()
+                && group.member_ids().count() == 2
+                && group.left.paragraphs.is_empty()
+                && group.right.paragraphs.is_empty()
+        }));
+        assert_eq!(
+            app.session.project().dual_dialogue_groups.iter().find(|group| Some(&group.id) == active_after.as_ref()).map(|group| group.member_ids().cloned().collect::<Vec<_>>()),
+            Some(old_group.member_ids().cloned().collect()),
+            "rebase maps both real cue identities and no placeholder",
+        );
+        assert!(!app.session.dirty());
+        let _ = std::fs::remove_file(destination);
+    }
+
+    fn enqueue_toggle(app: &mut ScriptCraftApp, origin: CommandOrigin) {
+        app.pending_commands
+            .enqueue_id(CommandId::EditorDualDialogueToggle, origin);
+    }
+
+    #[test]
+    fn shared_availability_rechecks_collapsed_body_target_and_rejects_title_focus() {
+        let Some(mut app) = app_with_toggle_target() else { return };
+        assert!(app
+            .app_command_availability()
+            .is_enabled(CommandId::EditorDualDialogueToggle));
+
+        assert!(app
+            .session
+            .set_selection(Selection {
+                anchor: Position { element: 0, offset: 0 },
+                focus: Position { element: 0, offset: 1 },
+            })
+            .is_ok());
+        assert!(!app
+            .app_command_availability()
+            .is_enabled(CommandId::EditorDualDialogueToggle));
+
+        assert!(app
+            .session
+            .set_selection(Selection::caret(Position { element: 0, offset: 0 }))
+            .is_ok());
+        app.set_active_editor_surface(EditorSurface::TitlePage);
+        assert!(!app
+            .app_command_availability()
+            .is_enabled(CommandId::EditorDualDialogueToggle));
+    }
+
+    #[test]
+    fn fifo_dispatch_executes_one_typed_activation_and_undoes_as_one_history_step() {
+        let Some(mut app) = app_with_toggle_target() else { return };
+        let context = egui::Context::default();
+        let mut pending = PendingDesktopCommands::default();
+        pending.enqueue_id(CommandId::EditorDualDialogueToggle, CommandOrigin::Menu);
+        app.pending_commands = pending;
+        app.dispatch_pending_commands(&context);
+
+        assert_eq!(app.session.project().dual_dialogue_groups.len(), 1);
+        assert!(app.session.can_undo());
+        let undone = app.dispatch_command(
+            CommandInvocation::new(Command::EditUndo, CommandOrigin::Menu),
+            &context,
+        );
+        assert_eq!(
+            undone.outcome,
+            DesktopCommandOutcome::Editor(CommandOutcome::Changed),
+        );
+        assert!(app.session.project().dual_dialogue_groups.is_empty());
+        let second_undo = app.dispatch_command(
+            CommandInvocation::new(Command::EditUndo, CommandOrigin::Menu),
+            &context,
+        );
+        assert_eq!(
+            second_undo.outcome,
+            DesktopCommandOutcome::Unavailable(super::DesktopUnavailableReason::UndoHistory),
+        );
+    }
+
+    #[test]
+    fn queued_toggle_refreshes_availability_and_pdf_modal_blocks_mutation() {
+        let Some(mut app) = app_with_toggle_target() else { return };
+        let context = egui::Context::default();
+        let mut pending = PendingDesktopCommands::default();
+        pending.enqueue_id(CommandId::EditorDualDialogueToggle, CommandOrigin::NativeMenu);
+        app.pending_commands = pending;
+        assert!(app
+            .session
+            .set_selection(Selection {
+                anchor: Position { element: 0, offset: 0 },
+                focus: Position { element: 0, offset: 1 },
+            })
+            .is_ok());
+        let stale_baseline = app.session.clone();
+        app.dispatch_pending_commands(&context);
+        assert_eq!(app.session, stale_baseline);
+        assert!(!app.session.can_undo());
+
+        assert!(app
+            .session
+            .set_selection(Selection::caret(Position { element: 0, offset: 0 }))
+            .is_ok());
+        let opened = app.dispatch_command(
+            CommandInvocation::new(Command::FileSaveAsPdf, CommandOrigin::Menu),
+            &context,
+        );
+        assert!(matches!(opened.outcome, DesktopCommandOutcome::EffectDispatched));
+        let modal_baseline = app.session.clone();
+        let blocked = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorDualDialogueToggle,
+                CommandOrigin::Shortcut,
+            ),
+            &context,
+        );
+        assert_eq!(
+            blocked.outcome,
+            DesktopCommandOutcome::Unavailable(super::DesktopUnavailableReason::ModalBlocked),
+        );
+        assert_eq!(app.session, modal_baseline);
+    }
+
+    #[test]
+    fn native_and_shortcut_activations_use_the_shared_fifo_dispatcher_once() {
+        for origin in [CommandOrigin::NativeMenu, CommandOrigin::Shortcut] {
+            let Some(mut app) = app_with_toggle_target() else { return };
+            let context = egui::Context::default();
+            enqueue_toggle(&mut app, origin);
+            app.dispatch_pending_commands(&context);
+            assert_eq!(app.session.project().dual_dialogue_groups.len(), 1);
+            assert!(app.session.can_undo());
+        }
+    }
+
+    #[test]
+    fn semantic_toggle_dispatch_restores_focus_to_the_body_editor() {
+        let Some(mut app) = app_with_toggle_target() else { return };
+        let context = egui::Context::default();
+        let editor_id = egui::Id::new("dual-dialogue-focus-restoration-body-editor");
+        app.editor_surface_id = Some(editor_id);
+
+        let dispatched = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorDualDialogueToggle,
+                CommandOrigin::Menu,
+            ),
+            &context,
+        );
+
+        assert_eq!(
+            dispatched.outcome,
+            DesktopCommandOutcome::Editor(CommandOutcome::Changed),
+        );
+        assert!(context.memory(|memory| memory.has_focus(editor_id)));
+    }
+
+    #[test]
+    fn body_group_activation_tracks_enable_disable_undo_and_redo_without_history_state() {
+        let Some(mut app) = app_with_toggle_target() else { return };
+        let context = egui::Context::default();
+        app.surface_focused = true;
+        let enabled = app.dispatch_command(
+            CommandInvocation::new(Command::EditorDualDialogueToggle, CommandOrigin::Menu),
+            &context,
+        );
+        assert_eq!(
+            enabled.outcome,
+            DesktopCommandOutcome::Editor(CommandOutcome::Changed),
+        );
+        let restored_group_id = app
+            .session
+            .project()
+            .dual_dialogue_groups
+            .first()
+            .map(|group| group.id.clone());
+        assert_eq!(app.active_body_dual_dialogue_group, restored_group_id);
+
+        let undo = app.dispatch_command(
+            CommandInvocation::new(Command::EditUndo, CommandOrigin::Menu),
+            &context,
+        );
+        assert_eq!(undo.outcome, DesktopCommandOutcome::Editor(CommandOutcome::Changed));
+        assert!(app.session.project().dual_dialogue_groups.is_empty());
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+
+        let redo = app.dispatch_command(
+            CommandInvocation::new(Command::EditRedo, CommandOrigin::Menu),
+            &context,
+        );
+        assert_eq!(redo.outcome, DesktopCommandOutcome::Editor(CommandOutcome::Changed));
+        assert_eq!(
+            app.session.project().dual_dialogue_groups.first().map(|group| &group.id),
+            restored_group_id.as_ref(),
+        );
+        assert_eq!(app.active_body_dual_dialogue_group, restored_group_id);
+
+        let disabled = app.dispatch_command(
+            CommandInvocation::new(Command::EditorDualDialogueToggle, CommandOrigin::Menu),
+            &context,
+        );
+        assert_eq!(
+            disabled.outcome,
+            DesktopCommandOutcome::Editor(CommandOutcome::Changed),
+        );
+        assert!(app.session.project().dual_dialogue_groups.is_empty());
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+    }
+
+    #[test]
+    fn accepted_pointer_selection_uses_focus_for_group_entry_and_click_away() {
+        let Some(mut app) = app_with_toggle_target_and_outside_action() else { return };
+        let context = egui::Context::default();
+        app.surface_focused = true;
+        app.dispatch_command(
+            CommandInvocation::new(Command::EditorDualDialogueToggle, CommandOrigin::Menu),
+            &context,
+        );
+        let group_id = app.active_body_dual_dialogue_group.clone();
+        assert!(group_id.is_some());
+
+        let outside = app.execute_navigation_selection(
+            Selection::caret(Position { element: 4, offset: 0 }),
+            EditorSurface::Body,
+            false,
+            &context,
+        );
+        assert_eq!(outside, DesktopCommandOutcome::Editor(CommandOutcome::Changed));
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+
+        let noncollapsed_with_group_focus = Selection {
+            anchor: Position { element: 4, offset: 0 },
+            focus: Position { element: 0, offset: 0 },
+        };
+        app.preferred_vertical_x = Some(37);
+        app.rendered_revision = Some(app.session.revision());
+        app.page_scale = Some(1.25);
+        let entered = app.execute_navigation_selection(
+            noncollapsed_with_group_focus,
+            EditorSurface::Body,
+            false,
+            &context,
+        );
+        assert_eq!(entered, DesktopCommandOutcome::Editor(CommandOutcome::Changed));
+        assert_eq!(app.active_body_dual_dialogue_group, group_id);
+        assert_eq!(app.preferred_vertical_x, None);
+        assert_eq!(app.rendered_revision, None);
+        assert_eq!(app.page_scale, None);
+        assert_eq!(app.reveal_intent, crate::RevealIntent::Conditional);
+        let active_layout = app.layout_for_render(EditorSurface::Body);
+        assert!(active_layout.is_ok_and(|layout| {
+            layout.active_group_id == app.active_body_dual_dialogue_group
+        }));
+    }
+
+    #[test]
+    fn automatic_pattern_unwrap_deactivates_the_group_and_failed_commands_do_not_activate() {
+        let Some(mut app) = app_with_toggle_target() else { return };
+        let context = egui::Context::default();
+        app.surface_focused = true;
+        app.dispatch_command(
+            CommandInvocation::new(Command::EditorDualDialogueToggle, CommandOrigin::Menu),
+            &context,
+        );
+        assert!(app.active_body_dual_dialogue_group.is_some());
+        let selection = app.execute_navigation_selection(
+            Selection::caret(Position { element: 1, offset: 0 }),
+            EditorSurface::Body,
+            false,
+            &context,
+        );
+        assert_eq!(selection, DesktopCommandOutcome::Editor(CommandOutcome::Changed));
+        let changed_role = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorElementChange {
+                    role: scriptcraft_commands::RoleValue::new(Role::Action),
+                    surface: EditorSurface::Body,
+                },
+                CommandOrigin::Menu,
+            ),
+            &context,
+        );
+        assert!(matches!(
+            changed_role.outcome,
+            DesktopCommandOutcome::Editor(CommandOutcome::Changed)
+        ));
+        assert!(app.session.project().dual_dialogue_groups.is_empty());
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+
+        app.set_active_body_group(None);
+        let noncollapsed = Selection {
+            anchor: Position { element: 0, offset: 0 },
+            focus: Position { element: 1, offset: 1 },
+        };
+        let Ok(selection) = scriptcraft_commands::Selection::from_core(noncollapsed) else { return };
+        let selected = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorSelectionSet {
+                    selection,
+                    surface: EditorSurface::Body,
+                },
+                CommandOrigin::Pointer,
+            ),
+            &context,
+        );
+        assert_eq!(selected.outcome, DesktopCommandOutcome::Editor(CommandOutcome::Changed));
+        let unavailable = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorDualDialogueToggle,
+                CommandOrigin::Menu,
+            ),
+            &context,
+        );
+        assert!(matches!(unavailable.outcome, DesktopCommandOutcome::Unavailable(_)));
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+    }
+
+    #[test]
+    fn focus_loss_title_surface_and_pdf_options_clear_only_transient_body_presentation() {
+        let Some(mut app) = app_with_toggle_target() else { return };
+        let context = egui::Context::default();
+        app.surface_focused = true;
+        app.dispatch_command(
+            CommandInvocation::new(Command::EditorDualDialogueToggle, CommandOrigin::Menu),
+            &context,
+        );
+        let semantic_baseline = app.session.clone();
+        let active_id = app.active_body_dual_dialogue_group.clone();
+        assert!(active_id.is_some());
+
+        app.surface_focused = false;
+        app.reconcile_body_active_group();
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+        assert_eq!(app.session, semantic_baseline);
+
+        app.surface_focused = true;
+        app.reconcile_body_active_group();
+        assert_eq!(app.active_body_dual_dialogue_group, active_id);
+        app.set_active_editor_surface(EditorSurface::TitlePage);
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+        app.swap_title_view_state();
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+        app.swap_title_view_state();
+        app.set_active_editor_surface(EditorSurface::Body);
+        app.surface_focused = true;
+        app.reconcile_body_active_group();
+        assert_eq!(app.active_body_dual_dialogue_group, active_id);
+
+        let revision = app.session.revision();
+        let dirty = app.session.dirty();
+        let history = (app.session.can_undo(), app.session.can_redo());
+        app.export_pdf();
+        assert!(app.pdf_export_options.is_open());
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+        assert_eq!(app.session.revision(), revision);
+        assert_eq!(app.session.dirty(), dirty);
+        assert_eq!((app.session.can_undo(), app.session.can_redo()), history);
+    }
+
+    #[test]
+    fn document_replacement_drops_the_old_active_identity_and_print_layout_has_no_boundaries() {
+        let Some(mut app) = app_with_toggle_target() else { return };
+        let context = egui::Context::default();
+        app.surface_focused = true;
+        app.dispatch_command(
+            CommandInvocation::new(Command::EditorDualDialogueToggle, CommandOrigin::Menu),
+            &context,
+        );
+        let old_group_id = app.active_body_dual_dialogue_group.clone();
+        assert!(old_group_id.is_some());
+        let body_layout = app.layout_for_render(EditorSurface::Body);
+        assert!(body_layout.is_ok());
+        assert!(body_layout.is_ok_and(|layout| !layout.editor_group_boundaries.is_empty()));
+
+        let print_layout = app
+            .layout_cache
+            .get_or_build_with_composition(
+                app.session.revision(),
+                app.session.project(),
+                app.session.layout_inputs(),
+                scriptcraft_core::layout::LayoutComposition::Print {
+                    include_title_page: false,
+                },
+            );
+        assert!(print_layout.is_ok_and(|(layout, _)| {
+            layout.active_group_id.is_none() && layout.editor_group_boundaries.is_empty()
+        }));
+
+        let replacement = Project::new();
+        assert!(replacement.is_ok());
+        let Some(replacement) = replacement.ok() else { return };
+        let text_state = app.root_text_state();
+        assert!(app.activate_opened_project(
+            replacement,
+            std::path::Path::new("replacement.fdx"),
+            None,
+            None,
+            None,
+            text_state,
+        ));
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+        assert!(app.session.project().dual_dialogue_groups.is_empty());
+        assert!(!app.surface_focused);
+    }
+}
+
+#[cfg(test)]
+mod dual_dialogue_navigation_dispatch_tests {
+    use super::{CommandInvocation, DesktopCommandOutcome};
+    use crate::{RevealIntent, ScriptCraftApp};
+    use eframe::egui;
+    use scriptcraft_commands::{
+        Command, CommandOrigin, CommandOutcome, EditorSurface, HorizontalDirection, LineEdge,
+        VerticalDirection,
+    };
+    use scriptcraft_core::dual_dialogue::{DualDialogueGroup, DualDialogueSide, DualDialogueWrapperProvenance};
+    use scriptcraft_core::editing::{EditingSession, Position, Selection};
+    use scriptcraft_core::{Project, Role, ScreenplayElement};
+
+    fn navigation_app(right_text: &str) -> Option<ScriptCraftApp> {
+        let mut app = ScriptCraftApp::new().ok()?;
+        let mut project = Project::new().ok()?;
+        project.elements = [
+            (Role::Action, "outside above"),
+            (Role::Character, "LEFT CUE"),
+            (Role::Dialogue, "a fairly long left-side line"),
+            (Role::Character, "RIGHT CUE"),
+            (Role::Dialogue, right_text),
+            (Role::Action, "outside below"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (role, text))| {
+            ScreenplayElement::new(format!("navigation-member-{index}"), role, text).ok()
+        })
+        .collect::<Option<Vec<_>>>()?;
+        app.session = EditingSession::new(project).ok()?;
+        app.surface_focused = true;
+        app.session
+            .set_selection(Selection::caret(Position { element: 1, offset: 0 }))
+            .ok()?;
+        let toggled = app.dispatch_command(
+            CommandInvocation::new(Command::EditorDualDialogueToggle, CommandOrigin::Menu),
+            &egui::Context::default(),
+        );
+        matches!(
+            toggled.outcome,
+            DesktopCommandOutcome::Editor(CommandOutcome::Changed)
+        )
+        .then_some(app)
+    }
+
+    fn cue_only_navigation_app() -> Option<ScriptCraftApp> {
+        let mut app = ScriptCraftApp::new().ok()?;
+        let mut project = Project::new().ok()?;
+        project.elements = [
+            (Role::Action, "outside above"),
+            (Role::Character, "LEFT CUE"),
+            (Role::Character, "RIGHT é"),
+            (Role::Action, "outside below"),
+        ].into_iter().enumerate().map(|(index, (role, text))| {
+            ScreenplayElement::new(format!("cue-only-navigation-{index}"), role, text).ok()
+        }).collect::<Option<Vec<_>>>()?;
+        project.dual_dialogue_groups.push(DualDialogueGroup {
+            id: scriptcraft_core::StableId::new("cue-only-navigation-group").ok()?,
+            left: DualDialogueSide { character: project.elements[1].id.clone(), paragraphs: Vec::new() },
+            right: DualDialogueSide { character: project.elements[2].id.clone(), paragraphs: Vec::new() },
+            wrapper: DualDialogueWrapperProvenance::default(),
+        });
+        app.session = EditingSession::new(project).ok()?;
+        app.surface_focused = true;
+        Some(app)
+    }
+
+    fn navigation_app_with_adjacent_groups() -> Option<ScriptCraftApp> {
+        let mut app = ScriptCraftApp::new().ok()?;
+        let mut project = Project::new().ok()?;
+        project.elements = [
+            (Role::Action, "outside"),
+            (Role::Character, "LEFT ONE"),
+            (Role::Dialogue, "left one"),
+            (Role::Character, "RIGHT ONE"),
+            (Role::Dialogue, "right one"),
+            (Role::Character, "LEFT TWO"),
+            (Role::Dialogue, "left two"),
+            (Role::Character, "RIGHT TWO"),
+            (Role::Dialogue, "right two"),
+            (Role::Action, "after"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (role, text))| {
+            ScreenplayElement::new(format!("adjacent-navigation-{index}"), role, text).ok()
+        })
+        .collect::<Option<Vec<_>>>()?;
+        app.session = EditingSession::new(project).ok()?;
+        app.surface_focused = true;
+        let context = egui::Context::default();
+        app.session
+            .set_selection(Selection::caret(Position { element: 1, offset: 0 }))
+            .ok()?;
+        let first = app.dispatch_command(
+            CommandInvocation::new(Command::EditorDualDialogueToggle, CommandOrigin::Menu),
+            &context,
+        );
+        if !matches!(first.outcome, DesktopCommandOutcome::Editor(CommandOutcome::Changed)) {
+            return None;
+        }
+        app.session
+            .set_selection(Selection::caret(Position { element: 5, offset: 0 }))
+            .ok()?;
+        let second = app.dispatch_command(
+            CommandInvocation::new(Command::EditorDualDialogueToggle, CommandOrigin::Menu),
+            &context,
+        );
+        matches!(second.outcome, DesktopCommandOutcome::Editor(CommandOutcome::Changed))
+            .then_some(app)
+    }
+
+    fn select(app: &mut ScriptCraftApp, selection: Selection, context: &egui::Context) {
+        let _ = app.execute_navigation_selection(
+            selection,
+            EditorSurface::Body,
+            false,
+            context,
+        );
+    }
+
+    fn navigate_vertical(
+        app: &mut ScriptCraftApp,
+        direction: VerticalDirection,
+        extend: bool,
+        context: &egui::Context,
+    ) -> DesktopCommandOutcome {
+        app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorNavigationVertical {
+                    direction,
+                    extend,
+                    surface: EditorSurface::Body,
+                },
+                CommandOrigin::Shortcut,
+            ),
+            context,
+        )
+        .outcome
+    }
+
+    fn navigate_horizontal(
+        app: &mut ScriptCraftApp,
+        direction: HorizontalDirection,
+        extend: bool,
+        context: &egui::Context,
+    ) -> DesktopCommandOutcome {
+        app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorNavigationHorizontal {
+                    direction,
+                    extend,
+                    surface: EditorSurface::Body,
+                },
+                CommandOrigin::Shortcut,
+            ),
+            context,
+        )
+        .outcome
+    }
+
+    #[test]
+    fn vertical_entry_uses_group_edges_for_equal_y_columns_and_reveals_after_activation() {
+        let Some(mut app) = navigation_app("右é") else { return };
+        let context = egui::Context::default();
+        select(
+            &mut app,
+            Selection::caret(Position { element: 0, offset: 0 }),
+            &context,
+        );
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+        let Ok(layout) = app.layout_for_render(EditorSurface::Body) else { return };
+        let left_cue = layout.pages.iter().flat_map(|page| &page.lines).find(|line| line.element == 1);
+        let right_cue = layout.pages.iter().flat_map(|page| &page.lines).find(|line| line.element == 3);
+        if let (Some(left), Some(right)) = (left_cue, right_cue) {
+            assert_eq!(left.geometry.y, right.geometry.y);
+        }
+        app.preferred_vertical_x = Some(991);
+
+        assert!(matches!(
+            navigate_vertical(&mut app, VerticalDirection::Down, false, &context),
+            DesktopCommandOutcome::Editor(CommandOutcome::Changed)
+                | DesktopCommandOutcome::Editor(CommandOutcome::NoOp)
+        ));
+        assert_eq!(app.session.selection().focus, Position { element: 1, offset: 0 });
+        assert!(app.active_body_dual_dialogue_group.is_some());
+        assert_eq!(app.preferred_vertical_x, None);
+        assert_eq!(app.reveal_intent, RevealIntent::Conditional);
+
+        let Some(mut app) = navigation_app("右é") else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 5, offset: 0 }),
+            &context,
+        );
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+        assert!(matches!(
+            navigate_vertical(&mut app, VerticalDirection::Up, false, &context),
+            DesktopCommandOutcome::Editor(CommandOutcome::Changed)
+                | DesktopCommandOutcome::Editor(CommandOutcome::NoOp)
+        ));
+        assert_eq!(
+            app.session.selection().focus,
+            Position { element: 4, offset: "右é".len() },
+        );
+        assert!(app.active_body_dual_dialogue_group.is_some());
+
+        let Some(mut app) = navigation_app("") else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 5, offset: 0 }),
+            &context,
+        );
+        let _ = navigate_vertical(&mut app, VerticalDirection::Up, false, &context);
+        assert_eq!(app.session.selection().focus, Position { element: 4, offset: 0 });
+    }
+
+    #[test]
+    fn cue_only_navigation_enters_from_both_edges_and_uses_utf8_right_cue_end() {
+        let context = egui::Context::default();
+        let Some(mut app) = cue_only_navigation_app() else { return };
+        select(&mut app, Selection::caret(Position { element: 0, offset: 0 }), &context);
+        assert!(matches!(navigate_vertical(&mut app, VerticalDirection::Down, false, &context), DesktopCommandOutcome::Editor(CommandOutcome::Changed | CommandOutcome::NoOp)));
+        assert_eq!(app.session.selection().focus, Position { element: 1, offset: 0 });
+        assert!(app.active_body_dual_dialogue_group.is_some());
+
+        let Some(mut app) = cue_only_navigation_app() else { return };
+        select(&mut app, Selection::caret(Position { element: 3, offset: 0 }), &context);
+        assert!(matches!(navigate_vertical(&mut app, VerticalDirection::Up, false, &context), DesktopCommandOutcome::Editor(CommandOutcome::Changed | CommandOutcome::NoOp)));
+        assert_eq!(app.session.selection().focus, Position { element: 2, offset: "RIGHT é".len() });
+        assert!(app.active_body_dual_dialogue_group.is_some());
+
+        let Some(mut app) = cue_only_navigation_app() else { return };
+        select(&mut app, Selection::caret(Position { element: 0, offset: "outside above".len() }), &context);
+        let _ = navigate_horizontal(&mut app, HorizontalDirection::Right, false, &context);
+        assert_eq!(app.session.selection().focus, Position { element: 1, offset: 0 });
+        let Some(mut app) = cue_only_navigation_app() else { return };
+        select(&mut app, Selection::caret(Position { element: 3, offset: 0 }), &context);
+        let _ = navigate_horizontal(&mut app, HorizontalDirection::Left, false, &context);
+        assert_eq!(app.session.selection().focus, Position { element: 2, offset: "RIGHT é".len() });
+    }
+
+    #[test]
+    fn vertical_and_horizontal_exits_resume_columns_and_horizontal_entry_uses_nearest_edge() {
+        let context = egui::Context::default();
+
+        let Some(mut app) = navigation_app("right") else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 1, offset: 0 }),
+            &context,
+        );
+        app.preferred_vertical_x = Some(100);
+        let _ = navigate_vertical(&mut app, VerticalDirection::Up, false, &context);
+        assert_eq!(app.session.selection().focus.element, 0);
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+        assert_eq!(app.preferred_vertical_x, None);
+
+        let Some(mut app) = navigation_app("right") else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 4, offset: 5 }),
+            &context,
+        );
+        let _ = navigate_vertical(&mut app, VerticalDirection::Down, false, &context);
+        assert_eq!(app.session.selection().focus.element, 5);
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+
+        let Some(mut app) = navigation_app("right") else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 1, offset: 0 }),
+            &context,
+        );
+        let _ = navigate_horizontal(&mut app, HorizontalDirection::Left, false, &context);
+        assert_eq!(app.session.selection().focus, Position { element: 0, offset: "outside above".len() });
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+
+        let Some(mut app) = navigation_app("right") else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 4, offset: 5 }),
+            &context,
+        );
+        let _ = navigate_horizontal(&mut app, HorizontalDirection::Right, false, &context);
+        assert_eq!(app.session.selection().focus, Position { element: 5, offset: 0 });
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+
+        let Some(mut app) = navigation_app("right") else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 0, offset: "outside above".len() }),
+            &context,
+        );
+        let _ = navigate_horizontal(&mut app, HorizontalDirection::Right, false, &context);
+        assert_eq!(app.session.selection().focus, Position { element: 1, offset: 0 });
+        assert!(app.active_body_dual_dialogue_group.is_some());
+
+        let Some(mut app) = navigation_app("right") else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 5, offset: 0 }),
+            &context,
+        );
+        let _ = navigate_horizontal(&mut app, HorizontalDirection::Left, false, &context);
+        assert_eq!(app.session.selection().focus, Position { element: 4, offset: "right".len() });
+        assert!(app.active_body_dual_dialogue_group.is_some());
+    }
+
+    #[test]
+    fn repeated_vertical_moves_shift_focus_local_home_end_and_page_edge_goals_are_safe() {
+        let Some(mut app) = navigation_app("short") else { return };
+        let context = egui::Context::default();
+        select(
+            &mut app,
+            Selection::caret(Position { element: 1, offset: 3 }),
+            &context,
+        );
+        let _ = navigate_vertical(&mut app, VerticalDirection::Down, false, &context);
+        let preferred = app.preferred_vertical_x;
+        assert!(preferred.is_some());
+        let _ = navigate_vertical(&mut app, VerticalDirection::Down, false, &context);
+        assert_eq!(app.preferred_vertical_x, preferred);
+        let focus = app.session.selection().focus;
+        let text = &app.session.project().elements[focus.element].text;
+        assert!(focus.offset <= text.len() && text.is_char_boundary(focus.offset));
+
+        let current = app.session.selection().focus;
+        let start = app.navigation_selection_line_edge(LineEdge::Start, true);
+        assert_eq!(start.anchor, app.session.selection().anchor);
+        assert_eq!(start.focus, Position { element: current.element, offset: 0 });
+        let end = app.navigation_selection_line_edge(LineEdge::End, true);
+        assert_eq!(end.focus.element, current.element);
+        assert_eq!(end.focus.offset, app.session.project().elements[current.element].text.len());
+
+        let Some(mut app) = navigation_app("right") else { return };
+        select(
+            &mut app,
+            Selection {
+                anchor: Position { element: 0, offset: 0 },
+                focus: Position { element: 0, offset: "outside above".len() },
+            },
+            &context,
+        );
+        let _ = navigate_vertical(&mut app, VerticalDirection::Down, true, &context);
+        assert_eq!(app.session.selection().anchor, Position { element: 0, offset: 0 });
+        assert_eq!(app.session.selection().focus, Position { element: 1, offset: 0 });
+        assert!(app.active_body_dual_dialogue_group.is_some());
+
+        let Some(mut app) = navigation_app("right") else { return };
+        select(
+            &mut app,
+            Selection {
+                anchor: Position { element: 4, offset: 5 },
+                focus: Position { element: 1, offset: 0 },
+            },
+            &context,
+        );
+        let _ = navigate_vertical(&mut app, VerticalDirection::Up, true, &context);
+        assert_eq!(app.session.selection().anchor, Position { element: 4, offset: 5 });
+        assert_eq!(app.session.selection().focus.element, 0);
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+
+        let Some(mut app) = navigation_app("right") else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 5, offset: "outside below".len() }),
+            &context,
+        );
+        app.preferred_vertical_x = Some(300);
+        let _ = app.navigation_selection_vertical(VerticalDirection::Down, false);
+        assert_eq!(app.preferred_vertical_x, None);
+        assert_eq!(app.session.selection().focus.element, 5);
+    }
+
+    #[test]
+    fn final_right_enter_and_pattern_unwrap_reconcile_active_mode_without_navigation_edits() {
+        let Some(mut app) = navigation_app("right") else { return };
+        let context = egui::Context::default();
+        select(
+            &mut app,
+            Selection::caret(Position { element: 4, offset: "right".len() }),
+            &context,
+        );
+        let enter = app.dispatch_command(
+            CommandInvocation::new(Command::EditorParagraphEnter, CommandOrigin::Shortcut),
+            &context,
+        );
+        assert!(matches!(
+            enter.outcome,
+            DesktopCommandOutcome::Editor(CommandOutcome::Changed)
+        ));
+        assert_eq!(app.session.project().dual_dialogue_groups.len(), 1);
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+        let focus = app.session.selection().focus;
+        assert!(scriptcraft_core::dual_dialogue::group_at_element_index(
+            app.session.project(),
+            focus.element,
+        )
+        .is_none());
+
+        let Some(mut app) = navigation_app("right") else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 2, offset: 0 }),
+            &context,
+        );
+        let changed = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorElementChange {
+                    role: scriptcraft_commands::RoleValue::new(Role::Action),
+                    surface: EditorSurface::Body,
+                },
+                CommandOrigin::Menu,
+            ),
+            &context,
+        );
+        assert!(matches!(changed.outcome, DesktopCommandOutcome::Editor(CommandOutcome::Changed)));
+        assert!(app.session.project().dual_dialogue_groups.is_empty());
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+    }
+
+    #[test]
+    fn adjacent_groups_enter_at_the_directional_edge_and_internal_enter_retains_activation() {
+        let context = egui::Context::default();
+        let Some(mut app) = navigation_app_with_adjacent_groups() else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 4, offset: "right one".len() }),
+            &context,
+        );
+        let second_group = scriptcraft_core::dual_dialogue::group_at_element_index(
+            app.session.project(),
+            5,
+        )
+        .map(|group| group.id.clone());
+        let _ = navigate_vertical(&mut app, VerticalDirection::Down, false, &context);
+        assert_eq!(app.session.selection().focus, Position { element: 5, offset: 0 });
+        assert_eq!(app.active_body_dual_dialogue_group, second_group);
+
+        let Some(mut app) = navigation_app_with_adjacent_groups() else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 4, offset: "right one".len() }),
+            &context,
+        );
+        let _ = navigate_horizontal(&mut app, HorizontalDirection::Right, false, &context);
+        assert_eq!(app.session.selection().focus, Position { element: 5, offset: 0 });
+        assert!(app.active_body_dual_dialogue_group.is_some());
+
+        let Some(mut app) = navigation_app("right") else { return };
+        select(
+            &mut app,
+            Selection::caret(Position { element: 2, offset: 2 }),
+            &context,
+        );
+        let internal_enter = app.dispatch_command(
+            CommandInvocation::new(Command::EditorParagraphEnter, CommandOrigin::Shortcut),
+            &context,
+        );
+        assert!(matches!(
+            internal_enter.outcome,
+            DesktopCommandOutcome::Editor(CommandOutcome::Changed)
+        ));
+        assert!(app.active_body_dual_dialogue_group.is_some());
+        assert!(scriptcraft_core::dual_dialogue::group_at_element_index(
+            app.session.project(),
+            app.session.selection().focus.element,
+        )
+        .is_some());
+    }
 }

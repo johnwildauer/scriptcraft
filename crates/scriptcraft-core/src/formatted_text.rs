@@ -772,7 +772,7 @@ pub fn toggle_paragraph_run_style(
     };
     if !range.is_empty() {
         if let Some(preservation) = candidate.preservation.as_ref() {
-            preservation.ensure_run_range_is_contiguous(&id)?;
+            preservation.ensure_run_range_is_contiguous(&id, range.clone())?;
         }
     }
     let edit = toggle_style_for_range(&text, &runs, range, active_style, style)?;
@@ -849,7 +849,7 @@ pub fn toggle_paragraph_run_styles(
         };
         if !range.is_empty() {
             if let Some(preservation) = candidate.preservation.as_ref() {
-                preservation.ensure_run_range_is_contiguous(&id)?;
+                preservation.ensure_run_range_is_contiguous(&id, range.clone())?;
             }
         }
         snapshots.push((*target, text, runs, range.clone()));

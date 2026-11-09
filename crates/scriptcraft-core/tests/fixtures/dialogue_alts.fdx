@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FinalDraft DocumentType="Script" Version="6">
+  <Content>
+    <Paragraph Type="Dialogue" id="alts-ordinary">
+      <Text>ordinary </Text>
+      <Alts Current="5" vendor-inline="ordinary"><AltId Id="5"/><Choice><Text>INLINE_ALT_SENTINEL</Text></Choice></Alts>
+      <Text>canonical</Text>
+    </Paragraph>
+    <Paragraph Type="General" id="alts-wrapper">
+      <DualDialogue>
+        <SpellCheckIgnoreLists><IgnoredRanges/><IgnoredWords/></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="alts-left-cue"><Text>Left</Text></Paragraph>
+        <Paragraph Type="Character" id="alts-right-cue"><Text>Right</Text></Paragraph>
+        <Paragraph Type="Dialogue" id="alts-member">
+          <Text>member canonical</Text>
+          <Alts Current="1" vendor-inline="member"><AltId Id="1"/><Choice><Text>MEMBER_ALT_SENTINEL</Text></Choice></Alts>
+        </Paragraph>
+      </DualDialogue>
+    </Paragraph>
+  </Content>
+  <AltCollection vendor-collection="retained">
+    <Alt Id="1"><Paragraph Type="Dialogue" id="alts-member"><Text>COLLECTION_MEMBER_SENTINEL</Text></Paragraph></Alt>
+    <Alt Id="5"><Paragraph Type="Dialogue" id="alts-ordinary"><Text>COLLECTION_ORDINARY_SENTINEL</Text></Paragraph></Alt>
+    <Alt Id="6"><Paragraph Type="Dialogue" id="alts-ordinary"><Text>COLLECTION_REPEAT_SENTINEL</Text></Paragraph></Alt>
+    <Alt Id="orphan"><Paragraph Type="Dialogue" id="orphan-copy"><Text>ORPHAN_SENTINEL</Text></Paragraph></Alt>
+  </AltCollection>
+</FinalDraft>

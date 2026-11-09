@@ -3,7 +3,7 @@
 
 use scriptcraft_core::exports::{
     export_pdf, export_pdf_with_layout_inputs_and_options, export_pdf_with_options,
-    PdfExportOptions,
+    ExportError, PdfExportOptions,
 };
 use scriptcraft_core::formatted_text::set_paragraph_alignments;
 use scriptcraft_core::layout::{LayoutComposition, ScreenplayLayout};
@@ -198,4 +198,14 @@ fn non_ascii_pdf_substitution_remains_the_documented_question_mark_behavior() {
         },
     ));
     assert!(extracted_text(&pdf).contains("caf?"));
+}
+
+#[test]
+fn pdf_layout_export_api_accepts_only_the_borrowed_project_inputs_and_title_option() {
+    let _: fn(&Project, &LayoutInputs, PdfExportOptions) -> Result<Vec<u8>, ExportError> =
+        export_pdf_with_layout_inputs_and_options;
+    let options = PdfExportOptions {
+        include_title_page: false,
+    };
+    assert!(!options.include_title_page);
 }

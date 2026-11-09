@@ -49,6 +49,7 @@ pub(super) struct PagePalette {
     pub(super) selection: Color32,
     pub(super) selection_text: Color32,
     pub(super) selection_boundary: Color32,
+    pub(super) dual_dialogue_boundary: Color32,
     pub(super) caret: Color32,
     pub(super) ime_text: Color32,
 }
@@ -158,6 +159,7 @@ impl ApplicationPalette {
                 selection: Color32::from_rgb(56, 109, 177),
                 selection_text: Color32::WHITE,
                 selection_boundary: Color32::from_rgb(0, 83, 125),
+                dual_dialogue_boundary: Color32::from_rgb(142, 153, 163),
                 caret: Color32::from_rgb(20, 80, 150),
                 ime_text: Color32::from_rgb(76, 42, 122),
             },
@@ -169,6 +171,7 @@ impl ApplicationPalette {
                 selection: Color32::from_rgb(75, 117, 163),
                 selection_text: Color32::WHITE,
                 selection_boundary: Color32::from_rgb(192, 222, 255),
+                dual_dialogue_boundary: Color32::from_rgb(143, 153, 163),
                 caret: Color32::from_rgb(85, 213, 255),
                 ime_text: Color32::from_rgb(211, 194, 255),
             },
@@ -180,6 +183,7 @@ impl ApplicationPalette {
                 selection: Color32::from_rgb(75, 117, 163),
                 selection_text: Color32::WHITE,
                 selection_boundary: Color32::from_rgb(192, 222, 255),
+                dual_dialogue_boundary: Color32::from_rgb(124, 135, 146),
                 caret: Color32::from_rgb(85, 213, 255),
                 ime_text: Color32::from_rgb(211, 194, 255),
             },
@@ -503,6 +507,25 @@ pub(super) fn configure_appearance(
 mod tests {
     use super::{ApplicationPalette, ResolvedAppearance};
     use eframe::egui::{self, Color32};
+
+    #[test]
+    fn dual_dialogue_boundary_color_is_theme_owned_and_subdued_per_appearance() {
+        for (appearance, expected) in [
+            (ResolvedAppearance::Day, Color32::from_rgb(142, 153, 163)),
+            (ResolvedAppearance::Night, Color32::from_rgb(143, 153, 163)),
+            (ResolvedAppearance::Midnight, Color32::from_rgb(124, 135, 146)),
+        ] {
+            let palette = ApplicationPalette::from_visuals(
+                appearance,
+                &super::visuals_for_appearance(appearance),
+            );
+            assert_eq!(palette.script_workspace.page.dual_dialogue_boundary, expected);
+            assert_ne!(
+                palette.script_workspace.page.dual_dialogue_boundary,
+                palette.script_workspace.page.selection_boundary,
+            );
+        }
+    }
 
     #[test]
     fn toolbar_selected_fill_has_explicit_values_and_appearance_polarity() {

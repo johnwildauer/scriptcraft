@@ -4,6 +4,7 @@
 //! Dependency-free semantic screenplay model and transitional legacy JSON adapter.
 
 pub mod cast_list;
+pub mod dual_dialogue;
 pub mod editing;
 pub mod exports;
 pub mod fdx;
@@ -97,6 +98,7 @@ pub enum ModelError {
     MissingField(&'static str),
     WrongType(&'static str),
     InvalidPreservationState(preservation::PreservationError),
+    InvalidDualDialogue(dual_dialogue::DualDialogueError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -495,9 +497,13 @@ impl Default for LayoutInputs {
 pub struct Project {
     pub title_page: Vec<TitlePageParagraph>,
     pub elements: Vec<ScreenplayElement>,
+    /// Ordered semantic groups; members remain in `elements` in visible order.
+    pub dual_dialogue_groups: Vec<dual_dialogue::DualDialogueGroup>,
     /// Direct body paragraph overrides not yet backed by imported FDX source.
     /// Source-backed projects mirror these values in preservation settings.
     pub direct_paragraph_overrides: std::collections::BTreeMap<StableId, SourceParagraphOverrides>,
+    /// Outer-wrapper direct fields, keyed only by semantic wrapper identities.
+    pub dual_dialogue_paragraph_overrides: std::collections::BTreeMap<StableId, SourceParagraphOverrides>,
     /// Source-owned state is separate from the semantic projection and is not
     /// representable in transitional JSON.
     pub preservation: Option<preservation::PreservationState>,
@@ -520,7 +526,9 @@ impl Project {
         Ok(Self {
             title_page,
             elements: vec![start],
+            dual_dialogue_groups: Vec::new(),
             direct_paragraph_overrides: std::collections::BTreeMap::new(),
+            dual_dialogue_paragraph_overrides: std::collections::BTreeMap::new(),
             preservation: None,
             legacy_json_state: None,
             layout_identity: Arc::new(()),
@@ -561,6 +569,7 @@ impl Project {
             }
             element_ids.insert(item.id.clone());
         }
+        dual_dialogue::validate_groups(self).map_err(ModelError::InvalidDualDialogue)?;
         if self
             .direct_paragraph_overrides
             .keys()
@@ -568,10 +577,20 @@ impl Project {
         {
             return Err(ModelError::InvalidParagraphOverride);
         }
+        let group_ids = self.dual_dialogue_groups.iter().map(|group| group.id.clone()).collect::<BTreeSet<_>>();
+        dual_dialogue::validate_wrapper_overrides(self).map_err(ModelError::InvalidDualDialogue)?;
         if let Some(preservation) = &self.preservation {
             preservation
-                .validate_project_elements(&element_ids)
+                .validate_project_elements(&element_ids, &group_ids)
                 .map_err(ModelError::InvalidPreservationState)?;
+            for group in &self.dual_dialogue_groups {
+                let wrapper_anchor = preservation.dual_dialogue_wrapper_anchor(&group.id);
+                if wrapper_anchor.as_ref() != group.wrapper.preservation_anchor.as_ref() {
+                    return Err(ModelError::InvalidDualDialogue(dual_dialogue::DualDialogueError::InvalidWrapperOwnership));
+                }
+            }
+        } else if self.dual_dialogue_groups.iter().any(|group| group.wrapper.preservation_anchor.is_some()) {
+            return Err(ModelError::InvalidDualDialogue(dual_dialogue::DualDialogueError::InvalidWrapperOwnership));
         }
         Ok(())
     }
@@ -586,6 +605,9 @@ impl Project {
     ) -> Result<bool, ModelError> {
         if self.elements.len() != baseline.elements.len()
             || self.title_page.len() != baseline.title_page.len()
+            || self.dual_dialogue_groups != baseline.dual_dialogue_groups
+            || self.dual_dialogue_paragraph_overrides != baseline.dual_dialogue_paragraph_overrides
+            || self.direct_paragraph_overrides != baseline.direct_paragraph_overrides
             || self.legacy_json_state != baseline.legacy_json_state
             || !Arc::ptr_eq(&self.layout_identity, &baseline.layout_identity)
         {
@@ -674,6 +696,9 @@ impl Project {
         }
         for element in &self.elements {
             allocator.reserve(element.id.clone())?;
+        }
+        for group in &self.dual_dialogue_groups {
+            allocator.reserve(group.id.clone())?;
         }
         allocator.allocate("element")
     }
@@ -825,6 +850,8 @@ fn ensure_legacy_json_compatible(project: &Project) -> Result<(), ModelError> {
         .all(|element| element.legacy_projection().is_ok());
     let richer_elements = !title_compatible
         || !project.direct_paragraph_overrides.is_empty()
+        || !project.dual_dialogue_groups.is_empty()
+        || !project.dual_dialogue_paragraph_overrides.is_empty()
         || project.elements.iter().any(|element| {
             !element.role.is_legacy()
                 || !element.runs.is_empty()
@@ -1239,6 +1266,8 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
             .map(TitlePageParagraph::from_legacy_element)
             .collect::<Result<Vec<_>, _>>()?,
         elements: decode_elements(obj(envelope, "elements")?)?,
+        dual_dialogue_groups: Vec::new(),
+        dual_dialogue_paragraph_overrides: std::collections::BTreeMap::new(),
         direct_paragraph_overrides: std::collections::BTreeMap::new(),
         preservation: None,
         legacy_json_state: Some(legacy_json_state),

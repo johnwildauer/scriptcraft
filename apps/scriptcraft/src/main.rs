@@ -10,9 +10,11 @@ use scriptcraft_core::fdx::{self, FdxImportOutcome, FdxMigrationConsent, FdxVers
 use scriptcraft_core::fdx_storage::{
     self, FdxBaseline, FdxSaveMode, FdxSaveTarget, OpenedFdxSource, StdFdxStorageFileSystem,
 };
-use scriptcraft_core::layout::{LayoutCache, LayoutComposition, ScreenplayLayout};
+use scriptcraft_core::layout::{
+    BodyEditorPresentation, LayoutCache, LayoutComposition, ScreenplayLayout,
+};
 use scriptcraft_core::persistence::{FileSystem, StdFileSystem};
-use scriptcraft_core::{Project, Role};
+use scriptcraft_core::{Project, Role, StableId};
 use scriptcraft_commands::DiagnosticMessage;
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -1074,6 +1076,7 @@ struct ScriptCraftApp {
     notification_results: Receiver<(u64, NotificationResult)>,
     surface_focused: bool,
     active_editor_surface: EditorSurface,
+    active_body_dual_dialogue_group: Option<StableId>,
     title_page_window_open: bool,
     title_page_focus_requested: bool,
     title_viewport_unsupported: bool,
@@ -1177,6 +1180,7 @@ fn session_activation_failure_code(error: &EditError) -> &'static str {
         EditError::TextTooLong => "EDIT_TEXT_LIMIT",
         EditError::TooManyElements => "EDIT_ELEMENT_LIMIT",
         EditError::UnsupportedTransition { .. } => "EDIT_UNSUPPORTED_TRANSITION",
+        EditError::InlineAltsRoleChange => "EDIT_INLINE_ALTS_ROLE_CHANGE",
         EditError::Preservation(_) => "EDIT_PRESERVATION_CONSTRAINT",
         EditError::CastList(_) => "EDIT_CAST_LIST_CONSTRAINT",
         EditError::FormattedText(_) => "EDIT_FORMATTING_CONSTRAINT",
@@ -1200,6 +1204,38 @@ fn session_activation_failure_message(error: &EditError) -> String {
 }
 
 impl ScriptCraftApp {
+    fn set_active_body_group(&mut self, next: Option<StableId>) -> bool {
+        if next == self.active_body_dual_dialogue_group {
+            return false;
+        }
+        self.active_body_dual_dialogue_group = next;
+        self.preferred_vertical_x = None;
+        self.rendered_revision = None;
+        self.page_geometry.invalidate();
+        self.page_scale = None;
+        self.last_layout_identity = None;
+        true
+    }
+
+    /// Reconcile the editor-only sequential presentation from the focused Body
+    /// caret. This state is deliberately outside EditingSession and history.
+    fn reconcile_body_active_group(&mut self) -> bool {
+        let next = if self.active_editor_surface == EditorSurface::Body
+            && self.surface_focused
+            && !self.pdf_export_options.is_open()
+            && self.pending_fdx_open.is_none()
+        {
+            scriptcraft_core::dual_dialogue::group_at_element_index(
+                self.session.project(),
+                self.session.selection().focus.element,
+            )
+            .map(|group| group.id.clone())
+        } else {
+            None
+        };
+        self.set_active_body_group(next)
+    }
+
     fn set_active_editor_surface(&mut self, surface: EditorSurface) {
         if self.active_editor_surface != surface {
             if self.active_editor_surface == EditorSurface::TitlePage
@@ -1213,6 +1249,12 @@ impl ScriptCraftApp {
             self.drag_anchor = None;
             self.preferred_vertical_x = None;
             self.reveal_intent = RevealIntent::None;
+            if surface == EditorSurface::Body {
+                // Surface routing alone is not evidence that Body owns focus.
+                self.set_active_body_group(None);
+            } else {
+                self.reconcile_body_active_group();
+            }
         }
     }
 
@@ -1432,6 +1474,7 @@ impl ScriptCraftApp {
             notification_results,
             surface_focused: false,
             active_editor_surface: EditorSurface::Body,
+            active_body_dual_dialogue_group: None,
             title_page_window_open: false,
             title_page_focus_requested: false,
             title_viewport_unsupported: false,
@@ -1671,16 +1714,32 @@ impl ScriptCraftApp {
         let revision = self.session.revision();
         let started = Instant::now();
         let composition = editor_layout_composition(surface);
+        if surface == EditorSurface::Body {
+            self.reconcile_body_active_group();
+        }
         let cache = match surface {
             EditorSurface::Body => &mut self.layout_cache,
             EditorSurface::TitlePage => &mut self.title_layout_cache,
         };
-        let (layout, hit) = cache.get_or_build_with_composition(
-            revision,
-            self.session.project(),
-            self.session.layout_inputs(),
-            composition,
-        )?;
+        let (layout, hit) = if surface == EditorSurface::Body {
+            let presentation = BodyEditorPresentation::for_project(
+                self.session.project(),
+                self.active_body_dual_dialogue_group.clone(),
+            );
+            cache.get_or_build_body_editor(
+                revision,
+                self.session.project(),
+                self.session.layout_inputs(),
+                &presentation,
+            )?
+        } else {
+            cache.get_or_build_with_composition(
+                revision,
+                self.session.project(),
+                self.session.layout_inputs(),
+                composition,
+            )?
+        };
         add_performance_nanos(
             &mut self.performance.layout_lookup_nanos,
             started.elapsed().as_nanos(),
@@ -1775,6 +1834,8 @@ impl ScriptCraftApp {
             .clone()
             .map(FdxSaveTarget::from_baseline)
             .unwrap_or_else(FdxSaveTarget::new_unsaved);
+        let before_save_project = self.session.project().clone();
+        let active_before_save = self.active_body_dual_dialogue_group.clone();
         let text_state = self.root_text_state();
         match fdx_storage::save_session_with_view_state(
             &StdFdxStorageFileSystem,
@@ -1788,6 +1849,19 @@ impl ScriptCraftApp {
             Ok(outcome) => {
                 self.native_path = target.path().map(PathBuf::from);
                 self.fdx_baseline = target.baseline().cloned();
+                let rebased_active = active_before_save.and_then(|old_id| {
+                    let new_id = scriptcraft_core::dual_dialogue::map_group_identity(
+                        &before_save_project,
+                        self.session.project(),
+                        &old_id,
+                    )?;
+                    let focused_group = scriptcraft_core::dual_dialogue::group_at_element_index(
+                        self.session.project(),
+                        self.session.selection().focus.element,
+                    )?;
+                    (focused_group.id == new_id).then_some(new_id)
+                });
+                self.set_active_body_group(rebased_active);
                 // Save preflight always prepares and publishes complete derived
                 // data. The session's pending-work state, not a revision marker,
                 // keeps the timer from repeating that work.
@@ -1828,10 +1902,15 @@ impl ScriptCraftApp {
         self.page_geometry.invalidate();
         self.rendered_revision = None;
         self.preferred_vertical_x = None;
+        self.page_scale = None;
+        self.effective_pixels_per_point = None;
         self.title_view.page_geometry.invalidate();
         self.title_view.rendered_revision = None;
         self.title_view.pending_zoom_anchor = None;
         self.title_view.preferred_vertical_x = None;
+        self.title_view.page_scale = None;
+        self.title_view.effective_pixels_per_point = None;
+        self.last_layout_identity = None;
     }
 
     fn show_fdx_save_error(&mut self, error: fdx_storage::TransactionalSaveError) {
@@ -1862,6 +1941,7 @@ impl ScriptCraftApp {
         let source = match fdx_storage::open_source(&StdFdxStorageFileSystem, path) {
             Ok(source) => source,
             Err(error) => {
+                self.reconcile_body_active_group();
                 self.show_error(open_read_failure_message(&error));
                 return false;
             }
@@ -1883,6 +1963,8 @@ impl ScriptCraftApp {
                     source,
                     declared_version: declared,
                 });
+                self.surface_focused = false;
+                self.reconcile_body_active_group();
                 self.clear_error();
                 true
             }
@@ -1941,6 +2023,7 @@ impl ScriptCraftApp {
                 false
             }
             Err(error) => {
+                self.reconcile_body_active_group();
                 self.show_error(open_import_failure_message(&error));
                 false
             }
@@ -1959,6 +2042,7 @@ impl ScriptCraftApp {
         let mut replacement = match EditingSession::with_policy(project, self.session.policy()) {
             Ok(replacement) => replacement,
             Err(error) => {
+                self.reconcile_body_active_group();
                 self.show_error(session_activation_failure_message(&error));
                 return false;
             }
@@ -1986,6 +2070,8 @@ impl ScriptCraftApp {
                 );
             }
         }
+        self.active_body_dual_dialogue_group = None;
+        self.surface_focused = false;
         self.session = replacement;
         self.zoom_percent = text_state.scaling.clamp(
             scriptcraft_core::text_state::MIN_TEXT_SCALING,
@@ -2002,9 +2088,14 @@ impl ScriptCraftApp {
         self.title_view.page_geometry.reset_for_document_replacement();
         self.layout_cache = LayoutCache::default();
         self.title_layout_cache = LayoutCache::default();
+        self.last_layout_identity = None;
+        self.page_scale = None;
+        self.effective_pixels_per_point = None;
         self.rendered_revision = None;
         self.title_view.rendered_revision = None;
         self.title_view.pending_zoom_anchor = None;
+        self.title_view.page_scale = None;
+        self.title_view.effective_pixels_per_point = None;
         self.title_view.preferred_vertical_x = None;
         self.title_view.reveal_intent = RevealIntent::None;
         self.title_view.drag_anchor = None;
@@ -2077,6 +2168,8 @@ impl ScriptCraftApp {
 
     fn export_pdf(&mut self) {
         self.pdf_export_options.begin();
+        self.surface_focused = false;
+        self.reconcile_body_active_group();
     }
 
     fn export_pdf_with_options(
@@ -2143,6 +2236,7 @@ impl ScriptCraftApp {
                 EditError::TextTooLong => "EDIT_TEXT_LIMIT",
                 EditError::TooManyElements => "EDIT_ELEMENT_LIMIT",
                 EditError::UnsupportedTransition { .. } => "EDIT_UNSUPPORTED_TRANSITION",
+                EditError::InlineAltsRoleChange => "EDIT_INLINE_ALTS_ROLE_CHANGE",
                 EditError::Preservation(_) => "EDIT_PRESERVATION_CONSTRAINT",
                 EditError::CastList(_) => "EDIT_CAST_LIST_CONSTRAINT",
                 EditError::FormattedText(_) => "EDIT_FORMATTING_CONSTRAINT",
@@ -2205,6 +2299,7 @@ impl ScriptCraftApp {
                 }
                 self.clear_error();
                 self.invalidate_surface(surface);
+                self.reconcile_body_active_group();
             }
             Err(error) => self.show_edit_error(error),
         }
@@ -2490,20 +2585,14 @@ impl eframe::App for ScriptCraftApp {
             .iter()
             .any(|event| matches!(event, egui::Event::Ime(_)));
         if self.menu_policy.in_window_shortcuts_owned()
-            && !self.ime_active
-            && !ime_event_in_frame
+            && shortcuts::shortcut_input_allowed(self.ime_active, ime_event_in_frame)
         {
             let mut retained_events = Vec::with_capacity(raw_input.events.len());
             for event in std::mem::take(&mut raw_input.events) {
-                let command = match &event {
-                    egui::Event::Key {
-                        key,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } => menu::command_for_key_event(*key, *modifiers),
-                    _ => None,
-                };
+                let command = menu::command_for_pressed_key_event(
+                    &event,
+                    shortcuts::ShortcutPlatform::current(),
+                );
                 if let Some(command) = command {
                     self.pending_commands
                         .enqueue_id(command, CommandOrigin::Shortcut);
@@ -2854,8 +2943,9 @@ fn main() -> eframe::Result {
 mod open_diagnostic_tests {
     use super::{
         child_startup_open_failure_copy, open_import_failure_message, open_read_failure_message,
-        session_activation_failure_message,
+        session_activation_failure_message, ScriptCraftApp,
     };
+    use scriptcraft_commands::Command;
     use scriptcraft_core::editing::EditError;
     use scriptcraft_core::fdx::FdxError;
     use scriptcraft_core::fdx_storage::{FdxStorageError, FdxStorageErrorKind, StorageOperation};
@@ -2883,12 +2973,35 @@ mod open_diagnostic_tests {
             "FDX_SESSION_ACTIVATION_FAILED: EDIT_INVALID_SELECTION; active document unchanged"
         );
 
-        for message in [read, import, activation] {
+        let alts_role_change =
+            session_activation_failure_message(&EditError::InlineAltsRoleChange);
+        assert_eq!(
+            alts_role_change,
+            "FDX_SESSION_ACTIVATION_FAILED: EDIT_INLINE_ALTS_ROLE_CHANGE; active document unchanged"
+        );
+
+        for message in [read, import, activation, alts_role_change] {
             assert!(!message.contains('/'));
             assert!(!message.contains("screenplay"));
             assert!(!message.contains('\n'));
             assert!(message.len() <= 512);
         }
+    }
+
+    #[test]
+    fn inline_alts_role_rejection_uses_the_existing_edit_diagnostic_route() {
+        let mut app = ScriptCraftApp::new().expect("default app session should initialize");
+        app.show_edit_error(EditError::InlineAltsRoleChange);
+
+        let diagnostic = match app.pending_diagnostic_commands.pop_front() {
+            Some(Command::UiStatusSet {
+                message: Some(message),
+            }) => message,
+            other => panic!("expected queued edit diagnostic, got {other:?}"),
+        };
+        assert!(diagnostic
+            .as_str()
+            .starts_with("EDIT_INLINE_ALTS_ROLE_CHANGE; document unchanged;"));
     }
 
     #[test]
@@ -3146,5 +3259,87 @@ mod pdf_export_adapter_tests {
 
         assert!(matches!(outcome, Err(super::PdfExportAdapterError::Write(_))));
         assert!(filesystem.writes.borrow().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod empty_sided_presentation_lifecycle_tests {
+    use super::ScriptCraftApp;
+    use scriptcraft_commands::EditorSurface;
+    use scriptcraft_core::dual_dialogue::{DualDialogueGroup, DualDialogueSide, DualDialogueWrapperProvenance};
+    use scriptcraft_core::editing::{EditingSession, Position, Selection};
+    use scriptcraft_core::layout::{LayoutComposition, ScreenplayLayout};
+    use scriptcraft_core::{Project, Role, ScreenplayElement, StableId};
+    use std::path::Path;
+
+    fn cue_only_project() -> Option<Project> {
+        let mut project = Project::new().ok()?;
+        project.elements = [
+            ScreenplayElement::new("lifecycle-left", Role::Character, "LEFT"),
+            ScreenplayElement::new("lifecycle-right", Role::Character, "RIGHT"),
+            ScreenplayElement::new("lifecycle-outside", Role::Action, "outside"),
+        ].into_iter().collect::<Result<Vec<_>, _>>().ok()?;
+        project.dual_dialogue_groups.push(DualDialogueGroup {
+            id: StableId::new("lifecycle-empty-sided-group").ok()?,
+            left: DualDialogueSide { character: project.elements[0].id.clone(), paragraphs: Vec::new() },
+            right: DualDialogueSide { character: project.elements[1].id.clone(), paragraphs: Vec::new() },
+            wrapper: DualDialogueWrapperProvenance::default(),
+        });
+        Some(project)
+    }
+
+    #[test]
+    fn empty_sided_active_state_is_transient_rebases_by_real_members_and_clears_on_replacement() {
+        let Some(project) = cue_only_project() else { return };
+        let mut app = match ScriptCraftApp::new() { Ok(app) => app, Err(_) => return };
+        app.session = match EditingSession::new(project.clone()) { Ok(session) => session, Err(_) => return };
+        app.surface_focused = true;
+        let _ = app.session.set_selection(Selection::caret(Position { element: 1, offset: 0 }));
+        assert!(app.reconcile_body_active_group());
+        let old_group = project.dual_dialogue_groups[0].clone();
+        assert_eq!(app.active_body_dual_dialogue_group.as_ref(), Some(&old_group.id));
+
+        let mut rebased = project.clone();
+        let new_id = match StableId::new("lifecycle-empty-sided-rebased") { Ok(id) => id, Err(_) => return };
+        rebased.dual_dialogue_groups[0].id = new_id.clone();
+        let mapped = scriptcraft_core::dual_dialogue::map_group_identity(&project, &rebased, &old_group.id);
+        assert_eq!(mapped.as_ref(), Some(&new_id), "rebase matches the complete actual cue-member sequence");
+        assert_eq!(rebased.dual_dialogue_groups[0].member_ids().count(), 2);
+        assert!(rebased.dual_dialogue_groups[0].left.paragraphs.is_empty());
+        assert!(rebased.dual_dialogue_groups[0].right.paragraphs.is_empty());
+
+        let semantic = app.session.project().clone();
+        app.surface_focused = false;
+        assert!(app.reconcile_body_active_group());
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+        assert_eq!(app.session.project(), &semantic, "focus loss changes no semantic/source state");
+        app.surface_focused = true;
+        let _ = app.session.set_selection(Selection::caret(Position { element: 0, offset: 0 }));
+        let _ = app.reconcile_body_active_group();
+        assert_eq!(app.active_body_dual_dialogue_group.as_ref(), Some(&old_group.id), "either actual cue activates the group");
+        app.set_active_editor_surface(EditorSurface::TitlePage);
+        assert_eq!(app.active_body_dual_dialogue_group, None);
+
+        let print = ScreenplayLayout::build_with_composition(
+            &project,
+            &scriptcraft_core::LayoutInputs::default(),
+            &project.preservation.as_ref().map(|state| state.source_layout_settings().clone()).unwrap_or_default(),
+            LayoutComposition::Print { include_title_page: false },
+        );
+        assert!(print.is_ok_and(|layout| layout.active_group_id.is_none() && layout.editor_group_boundaries.is_empty()));
+
+        let mut replacement = match Project::new() { Ok(project) => project, Err(_) => return };
+        replacement.elements.push(match ScreenplayElement::new("replacement-action", Role::Action, "replacement") { Ok(element) => element, Err(_) => return });
+        let activated = app.activate_opened_project(
+            replacement,
+            Path::new("/tmp/replacement-empty-side.fdx"),
+            None,
+            None,
+            None,
+            scriptcraft_core::text_state::TextState::DEFAULT,
+        );
+        assert!(activated);
+        assert_eq!(app.active_body_dual_dialogue_group, None, "document replacement clears transient group identity");
+        assert!(app.session.project().dual_dialogue_groups.is_empty(), "replacement does not unwrap or mutate the discarded document");
     }
 }

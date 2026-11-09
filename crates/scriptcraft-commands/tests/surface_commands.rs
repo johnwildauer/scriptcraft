@@ -26,13 +26,14 @@ fn position(element: u32, offset: u32) -> Position {
 #[test]
 fn catalog_has_stable_additive_surface_and_host_effect_ids() {
     assert_eq!(validate_descriptor_catalog(), Ok(()));
-    assert_eq!(CommandId::ALL.len(), 47);
-    assert_eq!(COMMAND_DESCRIPTORS.len(), 47);
+    assert_eq!(CommandId::ALL.len(), 48);
+    assert_eq!(COMMAND_DESCRIPTORS.len(), 48);
     for (id, spelling) in [
         (CommandId::WindowTitlePageOpen, "window.title-page.open"),
         (CommandId::WindowTitlePageClose, "window.title-page.close"),
         (CommandId::EditorStyleToggle, "editor.style.toggle"),
         (CommandId::EditorAlignmentSet, "editor.alignment.set"),
+        (CommandId::EditorDualDialogueToggle, "editor.dual-dialogue.toggle"),
         (CommandId::PdfIncludeTitlePageResolve, "pdf.include-title-page.resolve"),
     ] {
         assert_eq!(id.as_str(), spelling);

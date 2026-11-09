@@ -278,7 +278,14 @@ pub(super) fn command_for_key_event(
     key: egui::Key,
     modifiers: egui::Modifiers,
 ) -> Option<CommandId> {
-    let platform = ShortcutPlatform::current();
+    command_for_key_event_on_platform(key, modifiers, ShortcutPlatform::current())
+}
+
+fn command_for_key_event_on_platform(
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+    platform: ShortcutPlatform,
+) -> Option<CommandId> {
     for menu in MENU_CATALOG {
         for entry in menu.entries {
             let MenuEntrySpec::Item(item) = entry else {
@@ -287,17 +294,17 @@ pub(super) fn command_for_key_event(
             let MenuItemBehavior::Command(command) = item.behavior else {
                 continue;
             };
-            let advertised_match = item
-                .shortcut
-                .is_some_and(|shortcut| shortcut_matches(shortcut, key, modifiers, platform));
-            let windows_alias_match = cfg!(windows)
+            let is_dual_dialogue = command == CommandId::EditorDualDialogueToggle;
+            if is_dual_dialogue && platform == ShortcutPlatform::Other {
+                continue;
+            }
+            let advertised_match = !(is_dual_dialogue && platform == ShortcutPlatform::Windows)
+                && item
+                    .shortcut
+                    .is_some_and(|shortcut| shortcut_matches(shortcut, key, modifiers, platform));
+            let windows_alias_match = platform == ShortcutPlatform::Windows
                 && item.windows_alias.is_some_and(|shortcut| {
-                    shortcut_matches(
-                        shortcut,
-                        key,
-                        modifiers,
-                        ShortcutPlatform::Windows,
-                    )
+                    shortcut_matches(shortcut, key, modifiers, ShortcutPlatform::Windows)
                 });
             if advertised_match || windows_alias_match {
                 return Some(command);
@@ -305,6 +312,21 @@ pub(super) fn command_for_key_event(
         }
     }
     None
+}
+
+pub(super) fn command_for_pressed_key_event(
+    event: &egui::Event,
+    platform: ShortcutPlatform,
+) -> Option<CommandId> {
+    match event {
+        egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } => command_for_key_event_on_platform(*key, *modifiers, platform),
+        _ => None,
+    }
 }
 
 /// One FIFO owned by the application receives deferred typed invocations from
@@ -419,21 +441,7 @@ pub(super) fn show_menu_bar(
                                             }
                                             MenuItemBehavior::DisabledPlaceholder(_) => false,
                                         };
-                                        let shortcut = item
-                                            .shortcut
-                                            .map(shortcut_label)
-                                            .unwrap_or_else(|| {
-                                                if matches!(
-                                                    item.behavior,
-                                                    MenuItemBehavior::DisabledPlaceholder(
-                                                        PlaceholderKind::Disclosure
-                                                    )
-                                                ) {
-                                                    "›".to_owned()
-                                                } else {
-                                                    String::new()
-                                                }
-                                            });
+                                        let shortcut = menu_shortcut_label(item);
                                         let icon_atom = menu_icon_atom(
                                             item,
                                             matches!(
@@ -571,6 +579,26 @@ fn command_enabled(command: CommandId, availability: AppCommandAvailability) -> 
     availability.is_enabled(command)
 }
 
+fn menu_shortcut_label(item: &MenuItemSpec) -> String {
+    if item.behavior == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle) {
+        return match ShortcutPlatform::current() {
+            ShortcutPlatform::MacOS => "Command+D".to_owned(),
+            ShortcutPlatform::Windows => "Control+Alt+D".to_owned(),
+            ShortcutPlatform::Other => String::new(),
+        };
+    }
+    item.shortcut.map(shortcut_label).unwrap_or_else(|| {
+        if matches!(
+            item.behavior,
+            MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Disclosure)
+        ) {
+            "›".to_owned()
+        } else {
+            String::new()
+        }
+    })
+}
+
 /// The in-window catalog preserves its Windows-style shortcut annotations;
 /// actual shortcut matching continues to resolve against the host platform.
 fn shortcut_label(shortcut: LogicalShortcut) -> String {
@@ -661,5 +689,159 @@ impl super::ScriptCraftApp {
         for invocation in self.pending_commands.take_pending() {
             self.dispatch_command(invocation, ctx);
         }
+    }
+}
+
+#[cfg(test)]
+mod dual_dialogue_menu_tests {
+    use super::*;
+
+    fn dual_dialogue_item() -> MenuItemSpec {
+        MENU_CATALOG
+            .iter()
+            .flat_map(|menu| menu.entries)
+            .find_map(|entry| match entry {
+                MenuEntrySpec::Item(item)
+                    if item.behavior
+                        == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle) =>
+                {
+                    Some(*item)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| unreachable!("dual-dialogue menu command is catalogued"))
+    }
+
+    fn modifiers(
+        platform: ShortcutPlatform,
+        primary: bool,
+        option: bool,
+        extra_control: bool,
+        shift: bool,
+    ) -> egui::Modifiers {
+        egui::Modifiers {
+            alt: option,
+            ctrl: (platform == ShortcutPlatform::MacOS && extra_control)
+                || (platform == ShortcutPlatform::Windows && primary),
+            command: primary,
+            mac_cmd: platform == ShortcutPlatform::Windows && extra_control,
+            shift,
+        }
+    }
+
+    #[test]
+    fn only_the_format_dual_dialogue_placeholder_becomes_a_command() {
+        let entries = MENU_CATALOG
+            .iter()
+            .flat_map(|menu| menu.entries.iter())
+            .filter_map(|entry| match entry {
+                MenuEntrySpec::Item(item) => Some(item),
+                MenuEntrySpec::Separator => None,
+            })
+            .collect::<Vec<_>>();
+        let active = entries
+            .iter()
+            .filter(|item| {
+                item.behavior == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, "format.dual-dialogue");
+
+        let edit = entries
+            .iter()
+            .find(|item| item.id == "format.edit-dual-dialogue")
+            .copied();
+        assert!(edit.is_some_and(|item| {
+            matches!(item.behavior, MenuItemBehavior::DisabledPlaceholder(_))
+                && item.shortcut.is_some_and(|shortcut| shortcut.shift)
+        }));
+    }
+
+    #[test]
+    fn menu_accelerator_recognition_requires_exact_mac_and_windows_chords() {
+        let key = egui::Key::D;
+        assert_eq!(
+            command_for_key_event_on_platform(
+                key,
+                modifiers(ShortcutPlatform::MacOS, true, false, false, false),
+                ShortcutPlatform::MacOS,
+            ),
+            Some(CommandId::EditorDualDialogueToggle),
+        );
+        assert_eq!(
+            command_for_key_event_on_platform(
+                key,
+                modifiers(ShortcutPlatform::Windows, true, true, false, false),
+                ShortcutPlatform::Windows,
+            ),
+            Some(CommandId::EditorDualDialogueToggle),
+        );
+        for (platform, cases) in [
+            (
+                ShortcutPlatform::MacOS,
+                [
+                    modifiers(ShortcutPlatform::MacOS, false, false, false, false),
+                    modifiers(ShortcutPlatform::MacOS, true, true, false, false),
+                    modifiers(ShortcutPlatform::MacOS, true, false, true, false),
+                    modifiers(ShortcutPlatform::MacOS, true, false, false, true),
+                ],
+            ),
+            (
+                ShortcutPlatform::Windows,
+                [
+                    modifiers(ShortcutPlatform::Windows, false, true, false, false),
+                    modifiers(ShortcutPlatform::Windows, true, false, false, false),
+                    modifiers(ShortcutPlatform::Windows, true, true, true, false),
+                    modifiers(ShortcutPlatform::Windows, true, true, false, true),
+                ],
+            ),
+        ] {
+            for modifiers in cases {
+                assert_eq!(command_for_key_event_on_platform(key, modifiers, platform), None);
+            }
+        }
+        assert_eq!(
+            command_for_key_event_on_platform(
+                key,
+                modifiers(ShortcutPlatform::Other, true, false, false, false),
+                ShortcutPlatform::Other,
+            ),
+            None,
+        );
+        assert_eq!(
+            menu_shortcut_label(&dual_dialogue_item()),
+            match ShortcutPlatform::current() {
+                ShortcutPlatform::MacOS => "Command+D",
+                ShortcutPlatform::Windows => "Control+Alt+D",
+                ShortcutPlatform::Other => "",
+            },
+        );
+    }
+
+    #[test]
+    fn in_window_accelerator_dispatch_only_recognizes_key_press_not_release() {
+        let press = egui::Event::Key {
+            key: egui::Key::D,
+            physical_key: Some(egui::Key::D),
+            pressed: true,
+            repeat: false,
+            modifiers: modifiers(ShortcutPlatform::Windows, true, true, false, false),
+        };
+        let release = egui::Event::Key {
+            key: egui::Key::D,
+            physical_key: Some(egui::Key::D),
+            pressed: false,
+            repeat: false,
+            modifiers: modifiers(ShortcutPlatform::Windows, true, true, false, false),
+        };
+        assert_eq!(
+            command_for_pressed_key_event(&press, ShortcutPlatform::Windows),
+            Some(CommandId::EditorDualDialogueToggle),
+        );
+        assert_eq!(
+            command_for_pressed_key_event(&release, ShortcutPlatform::Windows),
+            None,
+        );
     }
 }

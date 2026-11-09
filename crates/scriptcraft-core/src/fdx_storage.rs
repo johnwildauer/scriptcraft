@@ -325,6 +325,7 @@ fn session_error_category(error: &EditError) -> &'static str {
         EditError::TextTooLong => "text size limit",
         EditError::TooManyElements => "element count limit",
         EditError::UnsupportedTransition { .. } => "unsupported role transition",
+        EditError::InlineAltsRoleChange => "inline Alts role constraint",
         EditError::Preservation(_) => "source preservation constraint",
         EditError::CastList(_) => "cast-list reconciliation constraint",
         EditError::FormattedText(_) => "formatted-text constraint",
@@ -537,6 +538,7 @@ fn same_save_projection(expected: &Project, actual: &Project) -> bool {
 
     same_title_paragraphs(&expected.title_page, &actual.title_page)
         && same_elements(&expected.elements, &actual.elements)
+        && fdx::same_dual_dialogue_projection(expected, actual)
 }
 
 fn same_title_paragraphs(
@@ -924,6 +926,8 @@ fn nonempty_parent(path: &Path) -> &Path {
 mod confirmed_save_as_tests {
     use super::*;
 
+    const DUAL_FIXTURE: &str = include_str!("../tests/fixtures/dual_dialogue_basic.fdx");
+
     struct FailingCandidateCodec;
 
     impl SaveCandidateCodec for FailingCandidateCodec {
@@ -958,6 +962,124 @@ mod confirmed_save_as_tests {
             }
             Ok(project)
         }
+    }
+
+    struct MismatchedDualGroupRereadCodec;
+
+    impl SaveCandidateCodec for MismatchedDualGroupRereadCodec {
+        fn serialize(
+            &self,
+            project: &Project,
+            context: &mut fdx::SaveContext,
+        ) -> Result<PreparedFdx, TransactionalSaveError> {
+            NativeSaveCandidateCodec.serialize(project, context)
+        }
+
+        fn reread(&self, bytes: &[u8]) -> Result<Project, fdx::FdxError> {
+            let mut project = fdx::read_v6(bytes)?.project;
+            project.dual_dialogue_groups.clear();
+            Ok(project)
+        }
+    }
+
+    struct MismatchedDualWrapperIdentityCodec;
+
+    impl SaveCandidateCodec for MismatchedDualWrapperIdentityCodec {
+        fn serialize(
+            &self,
+            project: &Project,
+            context: &mut fdx::SaveContext,
+        ) -> Result<PreparedFdx, TransactionalSaveError> {
+            NativeSaveCandidateCodec.serialize(project, context)
+        }
+
+        fn reread(&self, bytes: &[u8]) -> Result<Project, fdx::FdxError> {
+            let mut project = fdx::read_v6(bytes)?.project;
+            if let Some(group) = project.dual_dialogue_groups.first_mut() {
+                group.wrapper.outer_foreign_id = Some("tampered-wrapper-identity".to_owned());
+            }
+            Ok(project)
+        }
+    }
+
+    fn assert_dual_candidate_rejected<C: SaveCandidateCodec>(codec: &C, suffix: &str) {
+        let directory = std::env::temp_dir().join(format!(
+            "scriptcraft-dual-reread-{suffix}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory)
+            .unwrap_or_else(|_| unreachable!("test directory can be created"));
+        let destination = directory.join("existing.fdx");
+        std::fs::write(&destination, b"prior grouped destination")
+            .unwrap_or_else(|_| unreachable!("test destination can be written"));
+
+        let project = fdx::read_v6(DUAL_FIXTURE.as_bytes())
+            .unwrap_or_else(|_| unreachable!("the dual fixture is importable"))
+            .project;
+        let preservation = project
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("the fixture carries preservation state"));
+        let group = project
+            .dual_dialogue_groups
+            .first()
+            .unwrap_or_else(|| unreachable!("the fixture carries a semantic group"));
+        for member_id in group.member_ids() {
+            assert!(matches!(
+                preservation.managed_element(member_id),
+                Ok(Some(element)) if matches!(&element.ownership, crate::preservation::SourceOwnership::Managed(id) if id == member_id)
+            ));
+        }
+        assert!(preservation
+            .dual_dialogue_wrapper_anchor(&group.id)
+            .is_some());
+        for identity in preservation
+            .identities
+            .iter()
+            .filter(|identity| identity.domain == crate::preservation::ForeignIdDomain::Paragraph)
+        {
+            assert!(preservation.paragraph_identity_has_unique_source_definition(&identity.value));
+        }
+        let mut session = EditingSession::new(project)
+            .unwrap_or_else(|_| unreachable!("the imported group forms a session"));
+        let nested_member_end = session.project().elements[2].text.len();
+        session
+            .set_selection(crate::editing::Selection::caret(crate::editing::Position {
+                element: 2,
+                offset: nested_member_end,
+            }))
+            .unwrap_or_else(|_| unreachable!("nested member caret is valid"));
+        session
+            .insert(" pending")
+            .unwrap_or_else(|_| unreachable!("nested member text edit is valid"));
+        let before = session.clone();
+        let mut target = FdxSaveTarget::new_unsaved();
+        let before_target = target.clone();
+        let text_state = fdx::TextState {
+            scaling: 100,
+            selection: session.selection(),
+        };
+        let error = save_session_with_codec_and_view_state(
+            &StdFdxStorageFileSystem,
+            &mut session,
+            &mut target,
+            FdxSaveMode::SaveAsOverwrite(destination.clone()),
+            codec,
+            fdx::WindowState::DEFAULT,
+            text_state,
+        )
+        .err()
+        .unwrap_or_else(|| unreachable!("group or wrapper identity mismatch rejects publication"));
+        assert!(matches!(error, TransactionalSaveError::Codec(_)));
+        assert_eq!(session, before);
+        assert_eq!(target, before_target);
+        assert_eq!(
+            std::fs::read(&destination).ok().as_deref(),
+            Some(&b"prior grouped destination"[..])
+        );
+        std::fs::remove_dir_all(directory)
+            .unwrap_or_else(|_| unreachable!("test directory can be removed"));
     }
 
     #[test]
@@ -1077,5 +1199,11 @@ mod confirmed_save_as_tests {
 
         std::fs::remove_dir_all(directory)
             .unwrap_or_else(|_| unreachable!("test directory can be removed"));
+    }
+
+    #[test]
+    fn grouped_semantic_and_wrapper_identity_mismatches_roll_back_before_publish() {
+        assert_dual_candidate_rejected(&MismatchedDualGroupRereadCodec, "group-set");
+        assert_dual_candidate_rejected(&MismatchedDualWrapperIdentityCodec, "wrapper-id");
     }
 }
