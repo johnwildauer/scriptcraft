@@ -1200,6 +1200,15 @@ fn replacement_and_stale_active_ids_do_not_resurrect_groups_and_indexes_round_tr
                 0, points(350), right.paragraph_bounds.y,
             ).unwrap_or_else(|| unreachable!("right column hit test returns a caret"));
             assert_eq!(right_hit.element, 2);
+            let mut location_tie_diagnostics = InteractionQueryDiagnostics::default();
+            let tied_location = layout.nearest_line_location_fixed_with_diagnostics(
+                0,
+                points(324),
+                left.paragraph_bounds.y,
+                &mut location_tie_diagnostics,
+            ).unwrap_or_else(|| unreachable!("equal-distance query locates a dual-dialogue line"));
+            assert_eq!(tied_location.page_index, 0);
+            assert_eq!(tied_location.line.element, 0);
             let mut tie_diagnostics = InteractionQueryDiagnostics::default();
             let tied = layout.nearest_line_hit_test_fixed_with_diagnostics(
                 0, points(324), left.paragraph_bounds.y, &mut tie_diagnostics,
@@ -1207,6 +1216,7 @@ fn replacement_and_stale_active_ids_do_not_resurrect_groups_and_indexes_round_tr
             assert_eq!(tied.element, 0, "equal horizontal distances choose document order");
             assert!(tie_diagnostics.equal_y_candidates_examined >= 2);
             assert_eq!(tie_diagnostics.index_queries, 1);
+            assert_eq!(location_tie_diagnostics, tie_diagnostics);
         }
 
         for line in layout.pages.iter().flat_map(|page| &page.lines) {
@@ -1259,6 +1269,10 @@ fn cue_only_shapes_layout_only_real_members_and_active_boundary_ends_at_right_cu
         assert_eq!(right_cue.paragraph_bounds.x, points(342), "{name} right column");
         assert_eq!(right_cue.paragraph_bounds.width, points(198), "{name} right column width");
         assert_eq!(left_cue.paragraph_bounds.y, right_cue.paragraph_bounds.y, "{name} shared top");
+        assert_eq!(left_cue.alignment, ParagraphAlignment::Center, "{name} keeps effective cue alignment");
+        assert_eq!(right_cue.alignment, ParagraphAlignment::Center, "{name} keeps effective cue alignment");
+        assert_eq!(left_cue.unaligned_line_left, left_cue.paragraph_bounds.x, "{name} left anchor is pre-alignment");
+        assert_eq!(right_cue.unaligned_line_left, right_cue.paragraph_bounds.x, "{name} right anchor is pre-alignment");
         assert!(left_cue.geometry.x > left_cue.paragraph_bounds.x, "{name} centers the left cue");
         assert!(right_cue.geometry.x > right_cue.paragraph_bounds.x, "{name} centers the right cue");
 

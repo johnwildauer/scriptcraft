@@ -71,6 +71,10 @@ pub struct LayoutLine {
     pub spans: Arc<[PositionedStyledSpan]>,
     pub text_style: EffectiveTextStyle,
     pub char_width: FixedPoint,
+    /// Effective paragraph alignment before fixed-width text alignment is applied.
+    pub alignment: ParagraphAlignment,
+    /// Left anchor before alignment shifts the line; includes a first-visual-line indent.
+    pub unaligned_line_left: FixedPoint,
     /// Text extent after first-line indent and alignment.
     pub geometry: FixedRect,
     /// Full paragraph bounds, retained separately for hit testing and measure.
@@ -91,6 +95,49 @@ pub struct PositionedStyledSpan {
     pub geometry: FixedRect,
     pub underline: bool,
     pub strikethrough: bool,
+}
+
+/// A borrowed core line selected by an immutable location query.
+///
+/// The page index is the line's owning page in `ScreenplayLayout::pages`; no
+/// internal line-index representation is exposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocatedLayoutLine<'a> {
+    pub page_index: usize,
+    pub line: &'a LayoutLine,
+}
+
+impl LocatedLayoutLine<'_> {
+    /// Applies the existing deterministic fixed-cell x-to-source mapping to
+    /// this already located line.
+    pub fn fixed_caret_for_x(&self, x: FixedPoint) -> Caret {
+        let display_char = display_char_for_x(self.line, x);
+        Caret {
+            element: self.line.element,
+            offset: self.line.source_for_display_char(display_char),
+        }
+    }
+
+    /// Applies the existing fixed-cell source-to-x mapping to a caret owned by
+    /// this line. This does not perform another line-ownership query.
+    pub fn fixed_caret_geometry(&self, caret: &Caret) -> Result<FixedRect, LayoutError> {
+        if caret.element != self.line.element
+            || caret.offset < self.line.source.start
+            || caret.offset > self.line.source.end
+            || !is_boundary_in_line(self.line, caret.offset)
+        {
+            return Err(LayoutError {
+                kind: LayoutErrorKind::InvalidPosition,
+            });
+        }
+        let display_char = self.line.display_char_for_source(caret.offset, false);
+        Ok(FixedRect {
+            x: FixedPoint::from_raw(x_for_display_char(self.line, display_char)),
+            y: self.line.geometry.y,
+            width: FixedPoint::from_points(1),
+            height: self.line.geometry.height,
+        })
+    }
 }
 
 /// Selects which document surface is laid out. Print's compatibility builders
@@ -1296,6 +1343,19 @@ impl ScreenplayLayout {
         y: FixedPoint,
         diagnostics: &mut InteractionQueryDiagnostics,
     ) -> Option<Caret> {
+        self.nearest_line_location_fixed_with_diagnostics(page, x, y, diagnostics)
+            .map(|location| location.fixed_caret_for_x(x))
+    }
+
+    /// Selects the same nearest core line as fixed hit testing without mapping
+    /// the pointer's x coordinate to a caret.
+    pub fn nearest_line_location_fixed_with_diagnostics(
+        &self,
+        page: usize,
+        x: FixedPoint,
+        y: FixedPoint,
+        diagnostics: &mut InteractionQueryDiagnostics,
+    ) -> Option<LocatedLayoutLine<'_>> {
         diagnostics.query();
         if self.pages.get(page)?.title_page {
             if self.composition != LayoutComposition::TitlePageEditor {
@@ -1308,7 +1368,10 @@ impl ScreenplayLayout {
                 pointer_y.saturating_sub(entry.absolute_y).saturating_abs()
             })?.1;
             let line = &self.pages[entry.location.page].lines[entry.location.line];
-            return Some(self.caret_for_line(line, x));
+            return Some(LocatedLayoutLine {
+                page_index: entry.location.page,
+                line,
+            });
         }
         let page_height = i64::from(self.inputs.paper_height).saturating_mul(FixedPoint::SCALE);
         let pointer_y = i64::try_from(page)
@@ -1369,10 +1432,10 @@ impl ScreenplayLayout {
         }
         let (_, best_index) = best?;
         let entry = self.body_line_index[best_index];
-        Some(self.caret_for_line(
-            &self.pages[entry.location.page].lines[entry.location.line],
-            x,
-        ))
+        Some(LocatedLayoutLine {
+            page_index: entry.location.page,
+            line: &self.pages[entry.location.page].lines[entry.location.line],
+        })
     }
 
     fn caret_for_line(&self, line: &LayoutLine, x: FixedPoint) -> Caret {
@@ -1396,6 +1459,17 @@ impl ScreenplayLayout {
         caret: Caret,
         diagnostics: &mut InteractionQueryDiagnostics,
     ) -> Result<FixedRect, LayoutError> {
+        self.line_for_caret_with_diagnostics(&caret, diagnostics)?
+            .fixed_caret_geometry(&caret)
+    }
+
+    /// Finds the core line that owns a canonical caret without computing its
+    /// fixed-cell x coordinate.
+    pub fn line_for_caret_with_diagnostics(
+        &self,
+        caret: &Caret,
+        diagnostics: &mut InteractionQueryDiagnostics,
+    ) -> Result<LocatedLayoutLine<'_>, LayoutError> {
         diagnostics.query();
         let Some(locations) = self.element_line_index.get(caret.element) else {
             return Err(LayoutError {
@@ -1409,12 +1483,9 @@ impl ScreenplayLayout {
                 && caret.offset <= line.source.end
                 && is_boundary_in_line(line, caret.offset)
             {
-                let columns = line.display_char_for_source(caret.offset, false);
-                return Ok(FixedRect {
-                    x: FixedPoint::from_raw(x_for_display_char(line, columns)),
-                    y: line.geometry.y,
-                    width: FixedPoint::from_points(1),
-                    height: line.geometry.height,
+                return Ok(LocatedLayoutLine {
+                    page_index: location.page,
+                    line,
                 });
             }
         }
@@ -1719,6 +1790,8 @@ impl ScreenplayLayout {
             spans: spans.into(),
             text_style: line.text_style,
             char_width: line.char_width,
+            alignment: line.paragraph.alignment,
+            unaligned_line_left: line_left,
             geometry,
             paragraph_bounds,
             rect: compat_rect(paragraph_bounds),

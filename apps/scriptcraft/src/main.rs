@@ -33,6 +33,11 @@ mod macos_sf_symbols;
 mod menu;
 mod menu_items;
 mod pdf_export;
+// This primitive is intentionally prepared for WO-001a.3 and not yet wired
+// into visible painting.
+#[allow(dead_code)]
+mod presentation_geometry;
+mod presentation_style;
 mod runtime_icon;
 mod script_view;
 mod shortcuts;
@@ -1061,6 +1066,7 @@ enum RevealIntent {
 
 struct ScriptCraftApp {
     session: EditingSession,
+    document_font_availability: document_font::FontAvailability,
     pending_commands: menu::PendingDesktopCommands,
     menu_policy: menu::RuntimeMenuPolicy,
     menu_platform_choice: menu::MenuPlatformChoice,
@@ -1459,6 +1465,7 @@ impl ScriptCraftApp {
         let (notification_sink, notification_results) = sprint_timer::NativeNotificationSink::new();
         Ok(Self {
             session,
+            document_font_availability: document_font::FontAvailability::default(),
             pending_commands: menu::PendingDesktopCommands::default(),
             menu_policy,
             menu_platform_choice,
@@ -2904,7 +2911,7 @@ fn main() -> eframe::Result {
         UNTITLED_DOCUMENT_TITLE,
         options,
         Box::new(move |cc| {
-            document_font::install(&cc.egui_ctx);
+            let document_font_availability = document_font::install(&cc.egui_ctx);
             material_font::install(
                 &cc.egui_ctx,
                 &toolbar_items::custom_material_icon_axes(),
@@ -2916,6 +2923,7 @@ fn main() -> eframe::Result {
                 startup.development,
             )
                 .and_then(|mut app| {
+                    app.document_font_availability = document_font_availability;
                     #[cfg(target_os = "macos")]
                     if app.menu_policy.installs_native_macos() {
                         let availability = app.app_command_availability();

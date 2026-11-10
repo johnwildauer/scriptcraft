@@ -2,7 +2,7 @@
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use scriptcraft_core::exports::{
-    export_pdf, export_pdf_with_layout_inputs_and_options, export_pdf_with_options,
+    export_pdf, export_pdf_with_layout_inputs_and_options, export_pdf_with_options, export_text,
     ExportError, PdfExportOptions,
 };
 use scriptcraft_core::formatted_text::set_paragraph_alignments;
@@ -70,6 +70,78 @@ fn default_wrappers_include_title_and_explicit_options_control_print_page_order(
     assert!(title_position < body_position);
     assert!(!excluded_text.contains("SCRIPT TITLE"));
     assert!(excluded_text.contains("BODY_ONLY_CHECK"));
+}
+
+#[test]
+fn hidden_role_defaults_remain_omitted_from_print_pdf_and_plain_text() {
+    let mut project = valid(Project::new());
+    project.elements.clear();
+    let hidden_roles = [
+        (Role::Summary, "SUMMARY_HIDDEN_EXPORT_SENTINEL"),
+        (Role::Outline1, "OUTLINE1_HIDDEN_EXPORT_SENTINEL"),
+        (Role::Outline2, "OUTLINE2_HIDDEN_EXPORT_SENTINEL"),
+        (Role::Outline3, "OUTLINE3_HIDDEN_EXPORT_SENTINEL"),
+        (Role::Note, "NOTE_HIDDEN_EXPORT_SENTINEL"),
+    ];
+    for (index, (role, sentinel)) in hidden_roles.iter().enumerate() {
+        project.elements.push(valid(ScreenplayElement::new(
+            format!("hidden-role-export-{index}"),
+            *role,
+            *sentinel,
+        )));
+    }
+    project.elements.push(valid(ScreenplayElement::new(
+        "visible-role-export-control",
+        Role::Action,
+        "VISIBLE_EXPORT_CONTROL",
+    )));
+
+    let inputs = LayoutInputs::default();
+    let source = project
+        .preservation
+        .as_ref()
+        .map(|preservation| preservation.source_layout_settings().clone())
+        .unwrap_or_default();
+    for (role, _) in &hidden_roles {
+        assert!(
+            source.text_style(*role).hidden_text,
+            "{role:?} remains hidden by its source default"
+        );
+    }
+    let print = valid(ScreenplayLayout::build_with_composition(
+        &project,
+        &inputs,
+        &source,
+        LayoutComposition::Print {
+            include_title_page: false,
+        },
+    ));
+    let print_text = print
+        .pages
+        .iter()
+        .flat_map(|page| &page.lines)
+        .fold(String::new(), |mut text, line| {
+            text.push_str(&line.display_text);
+            text.push('\n');
+            text
+        });
+    let pdf = valid(export_pdf_with_layout_inputs_and_options(
+        &project,
+        &inputs,
+        PdfExportOptions {
+            include_title_page: false,
+        },
+    ));
+    let plain_text = valid(export_text(&project)).text;
+
+    assert!(print_text.contains("VISIBLE_EXPORT_CONTROL"));
+    assert!(extracted_text(&pdf).contains("VISIBLE_EXPORT_CONTROL"));
+    assert!(plain_text.contains("VISIBLE_EXPORT_CONTROL"));
+    for (_, sentinel) in hidden_roles {
+        assert!(!print_text.contains(sentinel), "Print excludes {sentinel}");
+        assert!(!extracted_text(&pdf).contains(sentinel), "PDF excludes {sentinel}");
+        assert!(!plain_text.contains(sentinel), "plain text excludes {sentinel}");
+    }
 }
 
 #[test]

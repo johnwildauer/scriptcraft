@@ -58,6 +58,7 @@ pub(super) struct PagePalette {
 pub(super) struct ToolbarPalette {
     pub(super) background: Color32,
     pub(super) border: Color32,
+    pub(super) formatting_separator: Color32,
     pub(super) foreground: Color32,
     pub(super) disabled_foreground: Color32,
     pub(super) hover_fill: Color32,
@@ -210,11 +211,15 @@ impl ApplicationPalette {
                     Color32::from_rgb(17, 17, 17),
                 ),
             };
+        let formatting_separator = match appearance {
+            ResolvedAppearance::Day => Color32::from_rgb(220, 220, 220),
+            ResolvedAppearance::Night => Color32::from_rgb(72, 72, 72),
+            ResolvedAppearance::Midnight => Color32::from_rgb(68, 68, 68),
+        };
         let toolbar_selected_fill = match appearance {
             ResolvedAppearance::Day => Color32::from_rgb(214, 214, 214),
-            ResolvedAppearance::Night | ResolvedAppearance::Midnight => {
-                Color32::from_rgb(66, 66, 66)
-            }
+            ResolvedAppearance::Night => Color32::from_rgb(80, 80, 80),
+            ResolvedAppearance::Midnight => Color32::from_rgb(76, 76, 76),
         };
         let (status_background, status_border, status_foreground, center_foreground) =
             match appearance {
@@ -247,6 +252,7 @@ impl ApplicationPalette {
             toolbar: ToolbarPalette {
                 background: toolbar_background,
                 border: toolbar_border,
+                formatting_separator,
                 foreground: toolbar_foreground,
                 disabled_foreground: alpha_color(toolbar_foreground, 0.45),
                 hover_fill: widgets.hovered.bg_fill,
@@ -505,7 +511,9 @@ pub(super) fn configure_appearance(
 
 #[cfg(test)]
 mod tests {
-    use super::{ApplicationPalette, ResolvedAppearance};
+    use super::{
+        resolved_appearance, ApplicationPalette, AppearanceMode, ResolvedAppearance,
+    };
     use eframe::egui::{self, Color32};
 
     #[test]
@@ -537,12 +545,12 @@ mod tests {
             ),
             (
                 ResolvedAppearance::Night,
-                Color32::from_rgb(66, 66, 66),
+                Color32::from_rgb(80, 80, 80),
                 Color32::from_rgb(72, 72, 72),
             ),
             (
                 ResolvedAppearance::Midnight,
-                Color32::from_rgb(66, 66, 66),
+                Color32::from_rgb(76, 76, 76),
                 Color32::from_rgb(68, 68, 68),
             ),
         ] {
@@ -552,6 +560,11 @@ mod tests {
             assert_eq!(toolbar.selected_fill, expected_selected);
             assert_eq!(toolbar.hover_fill, expected_hover);
             assert_ne!(toolbar.selected_fill, toolbar.hover_fill);
+            let mut independent_toolbar = toolbar;
+            independent_toolbar.hover_fill = Color32::BLACK;
+            assert_eq!(independent_toolbar.selected_fill, expected_selected);
+            independent_toolbar.selected_fill = Color32::WHITE;
+            assert_eq!(independent_toolbar.hover_fill, Color32::BLACK);
             assert_eq!(
                 palette.controls.selection_fill,
                 visuals.selection.bg_fill,
@@ -565,11 +578,77 @@ mod tests {
             match appearance {
                 ResolvedAppearance::Day => {
                     assert!(toolbar.selected_fill.r() < toolbar.background.r());
+                    assert!(toolbar.selected_fill.r() < toolbar.hover_fill.r());
                 }
                 ResolvedAppearance::Night | ResolvedAppearance::Midnight => {
                     assert!(toolbar.selected_fill.r() > toolbar.background.r());
+                    assert!(toolbar.selected_fill.r() > toolbar.hover_fill.r());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn formatting_separator_has_exact_values_and_independent_ownership() {
+        for (appearance, expected) in [
+            (ResolvedAppearance::Day, Color32::from_rgb(220, 220, 220)),
+            (ResolvedAppearance::Night, Color32::from_rgb(72, 72, 72)),
+            (ResolvedAppearance::Midnight, Color32::from_rgb(68, 68, 68)),
+        ] {
+            let visuals = super::visuals_for_appearance(appearance);
+            let palette = ApplicationPalette::from_visuals(appearance, &visuals);
+            assert_eq!(palette.toolbar.formatting_separator, expected);
+
+            let mut independent = palette;
+            independent.toolbar.border = Color32::from_rgb(1, 2, 3);
+            independent.toolbar.hover_fill = Color32::from_rgb(4, 5, 6);
+            independent.toolbar.selected_fill = Color32::from_rgb(7, 8, 9);
+            assert_eq!(independent.toolbar.formatting_separator, expected);
+            assert_eq!(
+                independent.controls.selection_fill,
+                palette.controls.selection_fill,
+                "toolbar token changes do not replace generic control selection",
+            );
+            assert_eq!(
+                independent.status.slider_trailing_fill,
+                palette.status.slider_trailing_fill,
+                "toolbar token changes do not recolor the status slider",
+            );
+
+            independent.toolbar.formatting_separator = Color32::from_rgb(10, 11, 12);
+            assert_eq!(independent.toolbar.border, Color32::from_rgb(1, 2, 3));
+            assert_eq!(independent.toolbar.hover_fill, Color32::from_rgb(4, 5, 6));
+            assert_eq!(independent.toolbar.selected_fill, Color32::from_rgb(7, 8, 9));
+        }
+    }
+
+    #[test]
+    fn system_resolution_uses_day_and_night_toolbar_tokens() {
+        for (theme, expected_appearance, expected_separator, expected_selected, expected_hover) in [
+            (
+                egui::Theme::Light,
+                ResolvedAppearance::Day,
+                Color32::from_rgb(220, 220, 220),
+                Color32::from_rgb(214, 214, 214),
+                Color32::from_rgb(220, 220, 220),
+            ),
+            (
+                egui::Theme::Dark,
+                ResolvedAppearance::Night,
+                Color32::from_rgb(72, 72, 72),
+                Color32::from_rgb(80, 80, 80),
+                Color32::from_rgb(72, 72, 72),
+            ),
+        ] {
+            let appearance = resolved_appearance(AppearanceMode::System, theme);
+            assert_eq!(appearance, expected_appearance);
+            let palette = ApplicationPalette::from_visuals(
+                appearance,
+                &super::visuals_for_appearance(appearance),
+            );
+            assert_eq!(palette.toolbar.formatting_separator, expected_separator);
+            assert_eq!(palette.toolbar.selected_fill, expected_selected);
+            assert_eq!(palette.toolbar.hover_fill, expected_hover);
         }
     }
 }

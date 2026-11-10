@@ -2,6 +2,7 @@ use super::{
     add_performance_counter, add_performance_nanos, document_font, status_bar, theme,
     PerformanceDiagnostics, RevealIntent, ScriptCraftApp,
 };
+use crate::presentation_style::AdvanceMode;
 use super::app_commands::CommandInvocation;
 use super::shortcuts::{editor_command_for_key_event, ShortcutPlatform};
 use eframe::egui::{self, Color32, FontFamily, FontId, Key, Sense, Stroke, Vec2};
@@ -13,7 +14,8 @@ use scriptcraft_commands::{
 use scriptcraft_core::editing::{EditError, Position, Selection};
 use scriptcraft_core::formatting::EffectiveTextStyle;
 use scriptcraft_core::layout::{
-    Caret, FixedRect, InteractionQueryDiagnostics, PositionedStyledSpan, ScreenplayLayout,
+    Caret, FixedRect, InteractionQueryDiagnostics, LayoutLine, PositionedStyledSpan,
+    ScreenplayLayout,
 };
 use scriptcraft_core::FixedPoint;
 use std::collections::HashMap;
@@ -30,6 +32,40 @@ const PAGE_PAINT_OVERSCAN: usize = 1;
 const FIXED_CELL_GALLEY_CACHE_ID: &str = "scriptcraft-fixed-cell-galley-cache-v1";
 const FIXED_CELL_GALLEY_CACHE_LIMIT: usize = 16_384;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy)]
+enum CaretPresentation {
+    Fixed(FixedRect),
+    Projected(super::presentation_geometry::ProjectedCaretRect),
+}
+
+fn viewport_caret_rect(
+    presentation: CaretPresentation,
+    page_rect: egui::Rect,
+    scale: f32,
+) -> (egui::Rect, Option<egui::Rect>) {
+    match presentation {
+        CaretPresentation::Fixed(rect) => (
+            egui::Rect::from_min_size(
+                egui::pos2(
+                    page_rect.left() + rect.x.to_points_f32() * scale,
+                    page_rect.top() + rect.y.to_points_f32() * scale,
+                ),
+                Vec2::new(CARET_WIDTH, rect.height.to_points_f32() * scale),
+            ),
+            None,
+        ),
+        CaretPresentation::Projected(projected) => {
+            let viewport_rect = projected.rect.translate(page_rect.min.to_vec2());
+            let viewport_clip = egui::Rect::from_min_max(
+                page_rect.min + projected.clip_bounds.min.to_vec2(),
+                page_rect.min + projected.clip_bounds.max.to_vec2(),
+            )
+            .intersect(page_rect);
+            (viewport_rect, Some(viewport_clip))
+        }
+    }
+}
 
 fn dual_group_navigation_edge(
     project: &scriptcraft_core::Project,
@@ -89,6 +125,7 @@ impl ScriptCraftApp {
         page_rect: egui::Rect,
         scale: f32,
         pointer: egui::Pos2,
+        projections: Option<&[Option<Vec<Option<super::presentation_geometry::PresentationLine<'_>>>>]>,
     ) -> Option<Position> {
         let local_x =
             FixedPoint::from_points_f64(f64::from((pointer.x - page_rect.left()) / scale))?;
@@ -98,12 +135,41 @@ impl ScriptCraftApp {
         self.performance.caret_lookups = self.performance.caret_lookups.saturating_add(1);
         let mut query_diagnostics = InteractionQueryDiagnostics::default();
         let result = layout
-            .nearest_line_hit_test_fixed_with_diagnostics(
+            .nearest_line_location_fixed_with_diagnostics(
                 page,
                 local_x,
                 local_y,
                 &mut query_diagnostics,
             )
+            .and_then(|located| {
+                let line_index = layout.pages.get(located.page_index)?.lines.iter()
+                    .position(|line| std::ptr::eq(line, located.line));
+                let projected = line_index
+                    .and_then(|index| {
+                        projections
+                            .and_then(|pages| pages.get(located.page_index))
+                            .and_then(Option::as_ref)
+                            .and_then(|lines| lines.get(index))
+                    })
+                    .and_then(Option::as_ref);
+                if let Some(projected) = projected {
+                    let screen_x = pointer.x - page_rect.left();
+                    Some(super::presentation_geometry::projected_caret_for_x(
+                        projected,
+                        screen_x,
+                    ))
+                } else {
+                    let has_proportional = located.line.spans.iter().any(|span| {
+                        resolve_span_paint(
+                            &span.text_style,
+                            span.text_style.size as f32 * scale,
+                            self.theme_palette.script_workspace.page,
+                            &self.document_font_availability,
+                        ).advance_mode == AdvanceMode::Proportional
+                    });
+                    (!has_proportional).then(|| located.fixed_caret_for_x(local_x))
+                }
+            })
             .map(|caret| Position {
                 element: caret.element,
                 offset: caret.offset,
@@ -121,6 +187,56 @@ impl ScriptCraftApp {
             .caret_lookup_nanos
             .saturating_add(started.elapsed().as_nanos());
         result
+    }
+
+    pub(super) fn project_line_for_interaction<'a>(
+        &mut self,
+        ctx: &egui::Context,
+        line: &'a LayoutLine,
+        scale: f32,
+    ) -> Result<Option<super::presentation_geometry::PresentationLine<'a>>, ()> {
+        let palette = self.theme_palette.script_workspace.page;
+        let resolved = line.spans.iter().map(|span| {
+            resolve_span_paint(
+                &span.text_style,
+                span.text_style.size as f32 * scale,
+                palette,
+                &self.document_font_availability,
+            )
+        }).collect::<Vec<_>>();
+        if !resolved.iter().any(|paint| paint.advance_mode == AdvanceMode::Proportional) {
+            return Ok(None);
+        }
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("scriptcraft-interaction-projection"),
+        ));
+        let mut natural = Vec::with_capacity(line.spans.len());
+        for (span, paint) in line.spans.iter().zip(&resolved) {
+            if paint.advance_mode == AdvanceMode::Proportional {
+                let (geometry, reused) = super::presentation_geometry::natural_singleline_geometry(
+                    &painter,
+                    ctx,
+                    &span.display_text,
+                    &paint.font,
+                    &span.text_style,
+                    paint.advance_mode,
+                    paint.color,
+                ).map_err(|_| ())?;
+                if reused {
+                    self.performance.galleys_reused = self.performance.galleys_reused.saturating_add(1);
+                } else {
+                    self.performance.galleys_built = self.performance.galleys_built.saturating_add(1);
+                }
+                natural.push(Some(geometry));
+            } else {
+                natural.push(None);
+            }
+        }
+        let modes = resolved.iter().map(|paint| paint.advance_mode).collect::<Vec<_>>();
+        super::presentation_geometry::project_line(line, &modes, &natural, scale)
+            .map(Some)
+            .map_err(|_| ())
     }
 
     fn pointer_surface_page(
@@ -221,9 +337,10 @@ impl ScriptCraftApp {
         page_index: usize,
         page_rect: egui::Rect,
         metrics: PresentationMetrics,
+        projections: &[Option<super::presentation_geometry::PresentationLine<'_>>],
         editor_id: egui::Id,
         caret_page_index: Option<usize>,
-        caret_geometry: Option<FixedRect>,
+        caret_geometry: Option<CaretPresentation>,
         surface: EditorSurface,
     ) {
         let scale = metrics.scale;
@@ -274,15 +391,163 @@ impl ScriptCraftApp {
             }
         }
 
-        for line in &layout.pages[page_index].lines {
-            let y = page_rect.top() + line.geometry.y.to_points_f32() * scale;
+        'paint_lines: for (line_index, line) in layout.pages[page_index].lines.iter().enumerate() {
             let selection = self.selection_range(
                 line.source.start,
                 line.source.end,
                 line.element,
                 surface,
             );
-            for span in line.spans.iter() {
+            let resolved_paints = line
+                .spans
+                .iter()
+                .map(|span| {
+                    resolve_span_paint(
+                        &span.text_style,
+                        span.text_style.size as f32 * scale,
+                        palette,
+                        &self.document_font_availability,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let has_proportional = resolved_paints
+                .iter()
+                .any(|resolved| resolved.advance_mode == AdvanceMode::Proportional);
+
+            if has_proportional {
+                // Unsupported natural topology fails closed. The same projection
+                // object is also consumed by caret/reveal/IME and pointer dispatch.
+                let Some(projection) = projections.get(line_index).and_then(Option::as_ref) else {
+                    continue 'paint_lines;
+                };
+                debug_assert!(std::ptr::eq(projection.core, line));
+                debug_assert!(projection.total_advance.is_finite());
+                if let Some(first_span) = projection.spans.first() {
+                    debug_assert_eq!(first_span.origin_x, projection.line_origin_x);
+                }
+                let line_clip = page_rect.intersect(egui::Rect::from_min_max(
+                    page_rect.min + projection.clip_bounds.min.to_vec2(),
+                    page_rect.min + projection.clip_bounds.max.to_vec2(),
+                ));
+                let line_painter = painter.with_clip_rect(line_clip);
+                for (projected, resolved) in projection.spans.iter().zip(&resolved_paints) {
+                    let span = projected.core;
+                    let span_y = page_rect.top() + span.geometry.y.to_points_f32() * scale;
+                    let span_height = span.geometry.height.to_points_f32() * scale;
+                    let span_origin = egui::pos2(
+                        page_rect.left() + projected.origin_x,
+                        span_y,
+                    );
+                    let selected_display = Self::selected_display_range(span, selection);
+                    if let Some((from, to)) = selected_display {
+                        add_performance_counter(&mut self.performance.selection_spans_submitted, 1);
+                        let boundaries = &projected.display_boundary_offsets;
+                        let start = from.min(boundaries.len().saturating_sub(1));
+                        let end = to.min(boundaries.len().saturating_sub(1));
+                        let selected_x = span_origin.x + boundaries[start];
+                        let selected_width = (boundaries[end] - boundaries[start]).max(0.0);
+                        let selected_rect = egui::Rect::from_min_size(
+                            egui::pos2(selected_x, span_y),
+                            Vec2::new(selected_width.max(1.0), span_height),
+                        );
+                        line_painter.rect_filled(selected_rect, 0.0, palette.selection);
+                        line_painter.rect_stroke(
+                            selected_rect,
+                            0.0,
+                            Stroke::new(1.0, palette.selection_boundary),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+
+                    if projected.advance_mode == AdvanceMode::Proportional {
+                        if let Some(geometry) = projected.natural.as_ref() {
+                            line_painter.galley(
+                                span_origin,
+                                geometry.galley.clone(),
+                                resolved.color,
+                            );
+                            if let Some((from, to)) = selected_display {
+                                let boundaries = &projected.display_boundary_offsets;
+                                let start = from.min(boundaries.len().saturating_sub(1));
+                                let end = to.min(boundaries.len().saturating_sub(1));
+                                let selected_rect = egui::Rect::from_min_max(
+                                    egui::pos2(span_origin.x + boundaries[start], span_y),
+                                    egui::pos2(
+                                        span_origin.x + boundaries[end],
+                                        span_y + span_height,
+                                    ),
+                                );
+                                let selected_clip = line_clip.intersect(selected_rect);
+                                if selected_rect.width() > 0.0
+                                    && selected_clip.width() > 0.0
+                                    && selected_clip.height() > 0.0
+                                {
+                                    let selected_galley =
+                                        super::presentation_geometry::recolor_natural_galley(
+                                            geometry,
+                                            palette.selection_text,
+                                        );
+                                    painter
+                                        .with_clip_rect(selected_clip)
+                                        .galley(span_origin, selected_galley, palette.selection_text);
+                                }
+                            }
+                        }
+                    } else {
+                        let display_count = span.display_text.chars().count();
+                        let cell_width = if display_count == 0 {
+                            span.char_width.to_points_f32() * scale
+                        } else {
+                            projected.advance / display_count as f32
+                        };
+                        paint_fixed_metric_text_with_selection(
+                            &line_painter,
+                            ui.ctx(),
+                            span_origin,
+                            &span.display_text,
+                            resolved.font.clone(),
+                            cell_width,
+                            span_height,
+                            FixedMetricTextStyle {
+                                color: resolved.color,
+                                selected_color: palette.selection_text,
+                                selection: selected_display,
+                            },
+                            &span.text_style,
+                            projected.advance,
+                            span.underline,
+                            span.strikethrough,
+                            &mut self.performance,
+                        );
+                    }
+
+                    if span.underline || span.strikethrough {
+                        if span.underline {
+                            let underline_y = span_y + span_height * 0.88;
+                            line_painter.line_segment(
+                                [
+                                    egui::pos2(span_origin.x, underline_y),
+                                    egui::pos2(span_origin.x + projected.advance, underline_y),
+                                ],
+                                Stroke::new(1.0_f32, resolved.color),
+                            );
+                        }
+                        if span.strikethrough {
+                            let strike_y = span_y + span_height * 0.52;
+                            line_painter.line_segment(
+                                [
+                                    egui::pos2(span_origin.x, strike_y),
+                                    egui::pos2(span_origin.x + projected.advance, strike_y),
+                                ],
+                                Stroke::new(1.0_f32, resolved.color),
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+
+            for (span, resolved_paint) in line.spans.iter().zip(&resolved_paints) {
                 let span_x = page_rect.left() + span.geometry.x.to_points_f32() * scale;
                 let span_y = page_rect.top() + span.geometry.y.to_points_f32() * scale;
                 let span_height = span.geometry.height.to_points_f32() * scale;
@@ -318,21 +583,14 @@ impl ScriptCraftApp {
                         egui::StrokeKind::Inside,
                     );
                 }
-                let color = if span.text_style.hidden_text {
-                    palette.subdued_text
-                } else {
-                    palette.text
-                };
+                let span_font = resolved_paint.font.clone();
+                let color = resolved_paint.color;
                 paint_fixed_metric_text_with_selection(
                     &painter,
                     ui.ctx(),
                     egui::pos2(span_x, span_y),
                     &span.display_text,
-                    renderer_font_for_style(
-                        span.text_style.bold,
-                        span.text_style.italic,
-                        span.text_style.size as f32 * scale,
-                    ),
+                    span_font,
                     cell_width,
                     span_height,
                     FixedMetricTextStyle {
@@ -347,11 +605,6 @@ impl ScriptCraftApp {
                     &mut self.performance,
                 );
                 if span.underline || span.strikethrough {
-                    let decoration_color = if span.text_style.hidden_text {
-                        palette.subdued_text
-                    } else {
-                        palette.text
-                    };
                     if span.underline {
                         let underline_y = span_y + span_height * 0.88;
                         painter.line_segment(
@@ -359,7 +612,7 @@ impl ScriptCraftApp {
                                 egui::pos2(span_x, underline_y),
                                 egui::pos2(span_x + span_width, underline_y),
                             ],
-                            Stroke::new(1.0_f32, decoration_color),
+                            Stroke::new(1.0_f32, color),
                         );
                     }
                     if span.strikethrough {
@@ -369,7 +622,7 @@ impl ScriptCraftApp {
                                 egui::pos2(span_x, strike_y),
                                 egui::pos2(span_x + span_width, strike_y),
                             ],
-                            Stroke::new(1.0_f32, decoration_color),
+                            Stroke::new(1.0_f32, color),
                         );
                     }
                 }
@@ -383,7 +636,8 @@ impl ScriptCraftApp {
         if caret_page_index == Some(page_index)
             && selection.anchor == selection.focus
         {
-            if let Some(rect) = caret_geometry {
+            if let Some(caret_geometry) = caret_geometry {
+                let (caret_rect, caret_clip) = viewport_caret_rect(caret_geometry, page_rect, scale);
                 let caret = Caret {
                     element: selection.focus.element,
                     offset: selection.focus.offset,
@@ -403,7 +657,11 @@ impl ScriptCraftApp {
                     true,
                     self.caret_blink_reset_time,
                 ) {
-                    painter.rect_filled(caret_bar_rect(page_rect, rect, scale), 0.0, palette.caret);
+                    if let Some(clip) = caret_clip {
+                        painter.with_clip_rect(clip).rect_filled(caret_rect, 0.0, palette.caret);
+                    } else {
+                        painter.rect_filled(caret_rect, 0.0, palette.caret);
+                    }
                 }
                 if self.surface_focused {
                     self.performance.repaint_requests =
@@ -418,18 +676,19 @@ impl ScriptCraftApp {
                     let caret_span = caret_line.and_then(|line| Self::span_for_caret(line, caret.offset));
                     let ime_font = caret_span.map_or_else(
                         || renderer_font(&layout.inputs.font_family, metrics.font_size),
-                        |span| {
-                            renderer_font_for_style(
-                                span.text_style.bold,
-                                span.text_style.italic,
-                                span.text_style.size as f32 * scale,
-                            )
-                        },
+                        |span| resolve_span_paint(
+                            &span.text_style,
+                            span.text_style.size as f32 * scale,
+                            palette,
+                            &self.document_font_availability,
+                        ).font,
                     );
-                    let x = page_rect.left() + rect.x.to_points_f32() * scale;
-                    let y = page_rect.top() + rect.y.to_points_f32() * scale;
-                    painter.text(
-                        egui::pos2(x, y),
+                    let ime_painter = caret_clip.map_or_else(
+                        || painter.clone(),
+                        |clip| painter.with_clip_rect(clip),
+                    );
+                    ime_painter.text(
+                        caret_rect.min,
                         egui::Align2::LEFT_TOP,
                         &self.ime_preedit,
                         ime_font,
@@ -462,6 +721,11 @@ impl ScriptCraftApp {
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let scroll_outer_rect = ui.available_rect_before_wrap();
         let mut page_rects = Vec::with_capacity(layout.pages.len());
+        let mut frame_projections = std::iter::repeat_with(|| None)
+            .take(layout.pages.len())
+            .collect::<Vec<
+                Option<Vec<Option<super::presentation_geometry::PresentationLine<'_>>>>,
+            >>();
         let mut rendered_scale = 1.0;
         let reveal_intent = self.reveal_intent;
         let pending_zoom_anchor = self.pending_zoom_anchor;
@@ -604,6 +868,29 @@ impl ScriptCraftApp {
                 reveal_intent == RevealIntent::Conditional
                     || (selection.anchor == selection.focus && !layout.pages[page_index].title_page)
             });
+            let mut pages_to_project = paint_range
+                .map(|(first, last)| (first..=last).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if let Some(page_index) = caret_page_index {
+                if !pages_to_project.contains(&page_index) {
+                    pages_to_project.push(page_index);
+                }
+            }
+            for page_index in pages_to_project {
+                if frame_projections[page_index].is_none() {
+                    frame_projections[page_index] = Some(
+                        layout.pages[page_index]
+                            .lines
+                            .iter()
+                            .map(|line| {
+                                self.project_line_for_interaction(ui.ctx(), line, scale)
+                                    .ok()
+                                    .flatten()
+                            })
+                            .collect(),
+                    );
+                }
+            }
             let caret_geometry = if resolve_caret {
                 let caret_started = Instant::now();
                 self.performance.caret_lookups = self.performance.caret_lookups.saturating_add(1);
@@ -612,13 +899,56 @@ impl ScriptCraftApp {
                     element: selection.focus.element,
                     offset: selection.focus.offset,
                 };
-                let result = match surface {
-                    EditorSurface::Body => layout.caret_geometry_with_diagnostics(
-                        caret,
-                        &mut query_diagnostics,
-                    ),
-                    EditorSurface::TitlePage => layout.title_caret_geometry(caret),
-                }.ok();
+                let located = if surface == EditorSurface::Body {
+                    layout.line_for_caret_with_diagnostics(&caret, &mut query_diagnostics)
+                } else {
+                    // Title's prior wrapper did not publish its internal
+                    // diagnostics, so preserve the established desktop count.
+                    layout.line_for_caret_with_diagnostics(
+                        &caret,
+                        &mut InteractionQueryDiagnostics::default(),
+                    )
+                };
+                let result = located
+                    .ok()
+                    .and_then(|located| {
+                        let projection = frame_projections
+                            .get(located.page_index)
+                            .and_then(Option::as_ref)
+                            .and_then(|projections| {
+                                layout.pages[located.page_index]
+                                    .lines
+                                    .iter()
+                                    .position(|line| std::ptr::eq(line, located.line))
+                                    .and_then(|index| projections.get(index))
+                                    .and_then(Option::as_ref)
+                            });
+                        if let Some(projection) = projection {
+                            super::presentation_geometry::projected_caret_rect(
+                                projection,
+                                caret.offset,
+                                scale,
+                                CARET_WIDTH,
+                            )
+                            .map(CaretPresentation::Projected)
+                        } else if located.line.spans.iter().any(|span| {
+                            resolve_span_paint(
+                                &span.text_style,
+                                span.text_style.size as f32 * scale,
+                                self.theme_palette.script_workspace.page,
+                                &self.document_font_availability,
+                            )
+                            .advance_mode
+                                == AdvanceMode::Proportional
+                        }) {
+                            None
+                        } else {
+                            located
+                                .fixed_caret_geometry(&caret)
+                                .ok()
+                                .map(CaretPresentation::Fixed)
+                        }
+                    });
                 self.performance.indexed_interaction_queries = self
                     .performance
                     .indexed_interaction_queries
@@ -641,14 +971,10 @@ impl ScriptCraftApp {
             if reveal_intent == RevealIntent::Conditional && !zoom_compensation_queued {
                 if let (Some(page_index), Some(caret)) = (caret_page_index, caret_geometry) {
                     let page_rect = page_rects[page_index];
-                    let caret_rect = egui::Rect::from_min_size(
-                        egui::pos2(
-                            page_rect.left() + caret.x.to_points_f32() * scale,
-                            page_rect.top() + caret.y.to_points_f32() * scale,
-                        ),
-                        Vec2::new(CARET_WIDTH, caret.height.to_points_f32() * scale),
-                    );
-                    if caret_needs_reveal(caret_rect, editor_clip) {
+                    let (caret_rect, caret_clip) = viewport_caret_rect(caret, page_rect, scale);
+                    let caret_is_clipped_out =
+                        caret_clip.is_some_and(|clip| !clip.intersects(caret_rect));
+                    if !caret_is_clipped_out && caret_needs_reveal(caret_rect, editor_clip) {
                         // `None` asks egui for nearest/minimal scrolling;
                         // centering would override the writer's viewport.
                         ui.scroll_to_rect(caret_rect, None);
@@ -668,6 +994,7 @@ impl ScriptCraftApp {
                         page_index,
                         *page_rect,
                         metrics,
+                        frame_projections[page_index].as_deref().unwrap_or(&[]),
                         editor_id,
                         caret_paint_page_index,
                         caret_geometry,
@@ -762,6 +1089,7 @@ impl ScriptCraftApp {
                         page_rects[page_index],
                         scale,
                         pointer,
+                        Some(&frame_projections),
                     ) {
                         let phase = if response.drag_started() {
                             PointerPhase::Press
@@ -1133,6 +1461,7 @@ impl ScriptCraftApp {
         &mut self,
         direction: VerticalDirection,
         extend: bool,
+        ctx: &egui::Context,
     ) -> Result<Selection, EditError> {
         let selection = self.session.selection();
         let current = selection.focus;
@@ -1216,10 +1545,9 @@ impl ScriptCraftApp {
             (None, Some(_)) | (Some(_), None) => true,
             (None, None) => false,
         };
-        let existing_goal = self.preferred_vertical_x;
-        let next = if let Some(group) = target_group.filter(|_| mode_transition) {
+        if let Some(group) = target_group.filter(|_| mode_transition) {
             self.preferred_vertical_x = None;
-            dual_group_navigation_edge(
+            let next = dual_group_navigation_edge(
                 project,
                 group,
                 direction == VerticalDirection::Down,
@@ -1227,23 +1555,47 @@ impl ScriptCraftApp {
             .unwrap_or(Position {
                 element: target_line.element,
                 offset: target_line.source.start,
-            })
-        } else {
-            let goal = existing_goal.unwrap_or_else(|| {
-                let columns = current_line.display_char_for_source(current.offset, false) as i64;
-                current_line.geometry.x.raw()
-                    + columns.saturating_mul(current_line.char_width.raw())
             });
-            self.preferred_vertical_x = (!mode_transition).then_some(goal);
+            return Ok(if extend {
+                Selection {
+                    anchor: selection.anchor,
+                    focus: next,
+                }
+            } else {
+                Selection::caret(next)
+            });
+        }
+        let scale = self.page_scale.unwrap_or(1.0);
+        let current_projection = self
+            .project_line_for_interaction(ctx, current_line, scale)
+            .map_err(|_| EditError::InvalidElement)?;
+        let target_projection = self
+            .project_line_for_interaction(ctx, target_line, scale)
+            .map_err(|_| EditError::InvalidElement)?;
+        let existing_goal = self.preferred_vertical_x;
+        let goal = existing_goal.unwrap_or_else(|| {
+            super::presentation_geometry::preferred_vertical_document_x(
+                current_line,
+                current.offset,
+                current_projection.as_ref(),
+                scale,
+            )
+            .unwrap_or(current_line.geometry.x.raw())
+        });
+        self.preferred_vertical_x = Some(goal);
+        let target_display = if let Some(projection) = target_projection.as_ref() {
+            super::presentation_geometry::projected_target_boundary(projection, goal, scale)
+                .ok_or(EditError::InvalidElement)?
+        } else {
             let cell = target_line.char_width.raw().max(1);
-            let columns = (goal
+            (goal
                 .saturating_sub(target_line.geometry.x.raw())
                 .saturating_add(cell / 2)
-                / cell) as u32;
-            Position {
-                element: target_line.element,
-                offset: target_line.source_for_display_char(columns as usize),
-            }
+                / cell) as u32 as usize
+        };
+        let next = Position {
+            element: target_line.element,
+            offset: target_line.source_for_display_char(target_display),
         };
         Ok(if extend {
             Selection {
@@ -1526,6 +1878,16 @@ struct FixedMetricTextStyle {
     selection: Option<(usize, usize)>,
 }
 
+impl FixedMetricTextStyle {
+    fn color_for(&self, selected: bool) -> Color32 {
+        if selected {
+            self.selected_color
+        } else {
+            self.color
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FixedCellGalleyKey {
     text: String,
@@ -1635,11 +1997,7 @@ fn paint_fixed_metric_text_with_selection(
         if span_text.is_empty() {
             continue;
         }
-        let color = if selected {
-            style.selected_color
-        } else {
-            style.color
-        };
+        let color = style.color_for(selected);
         let span_origin = egui::pos2(fixed_metric_x(origin.x, start_column, char_width), origin.y);
         let (galley, reused, fixed_geometry) = fixed_cell_span_galley(
             painter,
@@ -1814,14 +2172,41 @@ fn renderer_font(font_family: &str, font_size: f32) -> FontId {
     )
 }
 
-fn renderer_font_for_style(bold: bool, italic: bool, font_size: f32) -> FontId {
-    let family = match (bold, italic) {
-        (true, true) => "Courier Prime Bold Italic",
-        (true, false) => "Courier Prime Bold",
-        (false, true) => "Courier Prime Italic",
-        (false, false) => document_font::COURIER_PRIME_FAMILY,
-    };
-    FontId::new(font_size.max(1.0), FontFamily::Name(family.into()))
+#[derive(Clone, Debug, PartialEq)]
+struct ResolvedSpanPaint {
+    font: FontId,
+    color: Color32,
+    advance_mode: AdvanceMode,
+}
+
+fn resolve_span_paint(
+    style: &EffectiveTextStyle,
+    font_size: f32,
+    palette: theme::PagePalette,
+    availability: &document_font::FontAvailability,
+) -> ResolvedSpanPaint {
+    let resolved = super::presentation_style::resolve_effective_text_style(style);
+    let face = document_font::resolve_document_face(
+        resolved.family,
+        style.bold,
+        style.italic,
+        availability,
+    );
+    let color = resolved.color_rgb8.map_or_else(
+        || {
+            if style.hidden_text {
+                palette.subdued_text
+            } else {
+                palette.text
+            }
+        },
+        |[red, green, blue]| Color32::from_rgb(red, green, blue),
+    );
+    ResolvedSpanPaint {
+        font: FontId::new(font_size.max(1.0), face.family),
+        color,
+        advance_mode: face.advance_mode,
+    }
 }
 
 fn fixed_metric_x(origin: f32, column: usize, char_width: f32) -> f32 {
@@ -1859,20 +2244,6 @@ fn caret_blink_repaint_delay(time: f64) -> Duration {
     Duration::from_secs_f64(((phase + 1) as f64 * interval - time.max(0.0)).max(0.001))
 }
 
-fn caret_bar_rect(
-    page_rect: egui::Rect,
-    caret: scriptcraft_core::layout::FixedRect,
-    scale: f32,
-) -> egui::Rect {
-    egui::Rect::from_min_size(
-        egui::pos2(
-            page_rect.left() + caret.x.to_points_f32() * scale,
-            page_rect.top() + caret.y.to_points_f32() * scale,
-        ),
-        Vec2::new(CARET_WIDTH, caret.height.to_points_f32() * scale),
-    )
-}
-
 fn caret_needs_reveal(caret_rect: egui::Rect, visible_clip: egui::Rect) -> bool {
     !visible_clip.contains_rect(caret_rect)
 }
@@ -1889,12 +2260,19 @@ fn ordered_selection(selection: Selection) -> (Position, Position) {
 
 #[cfg(test)]
 mod styled_renderer_projection_tests {
-    use super::{FixedCellGalleyKey, ScriptCraftApp};
-    use eframe::egui::{Color32, FontFamily, FontId};
-    use scriptcraft_core::formatting::{EffectiveTextStyle, FontFallback};
+    use super::{
+        fixed_metric_x, position_galley_in_fixed_cells, resolve_span_paint,
+        FixedCellGalleyCache, FixedCellGalleyKey, ScriptCraftApp,
+    };
+    use crate::{document_font, theme};
+    use crate::presentation_style::AdvanceMode;
+    use eframe::egui::{self, Color32, FontFamily, FontId};
+    use egui::epaint::text::{Galley, LayoutJob};
+    use scriptcraft_core::formatting::{EffectiveTextStyle, FontFallback, SourceLayoutSettings};
     use scriptcraft_core::layout::{
         DisplaySourceSegment, FixedRect, PositionedStyledSpan, SourceRange,
     };
+    use std::sync::Arc;
 
     fn effective_style(bold: bool) -> EffectiveTextStyle {
         EffectiveTextStyle {
@@ -1974,6 +2352,41 @@ mod styled_renderer_projection_tests {
     }
 
     #[test]
+    fn projected_caret_paint_reveal_and_ime_share_one_translated_clipped_rectangle() {
+        let page = egui::Rect::from_min_size(egui::pos2(100.0, 200.0), egui::vec2(612.0, 792.0));
+        let projected = super::super::presentation_geometry::ProjectedCaretRect {
+            rect: egui::Rect::from_min_size(egui::pos2(21.0, 30.0), egui::vec2(1.5, 12.0)),
+            clip_bounds: egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(40.0, 60.0)),
+        };
+        let presentation = super::CaretPresentation::Projected(projected);
+        let (paint_rect, paint_clip) = super::viewport_caret_rect(presentation, page, 2.0);
+        let (reveal_rect, reveal_clip) = super::viewport_caret_rect(presentation, page, 2.0);
+        assert_eq!(paint_rect, reveal_rect);
+        assert_eq!(paint_clip, reveal_clip);
+        assert_eq!(paint_rect.min, egui::pos2(121.0, 230.0));
+        assert_eq!(paint_rect.size(), egui::vec2(1.5, 12.0));
+        assert_eq!(paint_clip, Some(egui::Rect::from_min_max(
+            egui::pos2(110.0, 220.0),
+            egui::pos2(140.0, 260.0),
+        )));
+    }
+
+    #[test]
+    fn fixed_caret_viewport_translation_still_scales_document_geometry_once() {
+        let page = egui::Rect::from_min_size(egui::pos2(40.0, 50.0), egui::vec2(612.0, 792.0));
+        let fixed = super::CaretPresentation::Fixed(FixedRect {
+            x: scriptcraft_core::FixedPoint::from_points(12),
+            y: scriptcraft_core::FixedPoint::from_points(24),
+            width: scriptcraft_core::FixedPoint::from_points(1),
+            height: scriptcraft_core::FixedPoint::from_points(10),
+        });
+        let (rect, clip) = super::viewport_caret_rect(fixed, page, 2.0);
+        assert_eq!(rect.min, egui::pos2(64.0, 98.0));
+        assert_eq!(rect.size(), egui::vec2(super::CARET_WIDTH, 20.0));
+        assert_eq!(clip, None);
+    }
+
+    #[test]
     fn caret_at_mixed_span_boundary_resolves_to_following_style_and_final_end_to_last_span() {
         let regular = span(
             "a",
@@ -2001,6 +2414,8 @@ mod styled_renderer_projection_tests {
             spans: std::sync::Arc::from([regular, bold]),
             text_style: effective_style(false),
             char_width: scriptcraft_core::FixedPoint::from_points(7),
+            alignment: scriptcraft_core::ParagraphAlignment::Left,
+            unaligned_line_left: scriptcraft_core::FixedPoint::from_points(10),
             geometry: FixedRect {
                 x: scriptcraft_core::FixedPoint::from_points(10),
                 y: scriptcraft_core::FixedPoint::from_points(20),
@@ -2062,6 +2477,335 @@ mod styled_renderer_projection_tests {
         );
         assert_ne!(regular, bold);
         assert_ne!(regular, expanded_gap);
+
+        let arial_font = FontId::new(
+            12.0,
+            FontFamily::Name("ScriptCraft Arial Regular".into()),
+        );
+        let arial = FixedCellGalleyKey::new(
+            "word",
+            &arial_font,
+            &effective_style(false),
+            7.0,
+            12.0,
+            28.0,
+            false,
+            false,
+            Color32::BLACK,
+            1.0,
+        );
+        let colored = FixedCellGalleyKey::new(
+            "word",
+            &font,
+            &effective_style(false),
+            7.0,
+            12.0,
+            28.0,
+            false,
+            false,
+            Color32::from_rgb(0x87, 0x8f, 0xe0),
+            1.0,
+        );
+        assert_ne!(regular, arial, "cache identity includes resolved FontFamily");
+        assert_ne!(regular, colored, "cache identity includes resolved Color32");
+        let hidpi = FixedCellGalleyKey::new(
+            "word",
+            &font,
+            &effective_style(false),
+            7.0,
+            12.0,
+            28.0,
+            false,
+            false,
+            Color32::BLACK,
+            2.0,
+        );
+        assert_ne!(regular, hidpi, "fixed cache identity includes pixels per point");
+    }
+
+    #[test]
+    fn renderer_resolves_all_four_available_arial_style_faces() {
+        let availability = document_font::all_arial_available_for_test();
+        for (bold, italic, family) in [
+            (false, false, "ScriptCraft Arial Regular"),
+            (true, false, "ScriptCraft Arial Bold"),
+            (false, true, "ScriptCraft Arial Italic"),
+            (true, true, "ScriptCraft Arial Bold Italic"),
+        ] {
+            let mut style = effective_style(bold);
+            style.declared_family = "aRiAl".to_owned();
+            style.italic = italic;
+            let resolved = resolve_span_paint(
+                &style,
+                12.0,
+                test_page_palette(),
+                &availability,
+            );
+            assert_eq!(resolved.font.family, FontFamily::Name(family.into()));
+            assert_eq!(resolved.font.size, 12.0);
+            assert_eq!(resolved.advance_mode, AdvanceMode::Proportional);
+        }
+    }
+
+    #[test]
+    fn imported_family_and_color_take_precedence_with_matching_face_selection() {
+        let mut style = effective_style(true);
+        style.declared_family = "Arial".to_owned();
+        style.italic = true;
+        style.source_color = Some("#1234aBcDffff".to_owned());
+        let resolved = resolve_span_paint(
+            &style,
+            13.0,
+            test_page_palette(),
+            &document_font::all_arial_available_for_test(),
+        );
+
+        assert_eq!(resolved.font.family, FontFamily::Name("ScriptCraft Arial Bold Italic".into()));
+        assert_eq!(resolved.color, Color32::from_rgb(0x12, 0xab, 0xff));
+        assert_eq!(resolved.advance_mode, AdvanceMode::Proportional);
+    }
+
+    #[test]
+    fn default_hidden_role_color_projects_to_rgb8_and_other_families_keep_courier() {
+        let default_style = SourceLayoutSettings::default()
+            .text_style(scriptcraft_core::Role::Summary);
+        let resolved = resolve_span_paint(
+            &default_style,
+            12.0,
+            test_page_palette(),
+            &document_font::all_arial_available_for_test(),
+        );
+        assert_eq!(resolved.font.family, FontFamily::Name("ScriptCraft Arial Regular".into()));
+        assert_eq!(resolved.color, Color32::from_rgb(0x87, 0x8f, 0xe0));
+        assert_eq!(resolved.advance_mode, AdvanceMode::Proportional);
+
+        let mut legacy_style = effective_style(true);
+        for family in ["Courier Final Draft", "Helvetica"] {
+            legacy_style.declared_family = family.to_owned();
+            let legacy = resolve_span_paint(
+                &legacy_style,
+                12.0,
+                test_page_palette(),
+                &document_font::all_arial_available_for_test(),
+            );
+            assert_eq!(legacy.font.family, FontFamily::Name("Courier Prime Bold".into()));
+            assert_eq!(legacy.advance_mode, AdvanceMode::FixedCell);
+        }
+    }
+
+    #[test]
+    fn missing_style_faces_and_invalid_colors_use_matching_face_and_visibility_fallbacks() {
+        let availability = document_font::FontAvailability::default();
+        for (bold, italic, family) in [
+            (false, false, "Courier Prime"),
+            (true, false, "Courier Prime Bold"),
+            (false, true, "Courier Prime Italic"),
+            (true, true, "Courier Prime Bold Italic"),
+        ] {
+            let mut style = effective_style(bold);
+            style.declared_family = "Arial".to_owned();
+            style.italic = italic;
+            let resolved = resolve_span_paint(&style, 12.0, test_page_palette(), &availability);
+            assert_eq!(resolved.font.family, FontFamily::Name(family.into()));
+            assert_eq!(resolved.advance_mode, AdvanceMode::FixedCell);
+        }
+
+        let mut ordinary_style = effective_style(false);
+        ordinary_style.source_color = Some("not-a-color".to_owned());
+        let ordinary = resolve_span_paint(
+            &ordinary_style,
+            12.0,
+            test_page_palette(),
+            &availability,
+        );
+        assert_eq!(ordinary.color, Color32::from_rgb(32, 32, 32));
+        ordinary_style.hidden_text = true;
+        let hidden = resolve_span_paint(
+            &ordinary_style,
+            12.0,
+            test_page_palette(),
+            &availability,
+        );
+        assert_eq!(hidden.color, Color32::from_rgb(98, 98, 98));
+    }
+
+    #[test]
+    fn decoration_and_ime_resolutions_share_span_color_and_font_without_changing_selection_colors() {
+        let mut style = effective_style(true);
+        style.declared_family = "Arial".to_owned();
+        style.italic = true;
+        style.underline = true;
+        style.source_color = Some("#aabbccddeeff".to_owned());
+        let palette = test_page_palette();
+        let availability = document_font::all_arial_available_for_test();
+        let span_paint = resolve_span_paint(&style, 12.0, palette, &availability);
+        let ime_paint = resolve_span_paint(&style, 12.0, palette, &availability);
+
+        assert_eq!(ime_paint.font, span_paint.font);
+        assert_eq!(ime_paint.advance_mode, span_paint.advance_mode);
+        assert_eq!(ime_paint.color, span_paint.color);
+        assert_eq!(span_paint.advance_mode, AdvanceMode::Proportional);
+        assert_eq!(span_paint.color, Color32::from_rgb(0xaa, 0xcc, 0xee));
+        assert_eq!(
+            resolve_span_paint(&style, 0.25, palette, &availability).font.size,
+            1.0,
+        );
+        assert_eq!(palette.selection, Color32::from_rgb(56, 109, 177));
+        assert_eq!(palette.selection_text, Color32::WHITE);
+        // Decoration strokes and ordinary glyphs consume the same `color` from
+        // resolve_span_paint; selected glyphs continue to use selection_text.
+        let selected = super::FixedMetricTextStyle {
+            color: span_paint.color,
+            selected_color: palette.selection_text,
+            selection: Some((0, 1)),
+        };
+        assert_eq!(selected.color_for(false), span_paint.color);
+        assert_eq!(selected.color_for(true), palette.selection_text);
+    }
+
+    #[test]
+    fn fixed_cell_x_positions_remain_independent_of_resolved_font_and_color() {
+        assert_eq!(
+            [0, 1, 2].map(|column| fixed_metric_x(10.0, column, 7.25)),
+            [10.0, 17.25, 24.5],
+        );
+    }
+
+    #[test]
+    fn fixed_galley_control_rewrites_each_glyph_mesh_and_total_advance_to_cells() {
+        let mut galley = (*fixed_test_galley("AV")).clone();
+        let result = position_galley_in_fixed_cells(&mut galley, 8.0);
+        assert!(result);
+        let row = &galley.rows[0];
+        assert_eq!(row.glyphs.len(), 2);
+        assert_eq!(row.glyphs[0].pos.x, 0.0);
+        assert_eq!(row.glyphs[0].advance_width, 8.0);
+        assert_eq!(row.glyphs[1].pos.x, 8.0);
+        assert_eq!(row.glyphs[1].advance_width, 8.0);
+        assert_eq!(row.size.x, 16.0);
+        assert_eq!(galley.rect.left(), 0.0);
+        assert_eq!(galley.rect.width(), 16.0);
+        assert_eq!(row.visuals.mesh_bounds, row.visuals.mesh.calc_bounds());
+        assert_eq!(
+            galley.mesh_bounds,
+            galley
+                .rows
+                .iter()
+                .fold(egui::Rect::NOTHING, |bounds, row| bounds.union(row.visuals.mesh_bounds)),
+        );
+
+        let mut vertex_index = row.visuals.glyph_vertex_range.start;
+        for (column, glyph) in row.glyphs.iter().enumerate() {
+            if glyph.uv_rect.is_nothing() {
+                continue;
+            }
+            let rounded_offset = (glyph.uv_rect.offset.x * galley.pixels_per_point).round()
+                / galley.pixels_per_point;
+            let left = column as f32 * 8.0 + rounded_offset;
+            let right = left + glyph.uv_rect.size.x;
+            let vertices = &row.visuals.mesh.vertices[vertex_index..vertex_index + 4];
+            assert_eq!(
+                [
+                    vertices[0].pos.x,
+                    vertices[1].pos.x,
+                    vertices[2].pos.x,
+                    vertices[3].pos.x,
+                ],
+                [left, right, left, right],
+            );
+            vertex_index += 4;
+        }
+        assert_eq!(vertex_index, row.visuals.glyph_vertex_range.end);
+    }
+
+    #[test]
+    fn fixed_galley_control_rejects_unrecognized_topology_for_existing_compatibility_fallback() {
+        let mut missing_glyph = (*fixed_test_galley("ab")).clone();
+        Arc::make_mut(&mut missing_glyph.rows[0].row).glyphs.pop();
+        let before = missing_glyph.clone();
+        assert!(!position_galley_in_fixed_cells(&mut missing_glyph, 7.0));
+        assert_eq!(missing_glyph, before);
+
+        let mut multiple_rows = (*fixed_test_galley("a\nb")).clone();
+        assert!(!position_galley_in_fixed_cells(&mut multiple_rows, 7.0));
+    }
+
+    #[test]
+    fn fixed_galley_cache_bound_clears_all_old_entries_before_next_insert() {
+        let font = FontId::new(12.0, FontFamily::Monospace);
+        let style = effective_style(false);
+        let galley = fixed_test_galley("x");
+        let mut cache = FixedCellGalleyCache::default();
+        for index in 0..super::FIXED_CELL_GALLEY_CACHE_LIMIT {
+            let text = format!("{index}");
+            cache.insert(
+                FixedCellGalleyKey::new(
+                    &text,
+                    &font,
+                    &style,
+                    7.0,
+                    12.0,
+                    7.0,
+                    false,
+                    false,
+                    Color32::BLACK,
+                    1.0,
+                ),
+                galley.clone(),
+            );
+        }
+        assert_eq!(cache.galleys.len(), super::FIXED_CELL_GALLEY_CACHE_LIMIT);
+        let first = FixedCellGalleyKey::new(
+            "0", &font, &style, 7.0, 12.0, 7.0, false, false, Color32::BLACK, 1.0,
+        );
+        assert!(cache.galleys.contains_key(&first));
+        cache.insert(
+            FixedCellGalleyKey::new(
+                "overflow", &font, &style, 7.0, 12.0, 7.0, false, false, Color32::BLACK, 1.0,
+            ),
+            galley,
+        );
+        assert_eq!(cache.galleys.len(), 1);
+        assert!(!cache.galleys.contains_key(&first));
+    }
+
+    fn fixed_test_galley(text: &str) -> Arc<Galley> {
+        let context = egui::Context::default();
+        let mut galley = None;
+        let _ = context.run(egui::RawInput::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                galley = Some(ui.painter().layout_job(LayoutJob::simple_singleline(
+                    text.to_owned(),
+                    FontId::new(18.0, FontFamily::Proportional),
+                    Color32::BLACK,
+                )));
+            });
+        });
+        match galley {
+            Some(galley) => galley,
+            None => context.fonts_mut(|fonts| {
+                fonts.layout_job(LayoutJob::simple_singleline(
+                    text.to_owned(),
+                    FontId::new(18.0, FontFamily::Proportional),
+                    Color32::BLACK,
+                ))
+            }),
+        }
+    }
+
+    fn test_page_palette() -> theme::PagePalette {
+        theme::PagePalette {
+            paper: Color32::WHITE,
+            text: Color32::from_rgb(32, 32, 32),
+            subdued_text: Color32::from_rgb(98, 98, 98),
+            border: Color32::BLACK,
+            selection: Color32::from_rgb(56, 109, 177),
+            selection_text: Color32::WHITE,
+            selection_boundary: Color32::BLACK,
+            dual_dialogue_boundary: Color32::BLACK,
+            caret: Color32::BLACK,
+            ime_text: Color32::BLACK,
+        }
     }
 }
 
@@ -2351,6 +3095,7 @@ mod dual_dialogue_pointer_entry_tests {
                 page_rect,
                 1.0,
                 egui::pos2(x.to_points_f32(), y.to_points_f32()),
+                None,
             ) else { continue };
             assert_eq!(adapter_caret.element, clicked_element);
             assert_eq!(app.performance.caret_lookups, caret_lookups_before.saturating_add(1));

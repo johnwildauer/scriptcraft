@@ -161,9 +161,10 @@ impl ScriptCraftApp {
         surface: EditorSurface,
         direction: VerticalDirection,
         extend: bool,
+        ctx: &egui::Context,
     ) -> Result<super::Selection, super::EditError> {
         if surface == EditorSurface::Body {
-            return self.navigation_selection_vertical(direction, extend);
+            return self.navigation_selection_vertical(direction, extend, ctx);
         }
         let current = self.session.title_selection();
         let focus = current.focus;
@@ -199,20 +200,41 @@ impl ScriptCraftApp {
                 super::Selection::caret(next)
             });
         };
+        let scale = if self.title_view_state_swapped {
+            self.page_scale.unwrap_or(1.0)
+        } else {
+            self.title_view.page_scale.unwrap_or(1.0)
+        };
+        let current_projection = self
+            .project_line_for_interaction(ctx, current_line, scale)
+            .map_err(|_| EditError::InvalidElement)?;
+        let target_projection = self
+            .project_line_for_interaction(ctx, target_line, scale)
+            .map_err(|_| EditError::InvalidElement)?;
         let goal = self.preferred_vertical_x_for(surface).unwrap_or_else(|| {
-            let columns = current_line.display_char_for_source(focus.offset, false) as i64;
-            current_line.geometry.x.raw()
-                + columns.saturating_mul(current_line.char_width.raw())
+            super::presentation_geometry::preferred_vertical_document_x(
+                current_line,
+                focus.offset,
+                current_projection.as_ref(),
+                scale,
+            )
+            .unwrap_or(current_line.geometry.x.raw())
         });
         self.set_preferred_vertical_x_for(surface, Some(goal));
-        let cell = target_line.char_width.raw().max(1);
-        let columns = goal
-            .saturating_sub(target_line.geometry.x.raw())
-            .saturating_add(cell / 2)
-            / cell;
+        let display_boundary = if let Some(projection) = target_projection.as_ref() {
+            super::presentation_geometry::projected_target_boundary(projection, goal, scale)
+                .ok_or(EditError::InvalidElement)?
+        } else {
+            let cell = target_line.char_width.raw().max(1);
+            (goal
+                .saturating_sub(target_line.geometry.x.raw())
+                .saturating_add(cell / 2)
+                / cell)
+                .max(0) as usize
+        };
         let next = Position {
             element: target_line.element,
-            offset: target_line.source_for_display_char(columns.max(0) as usize),
+            offset: target_line.source_for_display_char(display_boundary),
         };
         Ok(if extend {
             super::Selection { anchor: current.anchor, focus: next }
@@ -528,7 +550,7 @@ impl ScriptCraftApp {
             }
             Command::EditorNavigationVertical { direction, extend, surface } => {
                 let previous_vertical_goal = self.preferred_vertical_x_for(surface);
-                match self.navigation_selection_vertical_for(surface, direction, extend) {
+                match self.navigation_selection_vertical_for(surface, direction, extend, ctx) {
                     Ok(selection) => {
                         let outcome = self.execute_navigation_selection(selection, surface, true, ctx);
                         if matches!(&outcome, DesktopCommandOutcome::Rejected(_)) {
@@ -2777,7 +2799,7 @@ mod dual_dialogue_navigation_dispatch_tests {
             &context,
         );
         app.preferred_vertical_x = Some(300);
-        let _ = app.navigation_selection_vertical(VerticalDirection::Down, false);
+        let _ = app.navigation_selection_vertical(VerticalDirection::Down, false, &context);
         assert_eq!(app.preferred_vertical_x, None);
         assert_eq!(app.session.selection().focus.element, 5);
     }

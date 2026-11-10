@@ -30,7 +30,7 @@ pub(super) const TOOLBAR_ITEM_GAP: f32 = 4.0;
 pub(super) const TOOLBAR_TOP_PADDING: f32 = 4.0;
 pub(super) const TOOLBAR_CONTROL_CAPTION_GAP: f32 = 1.0;
 /// Reserved logical width between inline formatting choices; WO-005 paints into these slots.
-pub(super) const TOOLBAR_FORMATTING_SEPARATOR_SLOT_WIDTH: f32 = 1.0;
+pub(super) const TOOLBAR_FORMATTING_SEPARATOR_SLOT_WIDTH: f32 = 2.0;
 const TOOLBAR_FORMATTING_SEPARATOR_LENGTH: f32 = 15.0;
 pub(super) const TOOLBAR_ELEMENTS_CAPTION_VERTICAL_OFFSET: f32 = 0.0;
 // Explicit owner for trailing toolbar allocation; exact panel sizing includes this value.
@@ -83,9 +83,9 @@ mod toolbar_presentation {
 
     /// Optional enabled foreground for toolbar captions and icons; `None` follows Appearance.
     pub(super) const ENABLED_FOREGROUND_OVERRIDE: Option<Color32> = None;
-    /// Optional disabled foreground; `None` uses the resolved enabled foreground at reduced alpha.
+    /// Optional disabled foreground; `None` uses explicit custom-color alpha or the toolbar palette.
     pub(super) const DISABLED_FOREGROUND_OVERRIDE: Option<Color32> = None;
-    /// Alpha multiplier used only when no explicit disabled-color override resolves.
+    /// Alpha multiplier used only when an explicit enabled-color override lacks a disabled color.
     pub(super) const DISABLED_OPACITY_MULTIPLIER: f32 = 0.45;
     /// Agent-default Material glyph size, initially matching the existing Body glyph size.
     pub(super) const DEFAULT_MATERIAL_ICON_POINT_SIZE: f32 = 19.0;
@@ -116,29 +116,74 @@ mod toolbar_presentation {
             .unwrap_or_else(|| ui.visuals().text_color())
     }
 
+    fn reduced_alpha_custom_foreground(enabled: Color32) -> Color32 {
+        Color32::from_rgba_unmultiplied(
+            enabled.r(),
+            enabled.g(),
+            enabled.b(),
+            (f32::from(enabled.a()) * DISABLED_OPACITY_MULTIPLIER)
+                .round()
+                .clamp(0.0, 255.0) as u8,
+        )
+    }
+
+    pub(super) fn disabled_foreground_from_overrides(
+        icon_disabled: Option<Color32>,
+        item_disabled: Option<Color32>,
+        global_disabled: Option<Color32>,
+        custom_enabled: Option<Color32>,
+        ordinary_default: Color32,
+    ) -> Color32 {
+        icon_disabled
+            .or(item_disabled)
+            .or(global_disabled)
+            .unwrap_or_else(|| {
+                custom_enabled
+                    .map(reduced_alpha_custom_foreground)
+                    .unwrap_or(ordinary_default)
+            })
+    }
+
     pub(super) fn disabled_foreground(
-        ui: &egui::Ui,
         item: ToolbarItemSpec,
         icon: Option<IconSpec>,
         palette: crate::theme::ToolbarPalette,
     ) -> Color32 {
-        icon.and_then(|spec| spec.disabled_color)
-            .or(item.presentation.disabled_color)
-            .or(DISABLED_FOREGROUND_OVERRIDE)
-            .unwrap_or_else(|| {
-                let enabled = enabled_foreground(ui, item, icon);
-                if enabled == palette.foreground {
-                    return palette.disabled_foreground;
-                }
-                Color32::from_rgba_unmultiplied(
-                    enabled.r(),
-                    enabled.g(),
-                    enabled.b(),
-                    (f32::from(enabled.a()) * DISABLED_OPACITY_MULTIPLIER)
-                        .round()
-                        .clamp(0.0, 255.0) as u8,
-                )
-            })
+        let custom_enabled = icon
+            .and_then(|spec| spec.enabled_color)
+            .or(item.presentation.enabled_color)
+            .or(ENABLED_FOREGROUND_OVERRIDE);
+        disabled_foreground_from_overrides(
+            icon.and_then(|spec| spec.disabled_color),
+            item.presentation.disabled_color,
+            DISABLED_FOREGROUND_OVERRIDE,
+            custom_enabled,
+            palette.disabled_foreground,
+        )
+    }
+
+    pub(super) fn disabled_icon_foreground(
+        item: ToolbarItemSpec,
+        icon: IconSpec,
+        palette: crate::theme::ToolbarPalette,
+    ) -> Color32 {
+        disabled_foreground(item, Some(icon), palette)
+    }
+
+    pub(super) fn disabled_caption_foreground(
+        item: ToolbarItemSpec,
+        palette: crate::theme::ToolbarPalette,
+    ) -> Color32 {
+        disabled_foreground(item, None, palette)
+    }
+
+    pub(super) fn disabled_overflow_label_foreground(
+        item: ToolbarItemSpec,
+        palette: crate::theme::ToolbarPalette,
+    ) -> Option<Color32> {
+        (item.behavior == super::ToolbarBehavior::None
+            && item.enablement == super::EnablementPolicy::Disabled)
+            .then(|| disabled_caption_foreground(item, palette))
     }
 
     pub(super) fn icon_point_size(icon: IconSpec) -> f32 {
@@ -263,7 +308,9 @@ fn apply_toolbar_enablement(items: &mut [ToolbarItemSpec], availability: AppComm
                     EnablementPolicy::Enabled
                 }
             }
-            _ => EnablementPolicy::Enabled,
+            ToolbarBehavior::None
+            | ToolbarBehavior::ElementsRoleDropdown
+            | ToolbarBehavior::OverflowMenu => item.enablement,
         };
     }
 }
@@ -520,6 +567,83 @@ where
     }
 }
 
+fn toolbar_icon_galley(
+    ui: &egui::Ui,
+    icon: IconSpec,
+    color: Color32,
+) -> std::sync::Arc<egui::epaint::text::Galley> {
+    let point_size = toolbar_presentation::icon_point_size(icon);
+    WidgetText::from(
+        toolbar_presentation::material_icon_text(icon)
+            .size(point_size)
+            .color(color),
+    )
+    .into_galley(ui, None, point_size, TextStyle::Button)
+}
+
+fn paint_toolbar_galley_with_color(
+    ui: &egui::Ui,
+    position: egui::Pos2,
+    galley: std::sync::Arc<egui::epaint::text::Galley>,
+    color: Color32,
+) {
+    ui.painter()
+        .galley_with_override_text_color(position, galley, color);
+}
+
+fn paint_disabled_toolbar_overflow_label(
+    ui: &mut egui::Ui,
+    item: ToolbarItemSpec,
+    color: Color32,
+) -> egui::Rect {
+    let mut layout_job = WidgetText::from(RichText::new(item.label).color(color))
+        .into_layout_job(ui.style(), egui::FontSelection::Default, ui.text_valign())
+        .as_ref()
+        .clone();
+    let available_width = ui.available_width();
+    match ui.wrap_mode() {
+        egui::TextWrapMode::Extend => layout_job.wrap.max_width = f32::INFINITY,
+        egui::TextWrapMode::Wrap => layout_job.wrap.max_width = available_width,
+        egui::TextWrapMode::Truncate => {
+            layout_job.wrap.max_width = available_width;
+            layout_job.wrap.max_rows = 1;
+            layout_job.wrap.break_anywhere = true;
+        }
+    }
+    layout_job.halign = ui.layout().horizontal_placement();
+    layout_job.justify = ui.layout().horizontal_justify();
+    let galley = ui.painter().layout_job(layout_job);
+    let (_, rect) = ui.allocate_space(galley.size());
+    let position = match galley.job.halign {
+        egui::Align::LEFT => rect.left_top(),
+        egui::Align::Center => rect.center_top(),
+        egui::Align::RIGHT => rect.right_top(),
+    };
+    if ui.is_rect_visible(rect) {
+        paint_toolbar_galley_with_color(ui, position, galley, color);
+    }
+
+    let accessibility_id = ui.make_persistent_id(("disabled-toolbar-overflow-label", item.id));
+    ui.ctx().accesskit_node_builder(accessibility_id, |node| {
+        node.set_role(egui::accesskit::Role::Label);
+        node.set_label(item.accessibility_name.to_owned());
+        node.set_bounds(egui::accesskit::Rect {
+            x0: rect.min.x.into(),
+            y0: rect.min.y.into(),
+            x1: rect.max.x.into(),
+            y1: rect.max.y.into(),
+        });
+    });
+    rect
+}
+
+fn is_disabled_overflow_label(item: ToolbarItemSpec) -> bool {
+    matches!(
+        (item.behavior, item.enablement),
+        (ToolbarBehavior::None, EnablementPolicy::Disabled)
+    )
+}
+
 fn paint_toolbar_icon(
     ui: &egui::Ui,
     center: egui::Pos2,
@@ -527,21 +651,13 @@ fn paint_toolbar_icon(
     item: ToolbarItemSpec,
     palette: crate::theme::ToolbarPalette,
 ) {
-    let point_size = toolbar_presentation::icon_point_size(icon);
     let color = if matches!(item.enablement, EnablementPolicy::Enabled) {
         toolbar_presentation::enabled_foreground(ui, item, Some(icon))
     } else {
-        toolbar_presentation::disabled_foreground(ui, item, Some(icon), palette)
+        toolbar_presentation::disabled_icon_foreground(item, icon, palette)
     };
-    let galley = WidgetText::from(toolbar_presentation::material_icon_text(icon).size(point_size))
-    .into_galley(
-        ui,
-        None,
-        point_size,
-        TextStyle::Button,
-    );
-    ui.painter()
-        .galley(center - galley.size() / 2.0, galley, color);
+    let galley = toolbar_icon_galley(ui, icon, color);
+    paint_toolbar_galley_with_color(ui, center - galley.size() / 2.0, galley, color);
 }
 
 fn paint_toolbar_graphic(
@@ -597,18 +713,12 @@ impl ScriptCraftApp {
         let icon_control_size = Vec2::splat(presentation.icon_control_size);
         let icon_control_rect = toolbar_icon_control_rect(rect, icon_control_size);
         let icon_rect = toolbar_icon_hover_rect(icon_control_rect, TOOLBAR_ICON_HOVER_PADDING);
-        let enabled = item.enablement == EnablementPolicy::Enabled;
+        let enabled = toolbar_action_enabled(item);
         let response = ui
             .interact(
                 icon_rect,
                 id.with("icon"),
-                if enabled {
-                    Sense::click()
-                } else {
-                    // Hover-only keeps disabled accessibility state explicit but
-                    // cannot focus, activate, or receive the enabled hover paint.
-                    Sense::hover()
-                },
+                toolbar_action_sense(enabled),
             )
             .on_hover_cursor(egui::CursorIcon::Default);
         response.widget_info(|| {
@@ -618,7 +728,11 @@ impl ScriptCraftApp {
                 item.accessibility_name.to_owned(),
             )
         });
-        let fill = toolbar_group_fill(ui.style(), enabled && response.hovered());
+        let fill = if enabled {
+            toolbar_action_fill(ui.style(), enabled, response.hovered())
+        } else {
+            Color32::TRANSPARENT
+        };
         if fill != Color32::TRANSPARENT {
             ui.painter().rect_filled(icon_rect, 2.0, fill);
         }
@@ -628,7 +742,7 @@ impl ScriptCraftApp {
             let label_color = if enabled {
                 toolbar_presentation::enabled_foreground(ui, item, None)
             } else {
-                toolbar_presentation::disabled_foreground(ui, item, None, palette)
+                toolbar_presentation::disabled_caption_foreground(item, palette)
             };
             let label_galley = ui.painter().layout_no_wrap(
                 item.label.to_owned(),
@@ -644,20 +758,19 @@ impl ScriptCraftApp {
                 caption_rect.center().x,
                 caption_rect.center().y,
             );
-            ui.painter().galley(
+            paint_toolbar_galley_with_color(
+                ui,
                 label_center - label_galley.size() / 2.0,
                 label_galley,
                 label_color,
             );
         }
-        if response.clicked() {
-            if let ToolbarBehavior::Action(action) = item.behavior {
-                if let Some(command) = command_for_id(action) {
-                    self.dispatch_command(
-                        CommandInvocation::new(command, CommandOrigin::Toolbar),
-                        ui.ctx(),
-                    );
-                }
+        if let Some(action) = toolbar_action_activation(item, response.clicked()) {
+            if let Some(command) = command_for_id(action) {
+                self.dispatch_command(
+                    CommandInvocation::new(command, CommandOrigin::Toolbar),
+                    ui.ctx(),
+                );
             }
         }
     }
@@ -815,7 +928,8 @@ impl ScriptCraftApp {
             FontId::proportional(13.0),
             label_color,
         );
-        ui.painter().galley(
+        paint_toolbar_galley_with_color(
+            ui,
             egui::pos2(center.x + ICON_SIZE / 2.0 + 8.0, response.rect.center().y - label.size().y / 2.0),
             label,
             label_color,
@@ -903,9 +1017,10 @@ impl ScriptCraftApp {
                 presentation.font_id(),
                 toolbar_presentation::enabled_foreground(ui, item, None),
             );
-            ui.painter().galley(
+            paint_toolbar_galley_with_color(
+                ui,
                 geometry.caption_rect.center() - caption.size() / 2.0,
-                caption.clone(),
+                caption,
                 toolbar_presentation::enabled_foreground(ui, item, None),
             );
         }
@@ -1187,17 +1302,15 @@ impl ScriptCraftApp {
                             ui.add_enabled(false, egui::Button::new(item.label));
                         }
                     }
-                    ToolbarBehavior::None if item.enablement == EnablementPolicy::Disabled => {
-                        ui.label(
-                            RichText::new(item.label).color(
-                                toolbar_presentation::disabled_foreground(
-                                    ui,
-                                    item,
-                                    None,
-                                    self.theme_palette.toolbar,
-                                ),
-                            ),
-                        );
+                    ToolbarBehavior::None if is_disabled_overflow_label(item) => {
+                        if let Some(color) =
+                            toolbar_presentation::disabled_overflow_label_foreground(
+                                item,
+                                self.theme_palette.toolbar,
+                            )
+                        {
+                            paint_disabled_toolbar_overflow_label(ui, item, color);
+                        }
                     }
                     ToolbarBehavior::None | ToolbarBehavior::OverflowMenu => {}
                 }
@@ -1384,6 +1497,587 @@ mod toolbar_contract_tests {
         }
     }
 
+    fn disabled_color_test_palette() -> crate::theme::ToolbarPalette {
+        crate::theme::ToolbarPalette {
+            background: Color32::BLACK,
+            border: Color32::from_rgb(1, 2, 3),
+            formatting_separator: Color32::from_rgb(4, 5, 6),
+            foreground: Color32::from_rgb(7, 8, 9),
+            disabled_foreground: Color32::from_rgb(101, 102, 103),
+            hover_fill: Color32::from_rgb(10, 11, 12),
+            selected_fill: Color32::from_rgb(13, 14, 15),
+            hover_foreground: Color32::from_rgb(16, 17, 18),
+            pressed_fill: Color32::from_rgb(19, 20, 21),
+            open_fill: Color32::from_rgb(22, 23, 24),
+        }
+    }
+
+    fn real_toolbar_palette(
+        mode: crate::theme::AppearanceMode,
+    ) -> (egui::Theme, crate::theme::ToolbarPalette) {
+        let context = egui::Context::default();
+        let (resolved_theme, _, palette) =
+            crate::theme::configure_appearance(&context, mode, None);
+        (resolved_theme, palette.toolbar)
+    }
+
+    fn graphic_icons(graphic: ToolbarGraphic) -> Vec<IconSpec> {
+        match graphic {
+            ToolbarGraphic::Icon(icon) => vec![icon],
+            ToolbarGraphic::Icons(icons) => icons.to_vec(),
+            ToolbarGraphic::IconDisclosure { primary, disclosure } => vec![primary, disclosure],
+            ToolbarGraphic::None | ToolbarGraphic::TextDropdown => Vec::new(),
+        }
+    }
+
+    fn submitted_text_shapes(
+        output: &egui::FullOutput,
+    ) -> Vec<(String, Option<Color32>)> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) => {
+                    Some((shape.galley.text().to_owned(), shape.override_text_color))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn disabled_foreground_precedence_is_icon_then_item_then_global() {
+        let icon_disabled = Color32::from_rgb(31, 32, 33);
+        let item_disabled = Color32::from_rgb(41, 42, 43);
+        let global_disabled = Color32::from_rgb(51, 52, 53);
+        let custom_enabled = Color32::from_rgb(61, 62, 63);
+        let ordinary_default = Color32::from_rgb(71, 72, 73);
+
+        assert_eq!(
+            toolbar_presentation::disabled_foreground_from_overrides(
+                Some(icon_disabled),
+                Some(item_disabled),
+                Some(global_disabled),
+                Some(custom_enabled),
+                ordinary_default,
+            ),
+            icon_disabled,
+        );
+        assert_eq!(
+            toolbar_presentation::disabled_foreground_from_overrides(
+                None,
+                Some(item_disabled),
+                Some(global_disabled),
+                Some(custom_enabled),
+                ordinary_default,
+            ),
+            item_disabled,
+        );
+        assert_eq!(
+            toolbar_presentation::disabled_foreground_from_overrides(
+                None,
+                None,
+                Some(global_disabled),
+                Some(custom_enabled),
+                ordinary_default,
+            ),
+            global_disabled,
+        );
+    }
+
+    #[test]
+    fn disabled_foreground_reduces_alpha_only_for_unpaired_custom_enabled_color() {
+        let custom_enabled = Color32::from_rgba_unmultiplied(101, 102, 103, 201);
+        assert_eq!(
+            toolbar_presentation::disabled_foreground_from_overrides(
+                None,
+                None,
+                None,
+                Some(custom_enabled),
+                Color32::from_rgb(1, 2, 3),
+            ),
+            Color32::from_rgba_unmultiplied(101, 102, 103, 90),
+        );
+    }
+
+    #[test]
+    fn ordinary_disabled_foreground_uses_palette_without_egui_text_color_resolution() {
+        let palette = disabled_color_test_palette();
+        let projected = toolbar_items_for(availability(false, false));
+        let ordinary_item = projected
+            .iter()
+            .find(|item| item.id == "new")
+            .copied()
+            .unwrap();
+
+        assert_eq!(
+            toolbar_presentation::disabled_foreground(ordinary_item, None, palette),
+            palette.disabled_foreground,
+        );
+        assert_ne!(palette.foreground, palette.disabled_foreground);
+    }
+
+    #[test]
+    fn disabled_inline_icons_captions_and_overflow_labels_use_the_resolved_palette_color() {
+        let palette = disabled_color_test_palette();
+        let projected = toolbar_items_for(availability(false, false));
+        for id in ["show-hide", "export-text"] {
+            let item = *projected
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap();
+            assert_eq!(item.enablement, EnablementPolicy::Disabled);
+            assert_eq!(item.behavior, ToolbarBehavior::None);
+            assert!(item.caption_visible);
+            assert_eq!(
+                toolbar_presentation::disabled_caption_foreground(item, palette),
+                palette.disabled_foreground,
+                "{id} caption consumes the ordinary disabled palette color",
+            );
+
+            let icons: Vec<_> = match item.graphic {
+                ToolbarGraphic::Icon(icon) => vec![icon],
+                ToolbarGraphic::Icons(icons) => icons.to_vec(),
+                ToolbarGraphic::IconDisclosure { primary, disclosure } => {
+                    vec![primary, disclosure]
+                }
+                ToolbarGraphic::None | ToolbarGraphic::TextDropdown => Vec::new(),
+            };
+            assert!(!icons.is_empty(), "{id} retains its configured icon graphic");
+            for icon in icons {
+                assert_eq!(
+                    toolbar_presentation::disabled_icon_foreground(item, icon, palette),
+                    palette.disabled_foreground,
+                    "{id} icon consumes the ordinary disabled palette color",
+                );
+            }
+            assert_eq!(
+                toolbar_presentation::disabled_overflow_label_foreground(item, palette),
+                Some(palette.disabled_foreground),
+                "{id} overflow rendering retains a disabled-colored label",
+            );
+        }
+
+        let enabled = *projected
+            .iter()
+            .find(|item| item.id == "new")
+            .unwrap();
+        assert_eq!(
+            toolbar_presentation::disabled_overflow_label_foreground(enabled, palette),
+            None,
+            "enabled actions are not converted to disabled overflow labels",
+        );
+    }
+
+    #[test]
+    fn toolbar_icon_galley_meshes_carry_resolved_disabled_and_enabled_colors() {
+        let base_palette = disabled_color_test_palette();
+        let expected_disabled = Color32::from_rgba_unmultiplied(
+            base_palette.disabled_foreground.r(),
+            base_palette.disabled_foreground.g(),
+            base_palette.disabled_foreground.b(),
+            (f32::from(base_palette.disabled_foreground.a())
+                * toolbar_presentation::DISABLED_OPACITY_MULTIPLIER)
+                .round() as u8,
+        );
+        let palette = crate::theme::ToolbarPalette {
+            disabled_foreground: expected_disabled,
+            ..base_palette
+        };
+        let context = egui::Context::default();
+        let projected = toolbar_items_for(availability(false, false));
+
+        let _ = context.run(egui::RawInput::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                for (id, expected_icon_count) in [("show-hide", 2), ("export-text", 1)] {
+                    let item = *projected
+                        .iter()
+                        .find(|item| item.id == id)
+                        .unwrap();
+                    assert_eq!(item.enablement, EnablementPolicy::Disabled);
+                    assert_eq!(item.behavior, ToolbarBehavior::None);
+                    let icons: Vec<_> = match item.graphic {
+                        ToolbarGraphic::Icon(icon) => vec![icon],
+                        ToolbarGraphic::Icons(icons) => icons.to_vec(),
+                        ToolbarGraphic::IconDisclosure { primary, disclosure } => {
+                            vec![primary, disclosure]
+                        }
+                        ToolbarGraphic::None | ToolbarGraphic::TextDropdown => Vec::new(),
+                    };
+                    assert_eq!(icons.len(), expected_icon_count, "{id} icon set");
+
+                    for icon in icons {
+                        let resolved = toolbar_presentation::disabled_icon_foreground(
+                            item, icon, palette,
+                        );
+                        assert_eq!(resolved, expected_disabled, "{id} resolved palette color");
+                        let galley = toolbar_icon_galley(ui, icon, resolved);
+                        let vertex_colors: Vec<_> = galley
+                            .rows
+                            .iter()
+                            .flat_map(|placed_row| {
+                                placed_row
+                                    .row
+                                    .visuals
+                                    .mesh
+                                    .vertices
+                                    .iter()
+                                    .map(|vertex| vertex.color)
+                            })
+                            .collect();
+                        assert!(!vertex_colors.is_empty(), "{id} icon galley paints glyphs");
+                        assert!(
+                            vertex_colors.iter().all(|color| *color == expected_disabled),
+                            "{id} glyph mesh stores the 45%-alpha disabled palette color"
+                        );
+                    }
+
+                    assert_eq!(toolbar_action_activation(item, true), None);
+                }
+
+                let enabled = *projected
+                    .iter()
+                    .find(|item| item.id == "new")
+                    .unwrap();
+                assert_eq!(enabled.enablement, EnablementPolicy::Enabled);
+                let icon = match enabled.graphic {
+                    ToolbarGraphic::Icon(icon) => icon,
+                    _ => panic!("New retains its single icon graphic"),
+                };
+                let expected_enabled =
+                    toolbar_presentation::enabled_foreground(ui, enabled, Some(icon));
+                let enabled_galley = toolbar_icon_galley(ui, icon, expected_enabled);
+                let enabled_vertex_colors: Vec<_> = enabled_galley
+                    .rows
+                    .iter()
+                    .flat_map(|placed_row| {
+                        placed_row
+                            .row
+                            .visuals
+                            .mesh
+                            .vertices
+                            .iter()
+                            .map(|vertex| vertex.color)
+                    })
+                    .collect();
+                assert!(!enabled_vertex_colors.is_empty(), "enabled icon galley paints glyphs");
+                assert!(enabled_vertex_colors
+                    .iter()
+                    .all(|color| *color == expected_enabled));
+                assert_eq!(toolbar_action_activation(enabled, true), Some(CommandId::FileNew));
+            });
+        });
+    }
+
+    #[test]
+    fn disabled_toolbar_final_shapes_and_tessellated_glyphs_follow_real_appearance_palettes() {
+        use crate::theme::AppearanceMode;
+
+        let (_, day) = real_toolbar_palette(AppearanceMode::Day);
+        let (_, night) = real_toolbar_palette(AppearanceMode::Night);
+        let (_, midnight) = real_toolbar_palette(AppearanceMode::Midnight);
+        for (name, palette) in [("Day", day), ("Night", night), ("Midnight", midnight)] {
+            assert_eq!(palette.foreground.a(), 255, "{name} enabled palette is opaque");
+            assert_eq!(palette.disabled_foreground.r(), palette.foreground.r(), "{name} red");
+            assert_eq!(palette.disabled_foreground.g(), palette.foreground.g(), "{name} green");
+            assert_eq!(palette.disabled_foreground.b(), palette.foreground.b(), "{name} blue");
+            assert_eq!(
+                palette.disabled_foreground.a(),
+                115,
+                "{name} applies the existing 45% disabled alpha once",
+            );
+            assert_ne!(palette.disabled_foreground, palette.foreground);
+        }
+        assert_ne!(day.disabled_foreground, night.disabled_foreground);
+        assert_ne!(day.disabled_foreground, midnight.disabled_foreground);
+        assert_eq!(
+            night.disabled_foreground, midnight.disabled_foreground,
+            "Night and Midnight currently share the toolbar foreground token",
+        );
+
+        let context = egui::Context::default();
+        let projected_items = toolbar_items_for(availability(false, false));
+        let mut applied = None;
+        let mut previous_frame: Option<(AppearanceMode, Color32)> = None;
+        for mode in [
+            AppearanceMode::Day,
+            AppearanceMode::Day,
+            AppearanceMode::Night,
+            AppearanceMode::Midnight,
+            AppearanceMode::Day,
+            AppearanceMode::System,
+            AppearanceMode::System,
+        ] {
+            let (resolved_theme, next_applied, application_palette) =
+                crate::theme::configure_appearance(&context, mode, applied);
+            applied = next_applied;
+            let palette = application_palette.toolbar;
+            let expected_palette = match mode {
+                AppearanceMode::Day => day,
+                AppearanceMode::Night => night,
+                AppearanceMode::Midnight => midnight,
+                AppearanceMode::System if resolved_theme == egui::Theme::Light => day,
+                AppearanceMode::System => night,
+            };
+            assert_eq!(palette.foreground, expected_palette.foreground);
+            assert_eq!(palette.disabled_foreground, expected_palette.disabled_foreground);
+            if let Some((previous_mode, previous_disabled)) = previous_frame {
+                if previous_mode == mode {
+                    assert_eq!(
+                        previous_disabled, palette.disabled_foreground,
+                        "repeated frames in one appearance retain the same disabled color",
+                    );
+                }
+            }
+            previous_frame = Some((mode, palette.disabled_foreground));
+
+            let mut expected_shapes: Vec<(String, Color32)> = Vec::new();
+            let output = context.run(egui::RawInput::default(), |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    let center = ui.available_rect_before_wrap().center();
+                    for id in ["show-hide", "export-text", "new"] {
+                        let item = *projected_items
+                            .iter()
+                            .find(|item| item.id == id)
+                            .unwrap();
+                        let enabled = item.enablement == EnablementPolicy::Enabled;
+                        assert_eq!(
+                            enabled,
+                            id == "new",
+                            "live projection keeps {id} in its expected enabled state",
+                        );
+                        let icons = graphic_icons(item.graphic);
+                        assert!(item.caption_visible, "{id} retains its inline caption");
+                        assert!(!icons.is_empty(), "{id} retains its complete graphic");
+
+                        for icon in icons {
+                            let (text, color) = if enabled {
+                                (
+                                    toolbar_presentation::material_icon_text(icon).text().to_owned(),
+                                    toolbar_presentation::enabled_foreground(ui, item, Some(icon)),
+                                )
+                            } else {
+                                (
+                                    toolbar_presentation::material_icon_text(icon).text().to_owned(),
+                                    toolbar_presentation::disabled_icon_foreground(item, icon, palette),
+                                )
+                            };
+                            expected_shapes.push((text, color));
+                            paint_toolbar_icon(ui, center, icon, item, palette);
+                        }
+
+                        let caption_color = if enabled {
+                            toolbar_presentation::enabled_foreground(ui, item, None)
+                        } else {
+                            toolbar_presentation::disabled_caption_foreground(item, palette)
+                        };
+                        expected_shapes.push((item.label.to_owned(), caption_color));
+                        let caption = ui.painter().layout_no_wrap(
+                            item.label.to_owned(),
+                            FontId::proportional(12.0),
+                            caption_color,
+                        );
+                        paint_toolbar_galley_with_color(
+                            ui,
+                            center - caption.size() / 2.0,
+                            caption,
+                            caption_color,
+                        );
+                    }
+
+                    for id in ["show-hide", "export-text"] {
+                        let item = *projected_items
+                            .iter()
+                            .find(|item| item.id == id)
+                            .unwrap();
+                        assert!(is_disabled_overflow_label(item));
+                        let color = toolbar_presentation::disabled_overflow_label_foreground(
+                            item, palette,
+                        )
+                        .expect("disabled commandless toolbar items retain overflow labels");
+                        expected_shapes.push((item.label.to_owned(), color));
+                        paint_disabled_toolbar_overflow_label(ui, item, color);
+                    }
+                });
+            });
+
+            let submitted_text_shapes = submitted_text_shapes(&output);
+            assert_eq!(submitted_text_shapes.len(), 9, "complete inline and overflow text set");
+            assert_eq!(expected_shapes.len(), submitted_text_shapes.len());
+            for (index, ((text, override_color), (expected_text, expected_color))) in
+                submitted_text_shapes.iter().zip(expected_shapes.iter()).enumerate()
+            {
+                assert_eq!(text, expected_text, "submitted shape {index} retains full text");
+                assert_eq!(
+                    *override_color,
+                    Some(*expected_color),
+                    "submitted shape {index} carries its resolved final glyph color",
+                );
+            }
+
+            assert_eq!(submitted_text_shapes[2].0, "Show/Hide");
+            assert_eq!(submitted_text_shapes[4].0, "Export Text");
+            assert_eq!(submitted_text_shapes[6].0, "New");
+            assert_eq!(submitted_text_shapes[7].0, "Show/Hide");
+            assert_eq!(submitted_text_shapes[8].0, "Export Text");
+            for index in [0, 1, 2, 3, 4, 7, 8] {
+                assert_eq!(
+                    submitted_text_shapes[index].1,
+                    Some(palette.disabled_foreground),
+                    "disabled icon, caption, and overflow label receive one palette alpha",
+                );
+            }
+            for index in [5, 6] {
+                let enabled_color = submitted_text_shapes[index]
+                    .1
+                    .expect("enabled New shapes retain explicit final foregrounds");
+                assert_ne!(enabled_color, palette.disabled_foreground);
+                assert_eq!(enabled_color.a(), 255, "enabled New remains fully opaque");
+            }
+
+            // The public egui tessellator keeps each submitted text shape bounded here,
+            // so glyph vertices can be matched to that shape without test-only hooks.
+            let text_clipped_shapes: Vec<_> = output
+                .shapes
+                .iter()
+                .filter(|clipped| matches!(&clipped.shape, egui::Shape::Text(_)))
+                .collect();
+            assert_eq!(text_clipped_shapes.len(), expected_shapes.len());
+            for (index, (clipped, (expected_text, expected_color))) in text_clipped_shapes
+                .into_iter()
+                .zip(expected_shapes.iter())
+                .enumerate()
+            {
+                let primitives =
+                    context.tessellate(vec![(*clipped).clone()], output.pixels_per_point);
+                let glyph_colors: Vec<_> = primitives
+                    .iter()
+                    .filter_map(|primitive| match &primitive.primitive {
+                        egui::epaint::Primitive::Mesh(mesh) => Some(&mesh.vertices),
+                        egui::epaint::Primitive::Callback(_) => None,
+                    })
+                    .flat_map(|vertices| vertices.iter().map(|vertex| vertex.color))
+                    .collect();
+                assert!(!glyph_colors.is_empty(), "shape {index} ({expected_text}) tessellates glyphs");
+                assert!(
+                    glyph_colors.iter().all(|color| *color == *expected_color),
+                    "shape {index} ({expected_text}) tessellates to its final override color",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_toolbar_actions_have_no_hover_sensing_and_remain_nonactivating_and_accessibility_disabled() {
+        let projected_items = toolbar_items_for(availability(false, false));
+        for id in ["show-hide", "export-text"] {
+            let item = *projected_items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap();
+            assert_eq!(item.enablement, EnablementPolicy::Disabled, "{id} live state");
+            let enabled = toolbar_action_enabled(item);
+
+            assert!(!enabled, "{id} remains disabled for accessibility metadata");
+            let accessibility_info = egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                enabled,
+                item.accessibility_name.to_owned(),
+            );
+            assert!(!accessibility_info.enabled, "{id} publishes disabled accessibility state");
+            assert_eq!(toolbar_action_sense(enabled), Sense::empty());
+            assert_eq!(
+                toolbar_action_fill(&egui::Style::default(), enabled, true),
+                Color32::TRANSPARENT,
+                "disabled pointer hover never paints enabled hover fill",
+            );
+            assert_eq!(
+                toolbar_action_activation(item, true),
+                None,
+                "synthetic pointer, keyboard, or accessibility activation resolves no command",
+            );
+        }
+
+        let enabled_action = *projected_items
+            .iter()
+            .find(|item| item.id == "new")
+            .unwrap();
+        assert!(toolbar_action_enabled(enabled_action));
+        assert_eq!(toolbar_action_sense(true), Sense::click());
+        assert_eq!(
+            toolbar_action_fill(&egui::Style::default(), true, true),
+            egui::Style::default().visuals.widgets.hovered.bg_fill,
+            "enabled action hover paint remains intact",
+        );
+        assert_eq!(
+            toolbar_action_activation(enabled_action, true),
+            Some(CommandId::FileNew),
+            "enabled action dispatch remains intact",
+        );
+        assert_eq!(toolbar_action_activation(enabled_action, false), None);
+    }
+
+    #[test]
+    fn disabled_overflow_labels_submit_explicit_color_without_interactive_allocation() {
+        let palette = disabled_color_test_palette();
+        let projected_items = toolbar_items_for(availability(false, false));
+        let disabled_items: Vec<_> = ["show-hide", "export-text"]
+            .into_iter()
+            .map(|id| {
+                let item = *projected_items
+                    .iter()
+                    .find(|item| item.id == id)
+                    .unwrap();
+                assert_eq!(item.enablement, EnablementPolicy::Disabled, "{id} live state");
+                assert!(is_disabled_overflow_label(item), "{id} selects the production disabled-label row");
+                let color = toolbar_presentation::disabled_overflow_label_foreground(item, palette)
+                    .expect("selected disabled row retains its overflow foreground");
+                assert_ne!(color, palette.foreground, "{id} is visibly disabled");
+                (item, color)
+            })
+            .collect();
+        let enabled = *projected_items
+            .iter()
+            .find(|item| item.id == "new")
+            .unwrap();
+        assert!(!is_disabled_overflow_label(enabled));
+        assert_eq!(enabled.enablement, EnablementPolicy::Enabled);
+        assert_eq!(enabled.behavior, ToolbarBehavior::Action(CommandId::FileNew));
+        let context = egui::Context::default();
+        let mut allocated = Vec::new();
+
+        let output = context.run(egui::RawInput::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                for (item, color) in disabled_items.iter().copied() {
+                    // This is the same pure selection seam used by toolbar_overflow_menu's
+                    // disabled-label match arm; that row paints a label, not a button.
+                    assert!(is_disabled_overflow_label(item));
+                    allocated.push(paint_disabled_toolbar_overflow_label(ui, item, color));
+                }
+            });
+        });
+
+        for ((item, expected_color), rect) in disabled_items.iter().zip(allocated.iter()) {
+            let submitted_label = output.shapes.iter().find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(shape) if shape.galley.text() == item.label => {
+                    Some((shape.galley.text().to_owned(), shape.override_text_color))
+                }
+                _ => None,
+            });
+            assert_eq!(
+                submitted_label,
+                Some((item.label.to_owned(), Some(*expected_color))),
+                "selected disabled overflow row carries its final-paint foreground override",
+            );
+            assert!(rect.width() > 0.0 && rect.height() > 0.0);
+        }
+        assert_eq!(
+            toolbar_presentation::disabled_overflow_label_foreground(enabled, palette),
+            None,
+            "enabled overflow actions remain on their existing button path",
+        );
+    }
+
     #[test]
     fn title_page_availability_tracks_migration_and_pdf_modal_gates() {
         let enabled = toolbar_items_for(availability(false, false));
@@ -1399,6 +2093,53 @@ mod toolbar_contract_tests {
         let title_command = CommandId::WindowTitlePageOpen;
         assert!(!availability(true, false).is_enabled(title_command));
         assert!(!availability(false, true).is_enabled(title_command));
+    }
+
+    #[test]
+    fn live_toolbar_projection_preserves_declared_non_dynamic_enablement() {
+        let projected = toolbar_items_for(availability(false, false));
+
+        for id in ["show-hide", "export-text"] {
+            let item = projected.iter().find(|item| item.id == id);
+            assert_eq!(item.map(|item| item.behavior), Some(ToolbarBehavior::None));
+            assert_eq!(item.map(|item| item.enablement), Some(EnablementPolicy::Disabled));
+        }
+
+        for id in [
+            "flexible-space-leading",
+            "flexible-space-pre-elements",
+            "flexible-space-post-elements",
+            "flexible-space-trailing",
+            "elements",
+            "overflow",
+        ] {
+            let projected_item = projected.iter().find(|item| item.id == id);
+            let declared_item = TEMPORARY_TOOLBAR_ITEMS
+                .iter()
+                .find(|item| item.id == id);
+            assert_eq!(projected_item.map(|item| item.enablement), declared_item.map(|item| item.enablement), "{id} retains its declared enablement");
+            assert_eq!(projected_item.map(|item| item.enablement), Some(EnablementPolicy::Enabled));
+        }
+
+        for id in ["new", "open", "save", "save-as", "title-page", "export-pdf"] {
+            let item = projected.iter().find(|item| item.id == id);
+            assert_eq!(item.map(|item| item.enablement), Some(EnablementPolicy::Enabled), "{id} remains enabled under ordinary availability");
+        }
+    }
+
+    #[test]
+    fn enablement_projection_does_not_reenable_a_synthetic_disabled_behavior_free_item() {
+        let mut synthetic = TEMPORARY_TOOLBAR_ITEMS[0];
+        synthetic.id = "synthetic-disabled-behavior-free";
+        synthetic.enablement = EnablementPolicy::Disabled;
+
+        apply_toolbar_enablement(
+            std::slice::from_mut(&mut synthetic),
+            availability(false, false),
+        );
+
+        assert_eq!(synthetic.behavior, ToolbarBehavior::None);
+        assert_eq!(synthetic.enablement, EnablementPolicy::Disabled);
     }
 
     #[test]
@@ -1840,6 +2581,7 @@ mod toolbar_contract_tests {
         let palette = crate::theme::ToolbarPalette {
             background: Color32::from_rgb(1, 2, 3),
             border: Color32::from_rgb(4, 5, 6),
+            formatting_separator: Color32::from_rgb(13, 14, 15),
             foreground: Color32::from_rgb(7, 8, 9),
             disabled_foreground: Color32::from_rgb(10, 11, 12),
             hover_fill: Color32::from_rgb(13, 14, 15),
@@ -1894,14 +2636,18 @@ mod toolbar_contract_tests {
         assert_eq!(style_states, [true, false, true, false, true]);
 
         let common_alignment = Some(ParagraphAlignment::Right);
-        let common_states = ALIGNMENT_CHOICES.map(|choice| {
-            formatting_choice_active(choice.choice, RunStyleFlags::default(), common_alignment)
-        });
+        let common_states = ALIGNMENT_CHOICES
+            .map(|choice| formatting_choice_active(choice.choice, styles, common_alignment));
         assert_eq!(common_states, [false, false, true, false]);
         let mixed_states = ALIGNMENT_CHOICES.map(|choice| {
-            formatting_choice_active(choice.choice, RunStyleFlags::default(), None)
+            formatting_choice_active(choice.choice, styles, None)
         });
         assert_eq!(mixed_states, [false; 4]);
+        assert_eq!(
+            STYLE_CHOICES.map(|choice| formatting_choice_active(choice.choice, styles, None)),
+            [true, false, true, false, true],
+            "mixed alignment does not replace simultaneous semantic style projection",
+        );
     }
 
     #[test]
@@ -1909,9 +2655,10 @@ mod toolbar_contract_tests {
         let palette = crate::theme::ToolbarPalette {
             background: Color32::BLACK,
             border: Color32::from_rgb(31, 41, 51),
+            formatting_separator: Color32::from_rgb(220, 220, 220),
             foreground: Color32::WHITE,
             disabled_foreground: Color32::GRAY,
-            hover_fill: Color32::from_rgb(220, 220, 220),
+            hover_fill: Color32::from_rgb(180, 180, 180),
             selected_fill: Color32::from_rgb(214, 214, 214),
             hover_foreground: Color32::WHITE,
             pressed_fill: Color32::GRAY,
@@ -1967,7 +2714,22 @@ mod toolbar_contract_tests {
         assert_eq!(tiny_scale_width, 1.0 / f32::MIN_POSITIVE);
         let stroke = formatting_separator_stroke(palette, 2.0);
         assert_eq!(stroke.width, 0.5);
-        assert_eq!(stroke.color, palette.border);
+        assert_eq!(stroke.color, palette.formatting_separator);
+        let mut changed_border_and_hover = palette;
+        changed_border_and_hover.border = Color32::from_rgb(1, 2, 3);
+        changed_border_and_hover.hover_fill = Color32::from_rgb(4, 5, 6);
+        assert_eq!(
+            formatting_separator_stroke(changed_border_and_hover, 2.0).color,
+            palette.formatting_separator,
+            "separator color is independent of shared border and hover fill",
+        );
+        let mut changed_separator = palette;
+        changed_separator.formatting_separator = Color32::from_rgb(7, 8, 9);
+        assert_eq!(
+            formatting_separator_stroke(changed_separator, 2.0).color,
+            Color32::from_rgb(7, 8, 9),
+            "separator stroke consumes the dedicated formatting token",
+        );
 
         let control = egui::Rect::from_min_max(
             egui::pos2(0.0, 10.0),
@@ -2167,7 +2929,7 @@ fn formatting_separator_stroke(
 ) -> egui::Stroke {
     egui::Stroke::new(
         formatting_separator_stroke_width(pixels_per_point),
-        palette.border,
+        palette.formatting_separator,
     )
 }
 
@@ -2303,6 +3065,37 @@ pub(super) fn toolbar_group_fill(style: &egui::Style, hovered: bool) -> Color32 
         style.visuals.widgets.hovered.bg_fill
     } else {
         Color32::TRANSPARENT
+    }
+}
+
+fn toolbar_action_enabled(item: ToolbarItemSpec) -> bool {
+    item.enablement == EnablementPolicy::Enabled
+}
+
+fn toolbar_action_sense(enabled: bool) -> Sense {
+    if enabled {
+        Sense::click()
+    } else {
+        // Disabled controls retain their explicit accessibility metadata but have
+        // no pointer, hover, focus, or keyboard interaction sensing.
+        Sense::empty()
+    }
+}
+
+fn toolbar_action_fill(style: &egui::Style, enabled: bool, hovered: bool) -> Color32 {
+    toolbar_group_fill(style, enabled && hovered)
+}
+
+fn toolbar_action_activation(
+    item: ToolbarItemSpec,
+    activated: bool,
+) -> Option<scriptcraft_commands::CommandId> {
+    if !activated || !toolbar_action_enabled(item) {
+        return None;
+    }
+    match item.behavior {
+        ToolbarBehavior::Action(action) => Some(action),
+        _ => None,
     }
 }
 
