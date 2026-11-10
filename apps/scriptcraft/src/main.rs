@@ -34,6 +34,8 @@ mod macos_pdf_dialog;
 mod macos_print_dialog;
 #[cfg(target_os = "windows")]
 mod windows_pdf_dialog;
+#[cfg(target_os = "windows")]
+mod windows_print;
 #[cfg(target_os = "macos")]
 mod macos_sf_symbols;
 mod menu;
@@ -1116,6 +1118,10 @@ struct ScriptCraftApp {
     native_title: String,
     #[cfg(target_os = "macos")]
     accepted_print_settings: Option<macos_print_dialog::AcceptedPrintSettings>,
+    #[cfg(target_os = "windows")]
+    windows_print_session: Option<windows_print::PrintSession>,
+    #[cfg(target_os = "windows")]
+    windows_print_preparation: Option<windows_print::PrintPreparation>,
     native_output_modal_active: bool,
     fdx_baseline: Option<FdxBaseline>,
     pending_window_restore: Option<fdx::WindowState>,
@@ -1516,6 +1522,10 @@ impl ScriptCraftApp {
             native_title: UNTITLED_DOCUMENT_TITLE.to_owned(),
             #[cfg(target_os = "macos")]
             accepted_print_settings: None,
+            #[cfg(target_os = "windows")]
+            windows_print_session: None,
+            #[cfg(target_os = "windows")]
+            windows_print_preparation: None,
             native_output_modal_active: false,
             fdx_baseline: None,
             pending_window_restore: None,
@@ -2353,6 +2363,28 @@ impl ScriptCraftApp {
                 ),
             }
         }
+        #[cfg(target_os = "windows")]
+        {
+            // Capture all mutable editor inputs synchronously at command
+            // acceptance. Only detached project/layout data enters the worker;
+            // the real owner HWND is acquired later from the live eframe frame.
+            let request = WindowsPrintRequestSnapshot::capture(self);
+            match windows_print::PrintPreparation::start(
+                request.project,
+                request.layout_inputs,
+                request.revision,
+                request.job_title,
+            ) {
+                Ok(preparation) => {
+                    self.windows_print_preparation = Some(preparation);
+                    self.show_error("WINDOWS_PRINT_PREPARING: immutable Print layouts are being prepared off the UI thread");
+                }
+                Err(_) => {
+                    self.native_output_modal_active = false;
+                    self.show_error("WINDOWS_PRINT_FAILED: bounded immutable print preparation could not start; no system UI was opened");
+                }
+            }
+        }
     }
 
     fn show_error(&mut self, detail: impl AsRef<str>) {
@@ -2746,8 +2778,177 @@ impl eframe::App for ScriptCraftApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        #[cfg(target_os = "windows")]
+        self.update_windows_print_session(ui, frame);
         ScriptCraftApp::update(self, ui);
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsPrintRequestSnapshot {
+    project: Project,
+    layout_inputs: scriptcraft_core::LayoutInputs,
+    revision: u64,
+    job_title: String,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsPrintRequestSnapshot {
+    fn capture(app: &ScriptCraftApp) -> Self {
+        Self {
+            project: app.session.project().clone(),
+            layout_inputs: app.session.layout_inputs().clone(),
+            revision: app.session.revision(),
+            job_title: print_export::print_job_title(app.native_path.as_deref()),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl ScriptCraftApp {
+    /// Poll background preparation and native callbacks without blocking the
+    /// eframe loop. The current frame is the sole source of the owner HWND.
+    fn update_windows_print_session(
+        &mut self,
+        ui: &mut egui::Ui,
+        frame: &eframe::Frame,
+    ) {
+        let ctx = ui.ctx().clone();
+        let submitted = self
+            .windows_print_session
+            .as_mut()
+            .is_some_and(windows_print::PrintSession::take_submitted);
+        if submitted {
+            self.show_error("WINDOWS_PRINT_SUBMITTED: Windows accepted the captured screenplay request; physical delivery is unconfirmed");
+        }
+
+        let terminal = self
+            .windows_print_session
+            .as_mut()
+            .and_then(windows_print::PrintSession::poll);
+        if let Some(result) = terminal {
+            let message = match result {
+                windows_print::PrintResult::Submitted => "WINDOWS_PRINT_SUBMITTED: system reported submission; physical delivery is unconfirmed",
+                windows_print::PrintResult::Completed => "WINDOWS_PRINT_COMPLETED: native task reached its terminal callback; physical delivery is unconfirmed",
+                windows_print::PrintResult::Cancelled => "WINDOWS_PRINT_CANCELLED: system print task was cancelled before completion",
+                windows_print::PrintResult::Failed => "WINDOWS_PRINT_FAILED: native print session failed or stopped reporting after a lifecycle callback",
+                windows_print::PrintResult::Unsupported => "WINDOWS_PRINT_UNSUPPORTED: modern system print session is unavailable",
+            };
+            self.show_error(message);
+            self.finish_windows_print_session(&ctx);
+        }
+
+        let prepared = self
+            .windows_print_preparation
+            .as_ref()
+            .and_then(windows_print::PrintPreparation::take_result);
+        if let Some(prepared) = prepared {
+            self.windows_print_preparation = None;
+            match prepared {
+                Ok(packages) => match windows_print::PrintSession::start(frame, packages) {
+                    Ok(session) => {
+                        self.windows_print_session = Some(session);
+                        self.show_error("WINDOWS_PRINT_PREVIEW_REQUESTED: modern Windows print UI opened for the immutable request-time snapshot; later edits require a new request");
+                    }
+                    Err(failure) => {
+                        self.report_windows_print_start_failure(failure);
+                        self.finish_windows_print_session(&ctx);
+                    }
+                },
+                Err(failure) => {
+                    self.report_windows_print_start_failure(failure);
+                    self.finish_windows_print_session(&ctx);
+                }
+            }
+        }
+
+        if self.windows_print_session.is_some() || self.windows_print_preparation.is_some() {
+            // Session events are delivered from native callbacks and do not
+            // necessarily wake egui, so schedule bounded nonblocking polling.
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn finish_windows_print_session(&mut self, ctx: &egui::Context) {
+        self.windows_print_session = None;
+        self.windows_print_preparation = None;
+        self.native_output_modal_active = false;
+        self.restore_editor_focus(ctx);
+    }
+
+    fn report_windows_print_start_failure(&mut self, failure: windows_print::StartFailure) {
+        let message = match failure {
+            windows_print::StartFailure::UnsupportedWindow => {
+                "WINDOWS_PRINT_UNSUPPORTED: eframe did not expose a Win32 owner window"
+            }
+            windows_print::StartFailure::ApartmentUnavailable => {
+                "WINDOWS_PRINT_UNSUPPORTED: UI-thread WinRT apartment could not be initialized"
+            }
+            windows_print::StartFailure::ManagerUnavailable => {
+                "WINDOWS_PRINT_UNSUPPORTED: PrintManager interop for the owner HWND is unavailable"
+            }
+            windows_print::StartFailure::RegistrationFailed => {
+                "WINDOWS_PRINT_FAILED: PrintTaskRequested registration failed"
+            }
+            windows_print::StartFailure::UiUnavailable => {
+                "WINDOWS_PRINT_FAILED: modern system print UI could not be opened"
+            }
+            windows_print::StartFailure::PreparationFailed => {
+                "WINDOWS_PRINT_FAILED: immutable screenplay package preparation failed"
+            }
+        };
+        self.show_error(message);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_print_request_snapshot_tests {
+    use super::{ScriptCraftApp, WindowsPrintRequestSnapshot};
+    use std::path::PathBuf;
+
+    #[test]
+    fn accepted_request_captures_revision_layout_and_filename_without_mutating_the_editor() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else { return };
+        app.native_path = Some(PathBuf::from("C:\\scripts\\captured-episode.fdx"));
+
+        let project_before = app.session.project().clone();
+        let revision_before = app.session.revision();
+        let dirty_before = app.session.dirty();
+        let selection_before = app.session.selection();
+        let title_selection_before = app.session.title_selection();
+        let request = WindowsPrintRequestSnapshot::capture(&app);
+
+        assert_eq!(request.project, project_before);
+        assert_eq!(request.revision, revision_before);
+        assert_eq!(request.job_title, "captured-episode");
+        assert_eq!(app.session.project(), &project_before);
+        assert_eq!(app.session.revision(), revision_before);
+        assert_eq!(app.session.dirty(), dirty_before);
+        assert_eq!(app.session.selection(), selection_before);
+        assert_eq!(app.session.title_selection(), title_selection_before);
+        assert!(!app.native_output_modal_active);
+
+        app.native_path = Some(PathBuf::from("C:\\scripts\\later-edit.fdx"));
+        assert_eq!(request.job_title, "captured-episode");
+    }
+
+    #[test]
+    fn terminal_and_failure_cleanup_releases_the_persistent_native_output_gate() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else { return };
+        let context = eframe::egui::Context::default();
+        app.native_output_modal_active = true;
+        app.finish_windows_print_session(&context);
+        assert!(!app.native_output_modal_active);
+        assert!(app.windows_print_session.is_none());
+        assert!(app.windows_print_preparation.is_none());
+        assert!(app.app_command_availability().is_enabled(
+            scriptcraft_commands::CommandId::FilePrint
+        ));
     }
 }
 

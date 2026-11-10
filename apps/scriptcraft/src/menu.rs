@@ -817,7 +817,82 @@ mod dual_dialogue_menu_tests {
         );
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_print_uses_unshifted_primary_p_and_print_preview_stays_disabled() {
+        let file_entries = MENU_CATALOG
+            .iter()
+            .find(|menu| menu.id == "file")
+            .map(|menu| menu.entries)
+            .unwrap_or(&[]);
+        let print_count = file_entries
+            .iter()
+            .filter(|entry| matches!(entry, MenuEntrySpec::Item(item) if item.id == "file.print"))
+            .count();
+        assert_eq!(print_count, 1);
+        let print = file_entries
+            .iter()
+            .find_map(|entry| match entry {
+                MenuEntrySpec::Item(item) if item.id == "file.print" => Some(*item),
+                _ => None,
+            });
+        assert!(print.is_some_and(|item| {
+            item.label == "Print..."
+                && item.accessibility_name == "Print screenplay"
+                && item.behavior == MenuItemBehavior::Command(CommandId::FilePrint)
+                && item.shortcut.is_some_and(|shortcut| {
+                    shortcut.primary
+                        && shortcut.key == ShortcutKey::P
+                        && !shortcut.shift
+                        && !shortcut.control
+                        && !shortcut.option
+                })
+        }));
+
+        let preview_index = file_entries.iter().position(|entry| {
+            matches!(entry, MenuEntrySpec::Item(item) if item.id == "file.print-preview")
+        });
+        let print_index = file_entries
+            .iter()
+            .position(|entry| matches!(entry, MenuEntrySpec::Item(item) if item.id == "file.print"));
+        assert_eq!(print_index, preview_index.map(|index| index + 1));
+        let preview = file_entries
+            .iter()
+            .find_map(|entry| match entry {
+                MenuEntrySpec::Item(item) if item.id == "file.print-preview" => Some(*item),
+                _ => None,
+            });
+        assert!(preview.is_some_and(|item| matches!(
+            item.behavior,
+            MenuItemBehavior::DisabledPlaceholder(_)
+        )));
+        assert_eq!(
+            command_for_key_event_on_platform(
+                egui::Key::P,
+                modifiers(ShortcutPlatform::Windows, true, false, false, false),
+                ShortcutPlatform::Windows,
+            ),
+            Some(CommandId::FilePrint),
+        );
+        assert_eq!(
+            command_for_key_event_on_platform(
+                egui::Key::P,
+                modifiers(ShortcutPlatform::Windows, true, false, false, true),
+                ShortcutPlatform::Windows,
+            ),
+            Some(CommandId::FileSaveAsPdf),
+        );
+        assert_eq!(
+            command_for_key_event_on_platform(
+                egui::Key::P,
+                modifiers(ShortcutPlatform::Windows, false, false, false, false),
+                ShortcutPlatform::Windows,
+            ),
+            None,
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     #[test]
     fn print_remains_a_disabled_placeholder_off_macos() {
         let print = MENU_CATALOG

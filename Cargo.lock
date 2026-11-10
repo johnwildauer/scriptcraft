@@ -2984,10 +2984,13 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-pdf-kit",
  "objc2-uniform-type-identifiers 0.3.2",
+ "raw-window-handle",
  "rfd",
  "scriptcraft-commands",
  "scriptcraft-core",
  "windows",
+ "windows-core",
+ "windows-future",
 ]
 
 [[package]]

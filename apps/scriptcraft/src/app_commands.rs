@@ -293,6 +293,12 @@ impl ScriptCraftApp {
 
     pub(super) fn app_command_availability(&self) -> AppCommandAvailability {
         let migration_pending = self.pending_fdx_open.is_some();
+        #[cfg(target_os = "windows")]
+        let native_output_active = self.native_output_modal_active
+            || self.windows_print_preparation.is_some()
+            || self.windows_print_session.is_some();
+        #[cfg(not(target_os = "windows"))]
+        let native_output_active = self.native_output_modal_active;
         let (selection, text_len, role_is_empty_parenthetical, element_count) = match self.active_editor_surface {
             EditorSurface::Body => {
                 let selection = self.session.selection();
@@ -313,7 +319,7 @@ impl ScriptCraftApp {
 
         AppCommandAvailability {
             modal_blocked: migration_pending,
-            native_output_active: self.native_output_modal_active,
+            native_output_active,
             undo: !migration_pending && self.session.can_undo(),
             redo: !migration_pending && self.session.can_redo(),
             delete: !migration_pending && delete_target_exists,
@@ -497,6 +503,16 @@ impl ScriptCraftApp {
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FilePrint => {
+                #[cfg(target_os = "windows")]
+                {
+                    // Windows printing outlives this dispatch: preparation runs
+                    // in the background and the owner-HWND session is started
+                    // and polled from a later eframe frame. Keep the shared
+                    // output gate raised until that asynchronous owner releases it.
+                    self.native_output_modal_active = true;
+                    open_print_panel(self);
+                }
+                #[cfg(not(target_os = "windows"))]
                 self.with_native_output_modal(open_print_panel);
                 DesktopCommandOutcome::EffectDispatched
             }
@@ -1073,7 +1089,7 @@ impl AppCommandAvailability {
             CommandId::EditorDualDialogueToggle => self.dual_dialogue_toggle,
             CommandId::WindowTitlePageOpen => self.title_open,
             CommandId::WindowTitlePageClose => self.title_close,
-            CommandId::FilePrint => cfg!(target_os = "macos"),
+            CommandId::FilePrint => cfg!(any(target_os = "macos", target_os = "windows")),
             _ => true,
         }
     }
@@ -1412,7 +1428,7 @@ mod print_request_command_tests {
     use std::path::PathBuf;
 
     #[test]
-    fn file_print_is_typed_and_available_only_on_macos() {
+    fn file_print_is_typed_and_available_only_on_native_print_platforms() {
         let app_result = ScriptCraftApp::new();
         assert!(app_result.is_ok());
         let Ok(mut app) = app_result else { return };
@@ -1422,7 +1438,7 @@ mod print_request_command_tests {
         assert_eq!(command_for_id(CommandId::FilePrint), Some(Command::FilePrint));
         assert_eq!(
             app.app_command_availability().is_enabled(CommandId::FilePrint),
-            cfg!(target_os = "macos"),
+            cfg!(any(target_os = "macos", target_os = "windows")),
         );
 
         let result = app.dispatch_command_with_pdf_handlers(
@@ -1434,15 +1450,114 @@ mod print_request_command_tests {
         );
         assert_eq!(result.command, CommandId::FilePrint);
         assert_eq!(result.origin, CommandOrigin::Menu);
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
             assert_eq!(result.outcome, DesktopCommandOutcome::EffectDispatched);
             assert_eq!(panel_requests.get(), 1);
             assert!(!unexpected_pdf_build.get());
+            assert_eq!(
+                app.app_command_availability().native_output_active,
+                cfg!(target_os = "windows"),
+            );
+            // This injected dispatch test has no native frame/session to own
+            // cleanup; model the terminal callback before dropping the fixture.
+            app.native_output_modal_active = false;
         } else {
             assert!(matches!(result.outcome, DesktopCommandOutcome::Unavailable(_)));
             assert_eq!(panel_requests.get(), 0);
             assert!(!unexpected_pdf_build.get());
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_file_print_dispatch_is_single_and_keeps_the_async_gate_until_terminal_cleanup() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else { return };
+        let context = eframe::egui::Context::default();
+        let requests = std::cell::Cell::new(0);
+        let project_before = app.session.project().clone();
+        let revision_before = app.session.revision();
+        let dirty_before = app.session.dirty();
+        let selection_before = app.session.selection();
+        let title_selection_before = app.session.title_selection();
+        let history_before = (app.session.can_undo(), app.session.can_redo());
+        let path_before = app.native_path.clone();
+        let baseline_before = app.fdx_baseline.clone();
+        let body_zoom_before = app.zoom_percent;
+        let title_zoom_before = app.title_view.zoom_percent;
+        let active_group_before = app.active_body_dual_dialogue_group.clone();
+
+        let result = app.dispatch_command_with_pdf_handlers(
+            CommandInvocation::new(Command::FilePrint, CommandOrigin::Menu),
+            &context,
+            |_| panic!("FilePrint must not invoke PDF output"),
+            |_, _| panic!("FilePrint must not enter PDF options"),
+            |app| {
+                requests.set(requests.get() + 1);
+                assert!(app.app_command_availability().native_output_active);
+                for command in [
+                    Command::FilePrint,
+                    Command::FileSaveAsPdf,
+                    Command::FileNew,
+                    Command::FileOpenRequest,
+                    Command::FileClose,
+                    Command::WindowTitlePageOpen,
+                ] {
+                    let nested = app.dispatch_command_with_pdf_handlers(
+                        CommandInvocation::new(command, CommandOrigin::Shortcut),
+                        &context,
+                        |_| panic!("active print session must block PDF output"),
+                        |_, _| panic!("active print session must block PDF options"),
+                        |_| panic!("active print session must block duplicate print"),
+                    );
+                    assert_eq!(
+                        nested.outcome,
+                        DesktopCommandOutcome::Unavailable(DesktopUnavailableReason::ModalBlocked),
+                    );
+                }
+            },
+        );
+
+        assert_eq!(result.command, CommandId::FilePrint);
+        assert_eq!(result.outcome, DesktopCommandOutcome::EffectDispatched);
+        assert_eq!(requests.get(), 1);
+        assert!(app.app_command_availability().native_output_active);
+        assert!(!app.app_command_availability().is_enabled(CommandId::FileSaveAsPdf));
+        assert!(!app.app_command_availability().is_enabled(CommandId::FilePrint));
+        assert_eq!(app.session.project(), &project_before);
+        assert_eq!(app.session.revision(), revision_before);
+        assert_eq!(app.session.dirty(), dirty_before);
+        assert_eq!(app.session.selection(), selection_before);
+        assert_eq!(app.session.title_selection(), title_selection_before);
+        assert_eq!((app.session.can_undo(), app.session.can_redo()), history_before);
+        assert_eq!(app.native_path, path_before);
+        assert_eq!(app.fdx_baseline, baseline_before);
+        assert_eq!(app.zoom_percent, body_zoom_before);
+        assert_eq!(app.title_view.zoom_percent, title_zoom_before);
+        assert_eq!(app.active_body_dual_dialogue_group, active_group_before);
+
+        // Production clears the same persistent gate only when native polling
+        // observes terminal completion/cancellation/failure.
+        app.native_output_modal_active = false;
+        assert!(app.app_command_availability().is_enabled(CommandId::FilePrint));
+
+        let repeated = app.dispatch_command_with_pdf_handlers(
+            CommandInvocation::new(Command::FilePrint, CommandOrigin::Shortcut),
+            &context,
+            |_| panic!("FilePrint must not invoke PDF output"),
+            |_, _| panic!("FilePrint must not enter PDF options"),
+            |app| {
+                requests.set(requests.get() + 1);
+                assert!(app.app_command_availability().native_output_active);
+            },
+        );
+        assert_eq!(repeated.command, CommandId::FilePrint);
+        assert_eq!(repeated.origin, CommandOrigin::Shortcut);
+        assert_eq!(repeated.outcome, DesktopCommandOutcome::EffectDispatched);
+        assert_eq!(requests.get(), 2);
+        assert!(app.app_command_availability().native_output_active);
+        app.native_output_modal_active = false;
     }
 
     #[test]
@@ -1492,6 +1607,12 @@ mod print_request_command_tests {
             let nested_pdf_requests = std::cell::Cell::new(0);
             let command = command_for_id(CommandId::FilePrint)
                 .expect("File > Print and primary-P resolve to the typed FilePrint command");
+            let project_before = app.session.project().clone();
+            let revision_before = app.session.revision();
+            let dirty_before = app.session.dirty();
+            let selection_before = app.session.selection();
+            let native_path_before = app.native_path.clone();
+            let baseline_before = app.fdx_baseline.clone();
 
             let result = app.dispatch_command_with_pdf_handlers(
                 CommandInvocation::new(command, origin),
@@ -1534,6 +1655,12 @@ mod print_request_command_tests {
             assert_eq!(nested_print_requests.get(), 0);
             assert_eq!(nested_pdf_requests.get(), 0);
             assert!(!app.app_command_availability().native_output_active);
+            assert_eq!(app.session.project(), &project_before);
+            assert_eq!(app.session.revision(), revision_before);
+            assert_eq!(app.session.dirty(), dirty_before);
+            assert_eq!(app.session.selection(), selection_before);
+            assert_eq!(app.native_path, native_path_before);
+            assert_eq!(app.fdx_baseline, baseline_before);
         }
     }
 

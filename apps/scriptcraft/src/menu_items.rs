@@ -100,7 +100,7 @@ const DISCLOSURE: PlaceholderKind = PlaceholderKind::Disclosure;
 const CHECKED: PlaceholderKind = PlaceholderKind::Checked;
 const SEARCH: PlaceholderKind = PlaceholderKind::Search;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const PRINT_ENTRY: MenuEntrySpec = command_item(
     "file.print",
     "Print...",
@@ -111,7 +111,7 @@ const PRINT_ENTRY: MenuEntrySpec = command_item(
     CommandId::FilePrint,
 );
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const PRINT_ENTRY: MenuEntrySpec = placeholder(
     "file.print",
     "Print...",

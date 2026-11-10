@@ -1045,7 +1045,7 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 49] = [
         "path: document_path, overwrite: bool (default false)",
     ),
     descriptor(CommandId::FileSaveAsPdf, "file", "none"),
-    descriptor(CommandId::FilePrint, "file", "none; macOS native print-panel host effect"),
+    descriptor(CommandId::FilePrint, "file", "none; native print host effect (macOS panel or Windows print session)"),
     descriptor(CommandId::FileImportResolve, "file", "resolution: import_resolution"),
     descriptor(CommandId::EditUndo, "edit", "none"),
     descriptor(CommandId::EditRedo, "edit", "none"),
@@ -1156,7 +1156,8 @@ mod file_print_contract_tests {
         assert!(COMMAND_DESCRIPTORS.iter().any(|descriptor| {
             descriptor.id == CommandId::FilePrint
                 && descriptor.family == "file"
-                && descriptor.parameters == "none; macOS native print-panel host effect"
+                && descriptor.parameters
+                    == "none; native print host effect (macOS panel or Windows print session)"
         }));
         assert!(CommandEnvelope::new(CommandOrigin::Menu, command).validate().is_ok());
     }

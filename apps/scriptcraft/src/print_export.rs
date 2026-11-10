@@ -96,7 +96,7 @@ pub(super) fn build_print_request(
     })
 }
 
-fn print_job_title(native_path: Option<&Path>) -> String {
+pub(super) fn print_job_title(native_path: Option<&Path>) -> String {
     let Some(stem) = native_path
         .and_then(Path::file_stem)
         .filter(|stem| !stem.is_empty())
