@@ -35,6 +35,7 @@ pub(super) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::FileSave => Command::FileSave,
         CommandId::FileSaveAsRequest => Command::FileSaveAsRequest,
         CommandId::FileSaveAsPdf => Command::FileSaveAsPdf,
+        CommandId::FilePrint => Command::FilePrint,
         CommandId::EditUndo => Command::EditUndo,
         CommandId::EditRedo => Command::EditRedo,
         CommandId::EditCut => Command::EditCut,
@@ -52,7 +53,7 @@ pub(super) fn command_for_id(id: CommandId) -> Option<Command> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct AppCommandAvailability {
     pub(super) modal_blocked: bool,
-    pub(super) pdf_options_blocked: bool,
+    pub(super) native_output_active: bool,
     pub(super) undo: bool,
     pub(super) redo: bool,
     pub(super) delete: bool,
@@ -312,7 +313,7 @@ impl ScriptCraftApp {
 
         AppCommandAvailability {
             modal_blocked: migration_pending,
-            pdf_options_blocked: self.pdf_export_options.is_open(),
+            native_output_active: self.native_output_modal_active,
             undo: !migration_pending && self.session.can_undo(),
             redo: !migration_pending && self.session.can_redo(),
             delete: !migration_pending && delete_target_exists,
@@ -337,6 +338,12 @@ impl ScriptCraftApp {
         }
     }
 
+    fn with_native_output_modal(&mut self, operation: impl FnOnce(&mut ScriptCraftApp)) {
+        self.native_output_modal_active = true;
+        operation(self);
+        self.native_output_modal_active = false;
+    }
+
     /// The sole desktop activation boundary. It refreshes availability at the
     /// moment of dispatch and keeps platform/document effects behind their
     /// existing adapters while semantic editing delegates to WO-002's executor.
@@ -344,6 +351,23 @@ impl ScriptCraftApp {
         &mut self,
         invocation: CommandInvocation,
         ctx: &egui::Context,
+    ) -> DesktopCommandResult {
+        self.dispatch_command_with_pdf_handlers(
+            invocation,
+            ctx,
+            |app| app.export_pdf(),
+            |app, options| app.export_pdf_with_options(options),
+            |app| app.open_print_panel(),
+        )
+    }
+
+    fn dispatch_command_with_pdf_handlers(
+        &mut self,
+        invocation: CommandInvocation,
+        ctx: &egui::Context,
+        export_pdf: impl FnOnce(&mut ScriptCraftApp),
+        resolve_pdf_options: impl FnOnce(&mut ScriptCraftApp, scriptcraft_commands::PdfExportOptions),
+        open_print_panel: impl FnOnce(&mut ScriptCraftApp),
     ) -> DesktopCommandResult {
         let command_id = invocation.command.id();
         let origin = invocation.origin;
@@ -376,7 +400,13 @@ impl ScriptCraftApp {
             origin,
             self.active_editor_surface(),
         );
-        let outcome = self.dispatch_command_inner(command, ctx);
+        let outcome = self.dispatch_command_inner_with_pdf_handlers(
+            command,
+            ctx,
+            export_pdf,
+            resolve_pdf_options,
+            open_print_panel,
+        );
         self.flush_pending_diagnostic_commands(ctx);
         if restore_focus {
             self.restore_editor_focus(ctx);
@@ -393,11 +423,23 @@ impl ScriptCraftApp {
         command: Command,
         ctx: &egui::Context,
     ) -> DesktopCommandOutcome {
-        if self.pdf_export_options.is_open()
-            && !matches!(&command, Command::PdfIncludeTitlePageResolve { .. })
-        {
-            return DesktopCommandOutcome::Unavailable(DesktopUnavailableReason::ModalBlocked);
-        }
+        self.dispatch_command_inner_with_pdf_handlers(
+            command,
+            ctx,
+            |app| app.export_pdf(),
+            |app, options| app.export_pdf_with_options(options),
+            |app| app.open_print_panel(),
+        )
+    }
+
+    fn dispatch_command_inner_with_pdf_handlers(
+        &mut self,
+        command: Command,
+        ctx: &egui::Context,
+        export_pdf: impl FnOnce(&mut ScriptCraftApp),
+        resolve_pdf_options: impl FnOnce(&mut ScriptCraftApp, scriptcraft_commands::PdfExportOptions),
+        open_print_panel: impl FnOnce(&mut ScriptCraftApp),
+    ) -> DesktopCommandOutcome {
         let availability = self.app_command_availability();
         if !availability.is_enabled(command.id()) {
             return DesktopCommandOutcome::Unavailable(
@@ -451,7 +493,11 @@ impl ScriptCraftApp {
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FileSaveAsPdf => {
-                self.export_pdf();
+                self.with_native_output_modal(export_pdf);
+                DesktopCommandOutcome::EffectDispatched
+            }
+            Command::FilePrint => {
+                self.with_native_output_modal(open_print_panel);
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::WindowTitlePageOpen => {
@@ -463,7 +509,7 @@ impl ScriptCraftApp {
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::PdfIncludeTitlePageResolve { options } => {
-                self.export_pdf_with_options(options);
+                self.with_native_output_modal(|app| resolve_pdf_options(app, options));
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::EditorStyleToggle { surface, style } => self.execute_editor(
@@ -1006,10 +1052,13 @@ impl AppCommandAvailability {
         if matches!(command, CommandId::UiStatusSet) {
             return true;
         }
+        if self.native_output_active {
+            return false;
+        }
         if matches!(command, CommandId::FileImportResolve) {
             return self.modal_blocked;
         }
-        if self.modal_blocked || self.pdf_options_blocked {
+        if self.modal_blocked {
             return false;
         }
         match command {
@@ -1024,12 +1073,13 @@ impl AppCommandAvailability {
             CommandId::EditorDualDialogueToggle => self.dual_dialogue_toggle,
             CommandId::WindowTitlePageOpen => self.title_open,
             CommandId::WindowTitlePageClose => self.title_close,
+            CommandId::FilePrint => cfg!(target_os = "macos"),
             _ => true,
         }
     }
 
     const fn unavailable_reason(self, command: CommandId) -> DesktopUnavailableReason {
-        if self.modal_blocked {
+        if self.modal_blocked || self.native_output_active {
             return DesktopUnavailableReason::ModalBlocked;
         }
         match command {
@@ -1172,7 +1222,7 @@ mod diagnostic_command_tests {
     fn diagnostic_command_remains_available_during_migration_modal() {
         let availability = AppCommandAvailability {
             modal_blocked: true,
-            pdf_options_blocked: false,
+            native_output_active: false,
             undo: false,
             redo: false,
             delete: false,
@@ -1236,30 +1286,80 @@ mod diagnostic_command_tests {
 mod pdf_export_command_tests {
     use super::CommandInvocation;
     use crate::ScriptCraftApp;
-    use scriptcraft_commands::{Command, CommandId, CommandOrigin};
+    use scriptcraft_commands::{Command, CommandId, CommandOrigin, PdfExportOptions};
+    use std::cell::Cell;
 
     #[test]
-    fn save_as_pdf_opens_a_fresh_default_options_step_before_export() {
+    fn direct_pdf_activation_repeats_without_pending_modal_or_blocking_commands() {
         let app_result = ScriptCraftApp::new();
         assert!(app_result.is_ok());
         let Ok(mut app) = app_result else { return };
         let context = eframe::egui::Context::default();
+        app.surface_focused = true;
+        let focus_before = app.surface_focused;
+        let active_group_before = app.active_body_dual_dialogue_group.clone();
+        let requests = Cell::new(0);
+        let unexpected_resolve = Cell::new(false);
 
-        let result = app.dispatch_command(
-            CommandInvocation::new(Command::FileSaveAsPdf, CommandOrigin::Menu),
-            &context,
-        );
-        assert!(matches!(result.outcome, super::DesktopCommandOutcome::EffectDispatched));
-        assert!(app.pdf_export_options.is_open());
-        assert!(!app.app_command_availability().is_enabled(CommandId::FileNew));
+        for origin in [CommandOrigin::Menu, CommandOrigin::Toolbar] {
+            let result = app.dispatch_command_with_pdf_handlers(
+                CommandInvocation::new(Command::FileSaveAsPdf, origin),
+                &context,
+                |app| {
+                    requests.set(requests.get() + 1);
+                    app.export_pdf_with_picker(|filename| {
+                        assert_eq!(filename, crate::UNTITLED_PDF_FILENAME);
+                        crate::pdf_export::PdfExportPickerResult::Cancel
+                    });
+                },
+                |_, _| unexpected_resolve.set(true),
+                |_| {},
+            );
+            assert_eq!(result.command, CommandId::FileSaveAsPdf);
+            assert_eq!(result.origin, origin);
+            assert_eq!(result.outcome, super::DesktopCommandOutcome::EffectDispatched);
+        }
 
-        assert!(app.pdf_export_options.cancel());
-        let next = app.dispatch_command(
-            CommandInvocation::new(Command::FileSaveAsPdf, CommandOrigin::Menu),
+        assert_eq!(requests.get(), 2);
+        assert!(!unexpected_resolve.get());
+        assert!(app.surface_focused);
+        assert_eq!(app.surface_focused, focus_before);
+        assert_eq!(app.active_body_dual_dialogue_group, active_group_before);
+        assert!(app.app_command_availability().is_enabled(CommandId::FileNew));
+        assert!(app.app_command_availability().is_enabled(CommandId::FileSaveAsPdf));
+    }
+
+    #[test]
+    fn typed_resolve_command_keeps_its_id_and_forwards_supplied_options() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else { return };
+        let context = eframe::egui::Context::default();
+        let options = PdfExportOptions {
+            include_title_page: false,
+        };
+        let command = Command::PdfIncludeTitlePageResolve { options };
+        assert_eq!(command.id(), CommandId::PdfIncludeTitlePageResolve);
+        let received = Cell::new(None);
+        let unexpected_direct = Cell::new(false);
+
+        let result = app.dispatch_command_with_pdf_handlers(
+            CommandInvocation::new(command, CommandOrigin::Menu),
             &context,
+            |_| unexpected_direct.set(true),
+            |app, resolved_options| {
+                received.set(Some(resolved_options));
+                app.finish_pdf_export(crate::pdf_export::PdfExportPickerResult::Cancel);
+            },
+            |_| {},
         );
-        assert!(matches!(next.outcome, super::DesktopCommandOutcome::EffectDispatched));
-        assert!(app.pdf_export_options.is_open());
+
+        assert_eq!(result.command, CommandId::PdfIncludeTitlePageResolve);
+        assert_eq!(result.origin, CommandOrigin::Menu);
+        assert_eq!(result.outcome, super::DesktopCommandOutcome::EffectDispatched);
+        assert!(!unexpected_direct.get());
+        assert_eq!(received.get(), Some(options));
+        assert!(app.app_command_availability().is_enabled(CommandId::FileSaveAsPdf));
     }
 
     #[test]
@@ -1299,6 +1399,186 @@ mod pdf_export_command_tests {
         assert_eq!(app.editor_surface_id, body_viewport_before);
         assert_eq!(app.title_editor_surface_id, title_viewport_before);
         assert_eq!(app.title_page_window_open, title_open_before);
+    }
+}
+
+#[cfg(test)]
+mod print_request_command_tests {
+    use super::{
+        command_for_id, CommandInvocation, DesktopCommandOutcome, DesktopUnavailableReason,
+    };
+    use crate::ScriptCraftApp;
+    use scriptcraft_commands::{Command, CommandId, CommandOrigin, PdfExportOptions};
+    use std::path::PathBuf;
+
+    #[test]
+    fn file_print_is_typed_and_available_only_on_macos() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else { return };
+        let context = eframe::egui::Context::default();
+        let panel_requests = std::cell::Cell::new(0);
+        let unexpected_pdf_build = std::cell::Cell::new(false);
+        assert_eq!(command_for_id(CommandId::FilePrint), Some(Command::FilePrint));
+        assert_eq!(
+            app.app_command_availability().is_enabled(CommandId::FilePrint),
+            cfg!(target_os = "macos"),
+        );
+
+        let result = app.dispatch_command_with_pdf_handlers(
+            CommandInvocation::new(Command::FilePrint, CommandOrigin::Menu),
+            &context,
+            |_| unexpected_pdf_build.set(true),
+            |_, _| unexpected_pdf_build.set(true),
+            |_| panel_requests.set(panel_requests.get() + 1),
+        );
+        assert_eq!(result.command, CommandId::FilePrint);
+        assert_eq!(result.origin, CommandOrigin::Menu);
+        if cfg!(target_os = "macos") {
+            assert_eq!(result.outcome, DesktopCommandOutcome::EffectDispatched);
+            assert_eq!(panel_requests.get(), 1);
+            assert!(!unexpected_pdf_build.get());
+        } else {
+            assert!(matches!(result.outcome, DesktopCommandOutcome::Unavailable(_)));
+            assert_eq!(panel_requests.get(), 0);
+            assert!(!unexpected_pdf_build.get());
+        }
+    }
+
+    #[test]
+    fn native_pdf_picker_blocks_reentrant_print_until_it_returns() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else { return };
+        let context = eframe::egui::Context::default();
+        let nested_print_requests = std::cell::Cell::new(0);
+
+        let result = app.dispatch_command_with_pdf_handlers(
+            CommandInvocation::new(Command::FileSaveAsPdf, CommandOrigin::Menu),
+            &context,
+            |app| {
+                let nested_print = app.dispatch_command_with_pdf_handlers(
+                    CommandInvocation::new(Command::FilePrint, CommandOrigin::Shortcut),
+                    &context,
+                    |_| {},
+                    |_, _| {},
+                    |_| nested_print_requests.set(nested_print_requests.get() + 1),
+                );
+                assert_eq!(
+                    nested_print.outcome,
+                    DesktopCommandOutcome::Unavailable(DesktopUnavailableReason::ModalBlocked),
+                );
+            },
+            |_, _| {},
+            |_| nested_print_requests.set(nested_print_requests.get() + 1),
+        );
+
+        assert_eq!(result.command, CommandId::FileSaveAsPdf);
+        assert_eq!(result.outcome, DesktopCommandOutcome::EffectDispatched);
+        assert_eq!(nested_print_requests.get(), 0);
+        assert!(!app.app_command_availability().native_output_active);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menu_and_primary_p_print_dispatch_once_and_guard_native_output_modals() {
+        for origin in [CommandOrigin::Menu, CommandOrigin::Shortcut] {
+            let app_result = ScriptCraftApp::new();
+            assert!(app_result.is_ok());
+            let Ok(mut app) = app_result else { return };
+            let context = eframe::egui::Context::default();
+            let panel_requests = std::cell::Cell::new(0);
+            let nested_print_requests = std::cell::Cell::new(0);
+            let nested_pdf_requests = std::cell::Cell::new(0);
+            let command = command_for_id(CommandId::FilePrint)
+                .expect("File > Print and primary-P resolve to the typed FilePrint command");
+
+            let result = app.dispatch_command_with_pdf_handlers(
+                CommandInvocation::new(command, origin),
+                &context,
+                |_| nested_pdf_requests.set(nested_pdf_requests.get() + 1),
+                |_, _| {},
+                |app| {
+                    panel_requests.set(panel_requests.get() + 1);
+                    assert!(app.app_command_availability().native_output_active);
+
+                    let nested_print = app.dispatch_command_with_pdf_handlers(
+                        CommandInvocation::new(Command::FilePrint, CommandOrigin::Shortcut),
+                        &context,
+                        |_| nested_pdf_requests.set(nested_pdf_requests.get() + 1),
+                        |_, _| {},
+                        |_| nested_print_requests.set(nested_print_requests.get() + 1),
+                    );
+                    let nested_pdf = app.dispatch_command_with_pdf_handlers(
+                        CommandInvocation::new(Command::FileSaveAsPdf, CommandOrigin::Menu),
+                        &context,
+                        |_| nested_pdf_requests.set(nested_pdf_requests.get() + 1),
+                        |_, _| {},
+                        |_| nested_print_requests.set(nested_print_requests.get() + 1),
+                    );
+                    assert_eq!(
+                        nested_print.outcome,
+                        DesktopCommandOutcome::Unavailable(DesktopUnavailableReason::ModalBlocked),
+                    );
+                    assert_eq!(
+                        nested_pdf.outcome,
+                        DesktopCommandOutcome::Unavailable(DesktopUnavailableReason::ModalBlocked),
+                    );
+                },
+            );
+
+            assert_eq!(result.command, CommandId::FilePrint);
+            assert_eq!(result.origin, origin);
+            assert_eq!(result.outcome, DesktopCommandOutcome::EffectDispatched);
+            assert_eq!(panel_requests.get(), 1);
+            assert_eq!(nested_print_requests.get(), 0);
+            assert_eq!(nested_pdf_requests.get(), 0);
+            assert!(!app.app_command_availability().native_output_active);
+        }
+    }
+
+    #[test]
+    fn immutable_print_request_preserves_document_session_and_view_state() {
+        let app_result = ScriptCraftApp::new();
+        assert!(app_result.is_ok());
+        let Ok(mut app) = app_result else { return };
+        app.native_path = Some(PathBuf::from("/private/scripts/episode.fdx"));
+
+        let project_before = app.session.project().clone();
+        let dirty_before = app.session.dirty();
+        let revision_before = app.session.revision();
+        let body_selection_before = app.session.selection();
+        let title_selection_before = app.session.title_selection();
+        let history_before = (app.session.can_undo(), app.session.can_redo());
+        let native_path_before = app.native_path.clone();
+        let baseline_before = app.fdx_baseline.clone();
+        let body_zoom_before = app.zoom_percent;
+        let title_zoom_before = app.title_view.zoom_percent;
+        let active_group_before = app.active_body_dual_dialogue_group.clone();
+
+        let options = PdfExportOptions {
+            include_title_page: false,
+        };
+        let first = app.build_print_request(options);
+        let repeated = app.build_print_request(options);
+        assert!(first.is_ok());
+        assert!(repeated.is_ok());
+        let (Ok(first), Ok(repeated)) = (first, repeated) else { return };
+        assert_eq!(first, repeated);
+        assert_eq!(first.job_title(), "episode");
+        assert!(!first.pdf_data().is_empty());
+
+        assert_eq!(app.session.project(), &project_before);
+        assert_eq!(app.session.dirty(), dirty_before);
+        assert_eq!(app.session.revision(), revision_before);
+        assert_eq!(app.session.selection(), body_selection_before);
+        assert_eq!(app.session.title_selection(), title_selection_before);
+        assert_eq!((app.session.can_undo(), app.session.can_redo()), history_before);
+        assert_eq!(app.native_path, native_path_before);
+        assert_eq!(app.fdx_baseline, baseline_before);
+        assert_eq!(app.zoom_percent, body_zoom_before);
+        assert_eq!(app.title_view.zoom_percent, title_zoom_before);
+        assert_eq!(app.active_body_dual_dialogue_group, active_group_before);
     }
 }
 
@@ -1442,15 +1722,14 @@ mod title_page_window_command_tests {
     }
 
     #[test]
-    fn title_page_open_is_blocked_by_migration_and_pdf_modals() {
+    fn migration_modal_precedence_remains_after_pdf_modal_removal() {
         let app_result = ScriptCraftApp::new();
         assert!(app_result.is_ok());
-        let Ok(mut app) = app_result else { return };
-        let context = eframe::egui::Context::default();
+        let Ok(app) = app_result else { return };
 
         let modal_availability = super::AppCommandAvailability {
             modal_blocked: true,
-            pdf_options_blocked: false,
+            native_output_active: false,
             undo: false,
             redo: false,
             delete: false,
@@ -1465,22 +1744,12 @@ mod title_page_window_command_tests {
         };
         assert!(!modal_availability.is_enabled(CommandId::WindowTitlePageOpen));
         assert!(!modal_availability.is_enabled(CommandId::EditorDualDialogueToggle));
-
-        let opened_options = app.dispatch_command(
-            CommandInvocation::new(Command::FileSaveAsPdf, CommandOrigin::Toolbar),
-            &context,
-        );
-        assert!(matches!(opened_options.outcome, DesktopCommandOutcome::EffectDispatched));
-        let project_before = app.session.project().clone();
-        let blocked = app.dispatch_command(
-            CommandInvocation::new(Command::WindowTitlePageOpen, CommandOrigin::Toolbar),
-            &context,
-        );
-        assert_eq!(blocked.outcome, DesktopCommandOutcome::Unavailable(
-            super::DesktopUnavailableReason::ModalBlocked,
-        ));
-        assert!(!app.title_page_window_open);
-        assert_eq!(app.session.project(), &project_before);
+        assert!(!modal_availability.is_enabled(CommandId::FileSaveAsPdf));
+        assert!(!modal_availability.is_enabled(CommandId::FilePrint));
+        assert!(modal_availability.is_enabled(CommandId::FileImportResolve));
+        assert!(app
+            .app_command_availability()
+            .is_enabled(CommandId::WindowTitlePageOpen));
     }
 
     #[test]
@@ -2103,7 +2372,7 @@ mod dual_dialogue_dispatch_tests {
     }
 
     #[test]
-    fn queued_toggle_refreshes_availability_and_pdf_modal_blocks_mutation() {
+    fn queued_toggle_refreshes_availability_and_pdf_activation_does_not_block_mutation() {
         let Some(mut app) = app_with_toggle_target() else { return };
         let context = egui::Context::default();
         let mut pending = PendingDesktopCommands::default();
@@ -2125,13 +2394,18 @@ mod dual_dialogue_dispatch_tests {
             .session
             .set_selection(Selection::caret(Position { element: 0, offset: 0 }))
             .is_ok());
-        let opened = app.dispatch_command(
-            CommandInvocation::new(Command::FileSaveAsPdf, CommandOrigin::Menu),
+        let opened = app.dispatch_command_inner_with_pdf_handlers(
+            Command::FileSaveAsPdf,
             &context,
+            |app| {
+                app.export_pdf_with_picker(|_| crate::pdf_export::PdfExportPickerResult::Cancel);
+            },
+            |_, _| {},
+            |_| {},
         );
-        assert!(matches!(opened.outcome, DesktopCommandOutcome::EffectDispatched));
+        assert_eq!(opened, DesktopCommandOutcome::EffectDispatched);
         let modal_baseline = app.session.clone();
-        let blocked = app.dispatch_command(
+        let toggled = app.dispatch_command(
             CommandInvocation::new(
                 Command::EditorDualDialogueToggle,
                 CommandOrigin::Shortcut,
@@ -2139,10 +2413,10 @@ mod dual_dialogue_dispatch_tests {
             &context,
         );
         assert_eq!(
-            blocked.outcome,
-            DesktopCommandOutcome::Unavailable(super::DesktopUnavailableReason::ModalBlocked),
+            toggled.outcome,
+            DesktopCommandOutcome::Editor(CommandOutcome::Changed),
         );
-        assert_eq!(app.session, modal_baseline);
+        assert_ne!(app.session, modal_baseline);
     }
 
     #[test]
@@ -2340,7 +2614,7 @@ mod dual_dialogue_dispatch_tests {
     }
 
     #[test]
-    fn focus_loss_title_surface_and_pdf_options_clear_only_transient_body_presentation() {
+    fn focus_loss_title_surface_and_pdf_export_clear_only_transient_body_presentation() {
         let Some(mut app) = app_with_toggle_target() else { return };
         let context = egui::Context::default();
         app.surface_focused = true;
@@ -2373,9 +2647,8 @@ mod dual_dialogue_dispatch_tests {
         let revision = app.session.revision();
         let dirty = app.session.dirty();
         let history = (app.session.can_undo(), app.session.can_redo());
-        app.export_pdf();
-        assert!(app.pdf_export_options.is_open());
-        assert_eq!(app.active_body_dual_dialogue_group, None);
+        app.export_pdf_with_picker(|_| crate::pdf_export::PdfExportPickerResult::Cancel);
+        assert_eq!(app.active_body_dual_dialogue_group, active_id);
         assert_eq!(app.session.revision(), revision);
         assert_eq!(app.session.dirty(), dirty);
         assert_eq!((app.session.can_undo(), app.session.can_redo()), history);
@@ -2899,5 +3172,39 @@ mod dual_dialogue_navigation_dispatch_tests {
             app.session.selection().focus.element,
         )
         .is_some());
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_pdf_command_tests {
+    use super::{DesktopCommandOutcome, ScriptCraftApp};
+    use crate::pdf_export::PdfExportPickerResult;
+    use eframe::egui;
+    use scriptcraft_commands::Command;
+
+    #[test]
+    fn windows_pdf_command_uses_direct_picker_without_opening_egui_options() {
+        let Ok(mut app) = ScriptCraftApp::new() else {
+            return;
+        };
+        let context = egui::Context::default();
+
+        let outcome = app.dispatch_command_inner_with_pdf_handlers(
+            Command::FileSaveAsPdf,
+            &context,
+            |app| {
+                app.export_pdf_with_picker(|filename| {
+                    assert_eq!(filename, crate::UNTITLED_PDF_FILENAME);
+                    PdfExportPickerResult::Cancel
+                })
+            },
+            |_, _| {},
+            |_| {},
+        );
+
+        assert!(matches!(outcome, DesktopCommandOutcome::EffectDispatched));
+        assert!(app.app_command_availability().is_enabled(
+            scriptcraft_commands::CommandId::FileNew
+        ));
     }
 }

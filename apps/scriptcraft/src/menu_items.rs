@@ -100,6 +100,26 @@ const DISCLOSURE: PlaceholderKind = PlaceholderKind::Disclosure;
 const CHECKED: PlaceholderKind = PlaceholderKind::Checked;
 const SEARCH: PlaceholderKind = PlaceholderKind::Search;
 
+#[cfg(target_os = "macos")]
+const PRINT_ENTRY: MenuEntrySpec = command_item(
+    "file.print",
+    "Print...",
+    "Print screenplay",
+    None,
+    Some(primary_shortcut(ShortcutKey::P, false)),
+    None,
+    CommandId::FilePrint,
+);
+
+#[cfg(not(target_os = "macos"))]
+const PRINT_ENTRY: MenuEntrySpec = placeholder(
+    "file.print",
+    "Print...",
+    "Print (disabled placeholder)",
+    ITEM,
+    Some(primary_shortcut(ShortcutKey::P, false)),
+);
+
 const FILE_ENTRIES: &[MenuEntrySpec] = &[
     command_item("file.new", "New", "New document", Some(SemanticIcon::DocumentNew), Some(primary_shortcut(ShortcutKey::N, false)), None, CommandId::FileNew),
     placeholder("file.new-from-template", "New from Template...", "New from template (disabled placeholder)", ITEM, Some(primary_shortcut(ShortcutKey::N, true))),
@@ -117,7 +137,7 @@ const FILE_ENTRIES: &[MenuEntrySpec] = &[
     placeholder("file.save-as-template", "Save as Template...", "Save as template (disabled placeholder)", ITEM, None),
     SEP,
     placeholder("file.print-preview", "Print Preview", "Print Preview (disabled placeholder)", ITEM, None),
-    placeholder("file.print", "Print...", "Print (disabled placeholder)", ITEM, Some(primary_shortcut(ShortcutKey::P, false))),
+    PRINT_ENTRY,
     SEP,
     placeholder("file.register-script", "Register Script", "Register Script (disabled placeholder)", ITEM, None),
 ];

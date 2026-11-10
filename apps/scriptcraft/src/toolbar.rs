@@ -302,7 +302,7 @@ fn apply_toolbar_enablement(items: &mut [ToolbarItemSpec], availability: AppComm
                 }
             }
             ToolbarBehavior::StylesInlineGroup | ToolbarBehavior::AlignmentInlineGroup => {
-                if availability.modal_blocked || availability.pdf_options_blocked {
+                if availability.modal_blocked {
                     EnablementPolicy::Disabled
                 } else {
                     EnablementPolicy::Enabled
@@ -1479,10 +1479,10 @@ mod toolbar_contract_tests {
     use crate::app_commands::AppCommandAvailability;
     use scriptcraft_commands::CommandId;
 
-    fn availability(modal_blocked: bool, pdf_options_blocked: bool) -> AppCommandAvailability {
+    fn availability(modal_blocked: bool) -> AppCommandAvailability {
         AppCommandAvailability {
             modal_blocked,
-            pdf_options_blocked,
+            native_output_active: false,
             undo: true,
             redo: true,
             delete: true,
@@ -1603,7 +1603,7 @@ mod toolbar_contract_tests {
     #[test]
     fn ordinary_disabled_foreground_uses_palette_without_egui_text_color_resolution() {
         let palette = disabled_color_test_palette();
-        let projected = toolbar_items_for(availability(false, false));
+        let projected = toolbar_items_for(availability(false));
         let ordinary_item = projected
             .iter()
             .find(|item| item.id == "new")
@@ -1620,7 +1620,7 @@ mod toolbar_contract_tests {
     #[test]
     fn disabled_inline_icons_captions_and_overflow_labels_use_the_resolved_palette_color() {
         let palette = disabled_color_test_palette();
-        let projected = toolbar_items_for(availability(false, false));
+        let projected = toolbar_items_for(availability(false));
         for id in ["show-hide", "export-text"] {
             let item = *projected
                 .iter()
@@ -1685,7 +1685,7 @@ mod toolbar_contract_tests {
             ..base_palette
         };
         let context = egui::Context::default();
-        let projected = toolbar_items_for(availability(false, false));
+        let projected = toolbar_items_for(availability(false));
 
         let _ = context.run(egui::RawInput::default(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
@@ -1796,7 +1796,7 @@ mod toolbar_contract_tests {
         );
 
         let context = egui::Context::default();
-        let projected_items = toolbar_items_for(availability(false, false));
+        let projected_items = toolbar_items_for(availability(false));
         let mut applied = None;
         let mut previous_frame: Option<(AppearanceMode, Color32)> = None;
         for mode in [
@@ -1969,7 +1969,7 @@ mod toolbar_contract_tests {
 
     #[test]
     fn disabled_toolbar_actions_have_no_hover_sensing_and_remain_nonactivating_and_accessibility_disabled() {
-        let projected_items = toolbar_items_for(availability(false, false));
+        let projected_items = toolbar_items_for(availability(false));
         for id in ["show-hide", "export-text"] {
             let item = *projected_items
                 .iter()
@@ -2020,7 +2020,7 @@ mod toolbar_contract_tests {
     #[test]
     fn disabled_overflow_labels_submit_explicit_color_without_interactive_allocation() {
         let palette = disabled_color_test_palette();
-        let projected_items = toolbar_items_for(availability(false, false));
+        let projected_items = toolbar_items_for(availability(false));
         let disabled_items: Vec<_> = ["show-hide", "export-text"]
             .into_iter()
             .map(|id| {
@@ -2079,25 +2079,24 @@ mod toolbar_contract_tests {
     }
 
     #[test]
-    fn title_page_availability_tracks_migration_and_pdf_modal_gates() {
-        let enabled = toolbar_items_for(availability(false, false));
+    fn title_page_availability_tracks_migration_modal_gate() {
+        let enabled = toolbar_items_for(availability(false));
         let title = enabled.iter().find(|item| item.id == "title-page");
         assert_eq!(title.map(|item| item.enablement), Some(EnablementPolicy::Enabled));
 
-        for blocked in [availability(true, false), availability(false, true)] {
+        for blocked in [availability(true)] {
             let items = toolbar_items_for(blocked);
             let title = items.iter().find(|item| item.id == "title-page");
             assert_eq!(title.map(|item| item.enablement), Some(EnablementPolicy::Disabled));
         }
 
         let title_command = CommandId::WindowTitlePageOpen;
-        assert!(!availability(true, false).is_enabled(title_command));
-        assert!(!availability(false, true).is_enabled(title_command));
+        assert!(!availability(true).is_enabled(title_command));
     }
 
     #[test]
     fn live_toolbar_projection_preserves_declared_non_dynamic_enablement() {
-        let projected = toolbar_items_for(availability(false, false));
+        let projected = toolbar_items_for(availability(false));
 
         for id in ["show-hide", "export-text"] {
             let item = projected.iter().find(|item| item.id == id);
@@ -2135,7 +2134,7 @@ mod toolbar_contract_tests {
 
         apply_toolbar_enablement(
             std::slice::from_mut(&mut synthetic),
-            availability(false, false),
+            availability(false),
         );
 
         assert_eq!(synthetic.behavior, ToolbarBehavior::None);
@@ -2144,7 +2143,7 @@ mod toolbar_contract_tests {
 
     #[test]
     fn toolbar_allocation_retains_flexible_space_and_overflow_ownership() {
-        let items = toolbar_items_for(availability(false, false));
+        let items = toolbar_items_for(availability(false));
         let flexible_count = items.iter().filter(|item| is_flexible_toolbar_space(**item)).count();
         assert_eq!(flexible_count, 4);
         assert_eq!(items.last().map(|item| item.behavior), Some(ToolbarBehavior::OverflowMenu));
@@ -2221,7 +2220,7 @@ mod toolbar_contract_tests {
 
     #[test]
     fn inline_group_measurement_reserves_hover_slots_separators_and_caption_width() {
-        let items = toolbar_items_for(availability(false, false));
+        let items = toolbar_items_for(availability(false));
         let styles = *items.iter().find(|item| item.id == "styles").unwrap();
         let alignment = *items.iter().find(|item| item.id == "alignment").unwrap();
         let measure_label = |label: &str| label.chars().count() as f32 * 7.0;
@@ -2275,7 +2274,7 @@ mod toolbar_contract_tests {
 
     #[test]
     fn formatting_groups_cross_their_measured_allocation_boundary_atomically() {
-        let items = toolbar_items_for(availability(false, false));
+        let items = toolbar_items_for(availability(false));
         let measure_label = |label: &str| label.chars().count() as f32 * 7.0;
         let measure_graphic = toolbar_graphic_width;
         for item in items
@@ -2335,13 +2334,13 @@ mod toolbar_contract_tests {
     }
 
     #[test]
-    fn formatting_controls_disable_for_both_modal_gates_and_retain_child_order() {
-        let active = toolbar_items_for(availability(false, false));
+    fn formatting_controls_disable_for_migration_modal_and_retain_child_order() {
+        let active = toolbar_items_for(availability(false));
         let styles = active.iter().find(|item| item.id == "styles");
         let alignment = active.iter().find(|item| item.id == "alignment");
         assert_eq!(styles.map(|item| item.enablement), Some(EnablementPolicy::Enabled));
         assert_eq!(alignment.map(|item| item.enablement), Some(EnablementPolicy::Enabled));
-        for blocked in [availability(true, false), availability(false, true)] {
+        for blocked in [availability(true)] {
             let main = toolbar_items_for(blocked);
             assert_eq!(
                 main.iter().find(|item| item.id == "styles").map(|item| item.enablement),
@@ -2355,7 +2354,7 @@ mod toolbar_contract_tests {
             assert_eq!(child[0].enablement, EnablementPolicy::Disabled);
             assert_eq!(child[1].enablement, EnablementPolicy::Disabled);
         }
-        let child_ids = title_page_toolbar_items_for(availability(false, false))
+        let child_ids = title_page_toolbar_items_for(availability(false))
             .map(|item: ToolbarItemSpec| item.id);
         assert_eq!(
             child_ids,

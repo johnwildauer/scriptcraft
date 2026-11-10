@@ -34,6 +34,7 @@ pub enum CommandId {
     FileSaveAsRequest,
     FileSaveAs,
     FileSaveAsPdf,
+    FilePrint,
     FileImportResolve,
     EditUndo,
     EditRedo,
@@ -78,7 +79,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 49] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -87,6 +88,7 @@ impl CommandId {
         Self::FileSaveAsRequest,
         Self::FileSaveAs,
         Self::FileSaveAsPdf,
+        Self::FilePrint,
         Self::FileImportResolve,
         Self::EditUndo,
         Self::EditRedo,
@@ -139,6 +141,7 @@ impl CommandId {
             Self::FileSaveAsRequest => "file.save-as.request",
             Self::FileSaveAs => "file.save-as",
             Self::FileSaveAsPdf => "file.save-as-pdf",
+            Self::FilePrint => "file.print",
             Self::FileImportResolve => "file.import.resolve",
             Self::EditUndo => "edit.undo",
             Self::EditRedo => "edit.redo",
@@ -396,6 +399,7 @@ pub enum HostEffectDescription {
     CloseTitlePageWindow,
     FocusActiveEditor,
     OpenPdfDestinationPicker,
+    OpenPrintPanel,
     ToggleFocusModeViewport,
     ResolvePdfIncludeTitlePage(PdfExportOptions),
 }
@@ -783,6 +787,8 @@ pub enum Command {
     },
     #[serde(rename = "file.save-as-pdf")]
     FileSaveAsPdf,
+    #[serde(rename = "file.print")]
+    FilePrint,
     #[serde(rename = "file.import.resolve")]
     FileImportResolve { resolution: ImportResolution },
     #[serde(rename = "edit.undo")]
@@ -869,6 +875,7 @@ impl Command {
     pub const fn host_effect_description(&self) -> Option<HostEffectDescription> {
         match self {
             Self::FileSaveAsPdf => Some(HostEffectDescription::OpenPdfDestinationPicker),
+            Self::FilePrint => Some(HostEffectDescription::OpenPrintPanel),
             Self::ViewFocusModeToggle => Some(HostEffectDescription::ToggleFocusModeViewport),
             Self::EditorFocus => Some(HostEffectDescription::FocusActiveEditor),
             Self::WindowTitlePageOpen => Some(HostEffectDescription::OpenTitlePageWindow),
@@ -890,6 +897,7 @@ impl Command {
             Self::FileSaveAsRequest => CommandId::FileSaveAsRequest,
             Self::FileSaveAs { .. } => CommandId::FileSaveAs,
             Self::FileSaveAsPdf => CommandId::FileSaveAsPdf,
+            Self::FilePrint => CommandId::FilePrint,
             Self::FileImportResolve { .. } => CommandId::FileImportResolve,
             Self::EditUndo => CommandId::EditUndo,
             Self::EditRedo => CommandId::EditRedo,
@@ -1024,7 +1032,7 @@ const fn descriptor(id: CommandId, family: &'static str, parameters: &'static st
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 48] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 49] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -1037,6 +1045,7 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 48] = [
         "path: document_path, overwrite: bool (default false)",
     ),
     descriptor(CommandId::FileSaveAsPdf, "file", "none"),
+    descriptor(CommandId::FilePrint, "file", "none; macOS native print-panel host effect"),
     descriptor(CommandId::FileImportResolve, "file", "resolution: import_resolution"),
     descriptor(CommandId::EditUndo, "edit", "none"),
     descriptor(CommandId::EditRedo, "edit", "none"),
@@ -1123,6 +1132,34 @@ pub fn validate_descriptor_catalog() -> Result<(), CatalogError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod file_print_contract_tests {
+    use super::{
+        Command, CommandEnvelope, CommandId, CommandOrigin,
+        HostEffectDescription, COMMAND_DESCRIPTORS, COMMAND_WIRE_VERSION,
+    };
+
+    #[test]
+    fn file_print_is_an_additive_parameterless_version_one_host_command() {
+        let command = Command::FilePrint;
+        assert_eq!(COMMAND_WIRE_VERSION, 1);
+        assert_eq!(CommandId::ALL.len(), 49);
+        assert_eq!(COMMAND_DESCRIPTORS.len(), 49);
+        assert_eq!(CommandId::FilePrint.as_str(), "file.print");
+        assert_eq!(command.id(), CommandId::FilePrint);
+        assert_eq!(
+            command.host_effect_description(),
+            Some(HostEffectDescription::OpenPrintPanel),
+        );
+        assert!(COMMAND_DESCRIPTORS.iter().any(|descriptor| {
+            descriptor.id == CommandId::FilePrint
+                && descriptor.family == "file"
+                && descriptor.parameters == "none; macOS native print-panel host effect"
+        }));
+        assert!(CommandEnvelope::new(CommandOrigin::Menu, command).validate().is_ok());
+    }
 }
 
 #[cfg(test)]

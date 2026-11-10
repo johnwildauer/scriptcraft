@@ -29,10 +29,17 @@ mod material_font;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 #[cfg(target_os = "macos")]
+mod macos_pdf_dialog;
+#[cfg(target_os = "macos")]
+mod macos_print_dialog;
+#[cfg(target_os = "windows")]
+mod windows_pdf_dialog;
+#[cfg(target_os = "macos")]
 mod macos_sf_symbols;
 mod menu;
 mod menu_items;
 mod pdf_export;
+mod print_export;
 // This primitive is intentionally prepared for WO-001a.3 and not yet wired
 // into visible painting.
 #[allow(dead_code)]
@@ -688,25 +695,33 @@ fn pdf_export_filename(active_path: Option<&Path>) -> String {
 
 #[derive(Debug)]
 enum PdfExportAdapterError {
+    Picker(pdf_export::PdfExportPickerFailure),
     Path,
     Export(exports::ExportError),
     Write(scriptcraft_core::persistence::PersistenceError),
 }
 
 fn export_pdf_to_selected_path<F: FileSystem>(
-    selected_path: Option<&Path>,
+    picker_result: pdf_export::PdfExportPickerResult,
     filesystem: &F,
-    build_pdf: impl FnOnce() -> Result<Vec<u8>, exports::ExportError>,
+    build_pdf: impl FnOnce(scriptcraft_commands::PdfExportOptions) -> Result<Vec<u8>, exports::ExportError>,
 ) -> Result<bool, PdfExportAdapterError> {
-    let Some(path) = selected_path else {
-        return Ok(false);
+    let (path, options) = match picker_result {
+        pdf_export::PdfExportPickerResult::Cancel => return Ok(false),
+        pdf_export::PdfExportPickerResult::Error(error) => {
+            return Err(PdfExportAdapterError::Picker(error));
+        }
+        pdf_export::PdfExportPickerResult::Accept {
+            destination,
+            options,
+        } => (destination, options),
     };
     if path.to_str().is_none() {
         return Err(PdfExportAdapterError::Path);
     }
-    let bytes = build_pdf().map_err(PdfExportAdapterError::Export)?;
+    let bytes = build_pdf(options).map_err(PdfExportAdapterError::Export)?;
     filesystem
-        .write(path, &bytes)
+        .write(&path, &bytes)
         .map_err(PdfExportAdapterError::Write)?;
     Ok(true)
 }
@@ -1099,11 +1114,13 @@ struct ScriptCraftApp {
     flushing_diagnostic_commands: bool,
     native_path: Option<PathBuf>,
     native_title: String,
+    #[cfg(target_os = "macos")]
+    accepted_print_settings: Option<macos_print_dialog::AcceptedPrintSettings>,
+    native_output_modal_active: bool,
     fdx_baseline: Option<FdxBaseline>,
     pending_window_restore: Option<fdx::WindowState>,
     latest_window_state: Option<fdx::WindowState>,
     pending_fdx_open: Option<PendingFdxOpen>,
-    pdf_export_options: pdf_export::PdfExportController,
     startup_document_path: Option<PathBuf>,
     native_input_diagnostics: NativeInputDiagnostics,
     editor_surface_id: Option<egui::Id>,
@@ -1228,7 +1245,6 @@ impl ScriptCraftApp {
     fn reconcile_body_active_group(&mut self) -> bool {
         let next = if self.active_editor_surface == EditorSurface::Body
             && self.surface_focused
-            && !self.pdf_export_options.is_open()
             && self.pending_fdx_open.is_none()
         {
             scriptcraft_core::dual_dialogue::group_at_element_index(
@@ -1498,11 +1514,13 @@ impl ScriptCraftApp {
             flushing_diagnostic_commands: false,
             native_path: None,
             native_title: UNTITLED_DOCUMENT_TITLE.to_owned(),
+            #[cfg(target_os = "macos")]
+            accepted_print_settings: None,
+            native_output_modal_active: false,
             fdx_baseline: None,
             pending_window_restore: None,
             latest_window_state: None,
             pending_fdx_open: None,
-            pdf_export_options: pdf_export::PdfExportController::default(),
             startup_document_path,
             native_input_diagnostics: NativeInputDiagnostics::default(),
             editor_surface_id: None,
@@ -2174,9 +2192,30 @@ impl ScriptCraftApp {
     }
 
     fn export_pdf(&mut self) {
-        self.pdf_export_options.begin();
-        self.surface_focused = false;
-        self.reconcile_body_active_group();
+        #[cfg(target_os = "macos")]
+        {
+            self.export_pdf_with_picker(macos_pdf_dialog::show_pdf_save_panel);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.export_pdf_with_picker(windows_pdf_dialog::show_pdf_save_dialog);
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            self.finish_pdf_export(pdf_export::PdfExportPickerResult::Error(
+                pdf_export::PdfExportPickerFailure::UnsupportedPlatform,
+            ));
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    fn export_pdf_with_picker(
+        &mut self,
+        show_picker: impl FnOnce(&str) -> pdf_export::PdfExportPickerResult,
+    ) {
+        let default_filename = pdf_export_filename(self.native_path.as_deref());
+        let picker_result = show_picker(&default_filename);
+        self.finish_pdf_export(picker_result);
     }
 
     fn export_pdf_with_options(
@@ -2184,18 +2223,41 @@ impl ScriptCraftApp {
         options: scriptcraft_commands::PdfExportOptions,
     ) {
         let default_filename = pdf_export_filename(self.native_path.as_deref());
-        let selected_path = rfd::FileDialog::new()
+        let picker_result = rfd::FileDialog::new()
             .add_filter("PDF document", &["pdf"])
             .set_file_name(&default_filename)
-            .save_file();
+            .save_file()
+            .map_or(pdf_export::PdfExportPickerResult::Cancel, |destination| {
+                pdf_export::PdfExportPickerResult::Accept {
+                    destination,
+                    options,
+                }
+            });
 
-        match export_pdf_to_selected_path(
-            selected_path.as_deref(),
-            &StdFileSystem,
-            || self.build_pdf_with_options(options),
-        ) {
+        self.finish_pdf_export(picker_result);
+    }
+
+    fn finish_pdf_export(&mut self, picker_result: pdf_export::PdfExportPickerResult) {
+        match export_pdf_to_selected_path(picker_result, &StdFileSystem, |selected_options| {
+            self.build_pdf_with_options(selected_options)
+        }) {
             Ok(false) => {}
             Ok(true) => self.clear_error(),
+            Err(PdfExportAdapterError::Picker(pdf_export::PdfExportPickerFailure::Unavailable)) => {
+                self.show_error(
+                    "PDF_EXPORT_PICKER_UNAVAILABLE: destination picker unavailable; screenplay unchanged",
+                )
+            }
+            Err(PdfExportAdapterError::Picker(pdf_export::PdfExportPickerFailure::Failed)) => {
+                self.show_error(
+                    "PDF_EXPORT_PICKER_FAILED: destination selection failed; screenplay unchanged",
+                )
+            }
+            Err(PdfExportAdapterError::Picker(
+                pdf_export::PdfExportPickerFailure::UnsupportedPlatform,
+            )) => self.show_error(
+                "PDF_EXPORT_UNSUPPORTED_PLATFORM: native PDF destination selection is unsupported on this platform; screenplay unchanged",
+            ),
             Err(PdfExportAdapterError::Path) => self.show_error(
                 "PDF_EXPORT_PATH_REJECTED: selected path is not valid UTF-8; screenplay unchanged",
             ),
@@ -2215,13 +2277,82 @@ impl ScriptCraftApp {
         &self,
         options: scriptcraft_commands::PdfExportOptions,
     ) -> Result<Vec<u8>, exports::ExportError> {
-        exports::export_pdf_with_layout_inputs_and_options(
+        print_export::build_pdf_bytes(
             self.session.project(),
             self.session.layout_inputs(),
-            exports::PdfExportOptions {
-                include_title_page: options.include_title_page,
-            },
+            options,
         )
+    }
+
+    fn build_print_request(
+        &self,
+        options: scriptcraft_commands::PdfExportOptions,
+    ) -> Result<print_export::PrintRequest, exports::ExportError> {
+        print_export::build_print_request(
+            self.session.project(),
+            self.session.layout_inputs(),
+            options,
+            self.native_path.as_deref(),
+        )
+    }
+
+    fn open_print_panel(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            self.accepted_print_settings = None;
+            let snapshot = print_export::PrintCompositionSnapshot::capture(
+                self.session.project(),
+                self.session.layout_inputs(),
+                self.native_path.as_deref(),
+            );
+            let panel_result = macos_print_dialog::show_print_panel(snapshot);
+            let delivery = macos_print_dialog::dispatch_panel_result(panel_result, |settings| {
+                self.accepted_print_settings = Some(settings);
+                match self.accepted_print_settings.take() {
+                    Some(settings) => macos_print_dialog::deliver_print(settings),
+                    None => macos_print_dialog::PrintDeliveryResult::PrintOperationUnavailable,
+                }
+            });
+            match delivery {
+                macos_print_dialog::PrintPanelDispatch::Cancelled => self.clear_error(),
+                macos_print_dialog::PrintPanelDispatch::Accepted(
+                    macos_print_dialog::PrintDeliveryResult::OperationReportedSuccess,
+                ) => self.show_error(
+                    "PRINT_OPERATION_REPORTED_SUCCESS: macOS reported successful operation; physical printer delivery is unconfirmed; screenplay unchanged",
+                ),
+                macos_print_dialog::PrintPanelDispatch::Accepted(
+                    macos_print_dialog::PrintDeliveryResult::OperationCancelledOrFailed,
+                ) => self.show_error(
+                    "PRINT_OPERATION_CANCELLED_OR_FAILED: native print operation was cancelled or failed; AppKit does not distinguish these results; printer delivery is unknown; screenplay unchanged",
+                ),
+                macos_print_dialog::PrintPanelDispatch::Accepted(
+                    macos_print_dialog::PrintDeliveryResult::PdfBuildFailed,
+                ) => self.show_error(
+                    "PRINT_PDF_BUILD_FAILED: Print-composed PDF could not be built; no operation submitted; screenplay unchanged",
+                ),
+                macos_print_dialog::PrintPanelDispatch::Accepted(
+                    macos_print_dialog::PrintDeliveryResult::PdfDocumentInvalid,
+                ) => self.show_error(
+                    "PRINT_PDF_INVALID: PDFKit could not open the generated PDF; no operation submitted; screenplay unchanged",
+                ),
+                macos_print_dialog::PrintPanelDispatch::Accepted(
+                    macos_print_dialog::PrintDeliveryResult::MainThreadUnavailable,
+                ) => self.show_error(
+                    "PRINT_OPERATION_UNAVAILABLE: PDFKit printing requires the AppKit main thread; no operation submitted; screenplay unchanged",
+                ),
+                macos_print_dialog::PrintPanelDispatch::Accepted(
+                    macos_print_dialog::PrintDeliveryResult::PrintOperationUnavailable,
+                ) => self.show_error(
+                    "PRINT_OPERATION_UNAVAILABLE: PDFKit could not prepare a native print operation; no operation submitted; screenplay unchanged",
+                ),
+                macos_print_dialog::PrintPanelDispatch::Unavailable => self.show_error(
+                    "PRINT_PANEL_UNAVAILABLE: native print panel unavailable; screenplay unchanged",
+                ),
+                macos_print_dialog::PrintPanelDispatch::Failed => self.show_error(
+                    "PRINT_PANEL_FAILED: native print settings could not be collected; screenplay unchanged",
+                ),
+            }
+        }
     }
 
     fn show_error(&mut self, detail: impl AsRef<str>) {
@@ -2662,12 +2793,7 @@ impl ScriptCraftApp {
         self.dispatch_pending_commands(&ctx);
         self.notification_sink.set_repaint_context(&ctx);
         let migration_pending = self.pending_fdx_open.is_some();
-        if migration_pending {
-            // Migration consent owns the modal surface. Dismiss a pending PDF
-            // request without opening a picker or building export output.
-            self.pdf_export_options.cancel();
-        }
-        if !migration_pending && !self.pdf_export_options.is_open() {
+        if !migration_pending {
             // Route events using the editor-focus state established by the prior
             // surface frame, then let this frame's layout and paint observe edits.
             self.handle_surface_input(&ctx, EditorSurface::Body);
@@ -2694,24 +2820,6 @@ impl ScriptCraftApp {
                 let _ = ui.allocate_space(ui.available_size());
             });
             show_fdx_migration_dialog(self, &ctx);
-        } else if self.pdf_export_options.is_open() {
-            egui::CentralPanel::default().show_inside(ui, |ui| {
-                let _ = ui.allocate_space(ui.available_size());
-            });
-            if let Some(action) = self.pdf_export_options.show(&ctx) {
-                match action {
-                    pdf_export::PdfExportAction::Continue(options) => {
-                        self.dispatch_command(
-                            CommandInvocation::new(
-                                Command::PdfIncludeTitlePageResolve { options },
-                                CommandOrigin::Pointer,
-                            ),
-                            &ctx,
-                        );
-                    }
-                    pdf_export::PdfExportAction::Cancel => ctx.request_repaint(),
-                }
-            }
         } else {
             show_application_panels(self, ui);
         }
@@ -3111,7 +3219,11 @@ mod native_title_tests {
 
 #[cfg(test)]
 mod pdf_export_adapter_tests {
-    use super::{export_pdf_to_selected_path, pdf_export_filename, UNTITLED_PDF_FILENAME};
+    use super::{
+        export_pdf_to_selected_path, pdf_export_filename, ScriptCraftApp, UNTITLED_PDF_FILENAME,
+    };
+    use crate::pdf_export::{PdfExportPickerFailure, PdfExportPickerResult};
+    use scriptcraft_commands::PdfExportOptions;
     use scriptcraft_core::persistence::{FileSystem, PersistenceError};
     use std::cell::{Cell, RefCell};
     use std::path::{Path, PathBuf};
@@ -3189,7 +3301,7 @@ mod pdf_export_adapter_tests {
         let filesystem = RecordingFileSystem::default();
         let built = Cell::new(false);
 
-        let outcome = export_pdf_to_selected_path(None, &filesystem, || {
+        let outcome = export_pdf_to_selected_path(PdfExportPickerResult::Cancel, &filesystem, |_| {
             built.set(true);
             Ok(b"%PDF-1.4".to_vec())
         });
@@ -3208,10 +3320,17 @@ mod pdf_export_adapter_tests {
         let filesystem = RecordingFileSystem::default();
         let built = Cell::new(false);
         let selected_path = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/invalid-\xff.pdf"));
-        let outcome = export_pdf_to_selected_path(Some(selected_path), &filesystem, || {
-            built.set(true);
-            Ok(b"%PDF-1.4".to_vec())
-        });
+        let outcome = export_pdf_to_selected_path(
+            PdfExportPickerResult::Accept {
+                destination: selected_path.to_path_buf(),
+                options: PdfExportOptions::default(),
+            },
+            &filesystem,
+            |_| {
+                built.set(true);
+                Ok(b"%PDF-1.4".to_vec())
+            },
+        );
 
         assert!(matches!(outcome, Err(PdfExportAdapterError::Path)));
         assert!(!built.get());
@@ -3223,12 +3342,25 @@ mod pdf_export_adapter_tests {
         let filesystem = RecordingFileSystem::default();
         let selected_path = Path::new("/writer-selected/renamed-output.pdf");
         let bytes = b"%PDF-1.4 test bytes".to_vec();
+        let selected_options = PdfExportOptions {
+            include_title_page: false,
+        };
+        let received_options = Cell::new(None);
 
-        let outcome = export_pdf_to_selected_path(Some(selected_path), &filesystem, || {
-            Ok(bytes.clone())
-        });
+        let outcome = export_pdf_to_selected_path(
+            PdfExportPickerResult::Accept {
+                destination: selected_path.to_path_buf(),
+                options: selected_options,
+            },
+            &filesystem,
+            |options| {
+                received_options.set(Some(options));
+                Ok(bytes.clone())
+            },
+        );
 
         assert!(matches!(outcome, Ok(true)));
+        assert_eq!(received_options.get(), Some(selected_options));
         assert_eq!(
             filesystem.writes.borrow().as_slice(),
             &[(selected_path.to_owned(), bytes)]
@@ -3239,13 +3371,20 @@ mod pdf_export_adapter_tests {
     fn pdf_layout_failure_does_not_write_output() {
         let filesystem = RecordingFileSystem::default();
         let selected_path = Path::new("/selected/output.pdf");
-        let outcome = export_pdf_to_selected_path(Some(selected_path), &filesystem, || {
-            Err(scriptcraft_core::exports::ExportError::Layout(
-                scriptcraft_core::layout::LayoutError {
-                    kind: scriptcraft_core::layout::LayoutErrorKind::NoGeometry,
-                },
-            ))
-        });
+        let outcome = export_pdf_to_selected_path(
+            PdfExportPickerResult::Accept {
+                destination: selected_path.to_path_buf(),
+                options: PdfExportOptions::default(),
+            },
+            &filesystem,
+            |_| {
+                Err(scriptcraft_core::exports::ExportError::Layout(
+                    scriptcraft_core::layout::LayoutError {
+                        kind: scriptcraft_core::layout::LayoutErrorKind::NoGeometry,
+                    },
+                ))
+            },
+        );
 
         assert!(matches!(
             outcome,
@@ -3261,12 +3400,157 @@ mod pdf_export_adapter_tests {
         let filesystem = RecordingFileSystem::default();
         filesystem.fail_write.set(true);
         let selected_path = Path::new("/selected/output.pdf");
-        let outcome = export_pdf_to_selected_path(Some(selected_path), &filesystem, || {
-            Ok(b"%PDF-1.4 test bytes".to_vec())
-        });
+        let outcome = export_pdf_to_selected_path(
+            PdfExportPickerResult::Accept {
+                destination: selected_path.to_path_buf(),
+                options: PdfExportOptions::default(),
+            },
+            &filesystem,
+            |_| Ok(b"%PDF-1.4 test bytes".to_vec()),
+        );
 
         assert!(matches!(outcome, Err(super::PdfExportAdapterError::Write(_))));
         assert!(filesystem.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn picker_failure_is_returned_as_a_safe_category_without_build_or_write() {
+        let filesystem = RecordingFileSystem::default();
+        let built = Cell::new(false);
+
+        let outcome = export_pdf_to_selected_path(
+            PdfExportPickerResult::Error(PdfExportPickerFailure::Failed),
+            &filesystem,
+            |_| {
+                built.set(true);
+                Ok(b"%PDF-1.4".to_vec())
+            },
+        );
+
+        assert!(matches!(
+            outcome,
+            Err(super::PdfExportAdapterError::Picker(
+                PdfExportPickerFailure::Failed
+            ))
+        ));
+        assert!(!built.get());
+        assert!(filesystem.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn unsupported_platform_result_skips_build_and_write() {
+        let filesystem = RecordingFileSystem::default();
+        let built = Cell::new(false);
+
+        let outcome = export_pdf_to_selected_path(
+            PdfExportPickerResult::Error(PdfExportPickerFailure::UnsupportedPlatform),
+            &filesystem,
+            |_| {
+                built.set(true);
+                Ok(b"%PDF-1.4".to_vec())
+            },
+        );
+
+        assert!(matches!(
+            outcome,
+            Err(super::PdfExportAdapterError::Picker(
+                PdfExportPickerFailure::UnsupportedPlatform
+            ))
+        ));
+        assert!(!built.get());
+        assert!(filesystem.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn pdf_export_continuation_preserves_project_and_desktop_session_state() {
+        let mut app = ScriptCraftApp::new().expect("default app session should initialize");
+        let project_before = app.session.project().clone();
+        let selection_before = app.session.selection();
+        let history_before = (app.session.can_undo(), app.session.can_redo());
+        let path_before = app.native_path.clone();
+        let zoom_before = app.zoom_percent;
+        let filesystem = RecordingFileSystem::default();
+
+        let outcome = export_pdf_to_selected_path(
+            PdfExportPickerResult::Accept {
+                destination: PathBuf::from("/selected/output.pdf"),
+                options: PdfExportOptions::default(),
+            },
+            &filesystem,
+            |options| app.build_pdf_with_options(options),
+        );
+
+        assert!(matches!(outcome, Ok(true)));
+        assert_eq!(app.session.project(), &project_before);
+        assert_eq!(app.session.selection(), selection_before);
+        assert_eq!(
+            (app.session.can_undo(), app.session.can_redo()),
+            history_before
+        );
+        assert_eq!(app.native_path, path_before);
+        assert_eq!(app.zoom_percent, zoom_before);
+        assert_eq!(filesystem.writes.borrow().len(), 1);
+    }
+
+    #[test]
+    fn direct_pdf_requests_cancel_without_changing_editor_focus() {
+        let Ok(mut app) = ScriptCraftApp::new() else {
+            return;
+        };
+        app.surface_focused = true;
+        let group_before = app.active_body_dual_dialogue_group.clone();
+
+        for _ in 0..2 {
+            app.export_pdf_with_picker(|filename| {
+                assert_eq!(filename, UNTITLED_PDF_FILENAME);
+                PdfExportPickerResult::Cancel
+            });
+        }
+
+        assert!(app.surface_focused);
+        assert_eq!(app.active_body_dual_dialogue_group, group_before);
+    }
+
+    #[test]
+    fn cancelled_pdf_activation_keeps_script_view_in_normal_frame_composition() {
+        let Ok(mut app) = ScriptCraftApp::new() else {
+            return;
+        };
+        assert!(app.session.insert("Visible Script View regression text").is_ok());
+        app.export_pdf_with_picker(|_| PdfExportPickerResult::Cancel);
+
+        let context = eframe::egui::Context::default();
+        let output = context.run(eframe::egui::RawInput::default(), |ctx| {
+            eframe::egui::CentralPanel::default().show(ctx, |ui| app.update(ui));
+        });
+        let script_view_text_is_rendered = output.shapes.iter().any(|clipped| {
+            matches!(
+                &clipped.shape,
+                eframe::egui::Shape::Text(text)
+                    if text.galley.text().contains("Visible Script View regression text")
+            )
+        });
+
+        assert!(script_view_text_is_rendered);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn unsupported_platform_returns_a_deliberate_safe_pdf_result() {
+        let Ok(mut app) = ScriptCraftApp::new() else {
+            return;
+        };
+        let project_before = app.session.project().clone();
+        let path_before = app.native_path.clone();
+
+        app.export_pdf();
+
+        app.flush_pending_diagnostic_commands(&eframe::egui::Context::default());
+        assert!(app.diagnostic_message.as_ref().is_some_and(|message| {
+            message.as_str().starts_with("PDF_EXPORT_UNSUPPORTED_PLATFORM:")
+        }));
+        assert_eq!(app.session.project(), &project_before);
+        assert_eq!(app.native_path, path_before);
     }
 }
 

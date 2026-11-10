@@ -730,7 +730,7 @@ mod dual_dialogue_menu_tests {
     }
 
     #[test]
-    fn only_the_format_dual_dialogue_placeholder_becomes_a_command() {
+    fn dual_dialogue_remains_the_single_format_menu_command() {
         let entries = MENU_CATALOG
             .iter()
             .flat_map(|menu| menu.entries.iter())
@@ -756,6 +756,89 @@ mod dual_dialogue_menu_tests {
             matches!(item.behavior, MenuItemBehavior::DisabledPlaceholder(_))
                 && item.shortcut.is_some_and(|shortcut| shortcut.shift)
         }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_print_uses_unshifted_primary_p_and_print_preview_stays_disabled() {
+        let print = MENU_CATALOG
+            .iter()
+            .flat_map(|menu| menu.entries)
+            .find_map(|entry| match entry {
+                MenuEntrySpec::Item(item) if item.id == "file.print" => Some(*item),
+                _ => None,
+            });
+        assert!(print.is_some_and(|item| {
+            item.label == "Print..."
+                && item.behavior == MenuItemBehavior::Command(CommandId::FilePrint)
+                && item.shortcut.is_some_and(|shortcut| {
+                    shortcut.primary
+                        && shortcut.key == ShortcutKey::P
+                        && !shortcut.shift
+                        && !shortcut.control
+                        && !shortcut.option
+                })
+        }));
+
+        let preview = MENU_CATALOG
+            .iter()
+            .flat_map(|menu| menu.entries)
+            .find_map(|entry| match entry {
+                MenuEntrySpec::Item(item) if item.id == "file.print-preview" => Some(*item),
+                _ => None,
+            });
+        assert!(preview.is_some_and(|item| matches!(
+            item.behavior,
+            MenuItemBehavior::DisabledPlaceholder(_)
+        )));
+        assert_eq!(
+            command_for_key_event_on_platform(
+                egui::Key::P,
+                modifiers(ShortcutPlatform::MacOS, true, false, false, false),
+                ShortcutPlatform::MacOS,
+            ),
+            Some(CommandId::FilePrint),
+        );
+        assert_eq!(
+            command_for_key_event_on_platform(
+                egui::Key::P,
+                modifiers(ShortcutPlatform::MacOS, true, false, false, true),
+                ShortcutPlatform::MacOS,
+            ),
+            Some(CommandId::FileSaveAsPdf),
+        );
+        assert_eq!(
+            command_for_key_event_on_platform(
+                egui::Key::P,
+                modifiers(ShortcutPlatform::MacOS, false, false, false, false),
+                ShortcutPlatform::MacOS,
+            ),
+            None,
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn print_remains_a_disabled_placeholder_off_macos() {
+        let print = MENU_CATALOG
+            .iter()
+            .flat_map(|menu| menu.entries)
+            .find_map(|entry| match entry {
+                MenuEntrySpec::Item(item) if item.id == "file.print" => Some(*item),
+                _ => None,
+            });
+        assert!(print.is_some_and(|item| matches!(
+            item.behavior,
+            MenuItemBehavior::DisabledPlaceholder(_)
+        )));
+        assert_eq!(
+            command_for_key_event_on_platform(
+                egui::Key::P,
+                modifiers(ShortcutPlatform::Windows, true, false, false, false),
+                ShortcutPlatform::Windows,
+            ),
+            None,
+        );
     }
 
     #[test]
