@@ -152,14 +152,30 @@ fn default_columns_share_a_top_use_maximum_height_and_keep_left_before_right_ord
     assert_eq!(group_lines[0].source.element, 1);
     assert_eq!(group_lines[2].source.element, 3);
     assert_eq!(group_lines[0].paragraph_bounds.x, points(108));
-    assert_eq!(group_lines[0].paragraph_bounds.width, points(198));
-    assert_eq!(group_lines[2].paragraph_bounds.x, points(342));
-    assert_eq!(group_lines[2].paragraph_bounds.width, points(198));
-    assert_eq!(group_lines[0].paragraph_bounds.y, points(84));
-    assert_eq!(group_lines[2].paragraph_bounds.y, points(84));
-    assert_eq!(group_lines[0].geometry.x, FixedPoint::from_raw(20_350));
+    assert_eq!(group_lines[0].paragraph_bounds.width, points(207));
+    assert_eq!(group_lines[2].paragraph_bounds.x, points(333));
+    assert_eq!(group_lines[2].paragraph_bounds.width, points(207));
+    assert_eq!(group_lines[0].paragraph_bounds.x, points(108));
+    assert_eq!(
+        FixedPoint::from_raw(
+            group_lines[2].paragraph_bounds.x.raw()
+                - group_lines[0].paragraph_bounds.x.raw()
+                - group_lines[0].paragraph_bounds.width.raw(),
+        ),
+        points(18)
+    );
+    assert_eq!(
+        FixedPoint::from_raw(
+            group_lines[2].paragraph_bounds.x.raw()
+                + group_lines[2].paragraph_bounds.width.raw(),
+        ),
+        points(540)
+    );
+    assert_eq!(group_lines[0].paragraph_bounds.y, points(96));
+    assert_eq!(group_lines[2].paragraph_bounds.y, points(96));
+    assert_eq!(group_lines[0].geometry.x, FixedPoint::from_raw(20_800));
     assert_eq!(page.lines.last().map(|line| line.element), Some(5));
-    assert_eq!(page.lines.last().map(|line| line.geometry.y), Some(points(120)));
+    assert_eq!(page.lines.last().map(|line| line.geometry.y), Some(points(132)));
     assert!(page.lines.iter().all(|line| line.role != Role::General));
 
     // Inner horizontal settings stay available when the same source paragraph
@@ -236,9 +252,9 @@ fn outer_extent_falls_back_independently_and_preserves_hundredth_point_boundarie
         .find(|line| line.element == 2)
         .unwrap_or_else(|| unreachable!("right cue line is present"));
     assert_eq!(first_left.paragraph_bounds.x, FixedPoint::from_raw(12_025));
-    assert_eq!(first_left.paragraph_bounds.width, FixedPoint::from_raw(22_225));
-    assert_eq!(first_right.paragraph_bounds.x, FixedPoint::from_raw(37_850));
-    assert_eq!(first_right.paragraph_bounds.width, FixedPoint::from_raw(22_225));
+    assert_eq!(first_left.paragraph_bounds.width, FixedPoint::from_raw(23_125));
+    assert_eq!(first_right.paragraph_bounds.x, FixedPoint::from_raw(36_950));
+    assert_eq!(first_right.paragraph_bounds.width, FixedPoint::from_raw(23_125));
 
     let mut default_fallback = project.clone();
     default_fallback.dual_dialogue_paragraph_overrides.clear();
@@ -268,8 +284,8 @@ fn outer_extent_falls_back_independently_and_preserves_hundredth_point_boundarie
         .find(|line| line.element == 2)
         .unwrap_or_else(|| unreachable!("default-fallback right cue is present"));
     assert_eq!(fallback_left.paragraph_bounds.x, points(108));
-    assert_eq!(fallback_right.paragraph_bounds.x, points(342));
-    assert_eq!(fallback_left.paragraph_bounds.width, points(216));
+    assert_eq!(fallback_right.paragraph_bounds.x, points(351));
+    assert_eq!(fallback_left.paragraph_bounds.width, points(225));
 
     let mut invalid = project;
     invalid.dual_dialogue_paragraph_overrides.insert(
@@ -336,6 +352,12 @@ fn outer_and_internal_space_before_apply_once_per_block_and_side_paragraph() {
         .collect::<Vec<_>>();
     assert_eq!(left.len(), 3);
     assert_eq!(right.len(), 2);
+    assert_eq!(left[0].source.element, 1);
+    assert_eq!(left[0].source.start, 0);
+    assert_eq!(left[0].source.end, 1);
+    assert_eq!(right[0].source.element, 4);
+    assert_eq!(right[0].source.start, 0);
+    assert_eq!(right[0].source.end, 1);
     assert_eq!(left[0].paragraph_bounds.y, points(89));
     assert_eq!(right[0].paragraph_bounds.y, points(89));
     assert_eq!(left[1].paragraph_bounds.y, points(104));
@@ -345,10 +367,10 @@ fn outer_and_internal_space_before_apply_once_per_block_and_side_paragraph() {
     assert_eq!(left[1].display_text.as_ref(), "");
     assert_eq!(left[1].source.start, left[1].source.end);
     assert_eq!(left[2].paragraph_bounds.x, points(108));
-    assert_eq!(left[2].paragraph_bounds.width, points(198));
-    assert_eq!(right[1].paragraph_bounds.x, points(342));
-    assert_eq!(right[1].paragraph_bounds.width, points(198));
-    assert_eq!(right[1].geometry.x, points(505));
+    assert_eq!(left[2].paragraph_bounds.width, points(207));
+    assert_eq!(right[1].paragraph_bounds.x, points(333));
+    assert_eq!(right[1].paragraph_bounds.width, points(207));
+    assert_eq!(right[1].geometry.x, points(496));
 
     let mut no_preceding_content = project.clone();
     no_preceding_content.elements.remove(0);
@@ -410,7 +432,7 @@ fn unicode_all_caps_runs_and_centered_cues_keep_canonical_source_mapping() {
     assert_eq!(cue.text.as_ref(), "straße cue");
     assert_eq!(cue.display_text.as_ref(), "STRASSE CUE");
     assert_eq!(cue.paragraph_bounds.x, points(108));
-    assert_eq!(cue.paragraph_bounds.width, points(198));
+    assert_eq!(cue.paragraph_bounds.width, points(207));
     assert!(cue.geometry.x > cue.paragraph_bounds.x);
     assert!(cue.spans.iter().any(|span| {
         span.text_style.size == 24
@@ -518,7 +540,7 @@ fn print_and_editor_keep_ungrouped_lines_and_apply_wrapper_page_start_as_one_blo
         .unwrap_or_else(|| unreachable!("group page is present"));
     assert_eq!(group_page.lines.first().map(|line| line.element), Some(1));
     assert_eq!(group_page.lines[0].paragraph_bounds.x, points(108));
-    assert_eq!(group_page.lines[0].geometry.x, FixedPoint::from_raw(19_300));
+    assert_eq!(group_page.lines[0].geometry.x, FixedPoint::from_raw(19_750));
     let printed = build(
         &project,
         &SourceLayoutSettings::default(),
@@ -535,7 +557,7 @@ fn print_and_editor_keep_ungrouped_lines_and_apply_wrapper_page_start_as_one_blo
         .find(|line| line.element == 3)
         .unwrap_or_else(|| unreachable!("printed right cue is present"));
     assert_eq!(printed_left.paragraph_bounds.x, points(108));
-    assert_eq!(printed_right.paragraph_bounds.x, points(342));
+    assert_eq!(printed_right.paragraph_bounds.x, points(333));
     assert_eq!(printed_left.paragraph_bounds.y, printed_right.paragraph_bounds.y);
 }
 
@@ -708,6 +730,8 @@ fn starts_new_page_and_page_top_space_before_are_applied_once_without_empty_page
     assert_eq!(layout.pages[0].lines.len(), 1);
     assert_eq!(layout.pages[1].lines[0].element, 1);
     assert_eq!(layout.pages[1].lines[0].paragraph_bounds.y, points(72));
+    assert_eq!(layout.pages[1].lines[2].element, 3);
+    assert_eq!(layout.pages[1].lines[2].paragraph_bounds.y, points(72));
 
     let mut group_first = project;
     group_first.elements.remove(0);
@@ -719,6 +743,8 @@ fn starts_new_page_and_page_top_space_before_are_applied_once_without_empty_page
     assert_eq!(first_group.pages.len(), 1);
     assert_eq!(first_group.pages[0].lines[0].element, 0);
     assert_eq!(first_group.pages[0].lines[0].paragraph_bounds.y, points(72));
+    assert_eq!(first_group.pages[0].lines[2].element, 2);
+    assert_eq!(first_group.pages[0].lines[2].paragraph_bounds.y, points(72));
 }
 
 #[test]
@@ -1265,9 +1291,9 @@ fn cue_only_shapes_layout_only_real_members_and_active_boundary_ends_at_right_cu
             unreachable!("{name} retains both real cue lines")
         };
         assert_eq!(left_cue.paragraph_bounds.x, points(108), "{name} left column");
-        assert_eq!(left_cue.paragraph_bounds.width, points(198), "{name} left column width");
-        assert_eq!(right_cue.paragraph_bounds.x, points(342), "{name} right column");
-        assert_eq!(right_cue.paragraph_bounds.width, points(198), "{name} right column width");
+        assert_eq!(left_cue.paragraph_bounds.width, points(207), "{name} left column width");
+        assert_eq!(right_cue.paragraph_bounds.x, points(333), "{name} right column");
+        assert_eq!(right_cue.paragraph_bounds.width, points(207), "{name} right column width");
         assert_eq!(left_cue.paragraph_bounds.y, right_cue.paragraph_bounds.y, "{name} shared top");
         assert_eq!(left_cue.alignment, ParagraphAlignment::Center, "{name} keeps effective cue alignment");
         assert_eq!(right_cue.alignment, ParagraphAlignment::Center, "{name} keeps effective cue alignment");

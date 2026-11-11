@@ -12,6 +12,7 @@ use std::{fmt, path::Path, str::FromStr};
 use scriptcraft_core::editing::{Position as CorePosition, Selection as CoreSelection};
 use scriptcraft_core::{ParagraphAlignment, Project, Role, RunStyle};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+use unicode_segmentation::UnicodeSegmentation;
 
 pub mod executor;
 pub use executor::{
@@ -722,6 +723,63 @@ pub enum PointerPhase {
     Press,
     Drag,
     Release,
+    DoubleClick,
+    TripleClick,
+}
+
+/// Resolve a pointer phase to a semantic selection for the active screenplay
+/// surface. Multi-click selection uses canonical UTF-8 byte ranges and Unicode
+/// word boundaries; it does not depend on rendered coordinates or font metrics.
+pub fn pointer_selection(
+    project: &Project,
+    current: CoreSelection,
+    position: CorePosition,
+    surface: EditorSurface,
+    phase: PointerPhase,
+) -> Option<CoreSelection> {
+    let text = match surface {
+        EditorSurface::Body => project
+            .elements
+            .get(position.element)
+            .map(|element| element.text.as_str()),
+        EditorSurface::TitlePage => project
+            .title_page
+            .get(position.element)
+            .map(|paragraph| paragraph.text.as_str()),
+    }?;
+    if position.offset > text.len() || !text.is_char_boundary(position.offset) {
+        return None;
+    }
+
+    Some(match phase {
+        PointerPhase::Press | PointerPhase::Release => CoreSelection::caret(position),
+        PointerPhase::Drag => CoreSelection { anchor: current.anchor, focus: position },
+        PointerPhase::DoubleClick => {
+            match word_range_at(text, position.offset) {
+                Some((start, end)) => CoreSelection {
+                    anchor: CorePosition { element: position.element, offset: start },
+                    focus: CorePosition { element: position.element, offset: end },
+                },
+                None => CoreSelection::caret(position),
+            }
+        }
+        PointerPhase::TripleClick => CoreSelection {
+            anchor: CorePosition { element: position.element, offset: 0 },
+            focus: CorePosition { element: position.element, offset: text.len() },
+        },
+    })
+}
+
+fn word_range_at(text: &str, offset: usize) -> Option<(usize, usize)> {
+    let probe = if offset == text.len() {
+        text.char_indices().next_back().map(|(start, _)| start)?
+    } else {
+        offset
+    };
+
+    text.unicode_word_indices()
+        .find(|(start, word)| probe >= *start && probe < start.saturating_add(word.len()))
+        .map(|(start, word)| (start, start.saturating_add(word.len())))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

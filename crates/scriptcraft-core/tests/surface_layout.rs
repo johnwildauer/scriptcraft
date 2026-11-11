@@ -40,6 +40,60 @@ fn build(project: &Project, composition: LayoutComposition) -> ScreenplayLayout 
     ))
 }
 
+fn assert_default_action_wrap(layout: &ScreenplayLayout, canonical: &str, first_line_text: &str) {
+    assert_eq!(layout.inputs.chars_per_line, 55);
+    let lines = layout
+        .pages
+        .iter()
+        .flat_map(|page| &page.lines)
+        .filter(|line| line.element == 0)
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+
+    let first = lines[0];
+    assert_eq!(first.text.as_ref(), first_line_text);
+    assert_eq!(first.display_text.as_ref(), first_line_text);
+    assert_eq!(first.source.start, 0);
+    assert_eq!(first.source.end, first_line_text.len());
+    assert_eq!(first.source_for_display_char(60), 60);
+    assert_eq!(first.source_for_display_char(61), first_line_text.len());
+    assert_eq!(first.display_source_map.last().map(|segment| segment.source_start), Some(60));
+    assert_eq!(first.display_source_map.last().map(|segment| segment.source_end), Some(62));
+
+    let second = lines[1];
+    assert_eq!(second.text.as_ref(), "Z");
+    assert_eq!(second.source.start, first_line_text.len());
+    assert_eq!(second.source.end, canonical.len());
+
+    for line in lines {
+        assert_eq!(line.paragraph_bounds.x, FixedPoint::from_points(108));
+        assert_eq!(line.paragraph_bounds.width, FixedPoint::from_points(432));
+        assert_eq!(
+            line.paragraph_bounds.x.raw() + line.paragraph_bounds.width.raw(),
+            FixedPoint::from_points(540).raw()
+        );
+    }
+}
+
+#[test]
+fn default_action_wraps_to_effective_bounds_and_preserves_utf8_source_mapping_in_editor_and_print() {
+    let first_line_text = format!("{}é", "a".repeat(60));
+    let canonical = format!("{first_line_text}Z");
+    let mut project = fixture();
+    project.elements[0].text = canonical.clone();
+
+    let editor = build(&project, LayoutComposition::BodyEditor);
+    let print = build(
+        &project,
+        LayoutComposition::Print {
+            include_title_page: false,
+        },
+    );
+
+    assert_default_action_wrap(&editor, &canonical, &first_line_text);
+    assert_default_action_wrap(&print, &canonical, &first_line_text);
+}
+
 #[test]
 fn compositions_keep_body_title_and_print_page_domains_separate_and_deterministic() {
     let mut project = fixture();

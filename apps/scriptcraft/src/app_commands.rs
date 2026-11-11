@@ -2,7 +2,7 @@ use super::{LayoutCache, Position, Project, ScriptCraftApp, Selection};
 use eframe::egui;
 use scriptcraft_core::editing::EditError;
 use scriptcraft_commands::{
-    execute_editor_command_on_surface, Appearance, Command, CommandId, CommandOrigin, CommandOutcome,
+    execute_editor_command_on_surface, pointer_selection, Appearance, Command, CommandId, CommandOrigin, CommandOutcome,
     CommandRejection, DiagnosticMessage, EditorSurface, HorizontalDirection, HostEffectDescription,
     ImportResolution, LineEdge, PointerPhase, VerticalDirection,
     Position as CommandPosition, Selection as CommandSelection, SprintTimerMode,
@@ -955,13 +955,20 @@ impl ScriptCraftApp {
             return DesktopCommandOutcome::Rejected(CommandRejection::InvalidSelection(error));
         }
         let current = self.active_selection();
-        let desired = match phase {
-            PointerPhase::Press => super::Selection::caret(core_position),
-            PointerPhase::Drag => super::Selection {
-                anchor: self.drag_anchor.unwrap_or(current.anchor),
-                focus: core_position,
-            },
-            PointerPhase::Release => super::Selection::caret(core_position),
+        let drag_current = super::Selection {
+            anchor: self.drag_anchor.unwrap_or(current.anchor),
+            focus: current.focus,
+        };
+        let Some(desired) = pointer_selection(
+            self.session.project(),
+            drag_current,
+            core_position,
+            surface,
+            phase,
+        ) else {
+            return DesktopCommandOutcome::Rejected(CommandRejection::InvalidSelection(
+                scriptcraft_commands::SelectionError::ElementOutOfRange,
+            ));
         };
         let outcome = self.execute_navigation_selection(desired, surface, false, ctx);
         if matches!(
@@ -971,7 +978,9 @@ impl ScriptCraftApp {
             match phase {
                 PointerPhase::Press => self.drag_anchor = Some(core_position),
                 PointerPhase::Drag => {}
-                PointerPhase::Release => self.drag_anchor = None,
+                PointerPhase::Release | PointerPhase::DoubleClick | PointerPhase::TripleClick => {
+                    self.drag_anchor = None;
+                }
             }
             self.preferred_vertical_x = None;
             self.rendered_revision = None;

@@ -109,9 +109,16 @@ pub fn execute_editor_command_on_surface(
                 EditorSurface::Body => session.selection(),
                 EditorSurface::TitlePage => session.title_selection(),
             };
-            let selection = match phase {
-                PointerPhase::Press | PointerPhase::Release => CoreSelection::caret(core_position),
-                PointerPhase::Drag => CoreSelection { anchor: current.anchor, focus: core_position },
+            let Some(selection) = crate::pointer_selection(
+                session.project(),
+                current,
+                core_position,
+                *surface,
+                *phase,
+            ) else {
+                return CommandOutcome::Rejected(CommandRejection::InvalidSelection(
+                    SelectionError::ElementOutOfRange,
+                ));
             };
             set_selection(session, *surface, selection)
         }

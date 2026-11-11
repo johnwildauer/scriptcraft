@@ -1067,6 +1067,8 @@ impl ScriptCraftApp {
         }
         if let Some(pointer) = response.interact_pointer_pos() {
             let pointer_active = response.clicked()
+                || response.double_clicked()
+                || response.triple_clicked()
                 || response.drag_started()
                 || response.dragged()
                 || (response.hovered() && ui.input(|input| input.pointer.primary_down()));
@@ -1095,6 +1097,10 @@ impl ScriptCraftApp {
                             PointerPhase::Press
                         } else if response.dragged() {
                             PointerPhase::Drag
+                        } else if response.triple_clicked() {
+                            PointerPhase::TripleClick
+                        } else if response.double_clicked() {
+                            PointerPhase::DoubleClick
                         } else {
                             PointerPhase::Release
                         };

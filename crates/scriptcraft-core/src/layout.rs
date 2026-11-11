@@ -23,6 +23,7 @@ pub const FONT_FAMILY: &str = "Courier-family fixed metrics (12 pt target)";
 pub const CHAR_WIDTH: u32 = 7;
 pub const LINE_HEIGHT: u32 = 12;
 pub const POINTS_PER_INCH: u32 = 72;
+const DUAL_DIALOGUE_COLUMN_GAP_POINTS: i64 = 18;
 const MAX_LINES_PER_ELEMENT: usize = 1_000_000;
 const MAX_CACHED_ELEMENT_WRAPS: usize = 4_096;
 const MAX_CACHED_ELEMENT_WRAP_BYTES: usize = 32 * 1024 * 1024;
@@ -394,7 +395,6 @@ struct ElementWrapContext {
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
     char_width: FixedPoint,
-    max_chars: u32,
     run_signature: String,
     atomic_signature: Vec<(usize, usize)>,
 }
@@ -463,7 +463,6 @@ impl ElementWrapCache {
         paragraph: EffectiveParagraph,
         text_style: EffectiveTextStyle,
         char_width: FixedPoint,
-        max_chars: u32,
         runs: &[TextRun],
         atomic_ranges: &[std::ops::Range<usize>],
         purpose: LayoutPurpose,
@@ -480,7 +479,6 @@ impl ElementWrapCache {
             paragraph,
             text_style: text_style.clone(),
             char_width,
-            max_chars,
             run_signature: format!("{runs:?}"),
             atomic_signature: atomic_ranges.iter().map(|range| (range.start, range.end)).collect(),
         };
@@ -508,7 +506,7 @@ impl ElementWrapCache {
 
         let started = diagnostics.as_ref().map(|_| Instant::now());
         let lines = wrap_element(
-            text, element, role, paragraph, text_style, char_width, max_chars, atomic_ranges,
+            text, element, role, paragraph, text_style, char_width, atomic_ranges,
         );
         if let (Some(diagnostics), Some(started)) = (diagnostics, started) {
             diagnostics.record_element_wrap(started);
@@ -1105,7 +1103,6 @@ impl ScreenplayLayout {
                     style,
                     &element.runs,
                     paragraph.char_width,
-                    output.inputs.chars_per_line,
                     purpose,
                     true,
                     EffectiveGeometryMode::Sequential,
@@ -1145,7 +1142,7 @@ impl ScreenplayLayout {
                     project,
                     group,
                 )?;
-                let gap = FixedPoint::from_points(36);
+                let gap = FixedPoint::from_points(DUAL_DIALOGUE_COLUMN_GAP_POINTS);
                 let column_width = FixedPoint::from_raw(
                     outer_right
                         .raw()
@@ -1207,6 +1204,22 @@ impl ScreenplayLayout {
                         .space_before
                         .or(source_settings.paragraph_spec(Role::General).space_before)
                         .unwrap_or_else(|| FixedPoint::from_points(i64::from(native_general.space_before)));
+                    let first_visible_space_before = |side: &WrappedDualSide| {
+                        side.paragraphs
+                            .iter()
+                            .find_map(|paragraph| {
+                                paragraph
+                                    .first()
+                                    .map(|line| line.paragraph.space_before.raw())
+                            })
+                            .unwrap_or_default()
+                    };
+                    let space_before = FixedPoint::from_raw(
+                        space_before
+                            .raw()
+                            .max(first_visible_space_before(&left))
+                            .max(first_visible_space_before(&right)),
+                    );
                     output.place_dual_block(
                         &left,
                         &right,
@@ -1252,10 +1265,9 @@ impl ScreenplayLayout {
                 element.role,
                 paragraph,
                 text_style.clone(),
-                &element.runs,
-                paragraph.char_width,
-                output.inputs.chars_per_line,
-                purpose,
+                    &element.runs,
+                    paragraph.char_width,
+                    purpose,
                 false,
                 EffectiveGeometryMode::Sequential,
             );
@@ -2406,7 +2418,7 @@ fn dual_outer_extent(
     let left = wrapper.left_indent.unwrap_or(role_left);
     let right = wrapper.right_indent.unwrap_or(role_right);
     let page_right = FixedPoint::from_points(i64::from(inputs.paper_width));
-    let gap = FixedPoint::from_points(36);
+    let gap = FixedPoint::from_points(DUAL_DIALOGUE_COLUMN_GAP_POINTS);
     if left.raw() < 0
         || right <= left
         || right > page_right
@@ -2472,7 +2484,6 @@ fn wrap_dual_side(
             text_style,
             &element.runs,
             paragraph.char_width,
-            inputs.chars_per_line,
             purpose,
             false,
             EffectiveGeometryMode::DualColumn,
@@ -2669,7 +2680,6 @@ fn wrap_for_layout(
     text_style: EffectiveTextStyle,
     runs: &[TextRun],
     char_width: FixedPoint,
-    max_chars: u32,
     purpose: LayoutPurpose,
     title_page: bool,
     geometry_mode: EffectiveGeometryMode,
@@ -2726,7 +2736,6 @@ fn wrap_for_layout(
                 wrapping_style
             },
             wrapping_char_width,
-            max_chars,
             runs,
             &source_map.iter().map(|(display, _)| display.clone()).collect::<Vec<_>>(),
             purpose,
@@ -2739,7 +2748,7 @@ fn wrap_for_layout(
         let mut wrapping_style = text_style.clone();
         wrapping_style.all_caps = false;
         let lines = wrap_element(
-            &projected_text, element, role, paragraph, wrapping_style, wrapping_char_width, max_chars,
+            &projected_text, element, role, paragraph, wrapping_style, wrapping_char_width,
             &source_map.iter().map(|(display, _)| display.clone()).collect::<Vec<_>>(),
         );
         if let (Some(diagnostics), Some(started)) = (diagnostics, started) {
@@ -2779,7 +2788,6 @@ fn wrap_element(
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
     char_width: FixedPoint,
-    max_chars: u32,
     atomic_ranges: &[std::ops::Range<usize>],
 ) -> Vec<WrappedLine> {
     let cell = char_width.raw().max(1);
@@ -2792,14 +2800,12 @@ fn wrap_element(
         .raw()
         .saturating_sub(first_left)
         .div_euclid(cell)
-        .min(max_chars.max(1) as i64)
         .max(1) as usize;
     let rest_limit = paragraph
         .right
         .raw()
         .saturating_sub(paragraph.left.raw())
         .div_euclid(cell)
-        .min(max_chars.max(1) as i64)
         .max(1) as usize;
     let mut output = Vec::new();
     let mut first_visual_line = true;

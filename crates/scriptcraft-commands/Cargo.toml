@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 scriptcraft-core = { path = "../scriptcraft-core" }
 serde = { version = "=1.0.229", features = ["derive"] }
+unicode-segmentation = "=1.13.3"
 
 [lints]
 workspace = true
