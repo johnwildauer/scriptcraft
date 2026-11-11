@@ -58,6 +58,9 @@ pub(super) fn show_if_open(app: &mut ScriptCraftApp, root_ctx: &egui::Context) {
 
             let child_ctx = ui.ctx().clone();
             if child_ctx.input(|input| input.viewport().close_requested()) {
+                if app.timer_popup_surface == EditorSurface::TitlePage {
+                    app.finalize_sprint_timer_popup(&child_ctx);
+                }
                 app.set_title_page_window_open(false);
                 return;
             }
@@ -152,6 +155,7 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
                 if opening_timer {
                     app.sprint_timer.popup_anchor = timer_button_rect.unwrap_or(egui::Rect::NOTHING);
                     app.timer_popup_surface = EditorSurface::TitlePage;
+                    app.capture_sprint_timer_host_geometry(EditorSurface::TitlePage, ctx);
                 }
             }
         });
@@ -161,11 +165,20 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
         .frame(super::script_view::central_panel_frame(ctx, palette.script_workspace))
         .show_inside(ui, |ui| app.live_document_surface(ui, EditorSurface::TitlePage));
     if app.timer_popup_surface == EditorSurface::TitlePage {
-        for command in super::sprint_timer::show_popup(ctx, &mut app.sprint_timer, now) {
+        let host_geometry = app.sprint_timer_host_geometry(EditorSurface::TitlePage);
+        for command in super::sprint_timer::show_popup_with_host_geometry(
+            ctx,
+            &mut app.sprint_timer,
+            now,
+            host_geometry,
+        ) {
             app.dispatch_command(
                 CommandInvocation::new(command, CommandOrigin::Pointer),
                 ctx,
             );
+        }
+        if app.sprint_timer.take_popup_close_completion() {
+            app.finalize_sprint_timer_popup(ctx);
         }
     }
 }

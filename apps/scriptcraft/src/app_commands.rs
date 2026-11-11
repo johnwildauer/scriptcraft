@@ -11,6 +11,15 @@ use scriptcraft_commands::{
 use super::sprint_timer::NotificationSink;
 use std::collections::VecDeque;
 
+fn close_sprint_timer_popup_once(timer: &mut super::sprint_timer::SprintTimer) -> bool {
+    if !timer.popup_open {
+        return false;
+    }
+    timer.popup_open = false;
+    timer.close_popup();
+    true
+}
+
 /// An activation plus its diagnostic source. Origins never change execution
 /// semantics; adapters assign the origin as they create the invocation.
 #[derive(Debug, Clone, PartialEq)]
@@ -696,18 +705,27 @@ impl ScriptCraftApp {
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::ToolsSprintTimerTogglePopup => {
-                self.sprint_timer.popup_open = !self.sprint_timer.popup_open;
                 if self.sprint_timer.popup_open {
-                    self.sprint_timer.just_opened = true;
+                    self.sprint_timer.request_popup_close(
+                        ctx.input(|input| input.time),
+                        ctx.content_rect(),
+                    );
                 } else {
-                    self.sprint_timer.close_popup();
+                    self.sprint_timer.clear_popup_transition(ctx);
+                    self.clear_sprint_timer_popup_geometry();
+                    self.sprint_timer.popup_open = true;
+                    self.sprint_timer.just_opened = true;
+                    self.sprint_timer
+                        .start_popup_opening(ctx.input(|input| input.time));
                 }
                 ctx.request_repaint();
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::ToolsSprintTimerClosePopup => {
-                self.sprint_timer.popup_open = false;
-                self.sprint_timer.close_popup();
+                self.sprint_timer.request_popup_close(
+                    ctx.input(|input| input.time),
+                    ctx.content_rect(),
+                );
                 ctx.request_repaint();
                 DesktopCommandOutcome::EffectDispatched
             }
@@ -1087,6 +1105,17 @@ impl ScriptCraftApp {
             result,
         )
     }
+
+    /// Completes an app-owned popup transition, or immediately tears it down
+    /// when its viewport no longer has a drawable surface. Typed close commands
+    /// never call this path; they only request the ordinary animated dismissal.
+    pub(super) fn finalize_sprint_timer_popup(&mut self, ctx: &egui::Context) -> bool {
+        let finalized = close_sprint_timer_popup_once(&mut self.sprint_timer);
+        self.sprint_timer.clear_popup_transition(ctx);
+        self.clear_sprint_timer_popup_geometry();
+        ctx.request_repaint();
+        finalized
+    }
 }
 
 impl AppCommandAvailability {
@@ -1230,8 +1259,10 @@ impl DesktopTimerNotificationEffects {
 
 #[cfg(test)]
 mod surface_command_availability_tests {
+    use super::CommandInvocation;
     use crate::ScriptCraftApp;
     use scriptcraft_commands::{Command, CommandId, CommandOrigin, EditorSurface};
+    use super::super::sprint_timer::{NotificationFeedback, SprintTimer};
 
     #[test]
     fn availability_and_typed_routing_follow_focus_and_surface_policy() {
@@ -1267,6 +1298,191 @@ mod surface_command_availability_tests {
         assert!(availability.is_enabled(CommandId::FileImportResolve));
         assert!(!availability.is_enabled(CommandId::WindowTitlePageOpen));
         assert!(!availability.is_enabled(CommandId::EditorDualDialogueToggle));
+    }
+
+    #[test]
+    fn duplicate_popup_close_requests_run_idle_cleanup_once() {
+        let mut timer = SprintTimer::default();
+        timer.popup_open = true;
+        timer.set_minutes_input("7".to_owned());
+        timer.validation_error = Some("invalid input".to_owned());
+        timer.notification_feedback = Some(NotificationFeedback::Unavailable);
+
+        assert!(super::close_sprint_timer_popup_once(&mut timer));
+        assert!(!super::close_sprint_timer_popup_once(&mut timer));
+        assert!(!timer.popup_open);
+        assert!(timer.is_idle());
+        assert_eq!(timer.minutes_input, "25");
+        assert!(timer.validation_error.is_none());
+        assert!(timer.notification_feedback.is_none());
+    }
+
+    #[test]
+    fn popup_close_preserves_running_and_paused_timer_state() {
+        let mut running = SprintTimer::default();
+        running.popup_open = true;
+        running.set_minutes_input("2".to_owned());
+        let _ = running.start_countdown(std::time::Duration::ZERO);
+        assert!(super::close_sprint_timer_popup_once(&mut running));
+        assert!(running.is_running_or_paused());
+        assert_eq!(running.remaining(std::time::Duration::from_secs(15)), Some(std::time::Duration::from_secs(105)));
+
+        let mut paused = running.clone();
+        paused.popup_open = true;
+        let _ = paused.pause(std::time::Duration::from_secs(15));
+        let remaining = paused.remaining(std::time::Duration::from_secs(20));
+        assert!(super::close_sprint_timer_popup_once(&mut paused));
+        assert!(!super::close_sprint_timer_popup_once(&mut paused));
+        assert!(paused.is_running_or_paused());
+        assert_eq!(paused.remaining(std::time::Duration::from_secs(20)), remaining);
+    }
+
+    #[test]
+    fn popup_close_resets_completed_timer_once() {
+        let mut timer = SprintTimer::default();
+        timer.popup_open = true;
+        timer.set_minutes_input("1".to_owned());
+        let _ = timer.start_countdown(std::time::Duration::ZERO);
+        let _ = timer.reconcile(std::time::Duration::from_secs(60));
+        assert!(timer.is_completed());
+
+        assert!(super::close_sprint_timer_popup_once(&mut timer));
+        assert!(!super::close_sprint_timer_popup_once(&mut timer));
+        assert!(timer.is_idle());
+        assert_eq!(timer.minutes_input, "25");
+        assert_eq!(timer.mode, super::super::sprint_timer::TimerMode::Countdown);
+    }
+
+    #[test]
+    fn typed_close_and_icon_toggle_coalesce_then_reopen_with_a_clean_transition() {
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        let ctx = eframe::egui::Context::default();
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(600.0, 400.0),
+        );
+        app.sprint_timer.popup_open = true;
+        app.sprint_timer.set_minutes_input("7".to_owned());
+        app.sprint_timer.start_popup_opening(5.0);
+        let revision = app.session.revision();
+        let dirty = app.session.dirty();
+        let selection = app.session.selection();
+        let project = app.session.project().clone();
+
+        let _ = ctx.run(
+            eframe::egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(5.07),
+                ..Default::default()
+            },
+            |ctx| {
+                let _ = app.dispatch_command(
+                    CommandInvocation::new(
+                        Command::ToolsSprintTimerClosePopup,
+                        CommandOrigin::Pointer,
+                    ),
+                    ctx,
+                );
+                let _ = app.dispatch_command(
+                    CommandInvocation::new(
+                        Command::ToolsSprintTimerTogglePopup,
+                        CommandOrigin::Pointer,
+                    ),
+                    ctx,
+                );
+            },
+        );
+        assert!(app.sprint_timer.popup_open);
+        assert!(app.sprint_timer.is_closing());
+        assert_eq!(app.sprint_timer.minutes_input, "7");
+        assert_eq!(app.session.revision(), revision);
+        assert_eq!(app.session.dirty(), dirty);
+        assert_eq!(app.session.selection(), selection);
+        assert_eq!(app.session.project(), &project);
+
+        assert!(app.finalize_sprint_timer_popup(&ctx));
+        assert!(!app.sprint_timer.popup_open);
+        assert!(!app.finalize_sprint_timer_popup(&ctx));
+        assert_eq!(app.sprint_timer.minutes_input, "25");
+        assert_eq!(app.session.revision(), revision);
+        assert_eq!(app.session.dirty(), dirty);
+        assert_eq!(app.session.selection(), selection);
+        assert_eq!(app.session.project(), &project);
+
+        let _ = ctx.run(
+            eframe::egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(6.0),
+                ..Default::default()
+            },
+            |ctx| {
+                let _ = app.dispatch_command(
+                    CommandInvocation::new(
+                        Command::ToolsSprintTimerTogglePopup,
+                        CommandOrigin::Pointer,
+                    ),
+                    ctx,
+                );
+            },
+        );
+        assert!(app.sprint_timer.popup_open);
+        assert!(!app.sprint_timer.is_closing());
+        assert_eq!(app.sprint_timer.popup_anchor, eframe::egui::Rect::NOTHING);
+        assert_eq!(app.sprint_timer.popup_rect, eframe::egui::Rect::NOTHING);
+    }
+
+    #[test]
+    fn completed_cleanup_waits_for_close_completion_but_viewport_teardown_is_immediate() {
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        let ctx = eframe::egui::Context::default();
+        let screen = eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(600.0, 400.0),
+        );
+        app.sprint_timer.popup_open = true;
+        app.sprint_timer.set_minutes_input("1".to_owned());
+        let _ = app.sprint_timer.start_countdown(std::time::Duration::ZERO);
+        let _ = app.sprint_timer.reconcile(std::time::Duration::from_secs(60));
+        assert!(app.sprint_timer.is_completed());
+        let revision = app.session.revision();
+        let project = app.session.project().clone();
+
+        let _ = ctx.run(
+            eframe::egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(9.0),
+                ..Default::default()
+            },
+            |ctx| {
+                let _ = app.dispatch_command(
+                    CommandInvocation::new(
+                        Command::ToolsSprintTimerClosePopup,
+                        CommandOrigin::Pointer,
+                    ),
+                    ctx,
+                );
+            },
+        );
+        assert!(app.sprint_timer.is_completed());
+        assert_eq!(app.sprint_timer.minutes_input, "1");
+        assert_eq!(app.session.revision(), revision);
+        assert_eq!(app.session.project(), &project);
+        assert!(app.finalize_sprint_timer_popup(&ctx));
+        assert!(app.sprint_timer.is_idle());
+        assert_eq!(app.sprint_timer.minutes_input, "25");
+
+        app.sprint_timer.popup_open = true;
+        app.sprint_timer.set_minutes_input("2".to_owned());
+        let _ = app.sprint_timer.start_countdown(std::time::Duration::from_secs(10));
+        assert!(app.finalize_sprint_timer_popup(&ctx));
+        assert!(!app.sprint_timer.popup_open);
+        assert!(app.sprint_timer.is_running_or_paused());
+        assert_eq!(
+            app.sprint_timer.remaining(std::time::Duration::from_secs(20)),
+            Some(std::time::Duration::from_secs(110))
+        );
+        assert_eq!(app.session.revision(), revision);
+        assert_eq!(app.session.project(), &project);
     }
 }
 

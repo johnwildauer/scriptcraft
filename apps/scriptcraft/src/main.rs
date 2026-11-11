@@ -874,6 +874,8 @@ struct ScriptCraftApp {
     focus_mode: focus_mode::FocusModeController,
     sprint_timer: sprint_timer::SprintTimer,
     timer_popup_surface: EditorSurface,
+    timer_body_host_geometry: Option<sprint_timer::SprintTimerHostGeometry>,
+    timer_title_host_geometry: Option<sprint_timer::SprintTimerHostGeometry>,
     timer_clock_origin: Instant,
     next_cast_list_refresh: Instant,
     notification_sink: sprint_timer::NativeNotificationSink,
@@ -1095,9 +1097,9 @@ impl ScriptCraftApp {
         if self.title_page_window_open {
             title_page_window::send_close(ctx);
         }
+        self.timer_title_host_geometry = None;
         if self.timer_popup_surface == EditorSurface::TitlePage {
-            self.sprint_timer.popup_open = false;
-            self.sprint_timer.close_popup();
+            self.finalize_sprint_timer_popup(ctx);
         }
         self.set_title_page_window_open(false);
         self.title_page_focus_requested = false;
@@ -1105,6 +1107,41 @@ impl ScriptCraftApp {
         self.set_active_editor_surface(EditorSurface::Body);
         self.restore_editor_focus(ctx);
         ctx.request_repaint();
+    }
+
+    fn capture_sprint_timer_host_geometry(
+        &mut self,
+        surface: EditorSurface,
+        ctx: &egui::Context,
+    ) {
+        let geometry = sprint_timer::SprintTimerHostGeometry::from_context(ctx);
+        match surface {
+            EditorSurface::Body => {
+                self.timer_body_host_geometry = Some(geometry);
+                self.timer_title_host_geometry = None;
+            }
+            EditorSurface::TitlePage => {
+                self.timer_title_host_geometry = Some(geometry);
+                self.timer_body_host_geometry = None;
+            }
+        }
+    }
+
+    fn sprint_timer_host_geometry(
+        &self,
+        surface: EditorSurface,
+    ) -> Option<sprint_timer::SprintTimerHostGeometry> {
+        match surface {
+            EditorSurface::Body => self.timer_body_host_geometry,
+            EditorSurface::TitlePage => self.timer_title_host_geometry,
+        }
+    }
+
+    fn clear_sprint_timer_popup_geometry(&mut self) {
+        self.timer_body_host_geometry = None;
+        self.timer_title_host_geometry = None;
+        self.sprint_timer.popup_anchor = egui::Rect::NOTHING;
+        self.sprint_timer.popup_rect = egui::Rect::NOTHING;
     }
 
     /// Temporarily install child-local view state while the shared Script View
@@ -1278,6 +1315,8 @@ impl ScriptCraftApp {
             focus_mode: focus_mode::FocusModeController::default(),
             sprint_timer: sprint_timer::SprintTimer::default(),
             timer_popup_surface: EditorSurface::Body,
+            timer_body_host_geometry: None,
+            timer_title_host_geometry: None,
             timer_clock_origin: Instant::now(),
             next_cast_list_refresh: Instant::now() + CAST_LIST_REFRESH_INTERVAL,
             notification_sink,
@@ -2416,6 +2455,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
             if opening_timer {
                 app.sprint_timer.popup_anchor = timer_button_rect.unwrap_or(egui::Rect::NOTHING);
                 app.timer_popup_surface = EditorSurface::Body;
+                app.capture_sprint_timer_host_geometry(EditorSurface::Body, &ctx);
             }
         }
         });
@@ -2428,15 +2468,26 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
             .frame(script_view::central_panel_frame(&ctx, app.theme_palette.script_workspace))
         .show_inside(ui, |ui| app.live_document_surface(ui, EditorSurface::Body));
     let timer_commands = if app.timer_popup_surface == EditorSurface::Body {
-        sprint_timer::show_popup(&ctx, &mut app.sprint_timer, now)
+        let host_geometry = app.sprint_timer_host_geometry(EditorSurface::Body);
+        sprint_timer::show_popup_with_host_geometry(
+            &ctx,
+            &mut app.sprint_timer,
+            now,
+            host_geometry,
+        )
     } else {
         Vec::new()
     };
-        for command in timer_commands {
+    for command in timer_commands {
         app.dispatch_command(
             CommandInvocation::new(command, CommandOrigin::Pointer),
             &ctx,
         );
+    }
+    if app.timer_popup_surface == EditorSurface::Body
+        && app.sprint_timer.take_popup_close_completion()
+    {
+        app.finalize_sprint_timer_popup(&ctx);
     }
     central.response.rect
 }
@@ -2746,6 +2797,9 @@ impl ScriptCraftApp {
         }
         if ctx.input(|input| input.viewport().close_requested()) {
             self.close_title_page_window(&ctx);
+            if self.timer_popup_surface == EditorSurface::Body {
+                self.finalize_sprint_timer_popup(&ctx);
+            }
         } else {
             title_page_window::show_if_open(self, &ctx);
         }
