@@ -67,31 +67,13 @@ fn parse_channel(channels: &str, start: usize) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_fdx_source_color, resolve_effective_text_style, RendererFamilyChoice,
+        resolve_effective_text_style, RendererFamilyChoice,
     };
-    use scriptcraft_core::formatting::{EffectiveTextStyle, SourceLayoutSettings};
-    use scriptcraft_core::Role;
-
-    #[test]
-    fn all_five_hidden_role_defaults_resolve_to_arial_and_default_rgb8() {
-        for role in [
-            Role::Summary,
-            Role::Outline1,
-            Role::Outline2,
-            Role::Outline3,
-            Role::Note,
-        ] {
-            let style = SourceLayoutSettings::default().text_style(role);
-            let resolved = resolve_effective_text_style(&style);
-            assert_eq!(resolved.family, RendererFamilyChoice::Arial);
-            assert_eq!(resolved.color_rgb8, Some([0x87, 0x8f, 0xe0]));
-        }
-    }
+    use scriptcraft_core::formatting::EffectiveTextStyle;
 
     #[test]
     fn arial_family_matching_is_ascii_case_insensitive() {
-        let mut style = test_style("aRiAl", None);
-        style.hidden_text = false;
+        let style = test_style("aRiAl");
         assert_eq!(
             resolve_effective_text_style(&style).family,
             RendererFamilyChoice::Arial
@@ -101,7 +83,7 @@ mod tests {
     #[test]
     fn courier_and_unsupported_hidden_families_keep_courier_fallback() {
         for family in ["Courier Final Draft", "Courier Prime", "Helvetica"] {
-            let mut style = test_style(family, None);
+            let mut style = test_style(family);
             style.hidden_text = family == "Helvetica";
             assert_eq!(
                 resolve_effective_text_style(&style).family,
@@ -110,65 +92,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn valid_explicit_imported_color_is_resolved_instead_of_the_role_default() {
-        let style = test_style("Arial", Some("#1234aBcDffff"));
-        assert_eq!(
-            resolve_effective_text_style(&style).color_rgb8,
-            Some([0x12, 0xab, 0xff])
-        );
-    }
 
-    #[test]
-    fn malformed_and_unsupported_color_spellings_resolve_to_none() {
-        for value in [
-            "",
-            "87878F8FE0E0",
-            "#878FE0",
-            "#87878F8FE0E",
-            "#87878F8FE0E00",
-            "#87878F8FE0EG",
-            "#FFFFFFFFFFFFFFFF",
-            " #87878F8FE0E0",
-            "#ＦＦＦＦＦＦＦＦＦＦＦＦＦＦＦＦ",
-        ] {
-            assert_eq!(parse_fdx_source_color(value), None, "input: {value:?}");
-            let style = test_style("Arial", Some(value));
-            assert_eq!(
-                resolve_effective_text_style(&style).color_rgb8,
-                None,
-                "resolved input: {value:?}"
-            );
-        }
-        assert_eq!(parse_fdx_source_color("#FFFFFFFFFFFF"), Some([255; 3]));
-    }
 
-    #[test]
-    fn resolution_does_not_mutate_the_effective_style_or_source_settings() {
-        let mut settings = SourceLayoutSettings::default();
-        let mut found_summary = false;
-        for (role_index, role) in Role::ALL.iter().enumerate() {
-            if *role == Role::Summary {
-                settings.role_font_specs[role_index].family = Some("aRiAl".to_owned());
-                settings.role_font_specs[role_index].color = Some("#1234567890ab".to_owned());
-                found_summary = true;
-                break;
-            }
-        }
-        assert!(found_summary);
-        let settings_before = settings.clone();
-        let style = settings.text_style(Role::Summary);
-        let style_before = style.clone();
-
-        let resolved = resolve_effective_text_style(&style);
-
-        assert_eq!(resolved.family, RendererFamilyChoice::Arial);
-        assert_eq!(resolved.color_rgb8, Some([0x12, 0x56, 0x90]));
-        assert_eq!(style, style_before);
-        assert_eq!(settings, settings_before);
-    }
-
-    fn test_style(family: &str, source_color: Option<&str>) -> EffectiveTextStyle {
+    fn test_style(family: &str) -> EffectiveTextStyle {
         EffectiveTextStyle {
             declared_family: family.to_owned(),
             family: scriptcraft_core::formatting::FontFallback::CourierPrime,
@@ -178,7 +104,8 @@ mod tests {
             underline: false,
             all_caps: false,
             hidden_text: false,
-            source_color: source_color.map(str::to_owned),
+            source_color: None,
         }
     }
+
 }

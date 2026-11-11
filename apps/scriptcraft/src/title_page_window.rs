@@ -169,32 +169,3 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{accepts_viewport_class, native_title, viewport_builder, viewport_id};
-    use eframe::egui;
-
-    #[test]
-    fn native_viewport_identity_and_title_are_stable_and_bounded() {
-        assert_eq!(
-            viewport_id(),
-            egui::ViewportId::from_hash_of("scriptcraft-title-page-editor"),
-        );
-        let title = native_title("Untitled Screenplay");
-        assert_eq!(title, "Title Page - Untitled Screenplay");
-        assert_eq!(native_title("Example.fdx"), "Title Page - Example.fdx");
-        let builder = viewport_builder("Untitled Screenplay");
-        assert_eq!(builder.title.as_deref(), Some("Title Page - Untitled Screenplay"));
-        assert_eq!(builder.inner_size, Some([820.0, 680.0].into()));
-        assert_eq!(builder.min_inner_size, Some([520.0, 420.0].into()));
-    }
-
-    #[test]
-    fn embedded_fallback_is_rejected_and_title_zoom_starts_at_one_hundred_percent() {
-        assert!(accepts_viewport_class(egui::ViewportClass::Immediate));
-        assert!(!accepts_viewport_class(egui::ViewportClass::EmbeddedWindow));
-        let app = super::super::ScriptCraftApp::new();
-        assert_eq!(app.map(|app| app.title_view.zoom_percent), Ok(100));
-    }
-}

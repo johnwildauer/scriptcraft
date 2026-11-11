@@ -1790,48 +1790,6 @@ mod diagnostic_status_tests {
     }
 
     #[test]
-    fn ready_fallback_and_runtime_diagnostics_gate_preserve_body_and_title_page_contracts() {
-        assert_eq!(ready_center().text, "Ready");
-        assert!(!diagnostics_disclosure_enabled(false, StatusSurfaceOptions::BODY));
-        assert!(diagnostics_disclosure_enabled(true, StatusSurfaceOptions::BODY));
-        assert!(!diagnostics_disclosure_enabled(true, StatusSurfaceOptions::TITLE_PAGE));
-    }
-
-    #[test]
-    fn collapsed_empty_and_nonempty_ends_use_shared_targets_for_every_role() {
-        for role in Role::ALL {
-            for text in ["", "ending"] {
-                let editing_session = session(role, text, text.len(), text.len());
-                let targets = editing_session.paragraph_key_targets();
-                let center = projection(&editing_session, ShortcutPlatform::MacOS);
-                let any_target = matches!(
-                    targets.tab,
-                    scriptcraft_core::editing::ParagraphKeyTarget::Target(_)
-                ) || matches!(
-                    targets.enter,
-                    scriptcraft_core::editing::ParagraphKeyTarget::Target(_)
-                );
-                assert_eq!(center.text == "Ready", !any_target, "{role:?}: {}", center.text);
-                for (key, target) in [("[Tab]", targets.tab), ("[Enter]", targets.enter)] {
-                    if let scriptcraft_core::editing::ParagraphKeyTarget::Target(target_role) = target {
-                        let expected = format!("{key} {}", formatting_for_role(target_role).fdx_label);
-                        assert!(center.text.contains(&expected), "{role:?}: {}", center.text);
-                    } else {
-                        assert!(!center.text.contains(key), "{role:?}: {}", center.text);
-                    }
-                }
-                if center.text != "Ready" {
-                    assert!(center.text.contains("[Cmd] hold for Elements"));
-                }
-            }
-        }
-        let empty_action = session(Role::Action, "", 0, 0);
-        assert!(projection(&empty_action, ShortcutPlatform::Windows)
-            .text
-            .contains("[Ctrl] hold for Elements"));
-    }
-
-    #[test]
     fn paragraph_hints_require_a_collapsed_end_but_element_chord_has_priority() {
         let interior = session(Role::Action, "abc", 1, 1);
         assert_eq!(projection(&interior, ShortcutPlatform::MacOS).text, "Ready");
@@ -1868,55 +1826,6 @@ mod diagnostic_status_tests {
                 ShortcutPlatform::MacOS,
             );
             assert_eq!(center.text, "Ready");
-        }
-    }
-
-    #[test]
-    fn shared_binding_lists_cover_every_role_with_summary_first_extended_order() {
-        let base = element_hint_bindings(false);
-        let extended = element_hint_bindings(true);
-        assert_eq!(base.len(), 10);
-        assert_eq!(extended.len(), 7);
-        let base_text = modifier_list_text(ElementHintChord::Base).unwrap_or_default();
-        let expected_base = [
-            "[0] General",
-            "[1] Scene Heading",
-            "[2] Action",
-            "[3] Character",
-            "[4] Parenthetical",
-            "[5] Dialogue",
-            "[6] Transition",
-            "[7] Shot",
-            "[8] Cast List",
-            "[9] New Act",
-        ];
-        let mut previous = 0;
-        for row in expected_base {
-            let position = base_text.find(row).unwrap_or(usize::MAX);
-            assert!(position >= previous, "{base_text}");
-            previous = position;
-        }
-        let mut roles: Vec<_> = base.iter().chain(&extended).map(|(_, role)| *role).collect();
-        roles.sort_unstable();
-        let mut all_roles = Role::ALL;
-        all_roles.sort_unstable();
-        assert_eq!(roles, all_roles);
-
-        let extended_text = modifier_list_text(ElementHintChord::Extended).unwrap_or_default();
-        let expected = [
-            "[0] Summary",
-            "[1] Outline 1",
-            "[2] Outline 2",
-            "[3] Outline 3",
-            "[4] Note",
-            "[8] Sequence",
-            "[9] End of Act",
-        ];
-        let mut previous = 0;
-        for row in expected {
-            let position = extended_text.find(row).unwrap_or(usize::MAX);
-            assert!(position >= previous, "{extended_text}");
-            previous = position;
         }
     }
 

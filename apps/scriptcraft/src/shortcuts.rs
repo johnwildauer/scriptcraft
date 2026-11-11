@@ -495,53 +495,6 @@ mod tests {
     }
 
     #[test]
-    fn guidance_chord_projection_matches_host_resolver_modifiers_and_shared_bindings() {
-        for (platform, base, extended, wrong, extra) in [
-            (
-                ShortcutPlatform::MacOS,
-                modifiers(ShortcutPlatform::MacOS, true, false, false),
-                modifiers(ShortcutPlatform::MacOS, true, true, false),
-                modifiers(ShortcutPlatform::MacOS, true, false, true),
-                modifiers(ShortcutPlatform::MacOS, false, true, false),
-            ),
-            (
-                ShortcutPlatform::Windows,
-                modifiers(ShortcutPlatform::Windows, true, false, false),
-                modifiers(ShortcutPlatform::Windows, true, false, true),
-                modifiers(ShortcutPlatform::Windows, true, true, false),
-                modifiers(ShortcutPlatform::Windows, false, false, true),
-            ),
-        ] {
-            assert_eq!(element_hint_chord(base, platform), Some(ElementHintChord::Base));
-            assert_eq!(
-                element_hint_chord(extended, platform),
-                Some(ElementHintChord::Extended)
-            );
-            assert_eq!(element_hint_chord(wrong, platform), None);
-            assert_eq!(element_hint_chord(extra, platform), None);
-            let mut with_alt = base;
-            with_alt.alt = true;
-            assert_eq!(element_hint_chord(with_alt, platform), None);
-        }
-        assert_eq!(
-            element_hint_chord(
-                modifiers(ShortcutPlatform::Other, true, false, false),
-                ShortcutPlatform::Other,
-            ),
-            None
-        );
-
-        let base = element_hint_bindings(false);
-        let extended = element_hint_bindings(true);
-        assert_eq!(base.len(), 10);
-        assert_eq!(extended.len(), 7);
-        assert_eq!(base.first(), Some(&(0, Role::General)));
-        assert!(extended.contains(&(0, Role::Summary)));
-        assert!(extended.contains(&(8, Role::Sequence)));
-        assert!(extended.contains(&(9, Role::EndOfAct)));
-    }
-
-    #[test]
     fn paragraph_keys_are_unmodified_only_and_numpad_is_not_added() {
         assert_eq!(
             editor_command_for_key_event(

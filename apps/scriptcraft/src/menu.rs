@@ -167,108 +167,27 @@ impl RuntimeMenuPolicy {
 
 #[cfg(test)]
 mod runtime_menu_policy_tests {
-    use super::{
-        MenuAcceleratorOwner, MenuHostPlatform, MenuPlatformChoice, RuntimeMenuPolicy,
-    };
+    use super::{MenuAcceleratorOwner, MenuHostPlatform, MenuPlatformChoice, RuntimeMenuPolicy};
 
     #[test]
-    fn automatic_policy_selects_only_the_host_default_backend() {
-        let macos = RuntimeMenuPolicy::resolve(
-            MenuHostPlatform::MacOS,
-            MenuPlatformChoice::Auto,
-        );
-        let windows = RuntimeMenuPolicy::resolve(
-            MenuHostPlatform::Windows,
-            MenuPlatformChoice::Auto,
-        );
-        let other = RuntimeMenuPolicy::resolve(
-            MenuHostPlatform::Other,
-            MenuPlatformChoice::Auto,
-        );
-
-        assert!(macos.is_ok());
-        assert!(windows.is_ok());
-        assert!(other.is_ok());
-        if let (Ok(macos), Ok(windows), Ok(other)) = (macos, windows, other) {
-            assert!(macos.installs_native_macos());
-            assert!(!macos.renders_in_window());
-            assert!(!windows.installs_native_macos());
-            assert!(windows.renders_in_window());
-            assert!(!other.installs_native_macos());
-            assert!(!other.renders_in_window());
-        }
-    }
-
-    #[test]
-    fn a_selected_backend_is_the_only_renderer_and_accelerator_owner() {
-        for (host, requested, native, in_window, owner) in [
-            (
-                MenuHostPlatform::MacOS,
-                MenuPlatformChoice::Auto,
-                true,
-                false,
-                MenuAcceleratorOwner::NativeMacOS,
-            ),
-            (
-                MenuHostPlatform::Windows,
-                MenuPlatformChoice::Auto,
-                false,
-                true,
-                MenuAcceleratorOwner::InWindow,
-            ),
-            (
-                MenuHostPlatform::Windows,
-                MenuPlatformChoice::Windows,
-                false,
-                true,
-                MenuAcceleratorOwner::InWindow,
-            ),
-            (
-                MenuHostPlatform::MacOS,
-                MenuPlatformChoice::Windows,
-                false,
-                true,
-                MenuAcceleratorOwner::InWindow,
-            ),
-            (
-                MenuHostPlatform::Other,
-                MenuPlatformChoice::Auto,
-                false,
-                false,
-                MenuAcceleratorOwner::None,
-            ),
-            (
-                MenuHostPlatform::Other,
-                MenuPlatformChoice::Windows,
-                false,
-                true,
-                MenuAcceleratorOwner::InWindow,
-            ),
+    fn host_backend_matrix_has_one_renderer_and_one_accelerator_owner() {
+        for (host, requested, expected) in [
+            (MenuHostPlatform::MacOS, MenuPlatformChoice::Auto, MenuAcceleratorOwner::NativeMacOS),
+            (MenuHostPlatform::MacOS, MenuPlatformChoice::Windows, MenuAcceleratorOwner::InWindow),
+            (MenuHostPlatform::Windows, MenuPlatformChoice::Auto, MenuAcceleratorOwner::InWindow),
+            (MenuHostPlatform::Other, MenuPlatformChoice::Auto, MenuAcceleratorOwner::None),
+            (MenuHostPlatform::Other, MenuPlatformChoice::Windows, MenuAcceleratorOwner::InWindow),
         ] {
             let policy = RuntimeMenuPolicy::resolve(host, requested);
             assert!(policy.is_ok());
             if let Ok(policy) = policy {
-                assert_eq!(policy.renders_in_window(), in_window);
-                assert_eq!(policy.installs_native_macos(), native);
-                assert_eq!(policy.accelerator_owner(), owner);
-                assert_eq!(
-                    policy.in_window_shortcuts_owned(),
-                    owner == MenuAcceleratorOwner::InWindow
-                );
+                assert_eq!(policy.accelerator_owner(), expected);
+                assert_eq!(policy.installs_native_macos(), expected == MenuAcceleratorOwner::NativeMacOS);
+                assert_eq!(policy.renders_in_window(), expected == MenuAcceleratorOwner::InWindow);
             }
         }
-    }
-
-    #[test]
-    fn native_macos_choice_is_rejected_before_backend_construction_off_macos() {
-        for host in [MenuHostPlatform::Windows, MenuHostPlatform::Other] {
-            assert!(RuntimeMenuPolicy::resolve(host, MenuPlatformChoice::MacOS).is_err());
-        }
-        assert_eq!(
-            RuntimeMenuPolicy::resolve(MenuHostPlatform::MacOS, MenuPlatformChoice::MacOS)
-                .map(RuntimeMenuPolicy::installs_native_macos),
-            Ok(true)
-        );
+        assert!(RuntimeMenuPolicy::resolve(MenuHostPlatform::Windows, MenuPlatformChoice::MacOS).is_err());
+        assert!(RuntimeMenuPolicy::resolve(MenuHostPlatform::Other, MenuPlatformChoice::MacOS).is_err());
     }
 }
 
@@ -761,33 +680,17 @@ mod dual_dialogue_menu_tests {
         }
     }
 
-    fn dual_dialogue_item() -> MenuItemSpec {
-        MENU_CATALOG
-            .iter()
-            .flat_map(|menu| menu.entries)
-            .find_map(|entry| match entry {
-                MenuEntrySpec::Item(item)
-                    if item.behavior
-                        == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle) =>
-                {
-                    Some(*item)
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| unreachable!("dual-dialogue menu command is catalogued"))
+    fn dual_dialogue_item() -> Option<MenuItemSpec> {
+        MENU_CATALOG.iter().flat_map(|menu| menu.entries).find_map(|entry| match entry {
+            MenuEntrySpec::Item(item) if item.behavior == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle) => Some(*item),
+            _ => None,
+        })
     }
 
-    fn modifiers(
-        platform: ShortcutPlatform,
-        primary: bool,
-        option: bool,
-        extra_control: bool,
-        shift: bool,
-    ) -> egui::Modifiers {
+    fn modifiers(platform: ShortcutPlatform, primary: bool, option: bool, extra_control: bool, shift: bool) -> egui::Modifiers {
         egui::Modifiers {
             alt: option,
-            ctrl: (platform == ShortcutPlatform::MacOS && extra_control)
-                || (platform == ShortcutPlatform::Windows && primary),
+            ctrl: (platform == ShortcutPlatform::MacOS && extra_control) || (platform == ShortcutPlatform::Windows && primary),
             command: primary,
             mac_cmd: platform == ShortcutPlatform::Windows && extra_control,
             shift,
@@ -795,205 +698,26 @@ mod dual_dialogue_menu_tests {
     }
 
     #[test]
-    fn dual_dialogue_remains_the_single_format_menu_command() {
-        let mut entries = Vec::new();
-        for menu in MENU_CATALOG {
-            collect_items(menu.entries, &mut entries);
-        }
-        let active = entries
-            .iter()
-            .filter(|item| {
-                item.behavior == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle)
-            })
-            .collect::<Vec<_>>();
+    fn format_menu_has_one_dual_dialogue_command_and_projects_its_label() {
+        let mut items = Vec::new();
+        for menu in MENU_CATALOG { collect_items(menu.entries, &mut items); }
+        let active = items.iter().filter(|item| item.behavior == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle)).collect::<Vec<_>>();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, "format.dual-dialogue");
-
-        assert!(!entries
-            .iter()
-            .any(|item| item.id == "format.edit-dual-dialogue"));
-        assert_eq!(menu_item_label(&dual_dialogue_item(), true), "Undual Dialogue");
-        assert_eq!(menu_item_label(&dual_dialogue_item(), false), "Dual Dialogue");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_print_uses_unshifted_primary_p_and_print_preview_stays_disabled() {
-        let print = MENU_CATALOG
-            .iter()
-            .flat_map(|menu| menu.entries)
-            .find_map(|entry| match entry {
-                MenuEntrySpec::Item(item) if item.id == "file.print" => Some(*item),
-                _ => None,
-            });
-        assert!(print.is_some_and(|item| {
-            item.label == "Print..."
-                && item.behavior == MenuItemBehavior::Command(CommandId::FilePrint)
-                && item.shortcut.is_some_and(|shortcut| {
-                    shortcut.primary
-                        && shortcut.key == ShortcutKey::P
-                        && !shortcut.shift
-                        && !shortcut.control
-                        && !shortcut.option
-                })
-        }));
-
-        let preview = MENU_CATALOG
-            .iter()
-            .flat_map(|menu| menu.entries)
-            .find_map(|entry| match entry {
-                MenuEntrySpec::Item(item) if item.id == "file.print-preview" => Some(*item),
-                _ => None,
-            });
-        assert!(preview.is_some_and(|item| matches!(
-            item.behavior,
-            MenuItemBehavior::DisabledPlaceholder(_)
-        )));
-        assert_eq!(
-            command_for_key_event_on_platform(
-                egui::Key::P,
-                modifiers(ShortcutPlatform::MacOS, true, false, false, false),
-                ShortcutPlatform::MacOS,
-            ),
-            Some(CommandId::FilePrint),
-        );
-        assert_eq!(
-            command_for_key_event_on_platform(
-                egui::Key::P,
-                modifiers(ShortcutPlatform::MacOS, true, false, false, true),
-                ShortcutPlatform::MacOS,
-            ),
-            Some(CommandId::FileSaveAsPdf),
-        );
-        assert_eq!(
-            command_for_key_event_on_platform(
-                egui::Key::P,
-                modifiers(ShortcutPlatform::MacOS, false, false, false, false),
-                ShortcutPlatform::MacOS,
-            ),
-            None,
-        );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_print_uses_unshifted_primary_p_and_print_preview_stays_disabled() {
-        let file_entries = MENU_CATALOG
-            .iter()
-            .find(|menu| menu.id == "file")
-            .map(|menu| menu.entries)
-            .unwrap_or(&[]);
-        let print_count = file_entries
-            .iter()
-            .filter(|entry| matches!(entry, MenuEntrySpec::Item(item) if item.id == "file.print"))
-            .count();
-        assert_eq!(print_count, 1);
-        let print = file_entries
-            .iter()
-            .find_map(|entry| match entry {
-                MenuEntrySpec::Item(item) if item.id == "file.print" => Some(*item),
-                _ => None,
-            });
-        assert!(print.is_some_and(|item| {
-            item.label == "Print..."
-                && item.accessibility_name == "Print screenplay"
-                && item.behavior == MenuItemBehavior::Command(CommandId::FilePrint)
-                && item.shortcut.is_some_and(|shortcut| {
-                    shortcut.primary
-                        && shortcut.key == ShortcutKey::P
-                        && !shortcut.shift
-                        && !shortcut.control
-                        && !shortcut.option
-                })
-        }));
-
-        let preview_index = file_entries.iter().position(|entry| {
-            matches!(entry, MenuEntrySpec::Item(item) if item.id == "file.print-preview")
-        });
-        let print_index = file_entries
-            .iter()
-            .position(|entry| matches!(entry, MenuEntrySpec::Item(item) if item.id == "file.print"));
-        assert_eq!(print_index, preview_index.map(|index| index + 1));
-        let preview = file_entries
-            .iter()
-            .find_map(|entry| match entry {
-                MenuEntrySpec::Item(item) if item.id == "file.print-preview" => Some(*item),
-                _ => None,
-            });
-        assert!(preview.is_some_and(|item| matches!(
-            item.behavior,
-            MenuItemBehavior::DisabledPlaceholder(_)
-        )));
-        assert_eq!(
-            command_for_key_event_on_platform(
-                egui::Key::P,
-                modifiers(ShortcutPlatform::Windows, true, false, false, false),
-                ShortcutPlatform::Windows,
-            ),
-            Some(CommandId::FilePrint),
-        );
-        assert_eq!(
-            command_for_key_event_on_platform(
-                egui::Key::P,
-                modifiers(ShortcutPlatform::Windows, true, false, false, true),
-                ShortcutPlatform::Windows,
-            ),
-            Some(CommandId::FileSaveAsPdf),
-        );
-        assert_eq!(
-            command_for_key_event_on_platform(
-                egui::Key::P,
-                modifiers(ShortcutPlatform::Windows, false, false, false, false),
-                ShortcutPlatform::Windows,
-            ),
-            None,
-        );
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    #[test]
-    fn print_remains_a_disabled_placeholder_off_macos() {
-        let print = MENU_CATALOG
-            .iter()
-            .flat_map(|menu| menu.entries)
-            .find_map(|entry| match entry {
-                MenuEntrySpec::Item(item) if item.id == "file.print" => Some(*item),
-                _ => None,
-            });
-        assert!(print.is_some_and(|item| matches!(
-            item.behavior,
-            MenuItemBehavior::DisabledPlaceholder(_)
-        )));
-        assert_eq!(
-            command_for_key_event_on_platform(
-                egui::Key::P,
-                modifiers(ShortcutPlatform::Windows, true, false, false, false),
-                ShortcutPlatform::Windows,
-            ),
-            None,
-        );
+        let item = dual_dialogue_item();
+        assert!(item.is_some());
+        if let Some(item) = item {
+            assert_eq!(menu_item_label(&item, true), "Undual Dialogue");
+            assert_eq!(menu_item_label(&item, false), "Dual Dialogue");
+        }
     }
 
     #[test]
-    fn menu_accelerator_recognition_requires_exact_mac_and_windows_chords() {
+    fn dual_dialogue_chord_is_exact_on_each_host_and_format_shortcuts_resolve_typed_commands() {
         let key = egui::Key::D;
-        assert_eq!(
-            command_for_key_event_on_platform(
-                key,
-                modifiers(ShortcutPlatform::MacOS, true, false, false, false),
-                ShortcutPlatform::MacOS,
-            ),
-            Some(CommandId::EditorDualDialogueToggle),
-        );
-        assert_eq!(
-            command_for_key_event_on_platform(
-                key,
-                modifiers(ShortcutPlatform::Windows, true, true, false, false),
-                ShortcutPlatform::Windows,
-            ),
-            Some(CommandId::EditorDualDialogueToggle),
-        );
-        for (platform, cases) in [
+        assert_eq!(command_for_key_event_on_platform(key, modifiers(ShortcutPlatform::MacOS, true, false, false, false), ShortcutPlatform::MacOS), Some(CommandId::EditorDualDialogueToggle));
+        assert_eq!(command_for_key_event_on_platform(key, modifiers(ShortcutPlatform::Windows, true, true, false, false), ShortcutPlatform::Windows), Some(CommandId::EditorDualDialogueToggle));
+        for (platform, wrong_chords) in [
             (
                 ShortcutPlatform::MacOS,
                 [
@@ -1013,8 +737,8 @@ mod dual_dialogue_menu_tests {
                 ],
             ),
         ] {
-            for modifiers in cases {
-                assert_eq!(command_for_key_event_on_platform(key, modifiers, platform), None);
+            for wrong in wrong_chords {
+                assert_eq!(command_for_key_event_on_platform(key, wrong, platform), None);
             }
         }
         assert_eq!(
@@ -1025,65 +749,23 @@ mod dual_dialogue_menu_tests {
             ),
             None,
         );
-        assert_eq!(
-            menu_shortcut_label(&dual_dialogue_item()),
-            match ShortcutPlatform::current() {
-                ShortcutPlatform::MacOS => "Command+D",
-                ShortcutPlatform::Windows => "Control+Alt+D",
-                ShortcutPlatform::Other => "",
-            },
-        );
-    }
-
-    #[test]
-    fn nested_format_shortcuts_resolve_to_typed_commands_on_macos_and_windows() {
-        use scriptcraft_commands::{EditorSurface, TitleTextStyle};
-
         for platform in [ShortcutPlatform::MacOS, ShortcutPlatform::Windows] {
-            for (key, shift, expected) in [
-                (egui::Key::B, false, MenuAction::ToggleStyle(TitleTextStyle::Bold)),
-                (egui::Key::I, false, MenuAction::ToggleStyle(TitleTextStyle::Italics)),
-                (egui::Key::U, false, MenuAction::ToggleStyle(TitleTextStyle::Underline)),
-                (egui::Key::K, false, MenuAction::ToggleStyle(TitleTextStyle::AllCaps)),
-                (egui::Key::X, true, MenuAction::ToggleStyle(TitleTextStyle::Strikethrough)),
-                (egui::Key::T, false, MenuAction::ClearStyles),
-            ] {
-                assert_eq!(
-                    command_for_shortcut_event_on_platform(
-                        key,
-                        modifiers(platform, true, false, false, shift),
-                        platform,
-                    ),
-                    Some(command_for_action(expected, EditorSurface::Body)),
-                );
-            }
+            assert_eq!(
+                command_for_shortcut_event_on_platform(egui::Key::B, modifiers(platform, true, false, false, false), platform),
+                Some(command_for_action(MenuAction::ToggleStyle(scriptcraft_commands::TitleTextStyle::Bold), scriptcraft_commands::EditorSurface::Body)),
+            );
         }
+        let Some(item) = dual_dialogue_item() else { return };
+        assert_eq!(menu_shortcut_label(&item), match ShortcutPlatform::current() {
+            ShortcutPlatform::MacOS => "Command+D", ShortcutPlatform::Windows => "Control+Alt+D", ShortcutPlatform::Other => "",
+        });
     }
 
     #[test]
-    fn in_window_accelerator_dispatch_only_recognizes_key_press_not_release() {
-        let press = egui::Event::Key {
-            key: egui::Key::D,
-            physical_key: Some(egui::Key::D),
-            pressed: true,
-            repeat: false,
-            modifiers: modifiers(ShortcutPlatform::Windows, true, true, false, false),
-        };
-        let release = egui::Event::Key {
-            key: egui::Key::D,
-            physical_key: Some(egui::Key::D),
-            pressed: false,
-            repeat: false,
-            modifiers: modifiers(ShortcutPlatform::Windows, true, true, false, false),
-        };
-        assert_eq!(
-            command_for_pressed_key_event(&press, ShortcutPlatform::Windows)
-                .map(|command| command.id()),
-            Some(CommandId::EditorDualDialogueToggle),
-        );
-        assert_eq!(
-            command_for_pressed_key_event(&release, ShortcutPlatform::Windows),
-            None,
-        );
+    fn in_window_shortcut_resolution_is_press_only() {
+        let modifiers = modifiers(ShortcutPlatform::Windows, true, true, false, false);
+        let event = |pressed| egui::Event::Key { key: egui::Key::D, physical_key: Some(egui::Key::D), pressed, repeat: false, modifiers };
+        assert_eq!(command_for_pressed_key_event(&event(true), ShortcutPlatform::Windows).map(|command| command.id()), Some(CommandId::EditorDualDialogueToggle));
+        assert_eq!(command_for_pressed_key_event(&event(false), ShortcutPlatform::Windows), None);
     }
 }

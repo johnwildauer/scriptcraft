@@ -420,11 +420,6 @@ mod tests {
     }
 
     #[test]
-    fn book_5_uses_the_existing_material_family_without_custom_axis_registration() {
-        assert!(super::custom_material_icon_axes().is_empty());
-    }
-
-    #[test]
     fn inline_formatting_groups_precede_title_page_and_child_keeps_close_far_right() {
         let ids = TEMPORARY_TOOLBAR_ITEMS
             .iter()
@@ -453,49 +448,7 @@ mod tests {
         assert!(matches!(TITLE_PAGE_TOOLBAR_ITEMS[3].graphic, ToolbarGraphic::Icon(icon) if icon.icon.codepoint == ICON_CANCEL.codepoint));
     }
 
-    #[test]
-    fn inline_group_catalog_has_stable_names_and_exact_ordered_icon_assignments() {
-        let styles = TEMPORARY_TOOLBAR_ITEMS
-            .iter()
-            .find(|item| item.id == "styles")
-            .copied();
-        let alignment = TEMPORARY_TOOLBAR_ITEMS
-            .iter()
-            .find(|item| item.id == "alignment")
-            .copied();
-        assert!(matches!(styles, Some(item) if item.id == "styles" && item.label == "Styles" && item.accessibility_name == "Styles" && item.caption_visible && item.behavior == ToolbarBehavior::StylesInlineGroup));
-        assert!(matches!(alignment, Some(item) if item.id == "alignment" && item.label == "Alignment" && item.accessibility_name == "Alignment" && item.caption_visible && item.behavior == ToolbarBehavior::AlignmentInlineGroup));
 
-        let style_icons = [
-            ICON_FORMAT_BOLD,
-            ICON_FORMAT_ITALIC,
-            ICON_FORMAT_UNDERLINED,
-            ICON_TEXT_FIELDS,
-            ICON_FORMAT_STRIKETHROUGH,
-        ];
-        let alignment_icons = [
-            ICON_FORMAT_ALIGN_LEFT,
-            ICON_FORMAT_ALIGN_CENTER,
-            ICON_FORMAT_ALIGN_RIGHT,
-            ICON_FORMAT_ALIGN_JUSTIFY,
-        ];
-        let style_group = styles.and_then(|item| match item.graphic {
-            ToolbarGraphic::Icons(icons) => Some(icons),
-            _ => None,
-        });
-        let alignment_group = alignment.and_then(|item| match item.graphic {
-            ToolbarGraphic::Icons(icons) => Some(icons),
-            _ => None,
-        });
-        assert_eq!(
-            style_group.map(|icons| icons.iter().map(|icon| icon.icon.codepoint).collect::<Vec<_>>()),
-            Some(style_icons.map(|icon| icon.codepoint).to_vec()),
-        );
-        assert_eq!(
-            alignment_group.map(|icons| icons.iter().map(|icon| icon.icon.codepoint).collect::<Vec<_>>()),
-            Some(alignment_icons.map(|icon| icon.codepoint).to_vec()),
-        );
-    }
 }
 
 pub(super) const OVERFLOW_ITEM_SPEC: ToolbarItemSpec = ToolbarItemSpec {

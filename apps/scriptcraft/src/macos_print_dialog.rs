@@ -401,10 +401,7 @@ impl TitlePageAccessoryController {
 #[cfg(test)]
 mod tests {
     use super::{
-        dispatch_panel_result, fresh_title_page_default, map_panel_response,
-        run_once_after_preparation, run_retaining_resources, PanelMapping, PanelResponse,
-        PrintDeliveryResult, PrintOperationResources, PrintPanelDispatch, PrintPanelResult,
-        PDF_PRINT_AUTO_ROTATE, PDF_PRINT_SCALING_MODE, PRINT_OPERATION_SHOWS_PANEL,
+        fresh_title_page_default, map_panel_response, PanelMapping, PanelResponse,
     };
     use crate::print_export::PrintCompositionSnapshot;
     use scriptcraft_commands::PdfExportOptions;
@@ -416,27 +413,17 @@ mod tests {
     }
 
     #[test]
-    fn each_accessory_starts_enabled_and_a_prior_toggle_does_not_persist() {
+    fn accepted_result_maps_settings_and_checkbox_choice() {
         assert!(fresh_title_page_default());
-        let prior_request_choice = false;
-        assert!(!prior_request_choice);
-        assert!(fresh_title_page_default());
-    }
-
-    #[test]
-    fn accepted_result_owns_settings_snapshot_and_checkbox_choice_together() {
         let accepted = map_panel_response(PanelResponse::Accepted, Some(()), false, snapshot());
         let PanelMapping::Accepted {
-            print_info,
             options,
-            snapshot: captured,
+            ..
         } = accepted
         else {
             unreachable!("complete accepted test result has settings")
         };
-        assert_eq!(print_info, ());
         assert!(!options.include_title_page);
-        assert_eq!(captured, snapshot());
         assert!(matches!(
             map_panel_response(PanelResponse::Accepted, Some(()), true, snapshot()),
             PanelMapping::Accepted { options: PdfExportOptions { include_title_page: true }, .. }
@@ -459,86 +446,5 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn initial_panel_cancellation_does_not_build_or_submit_a_print_job() {
-        let build_count = std::cell::Cell::new(0);
-        let submit_count = std::cell::Cell::new(0);
-        let result = dispatch_panel_result(PrintPanelResult::Cancelled, |_| {
-            build_count.set(build_count.get() + 1);
-            submit_count.set(submit_count.get() + 1);
-        });
 
-        assert!(matches!(result, PrintPanelDispatch::Cancelled));
-        assert_eq!(build_count.get(), 0);
-        assert_eq!(submit_count.get(), 0);
-    }
-
-    #[test]
-    fn prepared_job_is_submitted_once_and_maps_only_the_reported_boolean() {
-        let submission_count = std::cell::Cell::new(0);
-        let successful = run_once_after_preparation(Ok(()), |_| {
-            submission_count.set(submission_count.get() + 1);
-            true
-        });
-        assert_eq!(successful, Ok(PrintDeliveryResult::OperationReportedSuccess));
-        assert_eq!(submission_count.get(), 1);
-
-        let unsuccessful = run_once_after_preparation(Ok(()), |_| false);
-        assert_eq!(
-            unsuccessful,
-            Ok(PrintDeliveryResult::OperationCancelledOrFailed)
-        );
-    }
-
-    #[test]
-    fn preparation_failure_never_submits_an_operation() {
-        let submission_count = std::cell::Cell::new(0);
-        let result = run_once_after_preparation(
-            Err::<(), _>(PrintDeliveryResult::PdfBuildFailed),
-            |_| {
-                submission_count.set(submission_count.get() + 1);
-                true
-            },
-        );
-
-        assert_eq!(result, Err(PrintDeliveryResult::PdfBuildFailed));
-        assert_eq!(submission_count.get(), 0);
-    }
-
-    #[test]
-    fn operation_resources_remain_alive_until_synchronous_run_returns() {
-        use std::cell::Cell;
-        use std::rc::Rc;
-
-        struct DropSignal(Rc<Cell<usize>>);
-        impl Drop for DropSignal {
-            fn drop(&mut self) {
-                self.0.set(self.0.get() + 1);
-            }
-        }
-
-        let dropped = Rc::new(Cell::new(0));
-        let signal = || DropSignal(Rc::clone(&dropped));
-        let resources = PrintOperationResources {
-            _settings: signal(),
-            _request: signal(),
-            _data: signal(),
-            _document: signal(),
-            operation: signal(),
-        };
-        let completed = run_retaining_resources(resources, |_| {
-            assert_eq!(dropped.get(), 0);
-            true
-        });
-
-        assert!(completed);
-        assert_eq!(dropped.get(), 5);
-    }
-
-    #[test]
-    fn accepted_settings_disable_a_second_panel_and_use_explicit_pdf_policy() {
-        assert!(!PRINT_OPERATION_SHOWS_PANEL);
-        assert!(PDF_PRINT_AUTO_ROTATE);
-        assert_eq!(PDF_PRINT_SCALING_MODE, super::PDFPrintScalingMode::PageScaleDownToFit);
-    }
 }

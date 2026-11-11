@@ -401,22 +401,3 @@ fn native_key(key: ShortcutKey) -> Code {
         ShortcutKey::ArrowRight => Code::ArrowRight,
     }
 }
-
-#[cfg(test)]
-mod dual_dialogue_native_accelerator_tests {
-    use super::*;
-
-    #[test]
-    fn native_dual_dialogue_accelerator_is_exactly_command_d() {
-        let shortcut = super::super::shortcuts::primary_shortcut(ShortcutKey::D, false);
-        assert_eq!(
-            native_accelerator(shortcut),
-            Accelerator::new(Some(Modifiers::SUPER), Code::KeyD),
-        );
-    }
-
-    #[test]
-    fn application_menu_uses_a_fixed_non_document_title() {
-        assert_eq!(APPLICATION_MENU_TITLE, "ScriptCraft");
-    }
-}

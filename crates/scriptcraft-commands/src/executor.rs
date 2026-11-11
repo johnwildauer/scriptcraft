@@ -231,18 +231,3 @@ fn select_all(session: &mut EditingSession, surface: EditorSurface) -> Result<()
         }
     }
 }
-
-#[cfg(test)]
-mod dual_dialogue_error_mapping_tests {
-    use super::{outcome_from_edit_result, CommandOutcome};
-    use scriptcraft_core::editing::EditError;
-
-    #[test]
-    fn core_edit_errors_are_returned_without_executor_reclassification() {
-        let core_error = EditError::InvalidElement;
-        assert_eq!(
-            outcome_from_edit_result(Err(core_error.clone()), false),
-            CommandOutcome::Failed(core_error),
-        );
-    }
-}

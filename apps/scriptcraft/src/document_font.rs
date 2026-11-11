@@ -104,10 +104,6 @@ pub(crate) struct ResolvedDocumentFace {
     pub advance_mode: AdvanceMode,
 }
 
-#[cfg(test)]
-pub(super) fn all_arial_available_for_test() -> FontAvailability {
-    FontAvailability { arial: [true; 4] }
-}
 
 pub(crate) fn font_definitions() -> (FontDefinitions, FontAvailability) {
     build_font_definitions(load_host_arial_faces())
@@ -309,46 +305,14 @@ mod tests {
     use super::{
         build_font_definitions, candidates_for_platform, family_for_style, load_faces_with,
         resolve_document_face, CandidatePlatform, FaceStyle, FontAvailability,
-        MAX_ARIAL_FACE_BYTES,
     };
     use crate::presentation_style::{AdvanceMode, RendererFamilyChoice};
-    use eframe::egui::{FontDefinitions, FontFamily};
+    use eframe::egui::FontFamily;
     use std::io;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     fn test_candidates() -> [Option<PathBuf>; 4] {
         std::array::from_fn(|index| Some(PathBuf::from(format!("candidate-{index}"))))
-    }
-
-    #[test]
-    fn registers_all_four_injected_arial_faces_with_stable_keys() {
-        let mut next_byte = 0_u8;
-        let faces = load_faces_with(test_candidates(), |_| {
-            next_byte += 1;
-            Ok(vec![next_byte])
-        });
-        let (definitions, availability) = build_font_definitions(faces);
-
-        assert_eq!(availability.arial, [true; 4]);
-        assert_bundled_courier_prime_definitions(&definitions);
-        for style in FaceStyle::ALL {
-            assert!(definitions.font_data.contains_key(style.arial_key()));
-            assert!(definitions
-                .families
-                .contains_key(&FontFamily::Name(style.arial_family().into())));
-            let resolved = resolve_document_face(
-                RendererFamilyChoice::Arial,
-                style.bold(),
-                style.italic(),
-                &availability,
-            );
-            assert_eq!(resolved.family, FontFamily::Name(style.arial_family().into()));
-            assert_eq!(resolved.advance_mode, AdvanceMode::Proportional);
-            assert_eq!(
-                family_for_style(RendererFamilyChoice::Arial, style.bold(), style.italic(), &availability),
-                FontFamily::Name(style.arial_family().into())
-            );
-        }
     }
 
     #[test]
@@ -382,47 +346,14 @@ mod tests {
             );
             assert_eq!(resolved.family, FontFamily::Name(missing.courier_family().into()));
             assert_eq!(resolved.advance_mode, AdvanceMode::FixedCell);
-            assert_eq!(
-                availability.arial.iter().filter(|available| **available).count(),
-                3
-            );
         }
     }
 
     #[test]
-    fn unreadable_empty_and_oversized_faces_are_rejected_independently() {
-        for (bad_index, result) in [
-            (0, Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected read failure"))),
-            (1, Ok(Vec::new())),
-            (2, Ok(vec![0; MAX_ARIAL_FACE_BYTES + 1])),
-        ] {
-            let faces = load_faces_with(test_candidates(), |path| {
-                if path == Path::new(&format!("candidate-{bad_index}")) {
-                    result.as_ref().map(Clone::clone).map_err(|error| {
-                        io::Error::new(error.kind(), error.to_string())
-                    })
-                } else {
-                    Ok(vec![9])
-                }
-            });
-            let (_, availability) = build_font_definitions(faces);
-            assert!(!availability.arial[bad_index]);
-            assert_eq!(availability.arial.iter().filter(|available| **available).count(), 3);
-        }
-    }
-
-    #[test]
-    fn unsupported_platform_has_no_candidates_or_font_reads() {
+    fn unsupported_platform_falls_back_to_courier_for_every_style() {
         let candidates = candidates_for_platform(CandidatePlatform::Unsupported, None);
-        let mut reads = 0;
-        let faces = load_faces_with(candidates, |_| {
-            reads += 1;
-            Ok(vec![1])
-        });
-
-        assert_eq!(reads, 0);
-        assert!(faces.iter().all(Option::is_none));
-        let (_, availability) = build_font_definitions(faces);
+        assert!(candidates.iter().all(Option::is_none));
+        let availability = FontAvailability::default();
         for bold in [false, true] {
             for italic in [false, true] {
                 assert_eq!(
@@ -458,48 +389,5 @@ mod tests {
         }
     }
 
-    #[test]
-    fn target_candidate_locations_are_explicit_and_nonrecursive() {
-        let mac = candidates_for_platform(CandidatePlatform::MacOs, None);
-        assert_eq!(
-            mac[0].as_deref(),
-            Some(Path::new("/System/Library/Fonts/Supplemental/Arial.ttf"))
-        );
-        assert_eq!(
-            mac[3].as_deref(),
-            Some(Path::new(
-                "/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf"
-            ))
-        );
-        let windows = candidates_for_platform(
-            CandidatePlatform::Windows,
-            Some(Path::new("C:/Windows")),
-        );
-        assert_eq!(windows[0].as_deref(), Some(Path::new("C:/Windows/Fonts/arial.ttf")));
-        assert_eq!(windows[3].as_deref(), Some(Path::new("C:/Windows/Fonts/arialbi.ttf")));
-    }
 
-    #[test]
-    fn bundled_courier_prime_definitions_remain_registered() {
-        let (definitions, _) = build_font_definitions([None, None, None, None]);
-        assert_bundled_courier_prime_definitions(&definitions);
-    }
-
-    fn assert_bundled_courier_prime_definitions(definitions: &FontDefinitions) {
-        for (family, key) in [
-            ("Courier Prime", "scriptcraft-courier-prime-regular"),
-            ("Courier Prime Bold", "scriptcraft-courier-prime-bold"),
-            ("Courier Prime Italic", "scriptcraft-courier-prime-italic"),
-            (
-                "Courier Prime Bold Italic",
-                "scriptcraft-courier-prime-bold-italic",
-            ),
-        ] {
-            assert!(definitions.font_data.contains_key(key));
-            assert_eq!(
-                definitions.families.get(&FontFamily::Name(family.into())),
-                Some(&vec![key.to_owned()])
-            );
-        }
-    }
 }

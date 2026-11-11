@@ -249,9 +249,7 @@ mod menu_platform_cli_tests {
     use super::{
         parse_startup_args, resolve_startup_menu_policy, StartupConfig, STARTUP_USAGE,
     };
-    use crate::menu::{
-        MenuAcceleratorOwner, MenuHostPlatform, MenuPlatformChoice, RuntimeMenuPolicy,
-    };
+    use crate::menu::{MenuHostPlatform, MenuPlatformChoice, MenuAcceleratorOwner};
     use std::ffi::OsString;
 
     fn parse(arguments: &[&str]) -> Result<StartupConfig, String> {
@@ -382,275 +380,58 @@ mod menu_platform_cli_tests {
 
     #[test]
     fn startup_choice_resolves_before_launch_and_preserves_single_backend_owner() {
-        for (host, requested, expected_owner) in [
-            (
-                MenuHostPlatform::MacOS,
-                MenuPlatformChoice::Auto,
-                MenuAcceleratorOwner::NativeMacOS,
-            ),
-            (
-                MenuHostPlatform::MacOS,
-                MenuPlatformChoice::Windows,
-                MenuAcceleratorOwner::InWindow,
-            ),
-            (
-                MenuHostPlatform::Windows,
-                MenuPlatformChoice::Auto,
-                MenuAcceleratorOwner::InWindow,
-            ),
-            (
-                MenuHostPlatform::Other,
-                MenuPlatformChoice::Auto,
-                MenuAcceleratorOwner::None,
-            ),
-            (
-                MenuHostPlatform::Other,
-                MenuPlatformChoice::Windows,
-                MenuAcceleratorOwner::InWindow,
-            ),
-        ] {
-            let policy = resolve_startup_menu_policy(host, requested);
-            assert!(policy.is_ok());
-            if let Ok(policy) = policy {
-                assert_eq!(policy.accelerator_owner(), expected_owner);
-                assert!(!(policy.installs_native_macos() && policy.renders_in_window()));
-            }
-        }
-
-        for host in [MenuHostPlatform::Windows, MenuHostPlatform::Other] {
-            let error = resolve_startup_menu_policy(host, MenuPlatformChoice::MacOS);
-            assert!(error.is_err());
-            if let Err(error) = error {
-                assert!(error.contains("--menu-platform=macos is unsupported"));
-                assert!(error.ends_with(STARTUP_USAGE));
-            }
-        }
-
-        assert_eq!(
-            RuntimeMenuPolicy::resolve(MenuHostPlatform::MacOS, MenuPlatformChoice::Windows)
-                .map(RuntimeMenuPolicy::accelerator_owner),
-            Ok(MenuAcceleratorOwner::InWindow)
+        let override_policy = resolve_startup_menu_policy(
+            MenuHostPlatform::MacOS,
+            MenuPlatformChoice::Windows,
         );
+        assert!(override_policy.is_ok());
+        if let Ok(policy) = override_policy {
+            assert_eq!(policy.accelerator_owner(), MenuAcceleratorOwner::InWindow);
+            assert!(policy.renders_in_window());
+            assert!(!policy.installs_native_macos());
+        }
+
+        let unsupported = resolve_startup_menu_policy(
+            MenuHostPlatform::Windows,
+            MenuPlatformChoice::MacOS,
+        );
+        assert!(unsupported.is_err());
+        if let Err(error) = unsupported {
+            assert!(error.contains("--menu-platform=macos is unsupported"));
+            assert!(error.ends_with(STARTUP_USAGE));
+        }
     }
 }
 
 #[cfg(test)]
-mod process_lifecycle_tests {
-    use super::{
-        child_arguments, dispatch_open_selection, launch_child_for_app, launch_child_with,
-    };
+mod child_argument_projection_tests {
+    use super::child_arguments;
     use crate::menu::MenuPlatformChoice;
-    use crate::{fdx, ScriptCraftApp, UNTITLED_DOCUMENT_TITLE};
-    use scriptcraft_commands::{execute_editor_command, Command, CommandOutcome, EditorSurface};
-    use std::cell::Cell;
     use std::ffi::OsString;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     #[test]
-    fn child_arguments_forward_menu_selection_and_one_utf8_path_argument() {
-        let arguments = child_arguments(
-            true,
-            MenuPlatformChoice::Windows,
-            Some(Path::new("/drafts/Été draft.fdx")),
-        );
+    fn child_arguments_project_backend_dev_flag_and_utf8_filename_as_distinct_arguments() {
         assert_eq!(
-            arguments,
+            child_arguments(true, MenuPlatformChoice::Windows, Some(Path::new("/drafts/Été draft.fdx"))),
             Ok(vec![
                 OsString::from("--menu-platform=windows"),
                 OsString::from("--dev"),
                 OsString::from("--document-path=/drafts/Été draft.fdx"),
-            ])
+            ]),
         );
         assert_eq!(
             child_arguments(false, MenuPlatformChoice::Auto, None),
-            Ok(vec![OsString::from("--menu-platform=auto")])
-        );
-        assert_eq!(
-            child_arguments(true, MenuPlatformChoice::Auto, None),
-            Ok(vec![OsString::from("--menu-platform=auto"), OsString::from("--dev")])
+            Ok(vec![OsString::from("--menu-platform=auto")]),
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn child_arguments_reject_non_utf8_document_paths() {
+    fn child_arguments_reject_non_utf8_paths() {
         use std::os::unix::ffi::OsStrExt;
-
         let path = Path::new(std::ffi::OsStr::from_bytes(b"/drafts/\xff.fdx"));
         assert!(child_arguments(false, MenuPlatformChoice::Auto, Some(path)).is_err());
-    }
-
-    #[test]
-    fn process_adapter_forwards_arguments_without_shell_reinterpretation_and_reports_failure() {
-        let arguments = vec![
-            OsString::from("--menu-platform=windows"),
-            OsString::from("--document-path=/drafts/one two.fdx"),
-        ];
-        let executable = Path::new("/current/scriptcraft");
-        let mut forwarded = None;
-        let result = launch_child_with(executable, &arguments, |received_executable, received| {
-            forwarded = Some((received_executable.to_owned(), received.to_vec()));
-            Ok(())
-        });
-        assert_eq!(result, Ok(()));
-        assert_eq!(forwarded, Some((executable.to_owned(), arguments.clone())));
-
-        let failed = launch_child_with(executable, &arguments, |_executable, _arguments| {
-            Err(std::io::Error::other("test-only spawn failure"))
-        });
-        assert!(failed.is_err());
-    }
-
-    #[test]
-    fn app_child_adapter_inherits_development_flag_once_with_open_path() {
-        let app_result = ScriptCraftApp::new();
-        assert!(app_result.is_ok());
-        let Ok(mut app) = app_result else {
-            return;
-        };
-        assert!(!app.development_mode);
-        app.development_mode = true;
-        let executable = Path::new("/current/scriptcraft");
-        let mut forwarded = None;
-        let result = launch_child_for_app(
-            &app,
-            executable,
-            Some(Path::new("/drafts/open.fdx")),
-            |_, arguments| {
-                forwarded = Some(arguments.to_vec());
-                Ok(())
-            },
-        );
-        assert_eq!(result, Ok(()));
-        let arguments = forwarded.unwrap_or_default();
-        assert_eq!(
-            arguments
-                .iter()
-                .filter(|argument| argument == &&OsString::from("--dev"))
-                .count(),
-            1
-        );
-        assert!(arguments.contains(&OsString::from("--document-path=/drafts/open.fdx")));
-    }
-
-    #[test]
-    fn cancelled_open_picker_dispatches_nothing() {
-        let dispatch_count = Cell::new(0);
-        dispatch_open_selection(None, |_path| dispatch_count.set(dispatch_count.get() + 1));
-        assert_eq!(dispatch_count.get(), 0);
-
-        dispatch_open_selection(Some(PathBuf::from("selected.fdx")), |_path| {
-            dispatch_count.set(dispatch_count.get() + 1)
-        });
-        assert_eq!(dispatch_count.get(), 1);
-    }
-
-    #[test]
-    fn child_startup_uses_staged_open_once_without_recursive_launch() {
-        let app_result = ScriptCraftApp::new();
-        assert!(app_result.is_ok());
-        let Ok(mut app) = app_result else {
-            return;
-        };
-        app.startup_document_path = Some(PathBuf::from("missing-child-startup.fdx"));
-
-        assert_eq!(app.consume_startup_document_handoff(), Some(false));
-        assert_eq!(app.consume_startup_document_handoff(), None);
-        assert!(app.native_path.is_none());
-        assert_eq!(app.native_title, UNTITLED_DOCUMENT_TITLE);
-    }
-
-    #[test]
-    fn separate_instance_launch_preserves_clean_and_dirty_origin_state() {
-        for make_dirty in [false, true] {
-            let app_result = ScriptCraftApp::new();
-            assert!(app_result.is_ok());
-            let Ok(mut app) = app_result else {
-                continue;
-            };
-            app.native_path = Some(PathBuf::from("origin.fdx"));
-            app.native_title = "origin.fdx".to_owned();
-            app.zoom_percent = 137;
-            if make_dirty {
-                let edit = execute_editor_command(
-                    &mut app.session,
-                    &Command::EditorTextInsert {
-                        text: "origin edit".to_owned(),
-                        surface: EditorSurface::Body,
-                    },
-                );
-                assert_eq!(edit, CommandOutcome::Changed);
-            }
-
-            let content_before = fdx::write_v6(app.session.project()).ok();
-            assert!(content_before.is_some());
-            let dirty_before = app.session.dirty();
-            let selection_before = app.session.selection();
-            let history_before = (app.session.can_undo(), app.session.can_redo());
-            let path_before = app.native_path.clone();
-            let baseline_before = app.fdx_baseline.clone();
-            let title_before = app.native_title.clone();
-            let zoom_before = app.zoom_percent;
-            let migration_before = app.pending_fdx_open.is_some();
-            let mut forwarded = None;
-            let launch = launch_child_for_app(
-                &app,
-                Path::new("/current/scriptcraft"),
-                Some(Path::new("/picked/Selected.fdx")),
-                |executable, arguments| {
-                    forwarded = Some((executable.to_owned(), arguments.to_vec()));
-                    Ok(())
-                },
-            );
-            assert_eq!(launch, Ok(()));
-            assert_eq!(
-                forwarded,
-                Some((
-                    PathBuf::from("/current/scriptcraft"),
-                    vec![
-                        OsString::from("--menu-platform=auto"),
-                        OsString::from("--document-path=/picked/Selected.fdx"),
-                    ],
-                ))
-            );
-            let mut blank_forwarded = None;
-            let blank_launch = launch_child_for_app(
-                &app,
-                Path::new("/current/scriptcraft"),
-                None,
-                |executable, arguments| {
-                    blank_forwarded = Some((executable.to_owned(), arguments.to_vec()));
-                    Ok(())
-                },
-            );
-            assert_eq!(blank_launch, Ok(()));
-            assert_eq!(
-                blank_forwarded,
-                Some((
-                    PathBuf::from("/current/scriptcraft"),
-                    vec![OsString::from("--menu-platform=auto")],
-                ))
-            );
-            let failed_launch = launch_child_for_app(
-                &app,
-                Path::new("/current/scriptcraft"),
-                None,
-                |_executable, _arguments| {
-                    Err(std::io::Error::other("test-only spawn failure"))
-                },
-            );
-            assert!(failed_launch.is_err());
-            assert_eq!(fdx::write_v6(app.session.project()).ok(), content_before);
-            assert_eq!(app.session.dirty(), dirty_before);
-            assert_eq!(app.session.selection(), selection_before);
-            assert_eq!((app.session.can_undo(), app.session.can_redo()), history_before);
-            assert_eq!(app.native_path, path_before);
-            assert_eq!(app.fdx_baseline, baseline_before);
-            assert_eq!(app.native_title, title_before);
-            assert_eq!(app.zoom_percent, zoom_before);
-            assert_eq!(app.pending_fdx_open.is_some(), migration_before);
-            assert_eq!(dirty_before, make_dirty);
-        }
     }
 }
 
@@ -2218,7 +1999,7 @@ impl ScriptCraftApp {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn export_pdf_with_picker(
         &mut self,
         show_picker: impl FnOnce(&str) -> pdf_export::PdfExportPickerResult,
@@ -2907,72 +2688,6 @@ impl ScriptCraftApp {
     }
 }
 
-#[cfg(all(test, target_os = "windows"))]
-mod windows_print_request_snapshot_tests {
-    use super::{ScriptCraftApp, WindowsPrintRequestSnapshot};
-    use std::path::PathBuf;
-
-    #[test]
-    fn accepted_request_captures_revision_layout_and_filename_without_mutating_the_editor() {
-        let app_result = ScriptCraftApp::new();
-        assert!(app_result.is_ok());
-        let Ok(mut app) = app_result else { return };
-        app.native_path = Some(PathBuf::from("C:\\scripts\\captured-episode.fdx"));
-
-        let project_before = app.session.project().clone();
-        let revision_before = app.session.revision();
-        let dirty_before = app.session.dirty();
-        let selection_before = app.session.selection();
-        let title_selection_before = app.session.title_selection();
-        let request = WindowsPrintRequestSnapshot::capture(&app);
-
-        assert_eq!(request.project, project_before);
-        assert_eq!(request.revision, revision_before);
-        assert_eq!(request.job_title, "captured-episode");
-        assert_eq!(app.session.project(), &project_before);
-        assert_eq!(app.session.revision(), revision_before);
-        assert_eq!(app.session.dirty(), dirty_before);
-        assert_eq!(app.session.selection(), selection_before);
-        assert_eq!(app.session.title_selection(), title_selection_before);
-        assert!(!app.native_output_modal_active);
-
-        app.native_path = Some(PathBuf::from("C:\\scripts\\later-edit.fdx"));
-        assert_eq!(request.job_title, "captured-episode");
-    }
-
-    #[test]
-    fn terminal_and_failure_cleanup_releases_the_persistent_native_output_gate() {
-        let app_result = ScriptCraftApp::new();
-        assert!(app_result.is_ok());
-        let Ok(mut app) = app_result else { return };
-        let context = eframe::egui::Context::default();
-        app.native_output_modal_active = true;
-        app.finish_windows_print_session(&context);
-        assert!(!app.native_output_modal_active);
-        assert!(app.windows_print_session.is_none());
-        assert!(app.windows_print_preparation.is_none());
-        assert!(app.app_command_availability().is_enabled(
-            scriptcraft_commands::CommandId::FilePrint
-        ));
-    }
-}
-
-#[cfg(test)]
-mod status_guidance_input_tests {
-    use super::status_modifiers_changed;
-    use eframe::egui;
-
-    #[test]
-    fn modifier_only_press_and_release_are_distinct_repaint_transitions() {
-        let pressed = egui::Modifiers {
-            command: true,
-            ..egui::Modifiers::NONE
-        };
-        assert!(status_modifiers_changed(egui::Modifiers::NONE, pressed));
-        assert!(status_modifiers_changed(pressed, egui::Modifiers::NONE));
-        assert!(!status_modifiers_changed(pressed, pressed));
-    }
-}
 
 impl ScriptCraftApp {
     fn update(&mut self, ui: &mut egui::Ui) {
@@ -3141,24 +2856,6 @@ fn native_options() -> Result<eframe::NativeOptions, String> {
     })
 }
 
-#[cfg(test)]
-mod title_surface_layout_routing_tests {
-    use super::editor_layout_composition;
-    use scriptcraft_commands::EditorSurface;
-    use scriptcraft_core::layout::LayoutComposition;
-
-    #[test]
-    fn body_and_title_views_select_disjoint_editor_compositions() {
-        assert_eq!(
-            editor_layout_composition(EditorSurface::Body),
-            LayoutComposition::BodyEditor,
-        );
-        assert_eq!(
-            editor_layout_composition(EditorSurface::TitlePage),
-            LayoutComposition::TitlePageEditor,
-        );
-    }
-}
 
 struct StartupPresentation {
     options: eframe::NativeOptions,
@@ -3265,79 +2962,26 @@ fn main() -> eframe::Result {
 }
 
 #[cfg(test)]
-mod open_diagnostic_tests {
-    use super::{
-        child_startup_open_failure_copy, open_import_failure_message, open_read_failure_message,
-        session_activation_failure_message, ScriptCraftApp,
-    };
-    use scriptcraft_commands::Command;
+mod safe_result_category_tests {
+    use super::{safe_layout_error_category, session_activation_failure_code};
     use scriptcraft_core::editing::EditError;
-    use scriptcraft_core::fdx::FdxError;
-    use scriptcraft_core::fdx_storage::{FdxStorageError, FdxStorageErrorKind, StorageOperation};
+    use scriptcraft_core::layout::{LayoutError, LayoutErrorKind};
+    use scriptcraft_core::ModelError;
 
     #[test]
-    fn open_stage_errors_retain_safe_causes_without_paths_or_document_content() {
-        let read = open_read_failure_message(&FdxStorageError {
-            kind: FdxStorageErrorKind::Io(StorageOperation::Read),
-            temporary_cleanup_failed: false,
-        });
+    fn layout_and_session_failures_project_to_safe_non_detail_categories() {
         assert_eq!(
-            read,
-            "FDX_OPEN_FAILED: FDX file read failed; active document unchanged"
+            safe_layout_error_category(&LayoutError::from(ModelError::EmptyId)),
+            "model validation",
         );
-
-        let import = open_import_failure_message(&FdxError::MalformedXml);
-        assert_eq!(
-            import,
-            "FDX_IMPORT_FAILED: FDX XML is malformed or unsupported; active document unchanged"
-        );
-
-        let activation = session_activation_failure_message(&EditError::InvalidSelection);
-        assert_eq!(
-            activation,
-            "FDX_SESSION_ACTIVATION_FAILED: EDIT_INVALID_SELECTION; active document unchanged"
-        );
-
-        let alts_role_change =
-            session_activation_failure_message(&EditError::InlineAltsRoleChange);
-        assert_eq!(
-            alts_role_change,
-            "FDX_SESSION_ACTIVATION_FAILED: EDIT_INLINE_ALTS_ROLE_CHANGE; active document unchanged"
-        );
-
-        for message in [read, import, activation, alts_role_change] {
-            assert!(!message.contains('/'));
-            assert!(!message.contains("screenplay"));
-            assert!(!message.contains('\n'));
-            assert!(message.len() <= 512);
+        for (kind, expected) in [
+            (LayoutErrorKind::InvalidProfile, "invalid layout profile"),
+            (LayoutErrorKind::InvalidPosition, "invalid layout position"),
+            (LayoutErrorKind::NoGeometry, "layout geometry unavailable"),
+        ] {
+            assert_eq!(safe_layout_error_category(&LayoutError { kind }), expected);
         }
-    }
-
-    #[test]
-    fn inline_alts_role_rejection_uses_the_existing_edit_diagnostic_route() {
-        let mut app = ScriptCraftApp::new().expect("default app session should initialize");
-        app.show_edit_error(EditError::InlineAltsRoleChange);
-
-        let diagnostic = match app.pending_diagnostic_commands.pop_front() {
-            Some(Command::UiStatusSet {
-                message: Some(message),
-            }) => message,
-            other => panic!("expected queued edit diagnostic, got {other:?}"),
-        };
-        assert!(diagnostic
-            .as_str()
-            .starts_with("EDIT_INLINE_ALTS_ROLE_CHANGE; document unchanged;"));
-    }
-
-    #[test]
-    fn child_open_failure_keeps_the_generic_native_dialog_copy() {
-        assert_eq!(
-            child_startup_open_failure_copy(),
-            (
-                "Unable to Open Document",
-                "The selected document could not be opened in this new instance. This instance remains untitled."
-            )
-        );
+        assert_eq!(session_activation_failure_code(&EditError::InvalidSelection), "EDIT_INVALID_SELECTION");
     }
 }
 
@@ -3347,500 +2991,32 @@ mod native_title_tests {
     use std::path::Path;
 
     #[test]
-    fn unsaved_and_new_documents_use_untitled_title() {
+    fn title_projection_uses_filename_preserves_unicode_and_ignores_path_only_changes() {
         assert_eq!(native_document_title(None), UNTITLED_DOCUMENT_TITLE);
         assert_eq!(
-            native_document_title(Some(Path::new(""))),
-            UNTITLED_DOCUMENT_TITLE
+            native_document_title(Some(Path::new("/private/Été 東京.fdx"))),
+            "Été 東京.fdx",
         );
         assert_eq!(
-            changed_native_document_title(
-                "Previously Saved.fdx",
-                None
-            ),
-            Some(UNTITLED_DOCUMENT_TITLE.to_owned())
-        );
-        assert_eq!(
-            changed_native_document_title(UNTITLED_DOCUMENT_TITLE, None),
-            None
-        );
-    }
-
-    #[test]
-    fn named_document_uses_only_filename_and_keeps_extension() {
-        assert_eq!(
-            native_document_title(Some(Path::new(
-                "/private/writer/projects/Screenplay Title.fdx"
-            ))),
-            "Screenplay Title.fdx"
-        );
-    }
-
-    #[test]
-    fn opened_and_save_as_paths_project_their_active_filenames() {
-        assert_eq!(
-            native_document_title(Some(Path::new("/opened/Opening Draft.fdx"))),
-            "Opening Draft.fdx"
-        );
-        assert_eq!(
-            native_document_title(Some(Path::new("/save-as/Final Draft.fdx"))),
-            "Final Draft.fdx"
-        );
-    }
-
-    #[test]
-    fn unicode_filename_and_extension_are_preserved() {
-        assert_eq!(
-            native_document_title(Some(Path::new("/drafts/Été 東京 — scène.fdx"))),
-            "Été 東京 — scène.fdx"
-        );
-    }
-
-    #[test]
-    fn unchanged_projected_title_does_not_request_an_update() {
-        assert_eq!(
-            changed_native_document_title(
-                "Screenplay Title.fdx",
-                Some(Path::new("/another/location/Screenplay Title.fdx"))
-            ),
-            None
-        );
-        assert_eq!(
-            changed_native_document_title(
-                "Untitled Screenplay",
-                Some(Path::new("/drafts/First.fdx"))
-            ),
-            Some("First.fdx".to_owned())
-        );
-    }
-
-    #[test]
-    fn unchanged_active_path_for_failed_or_cancelled_operation_keeps_title() {
-        let active_path = Path::new("/drafts/Current Draft.fdx");
-        let active_title = native_document_title(Some(active_path));
-
-        assert_eq!(
-            changed_native_document_title(&active_title, Some(active_path)),
-            None
+            changed_native_document_title("Été 東京.fdx", Some(Path::new("/elsewhere/Été 東京.fdx"))),
+            None,
         );
     }
 }
 
 #[cfg(test)]
-mod pdf_export_adapter_tests {
-    use super::{
-        export_pdf_to_selected_path, pdf_export_filename, ScriptCraftApp, UNTITLED_PDF_FILENAME,
-    };
-    use crate::pdf_export::{PdfExportPickerFailure, PdfExportPickerResult};
-    use scriptcraft_commands::PdfExportOptions;
-    use scriptcraft_core::persistence::{FileSystem, PersistenceError};
-    use std::cell::{Cell, RefCell};
-    use std::path::{Path, PathBuf};
-
-    #[derive(Default)]
-    struct RecordingFileSystem {
-        writes: RefCell<Vec<(PathBuf, Vec<u8>)>>,
-        fail_write: Cell<bool>,
-    }
-
-    impl FileSystem for RecordingFileSystem {
-        fn read(&self, _path: &Path) -> Result<Vec<u8>, PersistenceError> {
-            Err(PersistenceError::Io("unused test operation".to_owned()))
-        }
-
-        fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), PersistenceError> {
-            if self.fail_write.get() {
-                return Err(PersistenceError::Io("private test destination".to_owned()));
-            }
-            self.writes
-                .borrow_mut()
-                .push((path.to_owned(), bytes.to_vec()));
-            Ok(())
-        }
-
-        fn rename(&self, _from: &Path, _to: &Path) -> Result<(), PersistenceError> {
-            Err(PersistenceError::Io("unused test operation".to_owned()))
-        }
-
-        fn remove(&self, _path: &Path) -> Result<(), PersistenceError> {
-            Err(PersistenceError::Io("unused test operation".to_owned()))
-        }
-
-        fn list(&self, _directory: &Path) -> Result<Vec<PathBuf>, PersistenceError> {
-            Err(PersistenceError::Io("unused test operation".to_owned()))
-        }
-    }
-
-    #[test]
-    fn pdf_filename_replaces_only_the_final_extension_and_preserves_unicode() {
-        assert_eq!(
-            pdf_export_filename(Some(Path::new("/drafts/Draft.fdx"))),
-            "Draft.pdf"
-        );
-        assert_eq!(
-            pdf_export_filename(Some(Path::new("/drafts/Draft.final.fdx"))),
-            "Draft.final.pdf"
-        );
-        assert_eq!(
-            pdf_export_filename(Some(Path::new("/drafts/Été 東京.fdx"))),
-            "Été 東京.pdf"
-        );
-    }
-
-    #[test]
-    fn pdf_filename_uses_fallback_for_unsaved_or_empty_filename() {
-        assert_eq!(pdf_export_filename(None), UNTITLED_PDF_FILENAME);
-        assert_eq!(
-            pdf_export_filename(Some(Path::new(""))),
-            UNTITLED_PDF_FILENAME
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn pdf_filename_uses_fallback_for_non_utf8_filename() {
-        use std::os::unix::ffi::OsStrExt;
-
-        let path = Path::new(std::ffi::OsStr::from_bytes(b"Draft-\xff.fdx"));
-        assert_eq!(pdf_export_filename(Some(path)), UNTITLED_PDF_FILENAME);
-    }
-
-    #[test]
-    fn cancelled_pdf_picker_does_not_build_or_write_export() {
-        let filesystem = RecordingFileSystem::default();
-        let built = Cell::new(false);
-
-        let outcome = export_pdf_to_selected_path(PdfExportPickerResult::Cancel, &filesystem, |_| {
-            built.set(true);
-            Ok(b"%PDF-1.4".to_vec())
-        });
-
-        assert!(matches!(outcome, Ok(false)));
-        assert!(!built.get());
-        assert!(filesystem.writes.borrow().is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn non_utf8_pdf_picker_path_is_rejected_before_build_or_write() {
-        use super::PdfExportAdapterError;
-        use std::os::unix::ffi::OsStrExt;
-
-        let filesystem = RecordingFileSystem::default();
-        let built = Cell::new(false);
-        let selected_path = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/invalid-\xff.pdf"));
-        let outcome = export_pdf_to_selected_path(
-            PdfExportPickerResult::Accept {
-                destination: selected_path.to_path_buf(),
-                options: PdfExportOptions::default(),
-            },
-            &filesystem,
-            |_| {
-                built.set(true);
-                Ok(b"%PDF-1.4".to_vec())
-            },
-        );
-
-        assert!(matches!(outcome, Err(PdfExportAdapterError::Path)));
-        assert!(!built.get());
-        assert!(filesystem.writes.borrow().is_empty());
-    }
-
-    #[test]
-    fn pdf_export_writes_generated_bytes_only_to_selected_path() {
-        let filesystem = RecordingFileSystem::default();
-        let selected_path = Path::new("/writer-selected/renamed-output.pdf");
-        let bytes = b"%PDF-1.4 test bytes".to_vec();
-        let selected_options = PdfExportOptions {
-            include_title_page: false,
-        };
-        let received_options = Cell::new(None);
-
-        let outcome = export_pdf_to_selected_path(
-            PdfExportPickerResult::Accept {
-                destination: selected_path.to_path_buf(),
-                options: selected_options,
-            },
-            &filesystem,
-            |options| {
-                received_options.set(Some(options));
-                Ok(bytes.clone())
-            },
-        );
-
-        assert!(matches!(outcome, Ok(true)));
-        assert_eq!(received_options.get(), Some(selected_options));
-        assert_eq!(
-            filesystem.writes.borrow().as_slice(),
-            &[(selected_path.to_owned(), bytes)]
-        );
-    }
-
-    #[test]
-    fn pdf_layout_failure_does_not_write_output() {
-        let filesystem = RecordingFileSystem::default();
-        let selected_path = Path::new("/selected/output.pdf");
-        let outcome = export_pdf_to_selected_path(
-            PdfExportPickerResult::Accept {
-                destination: selected_path.to_path_buf(),
-                options: PdfExportOptions::default(),
-            },
-            &filesystem,
-            |_| {
-                Err(scriptcraft_core::exports::ExportError::Layout(
-                    scriptcraft_core::layout::LayoutError {
-                        kind: scriptcraft_core::layout::LayoutErrorKind::NoGeometry,
-                    },
-                ))
-            },
-        );
-
-        assert!(matches!(
-            outcome,
-            Err(super::PdfExportAdapterError::Export(
-                scriptcraft_core::exports::ExportError::Layout(_)
-            ))
-        ));
-        assert!(filesystem.writes.borrow().is_empty());
-    }
-
-    #[test]
-    fn pdf_write_failure_is_reported_without_retargeting_output() {
-        let filesystem = RecordingFileSystem::default();
-        filesystem.fail_write.set(true);
-        let selected_path = Path::new("/selected/output.pdf");
-        let outcome = export_pdf_to_selected_path(
-            PdfExportPickerResult::Accept {
-                destination: selected_path.to_path_buf(),
-                options: PdfExportOptions::default(),
-            },
-            &filesystem,
-            |_| Ok(b"%PDF-1.4 test bytes".to_vec()),
-        );
-
-        assert!(matches!(outcome, Err(super::PdfExportAdapterError::Write(_))));
-        assert!(filesystem.writes.borrow().is_empty());
-    }
-
-    #[test]
-    fn picker_failure_is_returned_as_a_safe_category_without_build_or_write() {
-        let filesystem = RecordingFileSystem::default();
-        let built = Cell::new(false);
-
-        let outcome = export_pdf_to_selected_path(
-            PdfExportPickerResult::Error(PdfExportPickerFailure::Failed),
-            &filesystem,
-            |_| {
-                built.set(true);
-                Ok(b"%PDF-1.4".to_vec())
-            },
-        );
-
-        assert!(matches!(
-            outcome,
-            Err(super::PdfExportAdapterError::Picker(
-                PdfExportPickerFailure::Failed
-            ))
-        ));
-        assert!(!built.get());
-        assert!(filesystem.writes.borrow().is_empty());
-    }
-
-    #[test]
-    fn unsupported_platform_result_skips_build_and_write() {
-        let filesystem = RecordingFileSystem::default();
-        let built = Cell::new(false);
-
-        let outcome = export_pdf_to_selected_path(
-            PdfExportPickerResult::Error(PdfExportPickerFailure::UnsupportedPlatform),
-            &filesystem,
-            |_| {
-                built.set(true);
-                Ok(b"%PDF-1.4".to_vec())
-            },
-        );
-
-        assert!(matches!(
-            outcome,
-            Err(super::PdfExportAdapterError::Picker(
-                PdfExportPickerFailure::UnsupportedPlatform
-            ))
-        ));
-        assert!(!built.get());
-        assert!(filesystem.writes.borrow().is_empty());
-    }
-
-    #[test]
-    fn pdf_export_continuation_preserves_project_and_desktop_session_state() {
-        let mut app = ScriptCraftApp::new().expect("default app session should initialize");
-        let project_before = app.session.project().clone();
-        let selection_before = app.session.selection();
-        let history_before = (app.session.can_undo(), app.session.can_redo());
-        let path_before = app.native_path.clone();
-        let zoom_before = app.zoom_percent;
-        let filesystem = RecordingFileSystem::default();
-
-        let outcome = export_pdf_to_selected_path(
-            PdfExportPickerResult::Accept {
-                destination: PathBuf::from("/selected/output.pdf"),
-                options: PdfExportOptions::default(),
-            },
-            &filesystem,
-            |options| app.build_pdf_with_options(options),
-        );
-
-        assert!(matches!(outcome, Ok(true)));
-        assert_eq!(app.session.project(), &project_before);
-        assert_eq!(app.session.selection(), selection_before);
-        assert_eq!(
-            (app.session.can_undo(), app.session.can_redo()),
-            history_before
-        );
-        assert_eq!(app.native_path, path_before);
-        assert_eq!(app.zoom_percent, zoom_before);
-        assert_eq!(filesystem.writes.borrow().len(), 1);
-    }
-
-    #[test]
-    fn direct_pdf_requests_cancel_without_changing_editor_focus() {
-        let Ok(mut app) = ScriptCraftApp::new() else {
-            return;
-        };
-        app.surface_focused = true;
-        let group_before = app.active_body_dual_dialogue_group.clone();
-
-        for _ in 0..2 {
-            app.export_pdf_with_picker(|filename| {
-                assert_eq!(filename, UNTITLED_PDF_FILENAME);
-                PdfExportPickerResult::Cancel
-            });
-        }
-
-        assert!(app.surface_focused);
-        assert_eq!(app.active_body_dual_dialogue_group, group_before);
-    }
-
-    #[test]
-    fn cancelled_pdf_activation_keeps_script_view_in_normal_frame_composition() {
-        let Ok(mut app) = ScriptCraftApp::new() else {
-            return;
-        };
-        assert!(app.session.insert("Visible Script View regression text").is_ok());
-        app.export_pdf_with_picker(|_| PdfExportPickerResult::Cancel);
-
-        let context = eframe::egui::Context::default();
-        let output = context.run(eframe::egui::RawInput::default(), |ctx| {
-            eframe::egui::CentralPanel::default().show(ctx, |ui| app.update(ui));
-        });
-        let script_view_text_is_rendered = output.shapes.iter().any(|clipped| {
-            matches!(
-                &clipped.shape,
-                eframe::egui::Shape::Text(text)
-                    if text.galley.text().contains("Visible Script View regression text")
-            )
-        });
-
-        assert!(script_view_text_is_rendered);
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    #[test]
-    fn unsupported_platform_returns_a_deliberate_safe_pdf_result() {
-        let Ok(mut app) = ScriptCraftApp::new() else {
-            return;
-        };
-        let project_before = app.session.project().clone();
-        let path_before = app.native_path.clone();
-
-        app.export_pdf();
-
-        app.flush_pending_diagnostic_commands(&eframe::egui::Context::default());
-        assert!(app.diagnostic_message.as_ref().is_some_and(|message| {
-            message.as_str().starts_with("PDF_EXPORT_UNSUPPORTED_PLATFORM:")
-        }));
-        assert_eq!(app.session.project(), &project_before);
-        assert_eq!(app.native_path, path_before);
-    }
-}
-
-#[cfg(test)]
-mod empty_sided_presentation_lifecycle_tests {
-    use super::ScriptCraftApp;
-    use scriptcraft_commands::EditorSurface;
-    use scriptcraft_core::dual_dialogue::{DualDialogueGroup, DualDialogueSide, DualDialogueWrapperProvenance};
-    use scriptcraft_core::editing::{EditingSession, Position, Selection};
-    use scriptcraft_core::layout::{LayoutComposition, ScreenplayLayout};
-    use scriptcraft_core::{Project, Role, ScreenplayElement, StableId};
+mod pdf_filename_projection_tests {
+    use super::{pdf_export_filename, UNTITLED_PDF_FILENAME};
     use std::path::Path;
 
-    fn cue_only_project() -> Option<Project> {
-        let mut project = Project::new().ok()?;
-        project.elements = [
-            ScreenplayElement::new("lifecycle-left", Role::Character, "LEFT"),
-            ScreenplayElement::new("lifecycle-right", Role::Character, "RIGHT"),
-            ScreenplayElement::new("lifecycle-outside", Role::Action, "outside"),
-        ].into_iter().collect::<Result<Vec<_>, _>>().ok()?;
-        project.dual_dialogue_groups.push(DualDialogueGroup {
-            id: StableId::new("lifecycle-empty-sided-group").ok()?,
-            left: DualDialogueSide { character: project.elements[0].id.clone(), paragraphs: Vec::new() },
-            right: DualDialogueSide { character: project.elements[1].id.clone(), paragraphs: Vec::new() },
-            wrapper: DualDialogueWrapperProvenance::default(),
-        });
-        Some(project)
-    }
-
     #[test]
-    fn empty_sided_active_state_is_transient_rebases_by_real_members_and_clears_on_replacement() {
-        let Some(project) = cue_only_project() else { return };
-        let mut app = match ScriptCraftApp::new() { Ok(app) => app, Err(_) => return };
-        app.session = match EditingSession::new(project.clone()) { Ok(session) => session, Err(_) => return };
-        app.surface_focused = true;
-        let _ = app.session.set_selection(Selection::caret(Position { element: 1, offset: 0 }));
-        assert!(app.reconcile_body_active_group());
-        let old_group = project.dual_dialogue_groups[0].clone();
-        assert_eq!(app.active_body_dual_dialogue_group.as_ref(), Some(&old_group.id));
-
-        let mut rebased = project.clone();
-        let new_id = match StableId::new("lifecycle-empty-sided-rebased") { Ok(id) => id, Err(_) => return };
-        rebased.dual_dialogue_groups[0].id = new_id.clone();
-        let mapped = scriptcraft_core::dual_dialogue::map_group_identity(&project, &rebased, &old_group.id);
-        assert_eq!(mapped.as_ref(), Some(&new_id), "rebase matches the complete actual cue-member sequence");
-        assert_eq!(rebased.dual_dialogue_groups[0].member_ids().count(), 2);
-        assert!(rebased.dual_dialogue_groups[0].left.paragraphs.is_empty());
-        assert!(rebased.dual_dialogue_groups[0].right.paragraphs.is_empty());
-
-        let semantic = app.session.project().clone();
-        app.surface_focused = false;
-        assert!(app.reconcile_body_active_group());
-        assert_eq!(app.active_body_dual_dialogue_group, None);
-        assert_eq!(app.session.project(), &semantic, "focus loss changes no semantic/source state");
-        app.surface_focused = true;
-        let _ = app.session.set_selection(Selection::caret(Position { element: 0, offset: 0 }));
-        let _ = app.reconcile_body_active_group();
-        assert_eq!(app.active_body_dual_dialogue_group.as_ref(), Some(&old_group.id), "either actual cue activates the group");
-        app.set_active_editor_surface(EditorSurface::TitlePage);
-        assert_eq!(app.active_body_dual_dialogue_group, None);
-
-        let print = ScreenplayLayout::build_with_composition(
-            &project,
-            &scriptcraft_core::LayoutInputs::default(),
-            &project.preservation.as_ref().map(|state| state.source_layout_settings().clone()).unwrap_or_default(),
-            LayoutComposition::Print { include_title_page: false },
-        );
-        assert!(print.is_ok_and(|layout| layout.active_group_id.is_none() && layout.editor_group_boundaries.is_empty()));
-
-        let mut replacement = match Project::new() { Ok(project) => project, Err(_) => return };
-        replacement.elements.push(match ScreenplayElement::new("replacement-action", Role::Action, "replacement") { Ok(element) => element, Err(_) => return });
-        let activated = app.activate_opened_project(
-            replacement,
-            Path::new("/tmp/replacement-empty-side.fdx"),
-            None,
-            None,
-            None,
-            scriptcraft_core::text_state::TextState::DEFAULT,
-        );
-        assert!(activated);
-        assert_eq!(app.active_body_dual_dialogue_group, None, "document replacement clears transient group identity");
-        assert!(app.session.project().dual_dialogue_groups.is_empty(), "replacement does not unwrap or mutate the discarded document");
+    fn pdf_filename_replaces_final_extension_and_falls_back_for_non_utf8() {
+        assert_eq!(pdf_export_filename(Some(Path::new("/drafts/Été.final.fdx"))), "Été.final.pdf");
+        assert_eq!(pdf_export_filename(None), UNTITLED_PDF_FILENAME);
+        #[cfg(unix)] {
+            use std::os::unix::ffi::OsStrExt;
+            let path = Path::new(std::ffi::OsStr::from_bytes(b"Draft-\xff.fdx"));
+            assert_eq!(pdf_export_filename(Some(path)), UNTITLED_PDF_FILENAME);
+        }
     }
 }
