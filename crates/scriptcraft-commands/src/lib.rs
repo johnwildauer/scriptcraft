@@ -76,11 +76,12 @@ pub enum CommandId {
     ToolsSprintTimerEnd,
     UiStatusSet,
     EditorDualDialogueToggle,
+    EditorStyleClear,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 49] = [
+    pub const ALL: [Self; 50] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -130,6 +131,7 @@ impl CommandId {
         Self::ToolsSprintTimerEnd,
         Self::UiStatusSet,
         Self::EditorDualDialogueToggle,
+        Self::EditorStyleClear,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -183,6 +185,7 @@ impl CommandId {
             Self::ToolsSprintTimerEnd => "tools.sprint-timer.end",
             Self::UiStatusSet => "ui.status.set",
             Self::EditorDualDialogueToggle => "editor.dual-dialogue.toggle",
+            Self::EditorStyleClear => "editor.style.clear",
         }
     }
 }
@@ -927,6 +930,8 @@ pub enum Command {
     UiStatusSet { message: Option<DiagnosticMessage> },
     #[serde(rename = "editor.dual-dialogue.toggle")]
     EditorDualDialogueToggle,
+    #[serde(rename = "editor.style.clear")]
+    EditorStyleClear { surface: EditorSurface },
 }
 
 impl Command {
@@ -996,6 +1001,7 @@ impl Command {
             Self::ToolsSprintTimerEnd => CommandId::ToolsSprintTimerEnd,
             Self::UiStatusSet { .. } => CommandId::UiStatusSet,
             Self::EditorDualDialogueToggle => CommandId::EditorDualDialogueToggle,
+            Self::EditorStyleClear { .. } => CommandId::EditorStyleClear,
         }
     }
 }
@@ -1090,7 +1096,7 @@ const fn descriptor(id: CommandId, family: &'static str, parameters: &'static st
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 49] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 50] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -1144,6 +1150,7 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 49] = [
     descriptor(CommandId::ToolsSprintTimerEnd, "tools", "none"),
     descriptor(CommandId::UiStatusSet, "ui", "message: optional diagnostic_message (<=512 UTF-8 bytes, single-line)"),
     descriptor(CommandId::EditorDualDialogueToggle, "editor", "none; Body only; host active surface"),
+    descriptor(CommandId::EditorStyleClear, "editor", "surface: editor_surface; clear supported run styles"),
 ];
 
 pub fn descriptor_for(id: CommandId) -> Option<&'static CommandDescriptor> {
@@ -1203,8 +1210,8 @@ mod file_print_contract_tests {
     fn file_print_is_an_additive_parameterless_version_one_host_command() {
         let command = Command::FilePrint;
         assert_eq!(COMMAND_WIRE_VERSION, 1);
-        assert_eq!(CommandId::ALL.len(), 49);
-        assert_eq!(COMMAND_DESCRIPTORS.len(), 49);
+        assert_eq!(CommandId::ALL.len(), 50);
+        assert_eq!(COMMAND_DESCRIPTORS.len(), 50);
         assert_eq!(CommandId::FilePrint.as_str(), "file.print");
         assert_eq!(command.id(), CommandId::FilePrint);
         assert_eq!(
@@ -1371,6 +1378,14 @@ mod save_as_wire_compatibility_tests {
 
     #[test]
     fn formatting_and_pdf_option_payloads_decode_to_bounded_typed_values() {
+        let clear = Command::deserialize(command_wire(
+            "editor.style.clear",
+            vec![("surface", WireValue::String("title_page"))],
+        ))
+        .unwrap_or_else(|_| unreachable!("Plain Text command surface payload is valid"));
+        assert_eq!(clear, Command::EditorStyleClear { surface: EditorSurface::TitlePage });
+        assert_eq!(clear.id(), CommandId::EditorStyleClear);
+
         let style = Command::deserialize(command_wire(
             "editor.style.toggle",
             vec![

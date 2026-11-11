@@ -32,11 +32,11 @@ fn session_with_toggle_pattern() -> EditingSession {
 }
 
 #[test]
-fn dual_toggle_is_the_additive_forty_eighth_version_one_parameterless_command() {
+fn dual_toggle_keeps_its_stable_id_and_version_one_wire_contract() {
     assert_eq!(validate_descriptor_catalog(), Ok(()));
-    assert_eq!(CommandId::ALL.len(), 48);
-    assert_eq!(COMMAND_DESCRIPTORS.len(), 48);
-    assert_eq!(CommandId::ALL[47], CommandId::EditorDualDialogueToggle);
+    assert_eq!(CommandId::ALL.len(), 50);
+    assert_eq!(COMMAND_DESCRIPTORS.len(), 50);
+    assert_eq!(CommandId::ALL[48], CommandId::EditorDualDialogueToggle);
     assert_eq!(CommandId::EditorDualDialogueToggle.as_str(), "editor.dual-dialogue.toggle");
     let descriptor = descriptor_for(CommandId::EditorDualDialogueToggle);
     assert!(descriptor.is_some_and(|descriptor| {

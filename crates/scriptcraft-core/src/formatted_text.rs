@@ -467,6 +467,83 @@ pub fn toggle_style_over_ranges(
         .collect()
 }
 
+/// Removes only the five supported run styles from one canonical UTF-8 range.
+/// Unknown Style tokens and all non-Style attributes are retained verbatim.
+pub fn clear_supported_styles_for_range(
+    canonical_text: &str,
+    runs: &[TextRun],
+    range: Range<usize>,
+) -> Result<RunStyleEdit, FormattedTextError> {
+    let source_runs = effective_runs(canonical_text, runs)?;
+    validate_range(canonical_text, &range)?;
+    if range.is_empty() {
+        return Ok(RunStyleEdit {
+            runs: source_runs,
+            active_style: RunStyleFlags::default(),
+            changed: false,
+        });
+    }
+
+    let mut transformed = Vec::with_capacity(source_runs.len().saturating_add(2));
+    let mut global_start = 0usize;
+    for run in &source_runs {
+        let global_end = global_start.saturating_add(run.text.len());
+        let local_start = range.start.max(global_start).min(global_end) - global_start;
+        let local_end = range.end.max(global_start).min(global_end) - global_start;
+        if local_start == local_end {
+            push_run_coalescing(&mut transformed, &run.text, &run.attributes);
+        } else {
+            push_run_coalescing(&mut transformed, &run.text[..local_start], &run.attributes);
+            let mut attributes = run.attributes.clone();
+            for style in [
+                RunStyle::Bold,
+                RunStyle::Italics,
+                RunStyle::Underline,
+                RunStyle::AllCaps,
+                RunStyle::Strikethrough,
+            ] {
+                attributes = update_run_style(&attributes, style, false)?;
+            }
+            push_run_coalescing(
+                &mut transformed,
+                &run.text[local_start..local_end],
+                &attributes,
+            );
+            push_run_coalescing(&mut transformed, &run.text[local_end..], &run.attributes);
+        }
+        global_start = global_end;
+    }
+    if transformed.len() > MAX_RUNS_PER_ELEMENT {
+        return Err(FormattedTextError::TooManyRuns);
+    }
+    let changed = transformed != source_runs;
+    Ok(RunStyleEdit {
+        runs: transformed,
+        active_style: RunStyleFlags::default(),
+        changed,
+    })
+}
+
+/// Clears supported styles for each paragraph range without deciding style
+/// directions independently. Collapsed ranges carry the cleared typing style.
+pub fn clear_supported_styles_over_ranges(
+    selections: &[RunStyleRange<'_>],
+) -> Result<Vec<RunStyleEdit>, FormattedTextError> {
+    if selections.is_empty() {
+        return Err(FormattedTextError::EmptyParagraphSelection);
+    }
+    selections
+        .iter()
+        .map(|selection| {
+            clear_supported_styles_for_range(
+                selection.canonical_text,
+                selection.runs,
+                selection.range.clone(),
+            )
+        })
+        .collect()
+}
+
 /// Project toolbar lit state: any intersecting run lights a style; a collapsed
 /// caret uses the caller-owned active run/typing flags.
 pub fn project_lit_styles(
@@ -863,6 +940,97 @@ pub fn toggle_paragraph_run_styles(
         })
         .collect::<Vec<_>>();
     let edits = toggle_style_over_ranges(&ranges, active_style, style)?;
+    let mut changed = false;
+    for ((target, text, _, _), edit) in snapshots.iter().zip(&edits) {
+        if !edit.changed {
+            continue;
+        }
+        changed = true;
+        match *target {
+            ParagraphTarget::Body(index) => {
+                candidate.elements[index].text = text.clone();
+                candidate.elements[index].runs = edit.runs.clone();
+            }
+            ParagraphTarget::TitlePage(index) => {
+                candidate.title_page[index].text = text.clone();
+                candidate.title_page[index].runs = edit.runs.clone();
+            }
+        }
+        if let Some(preservation) = candidate.preservation.as_mut() {
+            let (id, has_provenance) = match *target {
+                ParagraphTarget::Body(index) => {
+                    let element = &candidate.elements[index];
+                    (element.id.clone(), element.source_provenance.is_some())
+                }
+                ParagraphTarget::TitlePage(index) => {
+                    let paragraph = &candidate.title_page[index];
+                    (paragraph.id.clone(), paragraph.source_provenance.is_some())
+                }
+            };
+            if preservation.has_managed_element(&id) {
+                preservation.sync_managed_text_runs(&id, text, &edit.runs)?;
+            } else if has_provenance {
+                return Err(FormattedTextError::Preservation(
+                    PreservationError::ManagedAnchorMissing,
+                ));
+            }
+        }
+    }
+    if changed {
+        candidate.validate()?;
+        *project = candidate;
+    }
+    Ok(edits)
+}
+
+/// Transactionally clears supported run styles across Body/Title Page targets.
+/// The caller supplies source-mapped ranges and owns transient typing state.
+pub fn clear_paragraph_run_styles(
+    project: &mut Project,
+    selections: &[(ParagraphTarget, Range<usize>)],
+) -> Result<Vec<RunStyleEdit>, FormattedTextError> {
+    if selections.is_empty() {
+        return Err(FormattedTextError::EmptyParagraphSelection);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if selections.iter().any(|(target, _)| !seen.insert(*target)) {
+        return Err(FormattedTextError::DuplicateParagraphTarget);
+    }
+    let mut candidate = project.clone();
+    let mut snapshots = Vec::with_capacity(selections.len());
+    for (target, range) in selections {
+        let (id, text, runs) = match *target {
+            ParagraphTarget::Body(index) => {
+                let element = candidate
+                    .elements
+                    .get(index)
+                    .ok_or(FormattedTextError::ParagraphOutOfRange)?;
+                (element.id.clone(), element.text.clone(), element.runs.clone())
+            }
+            ParagraphTarget::TitlePage(index) => {
+                let paragraph = candidate
+                    .title_page
+                    .get(index)
+                    .ok_or(FormattedTextError::ParagraphOutOfRange)?;
+                (paragraph.id.clone(), paragraph.text.clone(), paragraph.runs.clone())
+            }
+        };
+        if !range.is_empty() {
+            if let Some(preservation) = candidate.preservation.as_ref() {
+                preservation.ensure_run_range_is_contiguous(&id, range.clone())?;
+            }
+        }
+        snapshots.push((*target, text, runs, range.clone()));
+    }
+    let ranges = snapshots
+        .iter()
+        .map(|(_, text, runs, range)| RunStyleRange {
+            canonical_text: text,
+            runs,
+            range: range.clone(),
+        })
+        .collect::<Vec<_>>();
+    let edits = clear_supported_styles_over_ranges(&ranges)?;
     let mut changed = false;
     for ((target, text, _, _), edit) in snapshots.iter().zip(&edits) {
         if !edit.changed {

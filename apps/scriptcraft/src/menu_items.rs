@@ -6,6 +6,7 @@
 //! real commands; placeholders are intrinsically disabled and never dispatch.
 
 use scriptcraft_commands::CommandId;
+use scriptcraft_commands::{Command, EditorSurface, ParagraphAlignmentValue, TitleTextStyle};
 use super::shortcuts::{display_shortcut, primary_shortcut};
 pub(super) use super::shortcuts::{LogicalShortcut, ShortcutKey};
 
@@ -21,12 +22,29 @@ pub(super) struct MenuSpec {
 pub(super) enum MenuEntrySpec {
     Item(MenuItemSpec),
     Separator,
+    Submenu(&'static MenuSpec),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MenuItemBehavior {
     Command(CommandId),
+    MenuCommand(MenuAction),
     DisabledPlaceholder(PlaceholderKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MenuAction {
+    ToggleStyle(TitleTextStyle),
+    ClearStyles,
+    SetAlignment(ParagraphAlignmentValue),
+}
+
+pub(super) fn command_for_action(action: MenuAction, surface: EditorSurface) -> Command {
+    match action {
+        MenuAction::ToggleStyle(style) => Command::EditorStyleToggle { surface, style },
+        MenuAction::ClearStyles => Command::EditorStyleClear { surface },
+        MenuAction::SetAlignment(alignment) => Command::EditorAlignmentSet { surface, alignment },
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +109,23 @@ const fn placeholder(
     MenuEntrySpec::Item(MenuItemSpec {
         id, label, accessibility_name, icon: None, shortcut, windows_alias: None,
         behavior: MenuItemBehavior::DisabledPlaceholder(kind),
+    })
+}
+
+const fn menu_command_item(
+    id: &'static str,
+    label: &'static str,
+    shortcut: Option<LogicalShortcut>,
+    action: MenuAction,
+) -> MenuEntrySpec {
+    MenuEntrySpec::Item(MenuItemSpec {
+        id,
+        label,
+        accessibility_name: label,
+        icon: None,
+        shortcut,
+        windows_alias: None,
+        behavior: MenuItemBehavior::MenuCommand(action),
     })
 }
 
@@ -201,11 +236,11 @@ const FORMAT_ENTRIES: &[MenuEntrySpec] = &[
     placeholder("format.set-font", "Set Font...", "Set Font (disabled placeholder)", ITEM, None),
     placeholder("format.font", "Font", "Font submenu placeholder", DISCLOSURE, None),
     placeholder("format.size", "Size", "Size submenu placeholder", DISCLOSURE, None),
-    placeholder("format.style", "Style", "Style submenu placeholder", DISCLOSURE, None),
+    MenuEntrySpec::Submenu(&STYLE_MENU),
     placeholder("format.color", "Color", "Color submenu placeholder", DISCLOSURE, None),
     placeholder("format.highlight", "Highlight", "Highlight submenu placeholder", DISCLOSURE, None),
     placeholder("format.toggle-case", "tOGGLE cASE", "Toggle Case (disabled placeholder)", ITEM, None), SEP,
-    placeholder("format.alignment", "Alignment", "Alignment submenu placeholder", DISCLOSURE, None),
+    MenuEntrySpec::Submenu(&ALIGNMENT_MENU),
     placeholder("format.spacing", "Spacing", "Spacing submenu placeholder", DISCLOSURE, None),
     placeholder("format.space-before", "Space Before", "Space Before submenu placeholder", DISCLOSURE, None),
     placeholder("format.leading", "Leading", "Leading submenu placeholder", DISCLOSURE, None), SEP,
@@ -219,8 +254,27 @@ const FORMAT_ENTRIES: &[MenuEntrySpec] = &[
         Some(display_shortcut(ShortcutKey::D, true, false, true, false)),
         CommandId::EditorDualDialogueToggle,
     ),
-    placeholder("format.edit-dual-dialogue", "Edit Dual Dialogue", "Edit Dual Dialogue (disabled placeholder)", ITEM, Some(primary_shortcut(ShortcutKey::D, true))),
 ];
+
+const STYLE_ENTRIES: &[MenuEntrySpec] = &[
+    menu_command_item("format.style.bold", "Bold", Some(primary_shortcut(ShortcutKey::B, false)), MenuAction::ToggleStyle(TitleTextStyle::Bold)),
+    menu_command_item("format.style.italics", "Italics", Some(primary_shortcut(ShortcutKey::I, false)), MenuAction::ToggleStyle(TitleTextStyle::Italics)),
+    menu_command_item("format.style.underline", "Underline", Some(primary_shortcut(ShortcutKey::U, false)), MenuAction::ToggleStyle(TitleTextStyle::Underline)),
+    menu_command_item("format.style.all-caps", "All Caps", Some(primary_shortcut(ShortcutKey::K, false)), MenuAction::ToggleStyle(TitleTextStyle::AllCaps)),
+    menu_command_item("format.style.strikethrough", "Strikethrough", Some(primary_shortcut(ShortcutKey::X, true)), MenuAction::ToggleStyle(TitleTextStyle::Strikethrough)),
+    SEP,
+    menu_command_item("format.style.plain-text", "Plain Text", Some(primary_shortcut(ShortcutKey::T, false)), MenuAction::ClearStyles),
+];
+
+const ALIGNMENT_ENTRIES: &[MenuEntrySpec] = &[
+    menu_command_item("format.alignment.left", "Left", None, MenuAction::SetAlignment(ParagraphAlignmentValue::Left)),
+    menu_command_item("format.alignment.center", "Center", None, MenuAction::SetAlignment(ParagraphAlignmentValue::Center)),
+    menu_command_item("format.alignment.right", "Right", None, MenuAction::SetAlignment(ParagraphAlignmentValue::Right)),
+    menu_command_item("format.alignment.justified", "Justified", None, MenuAction::SetAlignment(ParagraphAlignmentValue::Justified)),
+];
+
+const STYLE_MENU: MenuSpec = MenuSpec { id: "format.style", label: "Style", accessibility_name: "Style", entries: STYLE_ENTRIES };
+const ALIGNMENT_MENU: MenuSpec = MenuSpec { id: "format.alignment", label: "Alignment", accessibility_name: "Alignment", entries: ALIGNMENT_ENTRIES };
 
 const INSERT_ENTRIES: &[MenuEntrySpec] = &[
     placeholder("insert.add-alt", "Add Alt", "Add Alt (disabled placeholder)", ITEM, Some(display_shortcut(ShortcutKey::Period, true, false, false, true))),

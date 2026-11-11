@@ -13,11 +13,13 @@ use scriptcraft_commands::{Command, CommandOrigin, EditorSurface};
 pub(super) fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("scriptcraft-title-page-editor")
 }
-pub(super) const TITLE_PAGE_NATIVE_TITLE: &str = "Title Page";
+pub(super) fn native_title(main_window_title: &str) -> String {
+    format!("Title Page - {main_window_title}")
+}
 
-fn viewport_builder() -> egui::ViewportBuilder {
+fn viewport_builder(main_window_title: &str) -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
-        .with_title(TITLE_PAGE_NATIVE_TITLE)
+        .with_title(native_title(main_window_title))
         .with_inner_size([820.0, 680.0])
         .with_min_inner_size([520.0, 420.0])
         .with_resizable(true)
@@ -39,7 +41,7 @@ pub(super) fn show_if_open(app: &mut ScriptCraftApp, root_ctx: &egui::Context) {
     let focus_requested = std::mem::take(&mut app.title_page_focus_requested);
     root_ctx.show_viewport_immediate(
         viewport_id(),
-        viewport_builder(),
+        viewport_builder(&app.native_title),
         |ui, class| {
             if !accepts_viewport_class(class) {
                 // egui 0.34 deliberately falls back to an embedded Window when
@@ -170,7 +172,7 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
 
 #[cfg(test)]
 mod tests {
-    use super::{accepts_viewport_class, viewport_builder, viewport_id, TITLE_PAGE_NATIVE_TITLE};
+    use super::{accepts_viewport_class, native_title, viewport_builder, viewport_id};
     use eframe::egui;
 
     #[test]
@@ -179,9 +181,11 @@ mod tests {
             viewport_id(),
             egui::ViewportId::from_hash_of("scriptcraft-title-page-editor"),
         );
-        assert_eq!(TITLE_PAGE_NATIVE_TITLE, "Title Page");
-        let builder = viewport_builder();
-        assert_eq!(builder.title.as_deref(), Some(TITLE_PAGE_NATIVE_TITLE));
+        let title = native_title("Untitled Screenplay");
+        assert_eq!(title, "Title Page - Untitled Screenplay");
+        assert_eq!(native_title("Example.fdx"), "Title Page - Example.fdx");
+        let builder = viewport_builder("Untitled Screenplay");
+        assert_eq!(builder.title.as_deref(), Some("Title Page - Untitled Screenplay"));
         assert_eq!(builder.inner_size, Some([820.0, 680.0].into()));
         assert_eq!(builder.min_inner_size, Some([520.0, 420.0].into()));
     }

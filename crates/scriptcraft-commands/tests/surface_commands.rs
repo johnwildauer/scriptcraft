@@ -26,14 +26,15 @@ fn position(element: u32, offset: u32) -> Position {
 #[test]
 fn catalog_has_stable_additive_surface_and_host_effect_ids() {
     assert_eq!(validate_descriptor_catalog(), Ok(()));
-    assert_eq!(CommandId::ALL.len(), 48);
-    assert_eq!(COMMAND_DESCRIPTORS.len(), 48);
+    assert_eq!(CommandId::ALL.len(), 50);
+    assert_eq!(COMMAND_DESCRIPTORS.len(), 50);
     for (id, spelling) in [
         (CommandId::WindowTitlePageOpen, "window.title-page.open"),
         (CommandId::WindowTitlePageClose, "window.title-page.close"),
         (CommandId::EditorStyleToggle, "editor.style.toggle"),
         (CommandId::EditorAlignmentSet, "editor.alignment.set"),
         (CommandId::EditorDualDialogueToggle, "editor.dual-dialogue.toggle"),
+        (CommandId::EditorStyleClear, "editor.style.clear"),
         (CommandId::PdfIncludeTitlePageResolve, "pdf.include-title-page.resolve"),
     ] {
         assert_eq!(id.as_str(), spelling);
@@ -52,6 +53,44 @@ fn catalog_has_stable_additive_surface_and_host_effect_ids() {
         Command::EditorFocus.host_effect_description(),
         Some(HostEffectDescription::FocusActiveEditor)
     );
+}
+
+#[test]
+fn plain_text_surface_command_is_additive_and_keeps_wire_version_one() {
+    let command = Command::EditorStyleClear {
+        surface: EditorSurface::TitlePage,
+    };
+    let envelope = CommandEnvelope::new(CommandOrigin::Test, command.clone());
+    assert_eq!(CommandId::EditorStyleClear.as_str(), "editor.style.clear");
+    assert_eq!(command.id(), CommandId::EditorStyleClear);
+    assert_eq!(envelope.version, 1);
+    assert!(envelope.validate().is_ok());
+
+    let mut editing = session();
+    valid(editing.insert_title("Title"));
+    valid(editing.set_title_selection(CoreSelection {
+        anchor: CorePosition { element: 0, offset: 0 },
+        focus: CorePosition { element: 0, offset: 5 },
+    }));
+    assert_eq!(
+        execute_editor_command(
+            &mut editing,
+            &Command::EditorStyleToggle {
+                surface: EditorSurface::TitlePage,
+                style: TitleTextStyle::Bold,
+            },
+        ),
+        CommandOutcome::Changed,
+    );
+    assert_eq!(
+        execute_editor_command(&mut editing, &command),
+        CommandOutcome::Changed,
+    );
+    assert!(editing.project().title_page[0].runs.iter().all(|run| {
+        !run.attributes.iter().any(|attribute| {
+            attribute.name == "Style" && !attribute.value.is_empty()
+        })
+    }));
 }
 
 #[test]

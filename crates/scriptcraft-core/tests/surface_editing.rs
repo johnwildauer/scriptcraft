@@ -1,7 +1,7 @@
 use scriptcraft_core::editing::{EditingSession, Position, Selection};
 use scriptcraft_core::fdx::{read_v6, write_v6};
 use scriptcraft_core::preservation::{PreservedNode, SourceOwnership};
-use scriptcraft_core::{ParagraphAlignment, Project, RunStyle, StableId};
+use scriptcraft_core::{ParagraphAlignment, Project, RunAttribute, RunStyle, RunStyleFlags, StableId, TextRun};
 
 fn valid<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| panic!("unexpected error: {error:?}"))
@@ -142,6 +142,60 @@ fn body_formatting_changes_semantics_without_changing_the_screenplay_role() {
     valid(session.set_body_alignment(ParagraphAlignment::Right));
     assert_eq!(session.project().elements[0].role, role);
     assert_eq!(session.project().direct_paragraph_overrides[&session.project().elements[0].id].paragraph.alignment, Some(ParagraphAlignment::Right));
+}
+
+#[test]
+fn plain_text_is_one_undoable_body_edit_and_preserves_alignment_and_canonical_text() {
+    let mut project = valid(Project::new());
+    project.elements[0].text = "Body".to_owned();
+    project.elements[0].runs = vec![TextRun {
+        text: "Body".to_owned(),
+        attributes: vec![RunAttribute {
+            name: "Style".to_owned(),
+            value: "Bold+Italic+Underline+AllCaps+Strikethrough+VendorToken".to_owned(),
+        }],
+    }];
+    let mut session = valid(EditingSession::new(project));
+    valid(session.set_body_alignment(ParagraphAlignment::Right));
+    valid(session.set_selection(Selection {
+        anchor: Position { element: 0, offset: 0 },
+        focus: Position { element: 0, offset: 4 },
+    }));
+    let before_clear = session.project().clone();
+
+    valid(session.clear_body_run_styles());
+
+    assert_eq!(session.project().elements[0].text, "Body");
+    assert_eq!(session.project().elements[0].runs[0].attributes[0].value, "VendorToken");
+    assert_eq!(
+        session.project().direct_paragraph_overrides[&session.project().elements[0].id]
+            .paragraph
+            .alignment,
+        Some(ParagraphAlignment::Right),
+    );
+    assert!(session.undo().is_ok());
+    assert_eq!(session.project(), &before_clear);
+}
+
+#[test]
+fn plain_text_at_a_collapsed_caret_resets_typing_style_without_document_history() {
+    let mut session = valid(EditingSession::new(valid(Project::new())));
+    valid(session.toggle_body_run_style(RunStyle::Bold));
+    valid(session.toggle_body_run_style(RunStyle::AllCaps));
+    assert!(session.body_typing_style().bold && session.body_typing_style().all_caps);
+    let revision = session.revision();
+
+    valid(session.clear_body_run_styles());
+
+    assert_eq!(session.body_typing_style(), RunStyleFlags::default());
+    assert_eq!(session.revision(), revision);
+    assert!(!session.can_undo());
+    valid(session.insert("plain"));
+    assert!(session.project().elements[0].runs.iter().all(|run| {
+        !run.attributes.iter().any(|attribute| {
+            attribute.name == "Style" && !attribute.value.is_empty()
+        })
+    }));
 }
 
 #[test]

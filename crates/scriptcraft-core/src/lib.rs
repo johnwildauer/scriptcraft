@@ -45,7 +45,9 @@ pub use formatting::{
     SourceFontSpec, SourceLayoutSettings, SourceParagraphOverrides, SourceParagraphSpec,
 };
 pub use formatted_text::{
-    parse_style_attribute, project_lit_styles, project_paragraph_alignment,
+    clear_paragraph_run_styles, clear_supported_styles_for_range,
+    clear_supported_styles_over_ranges, parse_style_attribute, project_lit_styles,
+    project_paragraph_alignment,
     set_paragraph_alignments, styled_display_spans, toggle_paragraph_run_style,
     toggle_paragraph_run_styles, toggle_style_for_range, toggle_style_over_ranges,
     project_lit_styles_over_ranges, project_style_at_caret, DisplaySourceSegment,

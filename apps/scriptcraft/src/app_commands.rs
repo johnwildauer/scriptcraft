@@ -46,6 +46,7 @@ pub(super) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::WindowTitlePageOpen => Command::WindowTitlePageOpen,
         CommandId::WindowTitlePageClose => Command::WindowTitlePageClose,
         CommandId::EditorDualDialogueToggle => Command::EditorDualDialogueToggle,
+        CommandId::EditorStyleClear => Command::EditorStyleClear { surface: EditorSurface::Body },
         _ => return None,
     })
 }
@@ -317,6 +318,7 @@ impl ScriptCraftApp {
             selection.focus.offset < text_len || role_is_empty_parenthetical
         };
 
+        let dual_dialogue_target = self.dual_dialogue_toggle_target();
         AppCommandAvailability {
             modal_blocked: migration_pending,
             native_output_active,
@@ -330,18 +332,29 @@ impl ScriptCraftApp {
             // Clipboard state is read only when Paste is activated, never per frame.
             paste: !migration_pending,
             body_only: self.active_editor_surface == EditorSurface::Body,
-            dual_dialogue_toggle: self.active_editor_surface == EditorSurface::Body
-                && self
-                    .session
-                    .dual_dialogue_toggle_target(
-                        scriptcraft_core::dual_dialogue::SelectionSurface::Body,
-                    )
-                    .is_ok_and(|target| target.is_some()),
+            dual_dialogue_toggle: dual_dialogue_target.is_some(),
             // The same open command focuses/raises the singleton child when it
             // already exists; modal state, not open state, blocks activation.
             title_open: !migration_pending && !self.title_viewport_unsupported,
             title_close: !migration_pending && self.title_page_window_open,
         }
+    }
+
+    pub(super) fn dual_dialogue_menu_should_say_undual(&self) -> bool {
+        matches!(
+            self.dual_dialogue_toggle_target(),
+            Some(scriptcraft_core::dual_dialogue::ToggleTarget::Disable(_))
+        )
+    }
+
+    fn dual_dialogue_toggle_target(
+        &self,
+    ) -> Option<scriptcraft_core::dual_dialogue::ToggleTarget> {
+        (self.active_editor_surface == EditorSurface::Body)
+            .then(|| self.session.dual_dialogue_toggle_target(
+                scriptcraft_core::dual_dialogue::SelectionSurface::Body,
+            ).ok().flatten())
+            .flatten()
     }
 
     fn with_native_output_modal(&mut self, operation: impl FnOnce(&mut ScriptCraftApp)) {
@@ -398,6 +411,7 @@ impl ScriptCraftApp {
                 | CommandId::EditorNavigationVertical
                 | CommandId::EditorNavigationLineEdge
                 | CommandId::EditorStyleToggle
+                | CommandId::EditorStyleClear
                 | CommandId::EditorAlignmentSet
                 | CommandId::EditorDualDialogueToggle
         );
@@ -530,6 +544,11 @@ impl ScriptCraftApp {
             }
             Command::EditorStyleToggle { surface, style } => self.execute_editor(
                 &Command::EditorStyleToggle { surface, style },
+                super::RevealIntent::Conditional,
+                ctx,
+            ),
+            Command::EditorStyleClear { surface } => self.execute_editor(
+                &Command::EditorStyleClear { surface },
                 super::RevealIntent::Conditional,
                 ctx,
             ),
@@ -1130,6 +1149,8 @@ fn route_to_focused_surface(
         CommandOrigin::Keyboard
             | CommandOrigin::Shortcut
             | CommandOrigin::Pointer
+            | CommandOrigin::Menu
+            | CommandOrigin::NativeMenu
             | CommandOrigin::ImeCommit
     ) {
         return command;
@@ -1138,6 +1159,11 @@ fn route_to_focused_surface(
         Command::EditorTextInsert { text, .. } => Command::EditorTextInsert { text, surface },
         Command::EditorTextPaste { text, .. } => Command::EditorTextPaste { text, surface },
         Command::EditorElementChange { role, .. } => Command::EditorElementChange { role, surface },
+        Command::EditorStyleToggle { style, .. } => Command::EditorStyleToggle { surface, style },
+        Command::EditorStyleClear { .. } => Command::EditorStyleClear { surface },
+        Command::EditorAlignmentSet { alignment, .. } => {
+            Command::EditorAlignmentSet { surface, alignment }
+        }
         Command::EditorSelectionSet { selection, .. } => Command::EditorSelectionSet { selection, surface },
         Command::EditorSelectionPointer { position, phase, .. } => {
             Command::EditorSelectionPointer { position, phase, surface }
@@ -1743,6 +1769,7 @@ mod surface_command_availability_tests {
         let title_focused = app.app_command_availability();
         assert!(!title_focused.is_enabled(CommandId::EditorElementChange));
         assert!(title_focused.is_enabled(CommandId::EditorStyleToggle));
+        assert!(title_focused.is_enabled(CommandId::EditorStyleClear));
         assert!(title_focused.is_enabled(CommandId::EditorAlignmentSet));
 
         app.set_title_page_window_open(true);
@@ -1778,12 +1805,20 @@ mod surface_command_availability_tests {
             EditorSurface::TitlePage,
         );
         assert!(matches!(keyboard, Command::EditorTextInsert { surface: EditorSurface::TitlePage, .. }));
+        for origin in [CommandOrigin::Menu, CommandOrigin::NativeMenu, CommandOrigin::Shortcut] {
+            let clear = super::route_to_focused_surface(
+                Command::EditorStyleClear { surface: EditorSurface::Body },
+                origin,
+                EditorSurface::TitlePage,
+            );
+            assert!(matches!(clear, Command::EditorStyleClear { surface: EditorSurface::TitlePage }));
+        }
         let external = super::route_to_focused_surface(
-            Command::EditorTextInsert { text: "x".into(), surface: EditorSurface::Body },
+            Command::EditorStyleClear { surface: EditorSurface::Body },
             CommandOrigin::Mcp,
             EditorSurface::TitlePage,
         );
-        assert!(matches!(external, Command::EditorTextInsert { surface: EditorSurface::Body, .. }));
+        assert!(matches!(external, Command::EditorStyleClear { surface: EditorSurface::Body }));
         assert!(matches!(
             super::route_to_focused_surface(Command::EditUndo, CommandOrigin::Keyboard, EditorSurface::TitlePage),
             Command::EditUndo
@@ -2455,6 +2490,16 @@ mod dual_dialogue_dispatch_tests {
         assert!(app
             .app_command_availability()
             .is_enabled(CommandId::EditorDualDialogueToggle));
+        assert!(!app.dual_dialogue_menu_should_say_undual());
+        let toggle = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorDualDialogueToggle,
+                CommandOrigin::Shortcut,
+            ),
+            &egui::Context::default(),
+        );
+        assert_eq!(toggle.outcome, DesktopCommandOutcome::Editor(CommandOutcome::Changed));
+        assert!(app.dual_dialogue_menu_should_say_undual());
 
         assert!(app
             .session
@@ -2466,6 +2511,7 @@ mod dual_dialogue_dispatch_tests {
         assert!(!app
             .app_command_availability()
             .is_enabled(CommandId::EditorDualDialogueToggle));
+        assert!(!app.dual_dialogue_menu_should_say_undual());
 
         assert!(app
             .session

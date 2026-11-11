@@ -126,6 +126,10 @@ pub fn execute_editor_command_on_surface(
             EditorSurface::Body => session.toggle_body_run_style(style.as_core()),
             EditorSurface::TitlePage => session.toggle_title_run_style(style.as_core()),
         },
+        Command::EditorStyleClear { surface } => match surface {
+            EditorSurface::Body => session.clear_body_run_styles(),
+            EditorSurface::TitlePage => session.clear_title_run_styles(),
+        },
         Command::EditorAlignmentSet { surface, alignment } => match surface {
             EditorSurface::Body => session.set_body_alignment(alignment.as_core()),
             EditorSurface::TitlePage => session.set_title_alignment(alignment.as_core()),

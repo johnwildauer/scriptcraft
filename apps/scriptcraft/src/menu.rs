@@ -4,12 +4,12 @@ use super::app_commands::{
     command_for_id, AppCommandAvailability, CommandInvocation,
 };
 use super::menu_items::{
-    LogicalShortcut, MenuEntrySpec, MenuItemBehavior, MenuItemSpec, PlaceholderKind, SemanticIcon,
-    ShortcutKey, MENU_CATALOG,
+    command_for_action, LogicalShortcut, MenuAction, MenuEntrySpec, MenuItemBehavior,
+    MenuItemSpec, PlaceholderKind, SemanticIcon, ShortcutKey, MENU_CATALOG,
 };
 use super::shortcuts::{shortcut_matches, ShortcutPlatform};
 use eframe::egui;
-use scriptcraft_commands::{CommandId, CommandOrigin};
+use scriptcraft_commands::{Command, CommandId, CommandOrigin};
 use std::collections::VecDeque;
 
 /// Initial presentation values are agent-defaults pending user review against
@@ -281,50 +281,85 @@ pub(super) fn command_for_key_event(
     command_for_key_event_on_platform(key, modifiers, ShortcutPlatform::current())
 }
 
+pub(super) fn command_for_key_event_command(
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+) -> Option<Command> {
+    command_for_shortcut_event_on_platform(key, modifiers, ShortcutPlatform::current())
+}
+
 fn command_for_key_event_on_platform(
     key: egui::Key,
     modifiers: egui::Modifiers,
     platform: ShortcutPlatform,
 ) -> Option<CommandId> {
-    for menu in MENU_CATALOG {
-        for entry in menu.entries {
-            let MenuEntrySpec::Item(item) = entry else {
-                continue;
-            };
-            let MenuItemBehavior::Command(command) = item.behavior else {
-                continue;
-            };
-            let is_dual_dialogue = command == CommandId::EditorDualDialogueToggle;
-            if is_dual_dialogue && platform == ShortcutPlatform::Other {
-                continue;
-            }
-            let advertised_match = !(is_dual_dialogue && platform == ShortcutPlatform::Windows)
-                && item
-                    .shortcut
-                    .is_some_and(|shortcut| shortcut_matches(shortcut, key, modifiers, platform));
-            let windows_alias_match = platform == ShortcutPlatform::Windows
-                && item.windows_alias.is_some_and(|shortcut| {
-                    shortcut_matches(shortcut, key, modifiers, ShortcutPlatform::Windows)
-                });
-            if advertised_match || windows_alias_match {
-                return Some(command);
+    command_for_shortcut_event_on_platform(key, modifiers, platform).map(|command| command.id())
+}
+
+fn command_for_shortcut_event_on_platform(
+    key: egui::Key,
+    modifiers: egui::Modifiers,
+    platform: ShortcutPlatform,
+) -> Option<Command> {
+    fn visit(
+        entries: &'static [MenuEntrySpec],
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+        platform: ShortcutPlatform,
+    ) -> Option<Command> {
+        for entry in entries {
+            match entry {
+                MenuEntrySpec::Submenu(menu) => {
+                    if let Some(command) = visit(menu.entries, key, modifiers, platform) {
+                        return Some(command);
+                    }
+                }
+                MenuEntrySpec::Item(item) => {
+                    let dual = item.behavior
+                        == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle);
+                    if dual && platform == ShortcutPlatform::Other {
+                        continue;
+                    }
+                    let advertised = !(dual && platform == ShortcutPlatform::Windows)
+                        && item.shortcut.is_some_and(|shortcut| {
+                            shortcut_matches(shortcut, key, modifiers, platform)
+                        });
+                    let windows_alias = platform == ShortcutPlatform::Windows
+                        && item.windows_alias.is_some_and(|shortcut| {
+                            shortcut_matches(shortcut, key, modifiers, platform)
+                        });
+                    if !advertised && !windows_alias {
+                        continue;
+                    }
+                    return match item.behavior {
+                        MenuItemBehavior::Command(command) => super::app_commands::command_for_id(command),
+                        MenuItemBehavior::MenuCommand(action) => {
+                            Some(command_for_action(action, scriptcraft_commands::EditorSurface::Body))
+                        }
+                        MenuItemBehavior::DisabledPlaceholder(_) => None,
+                    };
+                }
+                MenuEntrySpec::Separator => {}
             }
         }
+        None
     }
-    None
+    MENU_CATALOG
+        .iter()
+        .find_map(|menu| visit(menu.entries, key, modifiers, platform))
 }
 
 pub(super) fn command_for_pressed_key_event(
     event: &egui::Event,
     platform: ShortcutPlatform,
-) -> Option<CommandId> {
+) -> Option<Command> {
     match event {
         egui::Event::Key {
             key,
             pressed: true,
             modifiers,
             ..
-        } => command_for_key_event_on_platform(*key, *modifiers, platform),
+        } => command_for_shortcut_event_on_platform(*key, *modifiers, platform),
         _ => None,
     }
 }
@@ -362,6 +397,7 @@ impl PendingDesktopCommands {
 pub(super) fn show_menu_bar(
     ui: &mut egui::Ui,
     availability: AppCommandAvailability,
+    say_undual: bool,
     pending: &mut PendingDesktopCommands,
 ) {
     let metrics = MENU_PRESENTATION;
@@ -425,76 +461,7 @@ pub(super) fn show_menu_bar(
                         .min_scrolled_height(0.0)
                         .auto_shrink([true, true])
                         .show(ui, |ui| {
-                            for entry in menu.entries {
-                                match entry {
-                                    MenuEntrySpec::Separator => {
-                                        ui.add(
-                                            egui::Separator::default()
-                                                .spacing(metrics.separator_spacing)
-                                                .horizontal(),
-                                        );
-                                    }
-                                    MenuEntrySpec::Item(item) => {
-                                        let enabled = match item.behavior {
-                                            MenuItemBehavior::Command(command) => {
-                                                command_enabled(command, availability)
-                                            }
-                                            MenuItemBehavior::DisabledPlaceholder(_) => false,
-                                        };
-                                        let shortcut = menu_shortcut_label(item);
-                                        let icon_atom = menu_icon_atom(
-                                            item,
-                                            matches!(
-                                                item.behavior,
-                                                MenuItemBehavior::DisabledPlaceholder(
-                                                    PlaceholderKind::Checked
-                                                )
-                                            ),
-                                            metrics,
-                                        );
-                                        let mut label_atom = egui::Atom::from(
-                                            egui::RichText::new(item.label)
-                                                .size(metrics.item_text_size),
-                                        );
-                                        label_atom.grow = true;
-                                        label_atom.align = egui::Align2::LEFT_CENTER;
-                                        let button = egui::Button::new((icon_atom, label_atom))
-                                        .shortcut_text(
-                                            egui::RichText::new(shortcut)
-                                                .size(metrics.shortcut_text_size),
-                                        )
-                                        .min_size(egui::vec2(0.0, metrics.row_height))
-                                        .corner_radius(egui::CornerRadius::same(
-                                            metrics.row_corner_radius,
-                                        ));
-                                        let response = ui.add_enabled(enabled, button);
-                                        response.widget_info(|| {
-                                            egui::WidgetInfo::labeled(
-                                                egui::WidgetType::Button,
-                                                enabled,
-                                                item.accessibility_name.to_owned(),
-                                            )
-                                        });
-                                        if response.has_focus() {
-                                            ui.painter().rect_stroke(
-                                                response.rect.shrink(1.0),
-                                                egui::CornerRadius::same(
-                                                    metrics.row_corner_radius,
-                                                ),
-                                                ui.visuals().selection.stroke,
-                                                egui::StrokeKind::Inside,
-                                            );
-                                        }
-                                        if response.clicked() {
-                                            if let MenuItemBehavior::Command(command) = item.behavior {
-                                                pending.enqueue_id(command, CommandOrigin::Menu);
-                                                ui.close();
-                                                ui.ctx().request_repaint();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            render_menu_entries(ui, menu.entries, availability, say_undual, pending, metrics);
                         });
                 },
             );
@@ -528,6 +495,94 @@ pub(super) fn show_menu_bar(
                 .data_mut(|data| data.insert_temp(active_top_level_popup_key, popup_id));
         }
     });
+}
+
+fn render_menu_entries(
+    ui: &mut egui::Ui,
+    entries: &'static [MenuEntrySpec],
+    availability: AppCommandAvailability,
+    say_undual: bool,
+    pending: &mut PendingDesktopCommands,
+    metrics: MenuPresentationMetrics,
+) {
+    for entry in entries {
+        match entry {
+            MenuEntrySpec::Separator => {
+                ui.add(egui::Separator::default().spacing(metrics.separator_spacing).horizontal());
+            }
+            MenuEntrySpec::Submenu(menu) => {
+                ui.menu_button(egui::RichText::new(menu.label).size(metrics.item_text_size), |ui| {
+                    render_menu_entries(ui, menu.entries, availability, say_undual, pending, metrics);
+                });
+            }
+            MenuEntrySpec::Item(item) => {
+                let command = menu_item_command(item);
+                let enabled = match item.behavior {
+                    MenuItemBehavior::Command(command) => command_enabled(command, availability),
+                    MenuItemBehavior::MenuCommand(_) => command.as_ref().is_some_and(|command| {
+                        command_enabled(command.id(), availability)
+                    }),
+                    MenuItemBehavior::DisabledPlaceholder(_) => false,
+                };
+                let label = menu_item_label(item, say_undual);
+                let shortcut = menu_shortcut_label(item);
+                let icon_atom = menu_icon_atom(
+                    item,
+                    matches!(item.behavior, MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Checked)),
+                    metrics,
+                );
+                let mut label_atom = egui::Atom::from(egui::RichText::new(label).size(metrics.item_text_size));
+                label_atom.grow = true;
+                label_atom.align = egui::Align2::LEFT_CENTER;
+                let button = egui::Button::new((icon_atom, label_atom))
+                    .shortcut_text(egui::RichText::new(shortcut).size(metrics.shortcut_text_size))
+                    .min_size(egui::vec2(0.0, metrics.row_height))
+                    .corner_radius(egui::CornerRadius::same(metrics.row_corner_radius));
+                let response = ui.add_enabled(enabled, button);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        enabled,
+                        label.to_owned(),
+                    )
+                });
+                if response.has_focus() {
+                    ui.painter().rect_stroke(
+                        response.rect.shrink(1.0),
+                        egui::CornerRadius::same(metrics.row_corner_radius),
+                        ui.visuals().selection.stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                if response.clicked() {
+                    if let Some(command) = command {
+                        pending.enqueue(CommandInvocation::new(command, CommandOrigin::Menu));
+                        ui.close();
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn menu_item_command(item: &MenuItemSpec) -> Option<Command> {
+    match item.behavior {
+        MenuItemBehavior::Command(id) => super::app_commands::command_for_id(id),
+        MenuItemBehavior::MenuCommand(action) => Some(command_for_action(
+            action,
+            scriptcraft_commands::EditorSurface::Body,
+        )),
+        MenuItemBehavior::DisabledPlaceholder(_) => None,
+    }
+}
+
+fn menu_item_label<'a>(item: &'a MenuItemSpec, say_undual: bool) -> &'a str {
+    if item.behavior == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle) && say_undual {
+        "Undual Dialogue"
+    } else {
+        item.label
+    }
 }
 
 fn menu_icon_atom(
@@ -696,6 +751,16 @@ impl super::ScriptCraftApp {
 mod dual_dialogue_menu_tests {
     use super::*;
 
+    fn collect_items<'a>(entries: &'a [MenuEntrySpec], items: &mut Vec<&'a MenuItemSpec>) {
+        for entry in entries {
+            match entry {
+                MenuEntrySpec::Item(item) => items.push(item),
+                MenuEntrySpec::Submenu(menu) => collect_items(menu.entries, items),
+                MenuEntrySpec::Separator => {}
+            }
+        }
+    }
+
     fn dual_dialogue_item() -> MenuItemSpec {
         MENU_CATALOG
             .iter()
@@ -731,14 +796,10 @@ mod dual_dialogue_menu_tests {
 
     #[test]
     fn dual_dialogue_remains_the_single_format_menu_command() {
-        let entries = MENU_CATALOG
-            .iter()
-            .flat_map(|menu| menu.entries.iter())
-            .filter_map(|entry| match entry {
-                MenuEntrySpec::Item(item) => Some(item),
-                MenuEntrySpec::Separator => None,
-            })
-            .collect::<Vec<_>>();
+        let mut entries = Vec::new();
+        for menu in MENU_CATALOG {
+            collect_items(menu.entries, &mut entries);
+        }
         let active = entries
             .iter()
             .filter(|item| {
@@ -748,14 +809,11 @@ mod dual_dialogue_menu_tests {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, "format.dual-dialogue");
 
-        let edit = entries
+        assert!(!entries
             .iter()
-            .find(|item| item.id == "format.edit-dual-dialogue")
-            .copied();
-        assert!(edit.is_some_and(|item| {
-            matches!(item.behavior, MenuItemBehavior::DisabledPlaceholder(_))
-                && item.shortcut.is_some_and(|shortcut| shortcut.shift)
-        }));
+            .any(|item| item.id == "format.edit-dual-dialogue"));
+        assert_eq!(menu_item_label(&dual_dialogue_item(), true), "Undual Dialogue");
+        assert_eq!(menu_item_label(&dual_dialogue_item(), false), "Dual Dialogue");
     }
 
     #[cfg(target_os = "macos")]
@@ -978,6 +1036,31 @@ mod dual_dialogue_menu_tests {
     }
 
     #[test]
+    fn nested_format_shortcuts_resolve_to_typed_commands_on_macos_and_windows() {
+        use scriptcraft_commands::{EditorSurface, TitleTextStyle};
+
+        for platform in [ShortcutPlatform::MacOS, ShortcutPlatform::Windows] {
+            for (key, shift, expected) in [
+                (egui::Key::B, false, MenuAction::ToggleStyle(TitleTextStyle::Bold)),
+                (egui::Key::I, false, MenuAction::ToggleStyle(TitleTextStyle::Italics)),
+                (egui::Key::U, false, MenuAction::ToggleStyle(TitleTextStyle::Underline)),
+                (egui::Key::K, false, MenuAction::ToggleStyle(TitleTextStyle::AllCaps)),
+                (egui::Key::X, true, MenuAction::ToggleStyle(TitleTextStyle::Strikethrough)),
+                (egui::Key::T, false, MenuAction::ClearStyles),
+            ] {
+                assert_eq!(
+                    command_for_shortcut_event_on_platform(
+                        key,
+                        modifiers(platform, true, false, false, shift),
+                        platform,
+                    ),
+                    Some(command_for_action(expected, EditorSurface::Body)),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn in_window_accelerator_dispatch_only_recognizes_key_press_not_release() {
         let press = egui::Event::Key {
             key: egui::Key::D,
@@ -994,7 +1077,8 @@ mod dual_dialogue_menu_tests {
             modifiers: modifiers(ShortcutPlatform::Windows, true, true, false, false),
         };
         assert_eq!(
-            command_for_pressed_key_event(&press, ShortcutPlatform::Windows),
+            command_for_pressed_key_event(&press, ShortcutPlatform::Windows)
+                .map(|command| command.id()),
             Some(CommandId::EditorDualDialogueToggle),
         );
         assert_eq!(

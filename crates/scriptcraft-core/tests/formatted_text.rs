@@ -1,6 +1,6 @@
 use scriptcraft_core::preservation::{PreservationError, PreservedElement, PreservedNode, SourceOwnership};
 use scriptcraft_core::{
-    fdx, parse_style_attribute, project_lit_styles, project_paragraph_alignment,
+    clear_supported_styles_for_range, fdx, parse_style_attribute, project_lit_styles, project_paragraph_alignment,
     set_paragraph_alignments, styled_display_spans, toggle_paragraph_run_style,
     toggle_paragraph_run_styles, toggle_style_for_range, FormattedTextError, ParagraphAlignment,
     project_style_at_caret, ParagraphTarget, Project, RunAttribute, RunBoundaryAffinity, RunStyle,
@@ -158,6 +158,36 @@ fn complete_selection_removes_style_and_only_equal_ordered_attributes_coalesce()
     assert_eq!(edited.runs[1].text, "ef");
     assert_eq!(style(&edited.runs[1]), Some("Bold+Unknown"));
     assert_eq!(edited.runs[1].attributes[0].name, "Font");
+}
+
+#[test]
+fn plain_text_clears_only_supported_styles_and_preserves_unknown_tokens_and_other_attributes() {
+    let runs = vec![TextRun {
+        text: "abcdef".to_owned(),
+        attributes: vec![
+            attribute(
+                "Style",
+                "Bold+Italic+Underline+AllCaps+StrikeThrough+VendorCase",
+            ),
+            attribute("Font", "Courier Prime"),
+            attribute("RevisionID", "7"),
+        ],
+    }];
+    let edited = clear_supported_styles_for_range("abcdef", &runs, 1..5)
+        .expect("Plain Text accepts valid UTF-8 selections");
+
+    assert_eq!(edited.runs.iter().map(|run| run.text.as_str()).collect::<String>(), "abcdef");
+    assert_eq!(edited.active_style, RunStyleFlags::default());
+    assert!(edited.changed);
+    assert_eq!(style(&edited.runs[0]), Some("Bold+Italic+Underline+AllCaps+StrikeThrough+VendorCase"));
+    assert_eq!(style(&edited.runs[1]), Some("VendorCase"));
+    assert_eq!(style(&edited.runs[2]), Some("Bold+Italic+Underline+AllCaps+StrikeThrough+VendorCase"));
+    assert!(edited.runs[1].attributes.iter().any(|attribute| {
+        attribute.name == "Font" && attribute.value == "Courier Prime"
+    }));
+    assert!(edited.runs[1].attributes.iter().any(|attribute| {
+        attribute.name == "RevisionID" && attribute.value == "7"
+    }));
 }
 
 #[test]

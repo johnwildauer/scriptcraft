@@ -4,28 +4,30 @@
 
 use super::app_commands::AppCommandAvailability;
 use super::menu_items::{
-    LogicalShortcut, MenuEntrySpec, MenuItemBehavior, MenuItemSpec, PlaceholderKind, ShortcutKey,
-    MENU_CATALOG,
+    command_for_action, LogicalShortcut, MenuEntrySpec, MenuItemBehavior, MenuItemSpec,
+    PlaceholderKind, ShortcutKey, MENU_CATALOG,
 };
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use scriptcraft_commands::{CommandId, CommandOrigin};
+use scriptcraft_commands::{Command, CommandId, CommandOrigin, EditorSurface};
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{
     AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
 
 type NativeEventInbox = Arc<Mutex<VecDeque<MenuId>>>;
+const APPLICATION_MENU_TITLE: &str = "ScriptCraft";
 
 /// Retains the complete installed native tree and each item handle for the
 /// lifetime of `ScriptCraftApp`. The `Rc` marker makes main-thread confinement
 /// explicit in addition to the non-Send muda handles.
 pub(super) struct NativeMenuController {
     _root: Menu,
+    application_menu: Submenu,
     _submenus: Vec<Submenu>,
-    command_items: HashMap<MenuId, (CommandId, MenuItem)>,
+    command_items: HashMap<MenuId, (Command, MenuItem)>,
     _placeholder_items: Vec<MenuItem>,
     _checked_placeholder_items: Vec<CheckMenuItem>,
     _predefined_items: Vec<PredefinedMenuItem>,
@@ -48,13 +50,13 @@ impl NativeMenuController {
         let mut checked_placeholder_items = Vec::new();
         let mut retained_predefined_items = Vec::new();
 
-        let application_menu = Submenu::with_id("application", "ScriptCraft", true);
+        let application_menu = Submenu::with_id("application", APPLICATION_MENU_TITLE, true);
         append_predefined(
             &application_menu,
             PredefinedMenuItem::about(
                 Some("About ScriptCraft"),
                 Some(AboutMetadata {
-                    name: Some("ScriptCraft".to_owned()),
+                name: Some(APPLICATION_MENU_TITLE.to_owned()),
                     version: Some(env!("CARGO_PKG_VERSION").to_owned()),
                     ..AboutMetadata::default()
                 }),
@@ -93,28 +95,19 @@ impl NativeMenuController {
         )?;
         root.append(&application_menu)
             .map_err(|error| format!("could not append native Application menu: {error}"))?;
-        retained_submenus.push(application_menu);
 
         for menu_spec in MENU_CATALOG {
             let submenu = Submenu::with_id(menu_spec.id, menu_spec.label, true);
-            for entry in menu_spec.entries {
-                match entry {
-                    MenuEntrySpec::Separator => append_predefined(
-                        &submenu,
-                        PredefinedMenuItem::separator(),
-                        &mut retained_predefined_items,
-                    )?,
-                    MenuEntrySpec::Item(item) => append_catalog_item(
-                        &submenu,
-                        item,
-                        availability,
-                        &mut command_items,
-                        &mut retained_submenus,
-                        &mut placeholder_items,
-                        &mut checked_placeholder_items,
-                    )?,
-                }
-            }
+            append_catalog_entries(
+                &submenu,
+                menu_spec.entries,
+                availability,
+                &mut command_items,
+                &mut retained_submenus,
+                &mut retained_predefined_items,
+                &mut placeholder_items,
+                &mut checked_placeholder_items,
+            )?;
             root.append(&submenu).map_err(|error| {
                 format!("could not append native {} menu: {error}", menu_spec.label)
             })?;
@@ -141,6 +134,7 @@ impl NativeMenuController {
 
         Ok(Self {
             _root: root,
+            application_menu,
             _submenus: retained_submenus,
             command_items,
             _placeholder_items: placeholder_items,
@@ -163,29 +157,73 @@ impl NativeMenuController {
         };
         for id in events {
             if let Some((command, _)) = self.command_items.get(&id) {
-                pending.enqueue_id(*command, CommandOrigin::NativeMenu);
+                pending.enqueue(super::app_commands::CommandInvocation::new(
+                    command.clone(),
+                    CommandOrigin::NativeMenu,
+                ));
             }
         }
     }
 
     /// Reprojects native labels and enabled state from the shared catalog and
     /// current application availability after each application update.
-    pub(super) fn synchronize(&self, availability: AppCommandAvailability) {
+    pub(super) fn synchronize(&self, availability: AppCommandAvailability, say_undual: bool) {
+        // Keep the macOS primary Application menu independent of the active
+        // document's native window title. The item text also supplies its
+        // accessible name in the native menu tree.
+        self.application_menu.set_text(APPLICATION_MENU_TITLE);
         for menu in MENU_CATALOG {
-            for entry in menu.entries {
-                let MenuEntrySpec::Item(spec) = entry else {
-                    continue;
-                };
-                let id = MenuId::new(spec.id);
-                if let MenuItemBehavior::Command(command) = spec.behavior {
-                    if let Some((_, item)) = self.command_items.get(&id) {
-                        item.set_text(spec.label);
-                        item.set_enabled(availability.is_enabled(command));
-                    }
-                }
-            }
+            synchronize_entries(menu.entries, availability, say_undual, &self.command_items);
         }
     }
+}
+
+fn append_catalog_entries(
+    submenu: &Submenu,
+    entries: &'static [MenuEntrySpec],
+    availability: AppCommandAvailability,
+    command_items: &mut HashMap<MenuId, (Command, MenuItem)>,
+    retained_submenus: &mut Vec<Submenu>,
+    retained_predefined_items: &mut Vec<PredefinedMenuItem>,
+    placeholder_items: &mut Vec<MenuItem>,
+    checked_placeholder_items: &mut Vec<CheckMenuItem>,
+) -> Result<(), String> {
+    for entry in entries {
+        match entry {
+            MenuEntrySpec::Separator => append_predefined(
+                submenu,
+                PredefinedMenuItem::separator(),
+                retained_predefined_items,
+            )?,
+            MenuEntrySpec::Submenu(spec) => {
+                let child = Submenu::with_id(spec.id, spec.label, true);
+                append_catalog_entries(
+                    &child,
+                    spec.entries,
+                    availability,
+                    command_items,
+                    retained_submenus,
+                    retained_predefined_items,
+                    placeholder_items,
+                    checked_placeholder_items,
+                )?;
+                submenu.append(&child).map_err(|error| {
+                    format!("could not append native {} submenu: {error}", spec.label)
+                })?;
+                retained_submenus.push(child);
+            }
+            MenuEntrySpec::Item(item) => append_catalog_item(
+                submenu,
+                item,
+                availability,
+                command_items,
+                retained_submenus,
+                placeholder_items,
+                checked_placeholder_items,
+            )?,
+        }
+    }
+    Ok(())
 }
 
 fn append_predefined(
@@ -204,7 +242,7 @@ fn append_catalog_item(
     submenu: &Submenu,
     spec: &MenuItemSpec,
     availability: AppCommandAvailability,
-    command_items: &mut HashMap<MenuId, (CommandId, MenuItem)>,
+    command_items: &mut HashMap<MenuId, (Command, MenuItem)>,
     retained_submenus: &mut Vec<Submenu>,
     placeholder_items: &mut Vec<MenuItem>,
     checked_placeholder_items: &mut Vec<CheckMenuItem>,
@@ -216,6 +254,22 @@ fn append_catalog_item(
                 spec.id,
                 spec.label,
                 availability.is_enabled(command),
+                accelerator,
+            );
+            submenu.append(&item).map_err(|error| {
+                format!("could not append native menu item {}: {error}", spec.id)
+            })?;
+            command_items.insert(
+                MenuId::new(spec.id),
+                (super::app_commands::command_for_id(command).expect("catalog command is mapped"), item),
+            );
+        }
+        MenuItemBehavior::MenuCommand(action) => {
+            let command = command_for_action(action, EditorSurface::Body);
+            let item = MenuItem::with_id(
+                spec.id,
+                spec.label,
+                availability.is_enabled(command.id()),
                 accelerator,
             );
             submenu.append(&item).map_err(|error| {
@@ -248,6 +302,34 @@ fn append_catalog_item(
         }
     }
     Ok(())
+}
+
+fn synchronize_entries(
+    entries: &'static [MenuEntrySpec],
+    availability: AppCommandAvailability,
+    say_undual: bool,
+    command_items: &HashMap<MenuId, (Command, MenuItem)>,
+) {
+    for entry in entries {
+        match entry {
+            MenuEntrySpec::Submenu(menu) => {
+                synchronize_entries(menu.entries, availability, say_undual, command_items);
+            }
+            MenuEntrySpec::Item(spec) => {
+                let id = MenuId::new(spec.id);
+                if let Some((command, item)) = command_items.get(&id) {
+                    let label = if command.id() == CommandId::EditorDualDialogueToggle && say_undual {
+                        "Undual Dialogue"
+                    } else {
+                        spec.label
+                    };
+                    item.set_text(label);
+                    item.set_enabled(availability.is_enabled(command.id()));
+                }
+            }
+            MenuEntrySpec::Separator => {}
+        }
+    }
 }
 
 fn native_accelerator(shortcut: LogicalShortcut) -> Accelerator {
@@ -331,5 +413,10 @@ mod dual_dialogue_native_accelerator_tests {
             native_accelerator(shortcut),
             Accelerator::new(Some(Modifiers::SUPER), Code::KeyD),
         );
+    }
+
+    #[test]
+    fn application_menu_uses_a_fixed_non_document_title() {
+        assert_eq!(APPLICATION_MENU_TITLE, "ScriptCraft");
     }
 }

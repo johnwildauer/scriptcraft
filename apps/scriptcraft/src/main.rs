@@ -2440,6 +2440,10 @@ impl ScriptCraftApp {
             self.native_path.as_deref(),
         ) {
             app_commands::DesktopViewportEffects::title(ctx, title.clone());
+            ctx.send_viewport_cmd_to(
+                title_page_window::viewport_id(),
+                egui::ViewportCommand::Title(title_page_window::native_title(&title)),
+            );
             self.native_title = title;
         }
     }
@@ -2517,6 +2521,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                 menu::show_menu_bar(
                     ui,
                     availability,
+                    app.dual_dialogue_menu_should_say_undual(),
                     &mut app.pending_commands,
                 );
             });
@@ -2765,7 +2770,7 @@ impl eframe::App for ScriptCraftApp {
                 );
                 if let Some(command) = command {
                     self.pending_commands
-                        .enqueue_id(command, CommandOrigin::Shortcut);
+                        .enqueue(CommandInvocation::new(command, CommandOrigin::Shortcut));
                 } else {
                     retained_events.push(event);
                 }
@@ -3035,7 +3040,10 @@ impl ScriptCraftApp {
         #[cfg(target_os = "macos")]
         if self.menu_policy.installs_native_macos() {
             if let Some(native_menu) = &self.native_menu {
-                native_menu.synchronize(self.app_command_availability());
+                native_menu.synchronize(
+                    self.app_command_availability(),
+                    self.dual_dialogue_menu_should_say_undual(),
+                );
             }
         }
         self.sync_native_title(&ctx);

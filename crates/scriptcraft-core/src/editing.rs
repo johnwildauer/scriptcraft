@@ -2,7 +2,8 @@
 
 use crate::{
     cast_list::{self, CastListError},
-    project_style_at_caret, set_paragraph_alignments, toggle_paragraph_run_styles,
+    clear_paragraph_run_styles, project_style_at_caret, set_paragraph_alignments,
+    toggle_paragraph_run_styles,
     validate_layout_inputs, LayoutInputs, ModelError, ParagraphAlignment, ParagraphTarget, Project,
     Role, RunBoundaryAffinity, RunStyle, RunStyleFlags, ScreenplayElement, StableId, TextRun,
     TitlePageParagraph, MAX_ELEMENTS, MAX_TEXT_BYTES,
@@ -997,6 +998,18 @@ impl EditingSession {
         self.toggle_surface_run_style(true, style)
     }
 
+    /// Clears all supported run formatting from the current Body selection in
+    /// one transactional edit. Alignment and unknown source style tokens remain.
+    pub fn clear_body_run_styles(&mut self) -> Result<(), EditError> {
+        self.clear_surface_run_styles(false)
+    }
+
+    /// Clears all supported run formatting from the current Title Page selection
+    /// in one transactional edit. Alignment and unknown source style tokens remain.
+    pub fn clear_title_run_styles(&mut self) -> Result<(), EditError> {
+        self.clear_surface_run_styles(true)
+    }
+
     pub fn set_body_alignment(&mut self, alignment: ParagraphAlignment) -> Result<(), EditError> {
         self.set_surface_alignment(false, alignment)
     }
@@ -1894,6 +1907,44 @@ impl EditingSession {
                     .map_err(EditError::FormattedText)?;
                 Ok(selection)
             })
+        }
+    }
+
+    fn clear_surface_run_styles(&mut self, title_surface: bool) -> Result<(), EditError> {
+        let selection = if title_surface { self.title_selection } else { self.selection };
+        if selection.anchor == selection.focus {
+            if title_surface {
+                self.project
+                    .title_page
+                    .get(selection.focus.element)
+                    .ok_or(EditError::InvalidElement)?;
+                self.title_typing_style = RunStyleFlags::default();
+            } else {
+                self.project
+                    .elements
+                    .get(selection.focus.element)
+                    .ok_or(EditError::InvalidElement)?;
+                self.body_typing_style = RunStyleFlags::default();
+            }
+            return Ok(());
+        }
+
+        let ranges = selection_run_ranges(&self.project, selection, title_surface)?;
+        if title_surface {
+            self.mutate_title(|project, _, typing| {
+                clear_paragraph_run_styles(project, &ranges)
+                    .map_err(EditError::FormattedText)?;
+                *typing = RunStyleFlags::default();
+                Ok(selection)
+            })
+        } else {
+            self.mutate(MutationValidationScope::Complete, |project, _, _, _| {
+                clear_paragraph_run_styles(project, &ranges)
+                    .map_err(EditError::FormattedText)?;
+                Ok(selection)
+            })?;
+            self.body_typing_style = RunStyleFlags::default();
+            Ok(())
         }
     }
 

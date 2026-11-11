@@ -20,8 +20,8 @@ fn new_session() -> EditingSession {
 #[test]
 fn diagnostic_status_is_bounded_catalogued_and_rejected_by_headless_execution() {
     let message = valid(DiagnosticMessage::new("SAVE_FAILED: destination conflict"));
-    assert_eq!(CommandId::ALL.len(), 48);
-    assert_eq!(COMMAND_DESCRIPTORS.len(), 48);
+    assert_eq!(CommandId::ALL.len(), 50);
+    assert_eq!(COMMAND_DESCRIPTORS.len(), 50);
     assert_eq!(validate_descriptor_catalog(), Ok(()));
     assert_eq!(CommandId::UiStatusSet.as_str(), "ui.status.set");
     assert_eq!(

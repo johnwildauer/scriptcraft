@@ -1233,8 +1233,7 @@ impl ScriptCraftApp {
                         if surface == EditorSurface::TitlePage
                             && self.menu_policy.in_window_shortcuts_owned()
                         {
-                            command = super::menu::command_for_key_event(*key, *modifiers)
-                                .and_then(super::app_commands::command_for_id)
+                            command = super::menu::command_for_key_event_command(*key, *modifiers)
                                 .map(|command| {
                                     CommandInvocation::new(command, CommandOrigin::Shortcut)
                                 });
