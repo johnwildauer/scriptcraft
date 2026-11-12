@@ -3,13 +3,20 @@
 //! This module is separate from the codec and the legacy JSON persistence path.
 //! It uses bounded, no-follow reads; uniquely created same-directory temporary
 //! files; file flush/sync before publication; and same-directory replacement.
-//! On Unix, replacement uses the platform's same-filesystem rename semantics.
-//! The standard backend rejects symlink destinations and non-regular files,
-//! preserves basic file permissions on replacement, and uses an atomic hard-link
-//! creation for Save As so an existing target is never overwritten. ACLs, owner,
-//! extended attributes, and directory-entry power-loss durability are not
-//! promised. External modifications are checked immediately before replacement;
-//! a non-cooperating writer can still race that final comparison and rename.
+//! On Unix, replacement uses the platform's same-filesystem rename semantics;
+//! on Windows, it uses the standard library's replacement rename operation.
+//! The standard backend rejects final-component symlink/reparse destinations and
+//! non-regular files, preserves basic file permissions on replacement, and uses
+//! atomic hard-link creation for Save As so an existing target is never
+//! overwritten. On Windows, `Permissions` copies the standard-library file
+//! attributes for replaceable targets, but does not preserve Windows ACLs or
+//! owner. Read-only targets fail closed before publication: the verified native
+//! rename probe did not replace a read-only destination when the staged file
+//! also carried its read-only attribute; this avoids silently dropping the
+//! attribute or attempting a delete-then-rename fallback. ACLs, owner, extended
+//! attributes, and directory-entry power-loss durability are not promised.
+//! External modifications are checked immediately before replacement; a
+//! non-cooperating writer can still race that final comparison and rename.
 
 use crate::editing::{EditError, EditingSession};
 use crate::fdx::{self, FdxDocument, FdxError, MAX_SOURCE_BYTES};
@@ -605,7 +612,14 @@ impl FdxStorageFileSystem for StdFdxStorageFileSystem {
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(0x20000); // O_NOFOLLOW
         }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(
+                windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT,
+            );
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             return Err(FdxStorageError::new(
                 FdxStorageErrorKind::UnsupportedPlatform,
@@ -618,6 +632,21 @@ impl FdxStorageFileSystem for StdFdxStorageFileSystem {
         let metadata = file
             .metadata()
             .map_err(|_| io_error(StorageOperation::Read))?;
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::fs::MetadataExt;
+            let attributes = metadata.file_attributes();
+            if attributes & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+                != 0
+            {
+                return Err(FdxStorageError::new(
+                    FdxStorageErrorKind::SymlinkDestination,
+                ));
+            }
+            if attributes & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DEVICE != 0 {
+                return Err(FdxStorageError::new(FdxStorageErrorKind::NotRegularFile));
+            }
+        }
         if !metadata.is_file() {
             return Err(FdxStorageError::new(FdxStorageErrorKind::NotRegularFile));
         }
@@ -644,6 +673,24 @@ impl FdxStorageFileSystem for StdFdxStorageFileSystem {
                     return Err(FdxStorageError::new(
                         FdxStorageErrorKind::SymlinkDestination,
                     ));
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    let attributes = metadata.file_attributes();
+                    if attributes
+                        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+                        != 0
+                    {
+                        return Err(FdxStorageError::new(
+                            FdxStorageErrorKind::SymlinkDestination,
+                        ));
+                    }
+                    if attributes & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DEVICE
+                        != 0
+                    {
+                        return Err(FdxStorageError::new(FdxStorageErrorKind::NotRegularFile));
+                    }
                 }
                 if !metadata.is_file() {
                     return Err(FdxStorageError::new(FdxStorageErrorKind::NotRegularFile));
@@ -693,6 +740,10 @@ impl FdxStorageFileSystem for StdFdxStorageFileSystem {
         temp: &mut Self::TempFile,
         permissions: &Self::Permissions,
     ) -> Result<(), FdxStorageError> {
+        #[cfg(target_os = "windows")]
+        if permissions.readonly() {
+            return Err(io_error(StorageOperation::SetPermissions));
+        }
         temp.set_permissions(permissions.clone())
             .map_err(|_| io_error(StorageOperation::SetPermissions))
     }
@@ -703,11 +754,11 @@ impl FdxStorageFileSystem for StdFdxStorageFileSystem {
     }
 
     fn replace(&self, temp: &Path, destination: &Path) -> Result<(), FdxStorageError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, target_os = "windows"))]
         {
             std::fs::rename(temp, destination).map_err(|_| io_error(StorageOperation::Replace))
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, target_os = "windows")))]
         {
             let _ = (temp, destination);
             Err(FdxStorageError::new(
@@ -717,7 +768,7 @@ impl FdxStorageFileSystem for StdFdxStorageFileSystem {
     }
 
     fn install_new(&self, temp: &Path, destination: &Path) -> Result<(), FdxStorageError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, target_os = "windows"))]
         {
             match std::fs::hard_link(temp, destination) {
                 Ok(()) => Ok(()),
@@ -727,7 +778,7 @@ impl FdxStorageFileSystem for StdFdxStorageFileSystem {
                 Err(_) => Err(io_error(StorageOperation::CreateDestination)),
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, target_os = "windows")))]
         {
             let _ = (temp, destination);
             Err(FdxStorageError::new(

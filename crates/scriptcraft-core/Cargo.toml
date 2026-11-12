@@ -11,5 +11,8 @@ quick-xml = "=0.41.0"
 time = { version = "=0.3.41", features = ["local-offset"] }
 uuid = { version = "=1.29.0", features = ["v4"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }
+
 [lints]
 workspace = true
