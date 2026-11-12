@@ -523,6 +523,16 @@ pub struct SourceName {
     pub qualified_name: Option<String>,
 }
 
+/// Identifies the one supported paragraph-owned opaque FDX attachment by
+/// expanded name. The owner namespace is authoritative; prefix spelling is not.
+pub(crate) fn is_user_paragraph_data_name(name: &SourceName, owner: &SourceName) -> bool {
+    name.local_name == "UserParagraphData" && name.namespace_uri == owner.namespace_uri
+}
+
+pub(crate) fn is_user_paragraph_data_lookalike(name: &SourceName) -> bool {
+    name.local_name == "UserParagraphData"
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceBinding {
     pub prefix: String,
@@ -920,6 +930,20 @@ impl SourceIdentityUseIndex {
             .collect::<Vec<_>>();
         let automaton = SubstringAutomaton::new(patterns);
         let mut visited = 0u64;
+        fn reserve_payload_ids(element: &PreservedElement, index: &mut SourceIdentityUseIndex) {
+            for attribute in &element.attributes {
+                if attribute.name.namespace_uri.is_none()
+                    && attribute.name.local_name.eq_ignore_ascii_case("id")
+                {
+                    index.source_id_values.insert(attribute.value.clone());
+                }
+            }
+            for child in &element.children {
+                if let PreservedNode::Element(child) = child {
+                    reserve_payload_ids(child, index);
+                }
+            }
+        }
         // The recursive collector threads bounded counters and path state down
         // the source tree; a context object would add indirection to this walk.
         #[allow(clippy::too_many_arguments)]
@@ -940,6 +964,17 @@ impl SourceIdentityUseIndex {
                 match node {
                     PreservedNode::Element(element) => {
                         path.push(node_index);
+                        if parent.is_some_and(|owner| {
+                            owner.name.local_name == "Paragraph"
+                                && is_user_paragraph_data_name(&element.name, &owner.name)
+                        }) {
+                            // Payload IDs still reserve lexical source values for
+                            // collision-safe allocation, but have no typed identity
+                            // or reference meaning in ScriptCraft.
+                            reserve_payload_ids(element, index);
+                            path.pop();
+                            continue;
+                        }
                         let exact_alternate_copy = element.name.local_name == "Paragraph"
                             && parent.is_some_and(|parent| {
                                 parent.name.local_name == "Alt"
@@ -1198,6 +1233,14 @@ impl PreservationState {
                 }
             }
         }
+        let total_text = text_indexes.iter().filter_map(|index| match &paragraph.children[*index] {
+            PreservedNode::Element(element) => Some(element.children.iter().filter_map(|content| match content {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.len()),
+                _ => None,
+            }).sum::<usize>()),
+            _ => None,
+        }).sum::<usize>();
+        let clear_all_text = range.start == 0 && range.end == total_text;
         let mut boundary = 0usize;
         for pair in text_indexes.windows(2) {
             let PreservedNode::Element(previous) = &paragraph.children[pair[0]] else {
@@ -1214,8 +1257,8 @@ impl PreservationState {
                 PreservedNode::Text(text) | PreservedNode::CData(text) => !text.trim().is_empty(),
                 _ => true,
             });
-            if has_unsupported_barrier || (range.start < boundary && range.end > boundary
-                && !gap.is_empty()) {
+            if !clear_all_text && (has_unsupported_barrier || (range.start < boundary
+                && range.end > boundary && !gap.is_empty())) {
                 return Err(PreservationError::UnsupportedRunTopology);
             }
         }
@@ -1232,7 +1275,13 @@ impl PreservationState {
         expected_text: &str,
         runs: &[TextRun],
     ) -> Result<(), PreservationError> {
+        self.ensure_managed_paragraph_index();
+        let title_source = self.indexed_location(id)?
+            .is_some_and(|location| is_title_content_location(&self.sections, location));
         let paragraph = self.managed_element_mut(id)?;
+        if title_source && !is_plain_managed_paragraph(paragraph) {
+            return Err(PreservationError::StructuralAttachmentConflict);
+        }
         if expected_text.is_empty() && runs.is_empty() {
             let mut indexes = BTreeSet::new();
             for (index, node) in paragraph.children.iter().enumerate() {
@@ -1538,11 +1587,16 @@ impl PreservationState {
             PreservedNode::Text(text) if text.chars().all(char::is_whitespace) => None,
             _ => None,
         }).collect::<Vec<_>>();
+        let outer_user_data_count = outer.children.iter().filter(|node| matches!(node,
+            PreservedNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &outer.name)
+        )).count();
         if duals.len() != 1 || outer.children.iter().any(|node| match node {
-            PreservedNode::Element(element) => element.name.local_name != "DualDialogue",
+            PreservedNode::Element(element) => element.name.local_name != "DualDialogue"
+                && !is_user_paragraph_data_name(&element.name, &outer.name),
             PreservedNode::Text(text) => !text.chars().all(char::is_whitespace),
             _ => true,
-        }) {
+        }) || outer_user_data_count > 1 {
             return Err(PreservationError::UnsupportedTextMapping);
         }
         let dual = duals[0];
@@ -1867,7 +1921,8 @@ impl PreservationState {
         if !matches!(&before.ownership, SourceOwnership::Managed(id) if id == &semantic.id)
             || !matches!(&after.ownership, SourceOwnership::Managed(id) if id == &semantic.id)
             || !is_plain_managed_paragraph(after)
-            || !same_managed_edit_shape(before, after, true)
+            || !same_managed_paragraph_shell(before, after)
+            || !same_direct_user_paragraph_data(before, after)
             || after.name.local_name != "Paragraph"
         {
             return Err(PreservationError::UnsupportedTextMapping);
@@ -1908,6 +1963,8 @@ impl PreservationState {
                         }
                     }
                 }
+                PreservedNode::Element(element)
+                    if is_user_paragraph_data_name(&element.name, &after.name) => {}
                 _ => return Err(PreservationError::UnsupportedTextMapping),
             }
         }
@@ -2259,6 +2316,17 @@ impl PreservationState {
         })
     }
 
+    fn has_user_paragraph_data(&self, id: &StableId) -> bool {
+        let paragraph = match self.indexed_location(id) {
+            Ok(Some(location)) => self.managed_element_at(location),
+            Ok(None) if self.managed_paragraph_index.is_none() => {
+                find_managed_element_counted(&self.sections, id)
+            }
+            _ => None,
+        };
+        paragraph.is_some_and(has_direct_user_paragraph_data)
+    }
+
     /// Reconciles a join or cross-paragraph deletion while retaining the
     /// surviving owner's Alts in place. The left source is trimmed through its
     /// mapped Text runs, and only the retained suffix Text runs of the final
@@ -2287,8 +2355,8 @@ impl PreservationState {
             .filter(|element| matches!(&element.ownership, SourceOwnership::Managed(id) if id == final_removed_id))
             .ok_or(PreservationError::ManagedAnchorMissing)?
             .clone();
-        let survivor_runs = paragraph_text_nodes_with_direct_alts(&survivor)?;
-        let removed_runs = paragraph_text_nodes_with_direct_alts(&removed)?;
+        let survivor_runs = paragraph_text_nodes_with_supported_attachments(&survivor)?;
+        let removed_runs = paragraph_text_nodes_with_supported_attachments(&removed)?;
         if text_of_nodes(&survivor_runs) != original_survivor_text
             || text_of_nodes(&removed_runs) != final_removed_text
             || survivor_prefix_len > original_survivor_text.len()
@@ -2387,7 +2455,13 @@ impl PreservationState {
         {
             return Err(PreservationError::UnsupportedTextMapping);
         }
+        self.ensure_managed_paragraph_index();
+        let title_source = self.indexed_location(id)?
+            .is_some_and(|location| is_title_content_location(&self.sections, location));
         let element = self.managed_element_mut(id)?;
+        if title_source && !is_plain_managed_paragraph(element) {
+            return Err(PreservationError::StructuralAttachmentConflict);
+        }
         if element.children.iter().any(
             |node| matches!(node, PreservedNode::Element(child) if is_text_element(child, element)),
         ) {
@@ -2490,9 +2564,7 @@ impl PreservationState {
                 .collect();
             if !replacement.is_empty() {
                 let (name, namespace_bindings) = paragraph_text_name(paragraph);
-                paragraph
-                    .children
-                    .push(PreservedNode::Element(PreservedElement {
+                let text_node = PreservedNode::Element(PreservedElement {
                         name,
                         attributes: Vec::new(),
                         namespace_bindings,
@@ -2501,7 +2573,12 @@ impl PreservationState {
                         dependency_confidence: DependencyConfidence::Unknown,
                         anchor: None,
                         children: vec![PreservedNode::Text(replacement.to_owned().into())].into(),
-                    }));
+                    });
+                let insertion_index = paragraph.children.iter().position(|node| matches!(node,
+                    PreservedNode::Element(element)
+                        if is_user_paragraph_data_name(&element.name, &paragraph.name)
+                )).unwrap_or(paragraph.children.len());
+                paragraph.children.insert(insertion_index, text_node);
             }
             return Ok(());
         }
@@ -2661,7 +2738,10 @@ impl PreservationState {
             };
             let final_removed = &removed[removed.len() - 1];
             let has_inline_attachment = self.has_inline_alts(&previous.id)
-                || removed.iter().any(|item| self.has_inline_alts(&item.id));
+                || self.has_user_paragraph_data(&previous.id)
+                || removed.iter().any(|item| {
+                    self.has_inline_alts(&item.id) || self.has_user_paragraph_data(&item.id)
+                });
             if !has_inline_attachment
             {
                 continue;
@@ -2743,7 +2823,8 @@ impl PreservationState {
             };
             if before_ids.contains(&right.id)
                 || original.text != format!("{}{}", left.text, right.text)
-                || !self.has_inline_alts(&original.id)
+                || !(self.has_inline_alts(&original.id)
+                    || self.has_user_paragraph_data(&original.id))
             {
                 continue;
             }
@@ -3423,6 +3504,18 @@ impl PreservationState {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let text_indexes = paragraph.children.iter().enumerate().filter_map(|(index, node)| {
+            matches!(node, PreservedNode::Element(element) if is_text_element(element, paragraph))
+                .then_some(index)
+        }).collect::<Vec<_>>();
+        if text_indexes.windows(2).any(|pair| {
+            paragraph.children[pair[0] + 1..pair[1]].iter().any(|node| matches!(node,
+                PreservedNode::Element(element)
+                    if is_user_paragraph_data_name(&element.name, &paragraph.name)
+            ))
+        }) {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
         let runs = semantic_text_runs(semantic);
         let mut rebuilt = Vec::with_capacity(paragraph.children.len().saturating_add(runs.len()));
         let mut inserted = false;
@@ -3446,6 +3539,11 @@ impl PreservationState {
                 }
                 PreservedNode::Text(text) | PreservedNode::CData(text)
                     if text.trim().is_empty() =>
+                {
+                    rebuilt.push(child.clone())
+                }
+                PreservedNode::Element(element)
+                    if is_user_paragraph_data_name(&element.name, &paragraph.name) =>
                 {
                     rebuilt.push(child.clone())
                 }
@@ -3560,6 +3658,8 @@ fn validate_managed_text_elements_replacement(
             {
                 text_elements.push(index);
             }
+            PreservedNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &paragraph.name) => {}
             PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => {}
             _ => return Err(PreservationError::UnsupportedTextMapping),
         }
@@ -4006,10 +4106,9 @@ fn same_preserved_node_shallow(before: &PreservedNode, after: &PreservedNode) ->
     }
 }
 
-fn same_managed_edit_shape(
+fn same_managed_paragraph_shell(
     before: &PreservedElement,
     after: &PreservedElement,
-    managed_root: bool,
 ) -> bool {
     let same_attributes = before.attributes.len() == after.attributes.len()
         && before
@@ -4019,8 +4118,7 @@ fn same_managed_edit_shape(
             .all(|(left, right)| {
                 left.name == right.name
                     && (left.value == right.value
-                        || (managed_root
-                            && left.name.namespace_uri.is_none()
+                        || (left.name.namespace_uri.is_none()
                             && left.name.local_name == "Type"))
             });
     before.name == after.name
@@ -4028,32 +4126,8 @@ fn same_managed_edit_shape(
         && before.ownership == after.ownership
         && before.dependency_confidence == after.dependency_confidence
         && before.anchor == after.anchor
-        && (before.source_type == after.source_type || managed_root)
+        && (before.source_type == after.source_type || before.name.local_name == "Paragraph")
         && same_attributes
-        && before.children.len() == after.children.len()
-        && before
-            .children
-            .iter()
-            .zip(&after.children)
-            .all(|(left, right)| match (left, right) {
-                (PreservedNode::Text(_), PreservedNode::Text(_))
-                | (PreservedNode::CData(_), PreservedNode::CData(_)) => true,
-                (PreservedNode::Comment(left), PreservedNode::Comment(right)) => left == right,
-                (
-                    PreservedNode::ProcessingInstruction {
-                        target: left_target,
-                        data: left_data,
-                    },
-                    PreservedNode::ProcessingInstruction {
-                        target: right_target,
-                        data: right_data,
-                    },
-                ) => left_target == right_target && left_data == right_data,
-                (PreservedNode::Element(left), PreservedNode::Element(right)) => {
-                    same_managed_edit_shape(left, right, false)
-                }
-                _ => false,
-            })
 }
 
 fn source_text_bytes_in_element(element: &PreservedElement) -> usize {
@@ -4225,6 +4299,8 @@ fn title_text_templates(
                 }
                 templates.push(element.clone());
             }
+            PreservedNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &paragraph.name) => {}
             PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => {}
             _ => return Err(PreservationError::StructuralAttachmentConflict),
         }
@@ -4335,6 +4411,13 @@ fn partition_title_children(
                     }
                 }
                 cursor = end;
+            }
+            PreservedNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &source.name) =>
+            {
+                // Split ownership is left-biased: opaque source data remains
+                // attached only to the original title paragraph.
+                left_children.push(child.clone());
             }
             PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => {
                 // Formatting whitespace remains at its original source position
@@ -4489,6 +4572,11 @@ fn title_text_children_from_templates(
                     inserted = true;
                 }
             }
+            PreservedNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &recipient_source.name) =>
+            {
+                rebuilt.push(child.clone());
+            }
             PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => {
                 rebuilt.push(child.clone());
             }
@@ -4496,6 +4584,7 @@ fn title_text_children_from_templates(
         }
     }
     if !inserted {
+        let mut generated = Vec::with_capacity(runs.len());
         for run in &runs {
             let template = templates.iter().find(|template| {
                 template.attributes.len() == run.attributes.len()
@@ -4524,8 +4613,13 @@ fn title_text_children_from_templates(
             } else {
                 text_element.children.push(PreservedNode::Text(run.text.clone().into()));
             }
-            rebuilt.push(PreservedNode::Element(text_element));
+            generated.push(PreservedNode::Element(text_element));
         }
+        let insert_at = rebuilt.iter().position(|node| matches!(node,
+            PreservedNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &recipient_source.name)
+        )).unwrap_or(rebuilt.len());
+        rebuilt.splice(insert_at..insert_at, generated);
     }
     if runs.iter().map(|run| run.text.as_str()).collect::<String>() != semantic.text {
         return Err(PreservationError::UnsupportedTextMapping);
@@ -4535,20 +4629,43 @@ fn title_text_children_from_templates(
 
 fn is_plain_managed_paragraph(paragraph: &PreservedElement) -> bool {
     paragraph.name.local_name == "Paragraph"
+        && direct_user_paragraph_data(paragraph).len() <= 1
         && paragraph.children.iter().all(|node| match node {
             PreservedNode::Text(text) | PreservedNode::CData(text) => text.trim().is_empty(),
             PreservedNode::Element(element) if is_text_element(element, paragraph) => element
                 .children
                 .iter()
                 .all(|child| matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_))),
+            PreservedNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &paragraph.name) => true,
             _ => false,
         })
 }
 
-fn paragraph_text_nodes_with_direct_alts(
+fn direct_user_paragraph_data(paragraph: &PreservedElement) -> Vec<&PreservedElement> {
+    paragraph.children.iter().filter_map(|node| match node {
+        PreservedNode::Element(element)
+            if is_user_paragraph_data_name(&element.name, &paragraph.name) => Some(element),
+        _ => None,
+    }).collect()
+}
+
+fn has_direct_user_paragraph_data(paragraph: &PreservedElement) -> bool {
+    !direct_user_paragraph_data(paragraph).is_empty()
+}
+
+fn same_direct_user_paragraph_data(
+    before: &PreservedElement,
+    after: &PreservedElement,
+) -> bool {
+    direct_user_paragraph_data(before) == direct_user_paragraph_data(after)
+}
+
+fn paragraph_text_nodes_with_supported_attachments(
     paragraph: &PreservedElement,
 ) -> Result<Vec<PreservedNode>, PreservationError> {
     let mut alts_count = 0usize;
+    let mut user_data_count = 0usize;
     let mut text_nodes = Vec::new();
     for node in &paragraph.children {
         match node {
@@ -4566,6 +4683,14 @@ fn paragraph_text_nodes_with_direct_alts(
             {
                 alts_count = alts_count.saturating_add(1);
                 if alts_count > 1 {
+                    return Err(PreservationError::StructuralAttachmentConflict);
+                }
+            }
+            PreservedNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &paragraph.name) =>
+            {
+                user_data_count = user_data_count.saturating_add(1);
+                if user_data_count > 1 {
                     return Err(PreservationError::StructuralAttachmentConflict);
                 }
             }
@@ -4656,6 +4781,7 @@ fn is_managed_paragraph_with_direct_alts(paragraph: &PreservedElement) -> bool {
         return false;
     }
     let mut alts_count = 0usize;
+    let mut user_data_count = 0usize;
     for node in &paragraph.children {
         match node {
             PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => {}
@@ -4672,10 +4798,15 @@ fn is_managed_paragraph_with_direct_alts(paragraph: &PreservedElement) -> bool {
             {
                 alts_count = alts_count.saturating_add(1);
             }
+            PreservedNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &paragraph.name) =>
+            {
+                user_data_count = user_data_count.saturating_add(1);
+            }
             _ => return false,
         }
     }
-    alts_count == 1
+    alts_count == 1 && user_data_count <= 1
 }
 
 fn paragraph_foreign_id(paragraph: &PreservedElement) -> Option<&str> {
@@ -4817,6 +4948,12 @@ fn has_potential_reference(
             ) {
                 return false;
             }
+            if parent.is_some_and(|owner| {
+                owner.name.local_name == "Paragraph"
+                    && is_user_paragraph_data_name(&element.name, &owner.name)
+            }) {
+                return false;
+            }
             let is_excluded =
                 matches!(&element.ownership, SourceOwnership::Managed(id) if id == excluded);
             let exact_alternate_copy = element.name.local_name == "Paragraph"
@@ -4862,6 +4999,8 @@ fn contains_unknown_nested_data(paragraph: &PreservedElement) -> bool {
                 .iter()
                 .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
         }
+        PreservedNode::Element(element)
+            if is_user_paragraph_data_name(&element.name, &paragraph.name) => false,
         PreservedNode::Text(text) | PreservedNode::CData(text) => !text.trim().is_empty(),
         _ => true,
     })
@@ -4899,9 +5038,7 @@ fn replace_text_element_children(
             return Ok(());
         }
         let (name, namespace_bindings) = paragraph_text_name(paragraph);
-        paragraph
-            .children
-            .push(PreservedNode::Element(PreservedElement {
+        let text_node = PreservedNode::Element(PreservedElement {
                 name,
                 attributes: Vec::new(),
                 namespace_bindings,
@@ -4910,8 +5047,13 @@ fn replace_text_element_children(
                 dependency_confidence: DependencyConfidence::Unknown,
                 anchor: None,
                 children: SharedVec::default(),
-            }));
-        indexes.push(paragraph.children.len().saturating_sub(1));
+            });
+        let insertion_index = paragraph.children.iter().position(|node| matches!(node,
+            PreservedNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &paragraph.name)
+        )).unwrap_or(paragraph.children.len());
+        paragraph.children.insert(insertion_index, text_node);
+        indexes.push(insertion_index);
     }
     let source_segments = indexes
         .iter()
@@ -4954,18 +5096,13 @@ fn replace_text_element_children(
                 PreservedNode::Text(text) | PreservedNode::CData(text) => !text.trim().is_empty(),
                 _ => true,
             });
-        if has_opaque_gap && start < boundary && end > boundary {
+        let clear_all_text = start == 0 && end == old_text.len() && inserted.is_empty();
+        if has_opaque_gap && start < boundary && end > boundary && !clear_all_text {
             return Err(PreservationError::UnsupportedTextMapping);
         }
     }
     let updated = replace_segments(&source_segments, start, end, inserted)?;
     if updated.iter().all(String::is_empty) {
-        if indexes.iter().any(|index| {
-            matches!(&paragraph.children[*index], PreservedNode::Element(element)
-                if element.children.iter().any(|child| matches!(child, PreservedNode::CData(_))))
-        }) {
-            return Err(PreservationError::UnsupportedTextMapping);
-        }
         let indexes = indexes.into_iter().collect::<BTreeSet<_>>();
         paragraph.children = paragraph
             .children

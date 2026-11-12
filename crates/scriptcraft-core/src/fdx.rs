@@ -15,7 +15,8 @@ use crate::preservation::{
     ForeignIdentity, ForeignReference, NamespaceBinding, PreservationError, PreservationState,
     PreservedAttribute, PreservedElement, PreservedNode, PreservedSection, ReferencePolicy,
     SectionKind, SharedBytes, SharedVec, SourceAnchor, SourceAnchorId, SourceEncoding, SourceName,
-    SourceOwnership, SourceSnapshot,
+    SourceOwnership, SourceSnapshot, is_user_paragraph_data_lookalike,
+    is_user_paragraph_data_name,
 };
 pub use crate::text_state::TextState;
 use crate::text_state::{self};
@@ -596,6 +597,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     let mut identities = Vec::new();
     let mut board_graph = BoardGraph::default();
     validate_image_payload_budgets(root)?;
+    validate_user_paragraph_data_locations(root, root_namespace)?;
     collect_identities(root, &mut identities, &mut board_graph)?;
     let mut anchors = Vec::new();
     let mut next_id = 1usize;
@@ -2596,6 +2598,7 @@ fn reconcile_dual_dialogue_wrapper(
         return Err(SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error());
     }
     let mut dual_index = None;
+    let mut outer_attachment = false;
     for (index, child) in outer.children.iter().enumerate() {
         match child {
             PreservedNode::Element(element)
@@ -2605,6 +2608,11 @@ fn reconcile_dual_dialogue_wrapper(
                 if dual_index.replace(index).is_some() {
                     return Err(SaveDiagnosticCode::ReconcileNodeManagedOutsideSection.error());
                 }
+            }
+            PreservedNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &outer.name) && !outer_attachment =>
+            {
+                outer_attachment = true;
             }
             PreservedNode::Text(text) if text.chars().all(char::is_whitespace) => {}
             _ => return Err(SaveDiagnosticCode::ReconcileNodeManagedOutsideSection.error()),
@@ -4684,6 +4692,117 @@ fn raw_root_text_state(root: &RawElement, project: &Project) -> TextState {
     }
 }
 
+fn validate_user_paragraph_data_locations(
+    root: &RawElement,
+    root_namespace: Option<&str>,
+) -> Result<(), FdxError> {
+    fn visit(
+        element: &RawElement,
+        parent: Option<&RawElement>,
+        grandparent: Option<&RawElement>,
+        parent_accepts_attachment: bool,
+        depth: usize,
+        section: SectionKind,
+        in_title_content: bool,
+        root_namespace: Option<&str>,
+    ) -> Result<(), FdxError> {
+        if is_user_paragraph_data_lookalike(&element.name) {
+            if !parent_accepts_attachment
+                || !parent.is_some_and(|owner| {
+                    is_user_paragraph_data_name(&element.name, &owner.name)
+                })
+            {
+                return Err(FdxError::UnsupportedConstruct);
+            }
+            // The complete third-party subtree is opaque, including any
+            // FDX-looking names nested within it.
+            return Ok(());
+        }
+
+        let current_section = if depth == 1 && is_fdx_element(element, "Content", root_namespace) {
+            SectionKind::Content
+        } else if depth == 1 && is_fdx_element(element, "TitlePage", root_namespace) {
+            SectionKind::TitlePage
+        } else {
+            section
+        };
+        let title_content = in_title_content
+            || (depth == 2
+                && current_section == SectionKind::TitlePage
+                && is_fdx_element(element, "Content", root_namespace));
+        let is_paragraph = is_fdx_element(element, "Paragraph", root_namespace);
+        let body_owner = current_section == SectionKind::Content
+            && depth == 2
+            && is_paragraph
+            && (attribute(element, "Type").and_then(role_from_fdx).is_some()
+                || (attribute(element, "Type") == Some("General")
+                    && element.children.iter().any(|child| {
+                        matches!(child, RawNode::Element(child)
+                            if is_fdx_element(child, "DualDialogue", root_namespace))
+                    })));
+        let title_owner = current_section == SectionKind::TitlePage
+            && is_paragraph
+            && ((title_content && depth == 3)
+                || (depth == 2 && attribute(element, "Type").and_then(role_from_fdx).is_some()));
+        let dual_member_owner = current_section == SectionKind::Content
+            && depth == 4
+            && is_paragraph
+            && parent.is_some_and(|parent| is_fdx_element(parent, "DualDialogue", root_namespace))
+            && grandparent.is_some_and(|wrapper| {
+                is_fdx_element(wrapper, "Paragraph", root_namespace)
+                    && attribute(wrapper, "Type") == Some("General")
+                    && wrapper.children.iter().any(|child| {
+                        matches!(child, RawNode::Element(child)
+                            if is_fdx_element(child, "DualDialogue", root_namespace))
+                    })
+            })
+            && matches!(
+                attribute(element, "Type").and_then(role_from_fdx),
+                Some(Role::Character | Role::Dialogue | Role::Parenthetical)
+            );
+        let accepts_attachment = body_owner || title_owner || dual_member_owner;
+
+        let attachment_count = element
+            .children
+            .iter()
+            .filter(|child| {
+                matches!(child, RawNode::Element(child)
+                    if is_user_paragraph_data_lookalike(&child.name))
+            })
+            .count();
+        if attachment_count > 1 {
+            return Err(FdxError::UnsupportedConstruct);
+        }
+
+        for child in &element.children {
+            if let RawNode::Element(child) = child {
+                visit(
+                    child,
+                    Some(element),
+                    parent,
+                    accepts_attachment,
+                    depth.saturating_add(1),
+                    current_section,
+                    title_content,
+                    root_namespace,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    visit(
+        root,
+        None,
+        None,
+        false,
+        0,
+        SectionKind::Other,
+        false,
+        root_namespace,
+    )
+}
+
 fn preserve_misc_node(node: RawNode) -> Result<PreservedNode, FdxError> {
     match node {
         RawNode::Element(element) => preserve_opaque_element(element),
@@ -4741,6 +4860,9 @@ fn preserve_node(
     let RawNode::Element(element) = node else {
         return preserve_misc_node(node.clone());
     };
+    if is_user_paragraph_data_lookalike(&element.name) {
+        return preserve_opaque_element(element.clone());
+    }
     let current_section = if depth == 1 && is_fdx_element(element, "Content", root_ns) {
         SectionKind::Content
     } else if depth == 1 && is_fdx_element(element, "TitlePage", root_ns) {
@@ -4908,11 +5030,17 @@ fn preserve_dual_dialogue_wrapper(
     }
 
     // The wrapper's direct mixed content is deliberately stricter than generic
-    // preservation: only indentation whitespace and its one DualDialogue child
-    // are accepted.
+    // preservation: only indentation whitespace, one opaque attachment, and its
+    // one DualDialogue child are accepted.
+    let mut outer_attachment = false;
     for child in &outer.children {
         match child {
             RawNode::Element(child) if child.name.local_name == "DualDialogue" => {}
+            RawNode::Element(child)
+                if is_user_paragraph_data_name(&child.name, &outer.name) && !outer_attachment =>
+            {
+                outer_attachment = true;
+            }
             RawNode::Text(value) if value.chars().all(char::is_whitespace) => {}
             _ => return Err(FdxError::UnsupportedConstruct),
         }
@@ -5077,6 +5205,9 @@ fn preserve_dual_dialogue_wrapper(
             RawNode::Element(child) if child.name.local_name == "DualDialogue" => {
                 Ok(PreservedNode::Element(dual_preserved.clone()))
             }
+            RawNode::Element(child) if is_user_paragraph_data_name(&child.name, &outer.name) => {
+                Ok(preserve_opaque_element(child.clone())?)
+            }
             RawNode::Text(value) if value.chars().all(char::is_whitespace) => {
                 preserve_misc_node(child.clone())
             }
@@ -5187,6 +5318,7 @@ fn validate_nested_member_topology(
     role: Role,
 ) -> Result<(), FdxError> {
     let mut saw_alts = false;
+    let mut saw_attachment = false;
     for child in &element.children {
         match child {
             RawNode::Text(value) if value.chars().all(char::is_whitespace) => {}
@@ -5204,6 +5336,11 @@ fn validate_nested_member_topology(
                     return Err(FdxError::UnsupportedConstruct);
                 }
                 saw_alts = true;
+            }
+            RawNode::Element(child)
+                if is_user_paragraph_data_name(&child.name, &element.name) && !saw_attachment =>
+            {
+                saw_attachment = true;
             }
             _ => return Err(FdxError::UnsupportedConstruct),
         }
@@ -5381,6 +5518,7 @@ fn semantic_text_runs(
 ) -> Result<Vec<TextRun>, FdxError> {
     let mut runs = Vec::new();
     let mut saw_alts = false;
+    let mut saw_attachment = false;
     for child in &element.children {
         let RawNode::Element(text_element) = child else {
             continue;
@@ -5402,6 +5540,13 @@ fn semantic_text_runs(
             // Scene metadata is source-owned and retained in the preservation
             // tree. It is not inline text, but is a valid direct child of a
             // Scene Heading paragraph emitted by the new-document writer.
+            continue;
+        }
+        if is_user_paragraph_data_name(&text_element.name, &element.name) {
+            if saw_attachment {
+                return Err(FdxError::UnsupportedConstruct);
+            }
+            saw_attachment = true;
             continue;
         }
         if text_element.name.local_name != "Text"
@@ -5823,6 +5968,9 @@ where
         )?;
         for child in &element.children {
             if let RawNode::Element(child) = child {
+                if is_user_paragraph_data_name(&child.name, &element.name) {
+                    continue;
+                }
                 let child_in_title_page = in_title_page
                     || (depth == 0 && is_fdx_element(child, "TitlePage", root_namespace));
                 let child_in_title_content = in_title_content
@@ -5962,7 +6110,9 @@ fn validate_image_payload_budgets(root: &RawElement) -> Result<(), FdxError> {
         }
         for child in &element.children {
             if let RawNode::Element(child) = child {
-                inspect(child, total_image_text)?;
+                if !is_user_paragraph_data_lookalike(&child.name) {
+                    inspect(child, total_image_text)?;
+                }
             }
         }
         Ok(())

@@ -1719,7 +1719,8 @@ impl EditingSession {
                     );
                     true
                 }
-                _ => false,
+                Ok(_) => false,
+                Err(error) => return Err(EditError::Model(error)),
             }
         } else {
             false

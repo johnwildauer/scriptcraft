@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FinalDraft DocumentType="Script" Version="6">
+  <Content>
+    <Paragraph Type="Action" id="body-001">
+      <Text>Opening action.</Text>
+      <UserParagraphData vendor="body" xmlns:v="urn:vendor:paragraph">
+        <v:Payload id="payload-body-id">opaque body text<![CDATA[ + cdata]]><!-- body comment --><?vendor keep="yes"?>
+          <DualDialogue id="body-001"/>
+          <Paragraph id="body-001"/>
+          <v:Empty/>
+        </v:Payload>
+      </UserParagraphData>
+    </Paragraph>
+    <Paragraph Type="General" id="outer-dual-001" vendor-outer="kept">
+      <UserParagraphData owner="outer"><v:Wrapper xmlns:v="urn:vendor:wrapper" arbitrary="true"/></UserParagraphData>
+      <DualDialogue>
+        <SpellCheckIgnoreLists><IgnoredRanges/><IgnoredWords/></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="left-cue-001">
+          <UserParagraphData owner="left-cue"><CueData id="left-cue-001"/></UserParagraphData>
+          <Text Style="AllCaps">LINA</Text>
+        </Paragraph>
+        <Paragraph Type="Dialogue" id="left-dialogue-001">
+          <Text>Hello there.</Text>
+          <UserParagraphData owner="left-dialogue"><Nested><DualDialogue id="not-a-group"/></Nested></UserParagraphData>
+        </Paragraph>
+        <Paragraph Type="Character" id="right-cue-001"><Text>OMAR</Text><UserParagraphData owner="right-cue"/></Paragraph>
+        <Paragraph Type="Dialogue" id="right-dialogue-001"><UserParagraphData owner="right-dialogue"/><Text>Goodbye.</Text></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+  </Content>
+  <TitlePage>
+    <Content>
+      <Paragraph Type="Title" id="title-001"><Text>A Small Story</Text><UserParagraphData owner="title"><TitlePayload xmlns="urn:vendor:title" value="opaque"/></UserParagraphData></Paragraph>
+    </Content>
+  </TitlePage>
+</FinalDraft>
