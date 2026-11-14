@@ -1,8 +1,7 @@
 #![forbid(unsafe_code)]
 
 use scriptcraft_core::fdx::{
-    import_fdx, read_v6, write_v6, FdxError, FdxImportOutcome, FdxMigrationConsent,
-    FdxMigrationKind,
+    import_fdx, read_v6, write_v6, FdxImportOutcome, FdxMigrationConsent, FdxMigrationKind,
 };
 use scriptcraft_core::preservation::{PreservedElement, PreservedNode, SectionKind};
 use scriptcraft_core::Project;
@@ -98,57 +97,42 @@ fn opaque_attachments_roundtrip_without_entering_semantic_projection_or_identity
 }
 
 #[test]
-fn unsupported_attachment_multiplicity_namespace_and_locations_stop_import() {
+fn unsupported_attachment_and_unknown_child_shapes_remain_opaque_on_import() {
     let source = std::str::from_utf8(SYNTHETIC).expect("synthetic fixture is UTF-8");
     let duplicate = source.replacen(
         "</UserParagraphData>",
         "</UserParagraphData><UserParagraphData/>",
         1,
     );
-    assert_eq!(
-        read_v6(duplicate.as_bytes()).err(),
-        Some(FdxError::UnsupportedConstruct)
-    );
+    assert!(read_v6(duplicate.as_bytes()).is_ok());
 
     let wrong_namespace = source.replacen(
         "<UserParagraphData vendor=\"body\"",
         "<UserParagraphData xmlns=\"urn:wrong\" vendor=\"body\"",
         1,
     );
-    assert_eq!(
-        read_v6(wrong_namespace.as_bytes()).err(),
-        Some(FdxError::UnsupportedConstruct)
-    );
+    assert!(read_v6(wrong_namespace.as_bytes()).is_ok());
 
     let nested_in_text = source.replacen(
         "<Text>Opening action.</Text>",
         "<Text>Opening <UserParagraphData/>action.</Text>",
         1,
     );
-    assert_eq!(
-        read_v6(nested_in_text.as_bytes()).err(),
-        Some(FdxError::UnsupportedConstruct)
-    );
+    assert!(read_v6(nested_in_text.as_bytes()).is_ok());
 
     let misplaced = source.replacen(
         "<Content>",
         "<Content><UserParagraphData/>",
         1,
     );
-    assert_eq!(
-        read_v6(misplaced.as_bytes()).err(),
-        Some(FdxError::UnsupportedConstruct)
-    );
+    assert!(read_v6(misplaced.as_bytes()).is_ok());
 
     let unrelated_child = source.replacen(
         "<Text>Opening action.</Text>",
         "<Text>Opening action.</Text><UnrecognizedDirectChild/>",
         1,
     );
-    assert_eq!(
-        read_v6(unrelated_child.as_bytes()).err(),
-        Some(FdxError::UnsupportedConstruct)
-    );
+    assert!(read_v6(unrelated_child.as_bytes()).is_ok());
 }
 
 #[test]

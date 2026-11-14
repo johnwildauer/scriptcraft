@@ -596,7 +596,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     let mut source_layout_settings = read_source_layout_settings(root, root_namespace)?;
     let mut identities = Vec::new();
     let mut board_graph = BoardGraph::default();
-    validate_image_payload_budgets(root)?;
+    validate_image_payload_budgets(root, root_namespace)?;
     validate_user_paragraph_data_locations(root, root_namespace)?;
     collect_identities(root, &mut identities, &mut board_graph)?;
     let mut anchors = Vec::new();
@@ -2755,31 +2755,47 @@ fn reconcile_managed_text_runs(
         if !semantic_runs.is_empty() {
             return Err(SaveDiagnosticCode::ReconcileParagraphEmptyRunsMismatch.error());
         }
-        for child in &paragraph.children {
-            let PreservedNode::Element(text_element) = child else {
+        let source_has_managed_text = paragraph.children.iter().any(|child| matches!(
+            child,
+            PreservedNode::Element(element)
+                if element.name.local_name == "Text"
+                    && element.name.namespace_uri == paragraph.name.namespace_uri
+                    && has_managed_text_content(element)
+        ));
+        if !source_has_managed_text {
+            // An already-empty source Text is part of a no-op source tree. Do
+            // not interpret the lack of semantic runs as an instruction to
+            // erase that representation or any inline/attribute payload.
+            return Ok(());
+        }
+        let mut reconciled_children = Vec::with_capacity(paragraph.children.len());
+        for child in std::mem::take(&mut paragraph.children) {
+            let PreservedNode::Element(mut element) = child else {
+                reconciled_children.push(child);
                 continue;
             };
-            if text_element.name.local_name != "Text"
-                || text_element.name.namespace_uri != paragraph.name.namespace_uri
+            if element.name.local_name != "Text"
+                || element.name.namespace_uri != paragraph.name.namespace_uri
+                || !has_managed_text_content(&element)
             {
+                reconciled_children.push(PreservedNode::Element(element));
                 continue;
             }
-            if text_element
-                .children
-                .iter()
-                .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
-            {
-                return Err(
-                    SaveDiagnosticCode::ReconcileParagraphUnsupportedEmptyChild.error(),
-                );
+            if is_fully_managed_text(&element) {
+                continue;
             }
+            let mut retained_children = Vec::with_capacity(element.children.len());
+            for inline in std::mem::take(&mut element.children) {
+                retained_children.push(match inline {
+                    PreservedNode::Text(_) => PreservedNode::Text("".into()),
+                    PreservedNode::CData(_) => PreservedNode::CData("".into()),
+                    opaque => opaque,
+                });
+            }
+            element.children = retained_children.into();
+            reconciled_children.push(PreservedNode::Element(element));
         }
-        paragraph.children.retain(|child| {
-            !matches!(child,
-                PreservedNode::Element(element)
-                    if element.name.local_name == "Text"
-                        && element.name.namespace_uri == paragraph.name.namespace_uri)
-        });
+        paragraph.children = reconciled_children.into();
         return Ok(());
     }
 
@@ -2805,7 +2821,8 @@ fn reconcile_managed_text_runs(
         .filter_map(|(index, child)| match child {
             PreservedNode::Element(element)
                 if element.name.local_name == "Text"
-                    && element.name.namespace_uri == paragraph.name.namespace_uri =>
+                    && element.name.namespace_uri == paragraph.name.namespace_uri
+                    && has_managed_text_content(element) =>
             {
                 Some(index)
             }
@@ -2817,14 +2834,20 @@ fn reconcile_managed_text_runs(
         let PreservedNode::Element(element) = &paragraph.children[*index] else {
             return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
         };
-        if element
-            .children
-            .iter()
-            .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
-        {
-            return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
-        }
         templates.push(element.clone());
+    }
+    if templates.len() > runs.len()
+        && templates.iter().skip(runs.len()).any(|element| {
+            !element.attributes.is_empty()
+                || !element.namespace_bindings.is_empty()
+                || element.children.iter().any(|child| {
+                    !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_))
+                })
+        })
+    {
+        // A removed semantic run cannot authorize dropping an opaque Text
+        // attribute or inline/mixed-content slot with it.
+        return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
     }
 
     let mut reconciled = Vec::with_capacity(runs.len());
@@ -2878,6 +2901,21 @@ fn reconcile_text_element(
     mut element: PreservedElement,
     run: &TextRun,
 ) -> Result<PreservedElement, FdxError> {
+    if element.children.iter().any(|child| {
+        !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_))
+    }) {
+        // Inline markup and XML miscellany are source-owned topology. The
+        // semantic run cannot identify character spans on either side of those
+        // nodes, so unchanged runs pass through verbatim while edits remain a
+        // bounded safe-stop for the later edit-lifecycle work order.
+        if preserved_text_projection(&element) == run.text
+            && source_run_attributes_match(&element, &run.attributes)
+        {
+            return Ok(element);
+        }
+        return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
+    }
+
     let mut attributes = Vec::with_capacity(run.attributes.len());
     for attribute in &run.attributes {
         validate_qname(&attribute.name)?;
@@ -2934,6 +2972,55 @@ fn reconcile_text_element(
     }
     element.children = text_children.into();
     Ok(element)
+}
+
+fn preserved_text_projection(element: &PreservedElement) -> String {
+    let mut projection = String::new();
+    for child in &element.children {
+        match child {
+            PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                projection.push_str(text.as_str());
+            }
+            PreservedNode::Element(_)
+            | PreservedNode::Comment(_)
+            | PreservedNode::ProcessingInstruction { .. } => {}
+        }
+    }
+    projection
+}
+
+fn source_run_attributes_match(element: &PreservedElement, attributes: &[RunAttribute]) -> bool {
+    element.attributes.len() == attributes.len()
+        && element
+            .attributes
+            .iter()
+            .zip(attributes)
+            .all(|(source, semantic)| {
+                source.name.qualified_name.as_deref().unwrap_or(
+                    source.name.local_name.as_str(),
+                ) == semantic.name
+                    && source.value == semantic.value
+            })
+}
+
+fn has_managed_text_content(element: &PreservedElement) -> bool {
+    element.children.iter().any(|child| match child {
+        PreservedNode::Text(text) | PreservedNode::CData(text) => !text.is_empty(),
+        PreservedNode::Element(_)
+        | PreservedNode::Comment(_)
+        | PreservedNode::ProcessingInstruction { .. } => false,
+    })
+}
+
+fn is_fully_managed_text(element: &PreservedElement) -> bool {
+    element.attributes.is_empty()
+        && element.namespace_bindings.is_empty()
+        && element.children.iter().all(|child| match child {
+            PreservedNode::Text(_) | PreservedNode::CData(_) => true,
+            PreservedNode::Element(_)
+            | PreservedNode::Comment(_)
+            | PreservedNode::ProcessingInstruction { .. } => false,
+        })
 }
 
 fn new_text_element_for_paragraph(paragraph: &PreservedElement) -> PreservedElement {
@@ -4692,6 +4779,52 @@ fn raw_root_text_state(root: &RawElement, project: &Project) -> TextState {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceClass {
+    Managed,
+    RecognizedAttachment,
+    KnownIdentity,
+    Structural,
+    GenericOpaque,
+    InvalidUnsafe,
+}
+
+fn classify_preserved_element(
+    element: &RawElement,
+    depth: usize,
+    section: SectionKind,
+    in_title_content: bool,
+    root_ns: Option<&str>,
+) -> SourceClass {
+    if is_user_paragraph_data_lookalike(&element.name) {
+        return SourceClass::RecognizedAttachment;
+    }
+    if (depth == 0 && is_fdx_element(element, FDX_ROOT, root_ns))
+        || (depth == 1
+            && (is_fdx_element(element, "Content", root_ns)
+                || is_fdx_element(element, "TitlePage", root_ns)))
+        || (depth == 2
+            && section == SectionKind::TitlePage
+            && is_fdx_element(element, "Content", root_ns))
+    {
+        return SourceClass::Structural;
+    }
+    if is_fdx_element(element, "Paragraph", root_ns) {
+        let body = section == SectionKind::Content
+            && depth == 2
+            && (attribute(element, "Type").and_then(role_from_fdx).is_some()
+                || (attribute(element, "Type") == Some("General")
+                    && is_supported_dual_dialogue_source(element, root_ns)));
+        let title = section == SectionKind::TitlePage
+            && ((in_title_content && depth == 3)
+                || (depth == 2 && attribute(element, "Type").and_then(role_from_fdx).is_some()));
+        if body || title {
+            return SourceClass::Managed;
+        }
+    }
+    SourceClass::GenericOpaque
+}
+
 fn validate_user_paragraph_data_locations(
     root: &RawElement,
     root_namespace: Option<&str>,
@@ -4707,15 +4840,10 @@ fn validate_user_paragraph_data_locations(
         root_namespace: Option<&str>,
     ) -> Result<(), FdxError> {
         if is_user_paragraph_data_lookalike(&element.name) {
-            if !parent_accepts_attachment
-                || !parent.is_some_and(|owner| {
-                    is_user_paragraph_data_name(&element.name, &owner.name)
-                })
-            {
-                return Err(FdxError::UnsupportedConstruct);
-            }
-            // The complete third-party subtree is opaque, including any
-            // FDX-looking names nested within it.
+            // Correctly placed attachments retain their established owner
+            // relationship. Other occurrences are still safe source: the
+            // generalized import policy keeps them opaque rather than making
+            // an unsupported attachment topology fatal.
             return Ok(());
         }
 
@@ -4761,18 +4889,6 @@ fn validate_user_paragraph_data_locations(
                 Some(Role::Character | Role::Dialogue | Role::Parenthetical)
             );
         let accepts_attachment = body_owner || title_owner || dual_member_owner;
-
-        let attachment_count = element
-            .children
-            .iter()
-            .filter(|child| {
-                matches!(child, RawNode::Element(child)
-                    if is_user_paragraph_data_lookalike(&child.name))
-            })
-            .count();
-        if attachment_count > 1 {
-            return Err(FdxError::UnsupportedConstruct);
-        }
 
         for child in &element.children {
             if let RawNode::Element(child) = child {
@@ -4881,18 +4997,27 @@ fn preserve_node(
         && attribute(element, "Type").and_then(role_from_fdx).is_some();
     let body_paragraph = current_section == SectionKind::Content && depth == 2 && paragraph;
 
-    // A DualDialogue container is only understood through the exact direct-body
-    // General Paragraph shape below. Never let an unmatched occurrence drift
-    // through generic opaque recursion or be projected as an ordinary General.
+    // A supported dual wrapper is recognized only at the direct managed body
+    // Paragraph boundary and only in the document namespace. Any unsupported
+    // occurrence remains a complete opaque source subtree.
+    let dual_children = element.children.iter().filter_map(|child| match child {
+        RawNode::Element(child) if is_fdx_element(child, "DualDialogue", root_ns) => Some(child),
+        _ => None,
+    }).collect::<Vec<_>>();
+    let has_dual_name = element.children.iter().any(|child| matches!(
+        child,
+        RawNode::Element(child) if child.name.local_name == "DualDialogue"
+    ));
     if element.name.local_name == "DualDialogue" {
-        return Err(FdxError::UnsupportedConstruct);
+        return preserve_opaque_element(element.clone());
     }
-    let has_dual_dialogue = element.children.iter().any(|child| {
-        matches!(child, RawNode::Element(child) if child.name.local_name == "DualDialogue")
-    });
-    if has_dual_dialogue {
-        if !body_paragraph || attribute(element, "Type") != Some("General") {
-            return Err(FdxError::UnsupportedConstruct);
+    if !dual_children.is_empty() || has_dual_name {
+        if !body_paragraph
+            || attribute(element, "Type") != Some("General")
+            || dual_children.len() != 1
+            || has_dual_name != !dual_children.is_empty()
+        {
+            return preserve_opaque_element(element.clone());
         }
         let preserved = preserve_dual_dialogue_wrapper(
             element,
@@ -4902,8 +5027,15 @@ fn preserve_node(
             anchors,
             next_id,
             next_anchor,
-        )?;
-        return Ok(PreservedNode::Element(preserved));
+        );
+        return match preserved {
+            Ok(preserved) => Ok(PreservedNode::Element(preserved)),
+            // Unsupported topology is source, not a document-level import
+            // failure. Identity ambiguity is checked separately in the
+            // contextual identity pass before projection.
+            Err(FdxError::UnsupportedConstruct) => preserve_opaque_element(element.clone()),
+            Err(error) => Err(error),
+        };
     }
 
     let managed = if title_content_paragraph || legacy_title_paragraph {
@@ -4926,6 +5058,18 @@ fn preserve_node(
     } else {
         None
     };
+    let classification = classify_preserved_element(
+        element,
+        depth,
+        current_section,
+        in_title_content,
+        root_ns,
+    );
+    if managed.is_none() && classification != SourceClass::Structural {
+        // Unknown and unsupported source is retained as one opaque boundary.
+        // No descendant local name can escape this branch into projection.
+        return preserve_opaque_element(element.clone());
+    }
     let anchor_id = if managed.is_some() {
         let value = format!("fdx-anchor-{}", *next_anchor);
         *next_anchor = next_anchor.checked_add(1).ok_or(FdxError::ResourceLimit)?;
@@ -4993,6 +5137,89 @@ fn preserve_node(
         }
     }
     Ok(PreservedNode::Element(preserved))
+}
+
+fn is_supported_dual_dialogue_source(outer: &RawElement, root_ns: Option<&str>) -> bool {
+    if !is_fdx_element(outer, "Paragraph", root_ns)
+        || attribute(outer, "Type") != Some("General")
+    {
+        return false;
+    }
+    let duals = outer
+        .children
+        .iter()
+        .filter_map(|node| match node {
+            RawNode::Element(element) if is_fdx_element(element, "DualDialogue", root_ns) => {
+                Some(element)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [dual] = duals.as_slice() else {
+        return false;
+    };
+
+    let mut outer_attachment = false;
+    for child in &outer.children {
+        match child {
+            RawNode::Element(element) if std::ptr::eq(*dual, element) => {}
+            RawNode::Element(element)
+                if is_user_paragraph_data_name(&element.name, &outer.name) && !outer_attachment =>
+            {
+                outer_attachment = true;
+            }
+            RawNode::Text(value) if value.chars().all(char::is_whitespace) => {}
+            _ => return false,
+        }
+    }
+
+    let mut spell_blocks = 0usize;
+    let mut roles = Vec::new();
+    for child in &dual.children {
+        match child {
+            RawNode::Text(value) if value.chars().all(char::is_whitespace) => {}
+            RawNode::Element(element)
+                if is_fdx_element(element, "SpellCheckIgnoreLists", root_ns) =>
+            {
+                if spell_blocks != 0
+                    || !roles.is_empty()
+                    || validate_nested_spell_check(element, root_ns).is_err()
+                {
+                    return false;
+                }
+                spell_blocks += 1;
+            }
+            RawNode::Element(element) if is_fdx_element(element, "Paragraph", root_ns) => {
+                let Some(role) = attribute(element, "Type").and_then(role_from_fdx) else {
+                    return false;
+                };
+                if !matches!(role, Role::Character | Role::Dialogue | Role::Parenthetical)
+                    || validate_nested_member_topology(element, root_ns, role).is_err()
+                {
+                    return false;
+                }
+                roles.push(role);
+            }
+            _ => return false,
+        }
+    }
+    if spell_blocks != 1 || roles.len() < 2 || roles.first() != Some(&Role::Character) {
+        return false;
+    }
+    let Some(right_cue) = roles
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, role)| (*role == Role::Character).then_some(index))
+    else {
+        return false;
+    };
+    !roles[1..right_cue]
+        .iter()
+        .any(|role| !matches!(role, Role::Dialogue | Role::Parenthetical))
+        && !roles[right_cue + 1..]
+            .iter()
+            .any(|role| !matches!(role, Role::Dialogue | Role::Parenthetical))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5511,57 +5738,66 @@ fn direct_title_page_formatting(element: &RawElement) -> crate::TitlePageParagra
     }
 }
 
+fn classify_paragraph_child(
+    owner: &RawElement,
+    child: &RawElement,
+    allow_scene_properties: bool,
+    allow_inline_alts: bool,
+) -> SourceClass {
+    let namespace = owner.name.namespace_uri.as_deref();
+    if is_fdx_element(child, "Text", namespace) {
+        SourceClass::Managed
+    } else if is_user_paragraph_data_name(&child.name, &owner.name)
+        || (allow_scene_properties && is_fdx_element(child, "SceneProperties", namespace))
+        || (allow_inline_alts && is_fdx_element(child, "Alts", namespace))
+    {
+        SourceClass::RecognizedAttachment
+    } else {
+        SourceClass::GenericOpaque
+    }
+}
+
 fn semantic_text_runs(
     element: &RawElement,
     allow_scene_properties: bool,
     allow_inline_alts: bool,
 ) -> Result<Vec<TextRun>, FdxError> {
     let mut runs = Vec::new();
-    let mut saw_alts = false;
-    let mut saw_attachment = false;
     for child in &element.children {
         let RawNode::Element(text_element) = child else {
             continue;
         };
-        if is_fdx_element(text_element, "Alts", element.name.namespace_uri.as_deref()) {
-            if !allow_inline_alts || saw_alts {
-                return Err(FdxError::UnsupportedConstruct);
+        match classify_paragraph_child(
+            element,
+            text_element,
+            allow_scene_properties,
+            allow_inline_alts,
+        ) {
+            SourceClass::Managed => {}
+            SourceClass::RecognizedAttachment
+            | SourceClass::KnownIdentity
+            | SourceClass::Structural
+            | SourceClass::GenericOpaque
+            | SourceClass::InvalidUnsafe => {
+                // Opaque children, including recognized owner attachments,
+                // remain at their source positions and are never text runs.
+                continue;
             }
-            saw_alts = true;
-            continue;
-        }
-        if allow_scene_properties
-            && is_fdx_element(
-                text_element,
-                "SceneProperties",
-                element.name.namespace_uri.as_deref(),
-            )
-        {
-            // Scene metadata is source-owned and retained in the preservation
-            // tree. It is not inline text, but is a valid direct child of a
-            // Scene Heading paragraph emitted by the new-document writer.
-            continue;
-        }
-        if is_user_paragraph_data_name(&text_element.name, &element.name) {
-            if saw_attachment {
-                return Err(FdxError::UnsupportedConstruct);
-            }
-            saw_attachment = true;
-            continue;
         }
         if text_element.name.local_name != "Text"
             || text_element.name.namespace_uri != element.name.namespace_uri
         {
-            return Err(FdxError::UnsupportedConstruct);
+            // Kept defensively in case a future classifier adds a managed
+            // child class other than Text.
+            continue;
         }
         let mut text = String::new();
         for inline in &text_element.children {
             match inline {
                 RawNode::Text(value) | RawNode::CData(value) => text.push_str(value),
-                RawNode::Element(_) => return Err(FdxError::UnsupportedConstruct),
-                RawNode::Comment(_) | RawNode::ProcessingInstruction { .. } => {
-                    return Err(FdxError::UnsupportedConstruct)
-                }
+                // Inline elements and miscellaneous nodes remain in the raw
+                // source tree. Their text is intentionally not flattened.
+                RawNode::Element(_) | RawNode::Comment(_) | RawNode::ProcessingInstruction { .. } => {}
             }
         }
         if text.is_empty() {
@@ -5606,7 +5842,10 @@ fn read_source_layout_settings(
             continue;
         };
         if !seen_roles.insert(role) {
-            return Err(FdxError::DuplicateSection);
+            // The repeated effective role is ambiguous, but the complete
+            // settings subtree remains source-owned. Keep defaults rather
+            // than rejecting a document whose settings can be retained.
+            continue;
         }
         let font_specs = setting
             .children
@@ -5663,7 +5902,9 @@ fn read_source_layout_settings(
             })
             .collect::<Vec<_>>();
         if paragraph_specs.len() > 1 {
-            return Err(FdxError::DuplicateSection);
+            // Unsupported settings multiplicity is retained without guessing
+            // which paragraph specification should become effective.
+            continue;
         }
         let Some(paragraph) = paragraph_specs.first() else {
             continue;
@@ -5925,6 +6166,170 @@ fn walk_elements<F>(element: &RawElement, visitor: &mut F) -> Result<(), FdxErro
 where
     F: FnMut(&RawElement, Option<&ForeignIdentity>, bool, bool, usize, bool) -> Result<(), FdxError>,
 {
+    fn classify(
+        element: &RawElement,
+        parent: Option<&RawElement>,
+        grandparent: Option<&RawElement>,
+        depth: usize,
+        in_title_page: bool,
+        in_title_content: bool,
+        root_namespace: Option<&str>,
+    ) -> SourceClass {
+        let Some(parent) = parent else {
+            return if depth == 0 && is_fdx_element(element, FDX_ROOT, root_namespace) {
+                SourceClass::Structural
+            } else {
+                SourceClass::GenericOpaque
+            };
+        };
+
+        if depth == 1
+            && is_fdx_element(parent, FDX_ROOT, root_namespace)
+            && (is_fdx_element(element, "Content", root_namespace)
+                || is_fdx_element(element, "TitlePage", root_namespace))
+        {
+            return SourceClass::Structural;
+        }
+        if depth == 2
+            && in_title_page
+            && is_fdx_element(parent, "TitlePage", root_namespace)
+            && is_fdx_element(element, "Content", root_namespace)
+        {
+            return SourceClass::Structural;
+        }
+        if depth == 3
+            && is_fdx_element(element, "DualDialogue", root_namespace)
+            && is_fdx_element(parent, "Paragraph", root_namespace)
+            && attribute(parent, "Type") == Some("General")
+            && grandparent.is_some_and(|content| is_fdx_element(content, "Content", root_namespace))
+            && is_supported_dual_dialogue_source(parent, root_namespace)
+        {
+            return SourceClass::Structural;
+        }
+
+        if is_fdx_element(element, "Paragraph", root_namespace) {
+            let body_paragraph = depth == 2
+                && grandparent.is_some_and(|root| is_fdx_element(root, FDX_ROOT, root_namespace))
+                && is_fdx_element(parent, "Content", root_namespace);
+            let title_paragraph = (depth == 3
+                && in_title_content
+                && is_fdx_element(parent, "Content", root_namespace)
+                && grandparent.is_some_and(|title| is_fdx_element(title, "TitlePage", root_namespace)))
+                || (depth == 2
+                    && in_title_page
+                    && is_fdx_element(parent, "TitlePage", root_namespace));
+            if (body_paragraph && attribute(element, "Type").and_then(role_from_fdx).is_some())
+                || (title_paragraph
+                    && (depth == 3 || attribute(element, "Type").and_then(role_from_fdx).is_some()))
+            {
+                return SourceClass::Managed;
+            }
+            if body_paragraph
+                && attribute(element, "Type") == Some("General")
+                && is_supported_dual_dialogue_source(element, root_namespace)
+            {
+                return SourceClass::Managed;
+            }
+            let dual_member = depth == 4
+                && is_fdx_element(parent, "DualDialogue", root_namespace)
+                && grandparent.is_some_and(|outer| {
+                    is_fdx_element(outer, "Paragraph", root_namespace)
+                        && attribute(outer, "Type") == Some("General")
+                        && is_supported_dual_dialogue_source(outer, root_namespace)
+                })
+                && matches!(
+                    attribute(element, "Type").and_then(role_from_fdx),
+                    Some(Role::Character | Role::Dialogue | Role::Parenthetical)
+                );
+            if dual_member {
+                return SourceClass::Managed;
+            }
+        }
+
+        if is_user_paragraph_data_name(&element.name, &parent.name) {
+            return SourceClass::RecognizedAttachment;
+        }
+
+        let body_parent = depth == 3
+            && is_fdx_element(parent, "Paragraph", root_namespace)
+            && attribute(parent, "Type").and_then(role_from_fdx) == Some(Role::SceneHeading)
+            && grandparent.is_some_and(|content| is_fdx_element(content, "Content", root_namespace));
+        if body_parent && is_fdx_element(element, "SceneProperties", root_namespace) {
+            return SourceClass::KnownIdentity;
+        }
+
+        // The supported board projection is intentionally narrow: root-owned
+        // entities, their recognized containers, and direct required-reference
+        // children. A same-named element elsewhere is generic opaque payload.
+        let root_child = depth == 1 && is_fdx_element(parent, FDX_ROOT, root_namespace);
+        let board_container = root_child
+            && matches!(element.name.local_name.as_str(), "DisplayBoards" | "ListItems" | "Images");
+        if board_container {
+            return SourceClass::Structural;
+        }
+        if root_child
+            && matches!(element.name.local_name.as_str(), "DisplayBoard" | "ListItem" | "Image")
+            && element.name.namespace_uri.as_deref() == root_namespace
+        {
+            return SourceClass::KnownIdentity;
+        }
+        let under_board_container = depth == 2
+            && parent.name.namespace_uri.as_deref() == root_namespace
+            && matches!(parent.name.local_name.as_str(), "DisplayBoards" | "ListItems" | "Images");
+        let board_entity = under_board_container
+            && matches!(element.name.local_name.as_str(), "DisplayBoard" | "ListItem" | "Image")
+            && element.name.namespace_uri.as_deref() == root_namespace;
+        if board_entity {
+            return SourceClass::KnownIdentity;
+        }
+        if depth == 2
+            && is_fdx_element(parent, "DisplayBoard", root_namespace)
+            && matches!(element.name.local_name.as_str(), "Item" | "Picture")
+            && element.name.namespace_uri.as_deref() == root_namespace
+        {
+            return SourceClass::KnownIdentity;
+        }
+
+        // These explicitly known containers are the only feature-local paths
+        // through which additional source-owned typed IDs are recognized.
+        if depth == 1
+            && is_fdx_element(parent, FDX_ROOT, root_namespace)
+            && is_fdx_element(element, "DocumentRef", root_namespace)
+        {
+            return SourceClass::KnownIdentity;
+        }
+        let inside_scene_properties = parent.name.local_name == "SceneProperties"
+            && parent.name.namespace_uri.as_deref() == root_namespace;
+        let inside_scene_arcs = parent.name.local_name == "SceneArcBeats"
+            && parent.name.namespace_uri.as_deref() == root_namespace
+            && grandparent.is_some_and(|scene| {
+                scene.name.local_name == "SceneProperties"
+                    && scene.name.namespace_uri.as_deref() == root_namespace
+            });
+        if (inside_scene_properties
+            && element.name.namespace_uri.as_deref() == root_namespace
+            && matches!(element.name.local_name.as_str(), "SceneArcBeats" | "CastMember" | "Character"))
+        || (inside_scene_arcs
+                && element.name.namespace_uri.as_deref() == root_namespace
+                && matches!(element.name.local_name.as_str(), "SceneArcBeat" | "Beat"))
+        {
+            return SourceClass::KnownIdentity;
+        }
+        if parent.name.local_name == "SceneArcBeat"
+            && parent.name.namespace_uri.as_deref() == root_namespace
+            && matches!(element.name.local_name.as_str(), "CastMember" | "Character")
+            && element.name.namespace_uri.as_deref() == root_namespace
+        {
+            return SourceClass::KnownIdentity;
+        }
+
+        // `in_title_page` and `in_title_content` are deliberately not enough to
+        // grant typed status: every unrecognized branch is an opaque boundary.
+        let _ = in_title_page;
+        let _ = in_title_content;
+        SourceClass::GenericOpaque
+    }
+
     fn visit<F>(
         element: &RawElement,
         parent: Option<&RawElement>,
@@ -5939,7 +6344,22 @@ where
     where
         F: FnMut(&RawElement, Option<&ForeignIdentity>, bool, bool, usize, bool) -> Result<(), FdxError>,
     {
-        let local_board = if element.name.local_name == "DisplayBoard" {
+        let class = classify(
+            element,
+            parent,
+            grandparent,
+            depth,
+            in_title_page,
+            in_title_content,
+            root_namespace,
+        );
+        if class == SourceClass::GenericOpaque || class == SourceClass::RecognizedAttachment {
+            return Ok(());
+        }
+        let local_board = if class != SourceClass::GenericOpaque
+            && element.name.local_name == "DisplayBoard"
+            && element.name.namespace_uri.as_deref() == root_namespace
+        {
             identity_attribute(element)
                 .map(|value| ForeignIdentity::new(ForeignIdDomain::Board, value.to_owned()))
                 .transpose()
@@ -5958,19 +6378,21 @@ where
                 grandparent.name.local_name == "AltCollection"
                     && grandparent.name.namespace_uri.as_deref() == root_namespace
             });
-        visitor(
-            element,
-            active_board,
-            in_title_page,
-            in_title_content,
-            depth,
-            exact_alternate_copy,
-        )?;
+        let identity_bearing = class != SourceClass::Structural
+            || (depth == 0 && is_fdx_element(element, FDX_ROOT, root_namespace))
+            || (depth == 1 && is_fdx_element(element, "DocumentRef", root_namespace));
+        if identity_bearing {
+            visitor(
+                element,
+                active_board,
+                in_title_page,
+                in_title_content,
+                depth,
+                exact_alternate_copy,
+            )?;
+        }
         for child in &element.children {
             if let RawNode::Element(child) = child {
-                if is_user_paragraph_data_name(&child.name, &element.name) {
-                    continue;
-                }
                 let child_in_title_page = in_title_page
                     || (depth == 0 && is_fdx_element(child, "TitlePage", root_namespace));
                 let child_in_title_content = in_title_content
@@ -6068,7 +6490,10 @@ fn raw_attribute_ci<'a>(attributes: &'a [RawAttribute], name: &str) -> Option<&'
     found
 }
 
-fn validate_image_payload_budgets(root: &RawElement) -> Result<(), FdxError> {
+fn validate_image_payload_budgets(
+    root: &RawElement,
+    root_namespace: Option<&str>,
+) -> Result<(), FdxError> {
     fn text_size(element: &RawElement) -> Result<usize, FdxError> {
         let mut size = 0usize;
         for child in &element.children {
@@ -6088,37 +6513,30 @@ fn validate_image_payload_budgets(root: &RawElement) -> Result<(), FdxError> {
         }
         Ok(size)
     }
-    fn inspect(element: &RawElement, total_image_text: &mut usize) -> Result<(), FdxError> {
-        if element.name.local_name == "Image" {
-            let encoded = text_size(element)?;
-            let per_image_encoded_limit = MAX_IMAGE_BYTES
-                .checked_mul(4)
-                .and_then(|value| value.checked_add(2))
-                .map(|value| value / 3)
-                .ok_or(FdxError::ResourceLimit)?;
-            *total_image_text = total_image_text
-                .checked_add(encoded)
-                .ok_or(FdxError::ResourceLimit)?;
-            let total_encoded_limit = MAX_TOTAL_IMAGE_BYTES
-                .checked_mul(4)
-                .and_then(|value| value.checked_add(2))
-                .map(|value| value / 3)
-                .ok_or(FdxError::ResourceLimit)?;
-            if encoded > per_image_encoded_limit || *total_image_text > total_encoded_limit {
-                return Err(FdxError::ResourceLimit);
-            }
+    let mut total_image_text = 0usize;
+    walk_elements(root, &mut |element, _, _, _, _, _| {
+        if !is_fdx_element(element, "Image", root_namespace) {
+            return Ok(());
         }
-        for child in &element.children {
-            if let RawNode::Element(child) = child {
-                if !is_user_paragraph_data_lookalike(&child.name) {
-                    inspect(child, total_image_text)?;
-                }
-            }
+        let encoded = text_size(element)?;
+        let per_image_encoded_limit = MAX_IMAGE_BYTES
+            .checked_mul(4)
+            .and_then(|value| value.checked_add(2))
+            .map(|value| value / 3)
+            .ok_or(FdxError::ResourceLimit)?;
+        total_image_text = total_image_text
+            .checked_add(encoded)
+            .ok_or(FdxError::ResourceLimit)?;
+        let total_encoded_limit = MAX_TOTAL_IMAGE_BYTES
+            .checked_mul(4)
+            .and_then(|value| value.checked_add(2))
+            .map(|value| value / 3)
+            .ok_or(FdxError::ResourceLimit)?;
+        if encoded > per_image_encoded_limit || total_image_text > total_encoded_limit {
+            return Err(FdxError::ResourceLimit);
         }
         Ok(())
-    }
-    let mut total_image_text = 0usize;
-    inspect(root, &mut total_image_text)
+    })
 }
 
 fn map_model_error(error: ModelError) -> FdxError {

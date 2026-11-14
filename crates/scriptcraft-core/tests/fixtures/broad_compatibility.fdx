@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FinalDraft DocumentType="Script" Version="6" xmlns:v="urn:scriptcraft:fixture:vendor" v:root-flag="kept">
+  <v:RootExtra ID="opaque-repeat">
+    <Paragraph Type="Action" id="spoofed-root-paragraph">
+      <Text>SPOOFED_ROOT_TEXT</Text>
+      <DualDialogue><Image ID="opaque-image-id"/></DualDialogue>
+    </Paragraph>
+    <!-- root-level opaque comment -->
+  </v:RootExtra>
+  <Content v:section-flag="kept">
+    <v:BeforeContent empty=""/>
+    <Paragraph Type="Action" id="body-one" Bookmark="body-bookmark" v:known-owner="kept">
+      <v:BeforeText ID="opaque-repeat"/>
+      <Text>Alpha<v:InlineMarkup ID="opaque-inline-id"><Text>INLINE_ONLY_SENTINEL</Text></v:InlineMarkup></Text>
+      <!-- paragraph-owned comment -->
+      <?opaque processing-instruction?>
+      <v:BetweenText ID="opaque-repeat">
+        mixed-source-text
+        <Paragraph Type="Action" id="spoofed-nested-paragraph"><Text>SPOOFED_NESTED_TEXT</Text></Paragraph>
+        <![CDATA[opaque CDATA sentinel]]>
+        <v:EmptyPayload/>
+      </v:BetweenText>
+      <Text> omega.</Text>
+      <ScriptNote ID="shared-note"><Paragraph Type="Action" id="note-payload-one"><Text>NOTE_ONLY_SENTINEL_ONE</Text></Paragraph></ScriptNote>
+      <ScriptNote ID="shared-note"><Paragraph Type="Action" id="note-payload-two"><Text>NOTE_ONLY_SENTINEL_TWO</Text></Paragraph></ScriptNote>
+      <UserParagraphData vendor-data="retained"><Payload/></UserParagraphData>
+      <v:AfterText ID="opaque-repeat"/>
+    </Paragraph>
+    <Paragraph Type="Scene Heading" id="scene-owner"><Text>SYNTHETIC SCENE HEADING</Text><SceneProperties><SceneColor Color="blue"/></SceneProperties></Paragraph>
+    <Paragraph Type="General" id="dual-outer" Bookmark="outer-bookmark" v:dual-flag="kept">
+      <DualDialogue v:wrapper-flag="kept">
+        <Paragraph Type="Character" id="dual-left-cue" Bookmark="member-bookmark"><Text>AVA</Text></Paragraph>
+        <Paragraph Type="Dialogue" id="dual-left-line"><Text>Left line.</Text></Paragraph>
+        <Paragraph Type="Character" id="dual-right-cue"><Text>BEAU</Text></Paragraph>
+        <Paragraph Type="Dialogue" id="dual-right-line"><Text>Right line.</Text></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+    <v:AfterContent ID="opaque-repeat"/>
+  </Content>
+  <TitlePage v:title-section="kept">
+    <Content>
+      <v:BeforeTitle/>
+      <Paragraph Type="Title" id="title-one" Bookmark="title-bookmark" v:title-owner="kept">
+        <v:TitleBeforeText/>
+        <Text>Portable title text</Text>
+        <v:TitleAfterText/>
+      </Paragraph>
+      <v:AfterTitle/>
+    </Content>
+  </TitlePage>
+  <SpellCheckIgnoreLists v:settings-flag="kept">
+    <v:SettingsOpaque ID="opaque-repeat">
+      <Text>SETTINGS_ONLY_SENTINEL</Text>
+      <v:NestedOpaque><Paragraph Type="Action" id="spoofed-settings-paragraph"><Text>SPOOFED_SETTINGS_TEXT</Text></Paragraph></v:NestedOpaque>
+    </v:SettingsOpaque>
+  </SpellCheckIgnoreLists>
+  <ScriptNoteDefinitions><ScriptNoteDefinition ID="shared-note"/></ScriptNoteDefinitions>
+</FinalDraft>

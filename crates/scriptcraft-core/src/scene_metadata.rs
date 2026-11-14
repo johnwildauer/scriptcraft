@@ -2,9 +2,8 @@
 
 use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
 use crate::preservation::{
-    is_user_paragraph_data_lookalike, is_user_paragraph_data_name, ForeignIdDomain,
-    ForeignIdentity, PreservationError, PreservationState, PreservedAttribute, PreservedElement,
-    PreservedNode, SourceName, SourceOwnership,
+    ForeignIdDomain, ForeignIdentity, PreservationError, PreservationState, PreservedAttribute,
+    PreservedElement, PreservedNode, SourceName, SourceOwnership,
 };
 use crate::{ModelError, Project, Role, ScreenplayElement, StableId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -234,7 +233,6 @@ pub(crate) fn recognized_generated_scene_heading_subtree(
     }
     let namespace = heading.name.namespace_uri.clone();
     let mut properties = None;
-    let mut user_paragraph_data_seen = false;
     for (index, child) in heading.children.iter().enumerate() {
         match child {
             PreservedNode::Element(element) if element.name.local_name == "SceneProperties" => {
@@ -248,18 +246,10 @@ pub(crate) fn recognized_generated_scene_heading_subtree(
                     && element.children.iter().all(|node| {
                         matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_))
                     }) => {}
-            PreservedNode::Element(element)
-                if is_user_paragraph_data_lookalike(&element.name) =>
-            {
-                if !is_user_paragraph_data_name(&element.name, &heading.name)
-                    || user_paragraph_data_seen
-                {
-                    return None;
-                }
-                user_paragraph_data_seen = true;
-            }
             PreservedNode::Text(text) | PreservedNode::CData(text)
                 if text.chars().all(char::is_whitespace) => {}
+            PreservedNode::Element(_) | PreservedNode::Comment(_)
+            | PreservedNode::ProcessingInstruction { .. } => {}
             _ => return None,
         }
     }
@@ -433,7 +423,6 @@ fn reconcile_heading(
     let mut allocated = Vec::new();
     let mut removed = Vec::new();
     let namespace = heading.name.namespace_uri.clone();
-    let mut user_paragraph_data_seen = false;
     for child in &heading.children {
         match child {
             PreservedNode::Element(element)
@@ -447,18 +436,10 @@ fn reconcile_heading(
                     return Err(SceneMetadataError::UnsupportedSceneMetadata);
                 }
             }
-            PreservedNode::Element(element)
-                if is_user_paragraph_data_lookalike(&element.name) =>
-            {
-                if !is_user_paragraph_data_name(&element.name, &heading.name)
-                    || user_paragraph_data_seen
-                {
-                    return Err(SceneMetadataError::UnsupportedSceneMetadata);
-                }
-                user_paragraph_data_seen = true;
-            }
             PreservedNode::Text(text) | PreservedNode::CData(text)
                 if text.chars().all(char::is_whitespace) => {}
+            PreservedNode::Element(_) | PreservedNode::Comment(_)
+            | PreservedNode::ProcessingInstruction { .. } => {}
             _ => return Err(SceneMetadataError::UnsupportedSceneMetadata),
         }
     }
@@ -944,7 +925,6 @@ fn recognized_arc_paragraph_content(
     paragraph: &PreservedElement,
     parent_namespace: &Option<String>,
 ) -> bool {
-    let mut user_paragraph_data_seen = false;
     paragraph.children.iter().all(|child| match child {
         PreservedNode::Element(run)
             if run.name.local_name == "Text" && run.name.namespace_uri == *parent_namespace =>
@@ -953,16 +933,9 @@ fn recognized_arc_paragraph_content(
                 .iter()
                 .all(|part| matches!(part, PreservedNode::Text(_) | PreservedNode::CData(_)))
         }
-        PreservedNode::Element(element) if is_user_paragraph_data_lookalike(&element.name) => {
-            if !is_user_paragraph_data_name(&element.name, &paragraph.name)
-                || user_paragraph_data_seen
-            {
-                return false;
-            }
-            user_paragraph_data_seen = true;
-            true
-        }
         PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => true,
+        PreservedNode::Element(_) | PreservedNode::Comment(_)
+        | PreservedNode::ProcessingInstruction { .. } => true,
         _ => false,
     })
 }

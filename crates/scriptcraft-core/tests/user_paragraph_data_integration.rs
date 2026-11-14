@@ -165,7 +165,11 @@ fn integration_scene_fixture() -> Vec<u8> {
         "</DualDialogue>\n    </Paragraph>\n    <Paragraph Type=\"Cast List\" id=\"cast-001\"><Text>(old)</Text><UserParagraphData owner=\"cast-list\"><CastPayload>CAST_PAYLOAD_SENTINEL</CastPayload></UserParagraphData></Paragraph>\n  </Content>",
         1,
     );
-    with_cast_list.into_bytes()
+    with_cast_list.replacen(
+        "</UserParagraphData>",
+        "</UserParagraphData><VendorSceneSibling xmlns=\"urn:vendor:scene\" flag=\"preserve\"/>",
+        1,
+    ).into_bytes()
 }
 
 fn generated_arc_payload(namespace: &Option<String>, owner_id: &str) -> PreservedElement {
@@ -275,6 +279,19 @@ fn has_root_user_document_data(project: &Project) -> bool {
     })
 }
 
+fn has_vendor_scene_sibling(project: &Project) -> bool {
+    fn contains(nodes: &[PreservedNode]) -> bool {
+        nodes.iter().any(|node| match node {
+            PreservedNode::Element(element) => element.name.local_name == "VendorSceneSibling"
+                || contains(&element.children),
+            _ => false,
+        })
+    }
+    project.preservation.as_ref().is_some_and(|preservation| {
+        preservation.sections.iter().any(|section| contains(&section.children))
+    })
+}
+
 #[test]
 fn clean_session_stays_clean_after_changed_imported_derived_refresh() {
     let imported = valid(read_v6(&integration_scene_fixture()));
@@ -289,6 +306,7 @@ fn clean_session_stays_clean_after_changed_imported_derived_refresh() {
 
     assert!(outcome.changed);
     assert!(!outcome.deferred);
+    assert!(has_vendor_scene_sibling(session.project()));
     assert_eq!(
         session.project().elements.last().map(|element| element.text.as_str()),
         Some("(LINA, OMAR)")

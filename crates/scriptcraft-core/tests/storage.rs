@@ -8,14 +8,99 @@ use scriptcraft_core::fdx_storage::{
     FdxStorageErrorKind, FdxStorageFileSystem, StdFdxStorageFileSystem, StorageOperation,
     TransactionalSaveError,
 };
+use scriptcraft_core::preservation::{PreservedElement, PreservedNode};
 use scriptcraft_core::Project;
 use std::cell::Cell;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+const OPAQUE_SOURCE: &[u8] = include_bytes!("fixtures/broad_compatibility.fdx");
+
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("acceptance scenario uses valid bounded input"))
+}
+
+fn preserved_elements(project: &Project) -> Vec<&PreservedElement> {
+    fn visit<'a>(nodes: &'a [PreservedNode], output: &mut Vec<&'a PreservedElement>) {
+        for node in nodes {
+            let PreservedNode::Element(element) = node else {
+                continue;
+            };
+            output.push(element);
+            visit(&element.children, output);
+        }
+    }
+
+    let mut output = Vec::new();
+    if let Some(preservation) = &project.preservation {
+        for section in &preservation.sections {
+            visit(&section.children, &mut output);
+        }
+    }
+    output
+}
+
+fn raw_attribute<'a>(element: &'a PreservedElement, local_name: &str) -> Option<&'a str> {
+    element.attributes.iter().find(|attribute| {
+        attribute.name.namespace_uri.is_none() && attribute.name.local_name == local_name
+    }).map(|attribute| attribute.value.as_str())
+}
+
+fn assert_opaque_fixture_roundtrip(project: &Project) {
+    let elements = preserved_elements(project);
+    let notes = elements.iter().filter(|element| element.name.local_name == "ScriptNote")
+        .copied().collect::<Vec<_>>();
+    assert_eq!(notes.len(), 2);
+    assert!(notes.iter().all(|note| raw_attribute(note, "ID") == Some("shared-note")));
+    assert!(elements.iter().any(|element| {
+        element.name.local_name == "ScriptNoteDefinition"
+            && raw_attribute(element, "ID") == Some("shared-note")
+    }));
+
+    let body = elements.iter().copied().find(|element| {
+        element.name.local_name == "Paragraph" && raw_attribute(element, "id") == Some("body-one")
+    }).unwrap_or_else(|| unreachable!("synthetic managed owner remains source-backed"));
+    assert_eq!(raw_attribute(body, "Bookmark"), Some("body-bookmark"));
+    assert!(body.attributes.iter().any(|attribute| {
+        attribute.name.local_name == "known-owner"
+            && attribute.name.namespace_uri.as_deref() == Some("urn:scriptcraft:fixture:vendor")
+            && attribute.value == "kept"
+    }));
+    let children = body.children.iter().filter_map(|node| match node {
+        PreservedNode::Element(element) => Some(element.name.local_name.as_str()),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(children, [
+        "BeforeText", "Text", "BetweenText", "Text", "ScriptNote", "ScriptNote",
+        "UserParagraphData", "AfterText",
+    ]);
+    assert!(body.children.iter().any(|node| matches!(node,
+        PreservedNode::Element(element) if element.name.local_name == "UserParagraphData"
+            && raw_attribute(element, "vendor-data") == Some("retained")
+    )));
+    assert!(elements.iter().any(|element| {
+        element.name.local_name == "FinalDraft"
+            && element.attributes.iter().any(|attribute| {
+                attribute.name.local_name == "root-flag"
+                    && attribute.name.namespace_uri.as_deref()
+                        == Some("urn:scriptcraft:fixture:vendor")
+                    && attribute.value == "kept"
+            })
+    }));
+    assert!(body.children.iter().any(|node| matches!(node,
+        PreservedNode::Element(text) if text.name.local_name == "Text"
+            && text.children.iter().any(|child| matches!(child,
+                PreservedNode::Element(inline) if inline.name.local_name == "InlineMarkup"
+            ))
+    )));
+}
+
+fn note_subtrees(project: &Project) -> Vec<PreservedElement> {
+    preserved_elements(project).into_iter()
+        .filter(|element| element.name.local_name == "ScriptNote")
+        .cloned()
+        .collect()
 }
 
 struct TestDirectory(PathBuf);
@@ -41,6 +126,130 @@ impl Drop for TestDirectory {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+
+#[test]
+fn opaque_noop_save_save_as_reopen_and_second_cycle_preserve_source_data() {
+    let directory = TestDirectory::new();
+    let source = directory.path("opaque-source.fdx");
+    let save_as_one = directory.path("opaque-save-as-one.fdx");
+    let save_as_two = directory.path("opaque-save-as-two.fdx");
+    fs::write(&source, OPAQUE_SOURCE)
+        .unwrap_or_else(|_| unreachable!("isolated fixture copy can be written"));
+    fs::write(&save_as_one, b"prior Save As destination")
+        .unwrap_or_else(|_| unreachable!("isolated Save As destination can be seeded"));
+
+    let opened = valid(open(&StdFdxStorageFileSystem, &source));
+    let original_project = opened.document.project.clone();
+    let original_notes = note_subtrees(&original_project);
+    let mut session = valid(EditingSession::new(opened.document.project));
+    let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+
+    valid(save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::Save,
+    ));
+    let saved = valid(read_v6(&valid(fs::read(&source))));
+    assert_eq!(saved.project.elements, original_project.elements);
+    assert_eq!(saved.project.title_page, original_project.title_page);
+    assert_eq!(note_subtrees(&saved.project), original_notes);
+    assert_opaque_fixture_roundtrip(&saved.project);
+    let saved_source_bytes = valid(fs::read(&source));
+
+    let reopened = valid(open(&StdFdxStorageFileSystem, &source));
+    let mut session = valid(EditingSession::new(reopened.document.project));
+    let mut target = FdxSaveTarget::from_baseline(reopened.baseline);
+    valid(save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::SaveAsOverwrite(save_as_one.clone()),
+    ));
+    let saved_as_one = valid(open(&StdFdxStorageFileSystem, &save_as_one));
+    assert_eq!(saved_as_one.document.project.elements, original_project.elements);
+    assert_eq!(saved_as_one.document.project.title_page, original_project.title_page);
+    assert_eq!(note_subtrees(&saved_as_one.document.project), original_notes);
+    assert_opaque_fixture_roundtrip(&saved_as_one.document.project);
+    assert_eq!(valid(fs::read(&source)), saved_source_bytes);
+
+    let saved_as_one_bytes = valid(fs::read(&save_as_one));
+    let mut session = valid(EditingSession::new(saved_as_one.document.project));
+    let mut target = FdxSaveTarget::from_baseline(saved_as_one.baseline);
+    valid(save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::SaveAs(save_as_two.clone()),
+    ));
+    let saved_as_two = valid(open(&StdFdxStorageFileSystem, &save_as_two));
+    assert_eq!(saved_as_two.document.project.elements, original_project.elements);
+    assert_eq!(saved_as_two.document.project.title_page, original_project.title_page);
+    assert_eq!(note_subtrees(&saved_as_two.document.project), original_notes);
+    assert_opaque_fixture_roundtrip(&saved_as_two.document.project);
+    assert_eq!(valid(fs::read(&save_as_one)), saved_as_one_bytes);
+}
+
+#[test]
+fn opaque_edit_save_rebases_session_without_detaching_owner_source() {
+    let directory = TestDirectory::new();
+    let source = directory.path("opaque-edited-rebase.fdx");
+    fs::write(&source, OPAQUE_SOURCE)
+        .unwrap_or_else(|_| unreachable!("isolated fixture copy can be written"));
+
+    let opened = valid(open(&StdFdxStorageFileSystem, &source));
+    let original_notes = note_subtrees(&opened.document.project);
+    let mut session = valid(EditingSession::new(opened.document.project));
+    let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+    valid(session.set_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    valid(session.insert("edited "));
+    assert_opaque_fixture_roundtrip(session.project());
+
+    valid(save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::Save,
+    ));
+    assert!(!session.dirty());
+    assert_opaque_fixture_roundtrip(session.project());
+    assert_eq!(note_subtrees(session.project()), original_notes);
+    let reopened = valid(open(&StdFdxStorageFileSystem, &source));
+    assert_opaque_fixture_roundtrip(&reopened.document.project);
+    assert_eq!(note_subtrees(&reopened.document.project), original_notes);
+}
+
+#[test]
+fn opaque_save_as_conflict_preserves_source_destination_and_live_session() {
+    let directory = TestDirectory::new();
+    let source = directory.path("opaque-conflict-source.fdx");
+    let destination = directory.path("opaque-existing-destination.fdx");
+    let prior_destination = b"preexisting destination remains unchanged";
+    fs::write(&source, OPAQUE_SOURCE)
+        .unwrap_or_else(|_| unreachable!("isolated fixture copy can be written"));
+    fs::write(&destination, prior_destination)
+        .unwrap_or_else(|_| unreachable!("isolated destination can be seeded"));
+    let opened = valid(open(&StdFdxStorageFileSystem, &source));
+    let mut session = valid(EditingSession::new(opened.document.project));
+    let before_session = session.clone();
+    let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+    let before_target = target.clone();
+
+    let error = save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::SaveAs(destination.clone()),
+    ).err().unwrap_or_else(|| unreachable!("Save As must reject an existing destination"));
+
+    assert!(matches!(error, TransactionalSaveError::Storage(ref storage)
+        if storage.kind == FdxStorageErrorKind::DestinationExists));
+    assert_eq!(valid(fs::read(&source)), OPAQUE_SOURCE);
+    assert_eq!(valid(fs::read(&destination)), prior_destination);
+    assert_eq!(session, before_session);
+    assert_eq!(target, before_target);
+}
+
 #[test]
 fn failed_save_as_keeps_existing_destination_and_live_unsaved_session() {
     let directory = TestDirectory::new();
@@ -514,6 +723,32 @@ fn temporary_write_failure_keeps_disk_session_selection_history_and_target_atomi
     assert_eq!(session.title_selection(), before.title_selection());
     assert_eq!(target.path(), before_target.path());
     assert_eq!(target.baseline(), before_target.baseline());
+}
+
+#[test]
+fn opaque_candidate_write_failure_preserves_source_and_live_session() {
+    let directory = TestDirectory::new();
+    let path = directory.path("opaque-write-failure.fdx");
+    fs::write(&path, OPAQUE_SOURCE)
+        .unwrap_or_else(|_| unreachable!("isolated fixture copy can be written"));
+    let opened = valid(open(&StdFdxStorageFileSystem, &path));
+    let mut session = valid(EditingSession::new(opened.document.project));
+    let before_session = session.clone();
+    let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+    let before_target = target.clone();
+
+    let error = save_session(
+        &FailingWriteFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::Save,
+    ).err().unwrap_or_else(|| unreachable!("injected candidate write failure must abort publication"));
+
+    assert!(matches!(error, TransactionalSaveError::Storage(ref storage)
+        if storage.kind == FdxStorageErrorKind::Io(StorageOperation::WriteTemporary)));
+    assert_eq!(valid(fs::read(&path)), OPAQUE_SOURCE);
+    assert_eq!(session, before_session);
+    assert_eq!(target, before_target);
 }
 
 struct FailingSyncFileSystem;

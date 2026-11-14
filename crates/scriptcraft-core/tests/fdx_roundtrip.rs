@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use scriptcraft_core::fdx::{read_v6, write_v6, FdxError};
+use scriptcraft_core::fdx::{read_v6, write_v6};
 use scriptcraft_core::Project;
 
 const BASIC: &[u8] = include_bytes!("fixtures/dual_dialogue_basic.fdx");
@@ -65,13 +65,22 @@ fn empty_side_wrappers_and_both_alts_scopes_survive_serialization() {
 }
 
 #[test]
-fn unsupported_namespace_and_malformed_group_shapes_stop_import_safely() {
+fn unsupported_dual_dialogue_shapes_import_without_fabricated_groups() {
     let source = std::str::from_utf8(BASIC).expect("fixture is UTF-8");
     let unsupported = source.replace("<DualDialogue>", "<DualDialogue xmlns=\"urn:unsupported\">");
-    assert_eq!(read_v6(unsupported.as_bytes()).err(), Some(FdxError::UnsupportedConstruct));
+    let imported = read_v6(unsupported.as_bytes())
+        .expect("foreign-namespace dual topology remains opaque source");
+    assert!(imported.project.dual_dialogue_groups.is_empty());
+    assert!(!imported.project.elements.iter().any(|paragraph| {
+        paragraph.text.contains("First half") || paragraph.text.contains("Second half")
+    }));
 
     let malformed = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="General" id="outer"><DualDialogue><Paragraph Type="Character" id="only-cue"><Text>ALONE</Text></Paragraph></DualDialogue></Paragraph></Content></FinalDraft>"#;
-    assert_eq!(read_v6(malformed).err(), Some(FdxError::UnsupportedConstruct));
+    let imported = read_v6(malformed)
+        .expect("unsupported one-sided dual topology remains opaque source");
+    assert!(imported.project.dual_dialogue_groups.is_empty());
+    assert!(!imported.project.elements.iter().any(|paragraph| paragraph.text.contains("ALONE")));
+    assert!(imported.project.preservation.is_some());
 }
 
 #[test]
