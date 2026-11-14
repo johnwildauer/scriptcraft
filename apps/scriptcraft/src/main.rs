@@ -18,6 +18,7 @@ use scriptcraft_core::{Project, Role, StableId};
 use scriptcraft_commands::DiagnosticMessage;
 use std::collections::VecDeque;
 use std::ffi::OsString;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -80,9 +81,18 @@ use replacement_open::StagedOpenOutcome;
 
 const UNTITLED_DOCUMENT_TITLE: &str = "Untitled Screenplay";
 const UNTITLED_PDF_FILENAME: &str = "Untitled Screenplay.pdf";
-// `--open-handoff=<id>` is an internal child-launch option, not an OS ingress
-// option. A document path without it is always an independent startup open.
-const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--menu-platform=auto|macos|windows] [--document-path=<UTF-8 FDX path>] [--open-handoff=<id> (internal; requires --document-path)]";
+// Native argument boundaries are authoritative: shell quoting has already
+// produced one argument, so paths are never split or reparsed here. Ordinary
+// shell associations should pass the selected path as one quoted native path.
+// `--open-handoff=<id>` is internal and only accompanies the custom option.
+const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--menu-platform=auto|macos|windows] [<UTF-8 FDX path> | --document-path=<UTF-8 FDX path> [--open-handoff=<id> (internal)]]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupDocumentSource {
+    CustomOption,
+    PositionalArgument,
+    NativeOpenDocuments,
+}
 
 /// Startup document and its optional replacement acknowledgement identity.
 /// Keeping these values together prevents ordinary document launches from
@@ -90,6 +100,7 @@ const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--menu-platform=auto|ma
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StartupDocumentInput {
     path: PathBuf,
+    source: StartupDocumentSource,
     handoff_id: Option<replacement_open::HandoffId>,
 }
 
@@ -109,7 +120,7 @@ fn parse_startup_args(
     let mut seen_open_handoff = false;
     let mut development = false;
     let mut menu_platform = menu::MenuPlatformChoice::Auto;
-    let mut document_path = None;
+    let mut document_input: Option<(PathBuf, StartupDocumentSource)> = None;
     let mut handoff_id = None;
 
     for argument in args {
@@ -150,16 +161,37 @@ fn parse_startup_args(
                 return Err(format!("duplicate --document-path option\n{STARTUP_USAGE}"));
             }
             seen_document_path = true;
+            if document_input
+                .as_ref()
+                .is_some_and(|(_, source)| *source == StartupDocumentSource::PositionalArgument)
+            {
+                return Err(format!(
+                    "ambiguous document sources: use one positional path or --document-path, not both\n{STARTUP_USAGE}"
+                ));
+            }
             return Err(format!("--document-path requires an equals-form value\n{STARTUP_USAGE}"));
         } else if let Some(value) = argument.strip_prefix("--document-path=") {
             if seen_document_path {
                 return Err(format!("duplicate --document-path option\n{STARTUP_USAGE}"));
             }
             seen_document_path = true;
-            if value.is_empty() {
-                return Err(format!("--document-path value must not be empty\n{STARTUP_USAGE}"));
+            if document_input
+                .as_ref()
+                .is_some_and(|(_, source)| *source == StartupDocumentSource::PositionalArgument)
+            {
+                return Err(format!(
+                    "ambiguous document sources: use one positional path or --document-path, not both\n{STARTUP_USAGE}"
+                ));
             }
-            document_path = Some(PathBuf::from(value));
+            let path = DocumentPath::new(value.to_owned()).map_err(|_| {
+                let reason = if value.is_empty() {
+                    "--document-path value must not be empty"
+                } else {
+                    "invalid --document-path value"
+                };
+                format!("{reason}\n{STARTUP_USAGE}")
+            })?;
+            document_input = Some((path.as_path().to_path_buf(), StartupDocumentSource::CustomOption));
         } else if argument == "--open-handoff" {
             if seen_open_handoff {
                 return Err(format!("duplicate --open-handoff option\n{STARTUP_USAGE}"));
@@ -177,16 +209,34 @@ fn parse_startup_args(
                 })?,
             );
         } else {
-            let error = if argument.starts_with('-') {
-                "unknown option"
-            } else {
-                "unexpected positional argument"
-            };
-            return Err(format!("{error}\n{STARTUP_USAGE}"));
+            if argument.starts_with('-') {
+                return Err(format!("unknown option\n{STARTUP_USAGE}"));
+            }
+            match document_input.as_ref().map(|(_, source)| source) {
+                Some(StartupDocumentSource::CustomOption) => {
+                    return Err(format!(
+                        "ambiguous document sources: use one positional path or --document-path, not both\n{STARTUP_USAGE}"
+                    ));
+                }
+                Some(StartupDocumentSource::PositionalArgument) => {
+                    return Err(format!(
+                        "multiple positional document paths are not supported\n{STARTUP_USAGE}"
+                    ));
+                }
+                Some(StartupDocumentSource::NativeOpenDocuments) | None => {}
+            }
+            let path = DocumentPath::new(argument.to_owned()).map_err(|_| {
+                format!("invalid positional document path\n{STARTUP_USAGE}")
+            })?;
+            document_input = Some((path.as_path().to_path_buf(), StartupDocumentSource::PositionalArgument));
         };
     }
 
-    if handoff_id.is_some() && document_path.is_none() {
+    if handoff_id.is_some()
+        && !document_input.as_ref().is_some_and(|(_, source)| {
+            *source == StartupDocumentSource::CustomOption
+        })
+    {
         return Err(format!(
             "--open-handoff requires --document-path\n{STARTUP_USAGE}"
         ));
@@ -195,7 +245,15 @@ fn parse_startup_args(
     Ok(StartupConfig {
         development,
         menu_platform,
-        startup_document: document_path.map(|path| StartupDocumentInput { path, handoff_id }),
+        startup_document: document_input.map(|(path, source)| StartupDocumentInput {
+            path,
+            source,
+            handoff_id: if source == StartupDocumentSource::CustomOption {
+                handoff_id
+            } else {
+                None
+            },
+        }),
     })
 }
 
@@ -352,9 +410,45 @@ fn show_native_lifecycle_error(title: &str, message: &str) {
         .show();
 }
 
-fn show_child_startup_open_failure() {
-    let (title, message) = child_startup_open_failure_copy();
-    show_native_lifecycle_error(title, message);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupFailureKind {
+    InvalidInvocation,
+    PresentationUnavailable,
+}
+
+impl StartupFailureKind {
+    fn exit_code(self) -> i32 {
+        match self {
+            Self::InvalidInvocation | Self::PresentationUnavailable => 2,
+        }
+    }
+}
+
+fn startup_failure_copy(kind: StartupFailureKind) -> (&'static str, String) {
+    let title = "Unable to Start ScriptCraft";
+    let message = match kind {
+        StartupFailureKind::InvalidInvocation => {
+            format!("The startup invocation is invalid.\n\n{STARTUP_USAGE}")
+        }
+        StartupFailureKind::PresentationUnavailable => {
+            "ScriptCraft could not prepare its startup presentation. No document was opened."
+                .to_owned()
+        }
+    };
+    (title, message)
+}
+
+fn exit_for_startup_failure(kind: StartupFailureKind, diagnostic: &str) -> ! {
+    // Keep detailed diagnostics for development, but never expose arguments or
+    // presentation errors in the bounded Windows GUI-subsystem dialog. A
+    // missing stderr must not prevent native feedback from appearing.
+    let _ = writeln!(std::io::stderr(), "{diagnostic}");
+    #[cfg(target_os = "windows")]
+    {
+        let (title, message) = startup_failure_copy(kind);
+        show_native_lifecycle_error(title, &message);
+    }
+    std::process::exit(kind.exit_code());
 }
 
 fn child_startup_open_failure_copy() -> (&'static str, &'static str) {
@@ -371,6 +465,7 @@ fn startup_document_with_cold_request(
     startup_document.or_else(|| {
         cold_path.map(|path| StartupDocumentInput {
             path,
+            source: StartupDocumentSource::NativeOpenDocuments,
             handoff_id: None,
         })
     })
@@ -405,6 +500,51 @@ fn take_startup_document_once(
     startup_document.clone()
 }
 
+fn consume_initial_startup_document(
+    startup_document: &Option<StartupDocumentInput>,
+    consumed: &mut bool,
+    open_staged: impl FnOnce(&Path) -> StagedOpenOutcome,
+) -> Option<StagedOpenOutcome> {
+    let startup_document = take_startup_document_once(startup_document, consumed)?;
+    Some(open_staged(&startup_document.path))
+}
+
+fn write_startup_handoff_result(
+    startup_document: &mut Option<StartupDocumentInput>,
+    outcome: StagedOpenOutcome,
+    writer: &mut impl std::io::Write,
+) {
+    if outcome == StagedOpenOutcome::AwaitingMigration {
+        return;
+    }
+    let Some(startup_document) = startup_document.as_mut() else {
+        return;
+    };
+    // Only application-generated custom-option requests can be replacement
+    // children. Positional shell opens and macOS native cold opens never speak
+    // the replacement protocol, even if an identity were accidentally attached.
+    if startup_document.source != StartupDocumentSource::CustomOption {
+        return;
+    }
+    let _ = replacement_open::write_terminal_handoff_result(
+        &mut startup_document.handoff_id,
+        outcome,
+        writer,
+    );
+}
+
+fn startup_open_failure_copy(
+    outcome: StagedOpenOutcome,
+) -> Option<(&'static str, &'static str)> {
+    (outcome == StagedOpenOutcome::Failed).then_some(child_startup_open_failure_copy())
+}
+
+fn show_startup_open_failure(outcome: StagedOpenOutcome) {
+    if let Some((title, message)) = startup_open_failure_copy(outcome) {
+        show_native_lifecycle_error(title, message);
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn macos_document_open_error_copy(
     error: macos_document_open::MacOsDocumentOpenError,
@@ -433,7 +573,7 @@ fn status_modifiers_changed(previous: egui::Modifiers, current: egui::Modifiers)
 mod menu_platform_cli_tests {
     use super::{
         parse_startup_args, resolve_startup_menu_policy, StartupConfig, StartupDocumentInput,
-        STARTUP_USAGE,
+        StartupDocumentSource, STARTUP_USAGE,
     };
     use crate::menu::{MenuHostPlatform, MenuPlatformChoice, MenuAcceleratorOwner};
     use crate::replacement_open::HandoffId;
@@ -469,6 +609,7 @@ mod menu_platform_cli_tests {
                 menu_platform: MenuPlatformChoice::Windows,
                 startup_document: Some(StartupDocumentInput {
                     path: std::path::PathBuf::from("/drafts/Été draft.fdx"),
+                    source: StartupDocumentSource::CustomOption,
                     handoff_id: None,
                 }),
             })
@@ -487,6 +628,7 @@ mod menu_platform_cli_tests {
                 menu_platform: MenuPlatformChoice::Auto,
                 startup_document: Some(StartupDocumentInput {
                     path: std::path::PathBuf::from("/drafts/Été first draft.fdx"),
+                    source: StartupDocumentSource::CustomOption,
                     handoff_id: HandoffId::parse_decimal("17").ok(),
                 }),
             })
@@ -498,10 +640,98 @@ mod menu_platform_cli_tests {
                 menu_platform: MenuPlatformChoice::Auto,
                 startup_document: Some(StartupDocumentInput {
                     path: std::path::PathBuf::from("/drafts/ordinary.fdx"),
+                    source: StartupDocumentSource::CustomOption,
                     handoff_id: None,
                 }),
             })
         );
+    }
+
+    #[test]
+    fn positional_document_is_one_exact_native_argument_with_no_handoff() {
+        for arguments in [
+            vec!["/drafts/Été first draft.fdx"],
+            vec!["--dev", "--menu-platform=windows", "/drafts/Été first draft.fdx"],
+            vec!["/drafts/Été first draft.fdx", "--menu-platform=windows", "--dev"],
+        ] {
+            let parsed = parse(&arguments).expect("one positional path should be accepted");
+            assert_eq!(parsed.development, arguments.contains(&"--dev"));
+            assert_eq!(
+                parsed.menu_platform,
+                if arguments.contains(&"--menu-platform=windows") {
+                    MenuPlatformChoice::Windows
+                } else {
+                    MenuPlatformChoice::Auto
+                }
+            );
+            assert_eq!(
+                parsed.startup_document,
+                Some(StartupDocumentInput {
+                    path: std::path::PathBuf::from("/drafts/Été first draft.fdx"),
+                    source: StartupDocumentSource::PositionalArgument,
+                    handoff_id: None,
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_and_mixed_document_sources_are_rejected_without_path_disclosure() {
+        let identical = "/drafts/Été same.fdx";
+        for (arguments, expected) in [
+            (
+                vec!["first.fdx", "second.fdx"],
+                "multiple positional document paths are not supported",
+            ),
+            (
+                vec!["--document-path=/drafts/Été same.fdx", identical],
+                "ambiguous document sources",
+            ),
+            (
+                vec![identical, "--document-path=/drafts/Été same.fdx"],
+                "ambiguous document sources",
+            ),
+            (
+                vec!["--document-path=/drafts/first.fdx", "second.fdx"],
+                "ambiguous document sources",
+            ),
+            (
+                vec!["first.fdx", "--document-path=/drafts/second.fdx"],
+                "ambiguous document sources",
+            ),
+            (
+                vec!["--open-handoff=17", identical],
+                "--open-handoff requires --document-path",
+            ),
+            (
+                vec![identical, "--open-handoff=17"],
+                "--open-handoff requires --document-path",
+            ),
+            (
+                vec![identical, "--open-handoff=17", "--document-path=/drafts/other.fdx"],
+                "ambiguous document sources",
+            ),
+        ] {
+            let error = parse(&arguments).expect_err("ambiguous startup source must fail");
+            assert!(error.starts_with(expected), "unexpected error: {error}");
+            assert!(error.ends_with(STARTUP_USAGE));
+            assert!(!error.contains("/drafts/"));
+        }
+    }
+
+    #[test]
+    fn document_path_constraints_reject_empty_whitespace_and_nul_values() {
+        for argument in ["--document-path=", "--document-path= \t", "--document-path=bad\0path"] {
+            let error = parse(&[argument]).expect_err("invalid custom path must fail");
+            assert!(error.ends_with(STARTUP_USAGE));
+            assert!(!error.contains("bad\0path"));
+        }
+        for argument in ["", " \t", "bad\0path"] {
+            let error = parse(&[argument]).expect_err("invalid positional path must fail");
+            assert!(error.starts_with("invalid positional document path"));
+            assert!(error.ends_with(STARTUP_USAGE));
+            assert!(!error.contains("bad\0path"));
+        }
     }
 
     #[test]
@@ -532,6 +762,8 @@ mod menu_platform_cli_tests {
                 "duplicate --menu-platform option",
             ),
             (&["--document-path="][..], "--document-path value must not be empty"),
+            (&["--document-path= \t"][..], "invalid --document-path value"),
+            (&["--document-path=bad\0path"][..], "invalid --document-path value"),
             (
                 &["--document-path=first.fdx", "--document-path=second.fdx"][..],
                 "duplicate --document-path option",
@@ -574,7 +806,6 @@ mod menu_platform_cli_tests {
             (&["--dev="][..], "--dev does not accept a value"),
             (&["--devx"][..], "unknown option"),
             (&["--unknown"][..], "unknown option"),
-            (&["draft.fdx"][..], "unexpected positional argument"),
         ] {
             let error = parse(arguments);
             assert!(error.is_err());
@@ -602,6 +833,7 @@ mod menu_platform_cli_tests {
                 menu_platform: MenuPlatformChoice::Windows,
                 startup_document: Some(StartupDocumentInput {
                     path: std::path::PathBuf::from("/drafts/test.fdx"),
+                    source: StartupDocumentSource::CustomOption,
                     handoff_id: None,
                 }),
             })
@@ -617,7 +849,10 @@ mod menu_platform_cli_tests {
     fn non_utf8_arguments_are_rejected_without_lossy_parsing() {
         use std::os::unix::ffi::OsStringExt;
 
-        let error = parse_startup_args([OsString::from_vec(vec![0xff])]);
+        let error = parse_startup_args([
+            OsString::from("--dev"),
+            OsString::from_vec(vec![b'd', b'r', b'a', b'f', b't', 0xff]),
+        ]);
         assert!(error.is_err());
         if let Err(error) = error {
             assert!(error.starts_with("arguments must be valid UTF-8"));
@@ -652,21 +887,33 @@ mod menu_platform_cli_tests {
 
 #[cfg(test)]
 mod child_argument_projection_tests {
-    use super::child_arguments;
+    use super::{child_arguments, parse_startup_args, StartupDocumentSource};
     use crate::menu::MenuPlatformChoice;
     use std::ffi::OsString;
     use std::path::Path;
 
     #[test]
     fn child_arguments_project_backend_dev_flag_and_utf8_filename_as_distinct_arguments() {
+        let arguments = child_arguments(
+            true,
+            MenuPlatformChoice::Windows,
+            Some(Path::new("/drafts/Été draft.fdx")),
+        )
+        .expect("UTF-8 child path should project");
         assert_eq!(
-            child_arguments(true, MenuPlatformChoice::Windows, Some(Path::new("/drafts/Été draft.fdx"))),
-            Ok(vec![
+            arguments,
+            vec![
                 OsString::from("--menu-platform=windows"),
                 OsString::from("--dev"),
                 OsString::from("--document-path=/drafts/Été draft.fdx"),
-            ]),
+            ],
         );
+        let parsed = parse_startup_args(arguments).expect("projected child arguments should parse");
+        let startup_document = parsed
+            .startup_document
+            .expect("projected child should request its document");
+        assert_eq!(startup_document.source, StartupDocumentSource::CustomOption);
+        assert_eq!(startup_document.handoff_id, None);
         assert_eq!(
             child_arguments(false, MenuPlatformChoice::Auto, None),
             Ok(vec![OsString::from("--menu-platform=auto")]),
@@ -1820,10 +2067,12 @@ impl ScriptCraftApp {
     }
 
     fn consume_startup_document_handoff(&mut self) -> Option<StagedOpenOutcome> {
-        let startup_document =
-            take_startup_document_once(&self.startup_document, &mut self.startup_document_consumed)?;
-        // Command-line, cold OS, and acknowledged-child startup paths share this
-        // staged-open boundary. Only an optional child identity is acknowledged.
+        // Positional shell input already owns this initial-instance slot. It
+        // goes straight to staged activation: no child, picker, or replacement.
+        let startup_document = take_startup_document_once(
+            &self.startup_document,
+            &mut self.startup_document_consumed,
+        )?;
         Some(self.open_staged_native_at(&startup_document.path))
     }
 
@@ -1831,23 +2080,9 @@ impl ScriptCraftApp {
     /// writer consumes it before any fallible stdout operation; migration keeps
     /// the identity attached to the startup document until resolution.
     fn emit_startup_handoff_result(&mut self, outcome: StagedOpenOutcome) {
-        if outcome == StagedOpenOutcome::AwaitingMigration {
-            return;
-        }
-        let Some(startup_document) = self.startup_document.as_mut() else {
-            return;
-        };
-        if startup_document.handoff_id.is_none() {
-            return;
-        }
-
         let stdout = std::io::stdout();
         let mut writer = stdout.lock();
-        let _ = replacement_open::write_terminal_handoff_result(
-            &mut startup_document.handoff_id,
-            outcome,
-            &mut writer,
-        );
+        write_startup_handoff_result(&mut self.startup_document, outcome, &mut writer);
     }
 
     fn request_repaint(&mut self, ctx: &egui::Context) {
@@ -2531,9 +2766,7 @@ impl ScriptCraftApp {
         let outcome = pending_resolution_outcome(Some(()), consent, continue_outcome);
         if let Some(outcome) = outcome {
             self.emit_startup_handoff_result(outcome);
-            if outcome == StagedOpenOutcome::Failed {
-                show_child_startup_open_failure();
-            }
+            show_startup_open_failure(outcome);
         }
         outcome
     }
@@ -3495,7 +3728,7 @@ impl ScriptCraftApp {
         #[cfg(target_os = "macos")]
         self.drain_native_open_documents();
         if startup_outcome == Some(StagedOpenOutcome::Failed) {
-            show_child_startup_open_failure();
+            show_startup_open_failure(StagedOpenOutcome::Failed);
         }
         #[cfg(target_os = "macos")]
         if !replacement_close_continuation && self.menu_policy.installs_native_macos() {
@@ -3791,12 +4024,13 @@ fn startup_presentation(
     })
 }
 
+// Windows GUI-subsystem startup failures need native feedback before exit;
+// neither failure path retries nor falls back to constructing a blank document.
 fn main() -> eframe::Result {
     let startup = match parse_startup_args(std::env::args_os().skip(1)) {
         Ok(startup) => startup,
         Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(2);
+            exit_for_startup_failure(StartupFailureKind::InvalidInvocation, &error);
         }
     };
     let StartupPresentation {
@@ -3805,8 +4039,7 @@ fn main() -> eframe::Result {
     } = match startup_presentation(startup.menu_platform) {
         Ok(presentation) => presentation,
         Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(2);
+            exit_for_startup_failure(StartupFailureKind::PresentationUnavailable, &error);
         }
     };
     #[cfg(target_os = "macos")]
@@ -3874,6 +4107,40 @@ fn main() -> eframe::Result {
                 .map_err(|error| error.into())
         }),
     )
+}
+
+#[cfg(test)]
+mod startup_failure_presentation_tests {
+    use super::{startup_failure_copy, StartupFailureKind, STARTUP_USAGE};
+
+    #[test]
+    fn startup_failure_copy_is_fixed_bounded_and_classifies_each_failure() {
+        let invalid = startup_failure_copy(StartupFailureKind::InvalidInvocation);
+        let presentation = startup_failure_copy(StartupFailureKind::PresentationUnavailable);
+
+        assert_eq!(invalid.0, "Unable to Start ScriptCraft");
+        assert_eq!(presentation.0, invalid.0);
+        assert!(invalid.1.starts_with("The startup invocation is invalid."));
+        assert!(invalid.1.ends_with(STARTUP_USAGE));
+        assert!(presentation
+            .1
+            .contains("could not prepare its startup presentation"));
+        assert!(presentation.1.contains("No document was opened."));
+        assert_ne!(invalid.1, presentation.1);
+        assert!(invalid.1.len() <= STARTUP_USAGE.len() + 64);
+        assert!(presentation.1.len() <= 128);
+        for message in [&invalid.1, &presentation.1] {
+            assert!(!message.contains("/private/"));
+            assert!(!message.contains("argument-secret"));
+            assert!(!message.contains("screenplay-secret"));
+        }
+    }
+
+    #[test]
+    fn startup_failure_categories_preserve_the_existing_failure_exit_status() {
+        assert_eq!(StartupFailureKind::InvalidInvocation.exit_code(), 2);
+        assert_eq!(StartupFailureKind::PresentationUnavailable.exit_code(), 2);
+    }
 }
 
 #[cfg(test)]
@@ -3997,6 +4264,131 @@ mod staged_open_outcome_tests {
 }
 
 #[cfg(test)]
+mod positional_startup_open_tests {
+    use super::{
+        consume_initial_startup_document, parse_startup_args, startup_open_failure_copy,
+        write_startup_handoff_result, StartupDocumentInput, StartupDocumentSource,
+        StagedOpenOutcome,
+    };
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    #[test]
+    fn positional_source_owns_the_initial_slot_and_stages_directly_once() {
+        let startup = parse_startup_args([OsString::from("/drafts/Été first draft.fdx")])
+            .expect("valid positional startup path should parse");
+        let input = startup.startup_document.expect("positional path is initial startup input");
+        assert_eq!(input.source, StartupDocumentSource::PositionalArgument);
+        assert_eq!(input.handoff_id, None);
+
+        let mut initial_slot = Some(input.clone());
+        let mut finalized = false;
+        let mut cold_request_taken = false;
+        super::finalize_startup_document_slot(
+            &mut initial_slot,
+            &mut finalized,
+            |_| {
+                cold_request_taken = true;
+                None
+            },
+        );
+        assert!(!cold_request_taken);
+        assert_eq!(initial_slot, Some(input.clone()));
+
+        let mut consumed = false;
+        let mut staged_paths = Vec::new();
+        let outcome = consume_initial_startup_document(
+            &initial_slot,
+            &mut consumed,
+            |path| {
+                staged_paths.push(path.to_path_buf());
+                StagedOpenOutcome::Activated
+            },
+        );
+        assert_eq!(outcome, Some(StagedOpenOutcome::Activated));
+        assert_eq!(staged_paths, vec![PathBuf::from("/drafts/Été first draft.fdx")]);
+        assert!(consumed);
+        assert_eq!(initial_slot, Some(input));
+        // This staging boundary accepts only the existing native staged-open callback;
+        // it cannot dispatch a child, picker, prompt, close, or replacement coordinator.
+    }
+
+    #[test]
+    fn positional_startup_never_emits_handoff_lines_for_any_outcome() {
+        for outcome in [
+            StagedOpenOutcome::Activated,
+            StagedOpenOutcome::Failed,
+            StagedOpenOutcome::Cancelled,
+            StagedOpenOutcome::AwaitingMigration,
+        ] {
+            let mut startup_document = Some(StartupDocumentInput {
+                path: PathBuf::from("/private/argument-secret.fdx"),
+                source: StartupDocumentSource::PositionalArgument,
+                // Defensive adversarial state: the source distinction must still prohibit
+                // protocol output if a handoff identity were ever attached incorrectly.
+                handoff_id: Some(super::replacement_open::HandoffId::parse_decimal("17")
+                    .expect("test identity is valid")),
+            });
+            let mut output = Vec::new();
+            write_startup_handoff_result(&mut startup_document, outcome, &mut output);
+            assert!(output.is_empty(), "unexpected handoff output for {outcome:?}");
+        }
+    }
+
+    #[test]
+    fn migration_pending_retains_positional_source_until_resolution() {
+        let startup_document = Some(StartupDocumentInput {
+            path: PathBuf::from("/drafts/legacy.fdx"),
+            source: StartupDocumentSource::PositionalArgument,
+            handoff_id: None,
+        });
+        let mut consumed = false;
+        let outcome = consume_initial_startup_document(
+            &startup_document,
+            &mut consumed,
+            |_| StagedOpenOutcome::AwaitingMigration,
+        );
+
+        assert_eq!(outcome, Some(StagedOpenOutcome::AwaitingMigration));
+        let retained = startup_document
+            .as_ref()
+            .expect("migration-pending startup document remains retained");
+        assert_eq!(retained.path, PathBuf::from("/drafts/legacy.fdx"));
+        assert_eq!(retained.source, StartupDocumentSource::PositionalArgument);
+        assert_eq!(retained.handoff_id, None);
+        let mut output = Vec::new();
+        write_startup_handoff_result(
+            &mut startup_document.clone(),
+            StagedOpenOutcome::AwaitingMigration,
+            &mut output,
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn only_terminal_failure_selects_bounded_path_free_startup_feedback() {
+        assert_eq!(
+            startup_open_failure_copy(StagedOpenOutcome::Failed),
+            Some((
+                "Unable to Open Document",
+                "The selected document could not be opened in this new instance. This instance remains untitled.",
+            )),
+        );
+        for outcome in [
+            StagedOpenOutcome::Activated,
+            StagedOpenOutcome::Cancelled,
+            StagedOpenOutcome::AwaitingMigration,
+        ] {
+            assert_eq!(startup_open_failure_copy(outcome), None);
+        }
+        let (_, message) = startup_open_failure_copy(StagedOpenOutcome::Failed)
+            .expect("failure has visible startup feedback");
+        assert!(!message.contains("/drafts/"));
+        assert!(!message.contains("argument-secret"));
+    }
+}
+
+#[cfg(test)]
 mod macos_cold_startup_routing_tests {
     use super::{
         finalize_startup_document_slot, startup_document_with_cold_request,
@@ -4018,6 +4410,7 @@ mod macos_cold_startup_routing_tests {
     fn command_line_document_keeps_ownership_and_ignores_cold_path() {
         let argument = StartupDocumentInput {
             path: PathBuf::from("/drafts/argument.fdx"),
+            source: super::StartupDocumentSource::CustomOption,
             handoff_id: None,
         };
 
@@ -4039,6 +4432,7 @@ mod macos_cold_startup_routing_tests {
             ),
             Some(StartupDocumentInput {
                 path: PathBuf::from("/drafts/cold Été.fdx"),
+                source: super::StartupDocumentSource::NativeOpenDocuments,
                 handoff_id: None,
             }),
         );
@@ -4071,6 +4465,7 @@ mod macos_cold_startup_routing_tests {
             startup_document,
             Some(StartupDocumentInput {
                 path: PathBuf::from("/drafts/before-construction.fdx"),
+                source: super::StartupDocumentSource::NativeOpenDocuments,
                 handoff_id: None,
             })
         );
@@ -4158,6 +4553,7 @@ mod macos_cold_startup_routing_tests {
         let inbox = MacOsDocumentOpenInbox::new();
         let argument = StartupDocumentInput {
             path: PathBuf::from("/drafts/argument.fdx"),
+            source: super::StartupDocumentSource::CustomOption,
             handoff_id: None,
         };
         let queued = queued_request("/drafts/native.fdx");
@@ -4176,7 +4572,7 @@ mod macos_cold_startup_routing_tests {
         );
 
         assert_eq!(startup_document, Some(argument));
-        assert_eq!(inbox.drain().events, vec![queued].into());
+        assert_eq!(inbox.drain().events, std::collections::VecDeque::from([queued]));
     }
 
     #[test]
@@ -4192,6 +4588,7 @@ mod macos_cold_startup_routing_tests {
         ] {
             let startup_document = Some(StartupDocumentInput {
                 path: PathBuf::from("/drafts/cold.fdx"),
+                source: super::StartupDocumentSource::NativeOpenDocuments,
                 handoff_id: None,
             });
             let mut consumed = false;

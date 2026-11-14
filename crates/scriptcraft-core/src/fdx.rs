@@ -6298,6 +6298,13 @@ where
         {
             return SourceClass::KnownIdentity;
         }
+        if depth == 2
+            && grandparent.is_some_and(|root| is_fdx_element(root, FDX_ROOT, root_namespace))
+            && is_fdx_element(parent, "DocumentRef", root_namespace)
+            && is_fdx_element(element, "XRef", root_namespace)
+        {
+            return SourceClass::KnownIdentity;
+        }
         let inside_scene_properties = parent.name.local_name == "SceneProperties"
             && parent.name.namespace_uri.as_deref() == root_namespace;
         let inside_scene_arcs = parent.name.local_name == "SceneArcBeats"
@@ -6306,12 +6313,49 @@ where
                 scene.name.local_name == "SceneProperties"
                     && scene.name.namespace_uri.as_deref() == root_namespace
             });
+        if inside_scene_properties
+            && element.name.namespace_uri.as_deref() == root_namespace
+            && element.name.local_name == "SceneArcBeats"
+        {
+            return SourceClass::Structural;
+        }
         if (inside_scene_properties
             && element.name.namespace_uri.as_deref() == root_namespace
-            && matches!(element.name.local_name.as_str(), "SceneArcBeats" | "CastMember" | "Character"))
-        || (inside_scene_arcs
+            && matches!(element.name.local_name.as_str(), "CastMember" | "Character"))
+            || (inside_scene_arcs
                 && element.name.namespace_uri.as_deref() == root_namespace
                 && matches!(element.name.local_name.as_str(), "SceneArcBeat" | "Beat"))
+        {
+            return SourceClass::KnownIdentity;
+        }
+        // Scene metadata generation emits CharacterArcBeat as an untyped
+        // container only at this exact edge. It is reachable here only after
+        // the supported body Scene Heading -> SceneProperties -> SceneArcBeats
+        // ancestry above has been recognized, so its children can be visited
+        // without promoting an ID-like attribute on the container itself.
+        if depth == 5
+            && parent.name.local_name == "SceneArcBeats"
+            && parent.name.namespace_uri.as_deref() == root_namespace
+            && grandparent.is_some_and(|scene| {
+                scene.name.local_name == "SceneProperties"
+                    && scene.name.namespace_uri.as_deref() == root_namespace
+            })
+            && element.name.local_name == "CharacterArcBeat"
+            && element.name.namespace_uri.as_deref() == root_namespace
+        {
+            return SourceClass::Structural;
+        }
+        // Generated arc identity belongs only to a direct same-namespace
+        // Paragraph under the exact supported CharacterArcBeat edge above.
+        if depth == 6
+            && parent.name.local_name == "CharacterArcBeat"
+            && parent.name.namespace_uri.as_deref() == root_namespace
+            && grandparent.is_some_and(|arcs| {
+                arcs.name.local_name == "SceneArcBeats"
+                    && arcs.name.namespace_uri.as_deref() == root_namespace
+            })
+            && element.name.local_name == "Paragraph"
+            && element.name.namespace_uri.as_deref() == root_namespace
         {
             return SourceClass::KnownIdentity;
         }

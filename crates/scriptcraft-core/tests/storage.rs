@@ -8,14 +8,18 @@ use scriptcraft_core::fdx_storage::{
     FdxStorageErrorKind, FdxStorageFileSystem, StdFdxStorageFileSystem, StorageOperation,
     TransactionalSaveError,
 };
-use scriptcraft_core::preservation::{PreservedElement, PreservedNode};
+use scriptcraft_core::preservation::{
+    ForeignIdDomain, ForeignIdentity, PreservedElement, PreservedNode,
+};
 use scriptcraft_core::Project;
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const OPAQUE_SOURCE: &[u8] = include_bytes!("fixtures/broad_compatibility.fdx");
+const REFERENCE_V6: &[u8] = include_bytes!("../../../.reference/The Once and Future King(1).fdx");
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("acceptance scenario uses valid bounded input"))
@@ -103,6 +107,279 @@ fn note_subtrees(project: &Project) -> Vec<PreservedElement> {
         .collect()
 }
 
+fn bookmarked_paragraphs(project: &Project) -> Vec<PreservedElement> {
+    preserved_elements(project)
+        .into_iter()
+        .filter(|element| {
+            element.name.local_name == "Paragraph" && raw_attribute(element, "Bookmark").is_some()
+        })
+        .cloned()
+        .collect()
+}
+
+fn source_id(element: &PreservedElement) -> Option<&str> {
+    element
+        .attributes
+        .iter()
+        .find(|attribute| {
+            attribute.name.namespace_uri.is_none()
+                && attribute.name.local_name.eq_ignore_ascii_case("id")
+        })
+        .map(|attribute| attribute.value.as_str())
+}
+
+fn scene_arc_paragraph_ids_by_heading(project: &Project) -> Vec<BTreeSet<String>> {
+    preserved_elements(project)
+        .into_iter()
+        .filter(|element| {
+            element.name.local_name == "Paragraph"
+                && raw_attribute(element, "Type") == Some("Scene Heading")
+        })
+        .map(|heading| {
+            let namespace = &heading.name.namespace_uri;
+            heading
+                .children
+                .iter()
+                .filter_map(|node| match node {
+                    PreservedNode::Element(properties)
+                        if properties.name.local_name == "SceneProperties"
+                            && properties.name.namespace_uri == *namespace =>
+                    {
+                        Some(properties)
+                    }
+                    _ => None,
+                })
+                .flat_map(|properties| properties.children.iter())
+                .filter_map(|node| match node {
+                    PreservedNode::Element(arcs)
+                        if arcs.name.local_name == "SceneArcBeats"
+                            && arcs.name.namespace_uri == *namespace =>
+                    {
+                        Some(arcs)
+                    }
+                    _ => None,
+                })
+                .flat_map(|arcs| arcs.children.iter())
+                .filter_map(|node| match node {
+                    PreservedNode::Element(beat)
+                        if beat.name.local_name == "CharacterArcBeat"
+                            && beat.name.namespace_uri == *namespace =>
+                    {
+                        Some(beat)
+                    }
+                    _ => None,
+                })
+                .flat_map(|beat| beat.children.iter())
+                .filter_map(|node| match node {
+                    PreservedNode::Element(paragraph)
+                        if paragraph.name.local_name == "Paragraph"
+                            && paragraph.name.namespace_uri == *namespace =>
+                    {
+                        source_id(paragraph).map(str::to_owned)
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn opaque_reference_identity_subtrees(project: &Project) -> Vec<PreservedElement> {
+    preserved_elements(project)
+        .into_iter()
+        .filter(|element| {
+            matches!(
+                element.name.local_name.as_str(),
+                "ScriptNote" | "ScriptNoteDefinition" | "Revision"
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+fn assert_reference_candidate_identity_inventory(project: &Project) {
+    let preservation = project
+        .preservation
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("reference candidate retains source preservation"));
+    let arc_ids_by_heading = scene_arc_paragraph_ids_by_heading(project);
+    assert_eq!(arc_ids_by_heading.len(), 2);
+    assert_eq!(arc_ids_by_heading[0].len(), 3);
+    assert_eq!(arc_ids_by_heading[1].len(), 5);
+    let arc_ids = arc_ids_by_heading.into_iter().flatten().collect::<BTreeSet<_>>();
+    assert_eq!(arc_ids.len(), 8);
+    let paragraph_identities = preservation
+        .identities
+        .iter()
+        .filter(|identity| identity.domain == ForeignIdDomain::Paragraph)
+        .map(|identity| identity.value.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(paragraph_identities, arc_ids);
+    assert_eq!(preservation.identities.len(), 8);
+
+    let opaque_ids = preserved_elements(project)
+        .into_iter()
+        .filter(|element| {
+            matches!(
+                element.name.local_name.as_str(),
+                "ScriptNote" | "ScriptNoteDefinition" | "Revision"
+            )
+        })
+        .filter_map(source_id)
+        .collect::<Vec<_>>();
+    assert_eq!(opaque_ids.len(), 24);
+    assert!(preservation
+        .identities
+        .iter()
+        .all(|identity| !opaque_ids.contains(&identity.value.as_str())));
+}
+
+fn assert_reference_complete_identity_set(
+    project: &Project,
+    expected_xref_count: usize,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let elements = preserved_elements(project);
+    let root = elements
+        .iter()
+        .copied()
+        .find(|element| element.name.local_name == "FinalDraft")
+        .unwrap_or_else(|| unreachable!("saved source retains its FinalDraft root"));
+    let document_refs = root
+        .children
+        .iter()
+        .filter_map(|node| match node {
+            PreservedNode::Element(element) if element.name.local_name == "DocumentRef" => {
+                Some(element)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(document_refs.len(), 1);
+    let document_ref = document_refs[0];
+    assert_eq!(document_ref.name.namespace_uri, root.name.namespace_uri);
+    let document_id = source_id(document_ref)
+        .unwrap_or_else(|| unreachable!("saved direct DocumentRef has an ID"))
+        .to_owned();
+    let xref_ids = document_ref
+        .children
+        .iter()
+        .filter_map(|node| match node {
+            PreservedNode::Element(element)
+                if element.name.local_name == "XRef"
+                    && element.name.namespace_uri == document_ref.name.namespace_uri =>
+            {
+                source_id(element).map(str::to_owned)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(xref_ids.len(), expected_xref_count);
+
+    let arc_ids_by_heading = scene_arc_paragraph_ids_by_heading(project);
+    assert_eq!(arc_ids_by_heading.len(), 2);
+    assert_eq!(arc_ids_by_heading[0].len(), 3);
+    assert_eq!(arc_ids_by_heading[1].len(), 5);
+    let arc_ids = arc_ids_by_heading.into_iter().flatten().collect::<BTreeSet<_>>();
+    assert_eq!(arc_ids.len(), 8);
+    let mut expected = arc_ids
+        .iter()
+        .map(|id| {
+            ForeignIdentity::new(ForeignIdDomain::Paragraph, id.clone())
+                .unwrap_or_else(|_| unreachable!("saved arc paragraph identity is valid"))
+        })
+        .collect::<BTreeSet<_>>();
+    expected.insert(
+        ForeignIdentity::new(ForeignIdDomain::Document, document_id)
+            .unwrap_or_else(|_| unreachable!("saved document identity is valid")),
+    );
+    for xref_id in &xref_ids {
+        expected.insert(
+            ForeignIdentity::new(ForeignIdDomain::Other("XRef".to_owned()), xref_id.clone())
+                .unwrap_or_else(|_| unreachable!("saved XRef identity is valid")),
+        );
+    }
+    assert_eq!(expected.len(), 9 + expected_xref_count);
+    let actual = project
+        .preservation
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("saved source preservation remains available"))
+        .identities
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(expected.difference(&actual).next().is_none());
+    assert!(actual.difference(&expected).next().is_none());
+    assert_eq!(actual, expected, "actual typed set equals the complete source-derived set");
+
+    let opaque_ids = elements
+        .iter()
+        .copied()
+        .filter(|element| {
+            matches!(
+                element.name.local_name.as_str(),
+                "ScriptNote" | "ScriptNoteDefinition" | "Revision"
+            )
+        })
+        .filter_map(source_id)
+        .collect::<Vec<_>>();
+    assert_eq!(opaque_ids.len(), 24);
+    assert!(actual
+        .iter()
+        .all(|identity| !opaque_ids.contains(&identity.value.as_str())));
+    (arc_ids, xref_ids)
+}
+
+fn assert_document_ref_xref_identities(
+    project: &Project,
+    prior_identities: &[ForeignIdentity],
+) {
+    let elements = preserved_elements(project);
+    let document_refs = elements
+        .iter()
+        .copied()
+        .filter(|element| element.name.local_name == "DocumentRef")
+        .collect::<Vec<_>>();
+    assert_eq!(document_refs.len(), 1);
+    let document_ref = document_refs[0];
+    let document_id = source_id(document_ref)
+        .unwrap_or_else(|| unreachable!("saved DocumentRef has an ID"));
+    let xrefs = document_ref
+        .children
+        .iter()
+        .filter_map(|node| match node {
+            PreservedNode::Element(element)
+                if element.name.local_name == "XRef"
+                    && element.name.namespace_uri == document_ref.name.namespace_uri =>
+            {
+                Some(element)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(xrefs.len(), 1);
+    let xref_id = source_id(xrefs[0])
+        .unwrap_or_else(|| unreachable!("saved direct XRef has an ID"));
+    let identities = &project
+        .preservation
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("saved source preservation remains available"))
+        .identities;
+    assert!(identities.iter().any(|identity| {
+        identity.domain == ForeignIdDomain::Document && identity.value == document_id
+    }));
+    assert!(!prior_identities.iter().any(|identity| {
+        identity.domain == ForeignIdDomain::Document && identity.value == document_id
+    }));
+    assert!(identities.iter().any(|identity| {
+        identity.domain == ForeignIdDomain::Other("XRef".to_owned())
+            && identity.value == xref_id
+    }));
+    assert!(!prior_identities.iter().any(|identity| {
+        identity.domain == ForeignIdDomain::Other("XRef".to_owned())
+            && identity.value == xref_id
+    }));
+}
+
 struct TestDirectory(PathBuf);
 
 impl TestDirectory {
@@ -188,6 +465,159 @@ fn opaque_noop_save_save_as_reopen_and_second_cycle_preserve_source_data() {
     assert_eq!(note_subtrees(&saved_as_two.document.project), original_notes);
     assert_opaque_fixture_roundtrip(&saved_as_two.document.project);
     assert_eq!(valid(fs::read(&save_as_one)), saved_as_one_bytes);
+}
+
+#[test]
+fn untouched_version_six_reference_transactional_save_and_save_as_rebase_lineage_safely() {
+    let directory = TestDirectory::new();
+    let save_source = directory.path("reference-save-source.fdx");
+    let save_as_source = directory.path("reference-save-as-source.fdx");
+    let save_as_destination = directory.path("reference-save-as-output.fdx");
+    let repeated_save_as_destination = directory.path("reference-save-as-second-output.fdx");
+    fs::write(&save_source, REFERENCE_V6)
+        .unwrap_or_else(|_| unreachable!("temporary untouched Version 6 copy can be written"));
+    fs::write(&save_as_source, REFERENCE_V6)
+        .unwrap_or_else(|_| unreachable!("fresh Save As Version 6 copy can be written"));
+    let untouched_copy_bytes = valid(fs::read(&save_as_source));
+
+    let opened = valid(open(&StdFdxStorageFileSystem, &save_source));
+    assert!(opened
+        .document
+        .project
+        .preservation
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("reference preservation is available"))
+        .identities
+        .is_empty());
+    let original_notes = note_subtrees(&opened.document.project);
+    let original_bookmarks = bookmarked_paragraphs(&opened.document.project);
+    let original_opaque_identity_subtrees = opaque_reference_identity_subtrees(&opened.document.project);
+    assert!(!original_notes.is_empty());
+    assert!(!original_bookmarks.is_empty());
+    let prior_identities = opened
+        .document
+        .project
+        .preservation
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("imported source preservation remains available"))
+        .identities
+        .clone();
+    let mut session = valid(EditingSession::new(opened.document.project));
+    let detached_candidate = valid(session.prepare_cast_list_save_candidate());
+    assert_reference_candidate_identity_inventory(&detached_candidate);
+    let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+    valid(save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::Save,
+    ));
+    let saved = valid(open(&StdFdxStorageFileSystem, &save_source));
+    assert_reference_complete_identity_set(&saved.document.project, 1);
+    assert_eq!(session.project().elements, saved.document.project.elements);
+    assert_eq!(session.project().title_page, saved.document.project.title_page);
+    assert_eq!(
+        session.project().preservation.as_ref().map(|source| &source.identities),
+        saved.document.project.preservation.as_ref().map(|source| &source.identities),
+    );
+    assert_eq!(note_subtrees(&saved.document.project), original_notes);
+    assert_eq!(bookmarked_paragraphs(&saved.document.project), original_bookmarks);
+    assert_eq!(
+        opaque_reference_identity_subtrees(&saved.document.project),
+        original_opaque_identity_subtrees,
+    );
+    assert_reference_complete_identity_set(session.project(), 1);
+    assert_document_ref_xref_identities(session.project(), &prior_identities);
+    assert!(!session.dirty());
+    assert_eq!(target.path(), Some(save_source.as_path()));
+    assert!(target.baseline().is_some());
+
+    let opened = valid(open(&StdFdxStorageFileSystem, &save_as_source));
+    assert!(opened
+        .document
+        .project
+        .preservation
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("fresh reference preservation is available"))
+        .identities
+        .is_empty());
+    let original_notes = note_subtrees(&opened.document.project);
+    let original_bookmarks = bookmarked_paragraphs(&opened.document.project);
+    let original_opaque_identity_subtrees = opaque_reference_identity_subtrees(&opened.document.project);
+    assert!(!original_notes.is_empty());
+    assert!(!original_bookmarks.is_empty());
+    let prior_identities = opened
+        .document
+        .project
+        .preservation
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("imported source preservation remains available"))
+        .identities
+        .clone();
+    let mut session = valid(EditingSession::new(opened.document.project));
+    let detached_candidate = valid(session.prepare_cast_list_save_candidate());
+    assert_reference_candidate_identity_inventory(&detached_candidate);
+    let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+    valid(save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::SaveAs(save_as_destination.clone()),
+    ));
+    let saved_as = valid(open(&StdFdxStorageFileSystem, &save_as_destination));
+    let (first_arc_ids, first_xref_ids) =
+        assert_reference_complete_identity_set(&saved_as.document.project, 1);
+    assert_eq!(session.project().elements, saved_as.document.project.elements);
+    assert_eq!(session.project().title_page, saved_as.document.project.title_page);
+    assert_eq!(
+        session.project().preservation.as_ref().map(|source| &source.identities),
+        saved_as.document.project.preservation.as_ref().map(|source| &source.identities),
+    );
+    assert_eq!(note_subtrees(&saved_as.document.project), original_notes);
+    assert_eq!(bookmarked_paragraphs(&saved_as.document.project), original_bookmarks);
+    assert_eq!(
+        opaque_reference_identity_subtrees(&saved_as.document.project),
+        original_opaque_identity_subtrees,
+    );
+    assert_reference_complete_identity_set(session.project(), 1);
+    assert_document_ref_xref_identities(session.project(), &prior_identities);
+    assert!(!session.dirty());
+    assert_eq!(target.path(), Some(save_as_destination.as_path()));
+    assert!(target.baseline().is_some());
+    assert_eq!(valid(fs::read(&save_as_source)), untouched_copy_bytes);
+
+    let first_save_as_bytes = valid(fs::read(&save_as_destination));
+    let mut repeated_session = valid(EditingSession::new(saved_as.document.project));
+    let mut repeated_target = FdxSaveTarget::from_baseline(saved_as.baseline);
+    valid(save_session(
+        &StdFdxStorageFileSystem,
+        &mut repeated_session,
+        &mut repeated_target,
+        FdxSaveMode::SaveAs(repeated_save_as_destination.clone()),
+    ));
+    let repeated_saved_as = valid(open(&StdFdxStorageFileSystem, &repeated_save_as_destination));
+    let (repeated_arc_ids, repeated_xref_ids) =
+        assert_reference_complete_identity_set(&repeated_saved_as.document.project, 2);
+    assert_eq!(repeated_arc_ids, first_arc_ids);
+    assert!(first_xref_ids.is_subset(&repeated_xref_ids));
+    assert_eq!(repeated_xref_ids.len(), 2);
+    assert_eq!(note_subtrees(&repeated_saved_as.document.project), original_notes);
+    assert_eq!(
+        bookmarked_paragraphs(&repeated_saved_as.document.project),
+        original_bookmarks,
+    );
+    assert_eq!(
+        opaque_reference_identity_subtrees(&repeated_saved_as.document.project),
+        original_opaque_identity_subtrees,
+    );
+    assert_eq!(valid(fs::read(&save_as_destination)), first_save_as_bytes);
+    assert_reference_complete_identity_set(repeated_session.project(), 2);
+    assert!(!repeated_session.dirty());
+    assert_eq!(
+        repeated_target.path(),
+        Some(repeated_save_as_destination.as_path())
+    );
+    assert!(repeated_target.baseline().is_some());
 }
 
 #[test]

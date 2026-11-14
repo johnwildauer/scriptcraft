@@ -219,11 +219,19 @@ ScriptCraft $version for Windows x64 (portable, unsigned)
 
 Extract the complete ScriptCraft-$version-windows-x64 folder to a writable location and run ScriptCraft.exe from that folder. Keep the Licenses folder with the application.
 
+Run ScriptCraft.exe with no document path for an ordinary blank launch. To open a document directly in a new instance, start ScriptCraft.exe with exactly one quoted Windows path, for example: ScriptCraft.exe "C:\Users\Name\Documents\My Screenplay.fdx". Paths containing spaces or non-ASCII characters are passed as one native Windows path; Windows supplies the selected path to the application.
+
+To choose an association yourself, use the FDX file's Open With or Choose another app option, then browse to the extracted ScriptCraft.exe. Labels vary by Windows version. Choose an Always or default option only if you deliberately want Windows to use ScriptCraft for that file type, or make that choice in Windows Default Apps settings. Windows controls and may record this user-created association; the package does not create it or choose a default.
+
+Each Explorer open starts an independent new instance and opens the selected document directly there; already running instances remain open and are not changed. Two positional paths, or a positional path combined with custom input, are invalid and produce a bounded native startup error. A document-open failure produces bounded native feedback in the new instance and leaves it untitled. Cancel on a version decision leaves the new instance untitled without treating Cancel as an open failure.
+
+Dragging one file onto ScriptCraft.exe or a suitable shortcut uses the same one-path launch convention. Taskbar drops and drops into an open application window are not supported by this guidance.
+
 The release application uses the Windows GUI subsystem and does not open a companion console window. Debug builds retain the console subsystem for diagnostics.
 
 This package is unsigned. Windows may display an unknown-publisher or SmartScreen warning; no signing or Microsoft trust approval is claimed. Run it only if you trust its source.
 
-The application embeds Courier Prime and Material Symbols font data. It does not install fonts, change the registry, or create file associations.
+This is a portable package with no installer. The application embeds Courier Prime and Material Symbols font data. It does not install fonts, modify the registry, or create file associations.
 "@
     [System.IO.File]::WriteAllText((Join-Path $stagePath 'README.txt'), $recipientReadme.Trim() + "`r`n", [System.Text.Encoding]::ASCII)
     foreach ($relativePath in $licenseSources.Keys) {

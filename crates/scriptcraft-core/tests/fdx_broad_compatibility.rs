@@ -11,6 +11,7 @@ use scriptcraft_core::preservation::{
     PreservedElement, PreservedNode, SharedBytes, MAX_TOTAL_IMAGE_BYTES,
 };
 use scriptcraft_core::{LayoutInputs, Project};
+use std::collections::BTreeSet;
 
 const SYNTHETIC: &[u8] = include_bytes!("fixtures/broad_compatibility.fdx");
 const ALTS_FIXTURE: &[u8] = include_bytes!("fixtures/dialogue_alts.fdx");
@@ -442,6 +443,85 @@ fn c10_c11_actual_managed_identity_and_required_reference_ambiguity_remain_error
     let preservation = imported.project.preservation.as_ref().expect("opaque source is retained");
     assert!(preservation.board_graph.entities.is_empty());
     assert!(preservation.board_graph.references.is_empty());
+}
+
+#[test]
+fn document_ref_xref_identity_registration_is_limited_to_its_exact_root_context() {
+    let source = br#"<FinalDraft DocumentType="Script" Version="6" xmlns:v="urn:fixture:vendor">
+<DocumentRef id="document-ref"><XRef id="direct-xref"/><Container><XRef id="nested-xref"/></Container><v:XRef id="foreign-xref"/><v:ForeignContainer><XRef id="foreign-parent-xref"/></v:ForeignContainer></DocumentRef>
+<XRef id="root-xref"/><OpaquePayload><XRef id="opaque-parent-xref"/></OpaquePayload>
+<Content><Paragraph Type="Action" id="managed"><Text>visible</Text></Paragraph></Content></FinalDraft>"#;
+    let imported = read_v6(source).expect("bounded XRef ancestry control imports");
+    let identities = &imported
+        .project
+        .preservation
+        .as_ref()
+        .expect("source preservation is retained")
+        .identities;
+
+    assert!(identities.iter().any(|identity| {
+        identity.domain == ForeignIdDomain::Other("XRef".to_owned())
+            && identity.value == "direct-xref"
+    }));
+    for opaque_id in [
+        "nested-xref",
+        "foreign-xref",
+        "foreign-parent-xref",
+        "root-xref",
+        "opaque-parent-xref",
+    ] {
+        assert!(!identities.iter().any(|identity| identity.value == opaque_id));
+    }
+}
+
+#[test]
+fn scene_arc_paragraph_identity_registration_is_limited_to_the_generated_ancestry() {
+    let source = br#"<FinalDraft DocumentType="Script" Version="6" xmlns="urn:fixture:fdx" xmlns:v="urn:fixture:vendor">
+<Content>
+  <Paragraph Type="Scene Heading"><Text>INT. ROOM - DAY</Text><SceneProperties><SceneArcBeats id="untyped-scene-arcs">
+    <CharacterArcBeat id="untyped-arc-container"><Paragraph id="arc-leaf-one"/></CharacterArcBeat>
+    <CharacterArcBeat id="untyped-arc-container"><Paragraph id="arc-leaf-two"/><v:Paragraph id="foreign-arc-leaf"/></CharacterArcBeat>
+    <v:CharacterArcBeat><Paragraph id="foreign-arc-container-leaf"/></v:CharacterArcBeat>
+    <OpaquePayload><CharacterArcBeat><Paragraph id="opaque-arc-descendant"/></CharacterArcBeat></OpaquePayload>
+    <v:SceneArcBeats id="foreign-scene-arcs"><CharacterArcBeat><Paragraph id="foreign-scene-arcs-descendant"/></CharacterArcBeat></v:SceneArcBeats>
+  </SceneArcBeats><CharacterArcBeat><Paragraph id="scene-properties-direct-leaf"/></CharacterArcBeat></SceneProperties></Paragraph>
+  <Paragraph Type="Action"><Text>Action.</Text><SceneProperties><SceneArcBeats><CharacterArcBeat><Paragraph id="non-scene-heading-leaf"/></CharacterArcBeat></SceneArcBeats></SceneProperties></Paragraph>
+  <Paragraph Type="Scene Heading"><Text>INT. OTHER - NIGHT</Text><OpaquePayload><SceneProperties><SceneArcBeats><CharacterArcBeat><Paragraph id="opaque-properties-leaf"/></CharacterArcBeat></SceneArcBeats></SceneProperties></OpaquePayload></Paragraph>
+</Content>
+<SceneArcBeats><CharacterArcBeat><Paragraph id="root-lookalike-leaf"/></CharacterArcBeat></SceneArcBeats>
+</FinalDraft>"#;
+    let imported = read_v6(source).expect("supported scene arc and opaque lookalikes import");
+    let identities = &imported
+        .project
+        .preservation
+        .as_ref()
+        .expect("source preservation is retained")
+        .identities;
+    let paragraph_ids = identities
+        .iter()
+        .filter(|identity| identity.domain == ForeignIdDomain::Paragraph)
+        .map(|identity| identity.value.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(paragraph_ids, BTreeSet::from(["arc-leaf-one", "arc-leaf-two"]));
+    assert_eq!(identities.len(), 2, "arc containers and unsupported lookalikes stay untyped");
+    for opaque_id in [
+        "untyped-arc-container",
+        "untyped-scene-arcs",
+        "foreign-arc-leaf",
+        "foreign-arc-container-leaf",
+        "opaque-arc-descendant",
+        "foreign-scene-arcs",
+        "foreign-scene-arcs-descendant",
+        "scene-properties-direct-leaf",
+        "non-scene-heading-leaf",
+        "opaque-properties-leaf",
+        "root-lookalike-leaf",
+    ] {
+        assert!(!identities.iter().any(|identity| identity.value == opaque_id));
+    }
+
+    let duplicate_arc_paragraphs = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Scene Heading"><Text>INT. ROOM - DAY</Text><SceneProperties><SceneArcBeats><CharacterArcBeat><Paragraph id="duplicate-arc-paragraph"/></CharacterArcBeat><CharacterArcBeat><Paragraph id="duplicate-arc-paragraph"/></CharacterArcBeat></SceneArcBeats></SceneProperties></Paragraph></Content></FinalDraft>"#;
+    assert_eq!(read_v6(duplicate_arc_paragraphs).err(), Some(FdxError::AmbiguousIdentity));
 }
 
 #[test]
