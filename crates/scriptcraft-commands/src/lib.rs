@@ -77,11 +77,12 @@ pub enum CommandId {
     UiStatusSet,
     EditorDualDialogueToggle,
     EditorStyleClear,
+    ApplicationQuit,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 51] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -132,6 +133,7 @@ impl CommandId {
         Self::UiStatusSet,
         Self::EditorDualDialogueToggle,
         Self::EditorStyleClear,
+        Self::ApplicationQuit,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -186,6 +188,7 @@ impl CommandId {
             Self::UiStatusSet => "ui.status.set",
             Self::EditorDualDialogueToggle => "editor.dual-dialogue.toggle",
             Self::EditorStyleClear => "editor.style.clear",
+            Self::ApplicationQuit => "application.quit",
         }
     }
 }
@@ -233,6 +236,7 @@ pub enum CommandOrigin {
     Cli,
     Mcp,
     Test,
+    NativeOs,
 }
 
 /// Screenplay element role serialized using the stable core role spelling.
@@ -932,6 +936,8 @@ pub enum Command {
     EditorDualDialogueToggle,
     #[serde(rename = "editor.style.clear")]
     EditorStyleClear { surface: EditorSurface },
+    #[serde(rename = "application.quit")]
+    ApplicationQuit,
 }
 
 impl Command {
@@ -1002,6 +1008,7 @@ impl Command {
             Self::UiStatusSet { .. } => CommandId::UiStatusSet,
             Self::EditorDualDialogueToggle => CommandId::EditorDualDialogueToggle,
             Self::EditorStyleClear { .. } => CommandId::EditorStyleClear,
+            Self::ApplicationQuit => CommandId::ApplicationQuit,
         }
     }
 }
@@ -1096,7 +1103,7 @@ const fn descriptor(id: CommandId, family: &'static str, parameters: &'static st
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 50] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 51] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -1151,6 +1158,7 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 50] = [
     descriptor(CommandId::UiStatusSet, "ui", "message: optional diagnostic_message (<=512 UTF-8 bytes, single-line)"),
     descriptor(CommandId::EditorDualDialogueToggle, "editor", "none; Body only; host active surface"),
     descriptor(CommandId::EditorStyleClear, "editor", "surface: editor_surface; clear supported run styles"),
+    descriptor(CommandId::ApplicationQuit, "application", "none; requests guarded root Close"),
 ];
 
 pub fn descriptor_for(id: CommandId) -> Option<&'static CommandDescriptor> {

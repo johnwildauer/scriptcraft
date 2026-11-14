@@ -105,8 +105,8 @@ fn assert_serializable<T: Serialize>() {}
 #[test]
 fn command_catalog_has_complete_unique_stable_dotted_identities() {
     assert_eq!(validate_descriptor_catalog(), Ok(()));
-    assert_eq!(CommandId::ALL.len(), 50);
-    assert_eq!(COMMAND_DESCRIPTORS.len(), 50);
+    assert_eq!(CommandId::ALL.len(), 51);
+    assert_eq!(COMMAND_DESCRIPTORS.len(), 51);
 
     let ids = CommandId::ALL.map(CommandId::as_str);
     for (index, id) in ids.iter().enumerate() {
@@ -147,9 +147,9 @@ fn introduction_order_is_independent_of_catalog_discovery_order() {
         "tools.sprint-timer.set-mode", "tools.sprint-timer.set-minutes", "tools.sprint-timer.start",
         "tools.sprint-timer.pause", "tools.sprint-timer.resume", "tools.sprint-timer.reset",
         "tools.sprint-timer.end", "ui.status.set", "editor.dual-dialogue.toggle", "file.print",
-        "editor.style.clear",
+        "editor.style.clear", "application.quit",
     ];
-    assert_eq!(introduced.len(), 50);
+    assert_eq!(introduced.len(), 51);
     for expected in introduced {
         let id = expected
             .parse::<CommandId>()
@@ -160,8 +160,11 @@ fn introduction_order_is_independent_of_catalog_discovery_order() {
     assert_eq!(introduced[47], "editor.dual-dialogue.toggle");
     assert_eq!(introduced[48], "file.print");
     assert_eq!(introduced[49], "editor.style.clear");
+    assert_eq!(introduced[50], "application.quit");
     assert_eq!(CommandId::ALL[8].as_str(), "file.print");
     assert_ne!(CommandId::ALL[48].as_str(), introduced[48]);
+    assert_eq!(CommandId::ApplicationQuit.as_str(), "application.quit");
+    assert_eq!(CommandId::ALL[50], CommandId::ApplicationQuit);
 }
 
 #[test]
@@ -169,6 +172,7 @@ fn wire_v1_envelope_and_adjacent_command_shape_are_stable() {
     assert_eq!(COMMAND_WIRE_VERSION, 1);
     assert_serializable::<Command>();
     assert_serializable::<CommandEnvelope>();
+    assert_serializable::<CommandOrigin>();
     let envelope = CommandEnvelope::new(CommandOrigin::Test, Command::EditorDualDialogueToggle);
     assert_eq!(envelope.version, 1);
     assert_eq!(envelope.validate(), Ok(()));
@@ -190,6 +194,23 @@ fn wire_v1_envelope_and_adjacent_command_shape_are_stable() {
         .unwrap_or_else(|_| unreachable!("known parameterless command wire payload"));
     assert_eq!(decoded, Command::EditorDualDialogueToggle);
     assert_eq!(decoded.id(), CommandId::EditorDualDialogueToggle);
+
+    let quit = Command::deserialize(parameterless("application.quit"))
+        .unwrap_or_else(|_| unreachable!("application Quit has a parameterless wire shape"));
+    assert_eq!(quit, Command::ApplicationQuit);
+    assert_eq!(quit.id(), CommandId::ApplicationQuit);
+    assert!(Command::deserialize(command_wire("application.quit", params(vec![]))).is_err());
+
+    let native_quit = CommandEnvelope::deserialize(WireValue::Map(vec![
+        ("version", WireValue::U64(1)),
+        ("origin", WireValue::String("native_os")),
+        ("command", parameterless("application.quit")),
+    ]))
+    .unwrap_or_else(|_| unreachable!("native_os is the stable NativeOs origin spelling"));
+    assert_eq!(
+        native_quit,
+        CommandEnvelope::new(CommandOrigin::NativeOs, Command::ApplicationQuit)
+    );
 
     let unsupported = CommandEnvelope { version: 2, ..envelope };
     assert_eq!(unsupported.validate(), Err(EnvelopeError::UnsupportedVersion(2)));

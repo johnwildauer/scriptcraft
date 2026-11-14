@@ -1,6 +1,8 @@
 //! Main-thread-only native macOS application-menu construction.
 //!
 //! Native menu construction, event wakeup/routing, and state synchronization.
+//! The custom Command-Q item enters the same FIFO as catalog activations and
+//! requests guarded root Close through the typed application command.
 
 use super::app_commands::AppCommandAvailability;
 use super::menu_items::{
@@ -19,6 +21,7 @@ use muda::{
 
 type NativeEventInbox = Arc<Mutex<VecDeque<MenuId>>>;
 const APPLICATION_MENU_TITLE: &str = "ScriptCraft";
+const APPLICATION_QUIT_MENU_ITEM_ID: &str = "application.quit.menu-item";
 
 /// Retains the complete installed native tree and each item handle for the
 /// lifetime of `ScriptCraftApp`. The `Rc` marker makes main-thread confinement
@@ -88,11 +91,19 @@ impl NativeMenuController {
             PredefinedMenuItem::separator(),
             &mut retained_predefined_items,
         )?;
-        append_predefined(
-            &application_menu,
-            PredefinedMenuItem::quit(None),
-            &mut retained_predefined_items,
-        )?;
+        let quit_item = MenuItem::with_id(
+            APPLICATION_QUIT_MENU_ITEM_ID,
+            "Quit ScriptCraft",
+            availability.is_enabled(CommandId::ApplicationQuit),
+            Some(Accelerator::new(Some(Modifiers::SUPER), Code::KeyQ)),
+        );
+        application_menu
+            .append(&quit_item)
+            .map_err(|error| format!("could not append native application Quit item: {error}"))?;
+        command_items.insert(
+            MenuId::new(APPLICATION_QUIT_MENU_ITEM_ID),
+            (Command::ApplicationQuit, quit_item),
+        );
         root.append(&application_menu)
             .map_err(|error| format!("could not append native Application menu: {error}"))?;
 
@@ -172,6 +183,12 @@ impl NativeMenuController {
         // document's native window title. The item text also supplies its
         // accessible name in the native menu tree.
         self.application_menu.set_text(APPLICATION_MENU_TITLE);
+        if let Some((command, item)) = self
+            .command_items
+            .get(&MenuId::new(APPLICATION_QUIT_MENU_ITEM_ID))
+        {
+            item.set_enabled(availability.is_enabled(command.id()));
+        }
         for menu in MENU_CATALOG {
             synchronize_entries(menu.entries, availability, say_undual, &self.command_items);
         }

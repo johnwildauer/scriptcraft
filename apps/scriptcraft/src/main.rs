@@ -24,24 +24,38 @@ use std::time::{Duration, Instant};
 
 mod app_commands;
 mod document_font;
+mod document_lifecycle;
 mod focus_mode;
 mod material_font;
+mod native_unsaved_changes_prompt;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+#[cfg(target_os = "macos")]
+mod macos_document_open;
+#[cfg(target_os = "macos")]
+mod macos_open_documents;
+#[cfg(target_os = "macos")]
+mod macos_lifecycle;
 #[cfg(target_os = "macos")]
 mod macos_pdf_dialog;
 #[cfg(target_os = "macos")]
 mod macos_print_dialog;
+#[cfg(target_os = "macos")]
+mod macos_unsaved_changes_prompt;
 #[cfg(target_os = "windows")]
 mod windows_pdf_dialog;
 #[cfg(target_os = "windows")]
 mod windows_print;
+#[cfg(target_os = "windows")]
+mod windows_unsaved_changes_prompt;
 #[cfg(target_os = "macos")]
 mod macos_sf_symbols;
 mod menu;
 mod menu_items;
 mod pdf_export;
 mod print_export;
+mod replacement_open;
+mod replacement_open_transport;
 // This primitive is intentionally prepared for WO-001a.3 and not yet wired
 // into visible painting.
 #[allow(dead_code)]
@@ -61,16 +75,29 @@ use status_bar::{DiagnosticProjection, ViewportCenterAnchor, ViewportPageTracker
 use toolbar::toolbar_content_height;
 use app_commands::CommandInvocation;
 use scriptcraft_commands::{Command, CommandOrigin, DocumentPath, EditorSurface, ImportResolution, ZoomFactor};
+use document_lifecycle::{RootCloseDecision, RootCloseLifecycle, RootCloseRequest, SaveOutcome};
+use replacement_open::StagedOpenOutcome;
 
 const UNTITLED_DOCUMENT_TITLE: &str = "Untitled Screenplay";
 const UNTITLED_PDF_FILENAME: &str = "Untitled Screenplay.pdf";
-const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--menu-platform=auto|macos|windows] [--document-path=<UTF-8 FDX path>]";
+// `--open-handoff=<id>` is an internal child-launch option, not an OS ingress
+// option. A document path without it is always an independent startup open.
+const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--menu-platform=auto|macos|windows] [--document-path=<UTF-8 FDX path>] [--open-handoff=<id> (internal; requires --document-path)]";
+
+/// Startup document and its optional replacement acknowledgement identity.
+/// Keeping these values together prevents ordinary document launches from
+/// being mistaken for acknowledged replacement children.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartupDocumentInput {
+    path: PathBuf,
+    handoff_id: Option<replacement_open::HandoffId>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StartupConfig {
     development: bool,
     menu_platform: menu::MenuPlatformChoice,
-    document_path: Option<PathBuf>,
+    startup_document: Option<StartupDocumentInput>,
 }
 
 fn parse_startup_args(
@@ -79,9 +106,11 @@ fn parse_startup_args(
     let mut seen_development = false;
     let mut seen_menu_platform = false;
     let mut seen_document_path = false;
+    let mut seen_open_handoff = false;
     let mut development = false;
     let mut menu_platform = menu::MenuPlatformChoice::Auto;
     let mut document_path = None;
+    let mut handoff_id = None;
 
     for argument in args {
         let Some(argument) = argument.to_str() else {
@@ -131,6 +160,22 @@ fn parse_startup_args(
                 return Err(format!("--document-path value must not be empty\n{STARTUP_USAGE}"));
             }
             document_path = Some(PathBuf::from(value));
+        } else if argument == "--open-handoff" {
+            if seen_open_handoff {
+                return Err(format!("duplicate --open-handoff option\n{STARTUP_USAGE}"));
+            }
+            seen_open_handoff = true;
+            return Err(format!("--open-handoff requires an equals-form value\n{STARTUP_USAGE}"));
+        } else if let Some(value) = argument.strip_prefix("--open-handoff=") {
+            if seen_open_handoff {
+                return Err(format!("duplicate --open-handoff option\n{STARTUP_USAGE}"));
+            }
+            seen_open_handoff = true;
+            handoff_id = Some(
+                replacement_open::HandoffId::parse_decimal(value).map_err(|_| {
+                    format!("invalid --open-handoff identity\n{STARTUP_USAGE}")
+                })?,
+            );
         } else {
             let error = if argument.starts_with('-') {
                 "unknown option"
@@ -141,10 +186,16 @@ fn parse_startup_args(
         };
     }
 
+    if handoff_id.is_some() && document_path.is_none() {
+        return Err(format!(
+            "--open-handoff requires --document-path\n{STARTUP_USAGE}"
+        ));
+    }
+
     Ok(StartupConfig {
         development,
         menu_platform,
-        document_path,
+        startup_document: document_path.map(|path| StartupDocumentInput { path, handoff_id }),
     })
 }
 
@@ -206,6 +257,79 @@ fn dispatch_open_selection(path: Option<PathBuf>, dispatch: impl FnOnce(&Path)) 
     }
 }
 
+fn stage_replacement_open(staged: &mut Option<PathBuf>, path: PathBuf) -> bool {
+    if staged.is_some() {
+        return false;
+    }
+    *staged = Some(path);
+    true
+}
+
+#[cfg(test)]
+mod replacement_open_staging_tests {
+    use super::{dispatch_open_selection, stage_replacement_open};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn picker_cancellation_does_not_dispatch_a_path() {
+        let mut dispatched = false;
+        dispatch_open_selection(None, |_| dispatched = true);
+        assert!(!dispatched);
+    }
+
+    #[test]
+    fn staging_accepts_one_path_and_preserves_the_first_on_duplicates() {
+        let mut staged = None;
+        assert!(stage_replacement_open(
+            &mut staged,
+            PathBuf::from("/drafts/Été first.fdx"),
+        ));
+        assert!(!stage_replacement_open(
+            &mut staged,
+            PathBuf::from("/drafts/ambiguous second.fdx"),
+        ));
+        assert_eq!(staged.as_deref(), Some(Path::new("/drafts/Été first.fdx")));
+    }
+}
+
+/// Converts an optional Save As picker result into its typed save result.
+/// Picker cancellation is not a dispatched save and is never reported as Saved.
+fn save_picker_outcome<T>(selection: Option<T>, save: impl FnOnce(T) -> SaveOutcome) -> SaveOutcome {
+    match selection {
+        Some(selection) => save(selection),
+        None => SaveOutcome::Cancelled,
+    }
+}
+
+#[cfg(test)]
+mod save_picker_outcome_tests {
+    use super::{save_picker_outcome, SaveOutcome};
+
+    #[test]
+    fn picker_cancellation_is_cancelled_without_dispatching_a_save() {
+        let mut dispatched = false;
+        let outcome = save_picker_outcome(None::<()>, |_| {
+            dispatched = true;
+            SaveOutcome::Saved
+        });
+
+        assert_eq!(outcome, SaveOutcome::Cancelled);
+        assert!(!dispatched);
+    }
+
+    #[test]
+    fn accepted_picker_result_preserves_the_typed_save_outcome() {
+        assert_eq!(
+            save_picker_outcome(Some(()), |_| SaveOutcome::Failed),
+            SaveOutcome::Failed
+        );
+        assert_eq!(
+            save_picker_outcome(Some(()), |_| SaveOutcome::Saved),
+            SaveOutcome::Saved
+        );
+    }
+}
+
 fn spawn_current_child(
     app: &ScriptCraftApp,
     document_path: Option<&Path>,
@@ -240,6 +364,67 @@ fn child_startup_open_failure_copy() -> (&'static str, &'static str) {
     )
 }
 
+fn startup_document_with_cold_request(
+    startup_document: Option<StartupDocumentInput>,
+    cold_path: Option<PathBuf>,
+) -> Option<StartupDocumentInput> {
+    startup_document.or_else(|| {
+        cold_path.map(|path| StartupDocumentInput {
+            path,
+            handoff_id: None,
+        })
+    })
+}
+
+/// Finalizes the initial-document slot once, taking a cold path only when no
+/// startup document already owns it. The closure is not called after finalization.
+fn finalize_startup_document_slot(
+    startup_document: &mut Option<StartupDocumentInput>,
+    finalized: &mut bool,
+    take_cold_path: impl FnOnce(bool) -> Option<PathBuf>,
+) {
+    if *finalized {
+        return;
+    }
+
+    let startup_document_exists = startup_document.is_some();
+    let cold_path = take_cold_path(startup_document_exists);
+    *startup_document =
+        startup_document_with_cold_request(startup_document.take(), cold_path);
+    *finalized = true;
+}
+
+fn take_startup_document_once(
+    startup_document: &Option<StartupDocumentInput>,
+    consumed: &mut bool,
+) -> Option<StartupDocumentInput> {
+    if *consumed {
+        return None;
+    }
+    *consumed = true;
+    startup_document.clone()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_document_open_error_copy(
+    error: macos_document_open::MacOsDocumentOpenError,
+) -> (&'static str, &'static str) {
+    let message = match error {
+        macos_document_open::MacOsDocumentOpenError::UnsupportedDocumentCount => {
+            "Multiple documents in one request are not supported; no documents from that request were opened. The current document is unchanged."
+        }
+        macos_document_open::MacOsDocumentOpenError::InboxOverflow => {
+            "A document request could not be accepted. The current document is unchanged."
+        }
+        macos_document_open::MacOsDocumentOpenError::EmptyOrMalformedEvent
+        | macos_document_open::MacOsDocumentOpenError::UnsupportedUrlOrDescriptor
+        | macos_document_open::MacOsDocumentOpenError::InvalidUtf8Path => {
+            "The document request could not be opened. The current document is unchanged."
+        }
+    };
+    ("Unable to Open Document", message)
+}
+
 fn status_modifiers_changed(previous: egui::Modifiers, current: egui::Modifiers) -> bool {
     previous != current
 }
@@ -247,9 +432,11 @@ fn status_modifiers_changed(previous: egui::Modifiers, current: egui::Modifiers)
 #[cfg(test)]
 mod menu_platform_cli_tests {
     use super::{
-        parse_startup_args, resolve_startup_menu_policy, StartupConfig, STARTUP_USAGE,
+        parse_startup_args, resolve_startup_menu_policy, StartupConfig, StartupDocumentInput,
+        STARTUP_USAGE,
     };
     use crate::menu::{MenuHostPlatform, MenuPlatformChoice, MenuAcceleratorOwner};
+    use crate::replacement_open::HandoffId;
     use std::ffi::OsString;
 
     fn parse(arguments: &[&str]) -> Result<StartupConfig, String> {
@@ -258,18 +445,18 @@ mod menu_platform_cli_tests {
 
     #[test]
     fn menu_platform_option_defaults_to_auto_and_accepts_each_value() {
-        assert_eq!(parse(&[]), Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::Auto, document_path: None }));
+        assert_eq!(parse(&[]), Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::Auto, startup_document: None }));
         assert_eq!(
             parse(&["--menu-platform=auto"]),
-            Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::Auto, document_path: None })
+            Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::Auto, startup_document: None })
         );
         assert_eq!(
             parse(&["--menu-platform=macos"]),
-            Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::MacOS, document_path: None })
+            Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::MacOS, startup_document: None })
         );
         assert_eq!(
             parse(&["--menu-platform=windows"]),
-            Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::Windows, document_path: None })
+            Ok(StartupConfig { development: false, menu_platform: MenuPlatformChoice::Windows, startup_document: None })
         );
     }
 
@@ -280,7 +467,39 @@ mod menu_platform_cli_tests {
             Ok(StartupConfig {
                 development: false,
                 menu_platform: MenuPlatformChoice::Windows,
-                document_path: Some(std::path::PathBuf::from("/drafts/Été draft.fdx")),
+                startup_document: Some(StartupDocumentInput {
+                    path: std::path::PathBuf::from("/drafts/Été draft.fdx"),
+                    handoff_id: None,
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn internal_handoff_is_tied_to_its_document_and_preserves_unicode_path() {
+        assert_eq!(
+            parse(&[
+                "--open-handoff=17",
+                "--document-path=/drafts/Été first draft.fdx",
+            ]),
+            Ok(StartupConfig {
+                development: false,
+                menu_platform: MenuPlatformChoice::Auto,
+                startup_document: Some(StartupDocumentInput {
+                    path: std::path::PathBuf::from("/drafts/Été first draft.fdx"),
+                    handoff_id: HandoffId::parse_decimal("17").ok(),
+                }),
+            })
+        );
+        assert_eq!(
+            parse(&["--document-path=/drafts/ordinary.fdx"]),
+            Ok(StartupConfig {
+                development: false,
+                menu_platform: MenuPlatformChoice::Auto,
+                startup_document: Some(StartupDocumentInput {
+                    path: std::path::PathBuf::from("/drafts/ordinary.fdx"),
+                    handoff_id: None,
+                }),
             })
         );
     }
@@ -325,6 +544,31 @@ mod menu_platform_cli_tests {
                 &["--document-path"][..],
                 "--document-path requires an equals-form value",
             ),
+            (
+                &["--open-handoff"][..],
+                "--open-handoff requires an equals-form value",
+            ),
+            (&["--open-handoff="][..], "invalid --open-handoff identity"),
+            (&["--open-handoff=0"][..], "invalid --open-handoff identity"),
+            (&["--open-handoff=+1"][..], "invalid --open-handoff identity"),
+            (&["--open-handoff=-1"][..], "invalid --open-handoff identity"),
+            (&["--open-handoff=١"][..], "invalid --open-handoff identity"),
+            (
+                &["--open-handoff=18446744073709551616"][..],
+                "invalid --open-handoff identity",
+            ),
+            (
+                &["--open-handoff=1", "--open-handoff=2"][..],
+                "duplicate --open-handoff option",
+            ),
+            (
+                &["--open-handoff=1", "--document-path=/draft.fdx", "--open-handoff=2"][..],
+                "duplicate --open-handoff option",
+            ),
+            (
+                &["--open-handoff=1"][..],
+                "--open-handoff requires --document-path",
+            ),
             (&["--dev", "--dev"][..], "duplicate --dev option"),
             (&["--dev=true"][..], "--dev does not accept a value"),
             (&["--dev="][..], "--dev does not accept a value"),
@@ -348,7 +592,7 @@ mod menu_platform_cli_tests {
             Ok(StartupConfig {
                 development: true,
                 menu_platform: MenuPlatformChoice::Auto,
-                document_path: None,
+                startup_document: None,
             })
         );
         assert_eq!(
@@ -356,7 +600,10 @@ mod menu_platform_cli_tests {
             Ok(StartupConfig {
                 development: true,
                 menu_platform: MenuPlatformChoice::Windows,
-                document_path: Some(std::path::PathBuf::from("/drafts/test.fdx")),
+                startup_document: Some(StartupDocumentInput {
+                    path: std::path::PathBuf::from("/drafts/test.fdx"),
+                    handoff_id: None,
+                }),
             })
         );
         assert_eq!(
@@ -534,6 +781,29 @@ struct PendingFdxOpen {
     path: PathBuf,
     source: OpenedFdxSource,
     declared_version: String,
+}
+
+fn pending_resolution_outcome(
+    pending: Option<()>,
+    consent: FdxMigrationConsent,
+    continue_outcome: StagedOpenOutcome,
+) -> Option<StagedOpenOutcome> {
+    if pending.is_none() {
+        None
+    } else if consent == FdxMigrationConsent::Cancel {
+        Some(StagedOpenOutcome::Cancelled)
+    } else {
+        Some(continue_outcome)
+    }
+}
+
+fn staged_open_activation_outcome(
+    activation: Result<(), StagedOpenOutcome>,
+) -> StagedOpenOutcome {
+    match activation {
+        Ok(()) => StagedOpenOutcome::Activated,
+        Err(outcome) => outcome,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -862,8 +1132,16 @@ enum RevealIntent {
     Conditional,
 }
 
+/// One active replacement handoff owns its identity, deadline, and child
+/// transport as a single record. Dropping it never kills or waits for child.
+struct PendingReplacement {
+    metadata: replacement_open::PendingReplacementMetadata,
+    transport: replacement_open_transport::ReplacementOpenTransport,
+}
+
 struct ScriptCraftApp {
     session: EditingSession,
+    root_close_lifecycle: RootCloseLifecycle,
     document_font_availability: document_font::FontAvailability,
     pending_commands: menu::PendingDesktopCommands,
     menu_policy: menu::RuntimeMenuPolicy,
@@ -871,6 +1149,10 @@ struct ScriptCraftApp {
     development_mode: bool,
     #[cfg(target_os = "macos")]
     native_menu: Option<macos_menu::NativeMenuController>,
+    #[cfg(target_os = "macos")]
+    native_lifecycle: Option<macos_lifecycle::NativeLifecycleController>,
+    #[cfg(target_os = "macos")]
+    native_open_documents: Option<macos_open_documents::NativeOpenDocumentsController>,
     focus_mode: focus_mode::FocusModeController,
     sprint_timer: sprint_timer::SprintTimer,
     timer_popup_surface: EditorSurface,
@@ -880,6 +1162,14 @@ struct ScriptCraftApp {
     next_cast_list_refresh: Instant,
     notification_sink: sprint_timer::NativeNotificationSink,
     notification_results: Receiver<(u64, NotificationResult)>,
+    // The bounded event channel is paired with the optional single pending
+    // record; a monotonic ID sequence scopes each acknowledged child.
+    replacement_open_event_sender: replacement_open_transport::ReplacementOpenEventSender,
+    replacement_open_events: replacement_open_transport::ReplacementOpenEventReceiver,
+    replacement_handoff_ids: replacement_open::HandoffIdSequence,
+    pending_replacement: Option<PendingReplacement>,
+    replacement_resume_surface: Option<EditorSurface>,
+    staged_replacement_open: Option<PathBuf>,
     surface_focused: bool,
     active_editor_surface: EditorSurface,
     active_body_dual_dialogue_group: Option<StableId>,
@@ -910,7 +1200,9 @@ struct ScriptCraftApp {
     pending_window_restore: Option<fdx::WindowState>,
     latest_window_state: Option<fdx::WindowState>,
     pending_fdx_open: Option<PendingFdxOpen>,
-    startup_document_path: Option<PathBuf>,
+    startup_document: Option<StartupDocumentInput>,
+    initial_document_slot_finalized: bool,
+    startup_document_consumed: bool,
     native_input_diagnostics: NativeInputDiagnostics,
     editor_surface_id: Option<egui::Id>,
     title_editor_surface_id: Option<egui::Id>,
@@ -1015,7 +1307,55 @@ fn session_activation_failure_message(error: &EditError) -> String {
     )
 }
 
+fn root_close_cleanup_allowed(decision: RootCloseDecision) -> bool {
+    matches!(
+        decision,
+        RootCloseDecision::Allow | RootCloseDecision::AllowAuthorized
+    )
+}
+
+fn should_cancel_replacement_root_close(replacement_pending: bool, close_requested: bool) -> bool {
+    replacement_pending && close_requested
+}
+
+fn replacement_resume_surface(
+    prior_surface: Option<EditorSurface>,
+    title_page_open: bool,
+) -> Option<EditorSurface> {
+    match prior_surface {
+        Some(EditorSurface::TitlePage) if !title_page_open => Some(EditorSurface::Body),
+        surface => surface,
+    }
+}
+
+fn replacement_resume_focus_allowed(modal_blocked: bool, native_output_active: bool) -> bool {
+    !modal_blocked && !native_output_active
+}
+
+fn replacement_resume_feedback(
+    reason: replacement_open::ReplacementOpenResumeReason,
+) -> (&'static str, &'static str) {
+    if reason == replacement_open::ReplacementOpenResumeReason::ChildCancelled {
+        (
+            "Document Not Opened",
+            "The selected document was not opened. The current document and its in-memory changes remain available.",
+        )
+    } else {
+        (
+            "Could Not Open Document",
+            "The selected document could not be opened. The current document and its in-memory changes remain available.",
+        )
+    }
+}
+
 impl ScriptCraftApp {
+    /// The replacement lock is owned only by the WO-002.5 pending record.
+    /// Keep this separate from `pending_fdx_open`, which represents the
+    /// migration decision and alone enables File Import Resolve.
+    fn replacement_open_pending(&self) -> bool {
+        self.pending_replacement.is_some()
+    }
+
     fn set_active_body_group(&mut self, next: Option<StableId>) -> bool {
         if next == self.active_body_dual_dialogue_group {
             return false;
@@ -1035,6 +1375,7 @@ impl ScriptCraftApp {
         let next = if self.active_editor_surface == EditorSurface::Body
             && self.surface_focused
             && self.pending_fdx_open.is_none()
+            && !self.replacement_open_pending()
         {
             scriptcraft_core::dual_dialogue::group_at_element_index(
                 self.session.project(),
@@ -1105,7 +1446,15 @@ impl ScriptCraftApp {
         self.title_page_focus_requested = false;
         self.title_view_reset_pending = true;
         self.set_active_editor_surface(EditorSurface::Body);
-        self.restore_editor_focus(ctx);
+        let availability = self.app_command_availability();
+        if !self.replacement_open_pending()
+            && replacement_resume_focus_allowed(
+                availability.modal_blocked,
+                availability.native_output_active,
+            )
+        {
+            self.restore_editor_focus(ctx);
+        }
         ctx.request_repaint();
     }
 
@@ -1296,15 +1645,20 @@ impl ScriptCraftApp {
     fn new_with_startup(
         menu_policy: menu::RuntimeMenuPolicy,
         menu_platform_choice: menu::MenuPlatformChoice,
-        startup_document_path: Option<PathBuf>,
+        startup_document: Option<StartupDocumentInput>,
         development_mode: bool,
     ) -> Result<Self, String> {
         let project = Project::new().map_err(|error| format!("new project failed: {error:?}"))?;
         let session = EditingSession::with_policy(project, EditPolicy::default())
             .map_err(|error| format!("session failed: {error:?}"))?;
         let (notification_sink, notification_results) = sprint_timer::NativeNotificationSink::new();
+        // The UI retains the receiver; replacement reader threads get sender
+        // clones and request egui repaint only after a successful try_send.
+        let (replacement_open_event_sender, replacement_open_events) =
+            replacement_open_transport::event_channel();
         Ok(Self {
             session,
+            root_close_lifecycle: RootCloseLifecycle::default(),
             document_font_availability: document_font::FontAvailability::default(),
             pending_commands: menu::PendingDesktopCommands::default(),
             menu_policy,
@@ -1312,6 +1666,10 @@ impl ScriptCraftApp {
             development_mode,
             #[cfg(target_os = "macos")]
             native_menu: None,
+            #[cfg(target_os = "macos")]
+            native_lifecycle: None,
+            #[cfg(target_os = "macos")]
+            native_open_documents: None,
             focus_mode: focus_mode::FocusModeController::default(),
             sprint_timer: sprint_timer::SprintTimer::default(),
             timer_popup_surface: EditorSurface::Body,
@@ -1321,6 +1679,12 @@ impl ScriptCraftApp {
             next_cast_list_refresh: Instant::now() + CAST_LIST_REFRESH_INTERVAL,
             notification_sink,
             notification_results,
+            replacement_open_event_sender,
+            replacement_open_events,
+            replacement_handoff_ids: replacement_open::HandoffIdSequence::default(),
+            pending_replacement: None,
+            replacement_resume_surface: None,
+            staged_replacement_open: None,
             surface_focused: false,
             active_editor_surface: EditorSurface::Body,
             active_body_dual_dialogue_group: None,
@@ -1351,7 +1715,9 @@ impl ScriptCraftApp {
             pending_window_restore: None,
             latest_window_state: None,
             pending_fdx_open: None,
-            startup_document_path,
+            startup_document,
+            initial_document_slot_finalized: false,
+            startup_document_consumed: false,
             native_input_diagnostics: NativeInputDiagnostics::default(),
             editor_surface_id: None,
             title_editor_surface_id: None,
@@ -1379,34 +1745,109 @@ impl ScriptCraftApp {
         })
     }
 
-    fn launch_child_instance(&self, document_path: Option<&Path>) {
-        if spawn_current_child(self, document_path).is_err() {
+    fn launch_child_instance(
+        &self,
+        document_path: Option<&Path>,
+    ) -> Result<(), ChildLaunchError> {
+        spawn_current_child(self, document_path)
+    }
+
+    fn launch_blank_instance(&self) {
+        if self.launch_child_instance(None).is_err() {
             show_native_lifecycle_error(
-                if document_path.is_some() {
-                    "Unable to Open Document"
-                } else {
-                    "Unable to Start ScriptCraft"
-                },
-                if document_path.is_some() {
-                    "A separate instance for the selected document could not be started. The current document is unchanged."
-                } else {
-                    "A separate blank ScriptCraft instance could not be started. The current document is unchanged."
-                },
+                "Unable to Start ScriptCraft",
+                "A separate blank ScriptCraft instance could not be started. The current document is unchanged.",
             );
         }
     }
 
-    fn launch_blank_instance(&self) {
-        self.launch_child_instance(None);
+    fn finalize_initial_document_slot(&mut self) {
+        if self.initial_document_slot_finalized {
+            return;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let controller = self.native_open_documents.as_ref();
+            finalize_startup_document_slot(
+                &mut self.startup_document,
+                &mut self.initial_document_slot_finalized,
+                |startup_document_exists| {
+                    controller.and_then(|controller| {
+                        controller.take_cold_startup_path(startup_document_exists)
+                    })
+                },
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        finalize_startup_document_slot(
+            &mut self.startup_document,
+            &mut self.initial_document_slot_finalized,
+            |_| None,
+        );
     }
 
-    fn launch_document_instance(&self, path: &Path) {
-        self.launch_child_instance(Some(path));
+    #[cfg(target_os = "macos")]
+    fn drain_native_open_documents(&self) {
+        let Some(controller) = &self.native_open_documents else {
+            return;
+        };
+        // Finder/Dock events bypass typed in-app Open and its acknowledged
+        // replacement lock: no dirty/save prompt, handoff identity, stdout
+        // acknowledgement, receiver mutation, close request, or child termination.
+        macos_document_open::route_independent_requests(
+            controller.drain(),
+            |path| self.launch_child_instance(Some(path)).map_err(|_| ()),
+            |feedback| match feedback {
+                macos_document_open::MacOsDocumentOpenFeedback::IntakeError(error) => {
+                    let (title, message) = macos_document_open_error_copy(error);
+                    show_native_lifecycle_error(title, message);
+                }
+                macos_document_open::MacOsDocumentOpenFeedback::IndependentLaunchFailed => {
+                    show_native_lifecycle_error(
+                        "Unable to Open Document",
+                        "A separate instance for the selected document could not be started. The current document is unchanged.",
+                    );
+                }
+                macos_document_open::MacOsDocumentOpenFeedback::InboxOverflow => {
+                    let (title, message) = macos_document_open_error_copy(
+                        macos_document_open::MacOsDocumentOpenError::InboxOverflow,
+                    );
+                    show_native_lifecycle_error(title, message);
+                }
+            },
+        );
     }
 
-    fn consume_startup_document_handoff(&mut self) -> Option<bool> {
-        let path = self.startup_document_path.take()?;
-        Some(self.open_staged_native_at(&path))
+    fn consume_startup_document_handoff(&mut self) -> Option<StagedOpenOutcome> {
+        let startup_document =
+            take_startup_document_once(&self.startup_document, &mut self.startup_document_consumed)?;
+        // Command-line, cold OS, and acknowledged-child startup paths share this
+        // staged-open boundary. Only an optional child identity is acknowledged.
+        Some(self.open_staged_native_at(&startup_document.path))
+    }
+
+    /// Emit only a terminal startup result. Taking the identity in the shared
+    /// writer consumes it before any fallible stdout operation; migration keeps
+    /// the identity attached to the startup document until resolution.
+    fn emit_startup_handoff_result(&mut self, outcome: StagedOpenOutcome) {
+        if outcome == StagedOpenOutcome::AwaitingMigration {
+            return;
+        }
+        let Some(startup_document) = self.startup_document.as_mut() else {
+            return;
+        };
+        if startup_document.handoff_id.is_none() {
+            return;
+        }
+
+        let stdout = std::io::stdout();
+        let mut writer = stdout.lock();
+        let _ = replacement_open::write_terminal_handoff_result(
+            &mut startup_document.handoff_id,
+            outcome,
+            &mut writer,
+        );
     }
 
     fn request_repaint(&mut self, ctx: &egui::Context) {
@@ -1622,56 +2063,55 @@ impl ScriptCraftApp {
         Ok(layout)
     }
 
-    fn save_native(&mut self, ctx: &egui::Context) {
+    /// Returns Saved only after the FDX storage transaction publishes; picker
+    /// cancellation is Cancelled, and all rejected or failed paths are Failed.
+    fn save_native(&mut self, ctx: &egui::Context) -> SaveOutcome {
         let Some(path) = self.native_path.clone() else {
-            self.dispatch_command(
-                CommandInvocation::new(
-                    Command::FileSaveAsRequest,
-                    CommandOrigin::InternalFollowUp,
-                ),
-                ctx,
-            );
-            return;
+            // Untitled Save must return the actual picker/save result rather
+            // than treating dispatch of Save As as successful publication.
+            return self.save_as_native(ctx);
         };
-        self.save_native_at(&path);
+        self.save_native_at(&path)
     }
 
-    fn save_native_at(&mut self, path: &std::path::Path) {
+    fn save_native_at(&mut self, path: &std::path::Path) -> SaveOutcome {
         if has_extension(path, "json") {
             self.show_error(
                 "LEGACY_JSON_SAVE_REJECTED: destination and current document unchanged",
             );
-            return;
+            return SaveOutcome::Failed;
         }
 
         let mode = match self.fdx_baseline.as_ref() {
             Some(baseline) if baseline.path() == path => FdxSaveMode::Save,
             _ => FdxSaveMode::SaveAs(path.to_owned()),
         };
-        self.save_fdx_mode_at(path, mode);
+        self.save_fdx_mode_at(path, mode)
     }
 
-    fn save_fdx_as_at(&mut self, path: &std::path::Path, overwrite: bool) {
+    fn save_fdx_as_at(&mut self, path: &std::path::Path, overwrite: bool) -> SaveOutcome {
         if !has_extension(path, "fdx") {
             self.show_error("SAVE_AS_EXTENSION_REJECTED: .fdx required; destination and document unchanged");
-            return;
+            return SaveOutcome::Failed;
         }
         let mode = if overwrite {
             FdxSaveMode::SaveAsOverwrite(path.to_owned())
         } else {
             FdxSaveMode::SaveAs(path.to_owned())
         };
-        self.save_fdx_mode_at(path, mode);
+        self.save_fdx_mode_at(path, mode)
     }
 
-    fn save_fdx_mode_at(&mut self, path: &std::path::Path, mode: FdxSaveMode) {
+    /// Save errors and preflight rejections map to Failed. A completed durable
+    /// publication maps to Saved even when temporary cleanup only warns.
+    fn save_fdx_mode_at(&mut self, path: &std::path::Path, mode: FdxSaveMode) -> SaveOutcome {
         if matches!(
             &mode,
             FdxSaveMode::SaveAs(_) | FdxSaveMode::SaveAsOverwrite(_)
         ) && !has_extension(path, "fdx")
         {
             self.show_error("SAVE_AS_EXTENSION_REJECTED: .fdx required; destination and document unchanged");
-            return;
+            return SaveOutcome::Failed;
         }
         if self.fdx_baseline.is_none()
             && self
@@ -1682,7 +2122,7 @@ impl ScriptCraftApp {
             self.show_error(
                 "FDX_SAVE_REFUSED_LEGACY_SOURCE: no FDX mapping; source, destination, and live document unchanged",
             );
-            return;
+            return SaveOutcome::Failed;
         }
         let mut target = self
             .fdx_baseline
@@ -1729,9 +2169,32 @@ impl ScriptCraftApp {
                 } else {
                     self.clear_error();
                 }
+                SaveOutcome::Saved
             }
-            Err(error) => self.show_fdx_save_error(error),
+            Err(error) => {
+                self.show_fdx_save_error(error);
+                SaveOutcome::Failed
+            }
         }
+    }
+
+    /// Saves for a lifecycle decision; only a clean live session yields Saved.
+    fn save_for_lifecycle(&mut self, ctx: &egui::Context) -> SaveOutcome {
+        let outcome = self.save_native(ctx);
+        let is_dirty = self.session.dirty();
+        let lifecycle_outcome = document_lifecycle::clean_save_outcome(outcome, is_dirty);
+        if outcome == SaveOutcome::Saved && is_dirty {
+            self.show_error(
+                "LIFECYCLE_SAVE_REPORTED_SUCCESS_BUT_DIRTY: the live session remains dirty after save",
+            );
+        }
+        if lifecycle_outcome == SaveOutcome::Failed {
+            show_native_lifecycle_error(
+                "Could Not Save Document",
+                "The document could not be saved. It remains open, and its unsaved changes have been preserved.",
+            );
+        }
+        lifecycle_outcome
     }
 
     fn root_text_state(&self) -> fdx::TextState {
@@ -1778,34 +2241,114 @@ impl ScriptCraftApp {
     fn open_native(&mut self, ctx: &egui::Context) {
         let dialog = rfd::FileDialog::new().add_filter("Final Draft document", &["fdx"]);
         dispatch_open_selection(dialog.pick_file(), |path| {
-            self.dispatch_document_path_command(path, false, false, ctx);
+            self.dispatch_document_path_command(path, ctx);
         });
+    }
+
+    /// Direct-path Open first stages one selected path. Root-frame processing
+    /// then applies selected path → dirty gate → spawn/pending → activation
+    /// Opened → the WO-001 arm-plus-root-Close continuation.
+    fn stage_replacement_document_path(&mut self, path: &Path) {
+        if !stage_replacement_open(&mut self.staged_replacement_open, path.to_owned()) {
+            self.show_error(
+                "OPEN_REPLACEMENT_ALREADY_STAGED: another selected document is already awaiting its lifecycle gate",
+            );
+        }
+    }
+
+    fn process_staged_replacement_open(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(path) = self.staged_replacement_open.take() else {
+            return;
+        };
+        if self.replacement_open_pending() || self.pending_fdx_open.is_some() {
+            self.show_replacement_launch_failure();
+            return;
+        }
+
+        let is_dirty = self.session.dirty();
+        let choice = is_dirty.then(|| {
+            native_unsaved_changes_prompt::prompt_unsaved_changes(&self.native_title, frame)
+        });
+        let save_outcome = if choice == Some(document_lifecycle::UnsavedChangesChoice::Save) {
+            Some(self.save_for_lifecycle(ctx))
+        } else {
+            None
+        };
+        if !replacement_open::replacement_open_gate_allows(is_dirty, choice, save_outcome) {
+            return;
+        }
+
+        let handoff_id = match self.replacement_handoff_ids.next_id() {
+            Ok(id) => id,
+            Err(_) => {
+                self.show_replacement_launch_failure();
+                return;
+            }
+        };
+        let executable = match std::env::current_exe() {
+            Ok(executable) => executable,
+            Err(_) => {
+                self.show_replacement_launch_failure();
+                return;
+            }
+        };
+        let transport = replacement_open_transport::spawn_acknowledged_replacement(
+            &executable,
+            self.development_mode,
+            self.menu_platform_choice,
+            &path,
+            handoff_id,
+            &self.replacement_open_event_sender,
+            ctx,
+        );
+        match transport {
+            Ok(transport) => {
+                if !self.retain_pending_replacement(transport, Instant::now()) {
+                    self.show_replacement_launch_failure();
+                }
+            }
+            Err(_) => self.show_replacement_launch_failure(),
+        }
+    }
+
+    fn show_replacement_launch_failure(&self) {
+        show_native_lifecycle_error(
+            "Unable to Open Document",
+            "The selected document could not be opened. The current document and its in-memory changes remain available.",
+        );
+    }
+
+    /// Reuses the WO-001 transient authorization and ordinary root Close path;
+    /// this does not save, revert, clean, or synchronously destroy the session.
+    fn arm_and_request_root_close(&mut self, ctx: &egui::Context) {
+        self.root_close_lifecycle.arm_confirmed_close();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     /// Format selection is based on bounded file content; the extension only
     /// controls the file-picker filter, never the decoder.
-    fn open_staged_native_at(&mut self, path: &std::path::Path) -> bool {
+    fn open_staged_native_at(&mut self, path: &std::path::Path) -> StagedOpenOutcome {
         if self.pending_fdx_open.is_some() {
             self.show_error("OPEN_BLOCKED_BY_MIGRATION: resolve pending FDX import; active document unchanged");
-            return false;
+            return StagedOpenOutcome::Failed;
         }
         if self.session.dirty() {
             self.show_error("OPEN_CANCELLED_DIRTY: unsaved project and active document unchanged");
-            return false;
+            return StagedOpenOutcome::Failed;
         }
         let source = match fdx_storage::open_source(&StdFdxStorageFileSystem, path) {
             Ok(source) => source,
             Err(error) => {
                 self.reconcile_body_active_group();
                 self.show_error(open_read_failure_message(&error));
-                return false;
+                return StagedOpenOutcome::Failed;
             }
         };
         if looks_like_legacy_json(source.bytes()) {
             self.show_error(
                 "LEGACY_JSON_OPEN_REJECTED: format unsupported; active document unchanged",
             );
-            return false;
+            return StagedOpenOutcome::Failed;
         }
 
         match fdx::preflight_version(source.bytes()) {
@@ -1821,23 +2364,23 @@ impl ScriptCraftApp {
                 self.surface_focused = false;
                 self.reconcile_body_active_group();
                 self.clear_error();
-                true
+                StagedOpenOutcome::AwaitingMigration
             }
             Ok(FdxVersionStatus::Missing) => {
                 self.show_error("FDX_VERSION_MISSING: active document unchanged");
-                false
+                StagedOpenOutcome::Failed
             }
             Ok(FdxVersionStatus::Malformed) => {
                 self.show_error("FDX_VERSION_INVALID: active document unchanged");
-                false
+                StagedOpenOutcome::Failed
             }
             Ok(FdxVersionStatus::Duplicate) => {
                 self.show_error("FDX_VERSION_DUPLICATE: active document unchanged");
-                false
+                StagedOpenOutcome::Failed
             }
             Err(_) => {
                 self.show_error("FDX_VERSION_CHECK_FAILED: selected document could not be checked; active document unchanged");
-                false
+                StagedOpenOutcome::Failed
             }
         }
     }
@@ -1847,10 +2390,10 @@ impl ScriptCraftApp {
         path: PathBuf,
         source: OpenedFdxSource,
         consent: FdxMigrationConsent,
-    ) -> bool {
+    ) -> StagedOpenOutcome {
         if consent == FdxMigrationConsent::Cancel {
             self.clear_error();
-            return true;
+            return StagedOpenOutcome::Cancelled;
         }
         let outcome = fdx::import_fdx(source.bytes(), consent);
         match outcome {
@@ -1864,23 +2407,23 @@ impl ScriptCraftApp {
                         Some("Opened non-current FDX with best-effort Version 6 import")
                     }
                 };
-                self.activate_opened_project(
+                staged_open_activation_outcome(self.activate_opened_project(
                     candidate.document.project,
                     &path,
                     Some(source.baseline),
                     migration_status,
                     candidate.document.window_state,
                     candidate.document.text_state,
-                )
+                ))
             }
             Ok(FdxImportOutcome::Cancelled { .. }) => {
                 self.clear_error();
-                false
+                StagedOpenOutcome::Cancelled
             }
             Err(error) => {
                 self.reconcile_body_active_group();
                 self.show_error(open_import_failure_message(&error));
-                false
+                StagedOpenOutcome::Failed
             }
         }
     }
@@ -1893,13 +2436,13 @@ impl ScriptCraftApp {
         migration_status: Option<&str>,
         window_state: Option<fdx::WindowState>,
         text_state: fdx::TextState,
-    ) -> bool {
+    ) -> Result<(), StagedOpenOutcome> {
         let mut replacement = match EditingSession::with_policy(project, self.session.policy()) {
             Ok(replacement) => replacement,
             Err(error) => {
                 self.reconcile_body_active_group();
                 self.show_error(session_activation_failure_message(&error));
-                return false;
+                return Err(StagedOpenOutcome::Failed);
             }
         };
         let restored_selection = scriptcraft_commands::Selection::from_core(text_state.selection)
@@ -1965,42 +2508,77 @@ impl ScriptCraftApp {
         } else {
             self.clear_error();
         }
-        true
+        // The replacement session is installed before this sole Activated result.
+        Ok(())
     }
 
-    fn resolve_pending_fdx_import(&mut self, consent: FdxMigrationConsent) {
+    fn resolve_pending_fdx_import(
+        &mut self,
+        consent: FdxMigrationConsent,
+    ) -> Option<StagedOpenOutcome> {
         let Some(pending) = self.pending_fdx_open.take() else {
-            return;
+            return pending_resolution_outcome(None, consent, StagedOpenOutcome::Failed);
         };
-        if consent == FdxMigrationConsent::Cancel {
+        let continue_outcome = if consent == FdxMigrationConsent::Cancel {
             self.clear_error();
-            return;
-        }
-        if self.session.dirty() {
+            StagedOpenOutcome::Failed
+        } else if self.session.dirty() {
             self.show_error("OPEN_CANCELLED_DIRTY: unsaved project and active document unchanged");
-            return;
+            StagedOpenOutcome::Failed
+        } else {
+            self.finish_fdx_import(pending.path, pending.source, consent)
+        };
+        let outcome = pending_resolution_outcome(Some(()), consent, continue_outcome);
+        if let Some(outcome) = outcome {
+            self.emit_startup_handoff_result(outcome);
+            if outcome == StagedOpenOutcome::Failed {
+                show_child_startup_open_failure();
+            }
         }
-        if !self.finish_fdx_import(pending.path, pending.source, consent) {
-            show_child_startup_open_failure();
-        }
+        outcome
     }
 
-    fn save_as_native(&mut self, ctx: &egui::Context) {
-        if let Some(path) = rfd::FileDialog::new()
+    fn save_as_native(&mut self, ctx: &egui::Context) -> SaveOutcome {
+        let picker_result = rfd::FileDialog::new()
             .add_filter("Final Draft document", &["fdx"])
             .set_file_name("Untitled Screenplay.fdx")
-            .save_file()
-        {
-            // A selected path means the native replacement prompt, if any, was accepted.
-            self.dispatch_document_path_command(&path, true, true, ctx);
+            .save_file();
+        save_picker_outcome(picker_result, |path| self.dispatch_save_as_path(&path, true, ctx))
+    }
+
+    /// Save As has a typed follow-up boundary so accepted picker destinations
+    /// preserve the durable save result; path routing itself is not success.
+    fn dispatch_save_as_path(
+        &mut self,
+        path: &std::path::Path,
+        overwrite: bool,
+        ctx: &egui::Context,
+    ) -> SaveOutcome {
+        let Some(path) = path
+            .to_str()
+            .and_then(|path| DocumentPath::new(path).ok())
+        else {
+            self.show_error("DOCUMENT_PATH_REJECTED: selected path is not valid UTF-8; active document unchanged");
+            return SaveOutcome::Failed;
+        };
+        let result = self.dispatch_command(
+            CommandInvocation::new(
+                Command::FileSaveAs { path, overwrite },
+                CommandOrigin::InternalFollowUp,
+            ),
+            ctx,
+        );
+        match result.outcome {
+            app_commands::DesktopCommandOutcome::SaveCompleted(outcome) => outcome,
+            // A non-save outcome is a dispatch failure, never evidence that the
+            // destination was durably published.
+            _ => SaveOutcome::Failed,
         }
     }
 
     fn dispatch_document_path_command(
         &mut self,
         path: &std::path::Path,
-        save_as: bool,
-        overwrite: bool,
         ctx: &egui::Context,
     ) {
         let Some(path) = path
@@ -2010,13 +2588,8 @@ impl ScriptCraftApp {
             self.show_error("DOCUMENT_PATH_REJECTED: selected path is not valid UTF-8; active document unchanged");
             return;
         };
-        let command = if save_as {
-            Command::FileSaveAs { path, overwrite }
-        } else {
-            Command::FileOpen { path }
-        };
         self.dispatch_command(
-            CommandInvocation::new(command, CommandOrigin::InternalFollowUp),
+            CommandInvocation::new(Command::FileOpen { path }, CommandOrigin::InternalFollowUp),
             ctx,
         );
     }
@@ -2618,7 +3191,7 @@ impl eframe::App for ScriptCraftApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         #[cfg(target_os = "windows")]
         self.update_windows_print_session(ui, frame);
-        ScriptCraftApp::update(self, ui);
+        ScriptCraftApp::update(self, ui, frame);
     }
 }
 
@@ -2741,31 +3314,217 @@ impl ScriptCraftApp {
 
 
 impl ScriptCraftApp {
-    fn update(&mut self, ui: &mut egui::Ui) {
+    /// Retains the sole successful acknowledged spawn. The transport and its
+    /// identity are stored together; a second child cannot replace an active
+    /// handoff. A rejected transport is merely dropped (never killed/waited).
+    fn retain_pending_replacement(
+        &mut self,
+        transport: replacement_open_transport::ReplacementOpenTransport,
+        now: Instant,
+    ) -> bool {
+        if self.pending_replacement.is_some() {
+            return false;
+        }
+        self.replacement_resume_surface = Some(self.active_editor_surface());
+        // This is transient Body presentation state, not session selection or
+        // semantic content; stop reconciling it while both editor inputs lock.
+        self.set_active_body_group(None);
+        let metadata = replacement_open::PendingReplacementMetadata::new(
+            transport.handoff_id,
+            now,
+        );
+        self.pending_replacement = Some(PendingReplacement {
+            metadata,
+            transport,
+        });
+        true
+    }
+
+    /// Drains all queued events before the nonblocking child poll, then applies
+    /// one terminal decision. Matching Opened arms and requests the next
+    /// WO-001 one-shot root Close; every other result resumes with feedback.
+    fn poll_pending_replacement(&mut self, ctx: &egui::Context, now: Instant) -> bool {
+        let events: Vec<_> = self.replacement_open_events.try_iter().collect();
+        let child_observation = match self.pending_replacement.as_mut() {
+            Some(pending) => match pending.transport.try_wait() {
+                Ok(Some(_status)) => replacement_open::ReplacementOpenChildObservation::Exited,
+                Ok(None) => replacement_open::ReplacementOpenChildObservation::Running,
+                Err(_) => replacement_open::ReplacementOpenChildObservation::PollFailed,
+            },
+            None => replacement_open::ReplacementOpenChildObservation::Running,
+        };
+        let decision = replacement_open::decide_pending_replacement(
+            self.pending_replacement
+                .as_ref()
+                .map(|pending| &pending.metadata),
+            now,
+            events,
+            child_observation,
+        );
+
+        match decision {
+            replacement_open::PendingReplacementDecision::Inactive => false,
+            replacement_open::PendingReplacementDecision::Pending { repaint_after } => {
+                self.performance.repaint_requests =
+                    self.performance.repaint_requests.saturating_add(1);
+                ctx.request_repaint_after(repaint_after);
+                false
+            }
+            replacement_open::PendingReplacementDecision::AuthorizeClose => {
+                // Reject commands queued during the locked interval before
+                // clearing the record, so a missed one-shot Close cannot replay
+                // them as ordinary unlocked commands on a later frame.
+                self.flush_pending_diagnostic_commands(ctx);
+                self.dispatch_pending_commands(ctx);
+                // Clear the entire record before requesting the WO-001
+                // continuation. Dropping the child handle never kills/waits.
+                self.pending_replacement = None;
+                self.replacement_resume_surface = None;
+                self.arm_and_request_root_close(ctx);
+                true
+            }
+            replacement_open::PendingReplacementDecision::Resume(reason) => {
+                // Drain the entire queued batch under locked availability before
+                // exposing the resumed command state; no catch-up replay.
+                self.flush_pending_diagnostic_commands(ctx);
+                self.dispatch_pending_commands(ctx);
+                // Clearing precedes any future feedback/focus restoration. No
+                // session, file baseline, title, selection, or dirty state is
+                // touched. Avoid an overdue derived-work catch-up this frame.
+                self.pending_replacement = None;
+                let (title, message) = replacement_resume_feedback(reason);
+                show_native_lifecycle_error(title, message);
+                self.next_cast_list_refresh = now
+                    .checked_add(CAST_LIST_REFRESH_INTERVAL)
+                    .unwrap_or(now);
+                let availability = self.app_command_availability();
+                let prior_surface = self.replacement_resume_surface.take();
+                let resume_surface = replacement_resume_surface(
+                    prior_surface,
+                    self.title_page_window_open,
+                );
+                if let Some(surface) = resume_surface {
+                    self.set_active_editor_surface(surface);
+                    self.reconcile_body_active_group();
+                    if replacement_resume_focus_allowed(
+                        availability.modal_blocked,
+                        availability.native_output_active,
+                    ) {
+                        self.restore_editor_focus(ctx);
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Observes root Close before normal update work. A dirty unauthorized close
+    /// is cancelled before prompting; confirmed choices request a fresh Close
+    /// guarded by one authorization consumed at the next root update boundary.
+    /// Replacement pending cancels root Close/Quit separately and never counts
+    /// as the child's Opened acknowledgement.
+    fn begin_root_close_update(&mut self, ctx: &egui::Context, frame: &eframe::Frame) -> bool {
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        if self.replacement_open_pending() {
+            // A native Close/Quit is not a replacement acknowledgement. Expire
+            // any prior one-shot authorization and cancel this root close while
+            // the transient replacement lock owns the document.
+            let _ = self.root_close_lifecycle.begin_root_update(None);
+            if should_cancel_replacement_root_close(true, close_requested) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+            return false;
+        }
+        let request = close_requested.then(|| RootCloseRequest {
+            is_dirty: self.session.dirty(),
+        });
+        let Some(decision) = self.root_close_lifecycle.begin_root_update(request) else {
+            return false;
+        };
+
+        match decision {
+            RootCloseDecision::Allow | RootCloseDecision::AllowAuthorized => {
+                root_close_cleanup_allowed(decision)
+            }
+            RootCloseDecision::CancelAndPrompt => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+
+                let availability = self.app_command_availability();
+                if availability.modal_blocked || availability.native_output_active {
+                    return false;
+                }
+
+                let choice = native_unsaved_changes_prompt::prompt_unsaved_changes(
+                    &self.native_title,
+                    frame,
+                );
+                let save_outcome = if matches!(
+                    choice,
+                    document_lifecycle::UnsavedChangesChoice::Save
+                ) {
+                    Some(self.save_for_lifecycle(ctx))
+                } else {
+                    None
+                };
+                if document_lifecycle::confirmed_close_for_choice(choice, save_outcome) {
+                    self.arm_and_request_root_close(ctx);
+                }
+                false
+            }
+        }
+    }
+
+    fn update(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        self.finalize_initial_document_slot();
         let ctx = ui.ctx().clone();
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
+        let root_close_allowed = self.begin_root_close_update(&ctx, frame);
+        // Acknowledgements and process exit are settled before availability or
+        // input projection. Matching Opened uses the same WO-001 root Close path.
+        let replacement_close_continuation =
+            self.poll_pending_replacement(&ctx, Instant::now());
         self.update_native_window_state(&ctx);
         if ctx.input(|input| input.viewport().focused) == Some(true) {
             self.set_active_editor_surface(EditorSurface::Body);
         }
-        if let Some(opened) = self.consume_startup_document_handoff() {
-            if !opened {
-                show_child_startup_open_failure();
-            }
+        let startup_outcome = self.consume_startup_document_handoff();
+        if let Some(outcome) = startup_outcome {
+            self.emit_startup_handoff_result(outcome);
         }
         #[cfg(target_os = "macos")]
-        if self.menu_policy.installs_native_macos() {
+        self.drain_native_open_documents();
+        if startup_outcome == Some(StagedOpenOutcome::Failed) {
+            show_child_startup_open_failure();
+        }
+        #[cfg(target_os = "macos")]
+        if !replacement_close_continuation && self.menu_policy.installs_native_macos() {
             if let Some(native_menu) = &self.native_menu {
                 native_menu.drain_events(&mut self.pending_commands);
             }
         }
+        #[cfg(target_os = "macos")]
+        if !replacement_close_continuation
+            && self
+            .native_lifecycle
+            .as_ref()
+            .is_some_and(macos_lifecycle::NativeLifecycleController::take_quit_request)
+        {
+            self.pending_commands.enqueue(CommandInvocation::new(
+                Command::ApplicationQuit,
+                CommandOrigin::NativeOs,
+            ));
+        }
         // Menu activations rendered in the previous pass are dispatched once
         // before ordinary editor input, with command availability rechecked.
-        self.dispatch_pending_commands(&ctx);
+        if !replacement_close_continuation {
+            self.dispatch_pending_commands(&ctx);
+        }
+        self.process_staged_replacement_open(&ctx, frame);
         self.notification_sink.set_repaint_context(&ctx);
-        let migration_pending = self.pending_fdx_open.is_some();
-        if !migration_pending {
+        let replacement_pending = self.replacement_open_pending();
+        let migration_pending = self.pending_fdx_open.is_some() && !replacement_pending;
+        if !migration_pending && !replacement_pending && !replacement_close_continuation {
             // Route events using the editor-focus state established by the prior
             // surface frame, then let this frame's layout and paint observe edits.
             self.handle_surface_input(&ctx, EditorSurface::Body);
@@ -2775,7 +3534,13 @@ impl ScriptCraftApp {
         }
         let timer_now = self.timer_now();
         self.reconcile_sprint_timer(timer_now);
-        if migration_pending {
+        if replacement_close_continuation {
+            // The authorized Close is delivered at the next root-update
+            // boundary. Keep this intervening frame noninteractive.
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                let _ = ui.allocate_space(ui.available_size());
+            });
+        } else if migration_pending {
             let status_panel = egui::Panel::bottom("status")
                 .frame(status_bar::status_panel_frame(&ctx, self.theme_palette.status))
                 .default_size(status_bar::default_panel_height())
@@ -2795,13 +3560,16 @@ impl ScriptCraftApp {
         } else {
             show_application_panels(self, ui);
         }
-        if ctx.input(|input| input.viewport().close_requested()) {
+        if root_close_allowed {
             self.close_title_page_window(&ctx);
             if self.timer_popup_surface == EditorSurface::Body {
                 self.finalize_sprint_timer_popup(&ctx);
             }
-        } else {
+        } else if !replacement_close_continuation {
             title_page_window::show_if_open(self, &ctx);
+        }
+        if replacement_pending {
+            show_pending_replacement_indicator(&ctx);
         }
         self.flush_pending_diagnostic_commands(&ctx);
         self.schedule_sprint_timer_repaint(&ctx, self.timer_now());
@@ -2823,6 +3591,25 @@ impl ScriptCraftApp {
     }
 }
 
+/// A bounded, nonclosable status card over the still-painted document. It has
+/// no action affordance and does not imply that the child has activated.
+fn show_pending_replacement_indicator(ctx: &egui::Context) {
+    egui::Area::new(egui::Id::new("replacement-open-pending-indicator"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::same(16))
+                .show(ui, |ui| {
+                    ui.set_max_width(360.0);
+                    ui.label(egui::RichText::new("Opening selected document in a new instance").strong());
+                    ui.add_space(6.0);
+                    ui.label("The current document is temporarily locked while the new instance opens.");
+                });
+        });
+}
+
 impl ScriptCraftApp {
     fn update_native_window_state(&mut self, ctx: &egui::Context) {
         let reported = ctx.input(|input| {
@@ -2835,6 +3622,53 @@ impl ScriptCraftApp {
         if let Some(commands) = take_window_restore_commands(&mut self.pending_window_restore) {
             self.restore_imported_window(commands, ctx);
         }
+    }
+}
+
+#[cfg(test)]
+mod root_close_flow_tests {
+    use super::{
+        replacement_resume_focus_allowed, replacement_resume_surface, root_close_cleanup_allowed,
+        should_cancel_replacement_root_close, RootCloseDecision,
+    };
+    use scriptcraft_commands::EditorSurface;
+
+    #[test]
+    fn only_clean_or_authorized_root_close_runs_destruction_cleanup() {
+        assert!(root_close_cleanup_allowed(RootCloseDecision::Allow));
+        assert!(root_close_cleanup_allowed(
+            RootCloseDecision::AllowAuthorized
+        ));
+        assert!(!root_close_cleanup_allowed(
+            RootCloseDecision::CancelAndPrompt
+        ));
+    }
+
+    #[test]
+    fn pending_replacement_cancels_root_close_only_for_an_observed_close() {
+        assert!(should_cancel_replacement_root_close(true, true));
+        assert!(!should_cancel_replacement_root_close(true, false));
+        assert!(!should_cancel_replacement_root_close(false, true));
+    }
+
+    #[test]
+    fn replacement_resume_restores_only_the_prior_live_editor_surface() {
+        assert_eq!(
+            replacement_resume_surface(Some(EditorSurface::TitlePage), true),
+            Some(EditorSurface::TitlePage),
+        );
+        assert_eq!(
+            replacement_resume_surface(Some(EditorSurface::TitlePage), false),
+            Some(EditorSurface::Body),
+        );
+        assert_eq!(
+            replacement_resume_surface(Some(EditorSurface::Body), true),
+            Some(EditorSurface::Body),
+        );
+        assert_eq!(replacement_resume_surface(None, true), None);
+        assert!(!replacement_resume_focus_allowed(true, false));
+        assert!(!replacement_resume_focus_allowed(false, true));
+        assert!(replacement_resume_focus_allowed(false, false));
     }
 }
 
@@ -2975,10 +3809,23 @@ fn main() -> eframe::Result {
             std::process::exit(2);
         }
     };
+    #[cfg(target_os = "macos")]
+    let native_open_documents = {
+        let inbox = macos_document_open::MacOsDocumentOpenInbox::new();
+        match macos_open_documents::NativeOpenDocumentsController::install(inbox) {
+            Ok(controller) => controller,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+    };
     eframe::run_native(
         UNTITLED_DOCUMENT_TITLE,
         options,
         Box::new(move |cc| {
+            let startup_document = startup.startup_document;
+
             let document_font_availability = document_font::install(&cc.egui_ctx);
             material_font::install(
                 &cc.egui_ctx,
@@ -2987,11 +3834,25 @@ fn main() -> eframe::Result {
             ScriptCraftApp::new_with_startup(
                 menu_policy,
                 startup.menu_platform,
-                startup.document_path,
+                startup_document,
                 startup.development,
             )
                 .and_then(|mut app| {
                     app.document_font_availability = document_font_availability;
+                    #[cfg(target_os = "macos")]
+                    {
+                        native_open_documents.attach_repaint_context(cc.egui_ctx.clone());
+                        app.native_open_documents = Some(native_open_documents);
+                        app.native_lifecycle = Some(
+                            macos_lifecycle::NativeLifecycleController::install(
+                                cc.egui_ctx.clone(),
+                            )
+                            .map_err(|_| {
+                                "native macOS Quit handler installation failed; startup aborted"
+                                    .to_owned()
+                            })?,
+                        );
+                    }
                     #[cfg(target_os = "macos")]
                     if app.menu_policy.installs_native_macos() {
                         let availability = app.app_command_availability();
@@ -3072,5 +3933,296 @@ mod pdf_filename_projection_tests {
             let path = Path::new(std::ffi::OsStr::from_bytes(b"Draft-\xff.fdx"));
             assert_eq!(pdf_export_filename(Some(path)), UNTITLED_PDF_FILENAME);
         }
+    }
+}
+
+#[cfg(test)]
+mod staged_open_outcome_tests {
+    use super::{
+        pending_resolution_outcome, staged_open_activation_outcome, FdxMigrationConsent,
+        StagedOpenOutcome,
+    };
+
+    #[test]
+    fn absent_pending_import_is_a_no_op_not_an_activation_or_failure() {
+        assert_eq!(
+            pending_resolution_outcome(
+                None,
+                FdxMigrationConsent::Continue,
+                StagedOpenOutcome::Activated,
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn migration_pending_and_cancel_never_report_activation() {
+        assert_eq!(
+            pending_resolution_outcome(
+                Some(()),
+                FdxMigrationConsent::Continue,
+                StagedOpenOutcome::AwaitingMigration,
+            ),
+            Some(StagedOpenOutcome::AwaitingMigration),
+        );
+        assert_eq!(
+            pending_resolution_outcome(
+                Some(()),
+                FdxMigrationConsent::Cancel,
+                StagedOpenOutcome::Activated,
+            ),
+            Some(StagedOpenOutcome::Cancelled),
+        );
+    }
+
+    #[test]
+    fn continue_failure_and_activation_failure_remain_failed() {
+        assert_eq!(
+            pending_resolution_outcome(
+                Some(()),
+                FdxMigrationConsent::Continue,
+                StagedOpenOutcome::Failed,
+            ),
+            Some(StagedOpenOutcome::Failed),
+        );
+        assert_eq!(
+            staged_open_activation_outcome(Err(StagedOpenOutcome::Failed)),
+            StagedOpenOutcome::Failed,
+        );
+        assert_eq!(
+            staged_open_activation_outcome(Ok(())),
+            StagedOpenOutcome::Activated,
+        );
+    }
+}
+
+#[cfg(test)]
+mod macos_cold_startup_routing_tests {
+    use super::{
+        finalize_startup_document_slot, startup_document_with_cold_request,
+        take_startup_document_once, StartupDocumentInput,
+    };
+    use std::path::PathBuf;
+
+    #[cfg(target_os = "macos")]
+    fn queued_request(path: &str) -> crate::macos_document_open::MacOsDocumentOpenEvent {
+        use crate::macos_document_open::{MacOsDocumentOpenEvent as Event, MacOsDocumentOpenRequest};
+
+        match MacOsDocumentOpenRequest::from_path(PathBuf::from(path)) {
+            Ok(request) => Event::Request(request),
+            Err(error) => Event::Error(error),
+        }
+    }
+
+    #[test]
+    fn command_line_document_keeps_ownership_and_ignores_cold_path() {
+        let argument = StartupDocumentInput {
+            path: PathBuf::from("/drafts/argument.fdx"),
+            handoff_id: None,
+        };
+
+        assert_eq!(
+            startup_document_with_cold_request(
+                Some(argument.clone()),
+                Some(PathBuf::from("/drafts/cold.fdx")),
+            ),
+            Some(argument),
+        );
+    }
+
+    #[test]
+    fn cold_path_becomes_independent_startup_without_handoff_identity() {
+        assert_eq!(
+            startup_document_with_cold_request(
+                None,
+                Some(PathBuf::from("/drafts/cold Été.fdx")),
+            ),
+            Some(StartupDocumentInput {
+                path: PathBuf::from("/drafts/cold Été.fdx"),
+                handoff_id: None,
+            }),
+        );
+        assert_eq!(startup_document_with_cold_request(None, None), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn request_queued_before_app_construction_uses_first_update_initial_slot() {
+        use crate::macos_document_open::MacOsDocumentOpenInbox;
+
+        let inbox = MacOsDocumentOpenInbox::new();
+        assert_eq!(inbox.enqueue(queued_request("/drafts/before-construction.fdx")), Ok(()));
+        // Constructing the app does not read or remove the queue entry.
+        let mut startup_document = None;
+        let mut finalized = false;
+        let inbox_for_update = inbox.clone();
+        finalize_startup_document_slot(
+            &mut startup_document,
+            &mut finalized,
+            move |startup_document_exists| {
+                inbox_for_update
+                    .take_cold_startup_request(startup_document_exists)
+                    .map(|request| request.into_path())
+            },
+        );
+
+        assert!(finalized);
+        assert_eq!(
+            startup_document,
+            Some(StartupDocumentInput {
+                path: PathBuf::from("/drafts/before-construction.fdx"),
+                handoff_id: None,
+            })
+        );
+        assert!(inbox.drain().events.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn request_after_construction_before_first_update_uses_initial_slot() {
+        use crate::macos_document_open::MacOsDocumentOpenInbox;
+
+        let inbox = MacOsDocumentOpenInbox::new();
+        let mut startup_document = None;
+        let mut finalized = false;
+        assert_eq!(inbox.enqueue(queued_request("/drafts/before-first-update.fdx")), Ok(()));
+        let inbox_for_update = inbox.clone();
+        finalize_startup_document_slot(
+            &mut startup_document,
+            &mut finalized,
+            move |startup_document_exists| {
+                inbox_for_update
+                    .take_cold_startup_request(startup_document_exists)
+                    .map(|request| request.into_path())
+            },
+        );
+
+        assert_eq!(
+            startup_document.map(|document| document.path),
+            Some(PathBuf::from("/drafts/before-first-update.fdx")),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn request_after_empty_first_update_remains_independent_child_work() {
+        use crate::macos_document_open::{
+            route_independent_requests, MacOsDocumentOpenInbox,
+        };
+
+        let inbox = MacOsDocumentOpenInbox::new();
+        let mut startup_document = None;
+        let mut finalized = false;
+        let inbox_for_update = inbox.clone();
+        finalize_startup_document_slot(
+            &mut startup_document,
+            &mut finalized,
+            move |startup_document_exists| {
+                inbox_for_update
+                    .take_cold_startup_request(startup_document_exists)
+                    .map(|request| request.into_path())
+            },
+        );
+        assert!(startup_document.is_none());
+
+        assert_eq!(inbox.enqueue(queued_request("/drafts/after-first-update.fdx")), Ok(()));
+        let mut extraction_repeated = false;
+        finalize_startup_document_slot(
+            &mut startup_document,
+            &mut finalized,
+            |_| {
+                extraction_repeated = true;
+                None
+            },
+        );
+        assert!(!extraction_repeated);
+        assert!(startup_document.is_none());
+
+        let mut launched = Vec::new();
+        route_independent_requests(
+            inbox.drain(),
+            |path| {
+                launched.push(path.to_path_buf());
+                Ok(())
+            },
+            |_| {},
+        );
+        assert_eq!(launched, vec![PathBuf::from("/drafts/after-first-update.fdx")]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn startup_argument_owns_initial_slot_and_native_request_stays_queued() {
+        use crate::macos_document_open::MacOsDocumentOpenInbox;
+
+        let inbox = MacOsDocumentOpenInbox::new();
+        let argument = StartupDocumentInput {
+            path: PathBuf::from("/drafts/argument.fdx"),
+            handoff_id: None,
+        };
+        let queued = queued_request("/drafts/native.fdx");
+        assert_eq!(inbox.enqueue(queued.clone()), Ok(()));
+        let mut startup_document = Some(argument.clone());
+        let mut finalized = false;
+        let inbox_for_update = inbox.clone();
+        finalize_startup_document_slot(
+            &mut startup_document,
+            &mut finalized,
+            move |startup_document_exists| {
+                inbox_for_update
+                    .take_cold_startup_request(startup_document_exists)
+                    .map(|request| request.into_path())
+            },
+        );
+
+        assert_eq!(startup_document, Some(argument));
+        assert_eq!(inbox.drain().events, vec![queued].into());
+    }
+
+    #[test]
+    fn startup_consumption_finalizes_even_without_a_path_and_preserves_failure_inputs() {
+        let mut consumed = false;
+        assert_eq!(take_startup_document_once(&None, &mut consumed), None);
+        assert!(consumed);
+        assert_eq!(take_startup_document_once(&None, &mut consumed), None);
+
+        for outcome in [
+            super::StagedOpenOutcome::Failed,
+            super::StagedOpenOutcome::AwaitingMigration,
+        ] {
+            let startup_document = Some(StartupDocumentInput {
+                path: PathBuf::from("/drafts/cold.fdx"),
+                handoff_id: None,
+            });
+            let mut consumed = false;
+            let open_input = take_startup_document_once(&startup_document, &mut consumed);
+            assert_eq!(open_input, startup_document);
+            // Staged failure and migration pending leave the stored slot/input in place.
+            assert_eq!(startup_document.as_ref().map(|input| &input.path), Some(&PathBuf::from("/drafts/cold.fdx")));
+            assert_eq!(open_input.and_then(|input| input.handoff_id), None);
+            assert!(matches!(
+                outcome,
+                super::StagedOpenOutcome::Failed | super::StagedOpenOutcome::AwaitingMigration
+            ));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn queued_error_copy_is_fixed_path_free_and_rejects_a_multi_file_request() {
+        use super::macos_document_open_error_copy;
+        use crate::macos_document_open::MacOsDocumentOpenError;
+
+        let (_, malformed) =
+            macos_document_open_error_copy(MacOsDocumentOpenError::UnsupportedUrlOrDescriptor);
+        let (_, multiple) =
+            macos_document_open_error_copy(MacOsDocumentOpenError::UnsupportedDocumentCount);
+        assert_eq!(
+            multiple,
+            "Multiple documents in one request are not supported; no documents from that request were opened. The current document is unchanged."
+        );
+        assert!(malformed.contains("The current document is unchanged."));
+        assert!(!malformed.contains("/drafts/"));
+        assert!(!multiple.contains("/drafts/"));
     }
 }

@@ -1351,6 +1351,13 @@ impl ScriptCraftApp {
         ctx: &egui::Context,
         surface: EditorSurface,
     ) {
+        if self.replacement_open_pending() {
+            // Do not consume Body or Title Page semantic input while a selected
+            // replacement is pending; the frame's events are intentionally not
+            // queued for replay after a later safe resume.
+            self.native_input_diagnostics.dispatch_enabled = false;
+            return;
+        }
         self.native_input_diagnostics.dispatch_enabled = self.surface_focused;
         if ctx.input(|input| has_nonzero_mouse_wheel(&input.raw.events)) {
             // Explicit user scrolling wins over a not-yet-applied zoom request.

@@ -1,4 +1,5 @@
 use super::{LayoutCache, Position, Project, ScriptCraftApp, Selection};
+use super::document_lifecycle::SaveOutcome;
 use eframe::egui;
 use scriptcraft_core::editing::EditError;
 use scriptcraft_commands::{
@@ -34,8 +35,8 @@ impl CommandInvocation {
     }
 }
 
-/// Static menu and toolbar catalogs contain only parameterless stable IDs.
-/// Dynamic payloads (such as a toolbar Role) are constructed at activation.
+/// Static menu, toolbar, and native application-menu IDs map to parameterless
+/// commands. Dynamic payloads (such as a toolbar Role) are built at activation.
 pub(super) fn command_for_id(id: CommandId) -> Option<Command> {
     Some(match id {
         CommandId::FileNew => Command::FileNew,
@@ -45,6 +46,7 @@ pub(super) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::FileSaveAsRequest => Command::FileSaveAsRequest,
         CommandId::FileSaveAsPdf => Command::FileSaveAsPdf,
         CommandId::FilePrint => Command::FilePrint,
+        CommandId::ApplicationQuit => Command::ApplicationQuit,
         CommandId::EditUndo => Command::EditUndo,
         CommandId::EditRedo => Command::EditRedo,
         CommandId::EditCut => Command::EditCut,
@@ -64,6 +66,10 @@ pub(super) fn command_for_id(id: CommandId) -> Option<Command> {
 pub(super) struct AppCommandAvailability {
     pub(super) modal_blocked: bool,
     pub(super) native_output_active: bool,
+    /// Replacement handoff lock; deliberately independent from the migration
+    /// modal that alone enables File Import Resolve.
+    pub(super) replacement_pending: bool,
+    pub(super) title_page_only_close: bool,
     pub(super) undo: bool,
     pub(super) redo: bool,
     pub(super) delete: bool,
@@ -92,6 +98,9 @@ pub(super) enum DesktopUnavailableReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DesktopCommandOutcome {
     EffectDispatched,
+    /// The save handler completed synchronously; routing or picker launch alone
+    /// must never be represented as a successful save.
+    SaveCompleted(SaveOutcome),
     HostEffectRequested(HostEffectDescription),
     Editor(CommandOutcome),
     Unavailable(DesktopUnavailableReason),
@@ -303,6 +312,7 @@ impl ScriptCraftApp {
 
     pub(super) fn app_command_availability(&self) -> AppCommandAvailability {
         let migration_pending = self.pending_fdx_open.is_some();
+        let replacement_pending = self.replacement_open_pending();
         #[cfg(target_os = "windows")]
         let native_output_active = self.native_output_modal_active
             || self.windows_print_preparation.is_some()
@@ -329,22 +339,27 @@ impl ScriptCraftApp {
 
         let dual_dialogue_target = self.dual_dialogue_toggle_target();
         AppCommandAvailability {
-            modal_blocked: migration_pending,
+            modal_blocked: migration_pending && !replacement_pending,
             native_output_active,
-            undo: !migration_pending && self.session.can_undo(),
-            redo: !migration_pending && self.session.can_redo(),
-            delete: !migration_pending && delete_target_exists,
+            replacement_pending,
+            title_page_only_close: self.active_editor_surface() == EditorSurface::TitlePage
+                && self.title_page_window_open,
+            undo: !migration_pending && !replacement_pending && self.session.can_undo(),
+            redo: !migration_pending && !replacement_pending && self.session.can_redo(),
+            delete: !migration_pending && !replacement_pending && delete_target_exists,
             // EditingSession projects a document with at least one body element.
-            select_all: !migration_pending && element_count != 0,
-            cut: !migration_pending && selection.anchor != selection.focus,
-            copy: !migration_pending && selection.anchor != selection.focus,
+            select_all: !migration_pending && !replacement_pending && element_count != 0,
+            cut: !migration_pending && !replacement_pending && selection.anchor != selection.focus,
+            copy: !migration_pending && !replacement_pending && selection.anchor != selection.focus,
             // Clipboard state is read only when Paste is activated, never per frame.
-            paste: !migration_pending,
+            paste: !migration_pending && !replacement_pending,
             body_only: self.active_editor_surface == EditorSurface::Body,
-            dual_dialogue_toggle: dual_dialogue_target.is_some(),
-            // The same open command focuses/raises the singleton child when it
-            // already exists; modal state, not open state, blocks activation.
-            title_open: !migration_pending && !self.title_viewport_unsupported,
+            dual_dialogue_toggle: !replacement_pending && dual_dialogue_target.is_some(),
+            // In-app Open is a selected-path replacement request and is blocked
+            // while the current document is resolving another lifecycle gate.
+            title_open: !migration_pending && !replacement_pending && !self.title_viewport_unsupported,
+            // Closing the presentation-only child viewport does not destroy
+            // the root document and remains available during replacement.
             title_close: !migration_pending && self.title_page_window_open,
         }
     }
@@ -437,7 +452,7 @@ impl ScriptCraftApp {
             open_print_panel,
         );
         self.flush_pending_diagnostic_commands(ctx);
-        if restore_focus {
+        if restore_focus && !self.replacement_open_pending() {
             self.restore_editor_focus(ctx);
         }
         DesktopCommandResult {
@@ -471,6 +486,16 @@ impl ScriptCraftApp {
     ) -> DesktopCommandOutcome {
         let availability = self.app_command_availability();
         if !availability.is_enabled(command.id()) {
+            if matches!(
+                command.id(),
+                CommandId::FileSave | CommandId::FileSaveAsRequest | CommandId::FileSaveAs
+            ) {
+                let reason = availability.unavailable_reason(command.id());
+                self.show_error(format!(
+                    "SAVE_DISPATCH_UNAVAILABLE: {reason:?}; document unchanged"
+                ));
+                return DesktopCommandOutcome::SaveCompleted(SaveOutcome::Failed);
+            }
             return DesktopCommandOutcome::Unavailable(
                 availability.unavailable_reason(command.id()),
             );
@@ -491,31 +516,39 @@ impl ScriptCraftApp {
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FileOpen { path } => {
-                self.launch_document_instance(path.as_path());
+                self.stage_replacement_document_path(path.as_path());
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FileClose => {
-                if self.active_editor_surface() == EditorSurface::TitlePage {
-                    self.close_title_page_window(ctx);
-                } else {
-                    DesktopViewportEffects::close(ctx);
+                // Body Close is guarded at the next root-update boundary:
+                // CancelClose -> native prompt -> one-shot confirmed Close.
+                // Title Page remains a separate child-only viewport close.
+                match file_close_target(self.active_editor_surface()) {
+                    FileCloseTarget::TitlePage => self.close_title_page_window(ctx),
+                    FileCloseTarget::Root => DesktopViewportEffects::close_root(ctx),
                 }
                 DesktopCommandOutcome::EffectDispatched
             }
-            Command::FileSave => {
-                self.save_native(ctx);
+            Command::ApplicationQuit => {
+                // Application Quit always requests root Close, even when the
+                // Title Page owns focus. The root-close coordinator performs
+                // the ordinary asynchronous CancelClose/prompt/save gate.
+                DesktopViewportEffects::close_root(ctx);
                 DesktopCommandOutcome::EffectDispatched
+            }
+            Command::FileSave => {
+                DesktopCommandOutcome::SaveCompleted(self.save_native(ctx))
             }
             Command::FileSaveAsRequest => {
-                self.save_as_native(ctx);
-                DesktopCommandOutcome::EffectDispatched
+                DesktopCommandOutcome::SaveCompleted(self.save_as_native(ctx))
             }
             Command::FileSaveAs { path, overwrite } => {
-                self.save_fdx_as_at(path.as_path(), overwrite);
-                DesktopCommandOutcome::EffectDispatched
+                DesktopCommandOutcome::SaveCompleted(
+                    self.save_fdx_as_at(path.as_path(), overwrite),
+                )
             }
             Command::FileImportResolve { resolution } => {
-                self.resolve_pending_fdx_import(match resolution {
+                let _outcome = self.resolve_pending_fdx_import(match resolution {
                     ImportResolution::Continue => super::FdxMigrationConsent::Continue,
                     ImportResolution::Cancel => super::FdxMigrationConsent::Cancel,
                 });
@@ -874,6 +907,11 @@ impl ScriptCraftApp {
         reveal_intent: super::RevealIntent,
         ctx: &egui::Context,
     ) -> DesktopCommandOutcome {
+        // Defense in depth for stale/direct editor calls that bypass command
+        // availability after a replacement handoff has engaged the lock.
+        if self.replacement_open_pending() {
+            return DesktopCommandOutcome::Unavailable(DesktopUnavailableReason::ModalBlocked);
+        }
         let active_surface = self.active_editor_surface();
         let outcome = execute_editor_command_on_surface(
             &mut self.session,
@@ -1128,6 +1166,24 @@ impl AppCommandAvailability {
         if self.native_output_active {
             return false;
         }
+        if self.replacement_pending {
+            return match command {
+                // Presentation-only controls remain usable. File Close is
+                // allowed only when it resolves to the title-page child.
+                CommandId::WindowTitlePageClose => self.title_close,
+                CommandId::FileClose => self.title_page_only_close,
+                CommandId::ToolsSprintTimerTogglePopup
+                | CommandId::ToolsSprintTimerClosePopup
+                | CommandId::ToolsSprintTimerSetMode
+                | CommandId::ToolsSprintTimerSetMinutes
+                | CommandId::ToolsSprintTimerStart
+                | CommandId::ToolsSprintTimerPause
+                | CommandId::ToolsSprintTimerResume
+                | CommandId::ToolsSprintTimerReset
+                | CommandId::ToolsSprintTimerEnd => true,
+                _ => false,
+            };
+        }
         if matches!(command, CommandId::FileImportResolve) {
             return self.modal_blocked;
         }
@@ -1146,13 +1202,16 @@ impl AppCommandAvailability {
             CommandId::EditorDualDialogueToggle => self.dual_dialogue_toggle,
             CommandId::WindowTitlePageOpen => self.title_open,
             CommandId::WindowTitlePageClose => self.title_close,
+            // The global modal gates above still disable Quit during migration
+            // and native-output dialogs; otherwise it is focus-independent.
+            CommandId::ApplicationQuit => true,
             CommandId::FilePrint => cfg!(any(target_os = "macos", target_os = "windows")),
             _ => true,
         }
     }
 
     const fn unavailable_reason(self, command: CommandId) -> DesktopUnavailableReason {
-        if self.modal_blocked || self.native_output_active {
+        if self.modal_blocked || self.native_output_active || self.replacement_pending {
             return DesktopUnavailableReason::ModalBlocked;
         }
         match command {
@@ -1214,12 +1273,25 @@ fn route_to_focused_surface(
 /// never becomes semantic screenplay state or a command payload.
 pub(super) struct DesktopViewportEffects;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileCloseTarget {
+    Root,
+    TitlePage,
+}
+
+fn file_close_target(surface: EditorSurface) -> FileCloseTarget {
+    match surface {
+        EditorSurface::Body => FileCloseTarget::Root,
+        EditorSurface::TitlePage => FileCloseTarget::TitlePage,
+    }
+}
+
 impl DesktopViewportEffects {
     pub(super) fn title(ctx: &egui::Context, title: String) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 
-    fn close(ctx: &egui::Context) {
+    fn close_root(ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
@@ -1259,10 +1331,23 @@ impl DesktopTimerNotificationEffects {
 
 #[cfg(test)]
 mod surface_command_availability_tests {
-    use super::CommandInvocation;
+    use super::{file_close_target, CommandInvocation, DesktopCommandOutcome, FileCloseTarget};
     use crate::ScriptCraftApp;
-    use scriptcraft_commands::{Command, CommandId, CommandOrigin, EditorSurface};
+    use crate::document_lifecycle::SaveOutcome;
+    use scriptcraft_commands::{Command, CommandId, CommandOrigin, DocumentPath, EditorSurface};
     use super::super::sprint_timer::{NotificationFeedback, SprintTimer};
+
+    #[test]
+    fn file_close_targets_only_the_focused_viewport() {
+        assert_eq!(
+            file_close_target(EditorSurface::Body),
+            FileCloseTarget::Root
+        );
+        assert_eq!(
+            file_close_target(EditorSurface::TitlePage),
+            FileCloseTarget::TitlePage
+        );
+    }
 
     #[test]
     fn availability_and_typed_routing_follow_focus_and_surface_policy() {
@@ -1270,6 +1355,7 @@ mod surface_command_availability_tests {
         assert!(app.app_command_availability().is_enabled(CommandId::WindowTitlePageOpen));
         app.set_active_editor_surface(EditorSurface::TitlePage);
         let title = app.app_command_availability();
+        assert!(title.is_enabled(CommandId::ApplicationQuit));
         assert!(title.is_enabled(CommandId::EditorStyleToggle));
         assert!(!title.is_enabled(CommandId::EditorDualDialogueToggle));
 
@@ -1288,16 +1374,173 @@ mod surface_command_availability_tests {
     }
 
     #[test]
+    fn direct_save_as_dispatch_reports_rejected_destination_as_failed() {
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        let Ok(path) = DocumentPath::new("/tmp/rejected-save.txt") else {
+            return;
+        };
+        let context = eframe::egui::Context::default();
+
+        let result = app.dispatch_command(
+            CommandInvocation::new(
+                Command::FileSaveAs {
+                    path,
+                    overwrite: false,
+                },
+                CommandOrigin::InternalFollowUp,
+            ),
+            &context,
+        );
+
+        assert_eq!(
+            result.outcome,
+            DesktopCommandOutcome::SaveCompleted(SaveOutcome::Failed)
+        );
+    }
+
+    #[test]
+    fn direct_path_open_only_stages_and_reports_dispatch_not_open_success() {
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        let Ok(path) = DocumentPath::new("/drafts/Été selected.fdx") else {
+            return;
+        };
+        let context = eframe::egui::Context::default();
+        let initial_native_path = app.native_path.clone();
+        let initial_dirty = app.session.dirty();
+
+        let result = app.dispatch_command(
+            CommandInvocation::new(Command::FileOpen { path }, CommandOrigin::InternalFollowUp),
+            &context,
+        );
+
+        assert_eq!(result.outcome, DesktopCommandOutcome::EffectDispatched);
+        assert_eq!(
+            app.staged_replacement_open.as_deref(),
+            Some(std::path::Path::new("/drafts/Été selected.fdx")),
+        );
+        assert!(app.pending_replacement.is_none());
+        assert_eq!(app.native_path, initial_native_path);
+        assert_eq!(app.session.dirty(), initial_dirty);
+    }
+
+    #[test]
     fn migration_modal_preserves_resolution_but_blocks_surface_commands() {
         let availability = super::AppCommandAvailability {
             modal_blocked: true, native_output_active: false,
+            replacement_pending: false, title_page_only_close: false,
             undo: false, redo: false, delete: false, select_all: false,
             cut: false, copy: false, paste: false, body_only: true,
             dual_dialogue_toggle: false, title_open: false, title_close: false,
         };
         assert!(availability.is_enabled(CommandId::FileImportResolve));
+        assert!(!availability.is_enabled(CommandId::ApplicationQuit));
         assert!(!availability.is_enabled(CommandId::WindowTitlePageOpen));
         assert!(!availability.is_enabled(CommandId::EditorDualDialogueToggle));
+
+        let native_output = super::AppCommandAvailability {
+            modal_blocked: false,
+            native_output_active: true,
+            replacement_pending: false,
+            title_page_only_close: false,
+            ..availability
+        };
+        assert!(!native_output.is_enabled(CommandId::ApplicationQuit));
+    }
+
+    #[test]
+    fn replacement_lock_blocks_document_commands_but_preserves_safe_child_and_timer_controls() {
+        let mut availability = super::AppCommandAvailability {
+            modal_blocked: false,
+            native_output_active: false,
+            replacement_pending: true,
+            title_page_only_close: false,
+            undo: true,
+            redo: true,
+            delete: true,
+            select_all: true,
+            cut: true,
+            copy: true,
+            paste: true,
+            body_only: true,
+            dual_dialogue_toggle: true,
+            title_open: true,
+            title_close: true,
+        };
+
+        for command in [
+            CommandId::FileNew,
+            CommandId::FileOpenRequest,
+            CommandId::FileOpen,
+            CommandId::FileSave,
+            CommandId::FileSaveAsRequest,
+            CommandId::FileSaveAs,
+            CommandId::FileImportResolve,
+            CommandId::FilePrint,
+            CommandId::FileClose,
+            CommandId::ApplicationQuit,
+            CommandId::EditUndo,
+            CommandId::EditCut,
+            CommandId::EditCopy,
+            CommandId::EditPaste,
+            CommandId::EditorTextInsert,
+            CommandId::EditorStyleToggle,
+            CommandId::WindowTitlePageOpen,
+        ] {
+            assert!(!availability.is_enabled(command), "{command:?} must be locked");
+        }
+        assert!(availability.is_enabled(CommandId::WindowTitlePageClose));
+        assert!(availability.is_enabled(CommandId::ToolsSprintTimerStart));
+        assert!(availability.is_enabled(CommandId::ToolsSprintTimerClosePopup));
+        assert!(!availability.is_enabled(CommandId::FileClose));
+
+        availability.title_page_only_close = true;
+        assert!(availability.is_enabled(CommandId::FileClose));
+    }
+
+    #[test]
+    fn replacement_lock_does_not_enable_migration_resolution_or_survive_resume_projection() {
+        let locked = super::AppCommandAvailability {
+            modal_blocked: false,
+            native_output_active: false,
+            replacement_pending: true,
+            title_page_only_close: false,
+            undo: false,
+            redo: false,
+            delete: false,
+            select_all: false,
+            cut: false,
+            copy: false,
+            paste: false,
+            body_only: true,
+            dual_dialogue_toggle: false,
+            title_open: false,
+            title_close: false,
+        };
+        assert!(!locked.is_enabled(CommandId::FileImportResolve));
+
+        let resumed = super::AppCommandAvailability {
+            replacement_pending: false,
+            undo: true,
+            redo: true,
+            ..locked
+        };
+        assert!(resumed.is_enabled(CommandId::EditUndo));
+        assert!(resumed.is_enabled(CommandId::EditorTextInsert));
+    }
+
+    #[test]
+    fn application_quit_requests_root_close_while_title_page_is_focused() {
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        app.set_active_editor_surface(EditorSurface::TitlePage);
+        let context = eframe::egui::Context::default();
+
+        let result = app.dispatch_command(
+            CommandInvocation::new(Command::ApplicationQuit, CommandOrigin::NativeMenu),
+            &context,
+        );
+
+        assert_eq!(result.command, CommandId::ApplicationQuit);
+        assert_eq!(result.outcome, DesktopCommandOutcome::EffectDispatched);
     }
 
     #[test]

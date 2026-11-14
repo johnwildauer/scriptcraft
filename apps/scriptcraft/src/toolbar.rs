@@ -1483,6 +1483,8 @@ mod toolbar_contract_tests {
         AppCommandAvailability {
             modal_blocked,
             native_output_active: false,
+            replacement_pending: false,
+            title_page_only_close: false,
             undo: true,
             redo: true,
             delete: true,

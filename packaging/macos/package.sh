@@ -110,15 +110,46 @@ generate_icon() {
 }
 
 check_bundle_layout() {
+    local plist document_types document_count extension_count
+    plist="$APP_PATH/Contents/Info.plist"
     [[ -x "$APP_PATH/$EXECUTABLE_RELATIVE" ]] || fail "assembled app executable is missing or not executable"
     [[ -s "$APP_PATH/Contents/Resources/AppIcon.icns" ]] || fail "assembled app icon resource is missing"
     [[ -s "$APP_PATH/Contents/Resources/Licenses/CourierPrime/OFL.txt" ]] || fail "Courier Prime license record is missing"
     [[ -s "$APP_PATH/Contents/Resources/Licenses/CourierPrime/Attribution.txt" ]] || fail "Courier Prime attribution is missing"
     [[ -s "$APP_PATH/Contents/Resources/Licenses/MaterialSymbols/LICENSE" ]] || fail "Material Symbols license record is missing"
     [[ -s "$APP_PATH/Contents/Resources/Licenses/MaterialSymbols/Asset-Attribution.md" ]] || fail "Material Symbols attribution is missing"
-    plutil -lint "$APP_PATH/Contents/Info.plist" >/dev/null || fail "generated Info.plist is invalid"
-    /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Contents/Info.plist" 2>/dev/null | grep -Fxq "$BUNDLE_IDENTIFIER" || fail "Info.plist bundle identifier is incorrect"
-    /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null | grep -Fxq "$APP_VERSION" || fail "Info.plist marketing version is incorrect"
+    plutil -lint "$plist" >/dev/null || fail "generated Info.plist is invalid"
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist" 2>/dev/null | grep -Fxq "$BUNDLE_IDENTIFIER" || fail "Info.plist bundle identifier is incorrect"
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist" 2>/dev/null | grep -Fxq "$APP_VERSION" || fail "Info.plist marketing version is incorrect"
+
+    document_types="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes' "$plist" 2>/dev/null)" || fail "Info.plist has no FDX document declaration"
+    document_count="$(printf '%s\n' "$document_types" | awk '$1 == "Dict" && $2 == "{" { count++ } END { print count + 0 }')"
+    [[ "$document_count" == 1 ]] || fail "Info.plist must contain exactly one document declaration"
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:CFBundleTypeName' "$plist" 2>/dev/null | grep -Fxq 'Final Draft document' || fail "FDX document display name must be Final Draft document"
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:CFBundleTypeRole' "$plist" 2>/dev/null | grep -Fxq 'Editor' || fail "FDX document role must be Editor"
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:LSHandlerRank' "$plist" 2>/dev/null | grep -Fxq 'Alternate' || fail "FDX document handler rank must be Alternate"
+    if /usr/libexec/PlistBuddy -c 'Print :UTImportedTypeDeclarations' "$plist" >/dev/null 2>&1; then
+        fail "extension-fallback Info.plist must not declare imported types"
+    fi
+    if /usr/libexec/PlistBuddy -c 'Print :LSItemContentTypes' "$plist" >/dev/null 2>&1 \
+        || /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:LSItemContentTypes' "$plist" >/dev/null 2>&1; then
+        fail "extension-fallback document declaration must not contain LSItemContentTypes"
+    fi
+    if /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:NSDocumentClass' "$plist" >/dev/null 2>&1 \
+        || /usr/libexec/PlistBuddy -c 'Print :NSDocumentClass' "$plist" >/dev/null 2>&1; then
+        fail "Info.plist must not declare NSDocumentClass"
+    fi
+    extension_count="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:CFBundleTypeExtensions' "$plist" 2>/dev/null | awk '
+        NR == 1 { next }
+        /^[[:space:]]*}$/ { next }
+        {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+            count++
+            if ($0 != "fdx") invalid = 1
+        }
+        END { printf "%d:%d", count + 0, invalid + 0 }
+    ')" || fail "FDX document declaration has no extension coverage"
+    [[ "$extension_count" == '1:0' ]] || fail "extension-fallback document declaration must contain only the fdx extension"
 }
 
 check_linkage() {

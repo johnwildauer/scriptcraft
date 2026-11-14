@@ -276,6 +276,62 @@ fn has_root_user_document_data(project: &Project) -> bool {
 }
 
 #[test]
+fn clean_session_stays_clean_after_changed_imported_derived_refresh() {
+    let imported = valid(read_v6(&integration_scene_fixture()));
+    let mut session = valid(EditingSession::new(imported.project));
+
+    assert!(!session.dirty());
+    assert_eq!(
+        session.project().elements.last().map(|element| element.text.as_str()),
+        Some("(old)")
+    );
+    let outcome = valid(session.refresh_cast_lists_with_outcome());
+
+    assert!(outcome.changed);
+    assert!(!outcome.deferred);
+    assert_eq!(
+        session.project().elements.last().map(|element| element.text.as_str()),
+        Some("(LINA, OMAR)")
+    );
+    assert!(!session.dirty());
+}
+
+#[test]
+fn dirty_session_stays_dirty_after_changed_imported_derived_refresh() {
+    let imported = valid(read_v6(&integration_scene_fixture()));
+    let mut session = valid(EditingSession::new(imported.project));
+    let character_index = session
+        .project()
+        .elements
+        .iter()
+        .position(|element| element.role == Role::Character)
+        .unwrap_or_else(|| unreachable!("fixture includes a Character cue"));
+    let character_length = session.project().elements[character_index].text.len();
+    valid(session.set_selection(Selection {
+        anchor: Position {
+            element: character_index,
+            offset: 0,
+        },
+        focus: Position {
+            element: character_index,
+            offset: character_length,
+        },
+    }));
+    valid(session.insert("NORA"));
+    assert!(session.dirty());
+
+    let outcome = valid(session.refresh_cast_lists_with_outcome());
+
+    assert!(outcome.changed);
+    assert!(!outcome.deferred);
+    assert_eq!(
+        session.project().elements.last().map(|element| element.text.as_str()),
+        Some("(NORA, OMAR)")
+    );
+    assert!(session.dirty());
+}
+
+#[test]
 fn derived_scene_and_cast_refresh_keep_payload_owned_and_noncanonical_exports_ignore_it() {
     let imported = valid(read_v6(&integration_scene_fixture()));
     let mut project = imported.project;

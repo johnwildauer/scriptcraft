@@ -26,5 +26,21 @@
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Final Draft document</string>
+			<!-- Extension fallback keeps eligibility separate from default ownership. -->
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>fdx</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+		</dict>
+	</array>
 </dict>
 </plist>

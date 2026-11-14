@@ -601,6 +601,7 @@ impl EditingSession {
                 (Some(retryable), false)
             }
         };
+        let was_clean = !self.dirty;
         let (mut project, outcome, deferred_scenes, completed_scenes) =
             match cast_list::corrected_cast_list_candidate_with_scope(&self.project, scope.as_ref())
             {
@@ -622,6 +623,9 @@ impl EditingSession {
             }
             self.project = project;
             self.revision = self.revision.saturating_add(1);
+            if was_clean && !outcome.deferred {
+                self.clean_project = self.project.clone();
+            }
             self.dirty = self.project != self.clean_project;
             self.last_validation_was_scoped = false;
         }

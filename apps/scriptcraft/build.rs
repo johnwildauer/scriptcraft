@@ -14,12 +14,13 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed=ScriptCraft.rc");
+    println!("cargo:rerun-if-changed=ScriptCraft.manifest");
     println!("cargo:rerun-if-changed=../../packaging/resources/AppIcon.ico");
 
     if let Err(error) =
         embed_resource::compile("ScriptCraft.rc", embed_resource::NONE).manifest_optional()
     {
-        eprintln!("failed to embed the ScriptCraft Windows icon resource: {error}");
+        eprintln!("failed to embed the ScriptCraft Windows resources: {error}");
         process::exit(1);
     }
 }

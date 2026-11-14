@@ -83,7 +83,7 @@ pub(super) fn show_if_open(app: &mut ScriptCraftApp, root_ctx: &egui::Context) {
                 theme::configure_appearance(&child_ctx, app.appearance_mode, app.applied_appearance);
             app.applied_appearance = applied;
             app.theme_palette = palette;
-            if app.pending_fdx_open.is_none() {
+            if app.pending_fdx_open.is_none() && !app.replacement_open_pending() {
                 app.handle_surface_input(&child_ctx, EditorSurface::TitlePage);
             }
             show_child_panels(app, ui, &child_ctx);
