@@ -2221,6 +2221,103 @@ fn resolve_span_paint(
     }
 }
 
+#[cfg(test)]
+mod imported_role_color_paint_tests {
+    use super::resolve_span_paint;
+    use crate::{document_font, theme};
+    use eframe::egui;
+    use scriptcraft_core::Role;
+    use scriptcraft_core::fdx::{read_v6, write_v6};
+
+    const BLACK_ROLE_COLOR_FIXTURE: &[u8] = include_bytes!("../../../.reference/black text.fdx");
+    const FINAL_DRAFT_BLACK_FIXTURE: &[u8] =
+        include_bytes!("../../../.reference/black text from final draft.fdx");
+    const WHITE_TEXT_FIXTURE: &[u8] = include_bytes!("../../../.reference/white text.fdx");
+
+    #[test]
+    fn black_saved_black_and_white_controls_resolve_ordinary_and_hidden_roles_by_theme()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let day = theme::ApplicationPalette::from_visuals(
+            theme::ResolvedAppearance::Day,
+            &egui::Visuals::light(),
+        )
+        .script_workspace
+        .page;
+        let night = theme::ApplicationPalette::from_visuals(
+            theme::ResolvedAppearance::Night,
+            &egui::Visuals::dark(),
+        )
+        .script_workspace
+        .page;
+        let availability = document_font::FontAvailability::default();
+
+        for (fixture_name, fixture, imported_role_color) in [
+            ("original black", BLACK_ROLE_COLOR_FIXTURE, Some("#000000000000")),
+            ("Final Draft-saved black", FINAL_DRAFT_BLACK_FIXTURE, None),
+            ("white control", WHITE_TEXT_FIXTURE, None),
+        ] {
+            let imported = read_v6(fixture)?;
+            let output = write_v6(&imported.project)?;
+            let reopened = read_v6(&output)?;
+
+            for (phase, project, expected_role_color) in [
+                ("import", &imported.project, imported_role_color),
+                ("reopen", &reopened.project, None),
+            ] {
+                let Some(preservation) = project.preservation.as_ref() else {
+                    return Err(format!("{fixture_name} {phase} retains source settings").into());
+                };
+                let settings = preservation.source_layout_settings();
+                for role in [Role::Action, Role::Dialogue] {
+                    let style = settings.text_style(role);
+                    assert_eq!(
+                        settings.font_spec(role).color.as_deref(),
+                        expected_role_color,
+                        "{fixture_name} {phase} source role color projection for {role:?}"
+                    );
+                    assert_eq!(
+                        style.source_color, None,
+                        "{fixture_name} {phase} ordinary role color stays theme-owned for {role:?}"
+                    );
+
+                    let day_paint = resolve_span_paint(&style, 12.0, day, &availability);
+                    let night_paint = resolve_span_paint(&style, 12.0, night, &availability);
+                    assert_eq!(day_paint.color, day.text, "{fixture_name} {phase} Day {role:?}");
+                    assert_eq!(night_paint.color, night.text, "{fixture_name} {phase} Night {role:?}");
+                    assert_ne!(day_paint.color, night_paint.color);
+                    assert_eq!(day_paint.advance_mode, super::AdvanceMode::FixedCell);
+                    assert_eq!(night_paint.advance_mode, super::AdvanceMode::FixedCell);
+                    let day_selection_style = super::FixedMetricTextStyle {
+                        color: day_paint.color,
+                        selected_color: day.selection_text,
+                        selection: Some((0, 1)),
+                    };
+                    let night_selection_style = super::FixedMetricTextStyle {
+                        color: night_paint.color,
+                        selected_color: night.selection_text,
+                        selection: Some((0, 1)),
+                    };
+                    assert_eq!(day_selection_style.color_for(false), day_paint.color);
+                    assert_eq!(day_selection_style.color_for(true), day.selection_text);
+                    assert_eq!(night_selection_style.color_for(false), night_paint.color);
+                    assert_eq!(night_selection_style.color_for(true), night.selection_text);
+                }
+
+                let hidden = settings.text_style(Role::Summary);
+                assert!(hidden.hidden_text, "{fixture_name} {phase} retains hidden-role behavior");
+                assert_eq!(hidden.source_color.as_deref(), Some("#87878F8FE0E0"));
+                let day_hidden = resolve_span_paint(&hidden, 12.0, day, &availability);
+                let night_hidden = resolve_span_paint(&hidden, 12.0, night, &availability);
+                let canonical_hidden = egui::Color32::from_rgb(0x87, 0x8f, 0xe0);
+                assert_eq!(day_hidden.color, canonical_hidden, "{fixture_name} {phase} hidden default in Day");
+                assert_eq!(night_hidden.color, canonical_hidden, "{fixture_name} {phase} hidden default in Night");
+            }
+        }
+
+        Ok(())
+    }
+}
+
 fn fixed_metric_x(origin: f32, column: usize, char_width: f32) -> f32 {
     origin + column as f32 * char_width
 }

@@ -603,6 +603,9 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     let mut next_id = 1usize;
     let mut next_anchor = 1usize;
     let mut root_owned = RawNode::Element(root.clone());
+    if let RawNode::Element(root_owned) = &mut root_owned {
+        normalize_root_role_and_page_colors(root_owned, root_namespace);
+    }
     let preserved_root = preserve_node(
         &mut root_owned,
         0,
@@ -4666,6 +4669,59 @@ fn prepare_non_v6_source(
 
 fn is_fdx_element(element: &RawElement, name: &str, root_ns: Option<&str>) -> bool {
     element.name.local_name == name && element.name.namespace_uri.as_deref() == root_ns
+}
+
+/// Normalize only the root-owned settings that Final Draft drops on save.
+/// The imported byte snapshot remains untouched; this operates on the retained
+/// source graph that is used for future source-backed serialization.
+fn normalize_root_role_and_page_colors(root: &mut RawElement, root_ns: Option<&str>) {
+    for child in &mut root.children {
+        let RawNode::Element(element) = child else {
+            continue;
+        };
+        if is_fdx_element(element, "PageLayout", root_ns) {
+            element.attributes.retain(|attribute| {
+                attribute.name.namespace_uri.is_some()
+                    || !matches!(
+                        attribute.name.local_name.as_str(),
+                        "BackgroundColor" | "ForegroundColor"
+                    )
+            });
+            continue;
+        }
+        if !is_fdx_element(element, "ElementSettings", root_ns) {
+            continue;
+        }
+
+        let role = attribute(element, "Type").and_then(role_from_fdx);
+        let default_color =
+            role.and_then(|role| crate::formatting::formatting_for_role(role).font.color);
+        for child in &mut element.children {
+            let RawNode::Element(font_spec) = child else {
+                continue;
+            };
+            if !is_fdx_element(font_spec, "FontSpec", root_ns) {
+                continue;
+            }
+            font_spec.attributes.retain(|attribute| {
+                attribute.name.namespace_uri.is_some()
+                    || !matches!(attribute.name.local_name.as_str(), "Background" | "Color")
+            });
+            if let Some(color) = default_color {
+                font_spec.attributes.insert(
+                    0,
+                    RawAttribute {
+                        name: SourceName {
+                            namespace_uri: None,
+                            local_name: "Color".to_owned(),
+                            qualified_name: Some("Color".to_owned()),
+                        },
+                        value: color.to_owned(),
+                    },
+                );
+            }
+        }
+    }
 }
 
 fn raw_document_ref_datetime(root: &RawElement) -> Option<String> {

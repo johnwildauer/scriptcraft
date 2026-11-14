@@ -114,6 +114,8 @@ pub struct SourceParagraphOverrides {
 
 /// Recognized role-level FontSpec values. Unknown FDX attributes and style
 /// tokens stay in the preservation tree; `None` means use the shared default.
+/// `color` is retained as a source projection for API compatibility, but does
+/// not override the app-owned color in effective role styling.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceFontSpec {
     pub family: Option<String>,
@@ -573,10 +575,7 @@ impl SourceLayoutSettings {
             underline: source.underline.unwrap_or_else(|| default_has("Underline")),
             all_caps: source.all_caps.unwrap_or_else(|| default_has("AllCaps")),
             hidden_text: self.print_visibility(role) == PrintVisibility::Hidden,
-            source_color: source
-                .color
-                .clone()
-                .or_else(|| default.color.map(str::to_owned)),
+            source_color: default.color.map(str::to_owned),
         }
     }
 }
