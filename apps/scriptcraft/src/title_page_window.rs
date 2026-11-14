@@ -35,6 +35,10 @@ pub(super) fn send_close(ctx: &egui::Context) {
 
 pub(super) fn show_if_open(app: &mut ScriptCraftApp, root_ctx: &egui::Context) {
     if !app.title_page_window_open || app.title_viewport_unsupported {
+        if app.title_viewport_unsupported {
+            app.appearance_applications
+                .clear(theme::AppearanceContext::TitlePage);
+        }
         return;
     }
 
@@ -79,11 +83,17 @@ pub(super) fn show_if_open(app: &mut ScriptCraftApp, root_ctx: &egui::Context) {
                 app.page_geometry.invalidate();
                 app.page_scale = None;
             }
-            let (_, applied, palette) =
-                theme::configure_appearance(&child_ctx, app.appearance_mode, app.applied_appearance);
-            app.applied_appearance = applied;
+            let (_, applied, palette) = theme::configure_appearance(
+                &child_ctx,
+                app.appearance_mode,
+                app.appearance_applications
+                    .get(theme::AppearanceContext::TitlePage),
+            );
+            app.appearance_applications
+                .set(theme::AppearanceContext::TitlePage, applied);
             app.theme_palette = palette;
             if app.pending_fdx_open.is_none() && !app.replacement_open_pending() {
+                app.adapt_title_page_wheel_input(&child_ctx);
                 app.handle_surface_input(&child_ctx, EditorSurface::TitlePage);
             }
             show_child_panels(app, ui, &child_ctx);

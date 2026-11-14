@@ -71,6 +71,7 @@ mod theme;
 mod toolbar;
 mod toolbar_items;
 mod title_page_window;
+mod wheel_zoom;
 use sprint_timer::NotificationResult;
 use status_bar::{DiagnosticProjection, ViewportCenterAnchor, ViewportPageTracker};
 use toolbar::toolbar_content_height;
@@ -1076,7 +1077,11 @@ struct PerformanceMeasurements {
     pages_culled: u64,
     lines_submitted: u64,
     selection_spans_submitted: u64,
+    /// ScriptCraft's fresh fixed-cell/natural galley transformations. This does
+    /// not report hits in egui's internal atlas-aware layout cache.
     galleys_built: u64,
+    /// Reuses of ScriptCraft-transformed UV-bearing galleys within a pass.
+    /// Currently zero by policy: without an atlas identity we rebuild variants.
     galleys_reused: u64,
     element_wraps_built: u64,
     element_wraps_reused: u64,
@@ -1426,6 +1431,7 @@ struct ScriptCraftApp {
     title_view_reset_pending: bool,
     title_view_state_swapped: bool,
     title_view: TitlePageViewState,
+    wheel_zoom: wheel_zoom::WheelZoomAdapter,
     last_status_modifiers: egui::Modifiers,
     drag_anchor: Option<Position>,
     ime_preedit: String,
@@ -1463,7 +1469,7 @@ struct ScriptCraftApp {
     zoom_percent: u16,
     pinch_zoom_percent: f64,
     appearance_mode: theme::AppearanceMode,
-    applied_appearance: theme::AppliedAppearance,
+    appearance_applications: theme::AppearanceApplications,
     theme_palette: theme::ApplicationPalette,
     caret_blink_focus_generation: u64,
     caret_blink_reset_time: f64,
@@ -1492,6 +1498,7 @@ struct TitlePageViewState {
     pinch_zoom_percent: f64,
     caret_blink_focus_generation: u64,
     caret_blink_reset_time: f64,
+    wheel_zoom: wheel_zoom::WheelZoomAdapter,
 }
 
 impl Default for TitlePageViewState {
@@ -1512,6 +1519,7 @@ impl Default for TitlePageViewState {
             pinch_zoom_percent: 100.0,
             caret_blink_focus_generation: 0,
             caret_blink_reset_time: 0.0,
+            wheel_zoom: wheel_zoom::WheelZoomAdapter::default(),
         }
     }
 }
@@ -1663,9 +1671,62 @@ impl ScriptCraftApp {
 
     fn set_title_page_window_open(&mut self, open: bool) {
         self.title_page_window_open = open;
+        if !open {
+            self.title_view.wheel_zoom.reset();
+            self.appearance_applications
+                .clear(theme::AppearanceContext::TitlePage);
+        }
         if !open && self.active_editor_surface == EditorSurface::TitlePage {
             self.set_active_editor_surface(EditorSurface::Body);
         }
+    }
+
+    fn dispatch_wheel_zoom_factors(
+        &mut self,
+        surface: EditorSurface,
+        ctx: &egui::Context,
+        factors: Vec<f32>,
+    ) {
+        if !factors.is_empty() {
+            self.set_active_editor_surface(surface);
+        }
+        for factor in factors {
+            if let Ok(factor) = ZoomFactor::new(factor) {
+                self.dispatch_command(
+                    CommandInvocation::new(
+                        Command::ViewZoomPinch { factor },
+                        CommandOrigin::Pointer,
+                    ),
+                    ctx,
+                );
+            }
+        }
+    }
+
+    /// Immediate child viewports may enter their callback without the app-level
+    /// raw-input hook. Reuse the same title-viewport adapter and pinch route as
+    /// the hook; removing from both event collections keeps editor scrolling and
+    /// manual-scroll anchor cancellation from seeing a zoom gesture.
+    fn adapt_title_page_wheel_input(&mut self, ctx: &egui::Context) {
+        let viewport_height_points = ctx.content_rect().height();
+        let factors = ctx.input_mut(|input| {
+            let previous_event_count = input.events.len();
+            let factors = self
+                .title_view
+                .wheel_zoom
+                .adapt_events(&mut input.events, viewport_height_points);
+            let consumed_event = input.events.len() < previous_event_count;
+            input.raw.events.clone_from(&input.events);
+            if consumed_event
+                && !script_view::has_nonzero_mouse_wheel(&input.raw.events)
+            {
+                // At this fallback point egui has already accumulated wheel
+                // deltas. Clear those only when no ordinary wheel event remains.
+                input.smooth_scroll_delta = Vec2::ZERO;
+            }
+            factors
+        });
+        self.dispatch_wheel_zoom_factors(EditorSurface::TitlePage, ctx, factors);
     }
 
     fn open_title_page_window(&mut self, ctx: &egui::Context) {
@@ -1941,6 +2002,7 @@ impl ScriptCraftApp {
             title_view_reset_pending: false,
             title_view_state_swapped: false,
             title_view: TitlePageViewState::default(),
+            wheel_zoom: wheel_zoom::WheelZoomAdapter::default(),
             last_status_modifiers: egui::Modifiers::NONE,
             drag_anchor: None,
             ime_preedit: String::new(),
@@ -1978,7 +2040,7 @@ impl ScriptCraftApp {
             zoom_percent: 100,
             pinch_zoom_percent: 100.0,
             appearance_mode: theme::AppearanceMode::System,
-            applied_appearance: None,
+            appearance_applications: theme::AppearanceApplications::default(),
             theme_palette: theme::ApplicationPalette::from_visuals(
                 theme::ResolvedAppearance::Day,
                 &egui::Visuals::light(),
@@ -3132,9 +3194,11 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     let (_resolved_theme, applied_appearance, theme_palette) = theme::configure_appearance(
         &ctx,
         app.appearance_mode,
-        app.applied_appearance,
+        app.appearance_applications
+            .get(theme::AppearanceContext::Root),
     );
-    app.applied_appearance = applied_appearance;
+    app.appearance_applications
+        .set(theme::AppearanceContext::Root, applied_appearance);
     app.theme_palette = theme_palette;
 
     if app.menu_policy.renders_in_window() {
@@ -3369,6 +3433,41 @@ impl eframe::App for ScriptCraftApp {
         ctx.set_zoom_factor(status_bar::ui_zoom_factor(native_scale));
         let scale_changed = self.effective_pixels_per_point != Some(effective_pixels_per_point);
         self.effective_pixels_per_point = Some(effective_pixels_per_point);
+
+        // eframe invokes this hook for each viewport. Keep the middle-button
+        // gesture state viewport-local while routing both windows through the
+        // same pinch command and anchor/repaint implementation.
+        let title_page_viewport = raw_input.viewport_id == title_page_window::viewport_id();
+        let viewport_close_requested = raw_input
+            .viewports
+            .get(&raw_input.viewport_id)
+            .is_some_and(|viewport| viewport.close_requested());
+        let viewport_height_points = raw_input
+            .screen_rect
+            .map_or_else(|| ctx.content_rect().height(), |rect| rect.height());
+        let wheel_factors = {
+            let adapter = if title_page_viewport {
+                &mut self.title_view.wheel_zoom
+            } else {
+                &mut self.wheel_zoom
+            };
+            if viewport_close_requested {
+                adapter.reset();
+                Vec::new()
+            } else {
+                adapter.adapt_events(&mut raw_input.events, viewport_height_points)
+            }
+        };
+        let surface = if title_page_viewport {
+            EditorSurface::TitlePage
+        } else {
+            EditorSurface::Body
+        };
+        if title_page_viewport && !self.title_page_window_open {
+            self.title_view.wheel_zoom.reset();
+        } else {
+            self.dispatch_wheel_zoom_factors(surface, ctx, wheel_factors);
+        }
 
         for event in &raw_input.events {
             if let egui::Event::Zoom(factor) = event {
@@ -3902,6 +4001,243 @@ mod root_close_flow_tests {
         assert!(!replacement_resume_focus_allowed(true, false));
         assert!(!replacement_resume_focus_allowed(false, true));
         assert!(replacement_resume_focus_allowed(false, false));
+    }
+}
+
+#[cfg(test)]
+mod wheel_zoom_command_route_tests {
+    use super::{
+        app_commands::CommandInvocation, page_geometry_input_invalidated, ScriptCraftApp,
+    };
+    use eframe::egui;
+    use scriptcraft_commands::{Command, CommandOrigin, EditorSurface, ZoomFactor};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn pinch(app: &mut ScriptCraftApp, ctx: &egui::Context, value: f32) {
+        if let Ok(factor) = ZoomFactor::new(value) {
+            app.dispatch_command(
+                CommandInvocation::new(
+                    Command::ViewZoomPinch { factor },
+                    CommandOrigin::Pointer,
+                ),
+                ctx,
+            );
+        }
+    }
+
+    #[test]
+    fn shared_pinch_route_keeps_body_and_title_zoom_state_anchor_and_repaint_separate() {
+        let Ok(mut app) = ScriptCraftApp::new() else {
+            return;
+        };
+        let ctx = egui::Context::default();
+        let repaint_count = Arc::new(AtomicUsize::new(0));
+        let repaint_count_callback = Arc::clone(&repaint_count);
+        ctx.set_request_repaint_callback(move |_| {
+            repaint_count_callback.fetch_add(1, Ordering::SeqCst);
+        });
+        app.title_page_window_open = true;
+
+        let body_anchor = super::status_bar::ViewportCenterAnchor {
+            page_index: 0,
+            page_local_document_point: egui::vec2(12.0, 24.0),
+            outside_page_offset_points: egui::Vec2::ZERO,
+            viewport_center: egui::pos2(100.0, 200.0),
+        };
+        app.pending_zoom_anchor = Some(body_anchor);
+        app.set_active_editor_surface(EditorSurface::Body);
+        pinch(&mut app, &ctx, 1.5);
+        assert_eq!(app.zoom_for_surface(EditorSurface::Body), 150);
+        assert_eq!(app.pending_zoom_anchor, Some(body_anchor));
+
+        let title_anchor = super::status_bar::ViewportCenterAnchor {
+            page_index: 1,
+            page_local_document_point: egui::vec2(8.0, 16.0),
+            outside_page_offset_points: egui::Vec2::ZERO,
+            viewport_center: egui::pos2(80.0, 160.0),
+        };
+        app.title_view.pending_zoom_anchor = Some(title_anchor);
+        app.set_active_editor_surface(EditorSurface::TitlePage);
+        pinch(&mut app, &ctx, 0.5);
+        assert_eq!(app.zoom_for_surface(EditorSurface::TitlePage), 75);
+        assert_eq!(app.zoom_for_surface(EditorSurface::Body), 150);
+        assert_eq!(app.title_view.pending_zoom_anchor, Some(title_anchor));
+        assert!(repaint_count.load(Ordering::SeqCst) >= 2);
+
+        // Further factors still use the shared 75–300 percent bounds.
+        pinch(&mut app, &ctx, 10.0);
+        assert_eq!(app.zoom_for_surface(EditorSurface::TitlePage), 300);
+        pinch(&mut app, &ctx, 0.01);
+        assert_eq!(app.zoom_for_surface(EditorSurface::TitlePage), 75);
+    }
+
+    #[test]
+    fn raw_input_hook_consumes_and_routes_body_and_title_page_wheels() {
+        let Ok(mut app) = ScriptCraftApp::new() else {
+            return;
+        };
+        let ctx = egui::Context::default();
+        app.title_page_window_open = true;
+        let make_wheel = || egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(100.0, 100.0),
+            modifiers: egui::Modifiers {
+                command: true,
+                ..egui::Modifiers::NONE
+            },
+            phase: egui::TouchPhase::Move,
+        };
+
+        let mut body_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            events: vec![make_wheel()],
+            ..egui::RawInput::default()
+        };
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut body_input);
+        assert!(body_input.events.is_empty());
+        let body_zoom = app.zoom_for_surface(EditorSurface::Body);
+        assert!(body_zoom > 100);
+
+        let mut title_input = egui::RawInput {
+            viewport_id: super::title_page_window::viewport_id(),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(820.0, 680.0),
+            )),
+            events: vec![make_wheel()],
+            ..egui::RawInput::default()
+        };
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut title_input);
+        assert!(title_input.events.is_empty());
+        assert!(app.zoom_for_surface(EditorSurface::TitlePage) > 100);
+        assert_eq!(app.zoom_for_surface(EditorSurface::Body), body_zoom);
+    }
+
+    #[test]
+    fn closing_title_viewport_clears_its_middle_button_state_only() {
+        let Ok(mut app) = ScriptCraftApp::new() else {
+            return;
+        };
+        let mut title_events = vec![egui::Event::PointerButton {
+            pos: egui::Pos2::ZERO,
+            button: egui::PointerButton::Middle,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        app.title_view.wheel_zoom.adapt_events(&mut title_events, 600.0);
+        let mut root_events = vec![egui::Event::PointerButton {
+            pos: egui::Pos2::ZERO,
+            button: egui::PointerButton::Middle,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        app.wheel_zoom.adapt_events(&mut root_events, 600.0);
+        app.set_title_page_window_open(false);
+        assert!(!app.title_view.wheel_zoom.middle_button_down());
+        assert!(app.wheel_zoom.middle_button_down());
+    }
+
+    #[test]
+    fn only_retained_ordinary_wheels_invalidate_page_geometry() {
+        let ctx = egui::Context::default();
+        let mut adapter = super::wheel_zoom::WheelZoomAdapter::default();
+        let mut zoom_events = vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 6.0),
+            modifiers: egui::Modifiers {
+                command: true,
+                ..egui::Modifiers::NONE
+            },
+            phase: egui::TouchPhase::Move,
+        }];
+        assert_eq!(adapter.adapt_events(&mut zoom_events, 600.0).len(), 1);
+        let mut zoom_invalidated = true;
+        let _ = ctx.run(
+            egui::RawInput {
+                events: zoom_events,
+                ..egui::RawInput::default()
+            },
+            |ctx| zoom_invalidated = page_geometry_input_invalidated(ctx, None),
+        );
+        assert!(!zoom_invalidated);
+
+        let mut ordinary_invalidated = false;
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, 1.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                }],
+                ..egui::RawInput::default()
+            },
+            |ctx| ordinary_invalidated = page_geometry_input_invalidated(ctx, None),
+        );
+        assert!(ordinary_invalidated);
+    }
+
+    #[test]
+    fn consumed_zoom_wheel_preserves_pending_anchor_and_ordinary_wheel_cancels_it() {
+        let Ok(mut app) = ScriptCraftApp::new() else {
+            return;
+        };
+        let ctx = egui::Context::default();
+        let anchor = super::status_bar::ViewportCenterAnchor {
+            page_index: 0,
+            page_local_document_point: egui::vec2(4.0, 9.0),
+            outside_page_offset_points: egui::Vec2::ZERO,
+            viewport_center: egui::pos2(120.0, 220.0),
+        };
+        app.pending_zoom_anchor = Some(anchor);
+        let mut zoom_events = vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 12.0),
+            modifiers: egui::Modifiers {
+                command: true,
+                ..egui::Modifiers::NONE
+            },
+            phase: egui::TouchPhase::Move,
+        }];
+        assert_eq!(app.wheel_zoom.adapt_events(&mut zoom_events, 600.0).len(), 1);
+        let cancellations_before = app.performance.zoom_manual_scroll_cancellations;
+        let _ = ctx.run(
+            egui::RawInput {
+                events: zoom_events,
+                ..egui::RawInput::default()
+            },
+            |ctx| app.handle_surface_input(ctx, EditorSurface::Body),
+        );
+        assert_eq!(app.pending_zoom_anchor, Some(anchor));
+        assert_eq!(
+            app.performance.zoom_manual_scroll_cancellations,
+            cancellations_before
+        );
+
+        app.pending_zoom_anchor = Some(anchor);
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, 1.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                }],
+                ..egui::RawInput::default()
+            },
+            |ctx| app.handle_surface_input(ctx, EditorSurface::Body),
+        );
+        assert!(app.pending_zoom_anchor.is_none());
+        assert_eq!(
+            app.performance.zoom_manual_scroll_cancellations,
+            cancellations_before + 1
+        );
     }
 }
 

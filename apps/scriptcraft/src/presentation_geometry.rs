@@ -2,16 +2,12 @@
 //! layout or used to alter the fixed-cell page painter in this work order.
 
 use crate::presentation_style::AdvanceMode;
-use eframe::egui::{self, Color32, FontFamily, FontId};
+use eframe::egui::{self, Color32, FontId};
 use egui::epaint::text::{Galley, LayoutJob};
-use scriptcraft_core::formatting::{EffectiveTextStyle, ParagraphAlignment};
+use scriptcraft_core::formatting::ParagraphAlignment;
 use scriptcraft_core::layout::{Caret, LayoutLine, PositionedStyledSpan};
 use scriptcraft_core::FixedPoint;
-use std::collections::HashMap;
 use std::sync::Arc;
-
-const NATURAL_GALLEY_CACHE_ID: &str = "scriptcraft-natural-galley-cache-v1";
-const NATURAL_GALLEY_CACHE_LIMIT: usize = 16_384;
 
 /// An unmodified full-span galley and boundary x offsets derived from its own
 /// cursor map. Offsets are in the galley's logical-point coordinate space.
@@ -401,73 +397,14 @@ pub(super) enum NaturalGalleyError {
     UnsupportedTopology(NaturalGalleyTopology),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct NaturalGalleyKey {
-    text: String,
-    font_family: FontFamily,
-    scaled_font_size_bits: u32,
-    effective_style: EffectiveTextStyle,
-    advance_mode: AdvanceMode,
-    ordinary_color: Color32,
-    pixels_per_point_bits: u32,
-}
-
-impl NaturalGalleyKey {
-    fn new(
-        text: &str,
-        font: &FontId,
-        effective_style: &EffectiveTextStyle,
-        advance_mode: AdvanceMode,
-        ordinary_color: Color32,
-        pixels_per_point: f32,
-    ) -> Self {
-        Self {
-            text: text.to_owned(),
-            font_family: font.family.clone(),
-            scaled_font_size_bits: font.size.to_bits(),
-            effective_style: effective_style.clone(),
-            advance_mode,
-            ordinary_color,
-            pixels_per_point_bits: pixels_per_point.to_bits(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct NaturalGalleyCache {
-    geometries: HashMap<NaturalGalleyKey, Arc<NaturalGalleyGeometry>>,
-}
-
-impl NaturalGalleyCache {
-    fn insert(&mut self, key: NaturalGalleyKey, geometry: Arc<NaturalGalleyGeometry>) {
-        if self.geometries.len() >= NATURAL_GALLEY_CACHE_LIMIT {
-            // Bounded and deterministic: clear all entries before retaining the
-            // next successful value; a miss merely causes a later fresh layout.
-            self.geometries.clear();
-        }
-        self.geometries.insert(key, geometry);
-    }
-
-    fn insert_supported(
-        &mut self,
-        key: NaturalGalleyKey,
-        geometry: Result<NaturalGalleyGeometry, NaturalGalleyError>,
-    ) -> Result<Arc<NaturalGalleyGeometry>, NaturalGalleyError> {
-        let geometry = Arc::new(geometry?);
-        self.insert(key, geometry.clone());
-        Ok(geometry)
-    }
-}
-
 /// Builds one natural single-line galley and its cursor-derived display
 /// boundaries. Selection is deliberately absent from both the signature and
-/// cache identity. A failed topology check is never cached.
+/// geometry. The UV-bearing result is scoped to the current egui pass; egui's
+/// own layout cache remains responsible for atlas-aware text layout reuse.
 pub(super) fn natural_singleline_geometry(
     painter: &egui::Painter,
-    ctx: &egui::Context,
     text: &str,
     font: &FontId,
-    effective_style: &EffectiveTextStyle,
     advance_mode: AdvanceMode,
     ordinary_color: Color32,
 ) -> Result<(Arc<NaturalGalleyGeometry>, bool), NaturalGalleyError> {
@@ -475,34 +412,9 @@ pub(super) fn natural_singleline_geometry(
         return Err(NaturalGalleyError::NotProportional);
     }
 
-    let key = NaturalGalleyKey::new(
-        text,
-        font,
-        effective_style,
-        advance_mode,
-        ordinary_color,
-        ctx.pixels_per_point(),
-    );
-    let cached = ctx.data_mut(|data| {
-        data.get_temp_mut_or_default::<NaturalGalleyCache>(egui::Id::new(
-            NATURAL_GALLEY_CACHE_ID,
-        ))
-        .geometries
-        .get(&key)
-        .cloned()
-    });
-    if let Some(geometry) = cached {
-        return Ok((geometry, true));
-    }
-
     let job = LayoutJob::simple_singleline(text.to_owned(), font.clone(), ordinary_color);
     let galley = painter.layout_job(job);
-    let geometry = ctx.data_mut(|data| {
-        data.get_temp_mut_or_default::<NaturalGalleyCache>(egui::Id::new(
-            NATURAL_GALLEY_CACHE_ID,
-        ))
-        .insert_supported(key, geometry_from_galley(text, galley))
-    })?;
+    let geometry = Arc::new(geometry_from_galley(text, galley)?);
     Ok((geometry, false))
 }
 
@@ -1119,6 +1031,112 @@ mod tests {
                 super::projected_target_boundary(&target_projected, projected_goal, 2.0),
                 Some(1),
             );
+        }
+    }
+
+    fn assert_galley_mesh_matches(actual: &Galley, expected: &Galley) {
+        assert_eq!(actual.text(), expected.text());
+        assert_eq!(actual.elided, expected.elided);
+        assert_eq!(actual.rect, expected.rect);
+        assert_eq!(actual.rows.len(), expected.rows.len());
+        for (actual_placed, expected_placed) in actual.rows.iter().zip(&expected.rows) {
+            assert_eq!(actual_placed.pos, expected_placed.pos);
+            let actual_row = &actual_placed.row;
+            let expected_row = &expected_placed.row;
+            assert_eq!(actual_row.glyphs.len(), expected_row.glyphs.len());
+            for (actual_glyph, expected_glyph) in
+                actual_row.glyphs.iter().zip(&expected_row.glyphs)
+            {
+                assert_eq!(actual_glyph.chr, expected_glyph.chr);
+                assert_eq!(actual_glyph.pos, expected_glyph.pos);
+                assert_eq!(actual_glyph.advance_width, expected_glyph.advance_width);
+                assert_eq!(actual_glyph.uv_rect, expected_glyph.uv_rect);
+            }
+            assert_eq!(actual_row.visuals.glyph_vertex_range, expected_row.visuals.glyph_vertex_range);
+            assert_eq!(actual_row.visuals.mesh.indices, expected_row.visuals.mesh.indices);
+            assert_eq!(actual_row.visuals.mesh.vertices.len(), expected_row.visuals.mesh.vertices.len());
+            for (actual_vertex, expected_vertex) in actual_row
+                .visuals
+                .mesh
+                .vertices
+                .iter()
+                .zip(&expected_row.visuals.mesh.vertices)
+            {
+                assert_eq!(actual_vertex.pos, expected_vertex.pos);
+                assert_eq!(actual_vertex.uv, expected_vertex.uv);
+                assert_eq!(actual_vertex.color, expected_vertex.color);
+            }
+        }
+    }
+
+    #[test]
+    fn natural_galley_variants_never_reuse_geometry_from_an_earlier_appearance_pass() {
+        let context = egui::Context::default();
+        let font = FontId::new(22.0, FontFamily::Proportional);
+        let ordinary_color = Color32::WHITE;
+        let selected_color = Color32::from_rgb(0x31, 0x72, 0xd0);
+        let mut previous = None;
+
+        // Day → Night → Day → Night → Day → unchanged Day covers both options
+        // transitions, the round trip, and a pass boundary without a theme change.
+        for (pass, dark) in [false, true, false, true, false, false].into_iter().enumerate() {
+            context.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+            let mut generated = None;
+            let _ = context.run(egui::RawInput::default(), |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    let painter = ui.painter();
+                    let (geometry, reused) = super::natural_singleline_geometry(
+                        painter,
+                        "Natural AV text",
+                        &font,
+                        AdvanceMode::Proportional,
+                        ordinary_color,
+                    )
+                    .expect("the single-line proportional text has supported topology");
+                    assert!(!reused, "pass {pass} returned application-cached natural geometry");
+                    if let Some(previous) = previous.as_ref() {
+                        assert!(
+                            !Arc::ptr_eq(previous, &geometry),
+                            "pass {pass} reused NaturalGalleyGeometry from an earlier egui pass"
+                        );
+                    }
+
+                    let fresh_ordinary = painter.layout_job(LayoutJob::simple_singleline(
+                        "Natural AV text".to_owned(),
+                        font.clone(),
+                        ordinary_color,
+                    ));
+                    assert_galley_mesh_matches(&geometry.galley, &fresh_ordinary);
+                    let fresh_geometry = super::geometry_from_galley(
+                        "Natural AV text",
+                        fresh_ordinary.clone(),
+                    )
+                    .expect("fresh natural layout should preserve supported topology");
+                    assert_eq!(geometry.display_boundary_offsets, fresh_geometry.display_boundary_offsets);
+                    assert_eq!(geometry.natural_advance, fresh_geometry.natural_advance);
+
+                    let selected = super::recolor_natural_galley(&geometry, selected_color);
+                    let fresh_selected = painter.layout_job(LayoutJob::simple_singleline(
+                        "Natural AV text".to_owned(),
+                        font.clone(),
+                        selected_color,
+                    ));
+                    assert_galley_mesh_matches(&selected, &fresh_selected);
+                    assert!(selected
+                        .rows
+                        .iter()
+                        .flat_map(|row| row.row.visuals.mesh.vertices.iter())
+                        .all(|vertex| vertex.color == selected_color));
+
+                    previous = Some(geometry.clone());
+                    generated = Some(geometry);
+                });
+            });
+            assert!(generated.is_some(), "pass {pass} should build natural geometry");
         }
     }
 }

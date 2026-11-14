@@ -18,7 +18,6 @@ use scriptcraft_core::layout::{
     ScreenplayLayout,
 };
 use scriptcraft_core::FixedPoint;
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const EDITOR_SURFACE_ID: &str = "page-editor-surface";
@@ -29,8 +28,6 @@ const SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING: f32 = 8.0;
 const SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING: f32 = 0.0;
 const PAGE_BORDER_WIDTH: f32 = 2.5;
 const PAGE_PAINT_OVERSCAN: usize = 1;
-const FIXED_CELL_GALLEY_CACHE_ID: &str = "scriptcraft-fixed-cell-galley-cache-v1";
-const FIXED_CELL_GALLEY_CACHE_LIMIT: usize = 16_384;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy)]
@@ -114,6 +111,33 @@ pub(super) fn has_nonzero_mouse_wheel(events: &[egui::Event]) -> bool {
             egui::Event::MouseWheel { delta, .. } if *delta != Vec2::ZERO
         )
     })
+}
+
+#[cfg(test)]
+mod wheel_scroll_cancellation_tests {
+    use super::has_nonzero_mouse_wheel;
+    use eframe::egui::{self, Event, Modifiers, MouseWheelUnit, Vec2};
+
+    fn wheel(modifiers: Modifiers) -> Event {
+        Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, 8.0),
+            modifiers,
+            phase: egui::TouchPhase::Move,
+        }
+    }
+
+    #[test]
+    fn consumed_zoom_wheel_does_not_cancel_anchor_but_ordinary_wheel_still_does() {
+        let mut zoom_adapter = super::super::wheel_zoom::WheelZoomAdapter::default();
+        let mut zoom_events = vec![wheel(Modifiers { command: true, ..Modifiers::NONE })];
+        assert_eq!(zoom_adapter.adapt_events(&mut zoom_events, 600.0).len(), 1);
+        assert!(!has_nonzero_mouse_wheel(&zoom_events));
+
+        let mut ordinary_events = vec![wheel(Modifiers::NONE)];
+        assert!(zoom_adapter.adapt_events(&mut ordinary_events, 600.0).is_empty());
+        assert!(has_nonzero_mouse_wheel(&ordinary_events));
+    }
 }
 
 
@@ -216,10 +240,8 @@ impl ScriptCraftApp {
             if paint.advance_mode == AdvanceMode::Proportional {
                 let (geometry, reused) = super::presentation_geometry::natural_singleline_geometry(
                     &painter,
-                    ctx,
                     &span.display_text,
                     &paint.font,
-                    &span.text_style,
                     paint.advance_mode,
                     paint.color,
                 ).map_err(|_| ())?;
@@ -502,21 +524,15 @@ impl ScriptCraftApp {
                         };
                         paint_fixed_metric_text_with_selection(
                             &line_painter,
-                            ui.ctx(),
                             span_origin,
                             &span.display_text,
                             resolved.font.clone(),
                             cell_width,
-                            span_height,
                             FixedMetricTextStyle {
                                 color: resolved.color,
                                 selected_color: palette.selection_text,
                                 selection: selected_display,
                             },
-                            &span.text_style,
-                            projected.advance,
-                            span.underline,
-                            span.strikethrough,
                             &mut self.performance,
                         );
                     }
@@ -587,21 +603,15 @@ impl ScriptCraftApp {
                 let color = resolved_paint.color;
                 paint_fixed_metric_text_with_selection(
                     &painter,
-                    ui.ctx(),
                     egui::pos2(span_x, span_y),
                     &span.display_text,
                     span_font,
                     cell_width,
-                    span_height,
                     FixedMetricTextStyle {
                         color,
                         selected_color: palette.selection_text,
                         selection: selected_display,
                     },
-                    &span.text_style,
-                    span_width,
-                    span.underline,
-                    span.strikethrough,
                     &mut self.performance,
                 );
                 if span.underline || span.strikethrough {
@@ -1900,81 +1910,15 @@ impl FixedMetricTextStyle {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct FixedCellGalleyKey {
-    text: String,
-    font_family: FontFamily,
-    font_size_bits: u32,
-    effective_style: EffectiveTextStyle,
-    char_width_bits: u32,
-    line_height_bits: u32,
-    span_width_bits: u32,
-    underline: bool,
-    strikethrough: bool,
-    color: Color32,
-    pixels_per_point_bits: u32,
-}
-
-impl FixedCellGalleyKey {
-    fn new(
-        text: &str,
-        font: &FontId,
-        effective_style: &EffectiveTextStyle,
-        char_width: f32,
-        line_height: f32,
-        span_width: f32,
-        underline: bool,
-        strikethrough: bool,
-        color: Color32,
-        pixels_per_point: f32,
-    ) -> Self {
-        Self {
-            text: text.to_owned(),
-            font_family: font.family.clone(),
-            font_size_bits: font.size.to_bits(),
-            effective_style: effective_style.clone(),
-            char_width_bits: char_width.to_bits(),
-            line_height_bits: line_height.to_bits(),
-            span_width_bits: span_width.to_bits(),
-            underline,
-            strikethrough,
-            color,
-            pixels_per_point_bits: pixels_per_point.to_bits(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct FixedCellGalleyCache {
-    galleys: HashMap<FixedCellGalleyKey, std::sync::Arc<Galley>>,
-}
-
-impl FixedCellGalleyCache {
-    fn insert(&mut self, key: FixedCellGalleyKey, galley: std::sync::Arc<Galley>) {
-        if self.galleys.len() >= FIXED_CELL_GALLEY_CACHE_LIMIT {
-            // Keep retention bounded under repeated text edits and document replacement.
-            // Clearing is diagnostic-neutral: the next use is simply a fresh build.
-            self.galleys.clear();
-        }
-        self.galleys.insert(key, galley);
-    }
-}
-
 // Text, selection, and paint instrumentation are independent view inputs.
 #[allow(clippy::too_many_arguments)]
 fn paint_fixed_metric_text_with_selection(
     painter: &egui::Painter,
-    ctx: &egui::Context,
     origin: egui::Pos2,
     text: &str,
     font: FontId,
     char_width: f32,
-    line_height: f32,
     style: FixedMetricTextStyle,
-    effective_style: &EffectiveTextStyle,
-    span_width: f32,
-    underline: bool,
-    strikethrough: bool,
     performance: &mut PerformanceDiagnostics,
 ) {
     if text.is_empty() {
@@ -2013,15 +1957,9 @@ fn paint_fixed_metric_text_with_selection(
         let span_origin = egui::pos2(fixed_metric_x(origin.x, start_column, char_width), origin.y);
         let (galley, reused, fixed_geometry) = fixed_cell_span_galley(
             painter,
-            ctx,
             span_text,
             &font,
-            effective_style,
             char_width,
-            line_height,
-            span_width,
-            underline,
-            strikethrough,
             color,
         );
         if reused {
@@ -2053,43 +1991,15 @@ fn paint_fixed_metric_text_with_selection(
 
 fn fixed_cell_span_galley(
     painter: &egui::Painter,
-    ctx: &egui::Context,
     text: &str,
     font: &FontId,
-    effective_style: &EffectiveTextStyle,
     char_width: f32,
-    line_height: f32,
-    span_width: f32,
-    underline: bool,
-    strikethrough: bool,
     color: Color32,
 ) -> (std::sync::Arc<Galley>, bool, bool) {
-    let pixels_per_point = ctx.pixels_per_point();
-    let key = FixedCellGalleyKey::new(
-        text,
-        font,
-        effective_style,
-        char_width,
-        line_height,
-        span_width,
-        underline,
-        strikethrough,
-        color,
-        pixels_per_point,
-    );
-    let cached = ctx.data_mut(|data| {
-        data.get_temp_mut_or_default::<FixedCellGalleyCache>(egui::Id::new(
-            FIXED_CELL_GALLEY_CACHE_ID,
-        ))
-        .galleys
-        .get(&key)
-        .cloned()
-    });
-    if let Some(galley) = cached {
-        return (galley, true, true);
-    }
-
-    let job = LayoutJob::simple_singleline(key.text.clone(), font.clone(), color);
+    // Keep ScriptCraft's fixed-cell transformation local to this egui pass.
+    // Painter::layout_job can use egui's own atlas-aware layout cache, while no
+    // UV-bearing transformed galley is retained by the application.
+    let job = LayoutJob::simple_singleline(text.to_owned(), font.clone(), color);
     let mut galley = painter.layout_job(job).as_ref().clone();
     if !position_galley_in_fixed_cells(&mut galley, char_width) {
         // The epaint 0.29 single-row galley contract is one glyph record per
@@ -2099,12 +2009,6 @@ fn fixed_cell_span_galley(
         return (std::sync::Arc::new(galley), false, false);
     }
     let galley = std::sync::Arc::new(galley);
-    ctx.data_mut(|data| {
-        data.get_temp_mut_or_default::<FixedCellGalleyCache>(egui::Id::new(
-            FIXED_CELL_GALLEY_CACHE_ID,
-        ))
-        .insert(key, galley.clone());
-    });
     (galley, false, true)
 }
 
@@ -2315,6 +2219,100 @@ mod imported_role_color_paint_tests {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fixed_cell_atlas_lifetime_tests {
+    use super::{fixed_cell_span_galley, position_galley_in_fixed_cells};
+    use eframe::egui::{self, Color32, FontFamily, FontId};
+    use egui::epaint::text::{Galley, LayoutJob};
+    use std::sync::Arc;
+
+    fn assert_galley_mesh_matches(actual: &Galley, expected: &Galley) {
+        assert_eq!(actual.text(), expected.text());
+        assert_eq!(actual.elided, expected.elided);
+        assert_eq!(actual.rect, expected.rect);
+        assert_eq!(actual.rows.len(), expected.rows.len());
+        for (actual_placed, expected_placed) in actual.rows.iter().zip(&expected.rows) {
+            assert_eq!(actual_placed.pos, expected_placed.pos);
+            let actual_row = &actual_placed.row;
+            let expected_row = &expected_placed.row;
+            assert_eq!(actual_row.glyphs.len(), expected_row.glyphs.len());
+            for (actual_glyph, expected_glyph) in
+                actual_row.glyphs.iter().zip(&expected_row.glyphs)
+            {
+                assert_eq!(actual_glyph.chr, expected_glyph.chr);
+                assert_eq!(actual_glyph.pos, expected_glyph.pos);
+                assert_eq!(actual_glyph.advance_width, expected_glyph.advance_width);
+                assert_eq!(actual_glyph.uv_rect, expected_glyph.uv_rect);
+            }
+            assert_eq!(actual_row.visuals.glyph_vertex_range, expected_row.visuals.glyph_vertex_range);
+            assert_eq!(actual_row.visuals.mesh.indices, expected_row.visuals.mesh.indices);
+            assert_eq!(actual_row.visuals.mesh.vertices.len(), expected_row.visuals.mesh.vertices.len());
+            for (actual_vertex, expected_vertex) in actual_row
+                .visuals
+                .mesh
+                .vertices
+                .iter()
+                .zip(&expected_row.visuals.mesh.vertices)
+            {
+                assert_eq!(actual_vertex.pos, expected_vertex.pos);
+                assert_eq!(actual_vertex.uv, expected_vertex.uv);
+                assert_eq!(actual_vertex.color, expected_vertex.color);
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_cell_variants_never_hit_a_previous_pass_cache_for_any_foreground() {
+        let context = egui::Context::default();
+        let font = FontId::new(18.0, FontFamily::Monospace);
+        let colors = [Color32::WHITE, Color32::from_rgb(0x31, 0x72, 0xd0)];
+        let mut previous: [Option<Arc<Galley>>; 2] = [None, None];
+
+        // The first five passes exercise Day → Night → Day → Night → Day;
+        // the final identical Day appearance proves lifetime is pass-based.
+        for (pass, dark) in [false, true, false, true, false, false].into_iter().enumerate() {
+            context.set_visuals(if dark {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+            let mut built = 0usize;
+            let _ = context.run(egui::RawInput::default(), |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    for (color_index, color) in colors.into_iter().enumerate() {
+                        let (galley, reused, fixed_geometry) = fixed_cell_span_galley(
+                            ui.painter(),
+                            "Fixed AV text",
+                            &font,
+                            9.0,
+                            color,
+                        );
+                        assert!(!reused, "pass {pass} returned a custom cache hit");
+                        assert!(fixed_geometry, "pass {pass} should preserve fixed-cell geometry");
+                        if let Some(previous) = previous[color_index].as_ref() {
+                            assert!(
+                                !Arc::ptr_eq(previous, &galley),
+                                "pass {pass} reused a UV-bearing fixed-cell galley from an earlier egui pass"
+                            );
+                        }
+
+                        let mut fresh = ui.painter().layout_job(LayoutJob::simple_singleline(
+                            "Fixed AV text".to_owned(),
+                            font.clone(),
+                            color,
+                        )).as_ref().clone();
+                        assert!(position_galley_in_fixed_cells(&mut fresh, 9.0));
+                        assert_galley_mesh_matches(&galley, &fresh);
+                        previous[color_index] = Some(galley);
+                        built += 1;
+                    }
+                });
+            });
+            assert_eq!(built, colors.len(), "pass {pass} builds ordinary and selected variants");
+        }
     }
 }
 

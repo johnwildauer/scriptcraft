@@ -34,6 +34,38 @@ impl AppearanceMode {
 pub(super) type AppliedAppearance = Option<(AppearanceMode, egui::Theme)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AppearanceContext {
+    Root,
+    TitlePage,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct AppearanceApplications {
+    root: AppliedAppearance,
+    title_page: AppliedAppearance,
+}
+
+impl AppearanceApplications {
+    pub(super) fn get(self, context: AppearanceContext) -> AppliedAppearance {
+        match context {
+            AppearanceContext::Root => self.root,
+            AppearanceContext::TitlePage => self.title_page,
+        }
+    }
+
+    pub(super) fn set(&mut self, context: AppearanceContext, applied: AppliedAppearance) {
+        match context {
+            AppearanceContext::Root => self.root = applied,
+            AppearanceContext::TitlePage => self.title_page = applied,
+        }
+    }
+
+    pub(super) fn clear(&mut self, context: AppearanceContext) {
+        self.set(context, None);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ResolvedAppearance {
     Day,
     Night,
@@ -475,6 +507,21 @@ pub(super) fn configure_appearance(
     let system_theme = ctx
         .system_theme()
         .unwrap_or_else(|| ctx.options(|options| options.fallback_theme));
+    let (resolved_theme, applied, palette, _) = configure_appearance_for_theme(
+        ctx,
+        mode,
+        currently_applied,
+        system_theme,
+    );
+    (resolved_theme, applied, palette)
+}
+
+fn configure_appearance_for_theme(
+    ctx: &egui::Context,
+    mode: AppearanceMode,
+    currently_applied: AppliedAppearance,
+    system_theme: egui::Theme,
+) -> (egui::Theme, AppliedAppearance, ApplicationPalette, bool) {
     let resolved_theme = match mode {
         AppearanceMode::System => system_theme,
         AppearanceMode::Day => egui::Theme::Light,
@@ -500,11 +547,238 @@ pub(super) fn configure_appearance(
         egui::Theme::Dark => dark = active_visuals,
     }
 
-    if currently_applied != applied {
+    let installed = currently_applied != applied;
+    if installed {
         ctx.set_visuals_of(egui::Theme::Light, light.clone());
         ctx.set_visuals_of(egui::Theme::Dark, dark.clone());
         ctx.set_theme(mode.theme_preference());
     }
 
-    (resolved_theme, applied, palette)
+    (resolved_theme, applied, palette, installed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_context() -> egui::Context {
+        egui::Context::default()
+    }
+
+    fn configure_tracked(
+        ctx: &egui::Context,
+        applications: &mut AppearanceApplications,
+        context: AppearanceContext,
+        mode: AppearanceMode,
+        system_theme: egui::Theme,
+    ) -> (egui::Theme, ApplicationPalette, bool) {
+        let (resolved, applied, palette, installed) = configure_appearance_for_theme(
+            ctx,
+            mode,
+            applications.get(context),
+            system_theme,
+        );
+        applications.set(context, applied);
+        (resolved, palette, installed)
+    }
+
+    fn assert_palette(palette: ApplicationPalette, appearance: ResolvedAppearance) {
+        let expected = visuals_for_appearance(appearance);
+        assert_eq!(palette.script_workspace.page.paper, match appearance {
+            ResolvedAppearance::Day => Color32::WHITE,
+            ResolvedAppearance::Night => Color32::from_rgb(54, 54, 54),
+            ResolvedAppearance::Midnight => Color32::from_rgb(27, 27, 27),
+        });
+        assert_eq!(palette.toolbar.background, match appearance {
+            ResolvedAppearance::Day => Color32::from_rgb(236, 236, 236),
+            ResolvedAppearance::Night | ResolvedAppearance::Midnight => Color32::from_rgb(54, 54, 54),
+        });
+        assert_eq!(expected.panel_fill, match appearance {
+            ResolvedAppearance::Day => Color32::from_rgb(248, 248, 248),
+            ResolvedAppearance::Night => Color32::from_rgb(44, 44, 44),
+            ResolvedAppearance::Midnight => Color32::from_rgb(40, 40, 40),
+        });
+    }
+
+    #[test]
+    fn root_first_and_child_first_install_day_in_both_contexts() {
+        for order in [
+            [AppearanceContext::Root, AppearanceContext::TitlePage],
+            [AppearanceContext::TitlePage, AppearanceContext::Root],
+        ] {
+            let root = new_context();
+            let child = new_context();
+            let mut applications = AppearanceApplications::default();
+            for context in order {
+                let ctx = match context {
+                    AppearanceContext::Root => &root,
+                    AppearanceContext::TitlePage => &child,
+                };
+                let (_, palette, installed) = configure_tracked(
+                    ctx,
+                    &mut applications,
+                    context,
+                    AppearanceMode::Day,
+                    egui::Theme::Light,
+                );
+                assert!(installed, "{context:?} must install its own Day visuals");
+                assert_palette(palette, ResolvedAppearance::Day);
+                assert_eq!(ctx.style().visuals.panel_fill, Color32::from_rgb(248, 248, 248));
+            }
+            assert_eq!(applications.get(AppearanceContext::Root), Some((AppearanceMode::Day, egui::Theme::Light)));
+            assert_eq!(applications.get(AppearanceContext::TitlePage), Some((AppearanceMode::Day, egui::Theme::Light)));
+        }
+    }
+
+    #[test]
+    fn night_updates_both_contexts_in_either_invocation_order() {
+        for order in [
+            [AppearanceContext::Root, AppearanceContext::TitlePage],
+            [AppearanceContext::TitlePage, AppearanceContext::Root],
+        ] {
+            let root = new_context();
+            let child = new_context();
+            let mut applications = AppearanceApplications::default();
+            for context in order {
+                let ctx = match context {
+                    AppearanceContext::Root => &root,
+                    AppearanceContext::TitlePage => &child,
+                };
+                let (_, palette, installed) = configure_tracked(
+                    ctx,
+                    &mut applications,
+                    context,
+                    AppearanceMode::Night,
+                    egui::Theme::Light,
+                );
+                assert!(installed);
+                assert_palette(palette, ResolvedAppearance::Night);
+            }
+            for ctx in [&root, &child] {
+                assert_eq!(ctx.style().visuals.panel_fill, Color32::from_rgb(44, 44, 44));
+            }
+        }
+    }
+
+    #[test]
+    fn day_night_day_and_midnight_update_each_context_independently() {
+        let root = new_context();
+        let child = new_context();
+        let mut applications = AppearanceApplications::default();
+        for mode in [AppearanceMode::Day, AppearanceMode::Night, AppearanceMode::Day, AppearanceMode::Midnight] {
+            for context in [AppearanceContext::Root, AppearanceContext::TitlePage] {
+                let ctx = match context {
+                    AppearanceContext::Root => &root,
+                    AppearanceContext::TitlePage => &child,
+                };
+                let (_, palette, installed) = configure_tracked(
+                    ctx,
+                    &mut applications,
+                    context,
+                    mode,
+                    egui::Theme::Light,
+                );
+                assert!(installed, "mode change to {mode:?} must install in {context:?}");
+                let appearance = match mode {
+                    AppearanceMode::System | AppearanceMode::Day => ResolvedAppearance::Day,
+                    AppearanceMode::Night => ResolvedAppearance::Night,
+                    AppearanceMode::Midnight => ResolvedAppearance::Midnight,
+                };
+                assert_palette(palette, appearance);
+            }
+        }
+        assert_eq!(root.style().visuals.panel_fill, Color32::from_rgb(40, 40, 40));
+        assert_eq!(child.style().visuals.panel_fill, Color32::from_rgb(40, 40, 40));
+    }
+
+    #[test]
+    fn system_resolution_changes_reconfigure_each_context() {
+        let root = new_context();
+        let child = new_context();
+        let mut applications = AppearanceApplications::default();
+        for system_theme in [egui::Theme::Light, egui::Theme::Dark] {
+            for context in [AppearanceContext::Root, AppearanceContext::TitlePage] {
+                let ctx = match context {
+                    AppearanceContext::Root => &root,
+                    AppearanceContext::TitlePage => &child,
+                };
+                let (resolved, palette, installed) = configure_tracked(
+                    ctx,
+                    &mut applications,
+                    context,
+                    AppearanceMode::System,
+                    system_theme,
+                );
+                assert!(installed, "resolved System theme change must reconfigure {context:?}");
+                assert_eq!(resolved, system_theme);
+                assert_palette(
+                    palette,
+                    match system_theme {
+                        egui::Theme::Light => ResolvedAppearance::Day,
+                        egui::Theme::Dark => ResolvedAppearance::Night,
+                    },
+                );
+            }
+        }
+        assert_eq!(applications.get(AppearanceContext::Root), Some((AppearanceMode::System, egui::Theme::Dark)));
+        assert_eq!(applications.get(AppearanceContext::TitlePage), Some((AppearanceMode::System, egui::Theme::Dark)));
+    }
+
+    #[test]
+    fn title_page_close_and_reopen_clears_only_child_application() {
+        let root = new_context();
+        let child = new_context();
+        let mut applications = AppearanceApplications::default();
+        configure_tracked(&root, &mut applications, AppearanceContext::Root, AppearanceMode::Day, egui::Theme::Light);
+        configure_tracked(&child, &mut applications, AppearanceContext::TitlePage, AppearanceMode::Day, egui::Theme::Light);
+
+        applications.clear(AppearanceContext::TitlePage);
+        assert!(applications.get(AppearanceContext::TitlePage).is_none());
+        assert!(applications.get(AppearanceContext::Root).is_some());
+
+        let reopened_child = new_context();
+        let (_, _, installed) = configure_tracked(
+            &reopened_child,
+            &mut applications,
+            AppearanceContext::TitlePage,
+            AppearanceMode::Day,
+            egui::Theme::Light,
+        );
+        assert!(installed, "reopened child context starts unconfigured");
+    }
+
+    #[test]
+    fn unchanged_context_is_a_no_op_without_affecting_the_other_context() {
+        let root = new_context();
+        let child = new_context();
+        let mut applications = AppearanceApplications::default();
+        configure_tracked(&root, &mut applications, AppearanceContext::Root, AppearanceMode::Night, egui::Theme::Light);
+        configure_tracked(&child, &mut applications, AppearanceContext::TitlePage, AppearanceMode::Day, egui::Theme::Light);
+
+        let (_, _, root_installed) = configure_tracked(
+            &root,
+            &mut applications,
+            AppearanceContext::Root,
+            AppearanceMode::Night,
+            egui::Theme::Light,
+        );
+        let (_, _, child_installed) = configure_tracked(
+            &child,
+            &mut applications,
+            AppearanceContext::TitlePage,
+            AppearanceMode::Day,
+            egui::Theme::Light,
+        );
+        assert!(!root_installed);
+        assert!(!child_installed);
+
+        let (_, _, child_update_installed) = configure_tracked(
+            &child,
+            &mut applications,
+            AppearanceContext::TitlePage,
+            AppearanceMode::Night,
+            egui::Theme::Light,
+        );
+        assert!(child_update_installed, "root's unchanged marker cannot suppress child installation");
+    }
 }
