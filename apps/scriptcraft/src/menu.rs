@@ -9,7 +9,7 @@ use super::menu_items::{
 };
 use super::shortcuts::{shortcut_matches, ShortcutPlatform};
 use eframe::egui;
-use scriptcraft_commands::{Command, CommandId, CommandOrigin};
+use scriptcraft_commands::{Command, CommandId, CommandOrigin, ScriptViewMode};
 use std::collections::VecDeque;
 
 /// Initial presentation values are agent-defaults pending user review against
@@ -316,6 +316,7 @@ impl PendingDesktopCommands {
 pub(super) fn show_menu_bar(
     ui: &mut egui::Ui,
     availability: AppCommandAvailability,
+    script_view_mode: ScriptViewMode,
     say_undual: bool,
     pending: &mut PendingDesktopCommands,
 ) {
@@ -380,7 +381,7 @@ pub(super) fn show_menu_bar(
                         .min_scrolled_height(0.0)
                         .auto_shrink([true, true])
                         .show(ui, |ui| {
-                            render_menu_entries(ui, menu.entries, availability, say_undual, pending, metrics);
+                            render_menu_entries(ui, menu.entries, availability, script_view_mode, say_undual, pending, metrics);
                         });
                 },
             );
@@ -420,6 +421,7 @@ fn render_menu_entries(
     ui: &mut egui::Ui,
     entries: &'static [MenuEntrySpec],
     availability: AppCommandAvailability,
+    script_view_mode: ScriptViewMode,
     say_undual: bool,
     pending: &mut PendingDesktopCommands,
     metrics: MenuPresentationMetrics,
@@ -431,7 +433,7 @@ fn render_menu_entries(
             }
             MenuEntrySpec::Submenu(menu) => {
                 ui.menu_button(egui::RichText::new(menu.label).size(metrics.item_text_size), |ui| {
-                    render_menu_entries(ui, menu.entries, availability, say_undual, pending, metrics);
+                    render_menu_entries(ui, menu.entries, availability, script_view_mode, say_undual, pending, metrics);
                 });
             }
             MenuEntrySpec::Item(item) => {
@@ -445,11 +447,7 @@ fn render_menu_entries(
                 };
                 let label = menu_item_label(item, say_undual);
                 let shortcut = menu_shortcut_label(item);
-                let icon_atom = menu_icon_atom(
-                    item,
-                    matches!(item.behavior, MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Checked)),
-                    metrics,
-                );
+                let icon_atom = menu_icon_atom(item, script_view_mode, metrics);
                 let mut label_atom = egui::Atom::from(egui::RichText::new(label).size(metrics.item_text_size));
                 label_atom.grow = true;
                 label_atom.align = egui::Align2::LEFT_CENTER;
@@ -506,11 +504,11 @@ fn menu_item_label<'a>(item: &'a MenuItemSpec, say_undual: bool) -> &'a str {
 
 fn menu_icon_atom(
     item: &MenuItemSpec,
-    checked: bool,
+    script_view_mode: ScriptViewMode,
     metrics: MenuPresentationMetrics,
 ) -> egui::Atom<'static> {
     let slot_size = egui::vec2(metrics.icon_slot_width, metrics.row_height);
-    if checked {
+    if super::menu_items::menu_item_is_checked(item, script_view_mode) {
         let mut atom = egui::Atom::from(
             egui::RichText::new("✓").size(metrics.icon_size),
         );

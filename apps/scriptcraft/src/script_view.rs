@@ -9,7 +9,7 @@ use eframe::egui::{self, Color32, FontFamily, FontId, Key, Sense, Stroke, Vec2};
 use egui::epaint::text::{Galley, LayoutJob};
 use scriptcraft_commands::{
     Command, CommandId, CommandOrigin, EditorSurface, HorizontalDirection, LineEdge,
-    PointerPhase, VerticalDirection,
+    PointerPhase, ScriptViewMode, VerticalDirection,
 };
 use scriptcraft_core::editing::{EditError, Position, Selection};
 use scriptcraft_core::formatting::EffectiveTextStyle;
@@ -27,6 +27,7 @@ const PAGE_VERTICAL_GAP: f32 = 12.0;
 const SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING: f32 = 8.0;
 const SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING: f32 = 0.0;
 const PAGE_BORDER_WIDTH: f32 = 2.5;
+const NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH: f32 = 1.0;
 const PAGE_PAINT_OVERSCAN: usize = 1;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -36,29 +37,127 @@ enum CaretPresentation {
     Projected(super::presentation_geometry::ProjectedCaretRect),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PresentedPage {
+    rect: egui::Rect,
+    document_y_offset: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PresentedPagePolicy {
+    page_height: f32,
+    document_y_offset: f32,
+    explicit_gap: f32,
+    vertical_item_spacing: f32,
+}
+
+fn resolve_presentation_mode(
+    surface: EditorSurface,
+    body_mode: impl FnOnce() -> ScriptViewMode,
+) -> ScriptViewMode {
+    match surface {
+        EditorSurface::Body => body_mode(),
+        EditorSurface::TitlePage => ScriptViewMode::Page,
+    }
+}
+
+fn presented_page_policy(
+    mode: ScriptViewMode,
+    paper_height: f32,
+    content_top: f32,
+    content_height: f32,
+    scale: f32,
+    vertical_item_spacing: f32,
+) -> PresentedPagePolicy {
+    let document_y_offset = match mode {
+        ScriptViewMode::Speed => content_top,
+        ScriptViewMode::Normal | ScriptViewMode::Page => 0.0,
+    };
+    let speed_view = mode == ScriptViewMode::Speed;
+    PresentedPagePolicy {
+        page_height: if speed_view {
+            content_height * scale
+        } else {
+            paper_height * scale
+        },
+        document_y_offset,
+        explicit_gap: if speed_view { 0.0 } else { PAGE_VERTICAL_GAP },
+        vertical_item_spacing: if speed_view {
+            0.0
+        } else {
+            vertical_item_spacing
+        },
+    }
+}
+
+fn page_chrome_visible(mode: ScriptViewMode) -> bool {
+    mode == ScriptViewMode::Page
+}
+
+fn normal_view_page_bottom_rule_visible(
+    mode: ScriptViewMode,
+    page_index: usize,
+    page_count: usize,
+) -> bool {
+    mode == ScriptViewMode::Normal && page_index < page_count.saturating_sub(1)
+}
+
+fn normal_view_page_bottom_rule_geometry(page_rect: egui::Rect) -> [egui::Pos2; 2] {
+    [
+        egui::pos2(page_rect.left(), page_rect.bottom()),
+        egui::pos2(page_rect.right(), page_rect.bottom()),
+    ]
+}
+
+fn script_view_backdrop(
+    mode: ScriptViewMode,
+    palette: theme::ScriptWorkspacePalette,
+) -> Color32 {
+    match mode {
+        ScriptViewMode::Page => palette.background,
+        ScriptViewMode::Normal | ScriptViewMode::Speed => palette.page.paper,
+    }
+}
+
+fn document_y_to_screen(page: PresentedPage, document_y: f32, scale: f32) -> f32 {
+    page.rect.top() + (document_y - page.document_y_offset) * scale
+}
+
+fn screen_y_to_document(page: PresentedPage, screen_y: f32, scale: f32) -> f32 {
+    page.document_y_offset + (screen_y - page.rect.top()) / scale
+}
+
+fn page_local_screen_origin(page: PresentedPage, scale: f32) -> egui::Pos2 {
+    egui::pos2(
+        page.rect.left(),
+        document_y_to_screen(page, 0.0, scale),
+    )
+}
+
 fn viewport_caret_rect(
     presentation: CaretPresentation,
-    page_rect: egui::Rect,
+    page: PresentedPage,
     scale: f32,
 ) -> (egui::Rect, Option<egui::Rect>) {
     match presentation {
         CaretPresentation::Fixed(rect) => (
             egui::Rect::from_min_size(
                 egui::pos2(
-                    page_rect.left() + rect.x.to_points_f32() * scale,
-                    page_rect.top() + rect.y.to_points_f32() * scale,
+                    page.rect.left() + rect.x.to_points_f32() * scale,
+                    document_y_to_screen(page, rect.y.to_points_f32(), scale),
                 ),
                 Vec2::new(CARET_WIDTH, rect.height.to_points_f32() * scale),
             ),
             None,
         ),
         CaretPresentation::Projected(projected) => {
-            let viewport_rect = projected.rect.translate(page_rect.min.to_vec2());
+            let page_origin = page_local_screen_origin(page, scale);
+            let viewport_rect = projected.rect.translate(page_origin.to_vec2());
             let viewport_clip = egui::Rect::from_min_max(
-                page_rect.min + projected.clip_bounds.min.to_vec2(),
-                page_rect.min + projected.clip_bounds.max.to_vec2(),
+                page_origin + projected.clip_bounds.min.to_vec2(),
+                page_origin + projected.clip_bounds.max.to_vec2(),
             )
-            .intersect(page_rect);
+            .intersect(page.rect);
             (viewport_rect, Some(viewport_clip))
         }
     }
@@ -83,13 +182,13 @@ fn dual_group_navigation_edge(
 }
 
 fn viewport_paint_page_range(
-    page_rects: &[egui::Rect],
+    pages: &[PresentedPage],
     editor_clip: egui::Rect,
 ) -> Option<(usize, usize)> {
     let mut first_visible = None;
     let mut last_visible = None;
-    for (page_index, page_rect) in page_rects.iter().enumerate() {
-        if page_rect.intersects(editor_clip) {
+    for (page_index, page) in pages.iter().enumerate() {
+        if page.rect.intersects(editor_clip) {
             first_visible.get_or_insert(page_index);
             last_visible = Some(page_index);
         }
@@ -100,7 +199,7 @@ fn viewport_paint_page_range(
         first_visible.saturating_sub(PAGE_PAINT_OVERSCAN),
         last_visible
             .saturating_add(PAGE_PAINT_OVERSCAN)
-            .min(page_rects.len().saturating_sub(1)),
+            .min(pages.len().saturating_sub(1)),
     ))
 }
 
@@ -111,6 +210,744 @@ pub(super) fn has_nonzero_mouse_wheel(events: &[egui::Event]) -> bool {
             egui::Event::MouseWheel { delta, .. } if *delta != Vec2::ZERO
         )
     })
+}
+
+#[cfg(test)]
+mod presented_page_policy_tests {
+    use super::{
+        boundary_screen_geometry, document_y_to_screen, page_chrome_visible,
+        presented_page_policy, presentation_metrics_at_zoom, resolve_presentation_mode,
+        screen_y_to_document, viewport_caret_rect, CaretPresentation,
+        normal_view_page_bottom_rule_geometry, normal_view_page_bottom_rule_visible,
+        prepaint_zoom_scroll_offset, script_view_backdrop, PrepaintZoomPlan, PresentedPage,
+        NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH, PAGE_VERTICAL_GAP,
+        page_scroll_geometry, SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING,
+    };
+    use eframe::egui::{self, vec2, Vec2};
+    use scriptcraft_commands::{EditorSurface, ScriptViewMode};
+    use super::theme::{ApplicationPalette, ResolvedAppearance};
+
+    fn workspace_palette(appearance: ResolvedAppearance) -> super::theme::ScriptWorkspacePalette {
+        let visuals = match appearance {
+            ResolvedAppearance::Day => egui::Visuals::light(),
+            ResolvedAppearance::Night | ResolvedAppearance::Midnight => egui::Visuals::dark(),
+        };
+        ApplicationPalette::from_visuals(appearance, &visuals).script_workspace
+    }
+
+    #[test]
+    fn allocation_policy_crops_speed_to_printable_height_and_preserves_other_modes() {
+        let paper_height = 900.0;
+        let top_margin = 37.0;
+        let bottom_margin = 91.0;
+        let content_height = paper_height - top_margin - bottom_margin;
+        let vertical_item_spacing = 8.0;
+        for mode in [ScriptViewMode::Normal, ScriptViewMode::Page, ScriptViewMode::Speed] {
+            for zoom_percent in [75, 100, 300] {
+                let scale = presentation_metrics_at_zoom(
+                    1_000.0,
+                    612.0,
+                    12.0,
+                    zoom_percent,
+                )
+                .scale;
+                let policy = presented_page_policy(
+                    mode,
+                    paper_height,
+                    top_margin,
+                    content_height,
+                    scale,
+                    vertical_item_spacing,
+                );
+
+                assert_eq!(
+                    policy.page_height,
+                    if mode == ScriptViewMode::Speed {
+                        (paper_height - top_margin - bottom_margin) * scale
+                    } else {
+                        paper_height * scale
+                    }
+                );
+                assert_eq!(
+                    policy.document_y_offset,
+                    if mode == ScriptViewMode::Speed {
+                        top_margin
+                    } else {
+                        0.0
+                    }
+                );
+                assert_eq!(
+                    policy.explicit_gap,
+                    if mode == ScriptViewMode::Speed {
+                        0.0
+                    } else {
+                        PAGE_VERTICAL_GAP
+                    }
+                );
+                assert_eq!(
+                    policy.vertical_item_spacing,
+                    if mode == ScriptViewMode::Speed {
+                        0.0
+                    } else {
+                        vertical_item_spacing
+                    }
+                );
+            }
+        }
+        assert_eq!(SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING, 8.0);
+        assert_eq!(super::SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING, 0.0);
+    }
+
+    #[test]
+    fn speed_rows_are_adjacent_and_keep_each_source_pages_content_offset_and_index() {
+        let page_content = [(42.0, 640.0), (31.0, 705.0), (58.0, 612.0)];
+        let scale = 1.5;
+        let page_width = 612.0 * scale;
+        let horizontal = page_scroll_geometry(1_000.0, page_width);
+        let page_left = horizontal.leading_padding;
+        assert_eq!(horizontal.content_width, 1_000.0);
+        assert_eq!(page_left, 41.0);
+        assert_eq!(
+            horizontal.content_width - page_left - page_width,
+            41.0,
+        );
+        let mut next_top = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING;
+        let presented = page_content
+            .iter()
+            .enumerate()
+            .map(|(page_index, (content_top, content_height))| {
+                let policy = presented_page_policy(
+                    ScriptViewMode::Speed,
+                    792.0,
+                    *content_top,
+                    *content_height,
+                    scale,
+                    8.0,
+                );
+                let page = PresentedPage {
+                    rect: egui::Rect::from_min_size(
+                        egui::pos2(page_left, next_top),
+                        vec2(page_width, policy.page_height),
+                    ),
+                    document_y_offset: policy.document_y_offset,
+                };
+                next_top += policy.page_height + policy.explicit_gap + policy.vertical_item_spacing;
+                (page_index, page)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(presented.len(), page_content.len());
+        for (page_index, (content_top, _)) in page_content.iter().enumerate() {
+            assert_eq!(presented[page_index].0, page_index);
+            assert_eq!(presented[page_index].1.document_y_offset, *content_top);
+            assert_eq!(presented[page_index].1.rect.left(), page_left);
+            assert_eq!(presented[page_index].1.rect.width(), page_width);
+            if let Some(next_page) = presented.get(page_index + 1) {
+                assert_eq!(presented[page_index].1.rect.bottom(), next_page.1.rect.top());
+            }
+        }
+
+        let one_page_content = [(42.0, 640.0)];
+        let one_page = one_page_content
+            .iter()
+            .enumerate()
+            .map(|(page_index, (content_top, content_height))| {
+                (
+                    page_index,
+                    presented_page_policy(
+                        ScriptViewMode::Speed,
+                        792.0,
+                        *content_top,
+                        *content_height,
+                        scale,
+                        8.0,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(one_page.len(), 1);
+        assert_eq!(one_page[0].0, 0);
+        assert_eq!(one_page[0].1.page_height, 640.0 * scale);
+        assert_eq!(one_page[0].1.explicit_gap, 0.0);
+        assert_eq!(one_page[0].1.vertical_item_spacing, 0.0);
+        assert_eq!(presented_page_policy(
+            ScriptViewMode::Page,
+            792.0,
+            42.0,
+            640.0,
+            scale,
+            8.0,
+        ).page_height, 792.0 * scale);
+        assert_eq!(presented_page_policy(
+            ScriptViewMode::Normal,
+            792.0,
+            42.0,
+            640.0,
+            scale,
+            8.0,
+        ).page_height, 792.0 * scale);
+    }
+
+    #[test]
+    fn pointer_coordinate_conversions_round_trip_speed_and_keep_page_normal_identity() {
+        for (scale, top) in [(0.75, 41.0), (1.0, 125.5), (3.0, 8.0)] {
+            for mode in [ScriptViewMode::Page, ScriptViewMode::Normal, ScriptViewMode::Speed] {
+                let offset = if mode == ScriptViewMode::Speed { 24.0 } else { 0.0 };
+                let page = PresentedPage {
+                    rect: egui::Rect::from_min_size(
+                        egui::pos2(0.0, top),
+                        vec2(612.0 * scale, 792.0 * scale),
+                    ),
+                    document_y_offset: offset,
+                };
+                for document_y in [0.0, offset, offset + 0.25, 320.25, 792.0] {
+                    let screen_y = document_y_to_screen(page, document_y, scale);
+                    let round_trip = screen_y_to_document(page, screen_y, scale);
+                    assert!((round_trip - document_y).abs() <= 0.0001);
+                    if mode != ScriptViewMode::Speed {
+                        assert_eq!(screen_y, top + document_y * scale);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_caret_spans_and_dual_boundaries_share_one_speed_y_translation() {
+        let content_top = 29.0;
+        let document_y = 185.0;
+        let x = 17.0;
+        let width = 43.0;
+        for scale in [0.75, 1.0, 3.0] {
+            let page_rect = egui::Rect::from_min_size(
+                egui::pos2(101.0, 53.0),
+                vec2(612.0 * scale, 792.0 * scale),
+            );
+            let page = PresentedPage {
+                rect: page_rect,
+                document_y_offset: content_top,
+            };
+            let fixed = super::FixedRect {
+                x: scriptcraft_core::FixedPoint::from_points(x as i64),
+                y: scriptcraft_core::FixedPoint::from_points(document_y as i64),
+                width: scriptcraft_core::FixedPoint::from_points(width as i64),
+                height: scriptcraft_core::FixedPoint::from_points(12),
+            };
+            let (caret, _) = viewport_caret_rect(CaretPresentation::Fixed(fixed), page, scale);
+            assert_eq!(caret.left(), page_rect.left() + x * scale);
+            assert_eq!(
+                caret.top(),
+                page_rect.top() + document_y * scale - content_top * scale
+            );
+
+            let (start_x, end_x, boundary_y) =
+                boundary_screen_geometry(page, fixed, scale);
+            assert_eq!(start_x, page_rect.left() + x * scale);
+            assert_eq!(end_x, start_x + width * scale);
+            assert_eq!(boundary_y, caret.top());
+            assert_eq!(
+                document_y_to_screen(page, document_y, scale),
+                boundary_y
+            );
+            let fixed_span_origin_y = document_y_to_screen(page, document_y, scale);
+            let projected_span_origin_y = document_y_to_screen(page, document_y, scale);
+            assert_eq!(fixed_span_origin_y, projected_span_origin_y);
+        }
+    }
+
+    #[test]
+    fn projected_caret_and_clip_translate_once_without_mutating_natural_page_local_geometry() {
+        use scriptcraft_core::formatting::{
+            EffectiveTextStyle, FontFallback, ParagraphAlignment,
+        };
+        use scriptcraft_core::layout::{
+            FixedRect, LayoutLine, PositionedStyledSpan, Rect, SourceRange,
+        };
+        use std::sync::Arc;
+
+        let text_style = EffectiveTextStyle {
+            declared_family: "Arial".to_owned(),
+            family: FontFallback::CourierPrime,
+            size: 12,
+            bold: false,
+            italic: false,
+            underline: false,
+            all_caps: false,
+            hidden_text: false,
+            source_color: None,
+        };
+        let source = SourceRange {
+            element: 0,
+            start: 0,
+            end: 2,
+        };
+        let span = PositionedStyledSpan {
+            display_text: Arc::from("AB"),
+            source,
+            display_source_map: Arc::from([]),
+            text_style: text_style.clone(),
+            char_width: scriptcraft_core::FixedPoint::from_points(10),
+            geometry: FixedRect {
+                x: scriptcraft_core::FixedPoint::from_points(15),
+                y: scriptcraft_core::FixedPoint::from_points(30),
+                width: scriptcraft_core::FixedPoint::from_points(20),
+                height: scriptcraft_core::FixedPoint::from_points(12),
+            },
+            underline: false,
+            strikethrough: false,
+        };
+        let core_line = LayoutLine {
+            page: 0,
+            role: scriptcraft_core::Role::Action,
+            element: 0,
+            source,
+            text: Arc::from("AB"),
+            display_text: Arc::from("AB"),
+            display_source_map: Arc::from([]),
+            spans: vec![span].into(),
+            text_style,
+            char_width: scriptcraft_core::FixedPoint::from_points(10),
+            alignment: ParagraphAlignment::Left,
+            unaligned_line_left: scriptcraft_core::FixedPoint::from_points(15),
+            geometry: FixedRect {
+                x: scriptcraft_core::FixedPoint::from_points(15),
+                y: scriptcraft_core::FixedPoint::from_points(30),
+                width: scriptcraft_core::FixedPoint::from_points(20),
+                height: scriptcraft_core::FixedPoint::from_points(12),
+            },
+            paragraph_bounds: FixedRect {
+                x: scriptcraft_core::FixedPoint::from_points(10),
+                y: scriptcraft_core::FixedPoint::from_points(30),
+                width: scriptcraft_core::FixedPoint::from_points(100),
+                height: scriptcraft_core::FixedPoint::from_points(20),
+            },
+            rect: Rect {
+                x: 10,
+                y: 30,
+                width: 100,
+                height: 20,
+            },
+            keep_with_next: false,
+            oversized: false,
+        };
+        let core_span = &core_line.spans[0];
+        let projected_line = super::super::presentation_geometry::PresentationLine {
+            core: &core_line,
+            line_origin_x: 15.0,
+            total_advance: 20.0,
+            clip_bounds: egui::Rect::from_min_max(
+                egui::pos2(10.0, 30.0),
+                egui::pos2(110.0, 50.0),
+            ),
+            spans: vec![super::super::presentation_geometry::PresentationSpan {
+                core: core_span,
+                advance_mode: super::super::presentation_style::AdvanceMode::FixedCell,
+                origin_x: 15.0,
+                advance: 20.0,
+                display_boundary_offsets: Arc::from([0.0, 10.0, 20.0]),
+                natural: None,
+            }],
+        };
+        for (scale, content_top) in [(0.75, 16.0), (1.0, 29.0), (3.0, 42.0)] {
+            let projected = super::super::presentation_geometry::projected_caret_rect(
+                &projected_line,
+                1,
+                scale,
+                super::CARET_WIDTH,
+            )
+            .expect("fixture produces a projected caret");
+            let natural_rect = projected.rect;
+            let natural_clip = projected.clip_bounds;
+            assert_eq!(natural_rect.top(), 30.0 * scale);
+            let page_rect = egui::Rect::from_min_size(
+                egui::pos2(101.0, 53.0),
+                vec2(612.0 * scale, 792.0 * scale),
+            );
+            let page = PresentedPage {
+                rect: page_rect,
+                document_y_offset: content_top,
+            };
+            let (viewport_rect, viewport_clip) =
+                viewport_caret_rect(CaretPresentation::Projected(projected), page, scale);
+            let translation = egui::vec2(
+                page_rect.left(),
+                page_rect.top() - content_top * scale,
+            );
+            assert_eq!(viewport_rect, natural_rect.translate(translation));
+            assert_eq!(
+                viewport_clip,
+                Some(natural_clip.translate(translation).intersect(page_rect))
+            );
+            assert_eq!(projected.rect, natural_rect);
+            assert_eq!(projected.clip_bounds, natural_clip);
+        }
+    }
+
+    #[test]
+    fn title_page_always_resolves_to_page_independently_of_body_mode() {
+        for body_mode in [ScriptViewMode::Normal, ScriptViewMode::Speed] {
+            let body_mode_was_read = std::cell::Cell::new(false);
+            assert_eq!(
+                resolve_presentation_mode(EditorSurface::TitlePage, || {
+                    body_mode_was_read.set(true);
+                    body_mode
+                }),
+                ScriptViewMode::Page
+            );
+            assert!(!body_mode_was_read.get());
+        }
+        assert_eq!(
+            resolve_presentation_mode(EditorSurface::Body, || ScriptViewMode::Normal),
+            ScriptViewMode::Normal
+        );
+        assert_eq!(
+            resolve_presentation_mode(EditorSurface::Body, || ScriptViewMode::Speed),
+            ScriptViewMode::Speed
+        );
+    }
+
+    #[test]
+    fn page_row_origins_and_stride_remain_the_existing_full_page_geometry() {
+        let policy = presented_page_policy(ScriptViewMode::Page, 792.0, 0.0, 612.0, 1.0, 8.0);
+        let stride = policy.page_height + policy.explicit_gap + policy.vertical_item_spacing;
+        assert_eq!(stride, 812.0);
+        let row_origins = (0..3)
+            .map(|page_index| {
+                SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING + page_index as f32 * stride
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(row_origins, vec![8.0, 820.0, 1632.0]);
+
+        let speed_policy = presented_page_policy(ScriptViewMode::Speed, 792.0, 40.0, 612.0, 1.0, 8.0);
+        assert_eq!(speed_policy.page_height, 612.0);
+        assert_eq!(
+            speed_policy.page_height
+                + speed_policy.explicit_gap
+                + speed_policy.vertical_item_spacing,
+            612.0,
+        );
+    }
+
+    #[test]
+    fn backdrop_policy_uses_workspace_for_page_and_paper_for_normal_and_speed() {
+        for appearance in [
+            ResolvedAppearance::Day,
+            ResolvedAppearance::Night,
+            ResolvedAppearance::Midnight,
+        ] {
+            let palette = workspace_palette(appearance);
+            assert_eq!(
+                script_view_backdrop(ScriptViewMode::Page, palette),
+                palette.background,
+                "Page backdrop for {appearance:?}",
+            );
+            for mode in [ScriptViewMode::Normal, ScriptViewMode::Speed] {
+                assert_eq!(
+                    script_view_backdrop(mode, palette),
+                    palette.page.paper,
+                    "{mode:?} backdrop for {appearance:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn per_page_paper_chrome_is_enabled_only_for_page_mode() {
+        assert!(page_chrome_visible(ScriptViewMode::Page));
+        assert!(!page_chrome_visible(ScriptViewMode::Normal));
+        assert!(!page_chrome_visible(ScriptViewMode::Speed));
+    }
+
+    #[test]
+    fn normal_bottom_rule_is_visible_only_between_normal_pages() {
+        let page_count = 3;
+        for mode in [ScriptViewMode::Normal, ScriptViewMode::Page, ScriptViewMode::Speed] {
+            assert_eq!(
+                normal_view_page_bottom_rule_visible(mode, 0, page_count),
+                mode == ScriptViewMode::Normal,
+                "first page rule for {mode:?}",
+            );
+            assert_eq!(
+                normal_view_page_bottom_rule_visible(mode, 1, page_count),
+                mode == ScriptViewMode::Normal,
+                "middle page rule for {mode:?}",
+            );
+            assert!(!normal_view_page_bottom_rule_visible(mode, 2, page_count));
+            assert!(!normal_view_page_bottom_rule_visible(mode, 0, 1));
+            assert!(!normal_view_page_bottom_rule_visible(mode, 0, 0));
+        }
+
+        for body_mode in [ScriptViewMode::Normal, ScriptViewMode::Speed] {
+            let title_page_mode =
+                resolve_presentation_mode(EditorSurface::TitlePage, || body_mode);
+            assert_eq!(title_page_mode, ScriptViewMode::Page);
+            assert!(!normal_view_page_bottom_rule_visible(title_page_mode, 0, page_count));
+        }
+    }
+
+    #[test]
+    fn normal_bottom_rule_uses_full_presented_paper_edges_and_preserves_page_geometry() {
+        let first_rect = egui::Rect::from_min_max(egui::pos2(37.25, 11.5), egui::pos2(649.25, 803.5));
+        let second_rect = first_rect.translate(vec2(0.0, 812.0));
+        let page_rects = [first_rect, second_rect];
+        let stride = 792.0 + PAGE_VERTICAL_GAP + 8.0;
+        let scroll_extent = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING as f32
+            + page_rects.len() as f32 * (792.0 + PAGE_VERTICAL_GAP + 8.0);
+
+        assert_eq!(
+            normal_view_page_bottom_rule_geometry(first_rect),
+            [egui::pos2(37.25, 803.5), egui::pos2(649.25, 803.5)],
+        );
+        assert_eq!(NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH, 1.0);
+        assert_eq!(page_rects, [first_rect, second_rect]);
+        assert_eq!(stride, 812.0);
+        assert_eq!(scroll_extent, 1632.0);
+    }
+
+    #[test]
+    fn title_page_backdrop_and_page_chrome_resolve_from_forced_page_mode() {
+        let palette = workspace_palette(ResolvedAppearance::Midnight);
+        for body_mode in [ScriptViewMode::Normal, ScriptViewMode::Speed] {
+            let mode = resolve_presentation_mode(EditorSurface::TitlePage, || body_mode);
+            assert_eq!(mode, ScriptViewMode::Page);
+            assert_eq!(script_view_backdrop(mode, palette), palette.background);
+            assert!(page_chrome_visible(mode));
+        }
+    }
+
+    fn viewport_anchor(
+        page_index: usize,
+        document_y: f32,
+    ) -> super::super::status_bar::ViewportCenterAnchor {
+        super::super::status_bar::ViewportCenterAnchor {
+            page_index,
+            page_local_document_point: vec2(280.0, document_y),
+            outside_page_offset_points: vec2(0.0, 0.0),
+            viewport_center: egui::pos2(0.0, 0.0),
+        }
+    }
+
+    fn assert_plan_matches_allocation_policy(
+        plan: &PrepaintZoomPlan,
+        mode: ScriptViewMode,
+        zoom_percent: u16,
+        page_content: &[(f32, f32)],
+        anchor: super::super::status_bar::ViewportCenterAnchor,
+    ) {
+        let paper_width = 612.0;
+        let paper_height = 792.0;
+        let base_font_size = 12.0;
+        let vertical_spacing = 8.0;
+        let outer = egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(900.0, 600.0));
+        let metrics = presentation_metrics_at_zoom(
+            outer.width(),
+            paper_width,
+            base_font_size,
+            zoom_percent,
+        );
+        let horizontal = page_scroll_geometry(outer.width(), metrics.page_width);
+        let mut next_top = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING;
+        let mut total_height =
+            SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING + super::SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING;
+        let mut expected_target = None;
+        for (index, (content_top, content_height)) in page_content.iter().copied().enumerate() {
+            let policy = presented_page_policy(
+                mode,
+                paper_height,
+                content_top,
+                content_height,
+                metrics.scale,
+                vertical_spacing,
+            );
+            let stride = policy.page_height + policy.explicit_gap + policy.vertical_item_spacing;
+            assert_eq!(plan.page_origins[index], next_top);
+            assert_eq!(plan.page_heights[index], policy.page_height);
+            assert_eq!(plan.page_strides[index], stride);
+            if index == anchor.page_index {
+                let target_document_y = if mode == ScriptViewMode::Speed {
+                    anchor
+                        .page_local_document_point
+                        .y
+                        .clamp(content_top, content_top + content_height)
+                } else {
+                    anchor.page_local_document_point.y.clamp(0.0, paper_height)
+                };
+                expected_target = Some(
+                    outer.min
+                        + vec2(horizontal.leading_padding, next_top)
+                        + vec2(
+                            anchor.page_local_document_point.x,
+                            target_document_y - policy.document_y_offset,
+                        ) * metrics.scale,
+                );
+            }
+            next_top += stride;
+            total_height += stride;
+        }
+        assert_eq!(
+            plan.content_size,
+            vec2(horizontal.content_width, total_height),
+        );
+        let viewport_center = outer.center();
+        let requested = expected_target.expect("anchor page is represented") - viewport_center;
+        let maximum = (plan.content_size - outer.size()).max(Vec2::ZERO);
+        assert_eq!(
+            plan.scroll_offset,
+            vec2(
+                requested.x.clamp(0.0, maximum.x),
+                requested.y.clamp(0.0, maximum.y),
+            ),
+        );
+    }
+
+    #[test]
+    fn prepaint_geometry_matches_allocated_origins_strides_extent_and_offsets_at_zoom_levels() {
+        let page_content = [(35.0, 650.0), (50.0, 620.0), (42.0, 660.0), (30.0, 670.0)];
+        for mode in [ScriptViewMode::Page, ScriptViewMode::Normal, ScriptViewMode::Speed] {
+            for zoom_percent in [75, 100, 300] {
+                let anchor = viewport_anchor(2, 315.0);
+                let plan = prepaint_zoom_scroll_offset(
+                    anchor,
+                    page_content.len(),
+                    612.0,
+                    792.0,
+                    mode,
+                    &page_content,
+                    12.0,
+                    zoom_percent,
+                    egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(900.0, 600.0)),
+                    8.0,
+                )
+                .expect("finite page allocation yields a zoom plan");
+                assert_plan_matches_allocation_policy(
+                    &plan,
+                    mode,
+                    zoom_percent,
+                    &page_content,
+                    anchor,
+                );
+                if mode == ScriptViewMode::Speed {
+                    assert!(plan
+                        .page_strides
+                        .iter()
+                        .zip(&plan.page_heights)
+                        .all(|(stride, height)| stride == height));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn target_speed_crop_clamps_paper_margin_anchors_and_preserves_page_local_y() {
+        let page_content = [(35.0, 650.0), (50.0, 620.0), (42.0, 660.0)];
+        let outer = egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(900.0, 600.0));
+        for (document_y, expected_target_y) in [(10.0, 50.0), (780.0, 670.0)] {
+            let anchor = viewport_anchor(1, document_y);
+            let speed = prepaint_zoom_scroll_offset(
+                anchor,
+                page_content.len(),
+                612.0,
+                792.0,
+                ScriptViewMode::Speed,
+                &page_content,
+                12.0,
+                100,
+                outer,
+                8.0,
+            )
+            .expect("Speed target policy is valid");
+            assert_plan_matches_allocation_policy(
+                &speed,
+                ScriptViewMode::Speed,
+                100,
+                &page_content,
+                anchor,
+            );
+            let speed_policy = presented_page_policy(
+                ScriptViewMode::Speed,
+                792.0,
+                page_content[1].0,
+                page_content[1].1,
+                presentation_metrics_at_zoom(outer.width(), 612.0, 12.0, 100).scale,
+                8.0,
+            );
+            assert_eq!(
+                document_y.clamp(
+                    page_content[1].0,
+                    page_content[1].0 + page_content[1].1,
+                ),
+                expected_target_y,
+            );
+            assert_eq!(speed.page_origins.len(), page_content.len());
+            assert_eq!(speed_policy.document_y_offset, page_content[1].0);
+
+            let page = prepaint_zoom_scroll_offset(
+                anchor,
+                page_content.len(),
+                612.0,
+                792.0,
+                ScriptViewMode::Page,
+                &page_content,
+                12.0,
+                100,
+                outer,
+                8.0,
+            )
+            .expect("Page target policy is valid");
+            assert_eq!(page.page_origins.len(), page_content.len());
+            assert_plan_matches_allocation_policy(
+                &page,
+                ScriptViewMode::Page,
+                100,
+                &page_content,
+                anchor,
+            );
+        }
+    }
+
+    #[test]
+    fn prepaint_handles_deep_horizontal_overflow_and_one_page_without_mutating_inputs() {
+        let page_content = [(35.0, 650.0), (50.0, 620.0), (42.0, 660.0), (30.0, 670.0)];
+        let anchor = viewport_anchor(3, 640.0);
+        let original_anchor = anchor;
+        let original_pages = page_content;
+        let deep = prepaint_zoom_scroll_offset(
+            anchor,
+            page_content.len(),
+            612.0,
+            792.0,
+            ScriptViewMode::Speed,
+            &page_content,
+            12.0,
+            300,
+            egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(400.0, 260.0)),
+            8.0,
+        )
+        .expect("deep multi-page overflow has a finite plan");
+        assert!(deep.content_size.x > 400.0);
+        assert!(deep.scroll_offset.x > 0.0);
+        assert!(deep.scroll_offset.y > 0.0);
+        assert!(deep.scroll_offset.y <= deep.content_size.y - 260.0);
+        assert_eq!(anchor, original_anchor);
+        assert_eq!(page_content, original_pages);
+
+        let one_page = [(42.0, 612.0)];
+        let one_page_plan = prepaint_zoom_scroll_offset(
+            viewport_anchor(0, 300.0),
+            1,
+            612.0,
+            792.0,
+            ScriptViewMode::Speed,
+            &one_page,
+            12.0,
+            100,
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(900.0, 700.0)),
+            8.0,
+        )
+        .expect("one-page allocation has a finite plan");
+        assert_eq!(one_page_plan.page_origins.len(), 1);
+        assert_eq!(one_page_plan.page_strides[0], one_page_plan.page_heights[0]);
+    }
 }
 
 #[cfg(test)]
@@ -146,15 +983,19 @@ impl ScriptCraftApp {
         &mut self,
         layout: &ScreenplayLayout,
         page: usize,
-        page_rect: egui::Rect,
+        presented_page: PresentedPage,
         scale: f32,
         pointer: egui::Pos2,
         projections: Option<&[Option<Vec<Option<super::presentation_geometry::PresentationLine<'_>>>>]>,
     ) -> Option<Position> {
-        let local_x =
-            FixedPoint::from_points_f64(f64::from((pointer.x - page_rect.left()) / scale))?;
-        let local_y =
-            FixedPoint::from_points_f64(f64::from((pointer.y - page_rect.top()) / scale))?;
+        let local_x = FixedPoint::from_points_f64(f64::from(
+            (pointer.x - presented_page.rect.left()) / scale,
+        ))?;
+        let local_y = FixedPoint::from_points_f64(f64::from(screen_y_to_document(
+            presented_page,
+            pointer.y,
+            scale,
+        )))?;
         let started = Instant::now();
         self.performance.caret_lookups = self.performance.caret_lookups.saturating_add(1);
         let mut query_diagnostics = InteractionQueryDiagnostics::default();
@@ -177,7 +1018,7 @@ impl ScriptCraftApp {
                     })
                     .and_then(Option::as_ref);
                 if let Some(projected) = projected {
-                    let screen_x = pointer.x - page_rect.left();
+                    let screen_x = pointer.x - presented_page.rect.left();
                     Some(super::presentation_geometry::projected_caret_for_x(
                         projected,
                         screen_x,
@@ -263,21 +1104,21 @@ impl ScriptCraftApp {
 
     fn pointer_surface_page(
         layout: &ScreenplayLayout,
-        page_rects: &[egui::Rect],
+        pages: &[PresentedPage],
         pointer: egui::Pos2,
         surface: EditorSurface,
     ) -> Option<usize> {
-        page_rects
+        pages
             .iter()
             .enumerate()
             .filter(|(index, _)| {
                 layout.pages[*index].title_page == (surface == EditorSurface::TitlePage)
             })
-            .min_by_key(|(index, rect)| {
-                let distance = if pointer.y < rect.top() {
-                    rect.top() - pointer.y
-                } else if pointer.y > rect.bottom() {
-                    pointer.y - rect.bottom()
+            .min_by_key(|(index, page)| {
+                let distance = if pointer.y < page.rect.top() {
+                    page.rect.top() - pointer.y
+                } else if pointer.y > page.rect.bottom() {
+                    pointer.y - page.rect.bottom()
                 } else {
                     0.0
                 };
@@ -357,15 +1198,17 @@ impl ScriptCraftApp {
         ui: &mut egui::Ui,
         layout: &ScreenplayLayout,
         page_index: usize,
-        page_rect: egui::Rect,
+        presented_page: PresentedPage,
         metrics: PresentationMetrics,
         projections: &[Option<super::presentation_geometry::PresentationLine<'_>>],
         editor_id: egui::Id,
         caret_page_index: Option<usize>,
         caret_geometry: Option<CaretPresentation>,
         surface: EditorSurface,
+        presentation_mode: ScriptViewMode,
     ) {
         let scale = metrics.scale;
+        let page_rect = presented_page.rect;
         let paint_started = Instant::now();
         self.performance.painted_pages = self.performance.painted_pages.saturating_add(1);
         add_performance_counter(
@@ -374,13 +1217,26 @@ impl ScriptCraftApp {
         );
         let painter = ui.painter_at(page_rect);
         let palette = self.theme_palette.script_workspace.page;
-        painter.rect_filled(page_rect, 2.0, palette.paper);
-        painter.rect_stroke(
-            page_rect,
-            2.0,
-            Stroke::new(PAGE_BORDER_WIDTH, palette.border),
-            egui::StrokeKind::Middle,
-        );
+        if page_chrome_visible(presentation_mode) {
+            painter.rect_filled(page_rect, 2.0, palette.paper);
+            painter.rect_stroke(
+                page_rect,
+                2.0,
+                Stroke::new(PAGE_BORDER_WIDTH, palette.border),
+                egui::StrokeKind::Middle,
+            );
+        }
+        if normal_view_page_bottom_rule_visible(
+            presentation_mode,
+            page_index,
+            layout.pages.len(),
+        ) {
+            let rule_painter = ui.painter().with_clip_rect(ui.clip_rect());
+            rule_painter.line_segment(
+                normal_view_page_bottom_rule_geometry(page_rect),
+                Stroke::new(NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH, palette.text),
+            );
+        }
 
         if surface == EditorSurface::Body
             && layout.purpose == scriptcraft_core::layout::LayoutPurpose::Editor
@@ -399,7 +1255,7 @@ impl ScriptCraftApp {
                             continue;
                         }
                         let (start_x, end_x, y) =
-                            boundary_screen_geometry(page_rect, geometry, scale);
+                            boundary_screen_geometry(presented_page, geometry, scale);
                         paint_dotted_boundary(
                             &painter,
                             start_x,
@@ -447,14 +1303,19 @@ impl ScriptCraftApp {
                 if let Some(first_span) = projection.spans.first() {
                     debug_assert_eq!(first_span.origin_x, projection.line_origin_x);
                 }
-                let line_clip = page_rect.intersect(egui::Rect::from_min_max(
-                    page_rect.min + projection.clip_bounds.min.to_vec2(),
-                    page_rect.min + projection.clip_bounds.max.to_vec2(),
-                ));
+                let page_origin = page_local_screen_origin(presented_page, scale);
+                let line_clip = projection
+                    .clip_bounds
+                    .translate(page_origin.to_vec2())
+                    .intersect(page_rect);
                 let line_painter = painter.with_clip_rect(line_clip);
                 for (projected, resolved) in projection.spans.iter().zip(&resolved_paints) {
                     let span = projected.core;
-                    let span_y = page_rect.top() + span.geometry.y.to_points_f32() * scale;
+                    let span_y = document_y_to_screen(
+                        presented_page,
+                        span.geometry.y.to_points_f32(),
+                        scale,
+                    );
                     let span_height = span.geometry.height.to_points_f32() * scale;
                     let span_origin = egui::pos2(
                         page_rect.left() + projected.origin_x,
@@ -565,7 +1426,11 @@ impl ScriptCraftApp {
 
             for (span, resolved_paint) in line.spans.iter().zip(&resolved_paints) {
                 let span_x = page_rect.left() + span.geometry.x.to_points_f32() * scale;
-                let span_y = page_rect.top() + span.geometry.y.to_points_f32() * scale;
+                let span_y = document_y_to_screen(
+                    presented_page,
+                    span.geometry.y.to_points_f32(),
+                    scale,
+                );
                 let span_height = span.geometry.height.to_points_f32() * scale;
                 let span_width = span.geometry.width.to_points_f32() * scale;
                 let display_count = span.display_text.chars().count();
@@ -647,7 +1512,8 @@ impl ScriptCraftApp {
             && selection.anchor == selection.focus
         {
             if let Some(caret_geometry) = caret_geometry {
-                let (caret_rect, caret_clip) = viewport_caret_rect(caret_geometry, page_rect, scale);
+                let (caret_rect, caret_clip) =
+                    viewport_caret_rect(caret_geometry, presented_page, scale);
                 let caret = Caret {
                     element: selection.focus.element,
                     offset: selection.focus.offset,
@@ -715,6 +1581,8 @@ impl ScriptCraftApp {
     }
 
     pub(super) fn live_document_surface(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
+        let presentation_mode =
+            resolve_presentation_mode(surface, || self.script_view_mode);
         let layout = match self.layout_for_render(surface) {
             Ok(layout) => layout,
             Err(error) => {
@@ -730,7 +1598,7 @@ impl ScriptCraftApp {
         self.rendered_revision = Some(self.session.revision());
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let scroll_outer_rect = ui.available_rect_before_wrap();
-        let mut page_rects = Vec::with_capacity(layout.pages.len());
+        let mut presented_pages = Vec::with_capacity(layout.pages.len());
         let mut frame_projections = std::iter::repeat_with(|| None)
             .take(layout.pages.len())
             .collect::<Vec<
@@ -740,16 +1608,29 @@ impl ScriptCraftApp {
         let reveal_intent = self.reveal_intent;
         let pending_zoom_anchor = self.pending_zoom_anchor;
         let zoom_compensation_offset = pending_zoom_anchor.and_then(|anchor| {
+            let page_content_bounds = layout
+                .pages
+                .iter()
+                .map(|page| {
+                    (
+                        page.content_bounds.y as f32,
+                        page.content_bounds.height as f32,
+                    )
+                })
+                .collect::<Vec<_>>();
             prepaint_zoom_scroll_offset(
                 anchor,
                 layout.pages.len(),
                 layout.inputs.paper_width as f32,
                 layout.inputs.paper_height as f32,
+                presentation_mode,
+                &page_content_bounds,
                 layout.inputs.font_size as f32,
                 self.zoom_percent,
                 scroll_outer_rect,
                 ui.spacing().item_spacing.y,
             )
+            .map(|plan| plan.scroll_offset)
         });
         let zoom_compensation_queued = zoom_compensation_offset.is_some();
         if zoom_compensation_queued {
@@ -796,32 +1677,53 @@ impl ScriptCraftApp {
             // Allocate every page row to preserve full scroll extent and source geometry;
             // page painting is a separate viewport-bounded pass below.
             let editor_clip = ui.clip_rect();
-            for _ in 0..layout.pages.len() {
+            let vertical_item_spacing = ui.spacing().item_spacing.y;
+            if presentation_mode == ScriptViewMode::Speed {
+                // Only page-row allocation uses this local Ui style; restore it
+                // before paint/reveal widgets and leave the shared context intact.
+                ui.spacing_mut().item_spacing.y = 0.0;
+            }
+            for (page_index, page) in layout.pages.iter().enumerate() {
                 add_performance_counter(&mut self.performance.pages_considered, 1);
+                let policy = presented_page_policy(
+                    presentation_mode,
+                    layout.inputs.paper_height as f32,
+                    page.content_bounds.y as f32,
+                    page.content_bounds.height as f32,
+                    scale,
+                    vertical_item_spacing,
+                );
                 ui.horizontal(|ui| {
                     // Explicit geometry owns all horizontal spacing; default
                     // row gaps would inflate measured scroll content.
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.add_space(geometry.leading_padding);
-                    let page_height = layout.inputs.paper_height as f32 * scale;
                     let page_rect = ui
-                        .allocate_space(Vec2::new(metrics.page_width, page_height))
+                        .allocate_space(Vec2::new(metrics.page_width, policy.page_height))
                         .1;
                     let trailing_padding =
                         (geometry.content_width - geometry.leading_padding - metrics.page_width)
                             .max(0.0);
                     ui.add_space(trailing_padding);
-                    page_rects.push(page_rect);
+                    presented_pages.push(PresentedPage {
+                        rect: page_rect,
+                        document_y_offset: policy.document_y_offset,
+                    });
                 });
-                ui.add_space(PAGE_VERTICAL_GAP);
+                if policy.explicit_gap > 0.0 {
+                    ui.add_space(policy.explicit_gap);
+                }
             }
-            let paint_range = viewport_paint_page_range(&page_rects, editor_clip);
+            if presentation_mode == ScriptViewMode::Speed {
+                ui.spacing_mut().item_spacing.y = vertical_item_spacing;
+            }
+            let paint_range = viewport_paint_page_range(&presented_pages, editor_clip);
             let painted_in_range = paint_range.map_or(0, |(first, last)| {
                 last.saturating_sub(first).saturating_add(1)
             });
             add_performance_counter(
                 &mut self.performance.pages_culled,
-                page_rects.len().saturating_sub(painted_in_range) as u64,
+                presented_pages.len().saturating_sub(painted_in_range) as u64,
             );
             let caret_page_index = if reveal_intent == RevealIntent::Conditional {
                 let mut query_diagnostics = InteractionQueryDiagnostics::default();
@@ -980,8 +1882,9 @@ impl ScriptCraftApp {
                 .flatten();
             if reveal_intent == RevealIntent::Conditional && !zoom_compensation_queued {
                 if let (Some(page_index), Some(caret)) = (caret_page_index, caret_geometry) {
-                    let page_rect = page_rects[page_index];
-                    let (caret_rect, caret_clip) = viewport_caret_rect(caret, page_rect, scale);
+                    let presented_page = presented_pages[page_index];
+                    let (caret_rect, caret_clip) =
+                        viewport_caret_rect(caret, presented_page, scale);
                     let caret_is_clipped_out =
                         caret_clip.is_some_and(|clip| !clip.intersects(caret_rect));
                     if !caret_is_clipped_out && caret_needs_reveal(caret_rect, editor_clip) {
@@ -992,7 +1895,7 @@ impl ScriptCraftApp {
                 }
             }
             if let Some((first, last)) = paint_range {
-                for (page_index, page_rect) in page_rects
+                for (page_index, presented_page) in presented_pages
                     .iter()
                     .enumerate()
                     .take(last.saturating_add(1))
@@ -1002,13 +1905,14 @@ impl ScriptCraftApp {
                         ui,
                         &layout,
                         page_index,
-                        *page_rect,
+                        *presented_page,
                         metrics,
                         frame_projections[page_index].as_deref().unwrap_or(&[]),
                         editor_id,
                         caret_paint_page_index,
                         caret_geometry,
                         surface,
+                        presentation_mode,
                     );
                 }
             }
@@ -1016,13 +1920,20 @@ impl ScriptCraftApp {
         ui.style_mut().spacing.scroll.fade = scroll_fade;
         let scale = rendered_scale;
         let published_scroll_offset = scroll_output.state.offset;
-        let published_page_rects = page_rects.clone();
+        let published_page_rects = presented_pages
+            .iter()
+            .map(|page| page.rect)
+            .collect::<Vec<_>>();
+        let published_page_document_y_offsets = presented_pages
+            .iter()
+            .map(|page| page.document_y_offset)
+            .collect::<Vec<_>>();
         if !zoom_compensation_queued {
             self.reveal_intent = RevealIntent::None;
         }
 
         let actual_clip = scroll_output.inner_rect.intersect(ui.clip_rect());
-        let geometry_count_matches = page_rects.len() == layout.pages.len();
+        let geometry_count_matches = presented_pages.len() == layout.pages.len();
         let zoom_anchor_was_pending = pending_zoom_anchor.is_some();
         let needs_repaint = if geometry_count_matches {
             self.page_geometry.publish(
@@ -1031,6 +1942,7 @@ impl ScriptCraftApp {
                 ui.ctx().content_rect(),
                 scale,
                 published_page_rects,
+                published_page_document_y_offsets,
                 actual_clip,
                 published_scroll_offset,
             )
@@ -1093,12 +2005,12 @@ impl ScriptCraftApp {
                     ui.ctx(),
                 );
                 if let Some(page_index) =
-                    Self::pointer_surface_page(&layout, &page_rects, pointer, surface)
+                    Self::pointer_surface_page(&layout, &presented_pages, pointer, surface)
                 {
                     if let Some(position) = self.caret_from_pointer(
                         &layout,
                         page_index,
-                        page_rects[page_index],
+                        presented_pages[page_index],
                         scale,
                         pointer,
                         Some(&frame_projections),
@@ -1773,6 +2685,15 @@ struct PageScrollGeometry {
     horizontal_overflow: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct PrepaintZoomPlan {
+    page_origins: Vec<f32>,
+    page_heights: Vec<f32>,
+    page_strides: Vec<f32>,
+    content_size: Vec2,
+    scroll_offset: Vec2,
+}
+
 fn paint_dotted_boundary(
     painter: &egui::Painter,
     start_x: f32,
@@ -1795,13 +2716,13 @@ fn boundary_stroke_width(pixels_per_point: f32) -> f32 {
 }
 
 fn boundary_screen_geometry(
-    page_rect: egui::Rect,
+    page: PresentedPage,
     geometry: FixedRect,
     scale: f32,
 ) -> (f32, f32, f32) {
-    let start_x = page_rect.left() + geometry.x.to_points_f32() * scale;
+    let start_x = page.rect.left() + geometry.x.to_points_f32() * scale;
     let end_x = start_x + geometry.width.to_points_f32() * scale;
-    let y = page_rect.top() + geometry.y.to_points_f32() * scale;
+    let y = document_y_to_screen(page, geometry.y.to_points_f32(), scale);
     (start_x, end_x, y)
 }
 
@@ -1852,12 +2773,24 @@ fn prepaint_zoom_scroll_offset(
     page_count: usize,
     paper_width: f32,
     paper_height: f32,
+    mode: ScriptViewMode,
+    page_content_bounds: &[(f32, f32)],
     base_font_size: f32,
     zoom_percent: u16,
     outer_rect: egui::Rect,
     vertical_item_spacing: f32,
-) -> Option<Vec2> {
-    if anchor.page_index >= page_count || page_count == 0 {
+) -> Option<PrepaintZoomPlan> {
+    if anchor.page_index >= page_count
+        || page_count == 0
+        || page_content_bounds.len() != page_count
+        || !paper_width.is_finite()
+        || !paper_height.is_finite()
+        || !base_font_size.is_finite()
+        || !vertical_item_spacing.is_finite()
+        || page_content_bounds
+            .iter()
+            .any(|(top, height)| !top.is_finite() || !height.is_finite())
+    {
         return None;
     }
     // egui's overlay scrollbars do not consume the ScrollArea inner viewport.
@@ -1866,31 +2799,88 @@ fn prepaint_zoom_scroll_offset(
     let metrics =
         presentation_metrics_at_zoom(inner_size.x, paper_width, base_font_size, zoom_percent);
     let geometry = page_scroll_geometry(inner_size.x, metrics.page_width);
-    let page_height = paper_height * metrics.scale;
-    // `live_document_surface` allocates each page row and then a 12-point
-    // spacer in egui's top-down layout. The layout also applies its vertical
-    // item spacing between rows, which is part of both the page stride and
-    // committed scroll extent; the first page starts after the top content margin.
-    let page_stride = page_height + PAGE_VERTICAL_GAP + vertical_item_spacing;
+    if !metrics.scale.is_finite() || metrics.scale <= 0.0 {
+        return None;
+    }
+    let mut page_origins = Vec::with_capacity(page_count);
+    let mut page_heights = Vec::with_capacity(page_count);
+    let mut page_strides = Vec::with_capacity(page_count);
+    let mut next_page_top = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING;
+    let mut content_height = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING
+        + SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING;
+    let mut target_policy = None;
+    for (page_index, (content_top, content_page_height)) in
+        page_content_bounds.iter().copied().enumerate()
+    {
+        let policy = presented_page_policy(
+            mode,
+            paper_height,
+            content_top,
+            content_page_height,
+            metrics.scale,
+            vertical_item_spacing,
+        );
+        if !policy.page_height.is_finite()
+            || policy.page_height <= 0.0
+            || !policy.document_y_offset.is_finite()
+            || !policy.explicit_gap.is_finite()
+            || !policy.vertical_item_spacing.is_finite()
+        {
+            return None;
+        }
+        if page_index == anchor.page_index {
+            target_policy = Some((policy, content_top, content_page_height));
+        }
+        let page_stride =
+            policy.page_height + policy.explicit_gap + policy.vertical_item_spacing;
+        if !page_stride.is_finite() || page_stride <= 0.0 {
+            return None;
+        }
+        page_origins.push(next_page_top);
+        page_heights.push(policy.page_height);
+        page_strides.push(page_stride);
+        next_page_top += page_stride;
+        content_height += page_stride;
+    }
+    let (target_policy, target_content_top, target_content_height) = target_policy?;
     let content_size = Vec2::new(
         geometry.content_width,
-        page_count as f32 * page_stride
-            + SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING
-            + SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING,
+        content_height,
     );
-    let page_top = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING + anchor.page_index as f32 * page_stride;
+    if !content_size.x.is_finite() || !content_size.y.is_finite() {
+        return None;
+    }
+    let target_document_y = if mode == ScriptViewMode::Speed {
+        anchor
+            .page_local_document_point
+            .y
+            .clamp(target_content_top, target_content_top + target_content_height)
+    } else {
+        anchor.page_local_document_point.y.clamp(0.0, paper_height)
+    };
+    let target_presented_y = target_document_y - target_policy.document_y_offset;
     let content_target = outer_rect.min
-        + Vec2::new(geometry.leading_padding, page_top)
-        + anchor.page_local_document_point * metrics.scale
+        + Vec2::new(geometry.leading_padding, page_origins[anchor.page_index])
+        + Vec2::new(
+            anchor.page_local_document_point.x,
+            target_presented_y,
+        ) * metrics.scale
         + anchor.outside_page_offset_points;
     let viewport_center = outer_rect.min + inner_size * 0.5;
     let requested_offset = content_target - viewport_center;
     let max_offset = (content_size - inner_size).max(Vec2::ZERO);
     (requested_offset.x.is_finite() && requested_offset.y.is_finite()).then(|| {
-        Vec2::new(
+        let scroll_offset = Vec2::new(
             requested_offset.x.clamp(0.0, max_offset.x),
             requested_offset.y.clamp(0.0, max_offset.y),
-        )
+        );
+        PrepaintZoomPlan {
+            page_origins,
+            page_heights,
+            page_strides,
+            content_size,
+            scroll_offset,
+        }
     })
 }
 
@@ -2365,16 +3355,20 @@ fn ordered_selection(selection: Selection) -> (Position, Position) {
     }
 }
 
-pub(super) fn chrome_clear_color(palette: theme::ScriptWorkspacePalette) -> [f32; 4] {
-    palette.background.to_normalized_gamma_f32()
+pub(super) fn chrome_clear_color(
+    mode: ScriptViewMode,
+    palette: theme::ScriptWorkspacePalette,
+) -> [f32; 4] {
+    script_view_backdrop(mode, palette).to_normalized_gamma_f32()
 }
 
 pub(super) fn central_panel_frame(
     _ctx: &egui::Context,
+    mode: ScriptViewMode,
     palette: theme::ScriptWorkspacePalette,
 ) -> egui::Frame {
-    // Keep the Script Workspace surface color without a fixed viewport inset.
-    egui::Frame::NONE.fill(palette.background)
+    // Keep the resolved Script View surface color without a fixed viewport inset.
+    egui::Frame::NONE.fill(script_view_backdrop(mode, palette))
 }
 
 fn document_cursor_icon() -> egui::CursorIcon {

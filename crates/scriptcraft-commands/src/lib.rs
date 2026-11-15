@@ -78,11 +78,12 @@ pub enum CommandId {
     EditorDualDialogueToggle,
     EditorStyleClear,
     ApplicationQuit,
+    ViewScriptViewSet,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 52] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -134,6 +135,7 @@ impl CommandId {
         Self::EditorDualDialogueToggle,
         Self::EditorStyleClear,
         Self::ApplicationQuit,
+        Self::ViewScriptViewSet,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -189,6 +191,7 @@ impl CommandId {
             Self::EditorDualDialogueToggle => "editor.dual-dialogue.toggle",
             Self::EditorStyleClear => "editor.style.clear",
             Self::ApplicationQuit => "application.quit",
+            Self::ViewScriptViewSet => "view.script-view.set",
         }
     }
 }
@@ -819,6 +822,15 @@ pub enum Appearance {
     Midnight,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptViewMode {
+    Normal,
+    #[default]
+    Page,
+    Speed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SprintTimerMode {
@@ -938,6 +950,8 @@ pub enum Command {
     EditorStyleClear { surface: EditorSurface },
     #[serde(rename = "application.quit")]
     ApplicationQuit,
+    #[serde(rename = "view.script-view.set")]
+    ViewScriptViewSet { mode: ScriptViewMode },
 }
 
 impl Command {
@@ -1009,6 +1023,7 @@ impl Command {
             Self::EditorDualDialogueToggle => CommandId::EditorDualDialogueToggle,
             Self::EditorStyleClear { .. } => CommandId::EditorStyleClear,
             Self::ApplicationQuit => CommandId::ApplicationQuit,
+            Self::ViewScriptViewSet { .. } => CommandId::ViewScriptViewSet,
         }
     }
 }
@@ -1103,7 +1118,7 @@ const fn descriptor(id: CommandId, family: &'static str, parameters: &'static st
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 51] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 52] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -1159,6 +1174,7 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 51] = [
     descriptor(CommandId::EditorDualDialogueToggle, "editor", "none; Body only; host active surface"),
     descriptor(CommandId::EditorStyleClear, "editor", "surface: editor_surface; clear supported run styles"),
     descriptor(CommandId::ApplicationQuit, "application", "none; requests guarded root Close"),
+    descriptor(CommandId::ViewScriptViewSet, "view", "mode: script_view_mode (normal, page, speed)"),
 ];
 
 pub fn descriptor_for(id: CommandId) -> Option<&'static CommandDescriptor> {

@@ -172,7 +172,11 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
     status_bar::paint_panel_top_border(ui, status_panel.response.rect, palette.status);
 
     egui::CentralPanel::default()
-        .frame(super::script_view::central_panel_frame(ctx, palette.script_workspace))
+        .frame(super::script_view::central_panel_frame(
+            ctx,
+            scriptcraft_commands::ScriptViewMode::Page,
+            palette.script_workspace,
+        ))
         .show_inside(ui, |ui| app.live_document_surface(ui, EditorSurface::TitlePage));
     if app.timer_popup_surface == EditorSurface::TitlePage {
         let host_geometry = app.sprint_timer_host_geometry(EditorSurface::TitlePage);

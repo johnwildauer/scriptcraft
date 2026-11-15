@@ -76,7 +76,9 @@ use sprint_timer::NotificationResult;
 use status_bar::{DiagnosticProjection, ViewportCenterAnchor, ViewportPageTracker};
 use toolbar::toolbar_content_height;
 use app_commands::CommandInvocation;
-use scriptcraft_commands::{Command, CommandOrigin, DocumentPath, EditorSurface, ImportResolution, ZoomFactor};
+use scriptcraft_commands::{
+    Command, CommandOrigin, DocumentPath, EditorSurface, ImportResolution, ScriptViewMode, ZoomFactor,
+};
 use document_lifecycle::{RootCloseDecision, RootCloseLifecycle, RootCloseRequest, SaveOutcome};
 use replacement_open::StagedOpenOutcome;
 
@@ -1468,6 +1470,7 @@ struct ScriptCraftApp {
     effective_pixels_per_point: Option<f32>,
     zoom_percent: u16,
     pinch_zoom_percent: f64,
+    script_view_mode: ScriptViewMode,
     appearance_mode: theme::AppearanceMode,
     appearance_applications: theme::AppearanceApplications,
     theme_palette: theme::ApplicationPalette,
@@ -2039,6 +2042,7 @@ impl ScriptCraftApp {
             effective_pixels_per_point: None,
             zoom_percent: 100,
             pinch_zoom_percent: 100.0,
+            script_view_mode: ScriptViewMode::Page,
             appearance_mode: theme::AppearanceMode::System,
             appearance_applications: theme::AppearanceApplications::default(),
             theme_palette: theme::ApplicationPalette::from_visuals(
@@ -3211,6 +3215,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                 menu::show_menu_bar(
                     ui,
                     availability,
+                    app.script_view_mode,
                     app.dual_dialogue_menu_should_say_undual(),
                     &mut app.pending_commands,
                 );
@@ -3335,7 +3340,11 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         app.theme_palette.status,
     );
         let central = egui::CentralPanel::default()
-            .frame(script_view::central_panel_frame(&ctx, app.theme_palette.script_workspace))
+            .frame(script_view::central_panel_frame(
+                &ctx,
+                app.script_view_mode,
+                app.theme_palette.script_workspace,
+            ))
         .show_inside(ui, |ui| app.live_document_surface(ui, EditorSurface::Body));
     let timer_commands = if app.timer_popup_surface == EditorSurface::Body {
         let host_geometry = app.sprint_timer_host_geometry(EditorSurface::Body);
@@ -3405,7 +3414,10 @@ fn show_fdx_migration_dialog(app: &mut ScriptCraftApp, ctx: &egui::Context) {
 
 impl eframe::App for ScriptCraftApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        script_view::chrome_clear_color(self.theme_palette.script_workspace)
+        script_view::chrome_clear_color(
+            self.script_view_mode,
+            self.theme_palette.script_workspace,
+        )
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -3911,6 +3923,7 @@ impl ScriptCraftApp {
             if let Some(native_menu) = &self.native_menu {
                 native_menu.synchronize(
                     self.app_command_availability(),
+                    self.script_view_mode,
                     self.dual_dialogue_menu_should_say_undual(),
                 );
             }
@@ -4428,6 +4441,7 @@ fn main() -> eframe::Result {
                         app.native_menu = Some(
                             macos_menu::NativeMenuController::install(
                                 availability,
+                                app.script_view_mode,
                                 cc.egui_ctx.clone(),
                             )
                             .map_err(|error| {

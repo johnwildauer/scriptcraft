@@ -6,7 +6,9 @@
 //! real commands; placeholders are intrinsically disabled and never dispatch.
 
 use scriptcraft_commands::CommandId;
-use scriptcraft_commands::{Command, EditorSurface, ParagraphAlignmentValue, TitleTextStyle};
+use scriptcraft_commands::{
+    Command, EditorSurface, ParagraphAlignmentValue, ScriptViewMode, TitleTextStyle,
+};
 use super::shortcuts::{display_shortcut, primary_shortcut};
 pub(super) use super::shortcuts::{LogicalShortcut, ShortcutKey};
 
@@ -37,6 +39,7 @@ pub(super) enum MenuAction {
     ToggleStyle(TitleTextStyle),
     ClearStyles,
     SetAlignment(ParagraphAlignmentValue),
+    SetScriptView(ScriptViewMode),
 }
 
 pub(super) fn command_for_action(action: MenuAction, surface: EditorSurface) -> Command {
@@ -44,6 +47,20 @@ pub(super) fn command_for_action(action: MenuAction, surface: EditorSurface) -> 
         MenuAction::ToggleStyle(style) => Command::EditorStyleToggle { surface, style },
         MenuAction::ClearStyles => Command::EditorStyleClear { surface },
         MenuAction::SetAlignment(alignment) => Command::EditorAlignmentSet { surface, alignment },
+        MenuAction::SetScriptView(mode) => Command::ViewScriptViewSet { mode },
+    }
+}
+
+/// Projects the checked appearance for a menu item from current application
+/// state while retaining the catalog's unrelated static checked placeholder.
+pub(super) fn menu_item_is_checked(
+    item: &MenuItemSpec,
+    script_view_mode: ScriptViewMode,
+) -> bool {
+    match item.behavior {
+        MenuItemBehavior::MenuCommand(MenuAction::SetScriptView(mode)) => mode == script_view_mode,
+        MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Checked) => true,
+        _ => false,
     }
 }
 
@@ -204,9 +221,9 @@ const EDIT_ENTRIES: &[MenuEntrySpec] = &[
 
 const VIEW_ENTRIES: &[MenuEntrySpec] = &[
     placeholder("view.split", "Split", "Split submenu placeholder", DISCLOSURE, None), SEP,
-    placeholder("view.script-normal", "Script - Normal View", "Script - Normal View (disabled placeholder)", ITEM, None),
-    placeholder("view.script-page", "Script - Page View", "Script - Page View (checked, disabled placeholder)", CHECKED, None),
-    placeholder("view.script-speed", "Script - Speed View", "Script - Speed View (disabled placeholder)", ITEM, None), SEP,
+    menu_command_item("view.script-normal", "Script - Normal View", None, MenuAction::SetScriptView(ScriptViewMode::Normal)),
+    menu_command_item("view.script-page", "Script - Page View", None, MenuAction::SetScriptView(ScriptViewMode::Page)),
+    menu_command_item("view.script-speed", "Script - Speed View", None, MenuAction::SetScriptView(ScriptViewMode::Speed)), SEP,
     placeholder("view.beat-board", "Beat Board", "Beat Board (disabled placeholder)", ITEM, None), SEP,
     placeholder("view.scene-view", "Scene View", "Scene View (disabled placeholder)", ITEM, None),
     placeholder("view.scene-view-visibility", "Show/Hide Scene View", "Show/Hide Scene View submenu placeholder", DISCLOSURE, None), SEP,
@@ -380,3 +397,186 @@ pub(super) const MENU_CATALOG: &[MenuSpec] = &[
     MenuSpec { id: "window", label: "Window", accessibility_name: "Window", entries: WINDOW_ENTRIES },
     MenuSpec { id: "help", label: "Help", accessibility_name: "Help", entries: HELP_ENTRIES },
 ];
+
+#[cfg(test)]
+mod script_view_menu_tests {
+    use super::{
+        command_for_action, menu_item_is_checked, MenuAction, MenuEntrySpec, MenuItemBehavior,
+        MenuItemSpec, PlaceholderKind, MENU_CATALOG,
+    };
+    use scriptcraft_commands::{Command, CommandId, EditorSurface, ScriptViewMode};
+
+    fn items(entries: &'static [MenuEntrySpec], result: &mut Vec<MenuItemSpec>) {
+        for entry in entries {
+            match entry {
+                MenuEntrySpec::Item(item) => result.push(*item),
+                MenuEntrySpec::Submenu(menu) => items(menu.entries, result),
+                MenuEntrySpec::Separator => {}
+            }
+        }
+    }
+
+    fn item_by_id(id: &str) -> MenuItemSpec {
+        let mut all_items = Vec::new();
+        for menu in MENU_CATALOG {
+            items(menu.entries, &mut all_items);
+        }
+        *all_items
+            .iter()
+            .find(|item| item.id == id)
+            .expect("catalog item exists")
+    }
+
+    #[test]
+    fn script_view_catalog_entries_keep_identity_order_and_typed_commands() {
+        let view = MENU_CATALOG
+            .iter()
+            .find(|menu| menu.id == "view")
+            .expect("View menu exists");
+        let expected = [
+            (2, "view.script-normal", "Script - Normal View", ScriptViewMode::Normal),
+            (3, "view.script-page", "Script - Page View", ScriptViewMode::Page),
+            (4, "view.script-speed", "Script - Speed View", ScriptViewMode::Speed),
+        ];
+
+        for (entry_index, id, label, mode) in expected {
+            let MenuEntrySpec::Item(item) = view.entries[entry_index] else {
+                panic!("script view catalog slot must remain an item")
+            };
+            assert_eq!(item.id, id);
+            assert_eq!(item.label, label);
+            assert_eq!(item.accessibility_name, label);
+            assert_eq!(item.shortcut, None);
+            assert_eq!(item.windows_alias, None);
+            assert_eq!(
+                item.behavior,
+                MenuItemBehavior::MenuCommand(MenuAction::SetScriptView(mode))
+            );
+            assert_eq!(
+                command_for_action(MenuAction::SetScriptView(mode), EditorSurface::Body),
+                Command::ViewScriptViewSet { mode }
+            );
+        }
+
+        let mut all_items = Vec::new();
+        for menu in MENU_CATALOG {
+            items(menu.entries, &mut all_items);
+        }
+        assert_eq!(
+            all_items
+                .iter()
+                .filter(|item| matches!(
+                    item.behavior,
+                    MenuItemBehavior::MenuCommand(MenuAction::SetScriptView(_))
+                ))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn exactly_the_current_script_view_mode_is_checked() {
+        let script_view_items = [
+            item_by_id("view.script-normal"),
+            item_by_id("view.script-page"),
+            item_by_id("view.script-speed"),
+        ];
+        for current_mode in [ScriptViewMode::Normal, ScriptViewMode::Page, ScriptViewMode::Speed] {
+            let checked: Vec<_> = script_view_items
+                .iter()
+                .filter(|item| menu_item_is_checked(item, current_mode))
+                .collect();
+            assert_eq!(checked.len(), 1);
+            assert!(matches!(
+                checked[0].behavior,
+                MenuItemBehavior::MenuCommand(MenuAction::SetScriptView(mode))
+                    if mode == current_mode
+            ));
+        }
+    }
+
+    #[test]
+    fn static_checked_placeholder_is_preserved_and_other_placeholders_stay_unchecked() {
+        let mut all_items = Vec::new();
+        for menu in MENU_CATALOG {
+            items(menu.entries, &mut all_items);
+        }
+        let static_checked: Vec<_> = all_items
+            .iter()
+            .filter(|item| matches!(
+                item.behavior,
+                MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Checked)
+            ))
+            .collect();
+        assert_eq!(static_checked.len(), 1);
+        for item in static_checked {
+            assert!(menu_item_is_checked(item, ScriptViewMode::Normal));
+            assert!(menu_item_is_checked(item, ScriptViewMode::Page));
+            assert!(menu_item_is_checked(item, ScriptViewMode::Speed));
+        }
+        for item in all_items {
+            if matches!(
+                item.behavior,
+                MenuItemBehavior::DisabledPlaceholder(
+                    PlaceholderKind::Item | PlaceholderKind::Disclosure | PlaceholderKind::Search
+                )
+            ) {
+                assert!(!menu_item_is_checked(&item, ScriptViewMode::Page));
+            }
+        }
+    }
+
+    #[test]
+    fn script_view_commands_share_availability_and_follow_normal_modal_gates() {
+        use crate::app_commands::AppCommandAvailability;
+
+        let ordinary = AppCommandAvailability {
+            modal_blocked: false,
+            native_output_active: false,
+            replacement_pending: false,
+            title_page_only_close: false,
+            undo: false,
+            redo: false,
+            delete: false,
+            select_all: false,
+            cut: false,
+            copy: false,
+            paste: false,
+            body_only: false,
+            dual_dialogue_toggle: false,
+            title_open: false,
+            title_close: false,
+        };
+        let ids: Vec<_> = [
+            ScriptViewMode::Normal,
+            ScriptViewMode::Page,
+            ScriptViewMode::Speed,
+        ]
+        .into_iter()
+        .map(|mode| {
+            let command = command_for_action(MenuAction::SetScriptView(mode), EditorSurface::Body);
+            assert_eq!(command.id(), CommandId::ViewScriptViewSet);
+            assert!(ordinary.is_enabled(command.id()));
+            command.id()
+        })
+        .collect();
+        assert!(ids.iter().all(|id| *id == CommandId::ViewScriptViewSet));
+
+        for blocked in [
+            AppCommandAvailability {
+                modal_blocked: true,
+                ..ordinary
+            },
+            AppCommandAvailability {
+                native_output_active: true,
+                ..ordinary
+            },
+            AppCommandAvailability {
+                replacement_pending: true,
+                ..ordinary
+            },
+        ] {
+            assert!(!blocked.is_enabled(CommandId::ViewScriptViewSet));
+        }
+    }
+}

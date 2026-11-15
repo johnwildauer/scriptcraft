@@ -6,14 +6,14 @@
 
 use super::app_commands::AppCommandAvailability;
 use super::menu_items::{
-    command_for_action, LogicalShortcut, MenuEntrySpec, MenuItemBehavior, MenuItemSpec,
-    PlaceholderKind, ShortcutKey, MENU_CATALOG,
+    command_for_action, menu_item_is_checked, LogicalShortcut, MenuAction, MenuEntrySpec,
+    MenuItemBehavior, MenuItemSpec, PlaceholderKind, ShortcutKey, MENU_CATALOG,
 };
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use scriptcraft_commands::{Command, CommandId, CommandOrigin, EditorSurface};
+use scriptcraft_commands::{Command, CommandId, CommandOrigin, EditorSurface, ScriptViewMode};
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{
     AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
@@ -23,6 +23,35 @@ type NativeEventInbox = Arc<Mutex<VecDeque<MenuId>>>;
 const APPLICATION_MENU_TITLE: &str = "ScriptCraft";
 const APPLICATION_QUIT_MENU_ITEM_ID: &str = "application.quit.menu-item";
 
+/// Retains the native widget associated with a command while allowing shared
+/// text/enabled updates and checked-state updates only where supported.
+enum RetainedNativeCommandItem {
+    Plain(MenuItem),
+    Checked(CheckMenuItem),
+}
+
+impl RetainedNativeCommandItem {
+    fn set_text(&self, text: &str) {
+        match self {
+            Self::Plain(item) => item.set_text(text),
+            Self::Checked(item) => item.set_text(text),
+        }
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        match self {
+            Self::Plain(item) => item.set_enabled(enabled),
+            Self::Checked(item) => item.set_enabled(enabled),
+        }
+    }
+
+    fn set_checked(&self, checked: bool) {
+        if let Self::Checked(item) = self {
+            item.set_checked(checked);
+        }
+    }
+}
+
 /// Retains the complete installed native tree and each item handle for the
 /// lifetime of `ScriptCraftApp`. The `Rc` marker makes main-thread confinement
 /// explicit in addition to the non-Send muda handles.
@@ -30,7 +59,7 @@ pub(super) struct NativeMenuController {
     _root: Menu,
     application_menu: Submenu,
     _submenus: Vec<Submenu>,
-    command_items: HashMap<MenuId, (Command, MenuItem)>,
+    command_items: HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
     _placeholder_items: Vec<MenuItem>,
     _checked_placeholder_items: Vec<CheckMenuItem>,
     _predefined_items: Vec<PredefinedMenuItem>,
@@ -44,6 +73,7 @@ impl NativeMenuController {
     /// by eframe's app-creation callback, which runs on the macOS main thread.
     pub(super) fn install(
         availability: AppCommandAvailability,
+        script_view_mode: ScriptViewMode,
         repaint_context: eframe::egui::Context,
     ) -> Result<Self, String> {
         let root = Menu::new();
@@ -102,7 +132,10 @@ impl NativeMenuController {
             .map_err(|error| format!("could not append native application Quit item: {error}"))?;
         command_items.insert(
             MenuId::new(APPLICATION_QUIT_MENU_ITEM_ID),
-            (Command::ApplicationQuit, quit_item),
+            (
+                Command::ApplicationQuit,
+                RetainedNativeCommandItem::Plain(quit_item),
+            ),
         );
         root.append(&application_menu)
             .map_err(|error| format!("could not append native Application menu: {error}"))?;
@@ -113,6 +146,7 @@ impl NativeMenuController {
                 &submenu,
                 menu_spec.entries,
                 availability,
+                script_view_mode,
                 &mut command_items,
                 &mut retained_submenus,
                 &mut retained_predefined_items,
@@ -178,7 +212,12 @@ impl NativeMenuController {
 
     /// Reprojects native labels and enabled state from the shared catalog and
     /// current application availability after each application update.
-    pub(super) fn synchronize(&self, availability: AppCommandAvailability, say_undual: bool) {
+    pub(super) fn synchronize(
+        &self,
+        availability: AppCommandAvailability,
+        script_view_mode: ScriptViewMode,
+        say_undual: bool,
+    ) {
         // Keep the macOS primary Application menu independent of the active
         // document's native window title. The item text also supplies its
         // accessible name in the native menu tree.
@@ -190,7 +229,13 @@ impl NativeMenuController {
             item.set_enabled(availability.is_enabled(command.id()));
         }
         for menu in MENU_CATALOG {
-            synchronize_entries(menu.entries, availability, say_undual, &self.command_items);
+            synchronize_entries(
+                menu.entries,
+                availability,
+                script_view_mode,
+                say_undual,
+                &self.command_items,
+            );
         }
     }
 }
@@ -199,7 +244,8 @@ fn append_catalog_entries(
     submenu: &Submenu,
     entries: &'static [MenuEntrySpec],
     availability: AppCommandAvailability,
-    command_items: &mut HashMap<MenuId, (Command, MenuItem)>,
+    script_view_mode: ScriptViewMode,
+    command_items: &mut HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
     retained_submenus: &mut Vec<Submenu>,
     retained_predefined_items: &mut Vec<PredefinedMenuItem>,
     placeholder_items: &mut Vec<MenuItem>,
@@ -218,6 +264,7 @@ fn append_catalog_entries(
                     &child,
                     spec.entries,
                     availability,
+                    script_view_mode,
                     command_items,
                     retained_submenus,
                     retained_predefined_items,
@@ -233,6 +280,7 @@ fn append_catalog_entries(
                 submenu,
                 item,
                 availability,
+                script_view_mode,
                 command_items,
                 retained_submenus,
                 placeholder_items,
@@ -259,7 +307,8 @@ fn append_catalog_item(
     submenu: &Submenu,
     spec: &MenuItemSpec,
     availability: AppCommandAvailability,
-    command_items: &mut HashMap<MenuId, (Command, MenuItem)>,
+    script_view_mode: ScriptViewMode,
+    command_items: &mut HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
     retained_submenus: &mut Vec<Submenu>,
     placeholder_items: &mut Vec<MenuItem>,
     checked_placeholder_items: &mut Vec<CheckMenuItem>,
@@ -278,20 +327,39 @@ fn append_catalog_item(
             })?;
             command_items.insert(
                 MenuId::new(spec.id),
-                (super::app_commands::command_for_id(command).expect("catalog command is mapped"), item),
+                (
+                    super::app_commands::command_for_id(command)
+                        .expect("catalog command is mapped"),
+                    RetainedNativeCommandItem::Plain(item),
+                ),
             );
         }
         MenuItemBehavior::MenuCommand(action) => {
             let command = command_for_action(action, EditorSurface::Body);
-            let item = MenuItem::with_id(
-                spec.id,
-                spec.label,
-                availability.is_enabled(command.id()),
-                accelerator,
-            );
-            submenu.append(&item).map_err(|error| {
-                format!("could not append native menu item {}: {error}", spec.id)
-            })?;
+            let item = if requires_checked_native_item(spec) {
+                let item = CheckMenuItem::with_id(
+                    spec.id,
+                    spec.label,
+                    availability.is_enabled(command.id()),
+                    menu_item_is_checked(spec, script_view_mode),
+                    accelerator,
+                );
+                submenu.append(&item).map_err(|error| {
+                    format!("could not append native menu item {}: {error}", spec.id)
+                })?;
+                RetainedNativeCommandItem::Checked(item)
+            } else {
+                let item = MenuItem::with_id(
+                    spec.id,
+                    spec.label,
+                    availability.is_enabled(command.id()),
+                    accelerator,
+                );
+                submenu.append(&item).map_err(|error| {
+                    format!("could not append native menu item {}: {error}", spec.id)
+                })?;
+                RetainedNativeCommandItem::Plain(item)
+            };
             command_items.insert(MenuId::new(spec.id), (command, item));
         }
         MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Disclosure) => {
@@ -324,13 +392,20 @@ fn append_catalog_item(
 fn synchronize_entries(
     entries: &'static [MenuEntrySpec],
     availability: AppCommandAvailability,
+    script_view_mode: ScriptViewMode,
     say_undual: bool,
-    command_items: &HashMap<MenuId, (Command, MenuItem)>,
+    command_items: &HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
 ) {
     for entry in entries {
         match entry {
             MenuEntrySpec::Submenu(menu) => {
-                synchronize_entries(menu.entries, availability, say_undual, command_items);
+                synchronize_entries(
+                    menu.entries,
+                    availability,
+                    script_view_mode,
+                    say_undual,
+                    command_items,
+                );
             }
             MenuEntrySpec::Item(spec) => {
                 let id = MenuId::new(spec.id);
@@ -342,11 +417,19 @@ fn synchronize_entries(
                     };
                     item.set_text(label);
                     item.set_enabled(availability.is_enabled(command.id()));
+                    item.set_checked(menu_item_is_checked(spec, script_view_mode));
                 }
             }
             MenuEntrySpec::Separator => {}
         }
     }
+}
+
+fn requires_checked_native_item(spec: &MenuItemSpec) -> bool {
+    matches!(
+        spec.behavior,
+        MenuItemBehavior::MenuCommand(MenuAction::SetScriptView(_))
+    )
 }
 
 fn native_accelerator(shortcut: LogicalShortcut) -> Accelerator {
@@ -416,5 +499,59 @@ fn native_key(key: ShortcutKey) -> Code {
         ShortcutKey::BracketRight => Code::BracketRight,
         ShortcutKey::Backslash | ShortcutKey::Pipe => Code::Backslash,
         ShortcutKey::ArrowRight => Code::ArrowRight,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{menu_item_is_checked, requires_checked_native_item};
+    use crate::menu_items::{MenuEntrySpec, MenuItemSpec, MENU_CATALOG};
+    use scriptcraft_commands::ScriptViewMode;
+
+    fn collect_items(entries: &'static [MenuEntrySpec], items: &mut Vec<MenuItemSpec>) {
+        for entry in entries {
+            match entry {
+                MenuEntrySpec::Item(item) => items.push(*item),
+                MenuEntrySpec::Submenu(menu) => collect_items(menu.entries, items),
+                MenuEntrySpec::Separator => {}
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_three_script_view_actions_use_checked_native_command_items() {
+        let mut items = Vec::new();
+        for menu in MENU_CATALOG {
+            collect_items(menu.entries, &mut items);
+        }
+
+        let checked_native_ids: Vec<_> = items
+            .iter()
+            .filter(|item| requires_checked_native_item(item))
+            .map(|item| item.id)
+            .collect();
+        assert_eq!(
+            checked_native_ids,
+            vec!["view.script-normal", "view.script-page", "view.script-speed"]
+        );
+
+        for current_mode in [
+            ScriptViewMode::Normal,
+            ScriptViewMode::Page,
+            ScriptViewMode::Speed,
+        ] {
+            let checked_views: Vec<_> = items
+                .iter()
+                .filter(|item| requires_checked_native_item(item))
+                .filter(|item| menu_item_is_checked(item, current_mode))
+                .map(|item| item.id)
+                .collect();
+            assert_eq!(checked_views.len(), 1);
+            assert!(match current_mode {
+                ScriptViewMode::Normal => checked_views[0] == "view.script-normal",
+                ScriptViewMode::Page => checked_views[0] == "view.script-page",
+                ScriptViewMode::Speed => checked_views[0] == "view.script-speed",
+            });
+        }
     }
 }

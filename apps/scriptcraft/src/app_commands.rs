@@ -4,7 +4,7 @@ use eframe::egui;
 use scriptcraft_core::editing::EditError;
 use scriptcraft_commands::{
     execute_editor_command_on_surface, pointer_selection, Appearance, Command, CommandId, CommandOrigin, CommandOutcome,
-    CommandRejection, DiagnosticMessage, EditorSurface, HorizontalDirection, HostEffectDescription,
+    CommandRejection, DiagnosticMessage, EditorSurface, HorizontalDirection, HostEffectDescription, ScriptViewMode,
     ImportResolution, LineEdge, PointerPhase, VerticalDirection,
     Position as CommandPosition, Selection as CommandSelection, SprintTimerMode,
     UnavailableReason, MAX_DIAGNOSTIC_MESSAGE_BYTES,
@@ -415,30 +415,7 @@ impl ScriptCraftApp {
         let command_id = invocation.command.id();
         let origin = invocation.origin;
         self.flush_pending_diagnostic_commands(ctx);
-        let restore_focus = matches!(
-            command_id,
-            CommandId::EditUndo
-                | CommandId::EditRedo
-                | CommandId::EditCut
-                | CommandId::EditCopy
-                | CommandId::EditPaste
-                | CommandId::EditDelete
-                | CommandId::EditSelectAll
-                | CommandId::EditorTextInsert
-                | CommandId::EditorTextPaste
-                | CommandId::EditorDeleteBackward
-                | CommandId::EditorParagraphEnter
-                | CommandId::EditorParagraphTab
-                | CommandId::EditorElementChange
-                | CommandId::EditorSelectionSet
-                | CommandId::EditorNavigationHorizontal
-                | CommandId::EditorNavigationVertical
-                | CommandId::EditorNavigationLineEdge
-                | CommandId::EditorStyleToggle
-                | CommandId::EditorStyleClear
-                | CommandId::EditorAlignmentSet
-                | CommandId::EditorDualDialogueToggle
-        );
+        let restore_focus = command_restores_editor_focus(command_id);
         let command = route_to_focused_surface(
             invocation.command,
             origin,
@@ -715,6 +692,15 @@ impl ScriptCraftApp {
                     let next_zoom = super::status_bar::normalized_zoom_percent(next);
                     self.set_zoom_for_surface(surface, next_zoom, ctx);
                     self.set_pinch_zoom_for_surface(surface, next);
+                }
+                DesktopCommandOutcome::EffectDispatched
+            }
+            Command::ViewScriptViewSet { mode } => {
+                if self.script_view_mode != mode {
+                    self.capture_pending_zoom_anchor(ctx);
+                    self.script_view_mode = mode;
+                    self.invalidate_surface(EditorSurface::Body);
+                    ctx.request_repaint();
                 }
                 DesktopCommandOutcome::EffectDispatched
             }
@@ -1227,6 +1213,33 @@ impl AppCommandAvailability {
     }
 }
 
+fn command_restores_editor_focus(command: CommandId) -> bool {
+    matches!(
+        command,
+        CommandId::EditUndo
+            | CommandId::EditRedo
+            | CommandId::EditCut
+            | CommandId::EditCopy
+            | CommandId::EditPaste
+            | CommandId::EditDelete
+            | CommandId::EditSelectAll
+            | CommandId::EditorTextInsert
+            | CommandId::EditorTextPaste
+            | CommandId::EditorDeleteBackward
+            | CommandId::EditorParagraphEnter
+            | CommandId::EditorParagraphTab
+            | CommandId::EditorElementChange
+            | CommandId::EditorSelectionSet
+            | CommandId::EditorNavigationHorizontal
+            | CommandId::EditorNavigationVertical
+            | CommandId::EditorNavigationLineEdge
+            | CommandId::EditorStyleToggle
+            | CommandId::EditorStyleClear
+            | CommandId::EditorAlignmentSet
+            | CommandId::EditorDualDialogueToggle
+    )
+}
+
 fn route_to_focused_surface(
     command: Command,
     origin: CommandOrigin,
@@ -1331,10 +1344,15 @@ impl DesktopTimerNotificationEffects {
 
 #[cfg(test)]
 mod surface_command_availability_tests {
-    use super::{file_close_target, CommandInvocation, DesktopCommandOutcome, FileCloseTarget};
+    use super::{
+        command_restores_editor_focus, file_close_target, CommandInvocation, DesktopCommandOutcome,
+        FileCloseTarget,
+    };
     use crate::ScriptCraftApp;
     use crate::document_lifecycle::SaveOutcome;
-    use scriptcraft_commands::{Command, CommandId, CommandOrigin, DocumentPath, EditorSurface};
+    use scriptcraft_commands::{
+        Command, CommandId, CommandOrigin, DocumentPath, EditorSurface, ScriptViewMode,
+    };
     use super::super::sprint_timer::{NotificationFeedback, SprintTimer};
 
     #[test]
@@ -1358,6 +1376,7 @@ mod surface_command_availability_tests {
         assert!(title.is_enabled(CommandId::ApplicationQuit));
         assert!(title.is_enabled(CommandId::EditorStyleToggle));
         assert!(!title.is_enabled(CommandId::EditorDualDialogueToggle));
+        assert!(title.is_enabled(CommandId::ViewScriptViewSet));
 
         let keyboard = super::route_to_focused_surface(
             Command::EditorTextInsert { text: "x".into(), surface: EditorSurface::Body },
@@ -1436,6 +1455,7 @@ mod surface_command_availability_tests {
         assert!(!availability.is_enabled(CommandId::ApplicationQuit));
         assert!(!availability.is_enabled(CommandId::WindowTitlePageOpen));
         assert!(!availability.is_enabled(CommandId::EditorDualDialogueToggle));
+        assert!(!availability.is_enabled(CommandId::ViewScriptViewSet));
 
         let native_output = super::AppCommandAvailability {
             modal_blocked: false,
@@ -1485,6 +1505,7 @@ mod surface_command_availability_tests {
             CommandId::EditorTextInsert,
             CommandId::EditorStyleToggle,
             CommandId::WindowTitlePageOpen,
+            CommandId::ViewScriptViewSet,
         ] {
             assert!(!availability.is_enabled(command), "{command:?} must be locked");
         }
@@ -1526,6 +1547,177 @@ mod surface_command_availability_tests {
         };
         assert!(resumed.is_enabled(CommandId::EditUndo));
         assert!(resumed.is_enabled(CommandId::EditorTextInsert));
+    }
+
+    #[test]
+    fn script_view_dispatch_changes_only_transient_view_mode_and_preserves_layout_cache() {
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        let context = eframe::egui::Context::default();
+        assert_eq!(app.script_view_mode, ScriptViewMode::Page);
+
+        let body_layout = app
+            .layout_for_render(EditorSurface::Body)
+            .expect("initial body layout should be available");
+        let project = app.session.project().clone();
+        let body_selection = app.session.selection();
+        let title_selection = app.session.title_selection();
+        let revision = app.session.revision();
+        let dirty = app.session.dirty();
+        let can_undo = app.session.can_undo();
+        let can_redo = app.session.can_redo();
+        let body_zoom = app.zoom_percent;
+        let body_pinch = app.pinch_zoom_percent;
+        let appearance = app.appearance_mode;
+        let title_zoom = app.title_view.zoom_percent;
+        let title_pinch = app.title_view.pinch_zoom_percent;
+        let title_page_scale = app.title_view.page_scale;
+        let title_pixels_per_point = app.title_view.effective_pixels_per_point;
+        let title_rendered_revision = app.title_view.rendered_revision;
+        let title_pending_anchor = app.title_view.pending_zoom_anchor;
+        let title_tracker_clip = app.title_view.page_geometry.clip();
+
+        for mode in [ScriptViewMode::Normal, ScriptViewMode::Page, ScriptViewMode::Speed] {
+            let result = app.dispatch_command(
+                CommandInvocation::new(
+                    Command::ViewScriptViewSet { mode },
+                    CommandOrigin::InternalFollowUp,
+                ),
+                &context,
+            );
+
+            assert_eq!(result.command, CommandId::ViewScriptViewSet);
+            assert_eq!(result.outcome, DesktopCommandOutcome::EffectDispatched);
+            assert_eq!(app.script_view_mode, mode);
+            assert_eq!(app.session.project(), &project);
+            assert_eq!(app.session.selection(), body_selection);
+            assert_eq!(app.session.title_selection(), title_selection);
+            assert_eq!(app.session.revision(), revision);
+            assert_eq!(app.session.dirty(), dirty);
+            assert_eq!(app.session.can_undo(), can_undo);
+            assert_eq!(app.session.can_redo(), can_redo);
+            assert_eq!(app.zoom_percent, body_zoom);
+            assert_eq!(app.pinch_zoom_percent, body_pinch);
+            assert_eq!(app.appearance_mode, appearance);
+            assert_eq!(app.title_view.zoom_percent, title_zoom);
+            assert_eq!(app.title_view.pinch_zoom_percent, title_pinch);
+            assert_eq!(app.title_view.page_scale, title_page_scale);
+            assert_eq!(
+                app.title_view.effective_pixels_per_point,
+                title_pixels_per_point
+            );
+            assert_eq!(app.title_view.rendered_revision, title_rendered_revision);
+            assert_eq!(app.title_view.pending_zoom_anchor, title_pending_anchor);
+            assert_eq!(app.title_view.page_geometry.clip(), title_tracker_clip);
+
+            let cached_layout = app
+                .layout_for_render(EditorSurface::Body)
+                .expect("Body layout should remain available after mode dispatch");
+            assert!(std::sync::Arc::ptr_eq(&body_layout, &cached_layout));
+        }
+    }
+
+    #[test]
+    fn selecting_current_script_view_mode_preserves_pending_anchor_and_body_geometry() {
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        let context = eframe::egui::Context::default();
+        let anchor = super::super::status_bar::ViewportCenterAnchor {
+            page_index: 2,
+            page_local_document_point: eframe::egui::vec2(31.0, 47.0),
+            outside_page_offset_points: eframe::egui::vec2(5.0, -3.0),
+            viewport_center: eframe::egui::pos2(120.0, 240.0),
+        };
+        app.pending_zoom_anchor = Some(anchor);
+        let rect = eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(400.0, 600.0),
+        );
+        app.page_geometry.publish(
+            1,
+            1,
+            rect,
+            1.0,
+            vec![rect],
+            vec![0.0],
+            rect,
+            eframe::egui::Vec2::ZERO,
+        );
+        let published_clip = app.page_geometry.clip();
+
+        let result = app.dispatch_command(
+            CommandInvocation::new(
+                Command::ViewScriptViewSet {
+                    mode: ScriptViewMode::Page,
+                },
+                CommandOrigin::InternalFollowUp,
+            ),
+            &context,
+        );
+
+        assert_eq!(result.outcome, DesktopCommandOutcome::EffectDispatched);
+        assert_eq!(app.script_view_mode, ScriptViewMode::Page);
+        assert_eq!(app.pending_zoom_anchor, Some(anchor));
+        assert_eq!(app.page_geometry.clip(), published_clip);
+        assert!(published_clip.is_some());
+    }
+
+    #[test]
+    fn real_script_view_change_invalidates_only_body_geometry() {
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        let context = eframe::egui::Context::default();
+        let rect = eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(400.0, 600.0),
+        );
+        app.page_geometry.publish(
+            1,
+            1,
+            rect,
+            1.0,
+            vec![rect],
+            vec![0.0],
+            rect,
+            eframe::egui::Vec2::ZERO,
+        );
+        app.title_view.page_geometry.publish(
+            1,
+            1,
+            rect,
+            1.0,
+            vec![rect],
+            vec![0.0],
+            rect,
+            eframe::egui::Vec2::ZERO,
+        );
+        let title_published_clip = app.title_view.page_geometry.clip();
+        let pending_anchor = super::super::status_bar::ViewportCenterAnchor {
+            page_index: 0,
+            page_local_document_point: eframe::egui::vec2(12.0, 24.0),
+            outside_page_offset_points: eframe::egui::Vec2::ZERO,
+            viewport_center: eframe::egui::pos2(80.0, 90.0),
+        };
+        app.pending_zoom_anchor = Some(pending_anchor);
+
+        let result = app.dispatch_command(
+            CommandInvocation::new(
+                Command::ViewScriptViewSet {
+                    mode: ScriptViewMode::Normal,
+                },
+                CommandOrigin::InternalFollowUp,
+            ),
+            &context,
+        );
+
+        assert_eq!(result.outcome, DesktopCommandOutcome::EffectDispatched);
+        assert_eq!(app.script_view_mode, ScriptViewMode::Normal);
+        assert!(app.page_geometry.clip().is_none());
+        assert_eq!(app.title_view.page_geometry.clip(), title_published_clip);
+        assert!(title_published_clip.is_some());
+        assert_eq!(app.pending_zoom_anchor, Some(pending_anchor));
+    }
+
+    #[test]
+    fn script_view_command_does_not_request_editor_focus_restoration() {
+        assert!(!command_restores_editor_focus(CommandId::ViewScriptViewSet));
     }
 
     #[test]

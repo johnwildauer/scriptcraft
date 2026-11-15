@@ -836,6 +836,7 @@ struct GeometrySnapshot {
     viewport_rect: Rect,
     scale: f32,
     page_rects: Vec<Rect>,
+    page_document_y_offsets: Vec<f32>,
     clip: Rect,
     scroll_offset: Vec2,
 }
@@ -879,6 +880,11 @@ impl ViewportPageTracker {
             || (snapshot.scale - scale).abs() > f32::EPSILON
             || !valid_geometry_rect(snapshot.clip)
             || snapshot.page_rects.is_empty()
+            || snapshot.page_rects.len() != snapshot.page_document_y_offsets.len()
+            || snapshot
+                .page_document_y_offsets
+                .iter()
+                .any(|offset| !offset.is_finite())
             || !snapshot.scroll_offset.x.is_finite()
             || !snapshot.scroll_offset.y.is_finite()
             || snapshot.scroll_offset.x < 0.0
@@ -918,9 +924,13 @@ impl ViewportPageTracker {
             content_point.x.clamp(page_rect.left(), page_rect.right()),
             content_point.y.clamp(page_rect.top(), page_rect.bottom()),
         );
+        let page_document_y_offset = *snapshot.page_document_y_offsets.get(page_index)?;
         Some(ViewportCenterAnchor {
             page_index,
-            page_local_document_point: (bounded_point - page_rect.min) / scale,
+            page_local_document_point: Vec2::new(
+                (bounded_point.x - page_rect.left()) / scale,
+                page_document_y_offset + (bounded_point.y - page_rect.top()) / scale,
+            ),
             outside_page_offset_points: (content_point - bounded_point),
             viewport_center,
         })
@@ -949,6 +959,11 @@ impl ViewportPageTracker {
             || !scale.is_finite()
             || (snapshot.scale - scale).abs() > f32::EPSILON
             || snapshot.page_rects.is_empty()
+            || snapshot.page_rects.len() != snapshot.page_document_y_offsets.len()
+            || snapshot
+                .page_document_y_offsets
+                .iter()
+                .any(|offset| !offset.is_finite())
         {
             self.repaint_after_publish = true;
             return self.last_valid.unwrap_or(VisiblePage::Unavailable);
@@ -973,15 +988,26 @@ impl ViewportPageTracker {
         viewport_rect: Rect,
         scale: f32,
         page_rects: Vec<Rect>,
+        page_document_y_offsets: Vec<f32>,
         clip: Rect,
         scroll_offset: Vec2,
     ) -> bool {
+        if page_rects.len() != page_document_y_offsets.len()
+            || page_document_y_offsets
+                .iter()
+                .any(|offset| !offset.is_finite())
+        {
+            self.published = None;
+            self.repaint_after_publish = true;
+            return true;
+        }
         let next = GeometrySnapshot {
             published_frame: frame,
             layout_revision,
             viewport_rect,
             scale,
             page_rects,
+            page_document_y_offsets,
             clip,
             scroll_offset,
         };
@@ -990,6 +1016,7 @@ impl ViewportPageTracker {
                 || old.viewport_rect != next.viewport_rect
                 || old.scale != next.scale
                 || old.page_rects != next.page_rects
+                || old.page_document_y_offsets != next.page_document_y_offsets
                 || old.clip != next.clip
                 || old.scroll_offset != next.scroll_offset
         });
@@ -1040,6 +1067,149 @@ fn distance_squared_to_rect(point: Pos2, rect: Rect) -> f32 {
         0.0
     };
     dx * dx + dy * dy
+}
+
+#[cfg(test)]
+mod viewport_page_tracker_tests {
+    use super::{VisiblePage, ViewportPageTracker};
+    use eframe::egui::{pos2, vec2, Rect, Vec2};
+
+    fn publish_one_page(
+        tracker: &mut ViewportPageTracker,
+        page_rect: Rect,
+        document_y_offset: f32,
+        clip: Rect,
+        scroll_offset: Vec2,
+    ) -> bool {
+        tracker.publish(
+            10,
+            7,
+            Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0)),
+            1.0,
+            vec![page_rect],
+            vec![document_y_offset],
+            clip,
+            scroll_offset,
+        )
+    }
+
+    #[test]
+    fn center_anchor_restores_document_y_and_keeps_outside_displacement() {
+        let viewport = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        let presented = Rect::from_min_size(pos2(100.0, 100.0), vec2(200.0, 100.0));
+        let mut tracker = ViewportPageTracker::default();
+        assert!(publish_one_page(
+            &mut tracker,
+            presented,
+            42.0,
+            viewport,
+            Vec2::ZERO,
+        ));
+
+        let inside = tracker
+            .capture_center_anchor(11, 7, viewport, 1.0)
+            .expect("published offset yields an anchor");
+        assert_eq!(inside.page_local_document_point, vec2(100.0, 92.0));
+        assert_eq!(inside.outside_page_offset_points, Vec2::ZERO);
+        assert_eq!(
+            tracker.visible_page(11, 7, viewport, 1.0, false),
+            VisiblePage::Available {
+                one_based: 1,
+                total: 1,
+            }
+        );
+
+        let outside_clip = Rect::from_min_size(pos2(320.0, 260.0), vec2(80.0, 40.0));
+        assert!(publish_one_page(
+            &mut tracker,
+            presented,
+            42.0,
+            outside_clip,
+            Vec2::ZERO,
+        ));
+        let outside = tracker
+            .capture_center_anchor(11, 7, viewport, 1.0)
+            .expect("nearest presented page remains anchorable");
+        assert_eq!(outside.page_local_document_point, vec2(200.0, 142.0));
+        assert_eq!(outside.outside_page_offset_points, vec2(60.0, 80.0));
+    }
+
+    #[test]
+    fn invalid_or_mismatched_offsets_reject_publication_and_offset_changes_repaint() {
+        let viewport = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        let page = Rect::from_min_size(pos2(20.0, 20.0), vec2(200.0, 100.0));
+        let mut tracker = ViewportPageTracker::default();
+        assert!(publish_one_page(
+            &mut tracker,
+            page,
+            30.0,
+            viewport,
+            Vec2::ZERO,
+        ));
+        assert!(!publish_one_page(
+            &mut tracker,
+            page,
+            30.0,
+            viewport,
+            Vec2::ZERO,
+        ));
+        assert!(publish_one_page(
+            &mut tracker,
+            page,
+            31.0,
+            viewport,
+            Vec2::ZERO,
+        ));
+        assert!(tracker.capture_center_anchor(11, 7, viewport, 1.0).is_some());
+
+        assert!(tracker.publish(
+            12,
+            7,
+            viewport,
+            1.0,
+            vec![page],
+            Vec::new(),
+            viewport,
+            Vec2::ZERO,
+        ));
+        assert!(tracker.capture_center_anchor(13, 7, viewport, 1.0).is_none());
+        assert!(tracker.publish(
+            14,
+            7,
+            viewport,
+            1.0,
+            vec![page],
+            vec![f32::NAN],
+            viewport,
+            Vec2::ZERO,
+        ));
+        assert!(tracker.capture_center_anchor(15, 7, viewport, 1.0).is_none());
+    }
+
+    #[test]
+    fn visible_page_uses_abutting_presented_rectangles_and_earlier_ties() {
+        let viewport = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 100.0));
+        let first = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 50.0));
+        let second = first.translate(vec2(0.0, 50.0));
+        let mut tracker = ViewportPageTracker::default();
+        tracker.publish(
+            4,
+            9,
+            viewport,
+            1.0,
+            vec![first, second],
+            vec![24.0, 18.0],
+            Rect::from_min_max(pos2(0.0, 25.0), pos2(200.0, 75.0)),
+            Vec2::ZERO,
+        );
+        assert_eq!(
+            tracker.visible_page(5, 9, viewport, 1.0, false),
+            VisiblePage::Available {
+                one_based: 1,
+                total: 2,
+            }
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

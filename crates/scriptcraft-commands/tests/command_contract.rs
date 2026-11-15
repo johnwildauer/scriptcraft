@@ -5,7 +5,7 @@ use scriptcraft_commands::{
     descriptor_for, validate_descriptor_catalog, AvailabilityPolicy, Command, CommandDescriptor,
     CommandEnvelope, CommandId, CommandOrigin, DiagnosticMessage, DocumentPath,
     EditorSurface, EnvelopeError, HostEffectDescription, ParagraphAlignmentValue, PdfExportOptions,
-    Position, Selection, TitleTextStyle, ZoomFactor, ZoomPercent, COMMAND_DESCRIPTORS,
+    Position, ScriptViewMode, Selection, TitleTextStyle, ZoomFactor, ZoomPercent, COMMAND_DESCRIPTORS,
     COMMAND_WIRE_VERSION, MAX_DIAGNOSTIC_MESSAGE_BYTES,
 };
 use serde::de::value::{Error as ValueError, MapDeserializer};
@@ -105,8 +105,8 @@ fn assert_serializable<T: Serialize>() {}
 #[test]
 fn command_catalog_has_complete_unique_stable_dotted_identities() {
     assert_eq!(validate_descriptor_catalog(), Ok(()));
-    assert_eq!(CommandId::ALL.len(), 51);
-    assert_eq!(COMMAND_DESCRIPTORS.len(), 51);
+    assert_eq!(CommandId::ALL.len(), 52);
+    assert_eq!(COMMAND_DESCRIPTORS.len(), 52);
 
     let ids = CommandId::ALL.map(CommandId::as_str);
     for (index, id) in ids.iter().enumerate() {
@@ -147,9 +147,9 @@ fn introduction_order_is_independent_of_catalog_discovery_order() {
         "tools.sprint-timer.set-mode", "tools.sprint-timer.set-minutes", "tools.sprint-timer.start",
         "tools.sprint-timer.pause", "tools.sprint-timer.resume", "tools.sprint-timer.reset",
         "tools.sprint-timer.end", "ui.status.set", "editor.dual-dialogue.toggle", "file.print",
-        "editor.style.clear", "application.quit",
+        "editor.style.clear", "application.quit", "view.script-view.set",
     ];
-    assert_eq!(introduced.len(), 51);
+    assert_eq!(introduced.len(), 52);
     for expected in introduced {
         let id = expected
             .parse::<CommandId>()
@@ -161,10 +161,59 @@ fn introduction_order_is_independent_of_catalog_discovery_order() {
     assert_eq!(introduced[48], "file.print");
     assert_eq!(introduced[49], "editor.style.clear");
     assert_eq!(introduced[50], "application.quit");
+    assert_eq!(introduced[51], "view.script-view.set");
     assert_eq!(CommandId::ALL[8].as_str(), "file.print");
     assert_ne!(CommandId::ALL[48].as_str(), introduced[48]);
     assert_eq!(CommandId::ApplicationQuit.as_str(), "application.quit");
     assert_eq!(CommandId::ALL[50], CommandId::ApplicationQuit);
+    assert_eq!(CommandId::ALL[51].as_str(), "view.script-view.set");
+}
+
+#[test]
+fn script_view_mode_command_has_bounded_typed_payload_and_catalog_entry() {
+    assert_eq!(ScriptViewMode::default(), ScriptViewMode::Page);
+
+    for (wire_mode, mode) in [
+        ("normal", ScriptViewMode::Normal),
+        ("page", ScriptViewMode::Page),
+        ("speed", ScriptViewMode::Speed),
+    ] {
+        let command = Command::deserialize(command_wire(
+            "view.script-view.set",
+            params(vec![("mode", WireValue::String(wire_mode))]),
+        ))
+        .unwrap_or_else(|_| unreachable!("known script-view mode decodes"));
+        assert_eq!(command, Command::ViewScriptViewSet { mode });
+        assert_eq!(command.id(), CommandId::ViewScriptViewSet);
+    }
+
+    assert!(Command::deserialize(command_wire(
+        "view.script-view.set",
+        params(vec![("mode", WireValue::String("continuous"))]),
+    ))
+    .is_err());
+    assert!(Command::deserialize(command_wire(
+        "view.script-view.set",
+        params(vec![
+            ("mode", WireValue::String("page")),
+            ("unexpected", WireValue::Bool(true)),
+        ]),
+    ))
+    .is_err());
+    assert!(Command::deserialize(command_wire("view.script-view.set", params(vec![]))).is_err());
+
+    assert_eq!(
+        COMMAND_DESCRIPTORS
+            .iter()
+            .filter(|descriptor| descriptor.id == CommandId::ViewScriptViewSet)
+            .count(),
+        1
+    );
+    let descriptor = descriptor_for(CommandId::ViewScriptViewSet)
+        .unwrap_or_else(|| unreachable!("script-view command descriptor is catalogued"));
+    assert_eq!(descriptor.availability, AvailabilityPolicy::RecheckAtExecution);
+    assert_eq!(descriptor.family, "view");
+    assert!(descriptor.parameters.contains("script_view_mode"));
 }
 
 #[test]
