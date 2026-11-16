@@ -10,9 +10,7 @@ use scriptcraft_core::fdx::{self, FdxImportOutcome, FdxMigrationConsent, FdxVers
 use scriptcraft_core::fdx_storage::{
     self, FdxBaseline, FdxSaveMode, FdxSaveTarget, OpenedFdxSource, StdFdxStorageFileSystem,
 };
-use scriptcraft_core::layout::{
-    BodyEditorPresentation, LayoutCache, LayoutComposition, ScreenplayLayout,
-};
+use scriptcraft_core::layout::{BodyEditorPresentation, LayoutCache, ScreenplayLayout};
 use scriptcraft_core::persistence::{FileSystem, StdFileSystem};
 use scriptcraft_core::{Project, Role, StableId};
 use scriptcraft_commands::DiagnosticMessage;
@@ -2308,9 +2306,7 @@ impl ScriptCraftApp {
         &mut self,
         surface: EditorSurface,
     ) -> Result<std::sync::Arc<ScreenplayLayout>, scriptcraft_core::layout::LayoutError> {
-        let revision = self.session.revision();
         let started = Instant::now();
-        let composition = editor_layout_composition(surface);
         if surface == EditorSurface::Body {
             self.reconcile_body_active_group();
         }
@@ -2323,19 +2319,9 @@ impl ScriptCraftApp {
                 self.session.project(),
                 self.active_body_dual_dialogue_group.clone(),
             );
-            cache.get_or_build_body_editor(
-                revision,
-                self.session.project(),
-                self.session.layout_inputs(),
-                &presentation,
-            )?
+            cache.get_or_build_body_editor_for_session(&self.session, &presentation)?
         } else {
-            cache.get_or_build_with_composition(
-                revision,
-                self.session.project(),
-                self.session.layout_inputs(),
-                composition,
-            )?
+            cache.get_or_build_title_page_editor_for_session(&self.session)?
         };
         add_performance_nanos(
             &mut self.performance.layout_lookup_nanos,
@@ -3172,13 +3158,6 @@ impl ScriptCraftApp {
     }
 
 
-}
-
-fn editor_layout_composition(surface: EditorSurface) -> LayoutComposition {
-    match surface {
-        EditorSurface::Body => LayoutComposition::BodyEditor,
-        EditorSurface::TitlePage => LayoutComposition::TitlePageEditor,
-    }
 }
 
 fn chrome_frame(palette: theme::ToolbarPalette) -> egui::Frame {

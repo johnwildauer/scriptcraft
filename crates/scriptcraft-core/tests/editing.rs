@@ -227,3 +227,47 @@ fn one_final_empty_title_paragraph_is_a_silent_noop_in_both_directions() {
         assert_eq!(session.revision(), before.revision());
     }
 }
+
+#[test]
+fn irrelevant_action_edits_skip_derived_work_while_character_and_heading_edits_invalidate_one_scene() {
+    let mut project = valid(Project::new());
+    project.elements = [
+        ("heading", Role::SceneHeading, "INT. ROOM - DAY"),
+        ("action", Role::Action, "Action"),
+        ("cue", Role::Character, "ALICE"),
+        ("dialogue", Role::Dialogue, "Hello"),
+    ]
+    .into_iter()
+    .map(|(id, role, text)| valid(ScreenplayElement::new(id, role, text)))
+    .collect();
+    let mut session = valid(EditingSession::new(project));
+    valid(session.refresh_cast_lists());
+    assert!(!session.pending_derived_work_summary().pending);
+
+    valid(session.set_selection(Selection::caret(Position { element: 1, offset: 6 })));
+    valid(session.insert(" changed"));
+    assert!(session.last_edit_used_scoped_validation());
+    assert!(!session.pending_derived_work_summary().pending);
+
+    valid(session.set_selection(Selection::caret(Position { element: 2, offset: 5 })));
+    valid(session.insert("X"));
+    assert!(session.last_edit_used_scoped_validation());
+    let character_work = session.pending_derived_work_summary();
+    assert!(character_work.pending);
+    assert!(!character_work.complete);
+    assert_eq!(character_work.affected_scene_count, 1);
+    valid(session.refresh_cast_lists());
+    assert!(!session.pending_derived_work_summary().pending);
+
+    let heading_offset = session.project().elements[0].text.len();
+    valid(session.set_selection(Selection::caret(Position {
+        element: 0,
+        offset: heading_offset,
+    })));
+    valid(session.insert("!"));
+    assert!(session.last_edit_used_scoped_validation());
+    let heading_work = session.pending_derived_work_summary();
+    assert!(heading_work.pending);
+    assert!(!heading_work.complete);
+    assert_eq!(heading_work.affected_scene_count, 1);
+}

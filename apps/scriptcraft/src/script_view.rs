@@ -2,6 +2,7 @@ use super::{
     add_performance_counter, add_performance_nanos, document_font, status_bar, theme,
     PerformanceDiagnostics, RevealIntent, ScriptCraftApp,
 };
+use super::status_bar::PresentedPage;
 use crate::presentation_style::AdvanceMode;
 use super::app_commands::CommandInvocation;
 use super::shortcuts::{editor_command_for_key_event, ShortcutPlatform};
@@ -35,12 +36,6 @@ const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 enum CaretPresentation {
     Fixed(FixedRect),
     Projected(super::presentation_geometry::ProjectedCaretRect),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct PresentedPage {
-    rect: egui::Rect,
-    document_y_offset: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -812,7 +807,7 @@ mod presented_page_policy_tests {
                     612.0,
                     792.0,
                     mode,
-                    &page_content,
+                    page_content.iter().copied(),
                     12.0,
                     zoom_percent,
                     egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(900.0, 600.0)),
@@ -849,7 +844,7 @@ mod presented_page_policy_tests {
                 612.0,
                 792.0,
                 ScriptViewMode::Speed,
-                &page_content,
+                page_content.iter().copied(),
                 12.0,
                 100,
                 outer,
@@ -887,7 +882,7 @@ mod presented_page_policy_tests {
                 612.0,
                 792.0,
                 ScriptViewMode::Page,
-                &page_content,
+                page_content.iter().copied(),
                 12.0,
                 100,
                 outer,
@@ -917,7 +912,7 @@ mod presented_page_policy_tests {
             612.0,
             792.0,
             ScriptViewMode::Speed,
-            &page_content,
+            page_content.iter().copied(),
             12.0,
             300,
             egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(400.0, 260.0)),
@@ -938,7 +933,7 @@ mod presented_page_policy_tests {
             612.0,
             792.0,
             ScriptViewMode::Speed,
-            &one_page,
+            one_page.iter().copied(),
             12.0,
             100,
             egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(900.0, 700.0)),
@@ -1608,23 +1603,18 @@ impl ScriptCraftApp {
         let reveal_intent = self.reveal_intent;
         let pending_zoom_anchor = self.pending_zoom_anchor;
         let zoom_compensation_offset = pending_zoom_anchor.and_then(|anchor| {
-            let page_content_bounds = layout
-                .pages
-                .iter()
-                .map(|page| {
-                    (
-                        page.content_bounds.y as f32,
-                        page.content_bounds.height as f32,
-                    )
-                })
-                .collect::<Vec<_>>();
             prepaint_zoom_scroll_offset(
                 anchor,
                 layout.pages.len(),
                 layout.inputs.paper_width as f32,
                 layout.inputs.paper_height as f32,
                 presentation_mode,
-                &page_content_bounds,
+                layout.pages.iter().map(|page| {
+                    (
+                        page.content_bounds.y as f32,
+                        page.content_bounds.height as f32,
+                    )
+                }),
                 layout.inputs.font_size as f32,
                 self.zoom_percent,
                 scroll_outer_rect,
@@ -1920,14 +1910,6 @@ impl ScriptCraftApp {
         ui.style_mut().spacing.scroll.fade = scroll_fade;
         let scale = rendered_scale;
         let published_scroll_offset = scroll_output.state.offset;
-        let published_page_rects = presented_pages
-            .iter()
-            .map(|page| page.rect)
-            .collect::<Vec<_>>();
-        let published_page_document_y_offsets = presented_pages
-            .iter()
-            .map(|page| page.document_y_offset)
-            .collect::<Vec<_>>();
         if !zoom_compensation_queued {
             self.reveal_intent = RevealIntent::None;
         }
@@ -1941,8 +1923,7 @@ impl ScriptCraftApp {
                 self.session.revision(),
                 ui.ctx().content_rect(),
                 scale,
-                published_page_rects,
-                published_page_document_y_offsets,
+                &presented_pages,
                 actual_clip,
                 published_scroll_offset,
             )
@@ -2774,7 +2755,7 @@ fn prepaint_zoom_scroll_offset(
     paper_width: f32,
     paper_height: f32,
     mode: ScriptViewMode,
-    page_content_bounds: &[(f32, f32)],
+    page_content_bounds: impl ExactSizeIterator<Item = (f32, f32)> + Clone,
     base_font_size: f32,
     zoom_percent: u16,
     outer_rect: egui::Rect,
@@ -2788,7 +2769,7 @@ fn prepaint_zoom_scroll_offset(
         || !base_font_size.is_finite()
         || !vertical_item_spacing.is_finite()
         || page_content_bounds
-            .iter()
+            .clone()
             .any(|(top, height)| !top.is_finite() || !height.is_finite())
     {
         return None;
@@ -2810,7 +2791,7 @@ fn prepaint_zoom_scroll_offset(
         + SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING;
     let mut target_policy = None;
     for (page_index, (content_top, content_page_height)) in
-        page_content_bounds.iter().copied().enumerate()
+        page_content_bounds.enumerate()
     {
         let policy = presented_page_policy(
             mode,

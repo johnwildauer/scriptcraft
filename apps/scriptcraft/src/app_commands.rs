@@ -1636,8 +1636,10 @@ mod surface_command_availability_tests {
             1,
             rect,
             1.0,
-            vec![rect],
-            vec![0.0],
+            &[super::super::status_bar::PresentedPage {
+                rect,
+                document_y_offset: 0.0,
+            }],
             rect,
             eframe::egui::Vec2::ZERO,
         );
@@ -1673,8 +1675,10 @@ mod surface_command_availability_tests {
             1,
             rect,
             1.0,
-            vec![rect],
-            vec![0.0],
+            &[super::super::status_bar::PresentedPage {
+                rect,
+                document_y_offset: 0.0,
+            }],
             rect,
             eframe::egui::Vec2::ZERO,
         );
@@ -1683,8 +1687,10 @@ mod surface_command_availability_tests {
             1,
             rect,
             1.0,
-            vec![rect],
-            vec![0.0],
+            &[super::super::status_bar::PresentedPage {
+                rect,
+                document_y_offset: 0.0,
+            }],
             rect,
             eframe::egui::Vec2::ZERO,
         );

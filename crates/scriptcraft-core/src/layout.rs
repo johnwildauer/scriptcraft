@@ -14,7 +14,7 @@ use crate::{
 };
 use std::time::Instant;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -369,6 +369,9 @@ pub struct LayoutBuildDiagnostics {
     /// Complete Project validations performed by this layout request.
     pub complete_project_validations: u64,
     pub layout_builds: u64,
+    /// Document-sized semantic signatures constructed by the generic cache path.
+    /// Validated-session lookups leave this at zero on both hits and misses.
+    pub semantic_signature_constructions: u64,
     pub element_wraps_built: u64,
     pub element_wrap_misses: u64,
     pub element_wraps_reused: u64,
@@ -418,6 +421,8 @@ struct ElementWrapEntry {
 #[derive(Debug, Default)]
 struct ElementWrapCache {
     buckets: HashMap<u64, Vec<ElementWrapEntry>>,
+    /// (last-used generation, unique insertion order, collision-bucket key).
+    usage_order: BTreeSet<(u64, u64, u64)>,
     generation: u64,
     next_order: u64,
     entry_count: usize,
@@ -428,8 +433,13 @@ impl ElementWrapCache {
     fn start_generation(&mut self) {
         if self.generation == u64::MAX {
             self.generation = 1;
-            for entry in self.buckets.values_mut().flatten() {
-                entry.last_used_generation = 0;
+            self.usage_order.clear();
+            for (fingerprint, bucket) in &mut self.buckets {
+                for entry in bucket {
+                    entry.last_used_generation = 0;
+                    self.usage_order
+                        .insert((0, entry.insertion_order, *fingerprint));
+                }
             }
         } else {
             self.generation = self.generation.saturating_add(1).max(1);
@@ -438,6 +448,7 @@ impl ElementWrapCache {
 
     fn clear(&mut self) {
         self.buckets.clear();
+        self.usage_order.clear();
         self.generation = 0;
         self.next_order = 0;
         self.entry_count = 0;
@@ -488,7 +499,17 @@ impl ElementWrapCache {
                 .iter_mut()
                 .find(|entry| entry.context == context && entry.canonical_text.as_ref() == text)
         }) {
+            self.usage_order.remove(&(
+                entry.last_used_generation,
+                entry.insertion_order,
+                fingerprint,
+            ));
             entry.last_used_generation = self.generation;
+            self.usage_order.insert((
+                entry.last_used_generation,
+                entry.insertion_order,
+                fingerprint,
+            ));
             if let Some(diagnostics) = diagnostics {
                 diagnostics.element_wraps_reused =
                     diagnostics.element_wraps_reused.saturating_add(1);
@@ -546,6 +567,8 @@ impl ElementWrapCache {
                 insertion_order: self.next_order,
                 byte_cost,
             });
+        self.usage_order
+            .insert((self.generation, self.next_order, fingerprint));
         self.entry_count = self.entry_count.saturating_add(1);
         self.retained_bytes = self.retained_bytes.saturating_add(byte_cost);
         lines
@@ -555,29 +578,23 @@ impl ElementWrapCache {
         while self.entry_count > MAX_CACHED_ELEMENT_WRAPS
             || self.retained_bytes > MAX_CACHED_ELEMENT_WRAP_BYTES
         {
-            let oldest = self
-                .buckets
-                .iter()
-                .flat_map(|(fingerprint, bucket)| {
-                    bucket.iter().enumerate().map(move |(index, entry)| {
-                        (
-                            entry.last_used_generation,
-                            entry.insertion_order,
-                            *fingerprint,
-                            index,
-                        )
-                    })
-                })
-                .min();
-            let Some((_, _, fingerprint, index)) = oldest else {
+            let Some(oldest) = self.usage_order.iter().next().copied() else {
                 self.entry_count = 0;
                 break;
             };
+            self.usage_order.remove(&oldest);
+            let (_, insertion_order, fingerprint) = oldest;
             let (removed_bytes, remove_bucket) =
                 if let Some(bucket) = self.buckets.get_mut(&fingerprint) {
-                    let removed = bucket.remove(index);
+                    let removed = bucket
+                        .iter()
+                        .position(|entry| entry.insertion_order == insertion_order)
+                        .map(|index| bucket.remove(index));
                     let remove_bucket = bucket.is_empty();
-                    (removed.byte_cost, remove_bucket)
+                    (
+                        removed.map_or(0, |entry| entry.byte_cost),
+                        remove_bucket,
+                    )
                 } else {
                     (0, false)
                 };
@@ -675,6 +692,71 @@ impl LayoutCache {
         )
     }
 
+    /// Looks up a Body-editor layout using the validated revision published by
+    /// the editing session. The transient presentation remains part of the key.
+    pub fn get_or_build_body_editor_for_session(
+        &mut self,
+        session: &crate::editing::EditingSession,
+        presentation: &BodyEditorPresentation,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        self.get_or_build_body_editor_for_session_with_diagnostics(
+            session,
+            presentation,
+            &mut LayoutBuildDiagnostics::default(),
+        )
+    }
+
+    /// Diagnostic counterpart to [`Self::get_or_build_body_editor_for_session`].
+    pub fn get_or_build_body_editor_for_session_with_diagnostics(
+        &mut self,
+        session: &crate::editing::EditingSession,
+        presentation: &BodyEditorPresentation,
+        diagnostics: &mut LayoutBuildDiagnostics,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        *diagnostics = LayoutBuildDiagnostics::default();
+        self.get_or_build_with_optional_diagnostics(
+            session.revision(),
+            session.project(),
+            session.layout_inputs(),
+            LayoutPurpose::Editor,
+            LayoutComposition::BodyEditor,
+            Some(diagnostics),
+            true,
+            presentation.clone(),
+        )
+    }
+
+    /// Looks up the Title-page-editor layout using the session's validated
+    /// revision and the title-editor composition.
+    pub fn get_or_build_title_page_editor_for_session(
+        &mut self,
+        session: &crate::editing::EditingSession,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        self.get_or_build_title_page_editor_for_session_with_diagnostics(
+            session,
+            &mut LayoutBuildDiagnostics::default(),
+        )
+    }
+
+    /// Diagnostic counterpart to [`Self::get_or_build_title_page_editor_for_session`].
+    pub fn get_or_build_title_page_editor_for_session_with_diagnostics(
+        &mut self,
+        session: &crate::editing::EditingSession,
+        diagnostics: &mut LayoutBuildDiagnostics,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        *diagnostics = LayoutBuildDiagnostics::default();
+        self.get_or_build_with_optional_diagnostics(
+            session.revision(),
+            session.project(),
+            session.layout_inputs(),
+            LayoutPurpose::Editor,
+            LayoutComposition::TitlePageEditor,
+            Some(diagnostics),
+            true,
+            BodyEditorPresentation::default(),
+        )
+    }
+
     /// Diagnostic counterpart to the ordinary cache lookup. A cache hit
     /// returns zero build measurements; a miss reports wrapping work separately
     /// from validation, pagination, and cache lookup.
@@ -746,21 +828,6 @@ impl LayoutCache {
         source_settings
             .direct_paragraph_overrides
             .extend(project.direct_paragraph_overrides.clone());
-        let mut signature_hasher = std::collections::hash_map::DefaultHasher::new();
-        format!(
-            "{:?}{:?}{:?}{:?}{:?}",
-            project.elements,
-            project.title_page,
-            project.direct_paragraph_overrides,
-            project.dual_dialogue_groups,
-            project.dual_dialogue_paragraph_overrides,
-        )
-            .hash(&mut signature_hasher);
-        let project_layout_signature = signature_hasher.finish();
-        let source_settings_match = self
-            .source_settings
-            .as_ref()
-            .is_some_and(|cached| cached == &source_settings);
         let same_document = self
             .project_identity
             .as_ref()
@@ -776,22 +843,52 @@ impl LayoutCache {
             self.layout = None;
             self.element_wraps.clear();
         }
-        if self.revision == Some(revision)
+        let source_settings_match = self
+            .source_settings
+            .as_ref()
+            .is_some_and(|cached| cached == &source_settings);
+        let cache_keys_match = self.revision == Some(revision)
             && self.inputs.as_ref() == Some(inputs)
             && source_settings_match
             && same_document
             && self.purpose == Some(purpose)
             && self.composition == Some(composition)
-            && self.body_presentation.as_ref() == Some(&body_presentation)
-            && self.project_layout_signature == Some(project_layout_signature)
-        {
-            return self
-                .layout
-                .clone()
-                .ok_or(LayoutError {
-                    kind: LayoutErrorKind::NoGeometry,
-                })
-                .map(|layout| (layout, true));
+            && self.body_presentation.as_ref() == Some(&body_presentation);
+        let mut project_layout_signature = None;
+        if cache_keys_match {
+            if validated_session {
+                return self
+                    .layout
+                    .clone()
+                    .ok_or(LayoutError {
+                        kind: LayoutErrorKind::NoGeometry,
+                    })
+                    .map(|layout| (layout, true));
+            }
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.semantic_signature_constructions = diagnostics
+                    .semantic_signature_constructions
+                    .saturating_add(1);
+            }
+            let signature = semantic_project_layout_signature(project);
+            if self.project_layout_signature == Some(signature) {
+                return self
+                    .layout
+                    .clone()
+                    .ok_or(LayoutError {
+                        kind: LayoutErrorKind::NoGeometry,
+                    })
+                    .map(|layout| (layout, true));
+            }
+            project_layout_signature = Some(signature);
+        }
+        if !validated_session && project_layout_signature.is_none() {
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.semantic_signature_constructions = diagnostics
+                    .semantic_signature_constructions
+                    .saturating_add(1);
+            }
+            project_layout_signature = Some(semantic_project_layout_signature(project));
         }
         self.element_wraps.start_generation();
         let layout = Arc::new(
@@ -814,11 +911,25 @@ impl LayoutCache {
         self.purpose = Some(purpose);
         self.composition = Some(composition);
         self.body_presentation = Some(body_presentation);
-        self.project_layout_signature = Some(project_layout_signature);
+        self.project_layout_signature = project_layout_signature;
         self.layout = Some(layout.clone());
         self.project_identity = Some(project.layout_identity().clone());
         Ok((layout, false))
     }
+}
+
+fn semantic_project_layout_signature(project: &Project) -> u64 {
+    let mut signature_hasher = std::collections::hash_map::DefaultHasher::new();
+    format!(
+        "{:?}{:?}{:?}{:?}{:?}",
+        project.elements,
+        project.title_page,
+        project.direct_paragraph_overrides,
+        project.dual_dialogue_groups,
+        project.dual_dialogue_paragraph_overrides,
+    )
+    .hash(&mut signature_hasher);
+    signature_hasher.finish()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2118,31 +2229,14 @@ fn x_for_display_char(line: &LayoutLine, display_char: usize) -> i64 {
 }
 
 fn positioned_spans(line: &WrappedLine, line_geometry: FixedRect) -> Vec<PositionedStyledSpan> {
-    let display_chars = line.display_text.chars().collect::<Vec<_>>();
-    if display_chars.is_empty() {
+    if line.display_text.is_empty() {
         return Vec::new();
     }
-    let mut run_ranges = Vec::with_capacity(line.runs.len());
-    let mut cursor = 0usize;
+    let mut run_styles = Vec::with_capacity(line.runs.len());
+    let mut source_cursor = 0usize;
     for run in line.runs.iter() {
-        let end = cursor.saturating_add(run.text.len());
-        run_ranges.push((cursor..end, run));
-        cursor = end;
-    }
-    let mapping_for = |display_index: usize| {
-        line.display_source_map.iter().find(|segment| {
-            display_index >= segment.display_start && display_index < segment.display_end
-        })
-    };
-    let mut styled = Vec::with_capacity(display_chars.len());
-    for (index, character) in display_chars.iter().enumerate() {
-        let Some(mapping) = mapping_for(index) else { continue };
-        let run = run_ranges
-            .iter()
-            .find(|(range, _)| mapping.source_start >= range.start && mapping.source_start < range.end)
-            .map(|(_, run)| *run);
-        let flags = run
-            .and_then(|run| parse_style_attribute(&run.attributes).ok())
+        let end = source_cursor.saturating_add(run.text.len());
+        let flags = parse_style_attribute(&run.attributes)
             .map(|projection| projection.flags)
             .unwrap_or_default();
         let mut style = line.text_style.clone();
@@ -2150,42 +2244,73 @@ fn positioned_spans(line: &WrappedLine, line_geometry: FixedRect) -> Vec<Positio
         style.italic |= flags.italics;
         style.underline |= flags.underline;
         style.all_caps |= flags.all_caps;
-        if let Some(run) = run {
-            for attribute in &run.attributes {
-                match attribute.name.as_str() {
-                    "Font" if !attribute.value.is_empty() => {
-                        style.declared_family = attribute.value.clone();
-                        style.family = FontFallback::CourierPrime;
-                    }
-                    "Size" => {
-                        if let Ok(size) = attribute.value.parse::<u8>() {
-                            if (1..=72).contains(&size) { style.size = size; }
+        for attribute in &run.attributes {
+            match attribute.name.as_str() {
+                "Font" if !attribute.value.is_empty() => {
+                    style.declared_family = attribute.value.clone();
+                    style.family = FontFallback::CourierPrime;
+                }
+                "Size" => {
+                    if let Ok(size) = attribute.value.parse::<u8>() {
+                        if (1..=72).contains(&size) {
+                            style.size = size;
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
-        let underline = style.underline;
-        styled.push((
-            *character,
-            mapping.source_start,
-            mapping.source_end,
-            style,
-            underline,
-            flags.strikethrough,
-        ));
+        run_styles.push((source_cursor..end, style, flags.strikethrough));
+        source_cursor = end;
     }
+
     let base_size = i64::from(line.text_style.size.max(1));
-    let mut output: Vec<PositionedStyledSpan> = Vec::new();
+    let mut output: Vec<PositionedSpanBuilder> = Vec::new();
     let mut x = line_geometry.x.raw();
-    for (character, source_start, source_end, style, underline, strikethrough) in styled {
+    let mut mapping_index = 0usize;
+    let mut run_index = 0usize;
+    for (display_index, character) in line.display_text.chars().enumerate() {
+        while line
+            .display_source_map
+            .get(mapping_index)
+            .is_some_and(|segment| display_index >= segment.display_end)
+        {
+            mapping_index = mapping_index.saturating_add(1);
+        }
+        let Some(mapping) = line
+            .display_source_map
+            .get(mapping_index)
+            .filter(|segment| {
+                display_index >= segment.display_start && display_index < segment.display_end
+            })
+        else {
+            continue;
+        };
+        while run_styles
+            .get(run_index)
+            .is_some_and(|(range, _, _)| mapping.source_start >= range.end)
+        {
+            run_index = run_index.saturating_add(1);
+        }
+        let (style, strikethrough) = run_styles
+            .get(run_index)
+            .filter(|(range, _, _)| {
+                mapping.source_start >= range.start && mapping.source_start < range.end
+            })
+            .map(|(_, style, strikethrough)| (style, *strikethrough))
+            .unwrap_or((&line.text_style, false));
+        let source_start = mapping.source_start;
+        let source_end = mapping.source_end;
         let cell = FixedPoint::from_raw(
-            line.char_width.raw().saturating_mul(i64::from(style.size.max(1))).div_euclid(base_size).max(1),
+            line.char_width
+                .raw()
+                .saturating_mul(i64::from(style.size.max(1)))
+                .div_euclid(base_size)
+                .max(1),
         );
         let same = output.last().is_some_and(|span| {
-            span.text_style == style
-                && span.underline == underline
+            &span.text_style == style
+                && span.underline == style.underline
                 && span.strikethrough == strikethrough
                 && !character.is_whitespace()
                 && !span.display_text.chars().last().is_some_and(char::is_whitespace)
@@ -2193,37 +2318,90 @@ fn positioned_spans(line: &WrappedLine, line_geometry: FixedRect) -> Vec<Positio
                     || (span.source.start == source_start && span.source.end == source_end))
         });
         if same {
-            let span = output.last_mut().expect("checked span exists");
-            let mut text = span.display_text.to_string();
-            text.push(character);
-            span.display_text = Arc::from(text);
-            span.source.end = source_end;
-            span.geometry.width = FixedPoint::from_raw(span.geometry.width.raw().saturating_add(cell.raw()));
-            span.char_width = cell;
-            let mut mapping = span.display_source_map.to_vec();
-            let display_start = span.display_text.chars().count().saturating_sub(1);
-            mapping.push(DisplaySourceSegment {
-                display_start,
-                display_end: display_start.saturating_add(1),
-                source_start,
-                source_end,
-            });
-            span.display_source_map = mapping.into();
+            output
+                .last_mut()
+                .expect("checked span exists")
+                .push(character, source_start, source_end, cell);
         } else {
-            output.push(PositionedStyledSpan {
-                display_text: Arc::from(character.to_string()),
-                source: SourceRange { element: line.element, start: source_start, end: source_end },
-                display_source_map: Arc::from([DisplaySourceSegment { display_start: 0, display_end: 1, source_start, source_end }]),
-                text_style: style,
+            output.push(PositionedSpanBuilder {
+                display_text: character.to_string(),
+                source: SourceRange {
+                    element: line.element,
+                    start: source_start,
+                    end: source_end,
+                },
+                display_source_map: vec![DisplaySourceSegment {
+                    display_start: 0,
+                    display_end: 1,
+                    source_start,
+                    source_end,
+                }],
+                text_style: style.clone(),
                 char_width: cell,
-                geometry: FixedRect { x: FixedPoint::from_raw(x), y: line_geometry.y, width: cell, height: line_geometry.height },
-                underline,
+                geometry: FixedRect {
+                    x: FixedPoint::from_raw(x),
+                    y: line_geometry.y,
+                    width: cell,
+                    height: line_geometry.height,
+                },
+                underline: style.underline,
                 strikethrough,
             });
         }
         x = x.saturating_add(cell.raw());
     }
-    output
+    output.into_iter().map(PositionedSpanBuilder::finish).collect()
+}
+
+struct PositionedSpanBuilder {
+    display_text: String,
+    source: SourceRange,
+    display_source_map: Vec<DisplaySourceSegment>,
+    text_style: EffectiveTextStyle,
+    char_width: FixedPoint,
+    geometry: FixedRect,
+    underline: bool,
+    strikethrough: bool,
+}
+
+impl PositionedSpanBuilder {
+    fn push(
+        &mut self,
+        character: char,
+        source_start: usize,
+        source_end: usize,
+        cell: FixedPoint,
+    ) {
+        let display_start = self
+            .display_source_map
+            .last()
+            .map_or(0, |segment| segment.display_end);
+        self.display_text.push(character);
+        self.source.end = source_end;
+        self.geometry.width = FixedPoint::from_raw(
+            self.geometry.width.raw().saturating_add(cell.raw()),
+        );
+        self.char_width = cell;
+        self.display_source_map.push(DisplaySourceSegment {
+            display_start,
+            display_end: display_start.saturating_add(1),
+            source_start,
+            source_end,
+        });
+    }
+
+    fn finish(self) -> PositionedStyledSpan {
+        PositionedStyledSpan {
+            display_text: Arc::from(self.display_text),
+            source: self.source,
+            display_source_map: self.display_source_map.into(),
+            text_style: self.text_style,
+            char_width: self.char_width,
+            geometry: self.geometry,
+            underline: self.underline,
+            strikethrough: self.strikethrough,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2686,11 +2864,14 @@ fn wrap_for_layout(
 ) -> Vec<WrappedLine> {
     let mut projected_text = String::new();
     let mut source_map = Vec::<(std::ops::Range<usize>, std::ops::Range<usize>)>::new();
-    let mut run_ranges = Vec::new();
+    let mut run_styles = Vec::with_capacity(runs.len());
     let mut source_cursor = 0usize;
     for run in runs {
         let end = source_cursor.saturating_add(run.text.len());
-        run_ranges.push((source_cursor..end, run));
+        let flags = parse_style_attribute(&run.attributes)
+            .map(|projection| projection.flags)
+            .unwrap_or_default();
+        run_styles.push((source_cursor..end, flags));
         source_cursor = end;
     }
     let base_size = i64::from(text_style.size.max(1));
@@ -2707,12 +2888,19 @@ fn wrap_for_layout(
     let wrapping_char_width = FixedPoint::from_raw(
         char_width.raw().saturating_mul(maximum_run_size).div_euclid(base_size).max(1),
     );
+    let mut run_index = 0usize;
     for (source_start, scalar) in text.char_indices() {
         let source_end = source_start + scalar.len_utf8();
-        let flags = run_ranges.iter()
-            .find(|(range, _)| source_start >= range.start && source_start < range.end)
-            .and_then(|(_, run)| parse_style_attribute(&run.attributes).ok())
-            .map(|projection| projection.flags)
+        while run_styles
+            .get(run_index)
+            .is_some_and(|(range, _)| source_start >= range.end)
+        {
+            run_index = run_index.saturating_add(1);
+        }
+        let flags = run_styles
+            .get(run_index)
+            .filter(|(range, _)| source_start >= range.start && source_start < range.end)
+            .map(|(_, flags)| *flags)
             .unwrap_or_default();
         let displayed = if text_style.all_caps || flags.all_caps {
             scalar.to_uppercase().collect::<String>()
@@ -2756,29 +2944,82 @@ fn wrap_for_layout(
         }
         lines
     };
+    let owner_runs: Arc<[TextRun]> = Arc::from(runs.to_vec());
+    let mut line_map_index = 0usize;
+    let mut segment_map_index = 0usize;
     for line in &mut lines {
         let projected_start = line.start;
         let projected_end = line.end;
-        let mapped_start = source_map.iter().find(|(display, _)| projected_start >= display.start && projected_start < display.end)
-            .map(|(_, source)| source.start).unwrap_or(text.len());
-        let mapped_end = source_map.iter().rev().find(|(display, _)| projected_end > display.start && projected_end <= display.end)
-            .map(|(_, source)| source.end).unwrap_or(mapped_start);
+        let mapped_start = source_start_for_display_offset(
+            &source_map,
+            &mut line_map_index,
+            projected_start,
+        )
+        .unwrap_or(text.len());
+        let mapped_end = source_end_for_display_offset(
+            &source_map,
+            &mut line_map_index,
+            projected_end,
+        )
+        .unwrap_or(mapped_start);
         line.start = mapped_start;
         line.end = mapped_end;
         line.text = Arc::from(&text[mapped_start..mapped_end]);
         for segment in Arc::make_mut(&mut line.display_source_map) {
-            let start = source_map.iter().find(|(display, _)| segment.source_start >= display.start && segment.source_start < display.end)
-                .map(|(_, source)| source.start).unwrap_or(mapped_start);
-            let end = source_map.iter().find(|(display, _)| segment.source_end > display.start && segment.source_end <= display.end)
-                .map(|(_, source)| source.end).unwrap_or(start);
+            let start = source_start_for_display_offset(
+                &source_map,
+                &mut segment_map_index,
+                segment.source_start,
+            )
+            .unwrap_or(mapped_start);
+            let end = source_end_for_display_offset(
+                &source_map,
+                &mut segment_map_index,
+                segment.source_end,
+            )
+            .unwrap_or(start);
             segment.source_start = start;
             segment.source_end = end;
         }
         line.text_style = text_style.clone();
         line.char_width = char_width;
-        line.runs = Arc::from(runs.to_vec());
+        line.runs = Arc::clone(&owner_runs);
     }
     lines
+}
+
+fn source_start_for_display_offset(
+    source_map: &[(std::ops::Range<usize>, std::ops::Range<usize>)],
+    cursor: &mut usize,
+    display_offset: usize,
+) -> Option<usize> {
+    while source_map
+        .get(*cursor)
+        .is_some_and(|(display, _)| display_offset >= display.end)
+    {
+        *cursor = (*cursor).saturating_add(1);
+    }
+    source_map
+        .get(*cursor)
+        .filter(|(display, _)| display_offset >= display.start && display_offset < display.end)
+        .map(|(_, source)| source.start)
+}
+
+fn source_end_for_display_offset(
+    source_map: &[(std::ops::Range<usize>, std::ops::Range<usize>)],
+    cursor: &mut usize,
+    display_offset: usize,
+) -> Option<usize> {
+    while source_map
+        .get(*cursor)
+        .is_some_and(|(display, _)| display_offset > display.end)
+    {
+        *cursor = (*cursor).saturating_add(1);
+    }
+    source_map
+        .get(*cursor)
+        .filter(|(display, _)| display_offset > display.start && display_offset <= display.end)
+        .map(|(_, source)| source.end)
 }
 
 fn wrap_element(
@@ -3022,5 +3263,577 @@ fn wrap_segment(
         });
         *first_visual_line = false;
         start = end;
+    }
+}
+
+#[cfg(test)]
+mod session_layout_cache_tests {
+    use super::{
+        BodyEditorPresentation, LayoutBuildDiagnostics, LayoutCache, LayoutComposition,
+        LayoutPurpose,
+    };
+    use crate::{editing::EditingSession, Project};
+    use std::sync::Arc;
+
+    #[test]
+    fn validated_session_wrappers_avoid_semantic_signatures_and_share_hits() {
+        let project = Project::new().expect("default project is valid");
+        let session = EditingSession::new(project).expect("valid project opens in a session");
+
+        let presentation = BodyEditorPresentation::for_project(session.project(), None);
+        let mut body_cache = LayoutCache::default();
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+        let (body_layout, body_hit) = body_cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("validated Body layout builds");
+        assert!(!body_hit);
+        assert_eq!(diagnostics.complete_project_validations, 0);
+        assert_eq!(diagnostics.layout_builds, 1);
+        assert_eq!(diagnostics.semantic_signature_constructions, 0);
+        assert_eq!(body_cache.composition, Some(LayoutComposition::BodyEditor));
+        assert_eq!(body_cache.body_presentation.as_ref(), Some(&presentation));
+        assert_eq!(body_cache.project_layout_signature, None);
+
+        let (cached_body_layout, body_hit) = body_cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("validated Body layout hits");
+        assert!(body_hit);
+        assert!(Arc::ptr_eq(&body_layout, &cached_body_layout));
+        assert_eq!(diagnostics.complete_project_validations, 0);
+        assert_eq!(diagnostics.layout_builds, 0);
+        assert_eq!(diagnostics.semantic_signature_constructions, 0);
+        assert_eq!(body_cache.project_layout_signature, None);
+
+        let mut title_cache = LayoutCache::default();
+        let (title_layout, title_hit) = title_cache
+            .get_or_build_title_page_editor_for_session_with_diagnostics(
+                &session,
+                &mut diagnostics,
+            )
+            .expect("validated Title layout builds");
+        assert!(!title_hit);
+        assert_eq!(diagnostics.complete_project_validations, 0);
+        assert_eq!(diagnostics.layout_builds, 1);
+        assert_eq!(diagnostics.semantic_signature_constructions, 0);
+        assert_eq!(
+            title_cache.composition,
+            Some(LayoutComposition::TitlePageEditor)
+        );
+        assert_eq!(
+            title_cache.body_presentation.as_ref(),
+            Some(&BodyEditorPresentation::default())
+        );
+        assert_eq!(title_cache.project_layout_signature, None);
+
+        let (cached_title_layout, title_hit) = title_cache
+            .get_or_build_title_page_editor_for_session_with_diagnostics(
+                &session,
+                &mut diagnostics,
+            )
+            .expect("validated Title layout hits");
+        assert!(title_hit);
+        assert!(Arc::ptr_eq(&title_layout, &cached_title_layout));
+        assert_eq!(diagnostics.complete_project_validations, 0);
+        assert_eq!(diagnostics.layout_builds, 0);
+        assert_eq!(diagnostics.semantic_signature_constructions, 0);
+        assert_eq!(title_cache.project_layout_signature, None);
+    }
+
+    #[test]
+    fn generic_cache_retains_same_revision_project_mutation_defense() {
+        let mut project = Project::new().expect("default project is valid");
+        let inputs = project.session_layout_inputs();
+        let mut cache = LayoutCache::default();
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+        let (first_layout, first_hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                0,
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("generic layout builds");
+        assert!(!first_hit);
+        assert_eq!(diagnostics.semantic_signature_constructions, 1);
+
+        let (cached_layout, cached_hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                0,
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("unchanged generic layout hits after content verification");
+        assert!(cached_hit);
+        assert!(Arc::ptr_eq(&first_layout, &cached_layout));
+        assert_eq!(diagnostics.semantic_signature_constructions, 1);
+
+        project.elements[0].text.push_str("changed without a revision");
+        let (mutated_layout, mutated_hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                0,
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("generic cache rebuilds after same-revision mutation");
+        assert!(!mutated_hit);
+        assert!(!Arc::ptr_eq(&first_layout, &mutated_layout));
+        assert_eq!(diagnostics.semantic_signature_constructions, 1);
+        assert!(cache.project_layout_signature.is_some());
+    }
+}
+
+#[cfg(test)]
+mod wrap_run_preparation_tests {
+    use super::{
+        positioned_spans, wrap_for_layout, DisplaySourceSegment, EffectiveGeometryMode,
+        EffectiveParagraph, FixedRect, LayoutBuildDiagnostics, LayoutCache, LayoutComposition,
+        LayoutPurpose, ScreenplayLayout, SourceRange, WrappedLine,
+    };
+    use crate::formatting::{EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment};
+    use crate::{Project, Role, RunAttribute, SourceLayoutSettings, StableId, TextRun};
+    use std::sync::Arc;
+
+    #[test]
+    fn ordered_run_styles_preserve_fresh_and_cached_unicode_wrapping() {
+        let plain = "plain ".repeat(8);
+        let expanded = "ß styled ".repeat(8);
+        let decorated = "tail ".repeat(8);
+        let mut project = Project::new().expect("default project is valid");
+        project.elements[0].text = format!("{plain}{expanded}{decorated}");
+        project.elements[0].runs = vec![
+            TextRun {
+                text: plain,
+                attributes: Vec::new(),
+            },
+            TextRun {
+                text: expanded,
+                attributes: vec![
+                    RunAttribute {
+                        name: "Style".into(),
+                        value: "Bold+AllCaps".into(),
+                    },
+                    RunAttribute {
+                        name: "Size".into(),
+                        value: "18".into(),
+                    },
+                ],
+            },
+            TextRun {
+                text: decorated,
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Italic+Underline+Strikethrough".into(),
+                }],
+            },
+        ];
+        let inputs = project.session_layout_inputs();
+        let fresh = ScreenplayLayout::build_with_composition(
+            &project,
+            &inputs,
+            &SourceLayoutSettings::default(),
+            LayoutComposition::BodyEditor,
+        )
+        .expect("fresh styled layout builds");
+        let lines = fresh
+            .pages
+            .iter()
+            .flat_map(|page| &page.lines)
+            .filter(|line| line.element == 0)
+            .collect::<Vec<_>>();
+        assert!(lines.len() > 1, "the fixture exercises wrapped lines");
+        assert!(lines.iter().any(|line| line.display_text.contains("SS")));
+        assert!(lines.iter().flat_map(|line| line.spans.iter()).any(|span| {
+            span.text_style.bold && span.text_style.all_caps && span.text_style.size == 18
+        }));
+        assert!(lines.iter().flat_map(|line| line.spans.iter()).any(|span| {
+            span.text_style.italic && span.underline && span.strikethrough
+        }));
+
+        let mut cache = LayoutCache::default();
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+        let (cold, cold_hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                0,
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("cold cached styled layout builds");
+        assert!(!cold_hit);
+        assert_eq!(diagnostics.element_wraps_built, 1);
+        assert_eq!(&fresh, cold.as_ref());
+
+        let (reused, reused_hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                1,
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("revision rebuild reuses the element wrap");
+        assert!(!reused_hit);
+        assert_eq!(diagnostics.element_wraps_built, 0);
+        assert_eq!(diagnostics.element_wraps_reused, 1);
+        assert_eq!(&fresh, reused.as_ref());
+    }
+
+    #[test]
+    fn monotonic_source_maps_preserve_unicode_offsets_and_share_runs() {
+        let text = "ßbc def";
+        let runs = vec![TextRun {
+            text: text.into(),
+            attributes: vec![RunAttribute {
+                name: "Style".into(),
+                value: "AllCaps".into(),
+            }],
+        }];
+        let char_width = FixedPoint::from_points(7);
+        let paragraph = EffectiveParagraph {
+            left: FixedPoint::default(),
+            right: FixedPoint::from_points(28),
+            first_indent: FixedPoint::default(),
+            alignment: ParagraphAlignment::Left,
+            space_before: FixedPoint::default(),
+            line_advance: FixedPoint::from_points(12),
+            char_width,
+        };
+        let text_style = EffectiveTextStyle {
+            declared_family: "Courier Prime".into(),
+            family: FontFallback::CourierPrime,
+            size: 12,
+            bold: false,
+            italic: false,
+            underline: false,
+            all_caps: false,
+            hidden_text: false,
+            source_color: None,
+        };
+        let lines = wrap_for_layout(
+            None,
+            None,
+            &StableId::new("unicode-wrap").expect("stable ID is valid"),
+            text,
+            0,
+            Role::Action,
+            paragraph,
+            text_style,
+            &runs,
+            char_width,
+            LayoutPurpose::Editor,
+            false,
+            EffectiveGeometryMode::Sequential,
+        );
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].start, 0);
+        assert_eq!(lines[0].end, 4);
+        assert_eq!(lines[0].text.as_ref(), "ßbc");
+        assert_eq!(lines[0].display_text.as_ref(), "SSBC");
+        assert_eq!(lines[1].start, 4);
+        assert_eq!(lines[1].end, 7);
+        assert_eq!(lines[1].text.as_ref(), " def");
+        assert_eq!(lines[1].display_text.as_ref(), " DEF");
+        assert_eq!(
+            lines[0].display_source_map[0],
+            DisplaySourceSegment {
+                display_start: 0,
+                display_end: 2,
+                source_start: 0,
+                source_end: 2,
+            }
+        );
+        assert!(Arc::ptr_eq(&lines[0].runs, &lines[1].runs));
+        assert_eq!(lines[0].runs.as_ref(), runs.as_slice());
+    }
+
+    #[test]
+    fn mutable_spans_preserve_style_boundaries_geometry_and_unicode_maps() {
+        let char_width = FixedPoint::from_points(7);
+        let text_style = EffectiveTextStyle {
+            declared_family: "Courier Prime".into(),
+            family: FontFallback::CourierPrime,
+            size: 12,
+            bold: false,
+            italic: false,
+            underline: false,
+            all_caps: false,
+            hidden_text: false,
+            source_color: None,
+        };
+        let line = WrappedLine {
+            element: 3,
+            role: Role::Action,
+            start: 0,
+            end: 5,
+            text: Arc::from("ßb c"),
+            display_text: Arc::from("SSB C"),
+            display_source_map: Arc::from([
+                DisplaySourceSegment {
+                    display_start: 0,
+                    display_end: 2,
+                    source_start: 0,
+                    source_end: 2,
+                },
+                DisplaySourceSegment {
+                    display_start: 2,
+                    display_end: 3,
+                    source_start: 2,
+                    source_end: 3,
+                },
+                DisplaySourceSegment {
+                    display_start: 3,
+                    display_end: 4,
+                    source_start: 3,
+                    source_end: 4,
+                },
+                DisplaySourceSegment {
+                    display_start: 4,
+                    display_end: 5,
+                    source_start: 4,
+                    source_end: 5,
+                },
+            ]),
+            text_style,
+            runs: Arc::from([
+                TextRun {
+                    text: "ßb".into(),
+                    attributes: vec![
+                        RunAttribute {
+                            name: "Style".into(),
+                            value: "Bold+AllCaps+Underline+Strikethrough".into(),
+                        },
+                        RunAttribute {
+                            name: "Size".into(),
+                            value: "18".into(),
+                        },
+                    ],
+                },
+                TextRun {
+                    text: " c".into(),
+                    attributes: vec![RunAttribute {
+                        name: "Style".into(),
+                        value: "Italic".into(),
+                    }],
+                },
+            ]),
+            char_width,
+            first_visual_line: true,
+            final_visual_line: true,
+            paragraph: EffectiveParagraph {
+                left: FixedPoint::default(),
+                right: FixedPoint::from_points(100),
+                first_indent: FixedPoint::default(),
+                alignment: ParagraphAlignment::Left,
+                space_before: FixedPoint::default(),
+                line_advance: FixedPoint::from_points(12),
+                char_width,
+            },
+            oversized: false,
+        };
+        let origin = FixedPoint::from_points(100);
+        let line_geometry = FixedRect {
+            x: origin,
+            y: FixedPoint::from_points(40),
+            width: FixedPoint::default(),
+            height: FixedPoint::from_points(12),
+        };
+
+        let spans = positioned_spans(&line, line_geometry);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].display_text.as_ref(), "SSB");
+        assert_eq!(spans[0].source, SourceRange { element: 3, start: 0, end: 3 });
+        assert!(spans[0].text_style.bold);
+        assert!(spans[0].text_style.all_caps);
+        assert_eq!(spans[0].text_style.size, 18);
+        assert!(spans[0].underline);
+        assert!(spans[0].strikethrough);
+        assert_eq!(spans[0].display_source_map.len(), 3);
+        assert_eq!(
+            spans[0].display_source_map[0],
+            DisplaySourceSegment {
+                display_start: 0,
+                display_end: 2,
+                source_start: 0,
+                source_end: 2,
+            }
+        );
+        assert_eq!(spans[1].display_text.as_ref(), " ");
+        assert_eq!(spans[1].source, SourceRange { element: 3, start: 3, end: 4 });
+        assert!(spans[1].text_style.italic);
+        assert!(!spans[1].underline);
+        assert!(!spans[1].strikethrough);
+        assert_eq!(spans[2].display_text.as_ref(), "c");
+        assert_eq!(spans[2].source, SourceRange { element: 3, start: 4, end: 5 });
+        assert!(spans[2].text_style.italic);
+
+        let expanded_cell = FixedPoint::from_raw(char_width.raw().saturating_mul(18).div_euclid(12));
+        let expanded_width = FixedPoint::from_raw(expanded_cell.raw().saturating_mul(3));
+        assert_eq!(spans[0].char_width, expanded_cell);
+        assert_eq!(spans[0].geometry.width, expanded_width);
+        assert_eq!(spans[0].geometry.x, origin);
+        assert_eq!(
+            spans[1].geometry.x,
+            FixedPoint::from_raw(origin.raw().saturating_add(expanded_width.raw()))
+        );
+        assert_eq!(spans[1].geometry.width, char_width);
+        assert_eq!(
+            spans[2].geometry.x,
+            FixedPoint::from_raw(
+                origin
+                    .raw()
+                    .saturating_add(expanded_width.raw())
+                    .saturating_add(char_width.raw())
+            )
+        );
+        assert_eq!(spans[2].geometry.width, char_width);
+        assert!(spans.iter().all(|span| {
+            span.geometry.y == line_geometry.y && span.geometry.height == line_geometry.height
+        }));
+    }
+}
+
+#[cfg(test)]
+mod wrap_cache_eviction_tests {
+    use super::{
+        ElementWrapCache, ElementWrapEntry, EffectiveGeometryMode, EffectiveParagraph,
+        LayoutPurpose, MAX_CACHED_ELEMENT_WRAPS,
+    };
+    use crate::formatting::{EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment};
+    use crate::{Role, StableId};
+    use std::sync::Arc;
+
+    #[test]
+    fn usage_index_tracks_freshness_overflow_and_generation_wrap() {
+        let char_width = FixedPoint::from_points(7);
+        let paragraph = EffectiveParagraph {
+            left: FixedPoint::default(),
+            right: FixedPoint::from_points(100),
+            first_indent: FixedPoint::default(),
+            alignment: ParagraphAlignment::Left,
+            space_before: FixedPoint::default(),
+            line_advance: FixedPoint::from_points(12),
+            char_width,
+        };
+        let text_style = EffectiveTextStyle {
+            declared_family: "Courier Prime".into(),
+            family: FontFallback::CourierPrime,
+            size: 12,
+            bold: false,
+            italic: false,
+            underline: false,
+            all_caps: false,
+            hidden_text: false,
+            source_color: None,
+        };
+        let element_id = StableId::new("cache-entry").expect("stable ID is valid");
+        let mut cache = ElementWrapCache::default();
+        cache.start_generation();
+        let _ = cache.wrap(
+            &element_id,
+            "one",
+            0,
+            Role::Action,
+            paragraph,
+            text_style.clone(),
+            char_width,
+            &[],
+            &[],
+            LayoutPurpose::Editor,
+            false,
+            EffectiveGeometryMode::Sequential,
+            None,
+        );
+        let first_fingerprint = cache.buckets.keys().next().copied().expect("one entry exists");
+        let first_order = cache.buckets[&first_fingerprint][0].insertion_order;
+        assert!(cache
+            .usage_order
+            .contains(&(1, first_order, first_fingerprint)));
+
+        cache.start_generation();
+        let _ = cache.wrap(
+            &element_id,
+            "one",
+            0,
+            Role::Action,
+            paragraph,
+            text_style,
+            char_width,
+            &[],
+            &[],
+            LayoutPurpose::Editor,
+            false,
+            EffectiveGeometryMode::Sequential,
+            None,
+        );
+        assert!(cache
+            .usage_order
+            .contains(&(2, first_order, first_fingerprint)));
+        assert!(!cache
+            .usage_order
+            .contains(&(1, first_order, first_fingerprint)));
+
+        let context = cache.buckets[&first_fingerprint][0].context.clone();
+        for order in 2..=(MAX_CACHED_ELEMENT_WRAPS as u64).saturating_add(1) {
+            let mut fingerprint = order;
+            while cache.buckets.contains_key(&fingerprint) {
+                fingerprint = fingerprint.saturating_add(1_000);
+            }
+            cache.buckets.insert(
+                fingerprint,
+                vec![ElementWrapEntry {
+                    context: context.clone(),
+                    canonical_text: Arc::from(format!("entry{order}")),
+                    lines: Arc::from([]),
+                    last_used_generation: 1,
+                    insertion_order: order,
+                    byte_cost: 1,
+                }],
+            );
+            cache.usage_order.insert((1, order, fingerprint));
+            cache.entry_count = cache.entry_count.saturating_add(1);
+            cache.retained_bytes = cache.retained_bytes.saturating_add(1);
+        }
+        cache.next_order = (MAX_CACHED_ELEMENT_WRAPS as u64).saturating_add(1);
+        assert_eq!(cache.entry_count, MAX_CACHED_ELEMENT_WRAPS + 1);
+        let bytes_before_eviction = cache.retained_bytes;
+
+        cache.evict_if_needed();
+
+        assert_eq!(cache.entry_count, MAX_CACHED_ELEMENT_WRAPS);
+        assert_eq!(cache.retained_bytes, bytes_before_eviction - 1);
+        assert_eq!(cache.usage_order.len(), cache.entry_count);
+        assert_eq!(cache.buckets.values().flatten().count(), cache.entry_count);
+        assert!(cache.buckets.contains_key(&first_fingerprint));
+        assert!(cache
+            .usage_order
+            .contains(&(2, first_order, first_fingerprint)));
+        assert!(!cache.usage_order.iter().any(|key| key.1 == 2));
+        assert!(cache.usage_order.iter().any(|key| key.1 == 3));
+
+        cache.generation = u64::MAX;
+        cache.start_generation();
+        assert_eq!(cache.generation, 1);
+        assert_eq!(cache.usage_order.len(), cache.entry_count);
+        assert!(cache
+            .buckets
+            .values()
+            .flatten()
+            .all(|entry| entry.last_used_generation == 0));
+        assert!(cache.usage_order.iter().all(|key| key.0 == 0));
     }
 }

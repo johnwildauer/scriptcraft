@@ -1840,7 +1840,16 @@ impl EditingSession {
             self.last_validation_was_scoped = scoped_valid;
             return Ok(());
         }
-        let derived_invalidation = classify_derived_invalidation(&self.project, &project);
+        let derived_invalidation = if can_skip_derived_invalidation(
+            &self.project,
+            &project,
+            scope_start.element,
+            scoped_valid,
+        ) {
+            PendingDerivedInvalidation::None
+        } else {
+            classify_derived_invalidation(&self.project, &project)
+        };
         match &derived_invalidation {
             PendingDerivedInvalidation::Scenes(scenes) => {
                 self.deferred_derived_scenes
@@ -2065,6 +2074,27 @@ impl EditingSession {
             self.history.remove(0);
         }
     }
+}
+
+fn can_skip_derived_invalidation(
+    before: &Project,
+    after: &Project,
+    element_index: usize,
+    scoped_valid: bool,
+) -> bool {
+    // Scoped validation is available only for nonstructural single-element
+    // candidates with a complete valid baseline and unchanged non-target state.
+    // Character text and scene-heading text/topology are the derived inputs.
+    scoped_valid
+        && before
+            .elements
+            .get(element_index)
+            .zip(after.elements.get(element_index))
+            .is_some_and(|(before, after)| {
+                before.id == after.id
+                    && before.role == after.role
+                    && !matches!(before.role, Role::Character | Role::SceneHeading)
+            })
 }
 
 fn classify_derived_invalidation(before: &Project, after: &Project) -> PendingDerivedInvalidation {
@@ -3541,4 +3571,46 @@ fn role_for_native_behavior_target(target: &str) -> Option<Role> {
         .iter()
         .find(|formatting| formatting.fdx_label == target)
         .map(|formatting| formatting.role)
+}
+
+#[cfg(test)]
+mod derived_invalidation_scope_tests {
+    use super::can_skip_derived_invalidation;
+    use crate::{Project, Role, StableId};
+
+    #[test]
+    fn skip_proof_requires_scope_stable_identity_and_derived_irrelevant_role() {
+        let before = Project::new().expect("default project is valid");
+        let mut after = before.clone();
+        after.elements[0].text.push_str("ordinary action");
+        assert!(can_skip_derived_invalidation(&before, &after, 0, true));
+        assert!(!can_skip_derived_invalidation(&before, &after, 0, false));
+
+        for role in [Role::Character, Role::SceneHeading] {
+            let mut relevant_before = before.clone();
+            relevant_before.elements[0].role = role;
+            let mut relevant_after = relevant_before.clone();
+            relevant_after.elements[0].text.push_str("changed");
+            assert!(!can_skip_derived_invalidation(
+                &relevant_before,
+                &relevant_after,
+                0,
+                true
+            ));
+        }
+
+        let mut changed_role = after.clone();
+        changed_role.elements[0].role = Role::Dialogue;
+        assert!(!can_skip_derived_invalidation(&before, &changed_role, 0, true));
+
+        let mut changed_identity = after.clone();
+        changed_identity.elements[0].id =
+            StableId::new("changed-owner").expect("replacement ID is valid");
+        assert!(!can_skip_derived_invalidation(
+            &before,
+            &changed_identity,
+            0,
+            true
+        ));
+    }
 }
