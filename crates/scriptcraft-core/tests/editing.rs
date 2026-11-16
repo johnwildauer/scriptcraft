@@ -133,3 +133,97 @@ fn group_unwrap_preserves_visible_members_and_invalid_selection_rolls_back() {
     );
     assert!(session.can_undo());
 }
+
+#[test]
+fn empty_neighbors_are_removed_before_role_checks_and_preserve_the_surviving_caret() {
+    let mut forward_project = valid(Project::new());
+    forward_project.elements = vec![
+        valid(ScreenplayElement::new("action", Role::Action, "keep")),
+        valid(ScreenplayElement::new("empty-dialogue", Role::Dialogue, "")),
+        valid(ScreenplayElement::new("right", Role::Transition, "right")),
+    ];
+    let mut forward = valid(EditingSession::new(forward_project));
+    valid(forward.set_selection(Selection::caret(Position { element: 0, offset: 4 })));
+    valid(forward.delete());
+    assert_eq!(forward.project().elements.len(), 2);
+    assert_eq!(forward.project().elements[0].id.as_str(), "action");
+    assert_eq!(forward.project().elements[1].id.as_str(), "right");
+    assert_eq!(forward.selection(), Selection::caret(Position { element: 0, offset: 4 }));
+
+    let mut backward_project = valid(Project::new());
+    backward_project.elements = vec![
+        valid(ScreenplayElement::new("empty-action", Role::Action, "")),
+        valid(ScreenplayElement::new("dialogue", Role::Dialogue, "café")),
+    ];
+    let mut backward = valid(EditingSession::new(backward_project));
+    valid(backward.set_selection(Selection::caret(Position { element: 1, offset: 0 })));
+    valid(backward.backspace());
+    assert_eq!(backward.project().elements.len(), 1);
+    assert_eq!(backward.project().elements[0].id.as_str(), "dialogue");
+    assert_eq!(backward.project().elements[0].text, "café");
+    assert_eq!(backward.selection(), Selection::caret(Position { element: 0, offset: 0 }));
+}
+
+#[test]
+fn incompatible_nonempty_boundary_joins_reject_transactionally_in_both_directions() {
+    for backward in [false, true] {
+        let mut project = valid(Project::new());
+        project.elements = vec![
+            valid(ScreenplayElement::new("left", Role::Action, "left")),
+            valid(ScreenplayElement::new("right", Role::Dialogue, "right")),
+        ];
+        let mut session = valid(EditingSession::new(project));
+        valid(session.set_selection(Selection::caret(if backward {
+            Position { element: 1, offset: 0 }
+        } else {
+            Position { element: 0, offset: 4 }
+        })));
+        let before = session.clone();
+        let result = if backward {
+            session.backspace()
+        } else {
+            session.delete()
+        };
+        assert_eq!(result, Err(scriptcraft_core::editing::EditError::InvalidSelection));
+        assert_eq!(session, before);
+    }
+}
+
+#[test]
+fn one_final_empty_element_is_a_silent_noop_in_both_directions() {
+    let mut session = valid(EditingSession::new(valid(Project::new())));
+    for backward in [false, true] {
+        let before = session.clone();
+        if backward {
+            valid(session.backspace());
+        } else {
+            valid(session.delete());
+        }
+        assert_eq!(session, before);
+        assert!(!session.can_undo());
+        assert!(!session.dirty());
+        assert_eq!(session.revision(), before.revision());
+    }
+}
+
+#[test]
+fn one_final_empty_title_paragraph_is_a_silent_noop_in_both_directions() {
+    let mut project = valid(Project::new());
+    project.title_page.truncate(1);
+    project.title_page[0].text.clear();
+    project.title_page[0].runs.clear();
+    let mut session = valid(EditingSession::new(project));
+    valid(session.set_title_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    for backward in [false, true] {
+        let before = session.clone();
+        if backward {
+            valid(session.backspace_title());
+        } else {
+            valid(session.delete_title());
+        }
+        assert_eq!(session, before);
+        assert!(!session.can_undo());
+        assert!(!session.dirty());
+        assert_eq!(session.revision(), before.revision());
+    }
+}

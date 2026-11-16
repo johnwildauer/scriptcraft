@@ -780,8 +780,24 @@ impl EditingSession {
                 .ok_or(EditError::InvalidElement)?
                 .text
                 .clone();
-                if start.offset == paragraph_text.len() {
-                    if start.element + 1 < project.title_page.len() {
+            if paragraph_text.is_empty() && project.title_page.len() > 1 {
+                project.title_page.remove(start.element);
+                let caret = if start.element < project.title_page.len() {
+                    Position {
+                        element: start.element,
+                        offset: 0,
+                    }
+                } else {
+                    let previous = start.element.saturating_sub(1);
+                    Position {
+                        element: previous,
+                        offset: project.title_page[previous].text.len(),
+                    }
+                };
+                return Ok(Selection::caret(caret));
+            }
+            if start.offset == paragraph_text.len() {
+                if start.element + 1 < project.title_page.len() {
                     join_title_at(project, start.element)?;
                 }
                 return Ok(*selection);
@@ -806,6 +822,22 @@ impl EditingSession {
                 .ok_or(EditError::InvalidElement)?
                 .text
                 .clone();
+            if paragraph_text.is_empty() && project.title_page.len() > 1 {
+                project.title_page.remove(start.element);
+                let caret = if start.element > 0 {
+                    let previous = start.element - 1;
+                    Position {
+                        element: previous,
+                        offset: project.title_page[previous].text.len(),
+                    }
+                } else {
+                    Position {
+                        element: 0,
+                        offset: 0,
+                    }
+                };
+                return Ok(Selection::caret(caret));
+            }
             if start.offset == 0 {
                 if start.element > 0 {
                     let left = start.element - 1;
@@ -1088,6 +1120,13 @@ impl EditingSession {
                 })
                 .map(|(_, element)| element.id.clone())
                 .collect()
+        } else if selection_start == selection_end {
+            deletion_candidate_empty_element(&self.project, selection_start, DeleteDirection::Forward)
+                .into_iter()
+                .filter_map(|index| self.project.elements.get(index))
+                .filter(|element| element.role == Role::SceneHeading)
+                .map(|element| element.id.clone())
+                .collect()
         } else {
             BTreeSet::new()
         };
@@ -1104,6 +1143,16 @@ impl EditingSession {
                     .elements
                     .get(start.element)
                     .ok_or(EditError::InvalidElement)?;
+                if item.text.is_empty() {
+                    if project.elements.len() == 1 {
+                        return Ok(Selection::caret(start));
+                    }
+                    return Ok(remove_empty_body_element(
+                        project,
+                        start.element,
+                        DeleteDirection::Forward,
+                    ));
+                }
                 if item.role == Role::Parenthetical
                     && is_delimiter_only_parenthetical(item.text.as_str())
                 {
@@ -1132,7 +1181,7 @@ impl EditingSession {
                     }
                     let previous = start.element.saturating_sub(1);
                     let offset = project.elements[previous].text.len();
-                    project.elements.remove(start.element);
+                    remove_body_owner(project, start.element);
                     return Ok(Selection::caret(Position {
                         element: previous,
                         offset,
@@ -1151,7 +1200,11 @@ impl EditingSession {
                     )?;
                 } else if start.element + 1 < project.elements.len() {
                     let offset = item.text.len();
-                    join_at(project, start.element)?;
+                    if project.elements[start.element + 1].text.is_empty() {
+                        remove_body_owner(project, start.element + 1);
+                    } else {
+                        join_at(project, start.element)?;
+                    }
                     return Ok(Selection::caret(Position {
                         element: start.element,
                         offset,
@@ -1163,19 +1216,41 @@ impl EditingSession {
     }
 
     pub fn backspace(&mut self) -> Result<(), EditError> {
-        self.mutate_structural(
+        let (start, end) = self.selection.ordered();
+        let generated_scene_heading_deletions = if start == end {
+            deletion_candidate_empty_element(&self.project, start, DeleteDirection::Backward)
+                .into_iter()
+                .filter_map(|index| self.project.elements.get(index))
+                .filter(|element| element.role == Role::SceneHeading)
+                .map(|element| element.id.clone())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        self.mutate_structural_with_scene_heading_deletions(
             MutationValidationScope::SingleParagraph,
+            generated_scene_heading_deletions,
             |project, selection, _generated, _policy| {
                 let (start, end) = selection.ordered();
                 if start != end {
                     replace_range(project, start, end, "")?;
                     return Ok(Selection::caret(start));
                 }
+                let item = project
+                    .elements
+                    .get(start.element)
+                    .ok_or(EditError::InvalidElement)?;
+                if start.offset == 0 && item.text.is_empty() {
+                    if project.elements.len() == 1 {
+                        return Ok(Selection::caret(start));
+                    }
+                    return Ok(remove_empty_body_element(
+                        project,
+                        start.element,
+                        DeleteDirection::Backward,
+                    ));
+                }
                 if start.offset > 0 {
-                    let item = project
-                        .elements
-                        .get(start.element)
-                        .ok_or(EditError::InvalidElement)?;
                     let previous = previous_boundary(&item.text, start.offset);
                     let from = Position {
                         offset: previous,
@@ -1189,6 +1264,13 @@ impl EditingSession {
                         .elements
                         .get(start.element - 1)
                         .ok_or(EditError::InvalidElement)?;
+                    if previous.text.is_empty() {
+                        remove_body_owner(project, start.element - 1);
+                        return Ok(Selection::caret(Position {
+                            element: start.element - 1,
+                            offset: 0,
+                        }));
+                    }
                     let offset = previous.text.len();
                     join_at(project, start.element - 1)?;
                     return Ok(Selection::caret(Position {
@@ -1356,9 +1438,8 @@ impl EditingSession {
         )
     }
 
-    /// Joins adjacent paragraphs while retaining the left source identity. Any
-    /// opaque attachment or unsafe reference prevents the candidate from being
-    /// published.
+    /// Joins adjacent same-role paragraphs while retaining the left source
+    /// identity. The removed owner's source subtree is discarded transactionally.
     pub fn join_with_next(&mut self) -> Result<(), EditError> {
         self.mutate_structural(
             MutationValidationScope::Complete,
@@ -2631,7 +2712,9 @@ fn replace_range(
     let runs = replace_cross_element_runs(project, start, end, inserted, &combined)?;
     project.elements[start.element].text = combined;
     project.elements[start.element].runs = runs;
-    project.elements.drain(start.element + 1..=end.element);
+    for _ in start.element + 1..=end.element {
+        remove_body_owner(project, start.element + 1);
+    }
     Ok(())
 }
 
@@ -3293,20 +3376,103 @@ fn split_id(project: &Project) -> Result<String, ModelError> {
     Ok(project.allocate_element_id()?.as_str().to_owned())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeleteDirection {
+    Forward,
+    Backward,
+}
+
+fn deletion_candidate_empty_element(
+    project: &Project,
+    position: Position,
+    direction: DeleteDirection,
+) -> Option<usize> {
+    let current = project.elements.get(position.element)?;
+    if current.text.is_empty() && project.elements.len() > 1 {
+        return Some(position.element);
+    }
+    match direction {
+        DeleteDirection::Forward if position.offset == current.text.len() => {
+            let next_index = position.element.checked_add(1)?;
+            project
+                .elements
+                .get(next_index)
+                .is_some_and(|element| element.text.is_empty())
+                .then_some(next_index)
+        }
+        DeleteDirection::Backward if position.offset == 0 && position.element > 0 => {
+            let previous_index = position.element - 1;
+            project.elements[previous_index]
+                .text
+                .is_empty()
+                .then_some(previous_index)
+        }
+        _ => None,
+    }
+}
+
+fn remove_empty_body_element(
+    project: &mut Project,
+    index: usize,
+    direction: DeleteDirection,
+) -> Selection {
+    let (caret_element, caret_offset) = match direction {
+        DeleteDirection::Forward if index + 1 < project.elements.len() => (index, 0),
+        DeleteDirection::Forward => (index - 1, project.elements[index - 1].text.len()),
+        DeleteDirection::Backward if index > 0 => (index - 1, project.elements[index - 1].text.len()),
+        DeleteDirection::Backward => (index, 0),
+    };
+    remove_body_owner(project, index);
+    Selection::caret(Position {
+        element: caret_element,
+        offset: caret_offset,
+    })
+}
+
+fn ensure_join_roles_match(project: &Project, index: usize) -> Result<(), EditError> {
+    let left = project.elements.get(index).ok_or(EditError::InvalidElement)?;
+    let right = project
+        .elements
+        .get(index + 1)
+        .ok_or(EditError::InvalidElement)?;
+    if left.role != right.role {
+        return Err(EditError::InvalidSelection);
+    }
+    Ok(())
+}
+
+/// Removes one semantic owner and its direct/group registrations. Source-tree
+/// cleanup remains in the transaction-level preservation reconciliation.
+fn remove_body_owner(project: &mut Project, index: usize) {
+    let removed_id = project.elements.remove(index).id;
+    project.direct_paragraph_overrides.remove(&removed_id);
+
+    let removed_cue_group_ids = project
+        .dual_dialogue_groups
+        .iter()
+        .filter(|group| group.left.character == removed_id || group.right.character == removed_id)
+        .map(|group| group.id.clone())
+        .collect::<Vec<_>>();
+    if removed_cue_group_ids.is_empty() {
+        for group in &mut project.dual_dialogue_groups {
+            group.left.paragraphs.retain(|id| id != &removed_id);
+            group.right.paragraphs.retain(|id| id != &removed_id);
+        }
+    } else {
+        project
+            .dual_dialogue_groups
+            .retain(|group| !removed_cue_group_ids.contains(&group.id));
+        for group_id in removed_cue_group_ids {
+            project.dual_dialogue_paragraph_overrides.remove(&group_id);
+        }
+    }
+}
+
 fn join_at(project: &mut Project, index: usize) -> Result<(), EditError> {
     if index + 1 >= project.elements.len() {
         return Err(EditError::InvalidElement);
     }
-    let removed_id = &project.elements[index + 1].id;
-    if project
-        .preservation
-        .as_ref()
-        .is_some_and(|state| state.has_direct_paragraph_formatting(removed_id))
-    {
-        return Err(EditError::Preservation(
-            crate::preservation::PreservationError::StructuralAttachmentConflict,
-        ));
-    }
+    ensure_join_roles_match(project, index)?;
     let right = project.elements[index + 1].text.clone();
     let joined_runs =
         if project.elements[index].runs.is_empty() && project.elements[index + 1].runs.is_empty() {
@@ -3326,7 +3492,7 @@ fn join_at(project: &mut Project, index: usize) -> Result<(), EditError> {
     }
     item.text.push_str(&right);
     item.runs = joined_runs;
-    project.elements.remove(index + 1);
+    remove_body_owner(project, index + 1);
     Ok(())
 }
 

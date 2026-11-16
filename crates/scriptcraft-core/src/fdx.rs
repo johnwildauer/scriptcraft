@@ -2738,6 +2738,10 @@ fn reconcile_managed_title_paragraph(
             if type_attributes.len() == 1
                 && type_attributes[0].value == source_type
                 && role_from_fdx(source_type) == Some(role) => {}
+        (None, Some(source_type))
+            if type_attributes.len() == 1
+                && type_attributes[0].value == source_type
+                && role_from_fdx(source_type).is_none() => {}
         (None, _) => {
             return Err(SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch.error())
         }

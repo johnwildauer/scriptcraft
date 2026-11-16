@@ -9,8 +9,8 @@ use scriptcraft_core::{ParagraphAlignment, RunStyle};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/user_paragraph_data.fdx");
 
-fn valid<T, E>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|_| unreachable!("lifecycle case uses supported input"))
+fn valid<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+    result.unwrap_or_else(|error| panic!("lifecycle case failed: {error:?}"))
 }
 
 fn attachments_by_paragraph_id(project: &scriptcraft_core::Project) -> BTreeMap<String, PreservedElement> {
@@ -106,6 +106,25 @@ fn assert_owner_opaque_roundtrip(session: &EditingSession, foreign_id: &str) {
         &paragraph_by_foreign_id(&reopened.project, foreign_id).expect("reopened owner exists"),
     );
     assert_eq!(actual, expected);
+}
+
+fn assert_title_native_semantics_eq(
+    actual: &[scriptcraft_core::TitlePageParagraph],
+    expected: &[scriptcraft_core::TitlePageParagraph],
+) {
+    assert_eq!(actual.len(), expected.len());
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert_eq!(actual.role, expected.role);
+        assert_eq!(actual.text, expected.text);
+        assert_eq!(actual.runs, expected.runs);
+        assert_eq!(actual.formatting, expected.formatting);
+        let actual_source = actual.source_provenance.as_ref().expect("actual title source");
+        let expected_source = expected.source_provenance.as_ref().expect("expected title source");
+        assert_eq!(actual_source.format, expected_source.format);
+        assert_eq!(actual_source.section, expected_source.section);
+        assert_eq!(actual_source.foreign_id, expected_source.foreign_id);
+        assert_eq!(actual_source.foreign_role, expected_source.foreign_role);
+    }
 }
 
 #[test]
@@ -278,6 +297,164 @@ fn unambiguous_run_edits_survive_opaque_inline_topology_but_crossing_edits_rollb
 }
 
 #[test]
+fn imported_empty_owner_removal_discards_subtree_history_and_allows_raw_orphan_roundtrip() {
+    let source = r#"<FinalDraft DocumentType="Script" Version="6"><Content>
+      <Paragraph Type="Action" id="empty-owner" Bookmark="owned-bookmark" vendor-owner="discard-me">
+        <Text></Text><AltCollection><Alt><Paragraph Type="Action" id="empty-owner"><Text>alternate</Text></Paragraph></Alt></AltCollection>
+        <ScriptNote ID="owned-note">note payload</ScriptNote>
+        <UserParagraphData vendor="owner"><Payload id="opaque-id"><Paragraph id="empty-owner"/><!--owner comment--><?owner keep?><Opaque/></Payload></UserParagraphData>
+      </Paragraph>
+      <Paragraph Type="Action" id="survivor"><Text>Keep</Text></Paragraph>
+      <Paragraph Type="Action" id="raw-use" vendor-ref="empty-owner"><Text>Raw reference</Text></Paragraph>
+    </Content></FinalDraft>"#;
+    let imported = read_v6(source.as_bytes()).expect("empty source-owner fixture imports");
+    let mut session = valid(EditingSession::new(imported.project));
+    let before = session.project().clone();
+    valid(session.set_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    valid(session.delete());
+    let after = session.project().clone();
+
+    assert_eq!(after.elements.len(), before.elements.len() - 1);
+    assert!(paragraph_by_foreign_id(session.project(), "empty-owner").is_none());
+    let preservation = session.project().preservation.as_ref().expect("source preservation remains");
+    assert!(!preservation.identities.iter().any(|identity| identity.value == "empty-owner"));
+    assert!(session.dirty());
+    let serialized = write_v6(session.project()).expect("post-removal source writes");
+    let serialized = std::str::from_utf8(&serialized).expect("writer emits UTF-8");
+    assert!(!serialized.contains("owned-bookmark"));
+    assert!(!serialized.contains("owned-note"));
+    assert!(!serialized.contains("opaque-id"));
+    assert!(!serialized.contains("owner comment"));
+    assert!(!serialized.contains("owner keep"));
+    assert!(serialized.contains("vendor-ref=\"empty-owner\""));
+    let reread = read_v6(serialized.as_bytes()).expect("orphaned raw use rereads");
+    assert_eq!(reread.project.elements, after.elements);
+    assert!(paragraph_by_foreign_id(&reread.project, "empty-owner").is_none());
+
+    valid(session.undo());
+    assert_eq!(session.project(), &before);
+    assert!(!session.dirty());
+    valid(session.redo());
+    assert_eq!(session.project(), &after);
+    assert!(session.dirty());
+
+    valid(session.set_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    valid(session.split());
+    let recreated = session.project().elements[1].source_provenance.as_ref()
+        .and_then(|provenance| provenance.foreign_id.as_deref())
+        .expect("recreated element receives a source identity");
+    assert_ne!(recreated, "empty-owner");
+    let recreated_source = write_v6(session.project()).expect("recreated source writes");
+    let recreated_source = std::str::from_utf8(&recreated_source).expect("writer emits UTF-8");
+    assert!(!recreated_source.contains("owned-note"));
+    assert!(!recreated_source.contains("opaque-id"));
+    assert!(recreated_source.contains("vendor-ref=\"empty-owner\""));
+    read_v6(recreated_source.as_bytes()).expect("recreated post-deletion source reopens");
+}
+
+#[test]
+fn same_role_source_join_discards_only_right_owner_and_never_inherits_it_on_recreation() {
+    let source = r#"<FinalDraft DocumentType="Script" Version="6"><Content>
+      <Paragraph Type="Action" id="join-left" Bookmark="left-bookmark"><Text>Left</Text><UserParagraphData owner="left"><LeftPayload/></UserParagraphData></Paragraph>
+      <Paragraph Type="Action" id="join-right" Alignment="Right" Bookmark="right-bookmark"><Text>Right</Text><UserParagraphData owner="right"><RightPayload id="right-opaque-id"/></UserParagraphData></Paragraph>
+      <Paragraph Type="Action" id="raw-use" vendor-ref="join-right"><Text>Raw reference</Text></Paragraph>
+    </Content></FinalDraft>"#;
+    let imported = read_v6(source.as_bytes()).expect("same-role join fixture imports");
+    let mut session = valid(EditingSession::new(imported.project));
+    let before = session.project().clone();
+    let removed_id = session.project().elements[1].id.clone();
+    let left_owner = owner_opaque_snapshot(
+        &paragraph_by_foreign_id(session.project(), "join-left").expect("left owner exists"),
+    );
+    valid(session.set_selection(Selection::caret(Position { element: 0, offset: 4 })));
+    valid(session.delete());
+    let after = session.project().clone();
+
+    assert_eq!(session.project().elements[0].text, "LeftRight");
+    assert_eq!(session.selection(), Selection::caret(Position { element: 0, offset: 4 }));
+    assert!(!session.project().direct_paragraph_overrides.contains_key(&removed_id));
+    assert!(!session.project().preservation.as_ref().expect("source preservation remains")
+        .source_layout_settings().direct_paragraph_overrides.contains_key(&removed_id));
+    assert_eq!(
+        owner_opaque_snapshot(&paragraph_by_foreign_id(session.project(), "join-left").unwrap()),
+        left_owner,
+    );
+    assert!(paragraph_by_foreign_id(session.project(), "join-right").is_none());
+    let joined_source = write_v6(session.project()).expect("joined source writes");
+    let joined_source = std::str::from_utf8(&joined_source).expect("writer emits UTF-8");
+    assert!(joined_source.contains("vendor-ref=\"join-right\""));
+    assert!(!joined_source.contains("right-bookmark"));
+    assert!(!joined_source.contains("right-opaque-id"));
+    let reopened = read_v6(joined_source.as_bytes()).expect("joined orphan source rereads");
+    assert!(paragraph_by_foreign_id(&reopened.project, "join-right").is_none());
+    assert_eq!(reopened.project.elements, after.elements);
+
+    valid(session.undo());
+    assert_eq!(session.project(), &before);
+    valid(session.redo());
+    assert_eq!(session.project(), &after);
+    valid(session.set_selection(Selection::caret(Position { element: 0, offset: 4 })));
+    valid(session.split());
+    let recreated = session.project().elements[1].source_provenance.as_ref()
+        .and_then(|provenance| provenance.foreign_id.as_deref())
+        .expect("new right owner receives a fresh source identity");
+    assert_ne!(recreated, "join-right");
+    let recreated_source = write_v6(session.project()).expect("recreated joined source writes");
+    let recreated_source = std::str::from_utf8(&recreated_source).expect("writer emits UTF-8");
+    assert!(!recreated_source.contains("right-bookmark"));
+    assert!(!recreated_source.contains("right-opaque-id"));
+    assert!(recreated_source.contains("vendor-ref=\"join-right\""));
+    read_v6(recreated_source.as_bytes()).expect("recreated source reopens with orphan intact");
+}
+
+#[test]
+fn source_backed_dual_member_and_cue_removal_update_membership_wrapper_and_history() {
+    let member_source = std::str::from_utf8(FIXTURE).expect("fixture is UTF-8")
+        .replace("<Text>Hello there.</Text>", "<Text></Text>");
+    let mut member_session = valid(EditingSession::new(
+        read_v6(member_source.as_bytes()).expect("empty dual-member fixture imports").project,
+    ));
+    let member_before = member_session.project().clone();
+    let removed_member = member_session.project().elements[2].id.clone();
+    valid(member_session.set_selection(Selection::caret(Position { element: 2, offset: 0 })));
+    valid(member_session.delete());
+    let member_after = member_session.project().clone();
+    assert_eq!(member_session.project().dual_dialogue_groups.len(), 1);
+    assert!(member_session.project().dual_dialogue_groups[0].member_ids()
+        .all(|id| id != &removed_member));
+    assert!(paragraph_by_foreign_id(member_session.project(), "left-dialogue-001").is_none());
+    assert!(paragraph_by_foreign_id(member_session.project(), "outer-dual-001").is_some());
+    assert_direct_roundtrip_attachments(&member_session);
+    valid(member_session.undo());
+    assert_eq!(member_session.project(), &member_before);
+    valid(member_session.redo());
+    assert_eq!(member_session.project(), &member_after);
+
+    let cue_source = std::str::from_utf8(FIXTURE).expect("fixture is UTF-8")
+        .replace("<Text Style=\"AllCaps\">LINA</Text>", "<Text Style=\"AllCaps\"></Text>");
+    let mut cue_session = valid(EditingSession::new(
+        read_v6(cue_source.as_bytes()).expect("empty dual-cue fixture imports").project,
+    ));
+    let cue_before = cue_session.project().clone();
+    let removed_group = cue_session.project().dual_dialogue_groups[0].id.clone();
+    valid(cue_session.set_selection(Selection::caret(Position { element: 1, offset: 0 })));
+    valid(cue_session.delete());
+    let cue_after = cue_session.project().clone();
+    assert!(cue_session.project().dual_dialogue_groups.is_empty());
+    assert!(!cue_session.project().dual_dialogue_paragraph_overrides.contains_key(&removed_group));
+    assert!(paragraph_by_foreign_id(cue_session.project(), "left-cue-001").is_none());
+    assert!(paragraph_by_foreign_id(cue_session.project(), "outer-dual-001").is_none());
+    for survivor in ["left-dialogue-001", "right-cue-001", "right-dialogue-001"] {
+        assert!(paragraph_by_foreign_id(cue_session.project(), survivor).is_some());
+    }
+    assert_direct_roundtrip_attachments(&cue_session);
+    valid(cue_session.undo());
+    assert_eq!(cue_session.project(), &cue_before);
+    valid(cue_session.redo());
+    assert_eq!(cue_session.project(), &cue_after);
+}
+
+#[test]
 fn body_split_keeps_payload_left_and_join_discards_only_the_removed_owner_payload() {
     let mut session = fixture_session();
     let before = attachments_by_paragraph_id(session.project());
@@ -345,9 +522,13 @@ fn body_split_keeps_payload_left_and_join_discards_only_the_removed_owner_payloa
         anchor: Position { element: 0, offset: survivor_len },
         focus: Position { element: 1, offset: removed_len },
     }));
-    let before_external_reference_attempt = referenced_session.clone();
-    assert!(referenced_session.insert("").is_err());
-    assert_eq!(referenced_session, before_external_reference_attempt);
+    valid(referenced_session.insert(""));
+    assert!(paragraph_by_foreign_id(referenced_session.project(), "left-cue-001").is_none());
+    let orphan_bytes = write_v6(referenced_session.project()).expect("raw orphan source writes");
+    let orphan_source = std::str::from_utf8(&orphan_bytes).expect("writer emits UTF-8");
+    assert!(orphan_source.contains("ref=\"left-cue-001\""));
+    let orphan_reopened = read_v6(orphan_source.as_bytes()).expect("raw orphan source rereads");
+    assert!(paragraph_by_foreign_id(&orphan_reopened.project, "left-cue-001").is_none());
 }
 
 #[test]
@@ -380,6 +561,173 @@ fn user_data_split_handles_multiple_utf8_safe_boundaries_without_copying() {
         assert_eq!(attachments_by_paragraph_id(session.project()), after);
         assert_direct_roundtrip_attachments(&session);
     }
+}
+
+#[test]
+fn empty_title_owner_removal_needs_no_text_recipient_and_restores_history() {
+    let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" id="body"><OpaqueExternal ref="title-empty"/><Text>Body</Text></Paragraph></Content><TitlePage><Content><Paragraph Type="Title" id="title-empty" Bookmark="discard-title"><Text></Text><VendorTitlePayload id="discard-title-id"/><UserParagraphData owner="discard"><Opaque/></UserParagraphData></Paragraph><Paragraph Type="Title" id="title-survivor"><Text>Surviving card</Text></Paragraph></Content></TitlePage></FinalDraft>"#;
+    let imported = read_v6(source).expect("empty title-owner fixture imports");
+    let mut session = valid(EditingSession::new(imported.project));
+    let before = session.project().clone();
+    valid(session.set_title_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    valid(session.delete_title());
+    let after = session.project().clone();
+
+    assert_eq!(session.project().title_page.len(), 1);
+    assert_eq!(session.project().title_page[0].text, "Surviving card");
+    assert_eq!(session.title_selection(), Selection::caret(Position { element: 0, offset: 0 }));
+    assert!(paragraph_by_foreign_id(session.project(), "title-empty").is_none());
+    let bytes = write_v6(session.project()).expect("title owner-removal source writes");
+    let serialized = std::str::from_utf8(&bytes).expect("writer emits UTF-8");
+    assert!(!serialized.contains("discard-title"));
+    assert!(!serialized.contains("discard-title-id"));
+    assert!(serialized.contains("ref=\"title-empty\""));
+    let reopened = read_v6(serialized.as_bytes()).expect("title owner-removal source reopens");
+    assert_title_native_semantics_eq(&reopened.project.title_page, &after.title_page);
+    valid(session.undo());
+    assert_eq!(session.project(), &before);
+    valid(session.redo());
+    assert_eq!(session.project(), &after);
+}
+
+#[test]
+fn consecutive_empty_title_owners_delete_without_survivor_text_mapping_constraints() {
+    for backward in [false, true] {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" id="body" vendor-ref="title-empty-second"><Text>Body</Text></Paragraph></Content><TitlePage><Content><Paragraph Type="Title" id="title-empty-first"><Text/></Paragraph><Paragraph Type="Title" id="title-empty-second" Bookmark="discard-title"><Text Style="Bold"></Text><UserParagraphData owner="discard"><Opaque id="discard-title-id"/></UserParagraphData></Paragraph><Paragraph Type="Title" id="title-survivor"><Text>Keep</Text></Paragraph></Content></TitlePage></FinalDraft>"#;
+        let imported = read_v6(source).expect("consecutive empty title fixture imports");
+        let mut session = valid(EditingSession::new(imported.project));
+        let before = session.project().clone();
+        valid(session.set_title_selection(Selection::caret(Position { element: 1, offset: 0 })));
+        if backward {
+            valid(session.backspace_title());
+        } else {
+            valid(session.delete_title());
+        }
+        let after = session.project().clone();
+
+        assert_eq!(session.project().title_page.len(), 2);
+        assert!(session.project().title_page[0].text.is_empty());
+        assert_eq!(session.project().title_page[1].text, "Keep");
+        assert!(paragraph_by_foreign_id(session.project(), "title-empty-second").is_none());
+        let bytes = write_v6(session.project()).expect("consecutive empty title result writes");
+        let serialized = std::str::from_utf8(&bytes).expect("writer emits UTF-8");
+        assert!(!serialized.contains("discard-title"));
+        assert!(!serialized.contains("discard-title-id"));
+        assert!(serialized.contains("vendor-ref=\"title-empty-second\""));
+        let reopened = read_v6(serialized.as_bytes()).expect("consecutive empty title result rereads");
+        assert_title_native_semantics_eq(&reopened.project.title_page, &after.title_page);
+        valid(session.undo());
+        assert_eq!(session.project(), &before);
+        valid(session.redo());
+        assert_eq!(session.project(), &after);
+    }
+}
+
+#[test]
+fn title_empty_deletions_at_first_interior_and_last_positions_keep_exact_history_and_native_output() {
+    for backward in [false, true] {
+        for empty_index in [0usize, 2, 4] {
+            let mut titles = String::new();
+            for index in 0..5 {
+                let text = if index == empty_index {
+                    String::new()
+                } else {
+                    format!("Title {index}")
+                };
+                titles.push_str(&format!(
+                    "<Paragraph Type=\"Title\" id=\"title-{index}\"><Text>{text}</Text></Paragraph>"
+                ));
+            }
+            let source = format!(
+                "<FinalDraft DocumentType=\"Script\" Version=\"6\"><Content><Paragraph Type=\"Action\" id=\"body\"><Text>Body</Text></Paragraph></Content><TitlePage><Content>{titles}</Content></TitlePage></FinalDraft>"
+            );
+            let imported = read_v6(source.as_bytes()).expect("title boundary fixture imports");
+            let mut session = valid(EditingSession::new(imported.project));
+            let before = session.project().clone();
+            let initial_revision = session.revision();
+            valid(session.set_title_selection(Selection::caret(Position {
+                element: empty_index,
+                offset: 0,
+            })));
+            if backward {
+                valid(session.backspace_title());
+            } else {
+                valid(session.delete_title());
+            }
+            let after = session.project().clone();
+            assert_eq!(after.title_page.len(), 4);
+            assert_eq!(session.revision(), initial_revision + 1);
+            assert!(session.dirty());
+            assert!(session.can_undo());
+
+            let expected_caret = if backward && empty_index > 0 {
+                Position {
+                    element: empty_index - 1,
+                    offset: format!("Title {}", empty_index - 1).len(),
+                }
+            } else if !backward && empty_index == 4 {
+                Position {
+                    element: 3,
+                    offset: "Title 3".len(),
+                }
+            } else {
+                Position {
+                    element: empty_index,
+                    offset: 0,
+                }
+            };
+            assert_eq!(session.title_selection(), Selection::caret(expected_caret));
+            let bytes = write_v6(session.project()).expect("title boundary result writes");
+            let reopened = read_v6(&bytes).expect("title boundary result rereads");
+            assert_title_native_semantics_eq(&reopened.project.title_page, &after.title_page);
+
+            valid(session.undo());
+            assert_eq!(session.project(), &before);
+            assert!(!session.dirty());
+            assert!(session.can_redo());
+            valid(session.redo());
+            assert_eq!(session.project(), &after);
+            assert!(session.dirty());
+        }
+    }
+}
+
+#[test]
+fn title_join_with_removed_formatting_and_subsequent_split_roundtrip() {
+    let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" id="body" vendor-ref="title-right"><Text>Body</Text></Paragraph></Content><TitlePage><Content><Paragraph Type="Title" id="title-left"><Text>Left</Text><UserParagraphData owner="left"/></Paragraph><Paragraph Type="Title" id="title-right" Alignment="Right" Bookmark="discard-title"><Text>Right</Text><UserParagraphData owner="right"><Opaque id="discard-title-id"/></UserParagraphData></Paragraph></Content></TitlePage></FinalDraft>"#;
+    let imported = read_v6(source).expect("title formatting join fixture imports");
+    let mut session = valid(EditingSession::new(imported.project));
+    let before = session.project().clone();
+    valid(session.set_title_selection(Selection::caret(Position { element: 1, offset: 0 })));
+    valid(session.backspace_title());
+    let joined = session.project().clone();
+
+    assert_eq!(session.project().title_page.len(), 1);
+    assert_eq!(session.project().title_page[0].text, "LeftRight");
+    assert_eq!(session.title_selection(), Selection::caret(Position { element: 0, offset: 4 }));
+    assert!(paragraph_by_foreign_id(session.project(), "title-right").is_none());
+    valid(session.undo());
+    assert_eq!(session.project(), &before);
+    valid(session.redo());
+    assert_eq!(session.project(), &joined);
+
+    valid(session.set_title_selection(Selection::caret(Position { element: 0, offset: 4 })));
+    valid(session.enter_title());
+    assert_eq!(session.project().title_page.len(), 2);
+    assert_eq!(session.project().title_page[0].text, "Left");
+    assert_eq!(session.project().title_page[1].text, "Right");
+    let recreated = session.project().title_page[1].source_provenance.as_ref()
+        .and_then(|provenance| provenance.foreign_id.as_deref())
+        .expect("split title owner receives a fresh foreign identity");
+    assert_ne!(recreated, "title-right");
+
+    let bytes = write_v6(session.project()).expect("title join/split result writes");
+    let serialized = std::str::from_utf8(&bytes).expect("writer emits UTF-8");
+    assert!(!serialized.contains("discard-title"));
+    assert!(!serialized.contains("discard-title-id"));
+    assert!(serialized.contains("vendor-ref=\"title-right\""));
+    let reopened = read_v6(serialized.as_bytes()).expect("title join/split result rereads");
+    assert_title_native_semantics_eq(&reopened.project.title_page, &session.project().title_page);
 }
 
 #[test]
@@ -477,8 +825,19 @@ fn title_split_join_and_dual_unwrap_follow_distinct_owner_lifetimes() {
         focus: Position { element: second_index, offset: second_len },
     }));
     let before_managed_conflict = conflict_session.clone();
-    assert!(conflict_session.insert_title("").is_err());
+    valid(conflict_session.insert_title(""));
+    let after_managed_conflict = conflict_session.clone();
+    assert_eq!(conflict_session.project().title_page.len(), 1);
+    assert!(paragraph_by_foreign_id(conflict_session.project(), "title-conflict").is_none());
+    let joined = conflict_session.project().title_page[0].text.clone();
+    let joined_bytes = write_v6(conflict_session.project())
+        .expect("title structure writes from current semantics");
+    let joined_reopened = read_v6(&joined_bytes).expect("title structure rereads");
+    assert_eq!(joined_reopened.project.title_page[0].text, joined);
+    valid(conflict_session.undo());
     assert_eq!(conflict_session, before_managed_conflict);
+    valid(conflict_session.redo());
+    assert_eq!(conflict_session, after_managed_conflict);
 
     let dual_source = std::str::from_utf8(FIXTURE).expect("fixture is UTF-8")
         .replace("<Paragraph Type=\"Dialogue\" id=\"left-dialogue-001\">",
