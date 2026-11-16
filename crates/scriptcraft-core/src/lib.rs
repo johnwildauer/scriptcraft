@@ -659,8 +659,57 @@ impl Project {
         {
             return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
         }
+        Self::validate_scoped_single_element_edit_after_owner_proof(
+            &mut self.preservation,
+            baseline,
+            after,
+        )
+    }
+
+    /// Descriptor-authorized variant for the transactional editing path. The
+    /// caller has already proved the operation's declared owner/range/field
+    /// boundary; this method rechecks global state and stable owner identity,
+    /// then retains the same current-owner and preservation proof as the public
+    /// defensive validator without rediscovering changed semantic owners.
+    pub(crate) fn validate_scoped_single_element_edit_for_descriptor(
+        &mut self,
+        baseline: &Project,
+        element_index: usize,
+        expected_owner: &StableId,
+    ) -> Result<ScopedEditValidationOutcome, ModelError> {
+        if self.elements.len() != baseline.elements.len()
+            || self.title_page != baseline.title_page
+            || self.dual_dialogue_groups != baseline.dual_dialogue_groups
+            || self.dual_dialogue_paragraph_overrides != baseline.dual_dialogue_paragraph_overrides
+            || self.direct_paragraph_overrides != baseline.direct_paragraph_overrides
+            || self.legacy_json_state != baseline.legacy_json_state
+            || !Arc::ptr_eq(&self.layout_identity, &baseline.layout_identity)
+        {
+            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
+        }
+        let Some(before) = baseline.elements.get(element_index) else {
+            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
+        };
+        let Some(after) = self.elements.get(element_index) else {
+            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
+        };
+        if &before.id != expected_owner || &after.id != expected_owner {
+            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
+        }
+        Self::validate_scoped_single_element_edit_after_owner_proof(
+            &mut self.preservation,
+            baseline,
+            after,
+        )
+    }
+
+    fn validate_scoped_single_element_edit_after_owner_proof(
+        candidate_preservation: &mut Option<preservation::PreservationState>,
+        baseline: &Project,
+        after: &ScreenplayElement,
+    ) -> Result<ScopedEditValidationOutcome, ModelError> {
         validate_element(after)?;
-        let updated_source_text_bytes = match (&self.preservation, &baseline.preservation) {
+        let updated_source_text_bytes = match (candidate_preservation.as_ref(), &baseline.preservation) {
             (Some(candidate), Some(valid_baseline)) => {
                 if !candidate.has_managed_paragraph_index()
                     || !valid_baseline.has_managed_paragraph_index()
@@ -684,7 +733,7 @@ impl Project {
             _ => return Ok(ScopedEditValidationOutcome::CompleteValidationRequired),
         };
         if let Some(byte_count) = updated_source_text_bytes {
-            if let Some(preservation) = self.preservation.as_mut() {
+            if let Some(preservation) = candidate_preservation.as_mut() {
                 preservation.set_validated_source_text_bytes(byte_count);
             }
         }

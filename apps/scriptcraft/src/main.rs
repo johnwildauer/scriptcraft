@@ -1079,14 +1079,44 @@ struct PerformanceMeasurements {
     repaint_requests: u64,
     pages_considered: u64,
     pages_culled: u64,
+    page_row_allocations: u64,
+    frame_projection_pages: u64,
+    visible_range_selections: u64,
+    visible_page_selections: u64,
     lines_submitted: u64,
     selection_spans_submitted: u64,
-    /// ScriptCraft's fresh fixed-cell/natural galley transformations. This does
-    /// not report hits in egui's internal atlas-aware layout cache.
-    galleys_built: u64,
-    /// Reuses of ScriptCraft-transformed UV-bearing galleys within a pass.
-    /// Currently zero by policy: without an atlas identity we rebuild variants.
-    galleys_reused: u64,
+    /// Calls requesting a galley from the current painter. This is not a claim
+    /// about egui's internal layout cache or construction of a new galley.
+    pass_galley_layout_requests: u64,
+    /// Fresh atlas-independent fixed-cell geometry plans built by ScriptCraft.
+    fixed_cell_plan_builds: u64,
+    /// Fixed-cell plans consumed; each hit still uses this pass's UV-bearing mesh.
+    fixed_cell_plan_hits: u64,
+    /// Fresh atlas-independent natural cursor-geometry plans extracted by ScriptCraft.
+    natural_geometry_plan_builds: u64,
+    /// Natural plans consumed after matching current-pass glyph geometry.
+    natural_geometry_plan_hits: u64,
+    fixed_cell_transformations: u64,
+    natural_geometry_requests: u64,
+    page_snapshot_publications: u64,
+    pending_zoom_plans: u64,
+    core_layout_complete_project_validations: u64,
+    core_layout_builds: u64,
+    core_layout_semantic_signature_constructions: u64,
+    core_layout_element_wraps_built: u64,
+    core_layout_element_wrap_misses: u64,
+    core_layout_element_wraps_reused: u64,
+    core_layout_projected_scalars: u64,
+    core_layout_run_range_searches: u64,
+    core_layout_style_attribute_parses: u64,
+    core_layout_source_map_segments_examined: u64,
+    core_layout_post_cache_run_constructions: u64,
+    core_layout_post_cache_run_bytes_cloned: u64,
+    core_layout_positioned_span_characters: u64,
+    core_layout_interaction_index_entries: u64,
+    core_layout_interaction_index_entries_sorted: u64,
+    core_layout_wrap_cache_evictions: u64,
+    core_layout_wrap_cache_eviction_entries_examined: u64,
     element_wraps_built: u64,
     element_wraps_reused: u64,
     layout_identity_changes: u64,
@@ -1122,6 +1152,18 @@ struct PerformanceMeasurements {
     layout_lookup_nanos: u128,
     element_wrap_nanos: u128,
     paint_nanos: u128,
+    page_row_allocation_nanos: u128,
+    frame_projection_nanos: u128,
+    visible_range_selection_nanos: u128,
+    visible_page_selection_nanos: u128,
+    page_snapshot_publication_nanos: u128,
+    pending_zoom_planning_nanos: u128,
+    core_layout_element_wrap_nanos: u128,
+    core_layout_display_projection_nanos: u128,
+    core_layout_source_map_remap_nanos: u128,
+    core_layout_post_cache_run_nanos: u128,
+    core_layout_positioned_span_nanos: u128,
+    core_layout_interaction_index_build_nanos: u128,
     caret_lookup_nanos: u128,
     derived_refresh_nanos: u128,
 }
@@ -1143,14 +1185,102 @@ impl PerformanceMeasurements {
                 .pages_considered
                 .saturating_sub(baseline.pages_considered),
             pages_culled: self.pages_culled.saturating_sub(baseline.pages_culled),
+            page_row_allocations: self
+                .page_row_allocations
+                .saturating_sub(baseline.page_row_allocations),
+            frame_projection_pages: self
+                .frame_projection_pages
+                .saturating_sub(baseline.frame_projection_pages),
+            visible_range_selections: self
+                .visible_range_selections
+                .saturating_sub(baseline.visible_range_selections),
+            visible_page_selections: self
+                .visible_page_selections
+                .saturating_sub(baseline.visible_page_selections),
             lines_submitted: self
                 .lines_submitted
                 .saturating_sub(baseline.lines_submitted),
             selection_spans_submitted: self
                 .selection_spans_submitted
                 .saturating_sub(baseline.selection_spans_submitted),
-            galleys_built: self.galleys_built.saturating_sub(baseline.galleys_built),
-            galleys_reused: self.galleys_reused.saturating_sub(baseline.galleys_reused),
+            pass_galley_layout_requests: self
+                .pass_galley_layout_requests
+                .saturating_sub(baseline.pass_galley_layout_requests),
+            fixed_cell_plan_builds: self
+                .fixed_cell_plan_builds
+                .saturating_sub(baseline.fixed_cell_plan_builds),
+            fixed_cell_plan_hits: self
+                .fixed_cell_plan_hits
+                .saturating_sub(baseline.fixed_cell_plan_hits),
+            natural_geometry_plan_builds: self
+                .natural_geometry_plan_builds
+                .saturating_sub(baseline.natural_geometry_plan_builds),
+            natural_geometry_plan_hits: self
+                .natural_geometry_plan_hits
+                .saturating_sub(baseline.natural_geometry_plan_hits),
+            fixed_cell_transformations: self
+                .fixed_cell_transformations
+                .saturating_sub(baseline.fixed_cell_transformations),
+            natural_geometry_requests: self
+                .natural_geometry_requests
+                .saturating_sub(baseline.natural_geometry_requests),
+            page_snapshot_publications: self
+                .page_snapshot_publications
+                .saturating_sub(baseline.page_snapshot_publications),
+            pending_zoom_plans: self
+                .pending_zoom_plans
+                .saturating_sub(baseline.pending_zoom_plans),
+            core_layout_complete_project_validations: self
+                .core_layout_complete_project_validations
+                .saturating_sub(baseline.core_layout_complete_project_validations),
+            core_layout_builds: self
+                .core_layout_builds
+                .saturating_sub(baseline.core_layout_builds),
+            core_layout_semantic_signature_constructions: self
+                .core_layout_semantic_signature_constructions
+                .saturating_sub(baseline.core_layout_semantic_signature_constructions),
+            core_layout_element_wraps_built: self
+                .core_layout_element_wraps_built
+                .saturating_sub(baseline.core_layout_element_wraps_built),
+            core_layout_element_wrap_misses: self
+                .core_layout_element_wrap_misses
+                .saturating_sub(baseline.core_layout_element_wrap_misses),
+            core_layout_element_wraps_reused: self
+                .core_layout_element_wraps_reused
+                .saturating_sub(baseline.core_layout_element_wraps_reused),
+            core_layout_projected_scalars: self
+                .core_layout_projected_scalars
+                .saturating_sub(baseline.core_layout_projected_scalars),
+            core_layout_run_range_searches: self
+                .core_layout_run_range_searches
+                .saturating_sub(baseline.core_layout_run_range_searches),
+            core_layout_style_attribute_parses: self
+                .core_layout_style_attribute_parses
+                .saturating_sub(baseline.core_layout_style_attribute_parses),
+            core_layout_source_map_segments_examined: self
+                .core_layout_source_map_segments_examined
+                .saturating_sub(baseline.core_layout_source_map_segments_examined),
+            core_layout_post_cache_run_constructions: self
+                .core_layout_post_cache_run_constructions
+                .saturating_sub(baseline.core_layout_post_cache_run_constructions),
+            core_layout_post_cache_run_bytes_cloned: self
+                .core_layout_post_cache_run_bytes_cloned
+                .saturating_sub(baseline.core_layout_post_cache_run_bytes_cloned),
+            core_layout_positioned_span_characters: self
+                .core_layout_positioned_span_characters
+                .saturating_sub(baseline.core_layout_positioned_span_characters),
+            core_layout_interaction_index_entries: self
+                .core_layout_interaction_index_entries
+                .saturating_sub(baseline.core_layout_interaction_index_entries),
+            core_layout_interaction_index_entries_sorted: self
+                .core_layout_interaction_index_entries_sorted
+                .saturating_sub(baseline.core_layout_interaction_index_entries_sorted),
+            core_layout_wrap_cache_evictions: self
+                .core_layout_wrap_cache_evictions
+                .saturating_sub(baseline.core_layout_wrap_cache_evictions),
+            core_layout_wrap_cache_eviction_entries_examined: self
+                .core_layout_wrap_cache_eviction_entries_examined
+                .saturating_sub(baseline.core_layout_wrap_cache_eviction_entries_examined),
             element_wraps_built: self
                 .element_wraps_built
                 .saturating_sub(baseline.element_wraps_built),
@@ -1246,6 +1376,42 @@ impl PerformanceMeasurements {
                 .element_wrap_nanos
                 .saturating_sub(baseline.element_wrap_nanos),
             paint_nanos: self.paint_nanos.saturating_sub(baseline.paint_nanos),
+            page_row_allocation_nanos: self
+                .page_row_allocation_nanos
+                .saturating_sub(baseline.page_row_allocation_nanos),
+            frame_projection_nanos: self
+                .frame_projection_nanos
+                .saturating_sub(baseline.frame_projection_nanos),
+            visible_range_selection_nanos: self
+                .visible_range_selection_nanos
+                .saturating_sub(baseline.visible_range_selection_nanos),
+            visible_page_selection_nanos: self
+                .visible_page_selection_nanos
+                .saturating_sub(baseline.visible_page_selection_nanos),
+            page_snapshot_publication_nanos: self
+                .page_snapshot_publication_nanos
+                .saturating_sub(baseline.page_snapshot_publication_nanos),
+            pending_zoom_planning_nanos: self
+                .pending_zoom_planning_nanos
+                .saturating_sub(baseline.pending_zoom_planning_nanos),
+            core_layout_element_wrap_nanos: self
+                .core_layout_element_wrap_nanos
+                .saturating_sub(baseline.core_layout_element_wrap_nanos),
+            core_layout_display_projection_nanos: self
+                .core_layout_display_projection_nanos
+                .saturating_sub(baseline.core_layout_display_projection_nanos),
+            core_layout_source_map_remap_nanos: self
+                .core_layout_source_map_remap_nanos
+                .saturating_sub(baseline.core_layout_source_map_remap_nanos),
+            core_layout_post_cache_run_nanos: self
+                .core_layout_post_cache_run_nanos
+                .saturating_sub(baseline.core_layout_post_cache_run_nanos),
+            core_layout_positioned_span_nanos: self
+                .core_layout_positioned_span_nanos
+                .saturating_sub(baseline.core_layout_positioned_span_nanos),
+            core_layout_interaction_index_build_nanos: self
+                .core_layout_interaction_index_build_nanos
+                .saturating_sub(baseline.core_layout_interaction_index_build_nanos),
             caret_lookup_nanos: self
                 .caret_lookup_nanos
                 .saturating_sub(baseline.caret_lookup_nanos),
@@ -1282,6 +1448,80 @@ fn add_performance_counter(counter: &mut u64, amount: u64) {
 
 fn add_performance_nanos(total: &mut u128, amount: u128) {
     *total = total.saturating_add(amount);
+}
+
+fn record_layout_build_diagnostics(
+    performance: &mut PerformanceDiagnostics,
+    diagnostics: scriptcraft_core::layout::LayoutBuildDiagnostics,
+) {
+    let totals = &mut performance.totals;
+    totals.core_layout_complete_project_validations = totals
+        .core_layout_complete_project_validations
+        .saturating_add(diagnostics.complete_project_validations);
+    totals.core_layout_builds = totals.core_layout_builds.saturating_add(diagnostics.layout_builds);
+    totals.core_layout_semantic_signature_constructions = totals
+        .core_layout_semantic_signature_constructions
+        .saturating_add(diagnostics.semantic_signature_constructions);
+    totals.core_layout_element_wraps_built = totals
+        .core_layout_element_wraps_built
+        .saturating_add(diagnostics.element_wraps_built);
+    totals.core_layout_element_wrap_misses = totals
+        .core_layout_element_wrap_misses
+        .saturating_add(diagnostics.element_wrap_misses);
+    totals.core_layout_element_wraps_reused = totals
+        .core_layout_element_wraps_reused
+        .saturating_add(diagnostics.element_wraps_reused);
+    totals.core_layout_element_wrap_nanos = totals
+        .core_layout_element_wrap_nanos
+        .saturating_add(diagnostics.element_wrap_nanos);
+    totals.core_layout_display_projection_nanos = totals
+        .core_layout_display_projection_nanos
+        .saturating_add(diagnostics.display_projection_nanos);
+    totals.core_layout_projected_scalars = totals
+        .core_layout_projected_scalars
+        .saturating_add(diagnostics.projected_scalars);
+    totals.core_layout_run_range_searches = totals
+        .core_layout_run_range_searches
+        .saturating_add(diagnostics.run_range_searches);
+    totals.core_layout_style_attribute_parses = totals
+        .core_layout_style_attribute_parses
+        .saturating_add(diagnostics.style_attribute_parses);
+    totals.core_layout_source_map_remap_nanos = totals
+        .core_layout_source_map_remap_nanos
+        .saturating_add(diagnostics.source_map_remap_nanos);
+    totals.core_layout_source_map_segments_examined = totals
+        .core_layout_source_map_segments_examined
+        .saturating_add(diagnostics.source_map_segments_examined);
+    totals.core_layout_post_cache_run_constructions = totals
+        .core_layout_post_cache_run_constructions
+        .saturating_add(diagnostics.post_cache_run_constructions);
+    totals.core_layout_post_cache_run_bytes_cloned = totals
+        .core_layout_post_cache_run_bytes_cloned
+        .saturating_add(diagnostics.post_cache_run_bytes_cloned);
+    totals.core_layout_post_cache_run_nanos = totals
+        .core_layout_post_cache_run_nanos
+        .saturating_add(diagnostics.post_cache_run_nanos);
+    totals.core_layout_positioned_span_nanos = totals
+        .core_layout_positioned_span_nanos
+        .saturating_add(diagnostics.positioned_span_nanos);
+    totals.core_layout_positioned_span_characters = totals
+        .core_layout_positioned_span_characters
+        .saturating_add(diagnostics.positioned_span_characters);
+    totals.core_layout_interaction_index_build_nanos = totals
+        .core_layout_interaction_index_build_nanos
+        .saturating_add(diagnostics.interaction_index_build_nanos);
+    totals.core_layout_interaction_index_entries = totals
+        .core_layout_interaction_index_entries
+        .saturating_add(diagnostics.interaction_index_entries);
+    totals.core_layout_interaction_index_entries_sorted = totals
+        .core_layout_interaction_index_entries_sorted
+        .saturating_add(diagnostics.interaction_index_entries_sorted);
+    totals.core_layout_wrap_cache_evictions = totals
+        .core_layout_wrap_cache_evictions
+        .saturating_add(diagnostics.wrap_cache_evictions);
+    totals.core_layout_wrap_cache_eviction_entries_examined = totals
+        .core_layout_wrap_cache_eviction_entries_examined
+        .saturating_add(diagnostics.wrap_cache_eviction_entries_examined);
 }
 
 impl Default for PerformanceDiagnostics {
@@ -1329,9 +1569,12 @@ impl PerformanceDiagnostics {
         let source_use = preservation::source_identity_use_index_diagnostics();
         let reconciliation = preservation::preservation_reconciliation_diagnostics();
         let copy_on_write = preservation::copy_on_write_diagnostics();
+        let preservation_phase = preservation::preservation_phase_diagnostics();
         let project_validation = scriptcraft_core::project_validation_diagnostics();
-        format!(
-            "profile={build_profile} operation={} frames={} events={} layouts={} cache-hits={} layout-identity-changes={} pages-considered={} pages-culled={} pages-painted={} lines={} selection-spans={} galleys-built={} galleys-reused={} wraps-built={} wraps-reused={} caret-lookups={} interaction-indexed={} interaction-linear={} interaction-index-entries={} derived-attempted={} derived-completed={} derived-skipped={} derived-irrelevant-skips={} derived-changed={} derived-unchanged={} derived-deferred={} derived-failed={} derived-scenes-requested={} derived-scenes-attempted={} derived-scenes-changed={} derived-scenes-unchanged={} derived-scenes-deferred={} derived-project-candidates={} derived-scene-candidates={} derived-redundant-preservation-clones={} zoom-anchor-capture-success={} zoom-anchor-capture-miss={} zoom-scroll-canceled={} zoom-compensation-queued={} zoom-geometry-published={} zoom-anchor-consumed={} frame-ns={} event-ns={} layout-lookup-ns={} element-wrap-ns={} page-paint-ns={} caret-lookup-ns={} derived-refresh-ns={} benchmark-frames={} benchmark-layouts={} benchmark-pages-painted={} benchmark-wraps-built={} benchmark-linear-queries={} benchmark-indexed-queries={} benchmark-index-entries={} process-project-validations={} process-edit-scoped-attempts={} process-edit-scoped-accepts={} process-edit-full-validations={} process-edit-full-fallbacks={} process-managed-index-rebuilds={} process-managed-index-source-nodes={} process-managed-index-lookups={} process-managed-index-entry-examinations={} process-managed-index-fallback-node-examinations={} process-source-use-index-rebuilds={} process-source-use-index-source-nodes={} process-source-use-identity-queries={} process-source-use-reserved-id-queries={} process-body-survivors-visited={} process-body-unchanged-survivors-skipped={} process-body-owners-projected={} process-body-owners-removed={} process-body-owners-inserted={} process-title-survivors-visited={} process-title-unchanged-survivors-skipped={} process-title-owners-projected={} process-title-owners-removed={} process-title-owners-inserted={} process-source-text-byte-delta-updates={} process-cow-shared-vector-clones={} process-cow-detached-vectors={} process-cow-shared-text-payload-clones={} process-cow-detached-text-payloads={} process-cow-shared-source-byte-clones={} process-cow-detached-source-byte-payloads={} process-cow-shared-image-payload-clones={} process-cow-detached-image-payloads={}",
+        let (visible_page_selections, visible_page_selection_nanos) =
+            status_bar::visible_page_selection_diagnostics();
+        let summary = format!(
+            "profile={build_profile} operation={} frames={} events={} layouts={} cache-hits={} layout-identity-changes={} pages-considered={} pages-culled={} pages-painted={} lines={} selection-spans={} process-render-galley-layout-requests={} process-fixed-cell-plan-builds={} process-fixed-cell-plan-hits={} process-natural-geometry-plan-builds={} process-natural-geometry-plan-hits={} wraps-built={} wraps-reused={} caret-lookups={} interaction-indexed={} interaction-linear={} interaction-index-entries={} derived-attempted={} derived-completed={} derived-skipped={} derived-irrelevant-skips={} derived-changed={} derived-unchanged={} derived-deferred={} derived-failed={} derived-scenes-requested={} derived-scenes-attempted={} derived-scenes-changed={} derived-scenes-unchanged={} derived-scenes-deferred={} derived-project-candidates={} derived-scene-candidates={} derived-redundant-preservation-clones={} zoom-anchor-capture-success={} zoom-anchor-capture-miss={} zoom-scroll-canceled={} zoom-compensation-queued={} zoom-geometry-published={} zoom-anchor-consumed={} frame-ns={} event-ns={} layout-lookup-ns={} element-wrap-ns={} page-paint-ns={} caret-lookup-ns={} derived-refresh-ns={} benchmark-frames={} benchmark-layouts={} benchmark-pages-painted={} benchmark-wraps-built={} benchmark-linear-queries={} benchmark-indexed-queries={} benchmark-index-entries={} benchmark-render-galley-layout-requests={} benchmark-fixed-cell-plan-builds={} benchmark-fixed-cell-plan-hits={} benchmark-natural-geometry-plan-builds={} benchmark-natural-geometry-plan-hits={} process-project-validations={} process-edit-scoped-attempts={} process-edit-scoped-accepts={} process-edit-full-validations={} process-edit-full-fallbacks={} process-managed-index-rebuilds={} process-managed-index-source-nodes={} process-managed-index-lookups={} process-managed-index-entry-examinations={} process-managed-index-fallback-node-examinations={} process-source-use-index-rebuilds={} process-source-use-index-source-nodes={} process-source-use-identity-queries={} process-source-use-reserved-id-queries={} process-body-survivors-visited={} process-body-unchanged-survivors-skipped={} process-body-owners-projected={} process-body-owners-removed={} process-body-owners-inserted={} process-title-survivors-visited={} process-title-unchanged-survivors-skipped={} process-title-owners-projected={} process-title-owners-removed={} process-title-owners-inserted={} process-source-text-byte-delta-updates={} process-cow-shared-vector-clones={} process-cow-detached-vectors={} process-cow-shared-text-payload-clones={} process-cow-detached-text-payloads={} process-cow-shared-source-byte-clones={} process-cow-detached-source-byte-payloads={} process-cow-shared-image-payload-clones={} process-cow-detached-image-payloads={}",
             self.benchmark_operation.label(),
             totals.frames,
             totals.events,
@@ -1343,8 +1586,11 @@ impl PerformanceDiagnostics {
             totals.painted_pages,
             totals.lines_submitted,
             totals.selection_spans_submitted,
-            totals.galleys_built,
-            totals.galleys_reused,
+            totals.pass_galley_layout_requests,
+            totals.fixed_cell_plan_builds,
+            totals.fixed_cell_plan_hits,
+            totals.natural_geometry_plan_builds,
+            totals.natural_geometry_plan_hits,
             totals.element_wraps_built,
             totals.element_wraps_reused,
             totals.caret_lookups,
@@ -1387,6 +1633,11 @@ impl PerformanceDiagnostics {
             benchmark.linear_interaction_queries,
             benchmark.indexed_interaction_queries,
             benchmark.interaction_index_entries_examined,
+            benchmark.pass_galley_layout_requests,
+            benchmark.fixed_cell_plan_builds,
+            benchmark.fixed_cell_plan_hits,
+            benchmark.natural_geometry_plan_builds,
+            benchmark.natural_geometry_plan_hits,
             project_validation.complete_project_validations,
             edit_validation.scoped_candidate_attempts,
             edit_validation.scoped_candidate_accepts,
@@ -1420,6 +1671,70 @@ impl PerformanceDiagnostics {
             copy_on_write.detached_source_byte_payloads,
             copy_on_write.shared_image_payload_clones,
             copy_on_write.detached_image_payloads
+        );
+        format!(
+            "{summary} benchmark-page-row-allocations={} benchmark-frame-projection-pages={} benchmark-pages-considered={} benchmark-pages-culled={} benchmark-pages-painted={} benchmark-visible-range-selections={} benchmark-fixed-cell-transformations={} benchmark-natural-geometry-requests={} benchmark-page-snapshot-publications={} benchmark-pending-zoom-plans={} benchmark-page-row-allocation-ns={} benchmark-frame-projection-ns={} benchmark-visible-range-selection-ns={} benchmark-page-paint-ns={} benchmark-page-snapshot-publication-ns={} benchmark-pending-zoom-planning-ns={} benchmark-core-layout-complete-project-validations={} benchmark-core-layout-builds={} benchmark-core-layout-semantic-signatures={} benchmark-core-layout-wraps-built={} benchmark-core-layout-wrap-misses={} benchmark-core-layout-wraps-reused={} benchmark-core-layout-wrap-ns={} benchmark-core-layout-display-projection-ns={} benchmark-core-layout-projected-scalars={} benchmark-core-layout-run-range-searches={} benchmark-core-layout-style-parses={} benchmark-core-layout-source-map-remap-ns={} benchmark-core-layout-source-map-segments={} benchmark-core-layout-post-cache-run-constructions={} benchmark-core-layout-post-cache-run-bytes={} benchmark-core-layout-post-cache-run-ns={} benchmark-core-layout-positioned-span-ns={} benchmark-core-layout-positioned-span-characters={} benchmark-core-layout-interaction-index-build-ns={} benchmark-core-layout-interaction-index-entries={} benchmark-core-layout-interaction-index-sorted={} benchmark-core-layout-wrap-cache-evictions={} benchmark-core-layout-wrap-cache-eviction-entries={} process-edit-full-validation-ns={} process-edit-full-fallback-ns={} process-edit-target-discovery-attempts={} process-edit-target-discovery-elements={} process-edit-target-discovery-ns={} process-edit-non-target-comparisons={} process-edit-scoped-validation-ns={} process-edit-derived-invalidation-classifications={} process-edit-derived-invalidation-ns={} process-source-text-run-projections={} process-source-text-projection-ns={} process-source-text-slot-nodes={} process-source-text-slots-found={} process-source-owner-nodes-rebuilt={} process-source-text-bytes-examined={} process-scoped-source-proofs={} process-scoped-source-proof-ns={} process-scoped-source-event-nodes={} process-visible-page-selections={} process-visible-page-selection-ns={} benchmark-visible-page-selections={} benchmark-visible-page-selection-ns={}",
+            benchmark.page_row_allocations,
+            benchmark.frame_projection_pages,
+            benchmark.pages_considered,
+            benchmark.pages_culled,
+            benchmark.painted_pages,
+            benchmark.visible_range_selections,
+            benchmark.fixed_cell_transformations,
+            benchmark.natural_geometry_requests,
+            benchmark.page_snapshot_publications,
+            benchmark.pending_zoom_plans,
+            benchmark.page_row_allocation_nanos,
+            benchmark.frame_projection_nanos,
+            benchmark.visible_range_selection_nanos,
+            benchmark.paint_nanos,
+            benchmark.page_snapshot_publication_nanos,
+            benchmark.pending_zoom_planning_nanos,
+            benchmark.core_layout_complete_project_validations,
+            benchmark.core_layout_builds,
+            benchmark.core_layout_semantic_signature_constructions,
+            benchmark.core_layout_element_wraps_built,
+            benchmark.core_layout_element_wrap_misses,
+            benchmark.core_layout_element_wraps_reused,
+            benchmark.core_layout_element_wrap_nanos,
+            benchmark.core_layout_display_projection_nanos,
+            benchmark.core_layout_projected_scalars,
+            benchmark.core_layout_run_range_searches,
+            benchmark.core_layout_style_attribute_parses,
+            benchmark.core_layout_source_map_remap_nanos,
+            benchmark.core_layout_source_map_segments_examined,
+            benchmark.core_layout_post_cache_run_constructions,
+            benchmark.core_layout_post_cache_run_bytes_cloned,
+            benchmark.core_layout_post_cache_run_nanos,
+            benchmark.core_layout_positioned_span_nanos,
+            benchmark.core_layout_positioned_span_characters,
+            benchmark.core_layout_interaction_index_build_nanos,
+            benchmark.core_layout_interaction_index_entries,
+            benchmark.core_layout_interaction_index_entries_sorted,
+            benchmark.core_layout_wrap_cache_evictions,
+            benchmark.core_layout_wrap_cache_eviction_entries_examined,
+            edit_validation.full_candidate_validation_nanos,
+            edit_validation.full_validation_fallback_nanos,
+            edit_validation.target_discovery_attempts,
+            edit_validation.target_discovery_elements_examined,
+            edit_validation.target_discovery_nanos,
+            edit_validation.non_target_semantic_comparisons,
+            edit_validation.scoped_candidate_validation_nanos,
+            edit_validation.derived_invalidation_classifications,
+            edit_validation.derived_invalidation_nanos,
+            preservation_phase.source_text_run_projections,
+            preservation_phase.source_text_projection_nanos,
+            preservation_phase.source_text_slot_nodes_examined,
+            preservation_phase.source_text_slots_found,
+            preservation_phase.source_owner_nodes_rebuilt,
+            preservation_phase.source_text_bytes_examined,
+            preservation_phase.scoped_source_proofs,
+            preservation_phase.scoped_source_proof_nanos,
+            preservation_phase.scoped_source_event_nodes_examined,
+            visible_page_selections,
+            visible_page_selection_nanos,
+            benchmark.visible_page_selections,
+            benchmark.visible_page_selection_nanos,
         )
     }
 }
@@ -2360,15 +2675,25 @@ impl ScriptCraftApp {
             EditorSurface::Body => &mut self.layout_cache,
             EditorSurface::TitlePage => &mut self.title_layout_cache,
         };
-        let (layout, hit) = if surface == EditorSurface::Body {
+        let mut build_diagnostics = scriptcraft_core::layout::LayoutBuildDiagnostics::default();
+        let build_result = if surface == EditorSurface::Body {
             let presentation = BodyEditorPresentation::for_project(
                 self.session.project(),
                 self.active_body_dual_dialogue_group.clone(),
             );
-            cache.get_or_build_body_editor_for_session(&self.session, &presentation)?
+            cache.get_or_build_body_editor_for_session_with_diagnostics(
+                &self.session,
+                &presentation,
+                &mut build_diagnostics,
+            )
         } else {
-            cache.get_or_build_title_page_editor_for_session(&self.session)?
+            cache.get_or_build_title_page_editor_for_session_with_diagnostics(
+                &self.session,
+                &mut build_diagnostics,
+            )
         };
+        record_layout_build_diagnostics(&mut self.performance, build_diagnostics);
+        let (layout, hit) = build_result?;
         add_performance_nanos(
             &mut self.performance.layout_lookup_nanos,
             started.elapsed().as_nanos(),
@@ -3571,6 +3896,16 @@ mod performance_summary_tests {
         }
         .safe_summary();
         let labels = [
+            "process-render-galley-layout-requests",
+            "process-fixed-cell-plan-builds",
+            "process-fixed-cell-plan-hits",
+            "process-natural-geometry-plan-builds",
+            "process-natural-geometry-plan-hits",
+            "benchmark-render-galley-layout-requests",
+            "benchmark-fixed-cell-plan-builds",
+            "benchmark-fixed-cell-plan-hits",
+            "benchmark-natural-geometry-plan-builds",
+            "benchmark-natural-geometry-plan-hits",
             "process-project-validations",
             "process-edit-scoped-attempts",
             "process-edit-scoped-accepts",
@@ -3604,6 +3939,67 @@ mod performance_summary_tests {
             "process-cow-detached-source-byte-payloads",
             "process-cow-shared-image-payload-clones",
             "process-cow-detached-image-payloads",
+            "benchmark-page-row-allocations",
+            "benchmark-frame-projection-pages",
+            "benchmark-pages-considered",
+            "benchmark-pages-culled",
+            "benchmark-pages-painted",
+            "benchmark-visible-range-selections",
+            "benchmark-fixed-cell-transformations",
+            "benchmark-natural-geometry-requests",
+            "benchmark-page-snapshot-publications",
+            "benchmark-pending-zoom-plans",
+            "benchmark-page-row-allocation-ns",
+            "benchmark-frame-projection-ns",
+            "benchmark-visible-range-selection-ns",
+            "benchmark-page-paint-ns",
+            "benchmark-page-snapshot-publication-ns",
+            "benchmark-pending-zoom-planning-ns",
+            "benchmark-core-layout-complete-project-validations",
+            "benchmark-core-layout-builds",
+            "benchmark-core-layout-semantic-signatures",
+            "benchmark-core-layout-wraps-built",
+            "benchmark-core-layout-wrap-misses",
+            "benchmark-core-layout-wraps-reused",
+            "benchmark-core-layout-wrap-ns",
+            "benchmark-core-layout-display-projection-ns",
+            "benchmark-core-layout-projected-scalars",
+            "benchmark-core-layout-run-range-searches",
+            "benchmark-core-layout-style-parses",
+            "benchmark-core-layout-source-map-remap-ns",
+            "benchmark-core-layout-source-map-segments",
+            "benchmark-core-layout-post-cache-run-constructions",
+            "benchmark-core-layout-post-cache-run-bytes",
+            "benchmark-core-layout-post-cache-run-ns",
+            "benchmark-core-layout-positioned-span-ns",
+            "benchmark-core-layout-positioned-span-characters",
+            "benchmark-core-layout-interaction-index-build-ns",
+            "benchmark-core-layout-interaction-index-entries",
+            "benchmark-core-layout-interaction-index-sorted",
+            "benchmark-core-layout-wrap-cache-evictions",
+            "benchmark-core-layout-wrap-cache-eviction-entries",
+            "benchmark-visible-page-selections",
+            "benchmark-visible-page-selection-ns",
+            "process-edit-full-validation-ns",
+            "process-edit-full-fallback-ns",
+            "process-edit-target-discovery-attempts",
+            "process-edit-target-discovery-elements",
+            "process-edit-target-discovery-ns",
+            "process-edit-non-target-comparisons",
+            "process-edit-scoped-validation-ns",
+            "process-edit-derived-invalidation-classifications",
+            "process-edit-derived-invalidation-ns",
+            "process-source-text-run-projections",
+            "process-source-text-projection-ns",
+            "process-source-text-slot-nodes",
+            "process-source-text-slots-found",
+            "process-source-owner-nodes-rebuilt",
+            "process-source-text-bytes-examined",
+            "process-scoped-source-proofs",
+            "process-scoped-source-proof-ns",
+            "process-scoped-source-event-nodes",
+            "process-visible-page-selections",
+            "process-visible-page-selection-ns",
         ];
 
         for label in labels {
@@ -3616,6 +4012,223 @@ mod performance_summary_tests {
                 }),
                 "summary is missing stable numeric field {label}"
             );
+        }
+    }
+
+    #[test]
+    fn renderer_reuse_counters_publish_numeric_totals_and_saturating_deltas() {
+        let totals = PerformanceMeasurements {
+            pass_galley_layout_requests: 12,
+            fixed_cell_transformations: 9,
+            natural_geometry_requests: 4,
+            fixed_cell_plan_builds: 3,
+            fixed_cell_plan_hits: 5,
+            natural_geometry_plan_builds: 2,
+            natural_geometry_plan_hits: 7,
+            ..PerformanceMeasurements::default()
+        };
+        let baseline = PerformanceMeasurements {
+            pass_galley_layout_requests: 4,
+            fixed_cell_transformations: 3,
+            natural_geometry_requests: 1,
+            fixed_cell_plan_builds: 1,
+            fixed_cell_plan_hits: 2,
+            natural_geometry_plan_builds: 1,
+            natural_geometry_plan_hits: 3,
+            ..PerformanceMeasurements::default()
+        };
+        let delta = totals.delta_since(baseline);
+        assert_eq!(delta.pass_galley_layout_requests, 8);
+        assert_eq!(delta.fixed_cell_transformations, 6);
+        assert_eq!(delta.natural_geometry_requests, 3);
+        assert_eq!(delta.fixed_cell_plan_builds, 2);
+        assert_eq!(delta.fixed_cell_plan_hits, 3);
+        assert_eq!(delta.natural_geometry_plan_builds, 1);
+        assert_eq!(delta.natural_geometry_plan_hits, 4);
+
+        let summary = PerformanceDiagnostics {
+            totals,
+            benchmark_start: baseline,
+            benchmark_operation: BenchmarkOperation::General,
+        }
+        .safe_summary();
+        for label in [
+            "process-render-galley-layout-requests=12",
+            "process-fixed-cell-plan-builds=3",
+            "process-fixed-cell-plan-hits=5",
+            "process-natural-geometry-plan-builds=2",
+            "process-natural-geometry-plan-hits=7",
+            "benchmark-render-galley-layout-requests=8",
+            "benchmark-fixed-cell-transformations=6",
+            "benchmark-natural-geometry-requests=3",
+            "benchmark-fixed-cell-plan-builds=2",
+            "benchmark-fixed-cell-plan-hits=3",
+            "benchmark-natural-geometry-plan-builds=1",
+            "benchmark-natural-geometry-plan-hits=4",
+        ] {
+            assert!(summary.split_whitespace().any(|field| field == label));
+        }
+    }
+
+    #[test]
+    fn desktop_frame_and_core_layout_phases_are_benchmark_deltas() {
+        let totals = PerformanceMeasurements {
+            pages_considered: 20,
+            pages_culled: 12,
+            painted_pages: 8,
+            page_row_allocations: 20,
+            frame_projection_pages: 5,
+            visible_range_selections: 4,
+            visible_page_selections: 3,
+            fixed_cell_transformations: 16,
+            natural_geometry_requests: 3,
+            page_snapshot_publications: 4,
+            pending_zoom_plans: 1,
+            page_row_allocation_nanos: 120,
+            frame_projection_nanos: 80,
+            visible_range_selection_nanos: 12,
+            paint_nanos: 250,
+            page_snapshot_publication_nanos: 32,
+            pending_zoom_planning_nanos: 18,
+            visible_page_selection_nanos: 22,
+            core_layout_element_wraps_built: 2,
+            core_layout_element_wraps_reused: 7,
+            core_layout_display_projection_nanos: 90,
+            core_layout_source_map_remap_nanos: 40,
+            ..PerformanceMeasurements::default()
+        };
+        let baseline = PerformanceMeasurements {
+            pages_considered: 8,
+            pages_culled: 5,
+            painted_pages: 3,
+            page_row_allocations: 8,
+            frame_projection_pages: 2,
+            visible_range_selections: 1,
+            visible_page_selections: 1,
+            fixed_cell_transformations: 6,
+            natural_geometry_requests: 1,
+            page_snapshot_publications: 1,
+            page_row_allocation_nanos: 50,
+            frame_projection_nanos: 20,
+            visible_range_selection_nanos: 4,
+            paint_nanos: 100,
+            page_snapshot_publication_nanos: 12,
+            pending_zoom_planning_nanos: 5,
+            visible_page_selection_nanos: 7,
+            core_layout_element_wraps_built: 1,
+            core_layout_element_wraps_reused: 2,
+            core_layout_display_projection_nanos: 30,
+            core_layout_source_map_remap_nanos: 10,
+            ..PerformanceMeasurements::default()
+        };
+        let delta = totals.delta_since(baseline);
+        assert_eq!(delta.pages_considered, 12);
+        assert_eq!(delta.pages_culled, 7);
+        assert_eq!(delta.painted_pages, 5);
+        assert_eq!(delta.page_row_allocations, 12);
+        assert_eq!(delta.frame_projection_pages, 3);
+        assert_eq!(delta.visible_range_selections, 3);
+        assert_eq!(delta.visible_page_selections, 2);
+        assert_eq!(delta.fixed_cell_transformations, 10);
+        assert_eq!(delta.natural_geometry_requests, 2);
+        assert_eq!(delta.page_snapshot_publications, 3);
+        assert_eq!(delta.pending_zoom_plans, 1);
+        assert_eq!(delta.page_row_allocation_nanos, 70);
+        assert_eq!(delta.frame_projection_nanos, 60);
+        assert_eq!(delta.visible_range_selection_nanos, 8);
+        assert_eq!(delta.paint_nanos, 150);
+        assert_eq!(delta.page_snapshot_publication_nanos, 20);
+        assert_eq!(delta.pending_zoom_planning_nanos, 13);
+        assert_eq!(delta.visible_page_selection_nanos, 15);
+        assert_eq!(delta.core_layout_element_wraps_built, 1);
+        assert_eq!(delta.core_layout_element_wraps_reused, 5);
+        assert_eq!(delta.core_layout_display_projection_nanos, 60);
+        assert_eq!(delta.core_layout_source_map_remap_nanos, 30);
+
+        let summary = PerformanceDiagnostics {
+            totals,
+            benchmark_start: baseline,
+            benchmark_operation: BenchmarkOperation::General,
+        }
+        .safe_summary();
+        for field in [
+            "benchmark-pages-considered=12",
+            "benchmark-pages-culled=7",
+            "benchmark-pages-painted=5",
+            "benchmark-page-row-allocations=12",
+            "benchmark-frame-projection-pages=3",
+            "benchmark-visible-range-selections=3",
+            "benchmark-visible-page-selections=2",
+            "benchmark-fixed-cell-transformations=10",
+            "benchmark-natural-geometry-requests=2",
+            "benchmark-page-snapshot-publications=3",
+            "benchmark-pending-zoom-plans=1",
+            "benchmark-page-row-allocation-ns=70",
+            "benchmark-frame-projection-ns=60",
+            "benchmark-visible-range-selection-ns=8",
+            "benchmark-page-paint-ns=150",
+            "benchmark-page-snapshot-publication-ns=20",
+            "benchmark-pending-zoom-planning-ns=13",
+            "benchmark-visible-page-selection-ns=15",
+            "benchmark-core-layout-wraps-built=1",
+            "benchmark-core-layout-wraps-reused=5",
+            "benchmark-core-layout-display-projection-ns=60",
+            "benchmark-core-layout-source-map-remap-ns=30",
+        ] {
+            assert!(summary.split_whitespace().any(|value| value == field));
+        }
+    }
+
+    #[test]
+    fn absent_pending_zoom_has_zero_planning_count_and_time() {
+        let summary = PerformanceDiagnostics::default().safe_summary();
+        assert!(summary
+            .split_whitespace()
+            .any(|field| field == "benchmark-pending-zoom-plans=0"));
+        assert!(summary
+            .split_whitespace()
+            .any(|field| field == "benchmark-pending-zoom-planning-ns=0"));
+    }
+
+    #[test]
+    fn page_modes_allocate_complete_rows_and_account_only_visible_paint_pages() {
+        for mode in [
+            scriptcraft_commands::ScriptViewMode::Page,
+            scriptcraft_commands::ScriptViewMode::Normal,
+            scriptcraft_commands::ScriptViewMode::Speed,
+        ] {
+            let Ok(mut app) = super::ScriptCraftApp::new() else {
+                return;
+            };
+            app.script_view_mode = mode;
+            let context = eframe::egui::Context::default();
+            let _ = context.run(
+                eframe::egui::RawInput {
+                    screen_rect: Some(eframe::egui::Rect::from_min_size(
+                        eframe::egui::Pos2::ZERO,
+                        eframe::egui::vec2(720.0, 480.0),
+                    )),
+                    ..eframe::egui::RawInput::default()
+                },
+                |context| {
+                    eframe::egui::CentralPanel::default().show(context, |ui| {
+                        app.live_document_surface(ui, scriptcraft_commands::EditorSurface::Body);
+                    });
+                },
+            );
+
+            assert!(app.performance.page_row_allocations > 0);
+            assert_eq!(
+                app.performance.page_row_allocations,
+                app.performance.pages_considered
+            );
+            assert_eq!(
+                app.performance.painted_pages + app.performance.pages_culled,
+                app.performance.page_row_allocations
+            );
+            assert_eq!(app.performance.visible_range_selections, 1);
+            assert_eq!(app.performance.pending_zoom_plans, 0);
+            assert_eq!(app.performance.pending_zoom_planning_nanos, 0);
         }
     }
 }
@@ -3902,6 +4515,7 @@ impl ScriptCraftApp {
     fn update(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         self.finalize_initial_document_slot();
         let ctx = ui.ctx().clone();
+        let visible_page_before = status_bar::visible_page_selection_diagnostics();
         let frame_started = Instant::now();
         self.performance.frames = self.performance.frames.saturating_add(1);
         let root_close_allowed = self.begin_root_close_update(&ctx, frame);
@@ -4010,6 +4624,15 @@ impl ScriptCraftApp {
             }
         }
         self.sync_native_title(&ctx);
+        let visible_page_after = status_bar::visible_page_selection_diagnostics();
+        self.performance.visible_page_selections = self
+            .performance
+            .visible_page_selections
+            .saturating_add(visible_page_after.0.saturating_sub(visible_page_before.0));
+        add_performance_nanos(
+            &mut self.performance.visible_page_selection_nanos,
+            visible_page_after.1.saturating_sub(visible_page_before.1) as u128,
+        );
         self.performance.frame_nanos = self
             .performance
             .frame_nanos

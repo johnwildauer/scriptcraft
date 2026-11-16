@@ -18,6 +18,37 @@ use crate::shortcuts::{
     element_hint_bindings, element_hint_chord, modifiers_are_none, ElementHintChord,
     ShortcutPlatform,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+static VISIBLE_PAGE_SELECTIONS: AtomicU64 = AtomicU64::new(0);
+static VISIBLE_PAGE_SELECTION_NANOS: AtomicU64 = AtomicU64::new(0);
+
+struct VisiblePageSelectionMeasurement(Instant);
+
+impl Drop for VisiblePageSelectionMeasurement {
+    fn drop(&mut self) {
+        let elapsed = self.0.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let _ = VISIBLE_PAGE_SELECTIONS.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |value| Some(value.saturating_add(1)),
+        );
+        let _ = VISIBLE_PAGE_SELECTION_NANOS.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |value| Some(value.saturating_add(elapsed)),
+        );
+    }
+}
+
+pub(super) fn visible_page_selection_diagnostics() -> (u64, u64) {
+    (
+        VISIBLE_PAGE_SELECTIONS.load(Ordering::Relaxed),
+        VISIBLE_PAGE_SELECTION_NANOS.load(Ordering::Relaxed),
+    )
+}
+
 pub(super) const MIN_ZOOM_PERCENT: u16 = 75;
 pub(super) const MAX_ZOOM_PERCENT: u16 = 300;
 pub(super) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250, 300];
@@ -757,6 +788,13 @@ pub(super) enum VisiblePage {
     Unavailable,
 }
 
+/// Complete geometry for one page in the current presented frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PresentedPageGeometry {
+    pub(super) rect: Rect,
+    pub(super) document_y_offset: f32,
+}
+
 impl VisiblePage {
     pub(super) fn label(self) -> String {
         match self {
@@ -779,10 +817,11 @@ fn valid_rect(rect: Rect) -> bool {
 
 /// Select the rendered sheet with the greatest vertical overlap against the
 /// actual editor clip. Empty overlap selects the nearest sheet interval.
-pub(super) fn select_visible_page(page_rects: &[Rect], clip: Rect) -> VisiblePage {
-    if page_rects.is_empty()
+pub(super) fn select_visible_page(pages: &[PresentedPageGeometry], clip: Rect) -> VisiblePage {
+    let _measurement = VisiblePageSelectionMeasurement(Instant::now());
+    if pages.is_empty()
         || !valid_rect(clip)
-        || page_rects.iter().any(|rect| !valid_rect(*rect))
+        || pages.iter().any(|page| !valid_rect(page.rect))
     {
         return VisiblePage::Unavailable;
     }
@@ -792,7 +831,8 @@ pub(super) fn select_visible_page(page_rects: &[Rect], clip: Rect) -> VisiblePag
     let mut best_index = 0;
     let mut best_overlap = 0.0_f32;
 
-    for (index, page) in page_rects.iter().enumerate() {
+    for (index, page) in pages.iter().enumerate() {
+        let page = &page.rect;
         let overlap = (page.bottom().min(clip_bottom) - page.top().max(clip_top)).max(0.0);
         if overlap > best_overlap {
             best_overlap = overlap;
@@ -811,7 +851,8 @@ pub(super) fn select_visible_page(page_rects: &[Rect], clip: Rect) -> VisiblePag
             }
         };
         let mut nearest = f32::INFINITY;
-        for (index, page) in page_rects.iter().enumerate() {
+        for (index, page) in pages.iter().enumerate() {
+            let page = &page.rect;
             let candidate = distance(page);
             if candidate < nearest {
                 nearest = candidate;
@@ -823,7 +864,7 @@ pub(super) fn select_visible_page(page_rects: &[Rect], clip: Rect) -> VisiblePag
     match best_index.checked_add(1) {
         Some(one_based) => VisiblePage::Available {
             one_based,
-            total: page_rects.len(),
+            total: pages.len(),
         },
         None => VisiblePage::Unavailable,
     }
@@ -835,8 +876,7 @@ struct GeometrySnapshot {
     layout_revision: u64,
     viewport_rect: Rect,
     scale: f32,
-    page_rects: Vec<Rect>,
-    page_document_y_offsets: Vec<f32>,
+    pages: Vec<PresentedPageGeometry>,
     clip: Rect,
     scroll_offset: Vec2,
 }
@@ -879,20 +919,19 @@ impl ViewportPageTracker {
             || scale <= 0.0
             || (snapshot.scale - scale).abs() > f32::EPSILON
             || !valid_geometry_rect(snapshot.clip)
-            || snapshot.page_rects.is_empty()
-            || snapshot.page_rects.len() != snapshot.page_document_y_offsets.len()
+            || snapshot.pages.is_empty()
             || snapshot
-                .page_document_y_offsets
+                .pages
                 .iter()
-                .any(|offset| !offset.is_finite())
+                .any(|page| !page.document_y_offset.is_finite())
             || !snapshot.scroll_offset.x.is_finite()
             || !snapshot.scroll_offset.y.is_finite()
             || snapshot.scroll_offset.x < 0.0
             || snapshot.scroll_offset.y < 0.0
             || snapshot
-                .page_rects
+                .pages
                 .iter()
-                .any(|rect| !valid_geometry_rect(*rect))
+                .any(|page| !valid_geometry_rect(page.rect))
         {
             return None;
         }
@@ -902,19 +941,21 @@ impl ViewportPageTracker {
         // egui 0.29 lays out ScrollArea children from `inner_rect.min - offset`,
         // so allocated rectangles move with the viewport. Normalize them into
         // content coordinates before comparing with the offset-adjusted center.
-        let (page_index, page_rect) = snapshot
-            .page_rects
+        let (page_index, page, page_rect) = snapshot
+            .pages
             .iter()
             .enumerate()
-            .map(|(index, rect)| (index, rect.translate(snapshot.scroll_offset)))
-            .find(|(_, rect)| rect.contains(content_point))
+            .map(|(index, page)| (index, *page, page.rect.translate(snapshot.scroll_offset)))
+            .find(|(_, _, rect)| rect.contains(content_point))
             .or_else(|| {
                 snapshot
-                    .page_rects
+                    .pages
                     .iter()
                     .enumerate()
-                    .map(|(index, rect)| (index, rect.translate(snapshot.scroll_offset)))
-                    .min_by(|(_, left), (_, right)| {
+                    .map(|(index, page)| {
+                        (index, *page, page.rect.translate(snapshot.scroll_offset))
+                    })
+                    .min_by(|(_, _, left), (_, _, right)| {
                         distance_squared_to_rect(content_point, *left)
                             .total_cmp(&distance_squared_to_rect(content_point, *right))
                     })
@@ -924,12 +965,11 @@ impl ViewportPageTracker {
             content_point.x.clamp(page_rect.left(), page_rect.right()),
             content_point.y.clamp(page_rect.top(), page_rect.bottom()),
         );
-        let page_document_y_offset = *snapshot.page_document_y_offsets.get(page_index)?;
         Some(ViewportCenterAnchor {
             page_index,
             page_local_document_point: Vec2::new(
                 (bounded_point.x - page_rect.left()) / scale,
-                page_document_y_offset + (bounded_point.y - page_rect.top()) / scale,
+                page.document_y_offset + (bounded_point.y - page_rect.top()) / scale,
             ),
             outside_page_offset_points: (content_point - bounded_point),
             viewport_center,
@@ -958,17 +998,16 @@ impl ViewportPageTracker {
             || snapshot.viewport_rect != viewport_rect
             || !scale.is_finite()
             || (snapshot.scale - scale).abs() > f32::EPSILON
-            || snapshot.page_rects.is_empty()
-            || snapshot.page_rects.len() != snapshot.page_document_y_offsets.len()
+            || snapshot.pages.is_empty()
             || snapshot
-                .page_document_y_offsets
+                .pages
                 .iter()
-                .any(|offset| !offset.is_finite())
+                .any(|page| !page.document_y_offset.is_finite())
         {
             self.repaint_after_publish = true;
             return self.last_valid.unwrap_or(VisiblePage::Unavailable);
         }
-        let selected = select_visible_page(&snapshot.page_rects, snapshot.clip);
+        let selected = select_visible_page(&snapshot.pages, snapshot.clip);
         if matches!(selected, VisiblePage::Available { .. }) {
             self.last_valid = Some(selected);
             selected
@@ -978,8 +1017,8 @@ impl ViewportPageTracker {
         }
     }
 
-    // Snapshot publication keeps geometry fields explicit and avoids a wrapper
-    // allocation on each editor frame.
+    // Keep the split-vector adapter for existing non-frame callers; live frame
+    // publication transfers the complete page representation below.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn publish(
         &mut self,
@@ -1001,13 +1040,49 @@ impl ViewportPageTracker {
             self.repaint_after_publish = true;
             return true;
         }
+        let pages = page_rects
+            .into_iter()
+            .zip(page_document_y_offsets)
+            .map(|(rect, document_y_offset)| PresentedPageGeometry {
+                rect,
+                document_y_offset,
+            })
+            .collect();
+        self.publish_presented_pages(
+            frame,
+            layout_revision,
+            viewport_rect,
+            scale,
+            pages,
+            clip,
+            scroll_offset,
+        )
+    }
+
+    pub(super) fn publish_presented_pages(
+        &mut self,
+        frame: u64,
+        layout_revision: u64,
+        viewport_rect: Rect,
+        scale: f32,
+        pages: Vec<PresentedPageGeometry>,
+        clip: Rect,
+        scroll_offset: Vec2,
+    ) -> bool {
+        if pages
+            .iter()
+            .any(|page| !page.document_y_offset.is_finite())
+        {
+            self.published = None;
+            self.repaint_after_publish = true;
+            return true;
+        }
         let next = GeometrySnapshot {
             published_frame: frame,
             layout_revision,
             viewport_rect,
             scale,
-            page_rects,
-            page_document_y_offsets,
+            pages,
             clip,
             scroll_offset,
         };
@@ -1015,8 +1090,7 @@ impl ViewportPageTracker {
             old.layout_revision != next.layout_revision
                 || old.viewport_rect != next.viewport_rect
                 || old.scale != next.scale
-                || old.page_rects != next.page_rects
-                || old.page_document_y_offsets != next.page_document_y_offsets
+                || old.pages != next.pages
                 || old.clip != next.clip
                 || old.scroll_offset != next.scroll_offset
         });
@@ -1024,6 +1098,12 @@ impl ViewportPageTracker {
         let request_repaint = changed || self.repaint_after_publish;
         self.repaint_after_publish = false;
         request_repaint
+    }
+
+    pub(super) fn presented_pages(&self) -> Option<&[PresentedPageGeometry]> {
+        self.published
+            .as_ref()
+            .map(|snapshot| snapshot.pages.as_slice())
     }
 
     pub(super) fn invalidate(&mut self) {
@@ -1071,7 +1151,7 @@ fn distance_squared_to_rect(point: Pos2, rect: Rect) -> f32 {
 
 #[cfg(test)]
 mod viewport_page_tracker_tests {
-    use super::{VisiblePage, ViewportPageTracker};
+    use super::{PresentedPageGeometry, VisiblePage, ViewportPageTracker};
     use eframe::egui::{pos2, vec2, Rect, Vec2};
 
     fn publish_one_page(
@@ -1081,13 +1161,15 @@ mod viewport_page_tracker_tests {
         clip: Rect,
         scroll_offset: Vec2,
     ) -> bool {
-        tracker.publish(
+        tracker.publish_presented_pages(
             10,
             7,
             Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0)),
             1.0,
-            vec![page_rect],
-            vec![document_y_offset],
+            vec![PresentedPageGeometry {
+                rect: page_rect,
+                document_y_offset,
+            }],
             clip,
             scroll_offset,
         )
@@ -1192,13 +1274,21 @@ mod viewport_page_tracker_tests {
         let first = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 50.0));
         let second = first.translate(vec2(0.0, 50.0));
         let mut tracker = ViewportPageTracker::default();
-        tracker.publish(
+        tracker.publish_presented_pages(
             4,
             9,
             viewport,
             1.0,
-            vec![first, second],
-            vec![24.0, 18.0],
+            vec![
+                PresentedPageGeometry {
+                    rect: first,
+                    document_y_offset: 24.0,
+                },
+                PresentedPageGeometry {
+                    rect: second,
+                    document_y_offset: 18.0,
+                },
+            ],
             Rect::from_min_max(pos2(0.0, 25.0), pos2(200.0, 75.0)),
             Vec2::ZERO,
         );

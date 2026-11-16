@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Value-free counters for immutable preservation snapshot sharing.
 ///
@@ -213,6 +214,79 @@ pub fn reset_preservation_reconciliation_diagnostics() {
     TITLE_OWNERS_REMOVED.store(0, Ordering::Relaxed);
     TITLE_OWNERS_INSERTED.store(0, Ordering::Relaxed);
     SOURCE_TEXT_BYTE_DELTA_UPDATES.store(0, Ordering::Relaxed);
+}
+
+/// Value-free timings and traversal counts for core source projection and the
+/// scoped current-source proof. This is process-wide and independent of the
+/// reconciliation/copy-on-write counters.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PreservationPhaseDiagnostics {
+    pub source_text_run_projections: u64,
+    pub source_text_projection_nanos: u64,
+    pub source_text_slot_nodes_examined: u64,
+    pub source_text_slots_found: u64,
+    pub source_owner_nodes_rebuilt: u64,
+    pub source_text_bytes_examined: u64,
+    pub scoped_source_proofs: u64,
+    pub scoped_source_proof_nanos: u64,
+    pub scoped_source_event_nodes_examined: u64,
+}
+
+static SOURCE_TEXT_RUN_PROJECTIONS: AtomicU64 = AtomicU64::new(0);
+static SOURCE_TEXT_PROJECTION_NANOS: AtomicU64 = AtomicU64::new(0);
+static SOURCE_TEXT_SLOT_NODES_EXAMINED: AtomicU64 = AtomicU64::new(0);
+static SOURCE_TEXT_SLOTS_FOUND: AtomicU64 = AtomicU64::new(0);
+static SOURCE_OWNER_NODES_REBUILT: AtomicU64 = AtomicU64::new(0);
+static SOURCE_TEXT_BYTES_EXAMINED: AtomicU64 = AtomicU64::new(0);
+static SCOPED_SOURCE_PROOFS: AtomicU64 = AtomicU64::new(0);
+static SCOPED_SOURCE_PROOF_NANOS: AtomicU64 = AtomicU64::new(0);
+static SCOPED_SOURCE_EVENT_NODES_EXAMINED: AtomicU64 = AtomicU64::new(0);
+
+pub fn preservation_phase_diagnostics() -> PreservationPhaseDiagnostics {
+    PreservationPhaseDiagnostics {
+        source_text_run_projections: SOURCE_TEXT_RUN_PROJECTIONS.load(Ordering::Relaxed),
+        source_text_projection_nanos: SOURCE_TEXT_PROJECTION_NANOS.load(Ordering::Relaxed),
+        source_text_slot_nodes_examined: SOURCE_TEXT_SLOT_NODES_EXAMINED.load(Ordering::Relaxed),
+        source_text_slots_found: SOURCE_TEXT_SLOTS_FOUND.load(Ordering::Relaxed),
+        source_owner_nodes_rebuilt: SOURCE_OWNER_NODES_REBUILT.load(Ordering::Relaxed),
+        source_text_bytes_examined: SOURCE_TEXT_BYTES_EXAMINED.load(Ordering::Relaxed),
+        scoped_source_proofs: SCOPED_SOURCE_PROOFS.load(Ordering::Relaxed),
+        scoped_source_proof_nanos: SCOPED_SOURCE_PROOF_NANOS.load(Ordering::Relaxed),
+        scoped_source_event_nodes_examined: SCOPED_SOURCE_EVENT_NODES_EXAMINED
+            .load(Ordering::Relaxed),
+    }
+}
+
+pub fn reset_preservation_phase_diagnostics() {
+    SOURCE_TEXT_RUN_PROJECTIONS.store(0, Ordering::Relaxed);
+    SOURCE_TEXT_PROJECTION_NANOS.store(0, Ordering::Relaxed);
+    SOURCE_TEXT_SLOT_NODES_EXAMINED.store(0, Ordering::Relaxed);
+    SOURCE_TEXT_SLOTS_FOUND.store(0, Ordering::Relaxed);
+    SOURCE_OWNER_NODES_REBUILT.store(0, Ordering::Relaxed);
+    SOURCE_TEXT_BYTES_EXAMINED.store(0, Ordering::Relaxed);
+    SCOPED_SOURCE_PROOFS.store(0, Ordering::Relaxed);
+    SCOPED_SOURCE_PROOF_NANOS.store(0, Ordering::Relaxed);
+    SCOPED_SOURCE_EVENT_NODES_EXAMINED.store(0, Ordering::Relaxed);
+}
+
+struct PreservationPhaseTimer {
+    counter: &'static AtomicU64,
+    started: Instant,
+}
+
+impl PreservationPhaseTimer {
+    fn start(counter: &'static AtomicU64) -> Self {
+        Self { counter, started: Instant::now() }
+    }
+}
+
+impl Drop for PreservationPhaseTimer {
+    fn drop(&mut self) {
+        add_counter(
+            self.counter,
+            self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        );
+    }
 }
 
 /// A vector whose clones share immutable storage and detach on mutable access.
@@ -832,6 +906,17 @@ pub struct PreservationState {
     pub(crate) managed_paragraph_index: Option<BTreeMap<StableId, Vec<ManagedParagraphLocation>>>,
     pub(crate) source_identity_use_index: Option<SourceIdentityUseIndex>,
     pub(crate) source_text_bytes: usize,
+    pub(crate) last_owner_local_projection: Option<OwnerLocalProjectionProof>,
+}
+
+/// A one-operation receipt for the exact text-byte delta established by the
+/// ordinary single-text-node projection path. It is transient proof data, not
+/// part of preservation equality or serialized document state.
+#[derive(Debug, Clone)]
+pub(crate) struct OwnerLocalProjectionProof {
+    owner: StableId,
+    before_text_bytes: usize,
+    after_text_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1374,8 +1459,80 @@ impl PreservationState {
         provenance: Option<&SourceProvenance>,
         role_name: Option<&str>,
     ) -> Result<Option<SourceProvenance>, PreservationError> {
+        self.project_managed_text_runs_with_edit(
+            id,
+            original_text,
+            text,
+            runs,
+            provenance,
+            role_name,
+            None,
+        )
+    }
+
+    /// Projects a known same-owner text replacement. The edit range authorizes
+    /// only a narrow ordinary-owner fast path; every uncertain source mapping
+    /// falls through to the generalized projection below.
+    pub(crate) fn project_managed_text_edit(
+        &mut self,
+        id: &StableId,
+        original_text: &str,
+        text: &str,
+        runs: &[TextRun],
+        provenance: Option<&SourceProvenance>,
+        role_name: Option<&str>,
+        old_range: std::ops::Range<usize>,
+        new_range: std::ops::Range<usize>,
+    ) -> Result<Option<SourceProvenance>, PreservationError> {
+        self.project_managed_text_runs_with_edit(
+            id,
+            original_text,
+            text,
+            runs,
+            provenance,
+            role_name,
+            Some((old_range, new_range)),
+        )
+    }
+
+    fn project_managed_text_runs_with_edit(
+        &mut self,
+        id: &StableId,
+        original_text: &str,
+        text: &str,
+        runs: &[TextRun],
+        provenance: Option<&SourceProvenance>,
+        role_name: Option<&str>,
+        known_edit: Option<(std::ops::Range<usize>, std::ops::Range<usize>)>,
+    ) -> Result<Option<SourceProvenance>, PreservationError> {
+        increment_counter(&SOURCE_TEXT_RUN_PROJECTIONS);
+        let _phase_timer = PreservationPhaseTimer::start(&SOURCE_TEXT_PROJECTION_NANOS);
+        self.last_owner_local_projection = None;
         if text.len() > crate::MAX_TEXT_BYTES {
             return Err(PreservationError::TextTooLarge);
+        }
+        if let Some((old_range, new_range)) = known_edit.as_ref() {
+            if text.is_empty()
+                || runs.len() > 1
+                || runs.first().is_some_and(|run| run.text != text)
+            {
+                // A fast-path miss is not a semantic rejection: the
+                // generalized projection remains authoritative.
+            } else if let Some(recovered) = self.try_project_owner_local_text_edit(
+                id,
+                original_text,
+                text,
+                runs,
+                old_range,
+                new_range,
+            )? {
+                self.last_owner_local_projection = Some(OwnerLocalProjectionProof {
+                    owner: id.clone(),
+                    before_text_bytes: original_text.len(),
+                    after_text_bytes: text.len(),
+                });
+                return Ok(recovered);
+            }
         }
         if runs.iter().map(|run| run.text.as_str()).collect::<String>()
             != if runs.is_empty() { "" } else { text }
@@ -1404,11 +1561,16 @@ impl PreservationState {
         if effective_runs.iter().map(|run| run.text.as_str()).collect::<String>() != text {
             return Err(PreservationError::UnsupportedTextMapping);
         }
+        let mut source_bytes_examined = 0u64;
         let old_bytes = self
             .managed_element(id)?
-            .map(source_text_bytes_in_element)
+            .map(|element| source_text_bytes_in_element_counted(element, &mut source_bytes_examined))
             .ok_or(PreservationError::ManagedAnchorMissing)?;
+        add_counter(&SOURCE_TEXT_BYTES_EXAMINED, source_bytes_examined);
+        source_bytes_examined = 0;
         let paragraph = self.managed_element_mut_indexed(id)?;
+        let old_child_count = paragraph.children.len();
+        add_counter(&SOURCE_TEXT_SLOT_NODES_EXAMINED, old_child_count as u64);
         let text_slots = paragraph.children.iter().enumerate().filter_map(|(index, node)| {
             match node {
                 PreservedNode::Element(element) if is_text_element(element, paragraph) => {
@@ -1417,6 +1579,7 @@ impl PreservationState {
                 _ => None,
             }
         }).collect::<Vec<_>>();
+        add_counter(&SOURCE_TEXT_SLOTS_FOUND, text_slots.len() as u64);
         let source_text = text_slots.iter().map(|(_, template)| text_element_plain_content(template))
             .collect::<String>();
         let has_exact_old_source = source_text == original_text;
@@ -1538,8 +1701,14 @@ impl PreservationState {
         if !inserted && text_slots.is_empty() {
             rebuilt.extend(replacements.remove(&first_text).unwrap_or_default());
         }
+        let rebuilt_child_count = rebuilt.len();
         paragraph.children = rebuilt.into();
-        let new_bytes = source_text_bytes_in_element(paragraph);
+        add_counter(
+            &SOURCE_OWNER_NODES_REBUILT,
+            old_child_count.saturating_add(rebuilt_child_count) as u64,
+        );
+        let new_bytes = source_text_bytes_in_element_counted(paragraph, &mut source_bytes_examined);
+        add_counter(&SOURCE_TEXT_BYTES_EXAMINED, source_bytes_examined);
         let new_total = self
             .source_text_bytes
             .saturating_sub(old_bytes)
@@ -1550,6 +1719,96 @@ impl PreservationState {
         self.source_text_bytes = new_total;
         increment_counter(&SOURCE_TEXT_BYTE_DELTA_UPDATES);
         Ok(recovered)
+    }
+
+    fn try_project_owner_local_text_edit(
+        &mut self,
+        id: &StableId,
+        original_text: &str,
+        text: &str,
+        runs: &[TextRun],
+        old_range: &std::ops::Range<usize>,
+        new_range: &std::ops::Range<usize>,
+    ) -> Result<Option<Option<SourceProvenance>>, PreservationError> {
+        if old_range.start > old_range.end
+            || old_range.end > original_text.len()
+            || new_range.start > new_range.end
+            || new_range.end > text.len()
+            || !original_text.is_char_boundary(old_range.start)
+            || !original_text.is_char_boundary(old_range.end)
+            || !text.is_char_boundary(new_range.start)
+            || !text.is_char_boundary(new_range.end)
+            || old_range.start != new_range.start
+            || original_text
+                .len()
+                .saturating_sub(old_range.end.saturating_sub(old_range.start))
+                .saturating_add(new_range.end.saturating_sub(new_range.start))
+                != text.len()
+        {
+            return Ok(None);
+        }
+        if runs.len() > 1 || runs.first().is_some_and(|run| run.text != text) {
+            return Ok(None);
+        }
+
+        self.ensure_managed_paragraph_index();
+        match self.indexed_location(id) {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(PreservationError::ManagedAnchorAmbiguous) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        let Some(paragraph) = self.managed_element(id)? else {
+            return Ok(None);
+        };
+        if paragraph.name.local_name != "Paragraph" || paragraph.children.len() != 1 {
+            return Ok(None);
+        }
+        let PreservedNode::Element(template) = &paragraph.children[0] else {
+            return Ok(None);
+        };
+        if !is_text_element(template, paragraph)
+            || template.children.len() != 1
+            || runs.first().map_or(!template.attributes.is_empty(), |run| {
+                !text_element_matches_run(template, run)
+            })
+        {
+            return Ok(None);
+        }
+        let PreservedNode::Text(source_text) = &template.children[0] else {
+            return Ok(None);
+        };
+        if source_text.as_str() != original_text {
+            return Ok(None);
+        }
+
+        let before_text_bytes = original_text.len();
+        let after_text_bytes = text.len();
+        let new_total = self
+            .source_text_bytes
+            .saturating_sub(before_text_bytes)
+            .saturating_add(after_text_bytes);
+        if new_total > MAX_SOURCE_TEXT_BYTES {
+            return Err(PreservationError::TextTooLarge);
+        }
+
+        // The fast-path proof is deliberately limited to exactly one source
+        // Text slot containing one Text node. Opaque siblings, attachments,
+        // mixed inline content, and unusual topology all use the full mapper.
+        let paragraph = self.managed_element_mut_indexed(id)?;
+        let PreservedNode::Element(template) = &mut paragraph.children[0] else {
+            return Ok(None);
+        };
+        let PreservedNode::Text(source_text) = &mut template.children[0] else {
+            return Ok(None);
+        };
+        *source_text = text.to_owned().into();
+
+        add_counter(&SOURCE_TEXT_SLOT_NODES_EXAMINED, 2);
+        increment_counter(&SOURCE_TEXT_SLOTS_FOUND);
+        add_counter(&SOURCE_TEXT_BYTES_EXAMINED, before_text_bytes as u64);
+        self.source_text_bytes = new_total;
+        increment_counter(&SOURCE_TEXT_BYTE_DELTA_UPDATES);
+        Ok(Some(None))
     }
 
     pub(crate) fn set_direct_paragraph_alignment(
@@ -1918,6 +2177,7 @@ impl PreservationState {
         &mut self,
         id: &StableId,
     ) -> Result<&mut PreservedElement, PreservationError> {
+        self.last_owner_local_projection = None;
         self.ensure_managed_paragraph_index();
         self.invalidate_source_identity_use_index();
         let location = self
@@ -2018,6 +2278,8 @@ impl PreservationState {
         baseline: &PreservationState,
         semantic: &ScreenplayElement,
     ) -> Result<ScopedManagedEditResult, PreservationError> {
+        increment_counter(&SCOPED_SOURCE_PROOFS);
+        let _phase_timer = PreservationPhaseTimer::start(&SCOPED_SOURCE_PROOF_NANOS);
         let baseline_location = match baseline.indexed_location(&semantic.id) {
             Ok(Some(location)) => location.clone(),
             Ok(None) | Err(PreservationError::ManagedAnchorAmbiguous) => {
@@ -2084,42 +2346,62 @@ impl PreservationState {
         }
         validate_scoped_owner_fields(after, candidate_location.node_path.len())?;
 
-        let expected_runs = merge_adjacent_equivalent_runs(semantic_text_runs(semantic));
-        let mut text_elements = Vec::new();
-        for child in &after.children {
-            match child {
-                PreservedNode::Text(text) | PreservedNode::CData(text)
-                    if text.trim().is_empty() => {}
-                PreservedNode::Text(text) | PreservedNode::CData(text) => {
-                    return Err(PreservationError::ManagedTextMismatchAt(
-                        ManagedTextMismatchSite::ScopedEditValidation,
-                    ));
+        let local_projection = self.last_owner_local_projection.as_ref().filter(|proof| {
+            proof.owner == semantic.id
+                && owner_local_projection_matches(after, semantic)
+                && owner_local_text_event_shape(before).is_some()
+                && owner_local_text_event_shape(before) == owner_local_text_event_shape(after)
+                && owner_local_text(before).is_some_and(|text| text.len() == proof.before_text_bytes)
+                && owner_local_text(after).is_some_and(|text| text.len() == proof.after_text_bytes)
+        });
+        if local_projection.is_none() {
+            let expected_runs = merge_adjacent_equivalent_runs(semantic_text_runs(semantic));
+            let mut text_elements = Vec::new();
+            for child in &after.children {
+                match child {
+                    PreservedNode::Text(text) | PreservedNode::CData(text)
+                        if text.trim().is_empty() => {}
+                    PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                        return Err(PreservationError::ManagedTextMismatchAt(
+                            ManagedTextMismatchSite::ScopedEditValidation,
+                        ));
+                    }
+                    PreservedNode::Element(element) if is_text_element(element, after) => {
+                        text_elements.push(element);
+                    }
+                    PreservedNode::Element(_) | PreservedNode::Comment(_)
+                    | PreservedNode::ProcessingInstruction { .. } => {}
                 }
-                PreservedNode::Element(element) if is_text_element(element, after) => {
-                    text_elements.push(element);
-                }
-                PreservedNode::Element(_) | PreservedNode::Comment(_)
-                | PreservedNode::ProcessingInstruction { .. } => {}
+            }
+            let projected_runs = merge_adjacent_equivalent_runs(
+                text_elements.iter().map(|text| TextRun {
+                    text: text_element_plain_content(text),
+                    attributes: text.attributes.iter().map(|attribute| crate::RunAttribute {
+                        name: attribute.name.qualified_name.as_deref()
+                            .unwrap_or(attribute.name.local_name.as_str()).to_owned(),
+                        value: attribute.value.clone(),
+                    }).collect(),
+                }).collect(),
+            );
+            if projected_runs != expected_runs {
+                return Err(PreservationError::ManagedTextMismatchAt(
+                    ManagedTextMismatchSite::ScopedEditValidation,
+                ));
             }
         }
-        let projected_runs = merge_adjacent_equivalent_runs(
-            text_elements.iter().map(|text| TextRun {
-                text: text_element_plain_content(text),
-                attributes: text.attributes.iter().map(|attribute| crate::RunAttribute {
-                    name: attribute.name.qualified_name.as_deref()
-                        .unwrap_or(attribute.name.local_name.as_str()).to_owned(),
-                    value: attribute.value.clone(),
-                }).collect(),
-            }).collect(),
-        );
-        if projected_runs != expected_runs {
-            return Err(PreservationError::ManagedTextMismatchAt(
-                ManagedTextMismatchSite::ScopedEditValidation,
-            ));
-        }
 
-        let old_bytes = source_text_bytes_in_element(before);
-        let new_bytes = source_text_bytes_in_element(after);
+        let (old_bytes, new_bytes) = if let Some(proof) = local_projection {
+            // The exact one-node projection receipt supplies the owner-local
+            // byte delta; unchanged event shape makes event-capacity work a
+            // no-op against the already validated baseline.
+            (proof.before_text_bytes, proof.after_text_bytes)
+        } else {
+            let mut source_bytes_examined = 0u64;
+            let old_bytes = source_text_bytes_in_element_counted(before, &mut source_bytes_examined);
+            let new_bytes = source_text_bytes_in_element_counted(after, &mut source_bytes_examined);
+            add_counter(&SOURCE_TEXT_BYTES_EXAMINED, source_bytes_examined);
+            (old_bytes, new_bytes)
+        };
         let new_total = baseline
             .source_text_bytes
             .saturating_sub(old_bytes)
@@ -2137,8 +2419,14 @@ impl PreservationState {
         // establishes that no other source subtree changed. If this owner adds
         // source events, remaining document-wide event capacity is unknown, so
         // defer that candidate to complete validation rather than guessing.
-        if source_event_count_in_element(after) > source_event_count_in_element(before) {
-            return Ok(ScopedManagedEditResult::CompleteValidationRequired);
+        if local_projection.is_none() {
+            let mut source_event_nodes_examined = 0u64;
+            let after_events = source_event_count_in_element_counted(after, &mut source_event_nodes_examined);
+            let before_events = source_event_count_in_element_counted(before, &mut source_event_nodes_examined);
+            add_counter(&SCOPED_SOURCE_EVENT_NODES_EXAMINED, source_event_nodes_examined);
+            if after_events > before_events {
+                return Ok(ScopedManagedEditResult::CompleteValidationRequired);
+            }
         }
         if !same_owner_anchor_bindings(before, after) {
             return Err(PreservationError::InvalidAnchor);
@@ -4814,6 +5102,14 @@ fn same_managed_owner_attributes_except_type(
 }
 
 fn source_text_bytes_in_element(element: &PreservedElement) -> usize {
+    let mut ignored = 0u64;
+    source_text_bytes_in_element_counted(element, &mut ignored)
+}
+
+fn source_text_bytes_in_element_counted(
+    element: &PreservedElement,
+    bytes_examined: &mut u64,
+) -> usize {
     let mut total = 0usize;
     let mut stack = vec![element];
     while let Some(current) = stack.pop() {
@@ -4822,9 +5118,13 @@ fn source_text_bytes_in_element(element: &PreservedElement) -> usize {
                 PreservedNode::Element(nested) => stack.push(nested),
                 PreservedNode::Text(text)
                 | PreservedNode::CData(text)
-                | PreservedNode::Comment(text) => total = total.saturating_add(text.len()),
+                | PreservedNode::Comment(text) => {
+                    total = total.saturating_add(text.len());
+                    *bytes_examined = bytes_examined.saturating_add(text.len() as u64);
+                }
                 PreservedNode::ProcessingInstruction { data, .. } => {
-                    total = total.saturating_add(data.len())
+                    total = total.saturating_add(data.len());
+                    *bytes_examined = bytes_examined.saturating_add(data.len() as u64);
                 }
             }
         }
@@ -4833,9 +5133,23 @@ fn source_text_bytes_in_element(element: &PreservedElement) -> usize {
 }
 
 fn source_event_count_in_element(element: &PreservedElement) -> usize {
+    let mut ignored = 0u64;
+    source_event_count_in_element_counted(element, &mut ignored)
+}
+
+fn source_event_count_in_element_counted(
+    element: &PreservedElement,
+    nodes_examined: &mut u64,
+) -> usize {
     let mut total = 0usize;
     let mut stack = vec![element];
     while let Some(current) = stack.pop() {
+        *nodes_examined = nodes_examined.saturating_add(
+            1u64
+                .saturating_add(current.attributes.len() as u64)
+                .saturating_add(current.namespace_bindings.len() as u64)
+                .saturating_add(current.children.len() as u64),
+        );
         total = total
             .saturating_add(1)
             .saturating_add(current.attributes.len())
@@ -5711,6 +6025,54 @@ fn text_element_matches_run(element: &PreservedElement, run: &TextRun) -> bool {
                     == model.name
                     && source.value == model.value
             })
+}
+
+fn owner_local_text(owner: &PreservedElement) -> Option<&str> {
+    if owner.children.len() != 1 {
+        return None;
+    }
+    let PreservedNode::Element(text_element) = &owner.children[0] else {
+        return None;
+    };
+    if !is_text_element(text_element, owner) || text_element.children.len() != 1 {
+        return None;
+    }
+    match &text_element.children[0] {
+        PreservedNode::Text(text) => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+fn owner_local_projection_matches(owner: &PreservedElement, semantic: &ScreenplayElement) -> bool {
+    let Some(source_text) = owner_local_text(owner) else {
+        return false;
+    };
+    if source_text != semantic.text {
+        return false;
+    }
+    let PreservedNode::Element(text_element) = &owner.children[0] else {
+        return false;
+    };
+    match semantic.runs.as_slice() {
+        [] => !semantic.text.is_empty() && text_element.attributes.is_empty(),
+        [run] => run.text == semantic.text && text_element_matches_run(text_element, run),
+        _ => false,
+    }
+}
+
+fn owner_local_text_event_shape(owner: &PreservedElement) -> Option<(usize, usize, usize, usize, usize)> {
+    let source_text = owner_local_text(owner)?;
+    let _ = source_text;
+    let PreservedNode::Element(text_element) = &owner.children[0] else {
+        return None;
+    };
+    Some((
+        owner.attributes.len(),
+        owner.namespace_bindings.len(),
+        text_element.attributes.len(),
+        text_element.namespace_bindings.len(),
+        text_element.children.len(),
+    ))
 }
 
 fn text_element_plain_content(element: &PreservedElement) -> String {
@@ -6940,6 +7302,164 @@ mod preservation_reconciliation_diagnostics_tests {
         assert_eq!(diagnostics.body_owners_projected, 1);
         assert_eq!(diagnostics.body_unchanged_survivors_skipped, 0);
         assert_eq!(diagnostics.source_text_byte_delta_updates, 0);
+    }
+}
+
+#[cfg(test)]
+mod preservation_phase_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn phase_diagnostic_getter_and_reset_are_numeric_and_independent() {
+        reset_preservation_phase_diagnostics();
+        assert_eq!(preservation_phase_diagnostics(), PreservationPhaseDiagnostics::default());
+
+        add_counter(&SOURCE_TEXT_RUN_PROJECTIONS, 1);
+        add_counter(&SOURCE_TEXT_SLOT_NODES_EXAMINED, 3);
+        add_counter(&SOURCE_TEXT_SLOTS_FOUND, 2);
+        add_counter(&SOURCE_OWNER_NODES_REBUILT, 5);
+        add_counter(&SOURCE_TEXT_BYTES_EXAMINED, 17);
+        add_counter(&SCOPED_SOURCE_PROOFS, 1);
+        add_counter(&SCOPED_SOURCE_EVENT_NODES_EXAMINED, 7);
+        increment_counter(&BODY_SURVIVORS_VISITED);
+        assert_eq!(
+            preservation_phase_diagnostics(),
+            PreservationPhaseDiagnostics {
+                source_text_run_projections: 1,
+                source_text_slot_nodes_examined: 3,
+                source_text_slots_found: 2,
+                source_owner_nodes_rebuilt: 5,
+                source_text_bytes_examined: 17,
+                scoped_source_proofs: 1,
+                scoped_source_event_nodes_examined: 7,
+                ..PreservationPhaseDiagnostics::default()
+            }
+        );
+
+        reset_preservation_phase_diagnostics();
+        assert_eq!(preservation_phase_diagnostics(), PreservationPhaseDiagnostics::default());
+        assert_eq!(preservation_reconciliation_diagnostics().body_survivors_visited, 1);
+        reset_preservation_reconciliation_diagnostics();
+    }
+}
+
+#[cfg(test)]
+mod owner_local_projection_tests {
+    use super::*;
+
+    fn source_project(source: &[u8]) -> crate::Project {
+        crate::fdx::read_v6(source)
+            .expect("owner-local projection fixture imports")
+            .project
+    }
+
+    fn complete_text_bytes(sections: &[PreservedSection]) -> usize {
+        fn count(nodes: &[PreservedNode]) -> usize {
+            nodes.iter().map(|node| match node {
+                PreservedNode::Element(element) => count(&element.children),
+                PreservedNode::Text(text)
+                | PreservedNode::CData(text)
+                | PreservedNode::Comment(text) => text.len(),
+                PreservedNode::ProcessingInstruction { data, .. } => data.len(),
+            }).sum()
+        }
+        sections.iter().map(|section| count(&section.children)).sum()
+    }
+
+    #[test]
+    fn known_single_run_edit_uses_local_projection_and_shared_scoped_proof() {
+        let baseline = source_project(
+            br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" id="local-owner"><Text>alpha</Text></Paragraph></Content></FinalDraft>"#,
+        );
+        let mut candidate = baseline.clone();
+        let before_bytes = baseline.preservation.as_ref().unwrap().source_text_bytes;
+        let id = candidate.elements[0].id.clone();
+        let provenance = candidate.elements[0].source_provenance.clone();
+        candidate.elements[0].text = "alpha!".to_owned();
+        let candidate_preservation = candidate.preservation.as_mut().unwrap();
+
+        candidate_preservation
+            .project_managed_text_edit(
+                &id,
+                "alpha",
+                "alpha!",
+                &candidate.elements[0].runs,
+                provenance.as_ref(),
+                Some("Action"),
+                5..5,
+                5..6,
+            )
+            .expect("known ordinary edit projects");
+
+        assert!(candidate_preservation.last_owner_local_projection.is_some());
+        assert_eq!(candidate_preservation.source_text_bytes, before_bytes + 1);
+        assert_eq!(
+            candidate_preservation.source_text_bytes,
+            complete_text_bytes(&candidate_preservation.sections),
+        );
+        assert!(matches!(
+            candidate_preservation
+                .validate_scoped_managed_edit(
+                    baseline.preservation.as_ref().unwrap(),
+                    &candidate.elements[0],
+                )
+                .expect("cached projection proof validates"),
+            ScopedManagedEditResult::Validated { source_text_bytes } if source_text_bytes == before_bytes + 1
+        ));
+    }
+
+    #[test]
+    fn owner_attachments_and_multi_slot_source_take_generalized_fallback() {
+        let with_attachment = source_project(
+            br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" id="attached"><Text>abc</Text><UserParagraphData vendor="keep"><Payload>opaque</Payload></UserParagraphData></Paragraph></Content></FinalDraft>"#,
+        );
+        let mut candidate = with_attachment.clone();
+        let id = candidate.elements[0].id.clone();
+        let provenance = candidate.elements[0].source_provenance.clone();
+        candidate.elements[0].text = "ab!c".to_owned();
+        let preservation = candidate.preservation.as_mut().unwrap();
+        preservation
+            .project_managed_text_edit(
+                &id,
+                "abc",
+                "ab!c",
+                &candidate.elements[0].runs,
+                provenance.as_ref(),
+                Some("Action"),
+                2..2,
+                2..3,
+            )
+            .expect("attachment owner uses generalized projection");
+        assert!(preservation.last_owner_local_projection.is_none());
+        assert_eq!(preservation.source_text_bytes, complete_text_bytes(&preservation.sections));
+        let owner = preservation.managed_element(&id).unwrap().unwrap();
+        assert!(owner.children.iter().any(|node| matches!(
+            node,
+            PreservedNode::Element(element) if element.name.local_name == "UserParagraphData"
+        )));
+
+        let multi_slot = source_project(
+            br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" id="multi"><Text>A</Text><Text>B</Text></Paragraph></Content></FinalDraft>"#,
+        );
+        let mut candidate = multi_slot.clone();
+        let id = candidate.elements[0].id.clone();
+        let provenance = candidate.elements[0].source_provenance.clone();
+        candidate.elements[0].text = "A!B".to_owned();
+        let preservation = candidate.preservation.as_mut().unwrap();
+        preservation
+            .project_managed_text_edit(
+                &id,
+                "AB",
+                "A!B",
+                &candidate.elements[0].runs,
+                provenance.as_ref(),
+                Some("Action"),
+                1..1,
+                1..2,
+            )
+            .expect("multi-slot owner uses generalized projection");
+        assert!(preservation.last_owner_local_projection.is_none());
+        assert_eq!(preservation.source_text_bytes, complete_text_bytes(&preservation.sections));
     }
 }
 

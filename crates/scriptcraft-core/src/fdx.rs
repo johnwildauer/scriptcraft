@@ -656,6 +656,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         managed_paragraph_index: None,
         source_identity_use_index: None,
         source_text_bytes: 0,
+        last_owner_local_projection: None,
     };
     for element in &project.elements {
         if let Some(overrides) = preservation

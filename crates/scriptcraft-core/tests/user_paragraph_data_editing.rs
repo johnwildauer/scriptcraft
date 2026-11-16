@@ -210,6 +210,31 @@ fn assert_direct_roundtrip_attachments(session: &EditingSession) {
     );
 }
 
+#[test]
+fn ordinary_single_run_edits_keep_source_backed_and_source_less_lifecycles_in_parity() {
+    let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" id="ordinary-owner"><Text>alpha</Text></Paragraph></Content></FinalDraft>"#;
+    let (mut source_backed, mut source_less) = source_new_pair(source);
+
+    assert_command_parity(&mut source_backed, &mut source_less, |session| {
+        let end = session.project().elements[0].text.len();
+        valid(session.set_selection(Selection::caret(Position { element: 0, offset: end })));
+        valid(session.insert("界"));
+    });
+    assert_command_parity(&mut source_backed, &mut source_less, |session| {
+        let end = session.project().elements[0].text.len();
+        valid(session.set_selection(Selection::caret(Position { element: 0, offset: end })));
+        valid(session.backspace());
+    });
+    assert_command_parity(&mut source_backed, &mut source_less, |session| {
+        valid(session.set_selection(Selection {
+            anchor: Position { element: 0, offset: 1 },
+            focus: Position { element: 0, offset: 4 },
+        }));
+        valid(session.insert("Ω"));
+    });
+    assert_source_new_parity(&source_backed, &source_less);
+}
+
 fn assert_owner_opaque_roundtrip(session: &EditingSession, foreign_id: &str) {
     let expected = owner_opaque_snapshot(
         &paragraph_by_foreign_id(session.project(), foreign_id).expect("source owner exists"),

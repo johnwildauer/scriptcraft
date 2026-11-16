@@ -19,7 +19,7 @@ use scriptcraft_core::{
 };
 
 const ITEMS_PER_PAGE_SCALE: usize = 24;
-const PAGE_SCALES: [usize; 3] = [1, 15, 50];
+const PAGE_SCALES: [usize; 5] = [1, 15, 50, 120, 180];
 
 #[derive(Debug, Clone, Copy)]
 enum Target {
@@ -223,6 +223,78 @@ fn fixture_pair(page_scale: usize, empty_target: Target) -> (Project, Project) {
     (backed, source_less)
 }
 
+/// A deterministic screenplay-shaped matrix fixture: several short scenes per
+/// page, dialogue-heavy role sequences, long wrapped paragraphs, styled runs,
+/// Unicode uppercase expansion, empty lines, and a dual-dialogue group in each
+/// scene. Fixture construction is deliberately outside measured operations.
+fn realistic_fixture_pair(page_scale: usize) -> (Project, Project) {
+    let scene_count = page_scale * 2;
+    let mut source = String::from(
+        r#"<FinalDraft DocumentType="Script" Version="6"><Content>"#,
+    );
+    for scene in 0..scene_count {
+        source.push_str(&format!(
+            "<Paragraph Type=\"Scene Heading\" id=\"scene-{scene}\"><Text>INT. ROOM {scene} - DAY</Text></Paragraph>\
+             <Paragraph Type=\"Character\" id=\"cue-a-{scene}\"><Text Style=\"AllCaps\">straße</Text></Paragraph>\
+             <Paragraph Type=\"Dialogue\" id=\"dialogue-a-{scene}\"><Text Style=\"Bold\" Font=\"Courier Prime\" Size=\"12\">A long dialogue run with enough words to wrap across multiple screenplay lines. </Text><Text Style=\"Bold\" Font=\"Courier Prime\" Size=\"12\">An adjacent equivalent run retains a separate authored boundary. </Text><Text Style=\"Italic\">A final contrasting styled run.</Text></Paragraph>\
+             <Paragraph Type=\"Parenthetical\" id=\"parenthetical-{scene}\"><Text>(quietly)</Text></Paragraph>\
+             <Paragraph Type=\"Character\" id=\"cue-b-{scene}\"><Text>NOAH</Text></Paragraph>\
+             <Paragraph Type=\"Dialogue\" id=\"dialogue-b-{scene}\"><Text>Unicode dialogue: café, naïve, 你好, and Straße.</Text></Paragraph>\
+             <Paragraph Type=\"Action\" id=\"long-action-{scene}\"><Text>"
+        ));
+        for _ in 0..12 {
+            source.push_str("A long wrapped action paragraph with deterministic content and enough words to cross line boundaries. ");
+        }
+        source.push_str(&format!(
+            "</Text></Paragraph>\
+             <Paragraph Type=\"Action\" id=\"styled-action-{scene}\"><Text Style=\"Bold\" Font=\"Courier Prime\" Size=\"12\">styled </Text><Text Style=\"Bold\" Font=\"Courier Prime\" Size=\"12\">adjacent </Text><Text Style=\"Underline\">owner</Text></Paragraph>\
+             <Paragraph Type=\"Action\" id=\"empty-action-{scene}\"><Text/></Paragraph>\
+             <Paragraph Type=\"Transition\" id=\"transition-{scene}\"><Text>FADE OUT:</Text></Paragraph>\
+             <Paragraph Type=\"General\" id=\"dual-wrapper-{scene}\"><DualDialogue>\
+               <Paragraph Type=\"Character\" id=\"dual-left-cue-{scene}\"><Text>LEFT {scene}</Text></Paragraph>\
+               <Paragraph Type=\"Dialogue\" id=\"dual-left-line-{scene}\"><Text>Overlapping dialogue left side, long enough to wrap.</Text></Paragraph>\
+               <Paragraph Type=\"Character\" id=\"dual-right-cue-{scene}\"><Text>RIGHT {scene}</Text></Paragraph>\
+               <Paragraph Type=\"Dialogue\" id=\"dual-right-line-{scene}\"><Text>Overlapping dialogue right side.</Text></Paragraph>\
+             </DualDialogue></Paragraph>"
+        ));
+        if scene == 0 {
+            // A formatted derived owner remains safely deferred while adjacent
+            // ordinary scenes can be current and edited independently.
+            source.push_str(
+                "<Paragraph Type=\"Cast List\" id=\"deferred-cast-list\"><Text Style=\"Italic\">preserved formatted cast</Text></Paragraph>",
+            );
+        }
+    }
+    source.push_str("</Content></FinalDraft>");
+    let backed = read_v6(source.as_bytes())
+        .unwrap_or_else(|_| unreachable!("deterministic screenplay-shaped FDX fixture imports"))
+        .project;
+    let mut source_less = backed.clone();
+    source_less.preservation = None;
+    for element in &mut source_less.elements {
+        element.source_provenance = None;
+    }
+    for paragraph in &mut source_less.title_page {
+        paragraph.source_provenance = None;
+    }
+    (backed, source_less)
+}
+
+fn cache_overflow_fixture(element_count: usize) -> Project {
+    let mut source = String::from(
+        r#"<FinalDraft DocumentType="Script" Version="6"><Content>"#,
+    );
+    for index in 0..element_count {
+        source.push_str(&format!(
+            "<Paragraph Type=\"Action\" id=\"cache-owner-{index}\"><Text>cache churn owner {index}</Text></Paragraph>"
+        ));
+    }
+    source.push_str("</Content></FinalDraft>");
+    read_v6(source.as_bytes())
+        .unwrap_or_else(|_| unreachable!("deterministic wrap-cache fixture imports"))
+        .project
+}
+
 fn title_fixture(owner_count: usize, empty_index: usize) -> Project {
     let mut source = String::from(
         r#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" id="title-scale-body"><Text>Body</Text></Paragraph></Content><TitlePage><Content>"#,
@@ -247,6 +319,7 @@ fn assert_canonical_parity(backed: &Project, source_less: &Project) {
     assert_eq!(backed.elements.len(), source_less.elements.len());
     assert_eq!(backed.title_page.len(), source_less.title_page.len());
     assert_eq!(backed.direct_paragraph_overrides, source_less.direct_paragraph_overrides);
+    assert_eq!(backed.dual_dialogue_groups, source_less.dual_dialogue_groups);
     for (backed_element, source_less_element) in backed.elements.iter().zip(&source_less.elements) {
         assert_eq!(backed_element.role, source_less_element.role);
         assert_eq!(backed_element.text, source_less_element.text);
@@ -702,4 +775,323 @@ fn title_reconciliation_counter_coverage_scales_for_large_structural_deletion() 
     assert_eq!(delta.source_use_index_rebuilds, 0);
     assert_eq!(delta.source_text_byte_delta_updates, 0);
     assert_eq!(session.project().title_page.len(), OWNER_COUNT - 1);
+}
+
+fn element_index_matching(
+    project: &Project,
+    role: scriptcraft_core::Role,
+    text_prefix: &str,
+) -> usize {
+    project
+        .elements
+        .iter()
+        .position(|element| element.role == role && element.text.starts_with(text_prefix))
+        .unwrap_or_else(|| unreachable!("deterministic fixture contains the requested owner"))
+}
+
+fn assert_session_semantic_parity(backed: &EditingSession, source_less: &EditingSession) {
+    assert_canonical_parity(backed.project(), source_less.project());
+    assert_eq!(backed.selection(), source_less.selection());
+    assert_eq!(backed.dirty(), source_less.dirty());
+    assert_eq!(backed.can_undo(), source_less.can_undo());
+    assert_eq!(backed.can_redo(), source_less.can_redo());
+    assert_eq!(backed.revision(), source_less.revision());
+    assert_eq!(
+        backed.pending_derived_work_summary(),
+        source_less.pending_derived_work_summary()
+    );
+}
+
+#[test]
+fn realistic_screenplay_matrix_covers_revision_phases_and_canonical_parity() {
+    for page_scale in PAGE_SCALES {
+        let (backed, source_less) = realistic_fixture_pair(page_scale);
+        assert_canonical_parity(&backed, &source_less);
+        assert_eq!(backed.dual_dialogue_groups.len(), page_scale * 2);
+        assert!(backed.elements.iter().any(|element| {
+            element.role == scriptcraft_core::Role::Character && element.text == "straße"
+        }));
+        assert!(backed.elements.iter().any(|element| {
+            element.role == scriptcraft_core::Role::Action && element.text.is_empty()
+        }));
+        assert!(backed.elements.iter().any(|element| {
+            element.role == scriptcraft_core::Role::Dialogue
+                && element.text.starts_with("A long dialogue run")
+                && element.runs.len() >= 3
+        }));
+        assert!(backed.elements.iter().any(|element| {
+            element.role == scriptcraft_core::Role::Action
+                && element.runs.iter().any(|run| {
+                    run.attributes
+                        .iter()
+                        .any(|attribute| attribute.name == "Font" && attribute.value == "Courier Prime")
+                })
+                && element.runs.iter().any(|run| {
+                    run.attributes
+                        .iter()
+                        .any(|attribute| attribute.name == "Size" && attribute.value == "12")
+                })
+                && element.runs.iter().any(|run| {
+                    run.attributes
+                        .iter()
+                        .any(|attribute| attribute.name == "Style" && attribute.value == "Underline")
+                })
+        }));
+        assert!(backed.elements.iter().any(|element| {
+            element.role == scriptcraft_core::Role::Action
+                && element.text.starts_with("A long wrapped action paragraph")
+                && element.runs.iter().all(|run| run.attributes.is_empty())
+        }));
+
+        // One unchanged-revision lookup separates the cache-hit path from the
+        // edited-revision build. Headless assertions intentionally stop at core
+        // layout counters; native frame/paint sampling belongs to the desktop
+        // regression protocol, not this test.
+        let mut session = valid(EditingSession::new(backed.clone()));
+        valid(session.refresh_cast_lists());
+        let mut layout_cache = LayoutCache::default();
+        let mut cold = LayoutBuildDiagnostics::default();
+        let (initial_layout, initial_hit) = valid(
+            layout_cache.get_or_build_for_session_with_diagnostics(
+                session.revision(),
+                &session,
+                LayoutPurpose::Editor,
+                &mut cold,
+            ),
+        );
+        assert!(!initial_hit);
+        assert!(cold.projected_scalars > 0);
+        assert!(cold.run_range_searches > 0);
+        assert!(cold.style_attribute_parses > 0);
+        assert!(cold.source_map_segments_examined > 0);
+        assert!(cold.post_cache_run_constructions > 0);
+        assert!(cold.post_cache_run_bytes_cloned > 0);
+        assert!(cold.positioned_span_characters > 0);
+        assert!(cold.interaction_index_entries > 0);
+
+        let mut unchanged = LayoutBuildDiagnostics::default();
+        let (same_layout, unchanged_hit) = valid(
+            layout_cache.get_or_build_for_session_with_diagnostics(
+                session.revision(),
+                &session,
+                LayoutPurpose::Editor,
+                &mut unchanged,
+            ),
+        );
+        assert!(unchanged_hit);
+        assert!(std::sync::Arc::ptr_eq(&initial_layout, &same_layout));
+        assert_eq!(unchanged.layout_builds, 0);
+        assert_eq!(unchanged.projected_scalars, 0);
+        assert_eq!(unchanged.positioned_span_characters, 0);
+
+        let action = element_index_matching(
+            session.project(),
+            scriptcraft_core::Role::Action,
+            "A long wrapped action paragraph",
+        );
+        let action_end = session.project().elements[action].text.len();
+        valid(session.set_selection(Selection::caret(Position {
+            element: action,
+            offset: action_end,
+        })));
+        valid(session.insert(" edited"));
+        let mut edited = LayoutBuildDiagnostics::default();
+        let (_, edited_hit) = valid(
+            layout_cache.get_or_build_for_session_with_diagnostics(
+                session.revision(),
+                &session,
+                LayoutPurpose::Editor,
+                &mut edited,
+            ),
+        );
+        assert!(!edited_hit);
+        assert!(edited.element_wraps_reused > 0, "unchanged owners reuse wraps");
+        assert!(edited.element_wrap_misses > 0, "the edited owner is rebuilt");
+        assert!(edited.projected_scalars > 0);
+        assert!(edited.run_range_searches > 0);
+        assert!(edited.style_attribute_parses > 0);
+        assert!(edited.source_map_segments_examined > 0);
+        assert!(edited.post_cache_run_constructions > 0);
+        assert!(edited.post_cache_run_bytes_cloned > 0);
+        assert!(edited.positioned_span_characters > 0);
+        assert!(edited.interaction_index_entries_sorted > 0);
+
+        // Beginning/middle/end are all exercised on both preservation states;
+        // each operation checks selection, undo/redo, dirty, revision, role,
+        // text, runs, dual membership, and derived-work parity.
+        let scene_count = page_scale * 2;
+        for scene in [0, scene_count / 2, scene_count - 1] {
+            let mut backed_session = valid(EditingSession::new(backed.clone()));
+            let mut source_less_session = valid(EditingSession::new(source_less.clone()));
+            valid(backed_session.refresh_cast_lists());
+            valid(source_less_session.refresh_cast_lists());
+            let prefix = format!("A long wrapped action paragraph");
+            // The long action paragraphs have identical order in each pair;
+            // choose the scene target by advancing through those owners.
+            let backed_actions = backed_session
+                .project()
+                .elements
+                .iter()
+                .enumerate()
+                .filter(|(_, element)| {
+                    element.role == scriptcraft_core::Role::Action
+                        && element.text.starts_with(&prefix)
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let source_less_actions = source_less_session
+                .project()
+                .elements
+                .iter()
+                .enumerate()
+                .filter(|(_, element)| {
+                    element.role == scriptcraft_core::Role::Action
+                        && element.text.starts_with(&prefix)
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let target_action = scene.min(backed_actions.len() - 1);
+            let backed_action = backed_actions[target_action];
+            let source_less_action = source_less_actions[target_action];
+            for (session, element) in [
+                (&mut backed_session, backed_action),
+                (&mut source_less_session, source_less_action),
+            ] {
+                let offset = session.project().elements[element].text.len() / 2;
+                valid(session.set_selection(Selection::caret(Position { element, offset })));
+                valid(session.insert("x"));
+            }
+            assert_session_semantic_parity(&backed_session, &source_less_session);
+            valid(backed_session.undo());
+            valid(source_less_session.undo());
+            assert_session_semantic_parity(&backed_session, &source_less_session);
+            assert!(backed_session.can_redo());
+            valid(backed_session.redo());
+            valid(source_less_session.redo());
+            assert_session_semantic_parity(&backed_session, &source_less_session);
+            assert!(backed_session.dirty());
+            assert!(!backed_session.can_redo());
+        }
+    }
+}
+
+#[test]
+fn dialogue_role_edits_distinguish_derived_relevance_and_deferred_scene_work() {
+    let (backed, source_less) = realistic_fixture_pair(1);
+    let mut backed_session = valid(EditingSession::new(backed));
+    let mut source_less_session = valid(EditingSession::new(source_less));
+    let backed_refresh = valid(backed_session.refresh_cast_lists_with_outcome());
+    let source_less_refresh = valid(source_less_session.refresh_cast_lists_with_outcome());
+    assert_eq!(backed_refresh.deferred_scenes, source_less_refresh.deferred_scenes);
+    assert!(backed_refresh.changed_scenes > 0, "missing derived owners are refreshed");
+    assert!(backed_refresh.deferred_scenes > 0, "styled cast-list owners defer safely");
+    let backed_current = valid(backed_session.refresh_cast_lists_with_outcome());
+    let source_less_current = valid(source_less_session.refresh_cast_lists_with_outcome());
+    assert_eq!(backed_current.unchanged_scenes, source_less_current.unchanged_scenes);
+    assert!(backed_current.unchanged_scenes > 0, "already-current scenes avoid changes");
+    assert!(backed_current.deferred_scenes > 0, "deferred scenes remain represented");
+    assert_eq!(
+        backed_session.pending_derived_work_summary().deferred_scene_count,
+        backed_refresh.deferred_scenes as usize,
+    );
+
+    let action = element_index_matching(
+        backed_session.project(),
+        scriptcraft_core::Role::Action,
+        "A long wrapped action paragraph",
+    );
+    let source_less_action = element_index_matching(
+        source_less_session.project(),
+        scriptcraft_core::Role::Action,
+        "A long wrapped action paragraph",
+    );
+    for (session, element) in [
+        (&mut backed_session, action),
+        (&mut source_less_session, source_less_action),
+    ] {
+        valid(session.set_selection(Selection::caret(Position { element, offset: 0 })));
+        reset_counters();
+        valid(session.insert("irrelevant "));
+        let irrelevant = edit_validation_diagnostics();
+        assert_eq!(irrelevant.derived_invalidation_classifications, 1);
+    }
+    assert_session_semantic_parity(&backed_session, &source_less_session);
+    assert_eq!(backed_session.pending_derived_work_summary().deferred_scene_count, 1);
+
+    let backed_characters = backed_session
+        .project()
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, element)| {
+            element.role == scriptcraft_core::Role::Character && element.text == "straße"
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let source_less_characters = source_less_session
+        .project()
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, element)| {
+            element.role == scriptcraft_core::Role::Character && element.text == "straße"
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    for (session, element) in [
+        (&mut backed_session, backed_characters[1]),
+        (&mut source_less_session, source_less_characters[1]),
+    ] {
+        valid(session.set_selection(Selection::caret(Position { element, offset: 0 })));
+        reset_counters();
+        valid(session.insert("changed "));
+        let relevant = edit_validation_diagnostics();
+        assert_eq!(relevant.derived_invalidation_classifications, 1);
+    }
+    assert_session_semantic_parity(&backed_session, &source_less_session);
+    let pending = backed_session.pending_derived_work_summary();
+    assert!(pending.pending);
+    assert!(pending.affected_scene_count > 0);
+    assert!(pending.deferred_scene_count > 0);
+}
+
+#[test]
+fn wrap_cache_overflow_and_revision_churn_report_bounded_retention_work() {
+    const OVERFLOW_ELEMENTS: usize = 4_097;
+    let project = cache_overflow_fixture(OVERFLOW_ELEMENTS);
+    let mut session = valid(EditingSession::new(project));
+    let mut cache = LayoutCache::default();
+    let mut initial = LayoutBuildDiagnostics::default();
+    let (_, hit) = valid(cache.get_or_build_for_session_with_diagnostics(
+        session.revision(),
+        &session,
+        LayoutPurpose::Editor,
+        &mut initial,
+    ));
+    assert!(!hit);
+    assert!(initial.element_wraps_built >= OVERFLOW_ELEMENTS as u64);
+    assert!(initial.wrap_cache_evictions > 0, "initial population crosses the 4,096-entry cap");
+    assert!(initial.wrap_cache_eviction_entries_examined >= OVERFLOW_ELEMENTS as u64);
+
+    let last = session.project().elements.len() - 1;
+    let end = session.project().elements[last].text.len();
+    valid(session.set_selection(Selection::caret(Position {
+        element: last,
+        offset: end,
+    })));
+    valid(session.insert(" churn"));
+    let mut churn = LayoutBuildDiagnostics::default();
+    let (_, churn_hit) = valid(cache.get_or_build_for_session_with_diagnostics(
+        session.revision(),
+        &session,
+        LayoutPurpose::Editor,
+        &mut churn,
+    ));
+    assert!(!churn_hit);
+    assert!(churn.element_wraps_reused > 0);
+    assert!(churn.element_wrap_misses > 0);
+    assert!(churn.wrap_cache_evictions > 0, "edited-revision insertion churns the full cache");
+    assert!(churn.wrap_cache_eviction_entries_examined > 0);
+    assert!(churn.positioned_span_characters > 0);
+    assert!(churn.source_map_segments_examined > 0);
 }
