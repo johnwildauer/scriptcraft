@@ -1672,15 +1672,17 @@ mod toolbar_contract_tests {
         let project_result = scriptcraft_core::Project::new();
         assert!(project_result.is_ok());
         let Ok(mut project) = project_result else { return };
-        project.elements[0].text = "ab".to_owned();
-        project.elements.push(
+        scriptcraft_core::BodyOwner::update(&mut project.elements[0], |element| {
+            element.text = "ab".to_owned();
+        });
+        project.elements.push(scriptcraft_core::BodyOwner::shared(
             scriptcraft_core::ScreenplayElement::new(
                 "formatting-toolbar-second-paragraph",
                 Role::Action,
                 "cd",
             )
             .unwrap(),
-        );
+        ));
         let session_result = scriptcraft_core::editing::EditingSession::new(project);
         assert!(session_result.is_ok());
         let Ok(session) = session_result else { return };

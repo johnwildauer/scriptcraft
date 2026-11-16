@@ -1,10 +1,11 @@
 //! Semantic dual-dialogue groups layered over the canonical flat body sequence.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::editing::{Position, Selection};
 use crate::preservation::SourceAnchorId;
-use crate::{ModelError, Project, Role, ScreenplayElement, SourceProvenance, StableId, MAX_ELEMENTS};
+use crate::{BodyOwner, ModelError, Project, Role, SourceProvenance, StableId, MAX_ELEMENTS};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DualDialogueSide {
@@ -465,7 +466,7 @@ fn recognize_candidate_unchecked(
     Ok(Some(CandidatePattern { left, right, flat_range: start..end }))
 }
 
-fn run_end(elements: &[ScreenplayElement], start: usize) -> Option<usize> {
+fn run_end(elements: &[Arc<BodyOwner>], start: usize) -> Option<usize> {
     if start > elements.len() { return None }
     let mut end = start;
     while elements.get(end).is_some_and(|element| matches!(element.role, Role::Dialogue | Role::Parenthetical)) {
@@ -474,7 +475,7 @@ fn run_end(elements: &[ScreenplayElement], start: usize) -> Option<usize> {
     Some(end)
 }
 
-fn candidate_shape_end(elements: &[ScreenplayElement], start: usize) -> Option<usize> {
+fn candidate_shape_end(elements: &[Arc<BodyOwner>], start: usize) -> Option<usize> {
     if elements.get(start)?.role != Role::Character { return None }
     let left_end = run_end(elements, start.checked_add(1)?)?;
     if elements.get(left_end)?.role != Role::Character { return None }

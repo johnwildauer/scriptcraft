@@ -55,6 +55,7 @@ mod pdf_export;
 mod print_export;
 mod replacement_open;
 mod replacement_open_transport;
+mod responsiveness;
 // This primitive is intentionally prepared for WO-001a.3 and not yet wired
 // into visible painting.
 #[allow(dead_code)]
@@ -1309,6 +1310,7 @@ impl PerformanceDiagnostics {
         self.totals.delta_since(self.benchmark_start)
     }
 
+    #[allow(dead_code)] // Retained instrumentation is intentionally not displayed.
     fn safe_summary(&self) -> String {
         let build_profile = if cfg!(debug_assertions) {
             "debug"
@@ -1477,6 +1479,7 @@ struct ScriptCraftApp {
     layout_cache: LayoutCache,
     title_layout_cache: LayoutCache,
     performance: PerformanceDiagnostics,
+    responsiveness: responsiveness::ResponsivenessDiagnostics,
     last_layout_identity: Option<std::sync::Weak<ScreenplayLayout>>,
 }
 
@@ -2052,6 +2055,7 @@ impl ScriptCraftApp {
             layout_cache: LayoutCache::default(),
             title_layout_cache: LayoutCache::default(),
             performance: PerformanceDiagnostics::default(),
+            responsiveness: responsiveness::ResponsivenessDiagnostics::default(),
             last_layout_identity: None,
         })
     }
@@ -2771,6 +2775,7 @@ impl ScriptCraftApp {
         self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
         self.page_geometry.reset_for_document_replacement();
         self.title_view.page_geometry.reset_for_document_replacement();
+        self.responsiveness.clear_pending_edit();
         self.layout_cache = LayoutCache::default();
         self.title_layout_cache = LayoutCache::default();
         self.last_layout_identity = None;
@@ -3237,22 +3242,9 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         modifiers,
         shortcuts::ShortcutPlatform::current(),
     );
-    let performance_summary = if app.development_mode {
-        let derived_work = app.session.pending_derived_work_summary();
-        Some(format!(
-            "{} derived-pending={} derived-pending-complete={} derived-pending-scenes={} derived-retryable={} derived-pending-deferred-scenes={} derived-failed-complete={} derived-failed-scenes={}",
-            app.performance.safe_summary(),
-            derived_work.pending,
-            derived_work.complete,
-            derived_work.affected_scene_count,
-            derived_work.retryable,
-            derived_work.deferred_scene_count,
-            derived_work.failed_complete,
-            derived_work.failed_scene_count,
-        ))
-    } else {
-        None
-    };
+    let performance_summary = app
+        .development_mode
+        .then(|| app.responsiveness.safe_summary());
     let diagnostic_message = if app.development_mode {
         app.diagnostic_message
             .as_ref()
@@ -3261,21 +3253,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         None
     };
     let diagnostics = performance_summary.as_deref().map(|performance_summary| {
-        let performance = app.performance;
-        let input_diagnostics = &app.native_input_diagnostics;
         DiagnosticProjection {
-            focused: input_diagnostics.focused,
-            focus_lock: input_diagnostics.focus_lock_installed,
-            dispatch_enabled: input_diagnostics.dispatch_enabled,
-            received_events: input_diagnostics.received_events,
-            dispatched_frames: input_diagnostics.dispatched_frames,
-            pointer_activations: input_diagnostics.pointer_activations,
-            last_event_category: input_diagnostics.last_event_category,
-            performance_events: performance.events,
-            layout_builds: performance.layout_builds,
-            layout_cache_hits: performance.layout_cache_hits,
-            painted_pages: performance.painted_pages,
-            repaint_requests: performance.repaint_requests,
             performance_summary,
             diagnostic_message: diagnostic_message.as_deref(),
         }
@@ -3908,6 +3886,10 @@ impl ScriptCraftApp {
             }
         }
         self.sync_native_title(&ctx);
+        let update_ended = Instant::now();
+        if self.development_mode {
+            self.responsiveness.record_update(frame_started, update_ended);
+        }
         self.performance.frame_nanos = self
             .performance
             .frame_nanos

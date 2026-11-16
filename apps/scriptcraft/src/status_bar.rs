@@ -1492,48 +1492,13 @@ fn paint_page_counter(ui: &egui::Ui, text: &str, rect: Rect, color: Color32) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DiagnosticProjection<'a> {
-    pub(super) focused: bool,
-    pub(super) focus_lock: bool,
-    pub(super) dispatch_enabled: bool,
-    pub(super) received_events: u32,
-    pub(super) dispatched_frames: u32,
-    pub(super) pointer_activations: u32,
-    pub(super) last_event_category: &'a str,
-    pub(super) performance_events: u64,
-    pub(super) layout_builds: u64,
-    pub(super) layout_cache_hits: u64,
-    pub(super) painted_pages: u64,
-    pub(super) repaint_requests: u64,
     pub(super) performance_summary: &'a str,
     pub(super) diagnostic_message: Option<&'a str>,
 }
 
 impl DiagnosticProjection<'_> {
     pub(super) fn safe_summary(self) -> String {
-        let summary = format!(
-            "focus={} lock={} dispatch={} received-events={} dispatched-frames={} pointer-activations={} last-category={} performance-events={} layouts={} cache-hits={} painted-pages={} repaint-requests={}",
-            self.focused,
-            self.focus_lock,
-            self.dispatch_enabled,
-            self.received_events,
-            self.dispatched_frames,
-            self.pointer_activations,
-            if self.last_event_category.is_empty() {
-                "none"
-            } else {
-                self.last_event_category
-            },
-            self.performance_events,
-            self.layout_builds,
-            self.layout_cache_hits,
-            self.painted_pages,
-            self.repaint_requests
-        );
-        if self.performance_summary.is_empty() {
-            summary
-        } else {
-            format!("{summary} {}", self.performance_summary)
-        }
+        self.performance_summary.to_owned()
     }
 }
 
@@ -1958,7 +1923,7 @@ mod diagnostic_status_tests {
     use super::{
         diagnostics_disclosure_enabled, element_hint_bindings, fitted_modifier_hint_font_size,
         modifier_list_text, plan_status_row, project_center, ready_center, CenterProjection,
-        ElementHintChord, StatusSurfaceOptions,
+        DiagnosticProjection, ElementHintChord, StatusSurfaceOptions,
     };
     use crate::shortcuts::ShortcutPlatform;
     use eframe::egui;
@@ -1972,8 +1937,10 @@ mod diagnostic_status_tests {
 
     fn session(role: Role, text: &str, anchor: usize, focus: usize) -> EditingSession {
         let mut project = valid(Project::new());
-        project.elements[0].role = role;
-        project.elements[0].text = text.to_owned();
+        scriptcraft_core::BodyOwner::update(&mut project.elements[0], |element| {
+            element.role = role;
+            element.text = text.to_owned();
+        });
         let mut session = valid(EditingSession::with_policy(project, EditPolicy::default()));
         valid(session.set_selection(Selection {
             anchor: Position { element: 0, offset: anchor },
@@ -2105,6 +2072,30 @@ mod diagnostic_status_tests {
                 assert!(rect.left() >= row.left());
                 assert!(rect.right() <= row.right());
             }
+        }
+    }
+
+    #[test]
+    fn diagnostics_keep_responsiveness_first_and_error_reporting_separate() {
+        let responsiveness = "Update FPS 60.0 | Update ms avg/p95/max 1.00/2.00/3.00 | Edit to app paint ms avg/p95/max 4.00/5.00/6.00 | Pages visible/total 2/90";
+        let projection = DiagnosticProjection {
+            performance_summary: responsiveness,
+            diagnostic_message: Some("EDIT_FAILED: bounded category"),
+        };
+        assert_eq!(projection.safe_summary(), responsiveness);
+        assert_eq!(
+            projection.diagnostic_message,
+            Some("EDIT_FAILED: bounded category")
+        );
+        for legacy in [
+            "focus=",
+            "lock=",
+            "dispatch=",
+            "received-events=",
+            "painted-pages=",
+            "profile=",
+        ] {
+            assert!(!projection.safe_summary().contains(legacy));
         }
     }
 }

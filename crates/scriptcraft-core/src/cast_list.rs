@@ -2,8 +2,9 @@
 
 use crate::preservation::PreservationError;
 use crate::scene_metadata::SceneMetadataError;
-use crate::{ModelError, Project, Role, TextRun, MAX_TEXT_BYTES};
+use crate::{BodyOwner, ModelError, Project, Role, TextRun, MAX_TEXT_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The desktop refresh cadence for derived scene cast lists.
@@ -240,7 +241,7 @@ fn correct_cast_lists_candidate(
     Ok((outcome, deferred_scenes, completed_scenes))
 }
 
-fn scene_needs_cast_list_update(scene: &[crate::ScreenplayElement]) -> Result<bool, CastListError> {
+fn scene_needs_cast_list_update(scene: &[Arc<BodyOwner>]) -> Result<bool, CastListError> {
     if !scene.iter().any(|element| element.role == Role::CastList) {
         return Ok(false);
     }
@@ -256,7 +257,7 @@ fn scene_needs_cast_list_update(scene: &[crate::ScreenplayElement]) -> Result<bo
 
 fn cast_list_source_is_replaceable(
     project: &Project,
-    scene: &[crate::ScreenplayElement],
+    scene: &[Arc<BodyOwner>],
 ) -> Result<bool, CastListError> {
     let names = crate::scene_metadata::derived_character_projection(scene)
         .into_iter()
@@ -385,24 +386,25 @@ fn replace_cast_list_text(
         ));
     }
 
-    let element = &mut project.elements[element_index];
-    element.text = replacement.to_owned();
-    if element.text.is_empty() {
-        element.runs.clear();
-    } else if let Some((first, remaining)) = element.runs.split_first_mut() {
-        first.text = replacement.to_owned();
-        for run in remaining {
-            run.text.clear();
+    BodyOwner::update(&mut project.elements[element_index], |element| {
+        element.text = replacement.to_owned();
+        if element.text.is_empty() {
+            element.runs.clear();
+        } else if let Some((first, remaining)) = element.runs.split_first_mut() {
+            first.text = replacement.to_owned();
+            for run in remaining {
+                run.text.clear();
+            }
+        } else {
+            // A newly inserted managed Cast List can have no semantic runs yet.
+            // Source replacement creates its first `<Text>` run, so publish the
+            // matching semantic run in the same candidate rather than leaving the
+            // next preflight to compare an empty projection with nonempty source.
+            element.runs.push(TextRun {
+                text: replacement.to_owned(),
+                attributes: Vec::new(),
+            });
         }
-    } else {
-        // A newly inserted managed Cast List can have no semantic runs yet.
-        // Source replacement creates its first `<Text>` run, so publish the
-        // matching semantic run in the same candidate rather than leaving the
-        // next preflight to compare an empty projection with nonempty source.
-        element.runs.push(TextRun {
-            text: replacement.to_owned(),
-            attributes: Vec::new(),
-        });
-    }
+    });
     Ok(())
 }

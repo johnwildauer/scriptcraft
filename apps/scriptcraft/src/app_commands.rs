@@ -898,6 +898,9 @@ impl ScriptCraftApp {
         if self.replacement_open_pending() {
             return DesktopCommandOutcome::Unavailable(DesktopUnavailableReason::ModalBlocked);
         }
+        let edit_input_started = (self.development_mode
+            && super::responsiveness::is_text_editing_command(command.id()))
+        .then(std::time::Instant::now);
         let active_surface = self.active_editor_surface();
         let outcome = execute_editor_command_on_surface(
             &mut self.session,
@@ -906,6 +909,10 @@ impl ScriptCraftApp {
         );
         match &outcome {
             CommandOutcome::Changed => {
+                if let Some(accepted_at) = edit_input_started {
+                    self.responsiveness
+                        .note_accepted_edit(self.session.revision(), accepted_at);
+                }
                 self.mutate(Ok(()), reveal_intent);
             }
             CommandOutcome::NoOp if command.id() != CommandId::EditorDualDialogueToggle => {

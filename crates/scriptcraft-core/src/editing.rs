@@ -4,12 +4,13 @@ use crate::{
     cast_list::{self, CastListError},
     clear_paragraph_run_styles, project_style_at_caret, set_paragraph_alignments,
     toggle_paragraph_run_styles,
-    validate_layout_inputs, LayoutInputs, ModelError, ParagraphAlignment, ParagraphTarget, Project,
-    Role, RunBoundaryAffinity, RunStyle, RunStyleFlags, ScreenplayElement, StableId, TextRun,
-    TitlePageParagraph, MAX_ELEMENTS, MAX_TEXT_BYTES,
+    validate_layout_inputs, BodyOwner, LayoutInputs, ModelError, ParagraphAlignment, ParagraphTarget,
+    Project, Role, RunBoundaryAffinity, RunStyle, RunStyleFlags, ScreenplayElement, StableId,
+    TextRun, TitlePageParagraph, MAX_ELEMENTS, MAX_TEXT_BYTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Session edit-validation work counts. These are structural counters, not
 /// timings, and do not expose document values.
@@ -267,6 +268,9 @@ struct Snapshot {
 #[derive(Debug, Clone)]
 pub struct EditingSession {
     project: Project,
+    /// Ephemeral operation cursor used by callers to distinguish successful
+    /// mutations from no-ops without cloning or comparing document state.
+    mutation_token: u64,
     /// Wall-clock time captured when this editing session begins. It is
     /// ephemeral lineage state, independent of DocumentRef and undo history.
     session_open_timestamp: String,
@@ -293,6 +297,8 @@ pub struct EditingSession {
 
 impl PartialEq for EditingSession {
     fn eq(&self, other: &Self) -> bool {
+        // The operation cursor observes mutations; it is not semantic session
+        // state and deliberately does not participate in value equality.
         self.project == other.project
             && self.session_open_timestamp == other.session_open_timestamp
             && self.policy == other.policy
@@ -384,6 +390,7 @@ impl EditingSession {
         Ok(Self {
             clean_project: project.clone(),
             project,
+            mutation_token: 0,
             session_open_timestamp,
             policy,
             layout_inputs,
@@ -484,6 +491,16 @@ impl EditingSession {
     }
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+    /// Cheap ephemeral cursor for editor-command outcome detection. Reachable
+    /// session operations advance it for semantic, selection, or typing-style
+    /// mutations. Unlike `revision`, it includes transient changes and cannot
+    /// saturate on a content edit.
+    pub const fn mutation_token(&self) -> u64 {
+        self.mutation_token
+    }
+    fn mark_mutated(&mut self) {
+        self.mutation_token = self.mutation_token.wrapping_add(1);
     }
     /// Returns value-free derived-work state without disclosing document or
     /// scene identities. A complete refresh reports zero individually affected
@@ -644,6 +661,7 @@ impl EditingSession {
     /// must install it only after the destination has been replaced.
     pub(crate) fn prepare_saved_rebase(&self, mut project: Project) -> Result<Self, EditError> {
         validate_full_candidate(&project)?;
+        project.share_unchanged_body_owners_from(&self.project);
         if let Some(preservation) = project.preservation.as_mut() {
             preservation.rebuild_managed_paragraph_index();
         }
@@ -703,6 +721,8 @@ impl EditingSession {
 
     pub fn set_selection(&mut self, selection: Selection) -> Result<(), EditError> {
         validate_selection(&self.project, selection)?;
+        let previous_selection = self.selection;
+        let previous_typing_style = self.body_typing_style;
         self.selection = selection;
         if selection.anchor == selection.focus {
             let element = &self.project.elements[selection.focus.element];
@@ -714,6 +734,11 @@ impl EditingSession {
                 self.body_typing_style,
             ).map_err(EditError::FormattedText)?;
         }
+        if self.selection != previous_selection
+            || self.body_typing_style != previous_typing_style
+        {
+            self.mark_mutated();
+        }
         Ok(())
     }
 
@@ -721,6 +746,8 @@ impl EditingSession {
     /// history, revision, or dirty state.
     pub fn set_title_selection(&mut self, selection: Selection) -> Result<(), EditError> {
         validate_title_selection(&self.project, selection)?;
+        let previous_selection = self.title_selection;
+        let previous_typing_style = self.title_typing_style;
         self.title_selection = selection;
         if selection.anchor == selection.focus {
             if let Some(paragraph) = self.project.title_page.get(selection.focus.element) {
@@ -732,6 +759,11 @@ impl EditingSession {
                     self.title_typing_style,
                 ).map_err(EditError::FormattedText)?;
             }
+        }
+        if self.title_selection != previous_selection
+            || self.title_typing_style != previous_typing_style
+        {
+            self.mark_mutated();
         }
         Ok(())
     }
@@ -965,6 +997,7 @@ impl EditingSession {
         self.deferred_derived_scenes.clear();
         self.failed_derived_complete = false;
         self.failed_derived_scenes.clear();
+        self.mark_mutated();
         Ok(())
     }
 
@@ -1173,7 +1206,9 @@ impl EditingSession {
                             "",
                         )?;
                         update_preserved_role(project, 0, Role::Parenthetical, Role::Dialogue)?;
-                        project.elements[0].role = Role::Dialogue;
+                        BodyOwner::update(&mut project.elements[0], |element| {
+                            element.role = Role::Dialogue;
+                        });
                         return Ok(Selection::caret(Position {
                             element: 0,
                             offset: 0,
@@ -1343,7 +1378,7 @@ impl EditingSession {
                                 new.id.clone(),
                             )?;
                         }
-                        project.elements.insert(element, new);
+                        project.elements.insert(element, BodyOwner::shared(new));
                         if automatic {
                             generated.insert(id);
                             Ok(Selection::caret(Position { element, offset: 1 }))
@@ -1352,13 +1387,17 @@ impl EditingSession {
                         }
                     }
                     EnterAction::ClearGeneratedAndSplit { position, role } => {
-                        project.elements[position.element].text.clear();
+                        BodyOwner::update(&mut project.elements[position.element], |element| {
+                            element.text.clear();
+                        });
                         generated.remove(project.elements[position.element].id.as_str());
                         split_at(project, position, role)
                     }
                     EnterAction::RepairAndInsertDialogue { element } => {
                         let text = project.elements[element].text.clone();
-                        project.elements[element].text = repair_parenthetical(text.as_str());
+                        BodyOwner::update(&mut project.elements[element], |element| {
+                            element.text = repair_parenthetical(text.as_str());
+                        });
                         insert_dialogue_below(project, element)
                     }
                     EnterAction::Split { position, role } => split_at(project, position, role),
@@ -1390,13 +1429,17 @@ impl EditingSession {
                             Role::Parenthetical,
                             Role::Dialogue,
                         )?;
-                        project.elements[element].role = Role::Dialogue;
+                        BodyOwner::update(&mut project.elements[element], |element| {
+                            element.role = Role::Dialogue;
+                        });
                         generated.remove(project.elements[element].id.as_str());
                         Ok(Selection::caret(Position { element, offset: 0 }))
                     }
                     TabAction::RepairAndInsertDialogue { element } => {
                         let text = project.elements[element].text.clone();
-                        project.elements[element].text = repair_parenthetical(text.as_str());
+                        BodyOwner::update(&mut project.elements[element], |element| {
+                            element.text = repair_parenthetical(text.as_str());
+                        });
                         insert_dialogue_below(project, element)
                     }
                     TabAction::SetRole {
@@ -1405,13 +1448,17 @@ impl EditingSession {
                         clear_generated_parenthetical,
                     } => {
                         if clear_generated_parenthetical {
-                            project.elements[position.element].text.clear();
+                            BodyOwner::update(&mut project.elements[position.element], |element| {
+                                element.text.clear();
+                            });
                             generated.remove(project.elements[position.element].id.as_str());
                         }
                         let old_role = project.elements[position.element].role;
                         if old_role != role {
                             update_preserved_role(project, position.element, old_role, role)?;
-                            project.elements[position.element].role = role;
+                            BodyOwner::update(&mut project.elements[position.element], |element| {
+                                element.role = role;
+                            });
                         }
                         if policy.auto_parenthetical
                             && role == Role::Parenthetical
@@ -1485,7 +1532,9 @@ impl EditingSession {
                 if old_role != role {
                     update_preserved_role(project, start.element, old_role, role)?;
                 }
-                project.elements[start.element].role = role;
+                BodyOwner::update(&mut project.elements[start.element], |element| {
+                    element.role = role;
+                });
                 if role != Role::Parenthetical {
                     generated.remove(project.elements[start.element].id.as_str());
                 } else if policy.auto_parenthetical
@@ -1554,6 +1603,7 @@ impl EditingSession {
         self.deferred_derived_scenes.clear();
         self.failed_derived_complete = false;
         self.failed_derived_scenes.clear();
+        self.mark_mutated();
         Ok(())
     }
 
@@ -1590,6 +1640,7 @@ impl EditingSession {
         self.deferred_derived_scenes.clear();
         self.failed_derived_complete = false;
         self.failed_derived_scenes.clear();
+        self.mark_mutated();
         Ok(())
     }
 
@@ -1682,7 +1733,7 @@ impl EditingSession {
                     .map(|element| element.id.clone())
             })
             .flatten();
-        let baseline = self.project.clone();
+        let baseline = &self.project;
         let baseline_generated = self.generated_parentheticals.clone();
         let mut first_project = baseline.clone();
         let mut first_generated = baseline_generated.clone();
@@ -1867,15 +1918,15 @@ impl EditingSession {
             }
             PendingDerivedInvalidation::None => {}
         }
+        let replaced_project = std::mem::replace(&mut self.project, project);
         self.push_history(Snapshot {
-            project: self.project.clone(),
+            project: replaced_project,
             selection: self.selection,
             title_selection: self.title_selection,
             title_typing_style: self.title_typing_style,
             body_typing_style: self.body_typing_style,
             generated_parentheticals: self.generated_parentheticals.clone(),
         });
-        self.project = project;
         self.selection = selection;
         self.generated_parentheticals = generated;
         self.redo.clear();
@@ -1885,6 +1936,7 @@ impl EditingSession {
         self.last_validation_was_scoped = scoped_valid;
         self.pending_derived_invalidation
             .merge(derived_invalidation);
+        self.mark_mutated();
         Ok(())
     }
 
@@ -1923,9 +1975,14 @@ impl EditingSession {
         validate_full_candidate(&project)?;
         validate_title_selection(&project, selection)?;
         if project == self.project {
+            let transient_changed = self.title_selection != selection
+                || self.title_typing_style != typing;
             self.title_selection = selection;
             self.title_typing_style = typing;
             self.last_validation_was_scoped = false;
+            if transient_changed {
+                self.mark_mutated();
+            }
             return Ok(());
         }
         self.push_history(Snapshot {
@@ -1945,6 +2002,7 @@ impl EditingSession {
         self.validated_baseline = true;
         self.last_validation_was_scoped = false;
         // Title-only edits cannot affect screenplay scene-derived attachments.
+        self.mark_mutated();
         Ok(())
     }
 
@@ -1985,6 +2043,7 @@ impl EditingSession {
             } else {
                 self.body_typing_style = next;
             }
+            self.mark_mutated();
             return Ok(());
         }
 
@@ -2013,13 +2072,21 @@ impl EditingSession {
                     .title_page
                     .get(selection.focus.element)
                     .ok_or(EditError::InvalidElement)?;
+                let changed = self.title_typing_style != RunStyleFlags::default();
                 self.title_typing_style = RunStyleFlags::default();
+                if changed {
+                    self.mark_mutated();
+                }
             } else {
                 self.project
                     .elements
                     .get(selection.focus.element)
                     .ok_or(EditError::InvalidElement)?;
+                let changed = self.body_typing_style != RunStyleFlags::default();
                 self.body_typing_style = RunStyleFlags::default();
+                if changed {
+                    self.mark_mutated();
+                }
             }
             return Ok(());
         }
@@ -2038,7 +2105,11 @@ impl EditingSession {
                     .map_err(EditError::FormattedText)?;
                 Ok(selection)
             })?;
+            let typing_changed = self.body_typing_style != RunStyleFlags::default();
             self.body_typing_style = RunStyleFlags::default();
+            if typing_changed {
+                self.mark_mutated();
+            }
             Ok(())
         }
     }
@@ -2193,12 +2264,12 @@ fn classify_derived_invalidation(before: &Project, after: &Project) -> PendingDe
 }
 
 fn unique_elements_by_id(
-    elements: &[ScreenplayElement],
+    elements: &[Arc<BodyOwner>],
 ) -> Option<BTreeMap<String, &ScreenplayElement>> {
     let mut by_id = BTreeMap::new();
     for element in elements {
         if by_id
-            .insert(element.id.as_str().to_owned(), element)
+            .insert(element.id.as_str().to_owned(), element.as_element())
             .is_some()
         {
             return None;
@@ -2208,7 +2279,7 @@ fn unique_elements_by_id(
 }
 
 fn character_projection_inputs(
-    elements: &[ScreenplayElement],
+    elements: &[Arc<BodyOwner>],
 ) -> Option<BTreeMap<String, Vec<(String, String)>>> {
     let mut by_scene = BTreeMap::<String, Vec<(String, String)>>::new();
     for (index, element) in elements.iter().enumerate() {
@@ -2224,7 +2295,7 @@ fn character_projection_inputs(
     Some(by_scene)
 }
 
-fn owning_scene_id(elements: &[ScreenplayElement], element_index: usize) -> Option<String> {
+fn owning_scene_id(elements: &[Arc<BodyOwner>], element_index: usize) -> Option<String> {
     elements
         .get(..=element_index)?
         .iter()
@@ -2382,7 +2453,7 @@ fn invalidate_changed_generated_parentheticals(
         else {
             continue;
         };
-        if before_element != after_element {
+        if !Arc::ptr_eq(before_element, after_element) && before_element != after_element {
             generated.remove(id);
         }
     }
@@ -2740,8 +2811,10 @@ fn replace_range(
         return Err(EditError::TextTooLong);
     }
     let runs = replace_cross_element_runs(project, start, end, inserted, &combined)?;
-    project.elements[start.element].text = combined;
-    project.elements[start.element].runs = runs;
+    BodyOwner::update(&mut project.elements[start.element], |element| {
+        element.text = combined;
+        element.runs = runs;
+    });
     for _ in start.element + 1..=end.element {
         remove_body_owner(project, start.element + 1);
     }
@@ -2801,8 +2874,7 @@ fn replace_element_text(
             crate::preservation::PreservationError::ManagedAnchorMissing,
         ));
     }
-    {
-        let item = &mut project.elements[element_index];
+    BodyOwner::update(&mut project.elements[element_index], |item| {
         item.text = new_text;
         if item.text.is_empty() {
             item.runs.clear();
@@ -2811,7 +2883,7 @@ fn replace_element_text(
                 run.text = text;
             }
         }
-    }
+    });
     if has_source_mapping {
         project.preservation.as_mut()
             .ok_or(EditError::Preservation(crate::preservation::PreservationError::ManagedAnchorMissing))?
@@ -3012,9 +3084,11 @@ fn update_preserved_role(
             crate::preservation::PreservationError::ManagedAnchorMissing,
         ));
     }
-    if let Some(provenance) = &mut project.elements[element_index].source_provenance {
-        provenance.foreign_role = Some(fdx_role_name(new_role).to_owned());
-    }
+    BodyOwner::update(&mut project.elements[element_index], |element| {
+        if let Some(provenance) = &mut element.source_provenance {
+            provenance.foreign_role = Some(fdx_role_name(new_role).to_owned());
+        }
+    });
     Ok(())
 }
 
@@ -3301,7 +3375,7 @@ fn insert_dialogue_below(project: &mut Project, element: usize) -> Result<Select
         &anchor,
         new.id.clone(),
     )?;
-    project.elements.insert(element + 1, new);
+    project.elements.insert(element + 1, BodyOwner::shared(new));
     Ok(Selection::caret(Position {
         element: element + 1,
         offset: 0,
@@ -3330,15 +3404,17 @@ fn split_at(project: &mut Project, position: Position, role: Role) -> Result<Sel
         &item.id,
         new_item.id.clone(),
     )?;
-    project.elements[position.element].text = left;
-    if !item.runs.is_empty() {
-        project.elements[position.element].runs = left_runs;
-    }
+    BodyOwner::update(&mut project.elements[position.element], |element| {
+        element.text = left;
+        if !item.runs.is_empty() {
+            element.runs = left_runs;
+        }
+    });
     let mut new_item = new_item;
     if !item.runs.is_empty() {
         new_item.runs = right_runs;
     }
-    project.elements.insert(position.element + 1, new_item);
+    project.elements.insert(position.element + 1, BodyOwner::shared(new_item));
     Ok(Selection::caret(Position {
         element: position.element + 1,
         offset: 0,
@@ -3474,7 +3550,7 @@ fn ensure_join_roles_match(project: &Project, index: usize) -> Result<(), EditEr
 /// Removes one semantic owner and its direct/group registrations. Source-tree
 /// cleanup remains in the transaction-level preservation reconciliation.
 fn remove_body_owner(project: &mut Project, index: usize) {
-    let removed_id = project.elements.remove(index).id;
+    let removed_id = project.elements.remove(index).id.clone();
     project.direct_paragraph_overrides.remove(&removed_id);
 
     let removed_cue_group_ids = project
@@ -3513,15 +3589,13 @@ fn join_at(project: &mut Project, index: usize) -> Result<(), EditError> {
             coalesce_runs(&mut runs);
             runs
         };
-    let item = project
-        .elements
-        .get_mut(index)
-        .ok_or(EditError::InvalidElement)?;
-    if item.text.len().saturating_add(right.len()) > MAX_TEXT_BYTES {
+    if project.elements[index].text.len().saturating_add(right.len()) > MAX_TEXT_BYTES {
         return Err(EditError::TextTooLong);
     }
-    item.text.push_str(&right);
-    item.runs = joined_runs;
+    BodyOwner::update(&mut project.elements[index], |item| {
+        item.text.push_str(&right);
+        item.runs = joined_runs;
+    });
     remove_body_owner(project, index + 1);
     Ok(())
 }
@@ -3576,21 +3650,27 @@ fn role_for_native_behavior_target(target: &str) -> Option<Role> {
 #[cfg(test)]
 mod derived_invalidation_scope_tests {
     use super::can_skip_derived_invalidation;
-    use crate::{Project, Role, StableId};
+    use crate::{BodyOwner, Project, Role, StableId};
 
     #[test]
     fn skip_proof_requires_scope_stable_identity_and_derived_irrelevant_role() {
         let before = Project::new().expect("default project is valid");
         let mut after = before.clone();
-        after.elements[0].text.push_str("ordinary action");
+        BodyOwner::update(&mut after.elements[0], |element| {
+            element.text.push_str("ordinary action");
+        });
         assert!(can_skip_derived_invalidation(&before, &after, 0, true));
         assert!(!can_skip_derived_invalidation(&before, &after, 0, false));
 
         for role in [Role::Character, Role::SceneHeading] {
             let mut relevant_before = before.clone();
-            relevant_before.elements[0].role = role;
+            BodyOwner::update(&mut relevant_before.elements[0], |element| {
+                element.role = role;
+            });
             let mut relevant_after = relevant_before.clone();
-            relevant_after.elements[0].text.push_str("changed");
+            BodyOwner::update(&mut relevant_after.elements[0], |element| {
+                element.text.push_str("changed");
+            });
             assert!(!can_skip_derived_invalidation(
                 &relevant_before,
                 &relevant_after,
@@ -3600,17 +3680,53 @@ mod derived_invalidation_scope_tests {
         }
 
         let mut changed_role = after.clone();
-        changed_role.elements[0].role = Role::Dialogue;
+        BodyOwner::update(&mut changed_role.elements[0], |element| {
+            element.role = Role::Dialogue;
+        });
         assert!(!can_skip_derived_invalidation(&before, &changed_role, 0, true));
 
         let mut changed_identity = after.clone();
-        changed_identity.elements[0].id =
-            StableId::new("changed-owner").expect("replacement ID is valid");
+        BodyOwner::update(&mut changed_identity.elements[0], |element| {
+            element.id = StableId::new("changed-owner").expect("replacement ID is valid");
+        });
         assert!(!can_skip_derived_invalidation(
             &before,
             &changed_identity,
             0,
             true
         ));
+    }
+}
+
+#[cfg(test)]
+mod body_owner_persistence_tests {
+    use super::EditingSession;
+    use std::sync::Arc;
+
+    #[test]
+    fn saved_rebase_reuses_semantically_unchanged_body_owners_for_live_and_clean_projects() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="SceneHeading" id="first"><Text>INT. ROOM - DAY</Text></Paragraph><Paragraph Type="Action" id="second"><Text>unchanged</Text></Paragraph></Content></FinalDraft>"#;
+        let project = crate::fdx::read_v6(source)
+            .expect("source-backed project imports")
+            .project;
+        let bytes = crate::fdx::write_v6(&project).expect("project serializes");
+        let decoded = crate::fdx::read_v6(&bytes)
+            .expect("serialized project reimports")
+            .project;
+        let session = EditingSession::new(project).expect("session is valid");
+        let before = session.project().clone();
+
+        let rebased = session
+            .prepare_saved_rebase(decoded)
+            .expect("validated save rebase succeeds");
+        assert_eq!(rebased.project.elements.len(), before.elements.len());
+        for (before, after) in before.elements.iter().zip(&rebased.project.elements) {
+            assert_eq!(before.as_element(), after.as_element());
+            assert!(Arc::ptr_eq(before, after));
+            assert_eq!(before.revision(), after.revision());
+        }
+        for (live, clean) in rebased.project.elements.iter().zip(&rebased.clean_project.elements) {
+            assert!(Arc::ptr_eq(live, clean));
+        }
     }
 }

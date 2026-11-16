@@ -1600,6 +1600,7 @@ impl ScriptCraftApp {
                 Option<Vec<Option<super::presentation_geometry::PresentationLine<'_>>>>,
             >>();
         let mut rendered_scale = 1.0;
+        let mut visible_pages = 0;
         let reveal_intent = self.reveal_intent;
         let pending_zoom_anchor = self.pending_zoom_anchor;
         let zoom_compensation_offset = pending_zoom_anchor.and_then(|anchor| {
@@ -1708,6 +1709,12 @@ impl ScriptCraftApp {
                 ui.spacing_mut().item_spacing.y = vertical_item_spacing;
             }
             let paint_range = viewport_paint_page_range(&presented_pages, editor_clip);
+            if self.development_mode {
+                visible_pages = presented_pages
+                    .iter()
+                    .filter(|page| page.rect.intersects(editor_clip))
+                    .count();
+            }
             let painted_in_range = paint_range.map_or(0, |(first, last)| {
                 last.saturating_sub(first).saturating_add(1)
             });
@@ -1907,6 +1914,14 @@ impl ScriptCraftApp {
                 }
             }
         });
+        if self.development_mode {
+            self.responsiveness
+                .note_revision_painted(self.session.revision(), Instant::now());
+            if surface == EditorSurface::Body {
+                self.responsiveness
+                    .note_pages(visible_pages, layout.pages.len());
+            }
+        }
         ui.style_mut().spacing.scroll.fade = scroll_fade;
         let scale = rendered_scale;
         let published_scroll_offset = scroll_output.state.offset;

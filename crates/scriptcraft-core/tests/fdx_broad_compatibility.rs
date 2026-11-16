@@ -854,8 +854,10 @@ fn r05_clearing_managed_text_keeps_opaque_inline_nodes_and_owner_attributes() {
     let source = br#"<FinalDraft DocumentType="Script" Version="6" xmlns:v="urn:fixture:vendor"><Content><Paragraph Type="Action" id="clear-owner" Bookmark="clear-bookmark"><Text hint="retain-run-attribute">managed-before<v:Inline keep="opaque"><Text>OPAQUE_INLINE_SENTINEL</Text></v:Inline><![CDATA[managed-after]]><!-- retain-comment --><?retain data?></Text><Text>fully managed sibling</Text><v:AfterText keep="slot"/></Paragraph></Content></FinalDraft>"#;
     let mut imported = read_v6(source).expect("mixed managed and opaque text source imports");
     assert_eq!(imported.project.elements[0].text, "managed-beforemanaged-after");
-    imported.project.elements[0].text.clear();
-    imported.project.elements[0].runs.clear();
+    scriptcraft_core::BodyOwner::update(&mut imported.project.elements[0], |element| {
+        element.text.clear();
+        element.runs.clear();
+    });
 
     let output = write_v6(&imported.project).expect("managed empty-text reconciliation retains opaque content");
     let reopened = read_v6(&output).expect("cleared output passes strict reread");

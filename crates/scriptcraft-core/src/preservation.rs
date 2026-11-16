@@ -7,8 +7,8 @@
 
 use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
 use crate::{
-    Role, ScreenplayElement, SourceFormat, SourceLayoutSettings, SourceProvenance, SourceSection,
-    StableId, TextRun, TitlePageParagraph,
+    BodyOwner, Role, ScreenplayElement, SourceFormat, SourceLayoutSettings, SourceProvenance,
+    SourceSection, StableId, TextRun, TitlePageParagraph,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
@@ -2696,8 +2696,8 @@ impl PreservationState {
     /// subtrees are discarded, and unrelated raw references may become orphans.
     pub(crate) fn reconcile_body_structure(
         &mut self,
-        before: &[ScreenplayElement],
-        after: &mut [ScreenplayElement],
+        before: &[Arc<BodyOwner>],
+        after: &mut [Arc<BodyOwner>],
         _generated_scene_heading_deletions: &BTreeSet<StableId>,
         groups: &[crate::dual_dialogue::DualDialogueGroup],
     ) -> Result<(), PreservationError> {
@@ -2800,7 +2800,9 @@ impl PreservationState {
                 continue;
             }
             let provenance = self.insert_managed_paragraph(element, index, &ordered_ids, groups)?;
-            element.source_provenance = Some(provenance);
+            BodyOwner::update(element, |element| {
+                element.source_provenance = Some(provenance);
+            });
             self.rebuild_managed_paragraph_index();
         }
 

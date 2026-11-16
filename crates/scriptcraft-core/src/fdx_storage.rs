@@ -528,8 +528,8 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
 
 fn same_save_projection(expected: &Project, actual: &Project) -> bool {
     fn same_elements(
-        expected: &[crate::ScreenplayElement],
-        actual: &[crate::ScreenplayElement],
+        expected: &[std::sync::Arc<crate::BodyOwner>],
+        actual: &[std::sync::Arc<crate::BodyOwner>],
     ) -> bool {
         expected.len() == actual.len()
         && expected.iter().zip(actual).all(|(expected, actual)| {
@@ -991,7 +991,9 @@ mod confirmed_save_as_tests {
         fn reread(&self, bytes: &[u8]) -> Result<Project, fdx::FdxError> {
             let mut project = fdx::read_v6(bytes)?.project;
             if let Some(first) = project.elements.first_mut() {
-                first.text.push_str(" injected mismatch");
+                crate::BodyOwner::update(first, |element| {
+                    element.text.push_str(" injected mismatch");
+                });
             }
             Ok(project)
         }

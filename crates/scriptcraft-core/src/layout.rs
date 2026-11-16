@@ -9,8 +9,8 @@ use crate::{
     formatting::{
         formatting_for_role, EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment,
     },
-    validate_layout_inputs, LayoutInputs, ModelError, Project, Role, RunAttribute, SourceLayoutSettings,
-    StableId, TextRun,
+    validate_layout_inputs, BodyOwner, LayoutInputs, ModelError, Project, Role, RunAttribute,
+    SourceLayoutSettings, StableId, TextRun,
 };
 use std::time::Instant;
 use std::{
@@ -27,6 +27,8 @@ const DUAL_DIALOGUE_COLUMN_GAP_POINTS: i64 = 18;
 const MAX_LINES_PER_ELEMENT: usize = 1_000_000;
 const MAX_CACHED_ELEMENT_WRAPS: usize = 4_096;
 const MAX_CACHED_ELEMENT_WRAP_BYTES: usize = 32 * 1024 * 1024;
+const MAX_CACHED_PREPARED_BODY_PARAGRAPHS: usize = 4_096;
+const MAX_CACHED_PREPARED_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -359,6 +361,7 @@ pub struct LayoutCache {
     layout: Option<Arc<ScreenplayLayout>>,
     project_identity: Option<Arc<()>>,
     element_wraps: ElementWrapCache,
+    prepared_body: PreparedBodyCache,
 }
 
 /// Measurements from one layout build. These values intentionally contain no
@@ -388,7 +391,7 @@ impl LayoutBuildDiagnostics {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ElementWrapContext {
     element_id: crate::StableId,
     role: Role,
@@ -398,14 +401,99 @@ struct ElementWrapContext {
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
     char_width: FixedPoint,
-    run_signature: String,
-    atomic_signature: Vec<(usize, usize)>,
+    runs: Arc<[TextRun]>,
+    atomic_ranges: Arc<[std::ops::Range<usize>]>,
+}
+
+#[derive(Clone, Copy)]
+struct ElementWrapIdentity<'a> {
+    element_id: &'a crate::StableId,
+    role: Role,
+    purpose: LayoutPurpose,
+    title_page: bool,
+    geometry_mode: EffectiveGeometryMode,
+    paragraph: EffectiveParagraph,
+    text_style: &'a EffectiveTextStyle,
+    char_width: FixedPoint,
+    runs: &'a [TextRun],
+    atomic_ranges: &'a [std::ops::Range<usize>],
+}
+
+impl ElementWrapContext {
+    fn from_identity(identity: ElementWrapIdentity<'_>) -> Self {
+        Self {
+            element_id: identity.element_id.clone(),
+            role: identity.role,
+            purpose: identity.purpose,
+            title_page: identity.title_page,
+            geometry_mode: identity.geometry_mode,
+            paragraph: identity.paragraph,
+            text_style: identity.text_style.clone(),
+            char_width: identity.char_width,
+            runs: Arc::from(identity.runs),
+            atomic_ranges: Arc::from(identity.atomic_ranges),
+        }
+    }
+
+    fn matches(&self, identity: ElementWrapIdentity<'_>) -> bool {
+        &self.element_id == identity.element_id
+            && self.role == identity.role
+            && self.purpose == identity.purpose
+            && self.title_page == identity.title_page
+            && self.geometry_mode == identity.geometry_mode
+            && self.paragraph == identity.paragraph
+            && &self.text_style == identity.text_style
+            && self.char_width == identity.char_width
+            && self.runs.as_ref() == identity.runs
+            && self.atomic_ranges.as_ref() == identity.atomic_ranges
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum EffectiveGeometryMode {
     Sequential,
     DualColumn,
+}
+
+/// Every owner-local input consumed by wrapping, source/display preparation,
+/// positioned spans, and line metrics. Page composition is deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PreparedBodyEnvironment {
+    purpose: LayoutPurpose,
+    composition: LayoutComposition,
+    geometry_mode: EffectiveGeometryMode,
+    paragraph: EffectiveParagraph,
+    text_style: EffectiveTextStyle,
+    char_width: FixedPoint,
+}
+
+/// Complete immutable owner-local Body output. Lines have owner-local element
+/// zero, page zero, and zero vertical placement; only placement rebases them.
+#[derive(Debug)]
+struct PreparedBodyParagraph {
+    paragraph: EffectiveParagraph,
+    lines: Arc<[LayoutLine]>,
+}
+
+#[derive(Debug)]
+struct PreparedBodyEntry {
+    owner: Arc<BodyOwner>,
+    owner_revision: u64,
+    environment: PreparedBodyEnvironment,
+    prepared: Arc<PreparedBodyParagraph>,
+    last_used_generation: u64,
+    insertion_order: u64,
+    byte_cost: usize,
+}
+
+#[derive(Debug, Default)]
+struct PreparedBodyCache {
+    buckets: HashMap<u64, Vec<PreparedBodyEntry>>,
+    usage_order: BTreeSet<(u64, u64, u64)>,
+    generation: u64,
+    next_order: u64,
+    entry_count: usize,
+    retained_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -427,6 +515,204 @@ struct ElementWrapCache {
     next_order: u64,
     entry_count: usize,
     retained_bytes: usize,
+}
+
+impl PreparedBodyCache {
+    fn start_generation(&mut self) {
+        if self.generation == u64::MAX {
+            self.generation = 1;
+            self.usage_order.clear();
+            for (fingerprint, bucket) in &mut self.buckets {
+                for entry in bucket {
+                    entry.last_used_generation = 0;
+                    self.usage_order
+                        .insert((0, entry.insertion_order, *fingerprint));
+                }
+            }
+        } else {
+            self.generation = self.generation.saturating_add(1).max(1);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buckets.clear();
+        self.usage_order.clear();
+        self.generation = 0;
+        self.next_order = 0;
+        self.entry_count = 0;
+        self.retained_bytes = 0;
+    }
+
+    fn fingerprint(owner: &Arc<BodyOwner>, environment: &PreparedBodyEnvironment) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (Arc::as_ptr(owner) as usize).hash(&mut hasher);
+        owner.revision().hash(&mut hasher);
+        environment.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn lookup(
+        &mut self,
+        owner: &Arc<BodyOwner>,
+        environment: &PreparedBodyEnvironment,
+    ) -> Option<Arc<PreparedBodyParagraph>> {
+        let fingerprint = Self::fingerprint(owner, environment);
+        let generation = self.generation;
+        let entry = self.buckets.get_mut(&fingerprint).and_then(|bucket| {
+            bucket.iter_mut().find(|entry| {
+                entry.owner_revision == owner.revision()
+                    && entry.environment == *environment
+                    && (Arc::ptr_eq(&entry.owner, owner)
+                        || entry.owner.as_element() == owner.as_element())
+            })
+        })?;
+        self.usage_order.remove(&(
+            entry.last_used_generation,
+            entry.insertion_order,
+            fingerprint,
+        ));
+        entry.last_used_generation = generation;
+        self.usage_order.insert((
+            entry.last_used_generation,
+            entry.insertion_order,
+            fingerprint,
+        ));
+        Some(Arc::clone(&entry.prepared))
+    }
+
+    fn insert(
+        &mut self,
+        owner: &Arc<BodyOwner>,
+        environment: PreparedBodyEnvironment,
+        prepared: Arc<PreparedBodyParagraph>,
+    ) {
+        let fingerprint = Self::fingerprint(owner, &environment);
+        let byte_cost = prepared_body_entry_byte_cost(owner, &environment, &prepared);
+        if byte_cost > MAX_CACHED_PREPARED_BODY_BYTES {
+            return;
+        }
+        self.next_order = self.next_order.saturating_add(1);
+        let insertion_order = self.next_order;
+        self.buckets
+            .entry(fingerprint)
+            .or_default()
+            .push(PreparedBodyEntry {
+                owner: Arc::clone(owner),
+                owner_revision: owner.revision(),
+                environment,
+                prepared,
+                last_used_generation: self.generation,
+                insertion_order,
+                byte_cost,
+            });
+        self.usage_order
+            .insert((self.generation, insertion_order, fingerprint));
+        self.entry_count = self.entry_count.saturating_add(1);
+        self.retained_bytes = self.retained_bytes.saturating_add(byte_cost);
+    }
+
+    fn evict_if_needed(&mut self) {
+        while self.entry_count > MAX_CACHED_PREPARED_BODY_PARAGRAPHS
+            || self.retained_bytes > MAX_CACHED_PREPARED_BODY_BYTES
+        {
+            let Some(oldest) = self.usage_order.iter().next().copied() else {
+                self.entry_count = 0;
+                self.retained_bytes = 0;
+                break;
+            };
+            self.usage_order.remove(&oldest);
+            let (_, insertion_order, fingerprint) = oldest;
+            let (removed_bytes, remove_bucket) =
+                if let Some(bucket) = self.buckets.get_mut(&fingerprint) {
+                    let removed = bucket
+                        .iter()
+                        .position(|entry| entry.insertion_order == insertion_order)
+                        .map(|index| bucket.remove(index));
+                    let remove_bucket = bucket.is_empty();
+                    (
+                        removed.map_or(0, |entry| entry.byte_cost),
+                        remove_bucket,
+                    )
+                } else {
+                    (0, false)
+                };
+            if remove_bucket {
+                self.buckets.remove(&fingerprint);
+            }
+            self.entry_count = self.entry_count.saturating_sub(1);
+            self.retained_bytes = self.retained_bytes.saturating_sub(removed_bytes);
+        }
+    }
+}
+
+fn text_style_heap_bytes(style: &EffectiveTextStyle) -> usize {
+    style
+        .declared_family
+        .len()
+        .saturating_add(style.source_color.as_ref().map_or(0, String::len))
+}
+
+fn prepared_body_entry_byte_cost(
+    owner: &Arc<BodyOwner>,
+    environment: &PreparedBodyEnvironment,
+    prepared: &PreparedBodyParagraph,
+) -> usize {
+    let element = owner.as_element();
+    let mut total = std::mem::size_of::<PreparedBodyEntry>()
+        .saturating_add(std::mem::size_of::<BodyOwner>())
+        .saturating_add(std::mem::size_of::<PreparedBodyParagraph>())
+        .saturating_add(
+            prepared
+                .lines
+                .len()
+                .saturating_mul(std::mem::size_of::<LayoutLine>()),
+        )
+        .saturating_add(element.id.as_str().len())
+        .saturating_add(element.text.len())
+        .saturating_add(text_style_heap_bytes(&environment.text_style));
+    for run in &element.runs {
+        total = total
+            .saturating_add(std::mem::size_of::<TextRun>())
+            .saturating_add(run.text.len());
+        for attribute in &run.attributes {
+            total = total
+                .saturating_add(std::mem::size_of::<RunAttribute>())
+                .saturating_add(attribute.name.len())
+                .saturating_add(attribute.value.len());
+        }
+    }
+    if let Some(provenance) = &element.source_provenance {
+        total = total
+            .saturating_add(provenance.foreign_id.as_ref().map_or(0, String::len))
+            .saturating_add(provenance.foreign_role.as_ref().map_or(0, String::len));
+    }
+    for line in prepared.lines.iter() {
+        total = total
+            .saturating_add(line.text.len())
+            .saturating_add(line.display_text.len())
+            .saturating_add(
+                line.display_source_map
+                    .len()
+                    .saturating_mul(std::mem::size_of::<DisplaySourceSegment>()),
+            )
+            .saturating_add(
+                line.spans
+                    .len()
+                    .saturating_mul(std::mem::size_of::<PositionedStyledSpan>()),
+            )
+            .saturating_add(text_style_heap_bytes(&line.text_style));
+        for span in line.spans.iter() {
+            total = total
+                .saturating_add(span.display_text.len())
+                .saturating_add(
+                    span.display_source_map
+                        .len()
+                        .saturating_mul(std::mem::size_of::<DisplaySourceSegment>()),
+                )
+                .saturating_add(text_style_heap_bytes(&span.text_style));
+        }
+    }
+    total
 }
 
 impl ElementWrapCache {
@@ -455,9 +741,30 @@ impl ElementWrapCache {
         self.retained_bytes = 0;
     }
 
-    fn fingerprint(&self, context: &ElementWrapContext, text: &str) -> u64 {
+    fn fingerprint(&self, identity: &ElementWrapIdentity<'_>, text: &str) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        context.hash(&mut hasher);
+        identity.element_id.hash(&mut hasher);
+        identity.role.hash(&mut hasher);
+        identity.purpose.hash(&mut hasher);
+        identity.title_page.hash(&mut hasher);
+        identity.geometry_mode.hash(&mut hasher);
+        identity.paragraph.hash(&mut hasher);
+        identity.text_style.hash(&mut hasher);
+        identity.char_width.hash(&mut hasher);
+        identity.runs.len().hash(&mut hasher);
+        for run in identity.runs {
+            run.text.hash(&mut hasher);
+            run.attributes.len().hash(&mut hasher);
+            for attribute in &run.attributes {
+                attribute.name.hash(&mut hasher);
+                attribute.value.hash(&mut hasher);
+            }
+        }
+        identity.atomic_ranges.len().hash(&mut hasher);
+        for range in identity.atomic_ranges {
+            range.start.hash(&mut hasher);
+            range.end.hash(&mut hasher);
+        }
         text.hash(&mut hasher);
         hasher.finish()
     }
@@ -481,23 +788,23 @@ impl ElementWrapCache {
         geometry_mode: EffectiveGeometryMode,
         diagnostics: Option<&mut LayoutBuildDiagnostics>,
     ) -> Vec<WrappedLine> {
-        let context = ElementWrapContext {
-            element_id: element_id.clone(),
+        let identity = ElementWrapIdentity {
+            element_id,
             role,
             purpose,
             title_page,
             geometry_mode,
             paragraph,
-            text_style: text_style.clone(),
+            text_style: &text_style,
             char_width,
-            run_signature: format!("{runs:?}"),
-            atomic_signature: atomic_ranges.iter().map(|range| (range.start, range.end)).collect(),
+            runs,
+            atomic_ranges,
         };
-        let fingerprint = self.fingerprint(&context, text);
+        let fingerprint = self.fingerprint(&identity, text);
         if let Some(entry) = self.buckets.get_mut(&fingerprint).and_then(|bucket| {
             bucket
                 .iter_mut()
-                .find(|entry| entry.context == context && entry.canonical_text.as_ref() == text)
+                .find(|entry| entry.context.matches(identity) && entry.canonical_text.as_ref() == text)
         }) {
             self.usage_order.remove(&(
                 entry.last_used_generation,
@@ -526,6 +833,7 @@ impl ElementWrapCache {
         }
 
         let started = diagnostics.as_ref().map(|_| Instant::now());
+        let context = ElementWrapContext::from_identity(identity);
         let lines = wrap_element(
             text, element, role, paragraph, text_style, char_width, atomic_ranges,
         );
@@ -842,6 +1150,7 @@ impl LayoutCache {
             self.project_layout_signature = None;
             self.layout = None;
             self.element_wraps.clear();
+            self.prepared_body.clear();
         }
         let source_settings_match = self
             .source_settings
@@ -891,6 +1200,7 @@ impl LayoutCache {
             project_layout_signature = Some(semantic_project_layout_signature(project));
         }
         self.element_wraps.start_generation();
+        self.prepared_body.start_generation();
         let layout = Arc::new(
             ScreenplayLayout::build_with_effective_inputs_for_purpose_internal(
                 project,
@@ -900,11 +1210,13 @@ impl LayoutCache {
                 composition,
                 diagnostics,
                 Some(&mut self.element_wraps),
+                Some(&mut self.prepared_body),
                 true,
                 &body_presentation,
             )?,
         );
         self.element_wraps.evict_if_needed();
+        self.prepared_body.evict_if_needed();
         self.revision = Some(revision);
         self.inputs = Some(inputs.clone());
         self.source_settings = Some(source_settings);
@@ -1015,6 +1327,7 @@ impl ScreenplayLayout {
             },
             None,
             None,
+            None,
             false,
             &BodyEditorPresentation::default(),
         )
@@ -1032,6 +1345,7 @@ impl ScreenplayLayout {
             source_settings,
             composition.purpose(),
             composition,
+            None,
             None,
             None,
             false,
@@ -1056,6 +1370,7 @@ impl ScreenplayLayout {
             &effective_settings,
             LayoutPurpose::Editor,
             LayoutComposition::BodyEditor,
+            None,
             None,
             None,
             false,
@@ -1085,6 +1400,7 @@ impl ScreenplayLayout {
             },
             Some(diagnostics),
             None,
+            None,
             false,
             &BodyEditorPresentation::default(),
         )
@@ -1098,6 +1414,7 @@ impl ScreenplayLayout {
         composition: LayoutComposition,
         mut diagnostics: Option<&mut LayoutBuildDiagnostics>,
         mut wrap_cache: Option<&mut ElementWrapCache>,
+        mut prepared_body_cache: Option<&mut PreparedBodyCache>,
         validated_session: bool,
         body_presentation: &BodyEditorPresentation,
     ) -> Result<Self, LayoutError> {
@@ -1225,7 +1542,7 @@ impl ScreenplayLayout {
                 }
                 for line in lines {
                     let line_advance = line.paragraph.line_advance.raw();
-                    let laid_out = output.make_line(&page, line, true, page.next_line_y);
+                    let laid_out = output.make_line(page.number, line, true, page.next_line_y);
                     page.lines.push(laid_out);
                     page.occupied_lines = page.occupied_lines.saturating_add(1);
                     page.next_line_y =
@@ -1287,6 +1604,9 @@ impl ScreenplayLayout {
                     source_settings,
                     project.legacy_json_state.is_some(),
                     purpose,
+                    composition,
+                    &output,
+                    &mut prepared_body_cache,
                     &mut wrap_cache,
                     &mut diagnostics,
                 );
@@ -1298,6 +1618,9 @@ impl ScreenplayLayout {
                     source_settings,
                     project.legacy_json_state.is_some(),
                     purpose,
+                    composition,
+                    &output,
+                    &mut prepared_body_cache,
                     &mut wrap_cache,
                     &mut diagnostics,
                 );
@@ -1320,8 +1643,10 @@ impl ScreenplayLayout {
                             .iter()
                             .find_map(|paragraph| {
                                 paragraph
+                                    .prepared
+                                    .lines
                                     .first()
-                                    .map(|line| line.paragraph.space_before.raw())
+                                    .map(|_| paragraph.prepared.paragraph.space_before.raw())
                             })
                             .unwrap_or_default()
                     };
@@ -1367,22 +1692,23 @@ impl ScreenplayLayout {
                 project.legacy_json_state.is_some(),
                 &text_style,
             );
-            let lines = wrap_for_layout(
+            let environment = PreparedBodyEnvironment {
+                purpose,
+                composition,
+                geometry_mode: EffectiveGeometryMode::Sequential,
+                paragraph,
+                text_style,
+                char_width: paragraph.char_width,
+            };
+            let prepared = prepare_body_for_layout(
+                prepared_body_cache.as_deref_mut(),
                 wrap_cache.as_deref_mut(),
                 diagnostics.as_deref_mut(),
-                &element.id,
-                element.text.as_str(),
-                index,
-                element.role,
-                paragraph,
-                text_style.clone(),
-                    &element.runs,
-                    paragraph.char_width,
-                    purpose,
-                false,
-                EffectiveGeometryMode::Sequential,
+                &output,
+                element,
+                environment,
             );
-            output.place_element(lines, element.role, paragraph);
+            output.place_element(prepared, index, element.role, paragraph);
             index = index.saturating_add(1);
         }
         if output.pages.is_empty() {
@@ -1806,7 +2132,7 @@ impl ScreenplayLayout {
 
     fn make_line(
         &self,
-        page: &LayoutPage,
+        page_number: usize,
         line: WrappedLine,
         title_page: bool,
         y: FixedPoint,
@@ -1899,7 +2225,7 @@ impl ScreenplayLayout {
             }
         }
         LayoutLine {
-            page: page.number,
+            page: page_number,
             role: line.role,
             element: line.element,
             source: SourceRange {
@@ -1925,24 +2251,22 @@ impl ScreenplayLayout {
 
     fn place_dual_side(
         &self,
-        page: &LayoutPage,
+        page_number: usize,
         side: &WrappedDualSide,
         block_top: FixedPoint,
     ) -> Vec<LayoutLine> {
         let mut y = block_top;
         let mut placed = Vec::with_capacity(side.line_count);
-        for (paragraph_index, paragraph_lines) in side.paragraphs.iter().enumerate() {
-            if paragraph_index > 0 {
-                if let Some(first_line) = paragraph_lines.first() {
-                    y = FixedPoint::from_raw(
-                        y.raw()
-                            .saturating_add(first_line.paragraph.space_before.raw().max(0)),
-                    );
-                }
+        for (paragraph_index, paragraph) in side.paragraphs.iter().enumerate() {
+            if paragraph_index > 0 && !paragraph.prepared.lines.is_empty() {
+                y = FixedPoint::from_raw(
+                    y.raw()
+                        .saturating_add(paragraph.prepared.paragraph.space_before.raw().max(0)),
+                );
             }
-            for wrapped in paragraph_lines {
-                let advance = wrapped.paragraph.line_advance;
-                let mut line = self.make_line(page, wrapped.clone(), false, y);
+            for wrapped in paragraph.prepared.lines.iter() {
+                let advance = paragraph.prepared.paragraph.line_advance;
+                let mut line = rebase_prepared_line(wrapped, paragraph.element, page_number, y);
                 line.keep_with_next = false;
                 placed.push(line);
                 y = FixedPoint::from_raw(y.raw().saturating_add(advance.raw()));
@@ -2028,9 +2352,9 @@ impl ScreenplayLayout {
                 .raw()
                 .saturating_add(applied_gap),
         );
-        let page = self.pages[page_index].clone();
-        let left_lines = self.place_dual_side(&page, left, block_top);
-        let right_lines = self.place_dual_side(&page, right, block_top);
+        let page_number = self.pages[page_index].number;
+        let left_lines = self.place_dual_side(page_number, left, block_top);
+        let right_lines = self.place_dual_side(page_number, right, block_top);
         self.pages[page_index].lines.extend(left_lines);
         self.pages[page_index].lines.extend(right_lines);
         self.pages[page_index].occupied_lines = self.pages[page_index]
@@ -2080,10 +2404,14 @@ impl ScreenplayLayout {
         for placements in [&left_placements, &right_placements] {
             for placement in &placements.lines {
                 let page_index = start_page.saturating_add(placement.page_offset);
-                let page = self.pages[page_index].clone();
-                let mut wrapped = placement.line.clone();
-                wrapped.oversized = true;
-                let mut line = self.make_line(&page, wrapped, false, placement.y);
+                let page_number = self.pages[page_index].number;
+                let mut line = rebase_prepared_line(
+                    &placement.line,
+                    placement.element,
+                    page_number,
+                    placement.y,
+                );
+                line.oversized = true;
                 line.keep_with_next = false;
                 self.pages[page_index].lines.push(line);
             }
@@ -2099,10 +2427,12 @@ impl ScreenplayLayout {
 
     fn place_element(
         &mut self,
-        lines: Vec<WrappedLine>,
+        prepared: Arc<PreparedBodyParagraph>,
+        element: usize,
         role: Role,
         paragraph: EffectiveParagraph,
     ) {
+        let lines = &prepared.lines;
         let keep = keep_with_next(role);
         let minimum = if keep { 2 } else { 1 };
         if self.pages.is_empty() {
@@ -2159,7 +2489,7 @@ impl ScreenplayLayout {
         let content_height =
             content_bottom.raw() - FixedPoint::from_points(i64::from(self.inputs.margin_top)).raw();
         let oversized_element = lines.len() > capacity || total_height > content_height;
-        for wrapped in lines {
+        for wrapped in lines.iter() {
             let current_fits = self.pages.last().is_some_and(|page| {
                 (page.occupied_lines as usize) < capacity
                     && (page.lines.is_empty()
@@ -2176,10 +2506,10 @@ impl ScreenplayLayout {
             if self.pages[page_index].lines.is_empty() {
                 self.pages[page_index].occupied_lines = 0;
             }
-            let page = self.pages[page_index].clone();
-            let mut wrapped = wrapped;
-            wrapped.oversized |= oversized_element;
-            let line = self.make_line(&page, wrapped, false, page.next_line_y);
+            let page_number = self.pages[page_index].number;
+            let next_line_y = self.pages[page_index].next_line_y;
+            let mut line = rebase_prepared_line(wrapped, element, page_number, next_line_y);
+            line.oversized |= oversized_element;
             self.pages[page_index].lines.push(line);
             self.pages[page_index].occupied_lines =
                 self.pages[page_index].occupied_lines.saturating_add(1);
@@ -2191,6 +2521,27 @@ impl ScreenplayLayout {
             );
         }
     }
+}
+
+fn rebase_prepared_line(
+    prepared: &LayoutLine,
+    element: usize,
+    page: usize,
+    y: FixedPoint,
+) -> LayoutLine {
+    let mut line = prepared.clone();
+    let vertical_delta = y.raw().saturating_sub(prepared.paragraph_bounds.y.raw());
+    line.page = page;
+    line.element = element;
+    line.source.element = element;
+    line.geometry.y = FixedPoint::from_raw(prepared.geometry.y.raw().saturating_add(vertical_delta));
+    line.paragraph_bounds.y = y;
+    line.rect = compat_rect(line.paragraph_bounds);
+    for span in Arc::make_mut(&mut line.spans) {
+        span.source.element = element;
+        span.geometry.y = FixedPoint::from_raw(span.geometry.y.raw().saturating_add(vertical_delta));
+    }
+    line
 }
 
 fn display_char_for_x(line: &LayoutLine, x: FixedPoint) -> usize {
@@ -2433,14 +2784,20 @@ struct EffectiveParagraph {
     char_width: FixedPoint,
 }
 
+struct PreparedDualParagraph {
+    element: usize,
+    prepared: Arc<PreparedBodyParagraph>,
+}
+
 struct WrappedDualSide {
-    paragraphs: Vec<Vec<WrappedLine>>,
+    paragraphs: Vec<PreparedDualParagraph>,
     height: FixedPoint,
     line_count: usize,
 }
 
 struct SpilledDualLine {
-    line: WrappedLine,
+    element: usize,
+    line: LayoutLine,
     page_offset: usize,
     y: FixedPoint,
 }
@@ -2467,13 +2824,13 @@ fn spill_side_lines(
     let mut page_offset = 0usize;
     let mut y = page_top;
 
-    for (paragraph_index, paragraph_lines) in side.paragraphs.iter().enumerate() {
+    for (paragraph_index, paragraph) in side.paragraphs.iter().enumerate() {
         let mut gap_pending = paragraph_index > 0;
-        for wrapped in paragraph_lines {
-            let advance = wrapped.paragraph.line_advance.raw().max(0);
+        for wrapped in paragraph.prepared.lines.iter() {
+            let advance = paragraph.prepared.paragraph.line_advance.raw().max(0);
             let current_count = result.lines_per_page[page_offset];
             let gap = if gap_pending && current_count > 0 {
-                wrapped.paragraph.space_before.raw().max(0)
+                paragraph.prepared.paragraph.space_before.raw().max(0)
             } else {
                 0
             };
@@ -2494,13 +2851,14 @@ fn spill_side_lines(
 
             let count = result.lines_per_page[page_offset];
             let line_gap = if gap_pending && count > 0 {
-                wrapped.paragraph.space_before.raw().max(0)
+                paragraph.prepared.paragraph.space_before.raw().max(0)
             } else {
                 0
             };
             let line_y = FixedPoint::from_raw(y.raw().saturating_add(line_gap));
             let line_bottom = line_y.raw().saturating_add(advance);
             result.lines.push(SpilledDualLine {
+                element: paragraph.element,
                 line: wrapped.clone(),
                 page_offset,
                 y: line_y,
@@ -2618,6 +2976,9 @@ fn wrap_dual_side(
     source: &SourceLayoutSettings,
     legacy_json_profile: bool,
     purpose: LayoutPurpose,
+    composition: LayoutComposition,
+    layout: &ScreenplayLayout,
+    prepared_cache: &mut Option<&mut PreparedBodyCache>,
     cache: &mut Option<&mut ElementWrapCache>,
     diagnostics: &mut Option<&mut LayoutBuildDiagnostics>,
 ) -> WrappedDualSide {
@@ -2651,20 +3012,21 @@ fn wrap_dual_side(
         if element.role == Role::Character {
             paragraph.alignment = ParagraphAlignment::Center;
         }
-        let lines = wrap_for_layout(
-            cache.as_deref_mut(),
-            diagnostics.as_deref_mut(),
-            &element.id,
-            &element.text,
-            index,
-            element.role,
+        let environment = PreparedBodyEnvironment {
+            purpose,
+            composition,
+            geometry_mode: EffectiveGeometryMode::DualColumn,
             paragraph,
             text_style,
-            &element.runs,
-            paragraph.char_width,
-            purpose,
-            false,
-            EffectiveGeometryMode::DualColumn,
+            char_width: paragraph.char_width,
+        };
+        let prepared = prepare_body_for_layout(
+            prepared_cache.as_deref_mut(),
+            cache.as_deref_mut(),
+            diagnostics.as_deref_mut(),
+            layout,
+            element,
+            environment,
         );
         if !paragraphs.is_empty() {
             height = height.saturating_add(paragraph.space_before.raw().max(0));
@@ -2673,10 +3035,13 @@ fn wrap_dual_side(
             paragraph
                 .line_advance
                 .raw()
-                .saturating_mul(lines.len().min(i64::MAX as usize) as i64),
+                .saturating_mul(prepared.lines.len().min(i64::MAX as usize) as i64),
         );
-        line_count = line_count.saturating_add(lines.len());
-        paragraphs.push(lines);
+        line_count = line_count.saturating_add(prepared.lines.len());
+        paragraphs.push(PreparedDualParagraph {
+            element: index,
+            prepared,
+        });
     }
     WrappedDualSide {
         paragraphs,
@@ -2844,6 +3209,51 @@ fn is_boundary_in_line(line: &LayoutLine, offset: usize) -> bool {
         return true;
     }
     line.text.is_char_boundary(offset - line.source.start)
+}
+
+fn prepare_body_for_layout(
+    mut prepared_cache: Option<&mut PreparedBodyCache>,
+    wrap_cache: Option<&mut ElementWrapCache>,
+    diagnostics: Option<&mut LayoutBuildDiagnostics>,
+    layout: &ScreenplayLayout,
+    owner: &Arc<BodyOwner>,
+    environment: PreparedBodyEnvironment,
+) -> Arc<PreparedBodyParagraph> {
+    if let Some(cache) = prepared_cache.as_deref_mut() {
+        if let Some(prepared) = cache.lookup(owner, &environment) {
+            return prepared;
+        }
+    }
+
+    let element = owner.as_element();
+    let paragraph = environment.paragraph;
+    let lines = wrap_for_layout(
+        wrap_cache,
+        diagnostics,
+        &element.id,
+        &element.text,
+        0,
+        element.role,
+        paragraph,
+        environment.text_style.clone(),
+        &element.runs,
+        environment.char_width,
+        environment.purpose,
+        false,
+        environment.geometry_mode,
+    );
+    let prepared = Arc::new(PreparedBodyParagraph {
+        paragraph,
+        lines: lines
+            .into_iter()
+            .map(|line| layout.make_line(0, line, false, FixedPoint::default()))
+            .collect::<Vec<_>>()
+            .into(),
+    });
+    if let Some(cache) = prepared_cache {
+        cache.insert(owner, environment, Arc::clone(&prepared));
+    }
+    prepared
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3378,7 +3788,9 @@ mod session_layout_cache_tests {
         assert!(Arc::ptr_eq(&first_layout, &cached_layout));
         assert_eq!(diagnostics.semantic_signature_constructions, 1);
 
-        project.elements[0].text.push_str("changed without a revision");
+        crate::BodyOwner::update(&mut project.elements[0], |element| {
+            element.text.push_str("changed without a revision");
+        });
         let (mutated_layout, mutated_hit) = cache
             .get_or_build_with_inputs_for_purpose_and_diagnostics(
                 0,
@@ -3403,7 +3815,10 @@ mod wrap_run_preparation_tests {
         LayoutPurpose, ScreenplayLayout, SourceRange, WrappedLine,
     };
     use crate::formatting::{EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment};
-    use crate::{Project, Role, RunAttribute, SourceLayoutSettings, StableId, TextRun};
+    use crate::{
+        Project, Role, RunAttribute, SourceLayoutSettings, SourceParagraphOverrides,
+        SourceParagraphSpec, StableId, TextRun,
+    };
     use std::sync::Arc;
 
     #[test]
@@ -3412,39 +3827,55 @@ mod wrap_run_preparation_tests {
         let expanded = "ß styled ".repeat(8);
         let decorated = "tail ".repeat(8);
         let mut project = Project::new().expect("default project is valid");
-        project.elements[0].text = format!("{plain}{expanded}{decorated}");
-        project.elements[0].runs = vec![
-            TextRun {
-                text: plain,
-                attributes: Vec::new(),
-            },
-            TextRun {
-                text: expanded,
-                attributes: vec![
-                    RunAttribute {
+        crate::BodyOwner::update(&mut project.elements[0], |element| {
+            element.text = format!("{plain}{expanded}{decorated}");
+            element.runs = vec![
+                TextRun {
+                    text: plain,
+                    attributes: Vec::new(),
+                },
+                TextRun {
+                    text: expanded,
+                    attributes: vec![
+                        RunAttribute {
+                            name: "Style".into(),
+                            value: "Bold+AllCaps".into(),
+                        },
+                        RunAttribute {
+                            name: "Size".into(),
+                            value: "18".into(),
+                        },
+                        RunAttribute {
+                            name: "Font".into(),
+                            value: "Courier Final Draft".into(),
+                        },
+                    ],
+                },
+                TextRun {
+                    text: decorated,
+                    attributes: vec![RunAttribute {
                         name: "Style".into(),
-                        value: "Bold+AllCaps".into(),
-                    },
-                    RunAttribute {
-                        name: "Size".into(),
-                        value: "18".into(),
-                    },
-                ],
+                        value: "Italic+Underline+Strikethrough".into(),
+                    }],
+                },
+            ];
+        });
+        project.direct_paragraph_overrides.insert(
+            project.elements[0].id.clone(),
+            SourceParagraphOverrides {
+                paragraph: SourceParagraphSpec {
+                    alignment: Some(ParagraphAlignment::Justified),
+                    ..SourceParagraphSpec::default()
+                },
+                starts_new_page: None,
             },
-            TextRun {
-                text: decorated,
-                attributes: vec![RunAttribute {
-                    name: "Style".into(),
-                    value: "Italic+Underline+Strikethrough".into(),
-                }],
-            },
-        ];
+        );
         let inputs = project.session_layout_inputs();
-        let fresh = ScreenplayLayout::build_with_composition(
+        let fresh = ScreenplayLayout::build_with_body_presentation(
             &project,
             &inputs,
             &SourceLayoutSettings::default(),
-            LayoutComposition::BodyEditor,
+            &super::BodyEditorPresentation::default(),
         )
         .expect("fresh styled layout builds");
         let lines = fresh
@@ -3456,7 +3887,10 @@ mod wrap_run_preparation_tests {
         assert!(lines.len() > 1, "the fixture exercises wrapped lines");
         assert!(lines.iter().any(|line| line.display_text.contains("SS")));
         assert!(lines.iter().flat_map(|line| line.spans.iter()).any(|span| {
-            span.text_style.bold && span.text_style.all_caps && span.text_style.size == 18
+            span.text_style.bold
+                && span.text_style.all_caps
+                && span.text_style.size == 18
+                && span.text_style.declared_family == "Courier Final Draft"
         }));
         assert!(lines.iter().flat_map(|line| line.spans.iter()).any(|span| {
             span.text_style.italic && span.underline && span.strikethrough
@@ -3485,11 +3919,24 @@ mod wrap_run_preparation_tests {
                 LayoutPurpose::Editor,
                 &mut diagnostics,
             )
-            .expect("revision rebuild reuses the element wrap");
+            .expect("revision rebuild reuses the complete prepared Body paragraph");
         assert!(!reused_hit);
         assert_eq!(diagnostics.element_wraps_built, 0);
-        assert_eq!(diagnostics.element_wraps_reused, 1);
+        assert_eq!(diagnostics.element_wraps_reused, 0);
         assert_eq!(&fresh, reused.as_ref());
+
+        let (complete_cached, complete_cached_hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                1,
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("same-revision complete layout is reused");
+        assert!(complete_cached_hit);
+        assert!(Arc::ptr_eq(&reused, &complete_cached));
+        assert_eq!(&fresh, complete_cached.as_ref());
     }
 
     #[test]
@@ -3708,6 +4155,239 @@ mod wrap_run_preparation_tests {
 }
 
 #[cfg(test)]
+mod wrap_cache_identity_tests {
+    use super::{
+        EffectiveGeometryMode, EffectiveParagraph, ElementWrapCache, ElementWrapIdentity,
+        LayoutBuildDiagnostics, LayoutPurpose, WrappedLine,
+    };
+    use crate::formatting::{EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment};
+    use crate::{Role, RunAttribute, StableId, TextRun};
+    use std::{ops::Range, sync::Arc};
+
+    struct IdentityFixture {
+        element_id: StableId,
+        paragraph: EffectiveParagraph,
+        text_style: EffectiveTextStyle,
+        char_width: FixedPoint,
+    }
+
+    impl IdentityFixture {
+        fn new() -> Self {
+            let char_width = FixedPoint::from_points(7);
+            Self {
+                element_id: StableId::new("wrap-identity").expect("stable ID is valid"),
+                paragraph: EffectiveParagraph {
+                    left: FixedPoint::default(),
+                    right: FixedPoint::from_points(100),
+                    first_indent: FixedPoint::default(),
+                    alignment: ParagraphAlignment::Left,
+                    space_before: FixedPoint::default(),
+                    line_advance: FixedPoint::from_points(12),
+                    char_width,
+                },
+                text_style: EffectiveTextStyle {
+                    declared_family: "Courier Prime".into(),
+                    family: FontFallback::CourierPrime,
+                    size: 12,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    all_caps: false,
+                    hidden_text: false,
+                    source_color: None,
+                },
+                char_width,
+            }
+        }
+
+        fn identity<'a>(
+            &'a self,
+            runs: &'a [TextRun],
+            atomic_ranges: &'a [Range<usize>],
+        ) -> ElementWrapIdentity<'a> {
+            ElementWrapIdentity {
+                element_id: &self.element_id,
+                role: Role::Action,
+                purpose: LayoutPurpose::Editor,
+                title_page: false,
+                geometry_mode: EffectiveGeometryMode::Sequential,
+                paragraph: self.paragraph,
+                text_style: &self.text_style,
+                char_width: self.char_width,
+                runs,
+                atomic_ranges,
+            }
+        }
+
+        fn wrap(
+            &self,
+            cache: &mut ElementWrapCache,
+            text: &str,
+            runs: &[TextRun],
+            atomic_ranges: &[Range<usize>],
+            diagnostics: Option<&mut LayoutBuildDiagnostics>,
+        ) -> Vec<WrappedLine> {
+            cache.wrap(
+                &self.element_id,
+                text,
+                0,
+                Role::Action,
+                self.paragraph,
+                self.text_style.clone(),
+                self.char_width,
+                runs,
+                atomic_ranges,
+                LayoutPurpose::Editor,
+                false,
+                EffectiveGeometryMode::Sequential,
+                diagnostics,
+            )
+        }
+    }
+
+    fn force_collision_and_poison_cached_lines(
+        cache: &mut ElementWrapCache,
+        text: &str,
+        candidate: ElementWrapIdentity<'_>,
+    ) -> u64 {
+        let candidate_fingerprint = cache.fingerprint(&candidate, text);
+        let previous_fingerprint = *cache.buckets.keys().next().expect("one cached entry exists");
+        if previous_fingerprint != candidate_fingerprint {
+            let entries = cache
+                .buckets
+                .remove(&previous_fingerprint)
+                .expect("the previous bucket exists");
+            for entry in &entries {
+                assert!(cache.usage_order.remove(&(
+                    entry.last_used_generation,
+                    entry.insertion_order,
+                    previous_fingerprint,
+                )));
+                assert!(cache.usage_order.insert((
+                    entry.last_used_generation,
+                    entry.insertion_order,
+                    candidate_fingerprint,
+                )));
+            }
+            cache
+                .buckets
+                .entry(candidate_fingerprint)
+                .or_default()
+                .extend(entries);
+        }
+        for entry in cache
+            .buckets
+            .get_mut(&candidate_fingerprint)
+            .expect("the collision bucket exists")
+        {
+            entry.lines = Arc::from([]);
+        }
+        candidate_fingerprint
+    }
+
+    #[test]
+    fn colliding_run_structures_require_exact_runs_and_fresh_lines() {
+        let fixture = IdentityFixture::new();
+        let first_runs = vec![TextRun {
+            text: "ab".into(),
+            attributes: vec![RunAttribute {
+                name: "Style".into(),
+                value: "Bold".into(),
+            }],
+        }];
+        let second_runs = vec![
+            TextRun {
+                text: "a".into(),
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Bold".into(),
+                }],
+            },
+            TextRun {
+                text: "b".into(),
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Italic".into(),
+                }],
+            },
+        ];
+        let mut cache = ElementWrapCache::default();
+        cache.start_generation();
+        let _ = fixture.wrap(&mut cache, "ab", &first_runs, &[], None);
+        let fingerprint = force_collision_and_poison_cached_lines(
+            &mut cache,
+            "ab",
+            fixture.identity(&second_runs, &[]),
+        );
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+
+        let lines = fixture.wrap(
+            &mut cache,
+            "ab",
+            &second_runs,
+            &[],
+            Some(&mut diagnostics),
+        );
+
+        assert_eq!(diagnostics.element_wraps_built, 1);
+        assert_eq!(diagnostics.element_wrap_misses, 1);
+        assert_eq!(diagnostics.element_wraps_reused, 0);
+        assert_eq!(lines.len(), 1, "poisoned collision lines were not reused");
+        assert_eq!(lines[0].display_text.as_ref(), "ab");
+        let bucket = &cache.buckets[&fingerprint];
+        assert_eq!(bucket.len(), 2);
+        assert!(bucket
+            .iter()
+            .any(|entry| entry.context.runs.as_ref() == first_runs.as_slice()));
+        assert!(bucket
+            .iter()
+            .any(|entry| entry.context.runs.as_ref() == second_runs.as_slice()));
+    }
+
+    #[test]
+    fn colliding_atomic_ranges_require_exact_ranges_and_fresh_lines() {
+        let fixture = IdentityFixture::new();
+        let runs = vec![TextRun {
+            text: "ab cd".into(),
+            attributes: Vec::new(),
+        }];
+        let first_ranges = vec![0..1];
+        let second_ranges = vec![1..4];
+        let mut cache = ElementWrapCache::default();
+        cache.start_generation();
+        let _ = fixture.wrap(&mut cache, "ab cd", &runs, &first_ranges, None);
+        let fingerprint = force_collision_and_poison_cached_lines(
+            &mut cache,
+            "ab cd",
+            fixture.identity(&runs, &second_ranges),
+        );
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+
+        let lines = fixture.wrap(
+            &mut cache,
+            "ab cd",
+            &runs,
+            &second_ranges,
+            Some(&mut diagnostics),
+        );
+
+        assert_eq!(diagnostics.element_wraps_built, 1);
+        assert_eq!(diagnostics.element_wrap_misses, 1);
+        assert_eq!(diagnostics.element_wraps_reused, 0);
+        assert_eq!(lines.len(), 1, "poisoned collision lines were not reused");
+        assert_eq!(lines[0].display_text.as_ref(), "ab cd");
+        let bucket = &cache.buckets[&fingerprint];
+        assert_eq!(bucket.len(), 2);
+        assert!(bucket.iter().any(|entry| {
+            entry.context.atomic_ranges.as_ref() == first_ranges.as_slice()
+        }));
+        assert!(bucket.iter().any(|entry| {
+            entry.context.atomic_ranges.as_ref() == second_ranges.as_slice()
+        }));
+    }
+}
+
+#[cfg(test)]
 mod wrap_cache_eviction_tests {
     use super::{
         ElementWrapCache, ElementWrapEntry, EffectiveGeometryMode, EffectiveParagraph,
@@ -3835,5 +4515,723 @@ mod wrap_cache_eviction_tests {
             .flatten()
             .all(|entry| entry.last_used_generation == 0));
         assert!(cache.usage_order.iter().all(|key| key.0 == 0));
+    }
+}
+
+#[cfg(test)]
+mod prepared_body_cache_tests {
+    use super::{
+        BodyEditorPresentation, Caret, EffectiveGeometryMode, LayoutBuildDiagnostics, LayoutCache,
+        LayoutComposition, PreparedBodyCache, PreparedBodyEntry, PreparedBodyParagraph,
+        ScreenplayLayout, MAX_CACHED_PREPARED_BODY_PARAGRAPHS,
+    };
+    use crate::dual_dialogue::{
+        DualDialogueGroup, DualDialogueSide, DualDialogueWrapperProvenance,
+    };
+    use crate::editing::{EditingSession, Position, Selection};
+    use crate::{
+        BodyOwner, FixedPoint, LayoutInputs, ParagraphAlignment, Project, Role,
+        RunAttribute, ScreenplayElement, SourceLayoutSettings, SourceParagraphOverrides,
+        SourceParagraphSpec, StableId, TextRun,
+    };
+    use std::sync::Arc;
+
+    fn project_with(texts: &[&str]) -> Project {
+        let mut project = Project::new().expect("default project is valid");
+        project.elements = texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                BodyOwner::shared(
+                    ScreenplayElement::new(format!("prepared-{index}"), Role::Action, *text)
+                        .expect("Body element is valid"),
+                )
+            })
+            .collect();
+        project
+    }
+
+    fn compact_inputs() -> LayoutInputs {
+        LayoutInputs {
+            paper_height: 52,
+            margin_top: 8,
+            margin_bottom: 8,
+            lines_per_page: 3,
+            ..LayoutInputs::default()
+        }
+    }
+
+    fn cached_prepared(
+        cache: &LayoutCache,
+        owner: &Arc<BodyOwner>,
+        geometry_mode: EffectiveGeometryMode,
+    ) -> Arc<PreparedBodyParagraph> {
+        cache
+            .prepared_body
+            .buckets
+            .values()
+            .flatten()
+            .find(|entry| {
+                Arc::ptr_eq(&entry.owner, owner)
+                    && entry.owner_revision == owner.revision()
+                    && entry.environment.geometry_mode == geometry_mode
+            })
+            .map(|entry| Arc::clone(&entry.prepared))
+            .expect("the requested prepared owner is retained")
+    }
+
+    fn assert_interaction_equal(fresh: &ScreenplayLayout, cached: &ScreenplayLayout) {
+        assert_eq!(fresh, cached);
+        for line in fresh.pages.iter().flat_map(|page| &page.lines) {
+            let caret = Caret {
+                element: line.element,
+                offset: line.source.start,
+            };
+            assert_eq!(
+                fresh.caret_geometry(caret.clone()),
+                cached.caret_geometry(caret.clone())
+            );
+            assert_eq!(
+                fresh.page_for_position_with_diagnostics(
+                    caret.element,
+                    caret.offset,
+                    &mut super::InteractionQueryDiagnostics::default(),
+                ),
+                cached.page_for_position_with_diagnostics(
+                    caret.element,
+                    caret.offset,
+                    &mut super::InteractionQueryDiagnostics::default(),
+                )
+            );
+            assert_eq!(
+                fresh.hit_test_fixed(line.page, line.geometry.x, line.geometry.y),
+                cached.hit_test_fixed(line.page, line.geometry.x, line.geometry.y)
+            );
+        }
+    }
+
+    #[test]
+    fn unchanged_prepared_hits_skip_content_preparation_and_changed_owners_miss() {
+        let first = "first ".repeat(30);
+        let second = "second ".repeat(30);
+        let mut project = project_with(&[&first, &second]);
+        let inputs = compact_inputs();
+        let fresh = ScreenplayLayout::build_with_composition(
+            &project,
+            &inputs,
+            &SourceLayoutSettings::default(),
+            LayoutComposition::BodyEditor,
+        )
+        .expect("fresh multipage layout builds");
+        assert!(fresh.pages.len() > 1);
+        let mut cache = LayoutCache::default();
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+        let (initial, hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                0,
+                &project,
+                &inputs,
+                super::LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("initial prepared layout builds");
+        assert!(!hit);
+        assert_eq!(diagnostics.element_wraps_built, 2);
+        let first_prepared = cached_prepared(
+            &cache,
+            &project.elements[0],
+            EffectiveGeometryMode::Sequential,
+        );
+        let second_prepared = cached_prepared(
+            &cache,
+            &project.elements[1],
+            EffectiveGeometryMode::Sequential,
+        );
+
+        let (unchanged, hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                1,
+                &project,
+                &inputs,
+                super::LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("unchanged owners reuse prepared paragraphs");
+        assert!(!hit);
+        assert_eq!(diagnostics.element_wraps_built, 0);
+        assert_eq!(diagnostics.element_wraps_reused, 0);
+        assert!(Arc::ptr_eq(
+            &first_prepared,
+            &cached_prepared(
+                &cache,
+                &project.elements[0],
+                EffectiveGeometryMode::Sequential,
+            )
+        ));
+        assert!(Arc::ptr_eq(
+            &second_prepared,
+            &cached_prepared(
+                &cache,
+                &project.elements[1],
+                EffectiveGeometryMode::Sequential,
+            )
+        ));
+        assert_interaction_equal(&fresh, &unchanged);
+        assert_eq!(&initial, &unchanged);
+
+        let original_second = Arc::clone(&project.elements[1]);
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.text.push_str("changed");
+        });
+        let (changed, hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                2,
+                &project,
+                &inputs,
+                super::LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("only the changed owner prepares again");
+        assert!(!hit);
+        assert_eq!(diagnostics.element_wraps_built, 1);
+        assert_eq!(diagnostics.element_wraps_reused, 0);
+        assert!(!Arc::ptr_eq(
+            &first_prepared,
+            &cached_prepared(
+                &cache,
+                &project.elements[0],
+                EffectiveGeometryMode::Sequential,
+            )
+        ));
+        assert!(Arc::ptr_eq(&original_second, &project.elements[1]));
+        assert!(Arc::ptr_eq(
+            &second_prepared,
+            &cached_prepared(
+                &cache,
+                &project.elements[1],
+                EffectiveGeometryMode::Sequential,
+            )
+        ));
+        let changed_fresh = ScreenplayLayout::build_with_composition(
+            &project,
+            &inputs,
+            &SourceLayoutSettings::default(),
+            LayoutComposition::BodyEditor,
+        )
+        .expect("changed fresh layout builds");
+        assert_interaction_equal(&changed_fresh, &changed);
+
+        let styled_text = project.elements[0].text.clone();
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.runs = vec![TextRun {
+                text: styled_text,
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Bold+Underline".into(),
+                }],
+            }];
+        });
+        let (styled, _) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                3,
+                &project,
+                &inputs,
+                super::LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("run style invalidates only its changed owner");
+        assert_eq!(diagnostics.element_wraps_built, 1);
+        assert!(styled.pages.iter().flat_map(|page| &page.lines).any(|line| {
+            line.spans.iter().any(|span| span.text_style.bold && span.underline)
+        }));
+        let styled_fresh = ScreenplayLayout::build_with_composition(
+            &project,
+            &inputs,
+            &SourceLayoutSettings::default(),
+            LayoutComposition::BodyEditor,
+        )
+        .expect("fresh run-styled layout builds");
+        assert_interaction_equal(&styled_fresh, &styled);
+    }
+
+    #[test]
+    fn prepared_collision_candidates_require_complete_owner_semantics() {
+        let project = project_with(&["original collision text"]);
+        let inputs = LayoutInputs::default();
+        let mut cache = LayoutCache::default();
+        let _ = cache
+            .get_or_build_with_composition(
+                0,
+                &project,
+                &inputs,
+                LayoutComposition::BodyEditor,
+            )
+            .expect("initial prepared entry builds");
+        let mut changed_element = project.elements[0].as_element().clone();
+        changed_element.text = "different collision text".into();
+        let changed = BodyOwner::shared(changed_element);
+        let environment = cache
+            .prepared_body
+            .buckets
+            .values()
+            .flatten()
+            .next()
+            .map(|entry| entry.environment.clone())
+            .expect("one prepared environment exists");
+        let fingerprint = PreparedBodyCache::fingerprint(&changed, &environment);
+        let entries = cache
+            .prepared_body
+            .buckets
+            .drain()
+            .flat_map(|(_, entries)| entries)
+            .map(|mut entry| {
+                entry.owner_revision = changed.revision();
+                entry.prepared = Arc::new(PreparedBodyParagraph {
+                    paragraph: entry.environment.paragraph,
+                    lines: Arc::from([]),
+                });
+                entry
+            })
+            .collect::<Vec<_>>();
+        cache.prepared_body.usage_order.clear();
+        cache
+            .prepared_body
+            .buckets
+            .insert(fingerprint, entries);
+        for entry in cache.prepared_body.buckets.values().flatten() {
+            cache.prepared_body.usage_order.insert((
+                entry.last_used_generation,
+                entry.insertion_order,
+                fingerprint,
+            ));
+        }
+
+        assert!(cache.prepared_body.lookup(&changed, &environment).is_none());
+
+        let semantically_equal = BodyOwner::shared(project.elements[0].as_element().clone());
+        for entry in cache.prepared_body.buckets.values_mut().flatten() {
+            entry.owner_revision = semantically_equal.revision();
+        }
+        let equal_fingerprint = PreparedBodyCache::fingerprint(&semantically_equal, &environment);
+        let entries = cache
+            .prepared_body
+            .buckets
+            .remove(&fingerprint)
+            .expect("collision bucket exists");
+        cache
+            .prepared_body
+            .buckets
+            .insert(equal_fingerprint, entries);
+        cache.prepared_body.usage_order.clear();
+        for entry in cache.prepared_body.buckets.values().flatten() {
+            cache.prepared_body.usage_order.insert((
+                entry.last_used_generation,
+                entry.insertion_order,
+                equal_fingerprint,
+            ));
+        }
+        assert!(cache
+            .prepared_body
+            .lookup(&semantically_equal, &environment)
+            .is_some());
+    }
+
+    #[test]
+    fn prepared_retention_orders_eviction_accounts_bytes_and_pins_owner_allocations() {
+        let mut project = project_with(&["retained"]);
+        let weak = Arc::downgrade(&project.elements[0]);
+        let inputs = LayoutInputs::default();
+        let mut cache = LayoutCache::default();
+        let _ = cache
+            .get_or_build_with_composition(
+                0,
+                &project,
+                &inputs,
+                LayoutComposition::BodyEditor,
+            )
+            .expect("retained prepared entry builds");
+        let (owner, environment, prepared, first_order) = {
+            let entry = cache
+                .prepared_body
+                .buckets
+                .values()
+                .flatten()
+                .next()
+                .expect("one prepared entry exists");
+            (
+                Arc::clone(&entry.owner),
+                entry.environment.clone(),
+                Arc::clone(&entry.prepared),
+                entry.insertion_order,
+            )
+        };
+        cache.prepared_body.start_generation();
+        assert!(cache.prepared_body.lookup(&owner, &environment).is_some());
+        let first_fingerprint = PreparedBodyCache::fingerprint(&owner, &environment);
+        for order in 2..=(MAX_CACHED_PREPARED_BODY_PARAGRAPHS as u64).saturating_add(1) {
+            let mut fingerprint = order;
+            while cache.prepared_body.buckets.contains_key(&fingerprint) {
+                fingerprint = fingerprint.saturating_add(1_000);
+            }
+            cache.prepared_body.buckets.insert(
+                fingerprint,
+                vec![PreparedBodyEntry {
+                    owner: Arc::clone(&owner),
+                    owner_revision: owner.revision(),
+                    environment: environment.clone(),
+                    prepared: Arc::clone(&prepared),
+                    last_used_generation: 1,
+                    insertion_order: order,
+                    byte_cost: 1,
+                }],
+            );
+            cache.prepared_body.usage_order.insert((1, order, fingerprint));
+            cache.prepared_body.entry_count = cache.prepared_body.entry_count.saturating_add(1);
+            cache.prepared_body.retained_bytes = cache.prepared_body.retained_bytes.saturating_add(1);
+        }
+        let bytes_before = cache.prepared_body.retained_bytes;
+        cache.prepared_body.evict_if_needed();
+        assert_eq!(
+            cache.prepared_body.entry_count,
+            MAX_CACHED_PREPARED_BODY_PARAGRAPHS
+        );
+        assert_eq!(cache.prepared_body.retained_bytes, bytes_before - 1);
+        assert_eq!(
+            cache.prepared_body.usage_order.len(),
+            cache.prepared_body.entry_count
+        );
+        assert_eq!(
+            cache
+                .prepared_body
+                .buckets
+                .values()
+                .flatten()
+                .map(|entry| entry.byte_cost)
+                .sum::<usize>(),
+            cache.prepared_body.retained_bytes
+        );
+        assert!(cache.prepared_body.usage_order.contains(&(
+            2,
+            first_order,
+            first_fingerprint,
+        )));
+        assert!(!cache.prepared_body.usage_order.iter().any(|key| key.1 == 2));
+
+        project.elements.clear();
+        drop(project);
+        drop(owner);
+        assert!(weak.upgrade().is_some());
+        cache.prepared_body.clear();
+        assert!(weak.upgrade().is_none());
+        assert_eq!(cache.prepared_body.entry_count, 0);
+        assert_eq!(cache.prepared_body.retained_bytes, 0);
+        assert!(cache.prepared_body.usage_order.is_empty());
+    }
+
+    #[test]
+    fn prepared_environment_active_groups_and_structure_rekey_or_rebase_exactly() {
+        let mut project = project_with(&[
+            "before",
+            "LEFT",
+            &"left dialogue ".repeat(8),
+            "RIGHT",
+            &"right dialogue ".repeat(8),
+            "after",
+        ]);
+        let group = |range: std::ops::Range<usize>| DualDialogueSide {
+            character: project.elements[range.start].id.clone(),
+            paragraphs: project.elements[range.start + 1..range.end]
+                .iter()
+                .map(|element| element.id.clone())
+                .collect(),
+        };
+        project.dual_dialogue_groups.push(DualDialogueGroup {
+            id: StableId::new("prepared-group").expect("group ID is valid"),
+            left: group(1..3),
+            right: group(3..5),
+            wrapper: DualDialogueWrapperProvenance::default(),
+        });
+        let inputs = LayoutInputs::default();
+        let inactive_presentation = BodyEditorPresentation::for_project(&project, None);
+        let active_presentation = BodyEditorPresentation::for_project(
+            &project,
+            Some(project.dual_dialogue_groups[0].id.clone()),
+        );
+        let mut cache = LayoutCache::default();
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+        let (inactive, _) = cache
+            .get_or_build_body_editor_with_diagnostics(
+                0,
+                &project,
+                &inputs,
+                &inactive_presentation,
+                &mut diagnostics,
+            )
+            .expect("inactive dual layout builds");
+        let member = Arc::clone(&project.elements[2]);
+        let inactive_member = cached_prepared(
+            &cache,
+            &member,
+            EffectiveGeometryMode::DualColumn,
+        );
+        let (active, _) = cache
+            .get_or_build_body_editor_with_diagnostics(
+                1,
+                &project,
+                &inputs,
+                &active_presentation,
+                &mut diagnostics,
+            )
+            .expect("active dual layout builds");
+        assert_eq!(diagnostics.element_wraps_built, 4);
+        assert_ne!(inactive, active);
+        let active_fresh = ScreenplayLayout::build_with_body_presentation(
+            &project,
+            &inputs,
+            &SourceLayoutSettings::default(),
+            &active_presentation,
+        )
+        .expect("fresh active layout builds");
+        assert_interaction_equal(&active_fresh, &active);
+        let (inactive_again, _) = cache
+            .get_or_build_body_editor_with_diagnostics(
+                2,
+                &project,
+                &inputs,
+                &inactive_presentation,
+                &mut diagnostics,
+            )
+            .expect("inactive prepared entries remain reusable");
+        assert_eq!(diagnostics.element_wraps_built, 0);
+        assert_eq!(inactive_again, inactive);
+        assert!(Arc::ptr_eq(
+            &inactive_member,
+            &cached_prepared(&cache, &member, EffectiveGeometryMode::DualColumn)
+        ));
+
+        project.direct_paragraph_overrides.insert(
+            project.elements[0].id.clone(),
+            SourceParagraphOverrides {
+                paragraph: SourceParagraphSpec {
+                    alignment: Some(ParagraphAlignment::Justified),
+                    right_indent: Some(FixedPoint::from_points(400)),
+                    ..SourceParagraphSpec::default()
+                },
+                starts_new_page: None,
+            },
+        );
+        let (direct, _) = cache
+            .get_or_build_body_editor_with_diagnostics(
+                3,
+                &project,
+                &inputs,
+                &inactive_presentation,
+                &mut diagnostics,
+            )
+            .expect("direct geometry invalidates its owner");
+        assert_eq!(diagnostics.element_wraps_built, 1);
+        let direct_fresh = ScreenplayLayout::build_with_body_presentation(
+            &project,
+            &inputs,
+            &SourceLayoutSettings::default(),
+            &inactive_presentation,
+        )
+        .expect("fresh direct layout builds");
+        assert_interaction_equal(&direct_fresh, &direct);
+
+        project.elements.swap(0, 5);
+        let (reordered, _) = cache
+            .get_or_build_body_editor_with_diagnostics(
+                4,
+                &project,
+                &inputs,
+                &inactive_presentation,
+                &mut diagnostics,
+            )
+            .expect("reorder only rebases owner placement");
+        assert_eq!(diagnostics.element_wraps_built, 0);
+        assert_eq!(diagnostics.element_wraps_reused, 0);
+        let reordered_fresh = ScreenplayLayout::build_with_body_presentation(
+            &project,
+            &inputs,
+            &SourceLayoutSettings::default(),
+            &inactive_presentation,
+        )
+        .expect("fresh reordered layout builds");
+        assert_interaction_equal(&reordered_fresh, &reordered);
+        assert_eq!(
+            reordered
+                .pages
+                .iter()
+                .flat_map(|page| &page.lines)
+                .find(|line| line.display_text.contains("before"))
+                .map(|line| line.element),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn prepared_split_join_and_delete_follow_structural_owner_lifecycles() {
+        let project = project_with(&["split me", "middle", "last"]);
+        let mut session = EditingSession::new(project).expect("session opens");
+        let presentation = BodyEditorPresentation::for_project(session.project(), None);
+        let mut cache = LayoutCache::default();
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+        let _ = cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("initial structural layout builds");
+        session
+            .set_selection(Selection::caret(Position { element: 0, offset: 5 }))
+            .expect("split caret is valid");
+        session.split().expect("split publishes fresh identities");
+        let (split, _) = cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("split layout builds");
+        assert_eq!(diagnostics.element_wraps_built, 2);
+        let split_fresh = ScreenplayLayout::build_with_composition(
+            session.project(),
+            session.layout_inputs(),
+            &SourceLayoutSettings::default(),
+            LayoutComposition::BodyEditor,
+        )
+        .expect("fresh split layout builds");
+        assert_interaction_equal(&split_fresh, &split);
+
+        session
+            .set_selection(Selection::caret(Position { element: 0, offset: 5 }))
+            .expect("join caret is valid");
+        session.join_with_next().expect("join revises the survivor");
+        let (joined, _) = cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("join layout builds");
+        assert_eq!(diagnostics.element_wraps_built, 1);
+        let joined_fresh = ScreenplayLayout::build_with_composition(
+            session.project(),
+            session.layout_inputs(),
+            &SourceLayoutSettings::default(),
+            LayoutComposition::BodyEditor,
+        )
+        .expect("fresh join layout builds");
+        assert_interaction_equal(&joined_fresh, &joined);
+
+        session
+            .set_selection(Selection {
+                anchor: Position { element: 0, offset: 0 },
+                focus: Position { element: 1, offset: 0 },
+            })
+            .expect("structural deletion selection is valid");
+        session.delete().expect("delete retains surviving owners");
+        let (deleted, _) = cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("delete only rebases surviving prepared owners");
+        assert_eq!(diagnostics.element_wraps_built, 0);
+        assert_eq!(diagnostics.element_wraps_reused, 0);
+        let deleted_fresh = ScreenplayLayout::build_with_composition(
+            session.project(),
+            session.layout_inputs(),
+            &SourceLayoutSettings::default(),
+            LayoutComposition::BodyEditor,
+        )
+        .expect("fresh deleted layout builds");
+        assert_interaction_equal(&deleted_fresh, &deleted);
+    }
+
+    #[test]
+    fn prepared_undo_redo_and_replacement_restore_or_invalidate_owner_identity() {
+        let project = project_with(&["original", &"unchanged ".repeat(12)]);
+        let mut session = EditingSession::new(project).expect("session opens");
+        let presentation = BodyEditorPresentation::for_project(session.project(), None);
+        let mut cache = LayoutCache::default();
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+        let (initial, _) = cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("initial session layout builds");
+        let original_owner = Arc::clone(&session.project().elements[0]);
+        let original_prepared = cached_prepared(
+            &cache,
+            &original_owner,
+            EffectiveGeometryMode::Sequential,
+        );
+        session
+            .set_selection(Selection::caret(Position {
+                element: 0,
+                offset: session.project().elements[0].text.len(),
+            }))
+            .expect("caret is valid");
+        session.insert(" edited").expect("edit publishes");
+        let (edited, _) = cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("edited layout builds");
+        assert_eq!(diagnostics.element_wraps_built, 1);
+        session.undo().expect("undo restores the original owner");
+        assert!(Arc::ptr_eq(&original_owner, &session.project().elements[0]));
+        let (undone, _) = cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("undo reuses original prepared entries");
+        assert_eq!(diagnostics.element_wraps_built, 0);
+        assert_eq!(undone, initial);
+        assert!(Arc::ptr_eq(
+            &original_prepared,
+            &cached_prepared(
+                &cache,
+                &session.project().elements[0],
+                EffectiveGeometryMode::Sequential,
+            )
+        ));
+        session.redo().expect("redo restores the edited owner");
+        let (redone, _) = cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("redo reuses edited prepared entries");
+        assert_eq!(diagnostics.element_wraps_built, 0);
+        assert_eq!(redone, edited);
+
+        let replacement = project_with(&["replacement"]);
+        let (replacement_layout, _) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                session.revision().saturating_add(1),
+                &replacement,
+                &LayoutInputs::default(),
+                super::LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("replacement gets fresh owner identity");
+        assert_eq!(diagnostics.element_wraps_built, 1);
+        assert_eq!(replacement_layout.pages[0].lines[0].display_text.as_ref(), "replacement");
+        assert!(cache.prepared_body.buckets.values().flatten().all(|entry| {
+            entry.owner.id.as_str() == "prepared-0"
+                && entry.owner.text == "replacement"
+        }));
     }
 }

@@ -5,8 +5,9 @@ use crate::preservation::{
     ForeignIdDomain, ForeignIdentity, PreservationError, PreservationState, PreservedAttribute,
     PreservedElement, PreservedNode, SourceName, SourceOwnership,
 };
-use crate::{ModelError, Project, Role, ScreenplayElement, StableId};
+use crate::{BodyOwner, ModelError, Project, Role, StableId};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Debug, Default)]
 pub(crate) struct ReconcileOutcome {
@@ -337,7 +338,7 @@ fn generated_scene_properties_attributes(
 /// Projects canonical Character cues into normalized association keys and
 /// uppercase names for generated and imported scene metadata.
 pub(crate) fn derived_character_projection(
-    elements: &[ScreenplayElement],
+    elements: &[Arc<BodyOwner>],
 ) -> Vec<(String, String)> {
     let mut seen = BTreeSet::new();
     let mut projection = Vec::new();
@@ -359,7 +360,7 @@ type SceneProjection = (StableId, Vec<(String, String)>);
 type ActiveSceneProjection = (StableId, Vec<(String, String)>, BTreeSet<String>);
 
 fn scene_casts_with_scope(
-    elements: &[ScreenplayElement],
+    elements: &[Arc<BodyOwner>],
     requested_scenes: Option<&BTreeSet<String>>,
 ) -> Vec<SceneProjection> {
     let mut scenes = Vec::new();

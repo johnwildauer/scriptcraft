@@ -21,8 +21,8 @@ use crate::preservation::{
 pub use crate::text_state::TextState;
 use crate::text_state::{self};
 use crate::{
-    ModelError, PrintVisibility, Project, Role, RunAttribute, ScreenplayElement, SourceFormat,
-    SourceLayoutSettings, SourceProvenance, SourceSection, TextRun, TitlePageParagraph,
+    BodyOwner, ModelError, PrintVisibility, Project, Role, RunAttribute, ScreenplayElement,
+    SourceFormat, SourceLayoutSettings, SourceProvenance, SourceSection, TextRun, TitlePageParagraph,
 };
 use quick_xml::escape::unescape;
 use quick_xml::events::{BytesStart, Event};
@@ -957,7 +957,10 @@ fn identity_domain_summary(domain: &ForeignIdDomain) -> IdentityDomainSummary {
     }
 }
 
-fn same_semantic_elements(left: &[ScreenplayElement], right: &[ScreenplayElement]) -> bool {
+fn same_semantic_elements(
+    left: &[std::sync::Arc<BodyOwner>],
+    right: &[std::sync::Arc<BodyOwner>],
+) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
             left.role == right.role
@@ -2371,7 +2374,7 @@ fn reconcile_project_elements(
     let body = project
         .elements
         .iter()
-        .map(|element| (element.id.clone(), element))
+        .map(|element| (element.id.clone(), element.as_element()))
         .collect::<BTreeMap<_, _>>();
     let title = project
         .title_page
@@ -5192,7 +5195,7 @@ fn preserve_node(
             relation: crate::preservation::AnchorRelation::Represents,
         });
         match semantic {
-            ImportedSemanticParagraph::Body(body) => project.elements.push(body),
+            ImportedSemanticParagraph::Body(body) => project.elements.push(BodyOwner::shared(body)),
             ImportedSemanticParagraph::Title(title) => project.title_page.push(title),
         }
     }
@@ -5511,7 +5514,7 @@ fn preserve_dual_dialogue_wrapper(
         anchor: Some(wrapper_anchor),
         children: wrapper_children.into(),
     };
-    project.elements.extend(staged_members);
+    project.elements.extend(staged_members.into_iter().map(BodyOwner::shared));
     project.dual_dialogue_groups.push(group);
     for (id, overrides) in staged_member_overrides {
         source_layout_settings

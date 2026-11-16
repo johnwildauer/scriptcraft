@@ -2,7 +2,7 @@
 
 use scriptcraft_core::dual_dialogue::{self, DualDialogueGroup, DualDialogueSide, DualDialogueWrapperProvenance, SelectionSurface, ToggleTarget};
 use scriptcraft_core::editing::{Position, Selection};
-use scriptcraft_core::{ModelError, Project, Role, RunAttribute, ScreenplayElement, StableId, TextRun, TitlePageParagraph};
+use scriptcraft_core::{BodyOwner, ModelError, Project, Role, RunAttribute, ScreenplayElement, StableId, TextRun, TitlePageParagraph};
 use std::ops::Range;
 
 fn project_with_roles(roles: &[Role]) -> Project {
@@ -10,7 +10,7 @@ fn project_with_roles(roles: &[Role]) -> Project {
     project.elements = roles
         .iter()
         .enumerate()
-        .map(|(index, role)| ScreenplayElement::new(format!("p-{index}"), *role, "").expect("valid element"))
+        .map(|(index, role)| BodyOwner::shared(ScreenplayElement::new(format!("p-{index}"), *role, "").expect("valid element")))
         .collect();
     project
 }
@@ -91,28 +91,32 @@ fn title_page_template_and_import_model_constraints_are_bounded() {
     assert_eq!(oversized.err(), Some(ModelError::TextTooLong));
 
     let mut duplicate_id = project.clone();
-    duplicate_id.elements[0] = ScreenplayElement::new(
+    duplicate_id.elements[0] = BodyOwner::shared(ScreenplayElement::new(
         duplicate_id.title_page[0].id.as_str(),
         Role::SceneHeading,
         "",
     )
-    .expect("well-formed element with colliding identity");
+    .expect("well-formed element with colliding identity"));
     assert_eq!(duplicate_id.validate(), Err(ModelError::DuplicateId));
 }
 
 #[test]
 fn formatted_text_projection_and_attribute_limits_are_semantic_invariants() {
     let mut project = Project::new().expect("valid project");
-    project.elements[0].text = "café".into();
-    project.elements[0].runs = vec![TextRun {
-        text: "café".into(),
-        attributes: vec![RunAttribute {
-            name: "Style".into(),
-            value: "Bold+VendorToken".into(),
-        }],
-    }];
+    BodyOwner::update(&mut project.elements[0], |element| {
+        element.text = "café".into();
+        element.runs = vec![TextRun {
+            text: "café".into(),
+            attributes: vec![RunAttribute {
+                name: "Style".into(),
+                value: "Bold+VendorToken".into(),
+            }],
+        }];
+    });
     assert_eq!(project.validate(), Ok(()));
-    project.elements[0].runs[0].text = "cafe".into();
+    BodyOwner::update(&mut project.elements[0], |element| {
+        element.runs[0].text = "cafe".into();
+    });
     assert_eq!(project.validate(), Err(ModelError::InvalidRunProjection));
 }
 
