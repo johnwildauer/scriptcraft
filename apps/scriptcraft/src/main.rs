@@ -13,6 +13,7 @@ use scriptcraft_core::fdx_storage::{
 use scriptcraft_core::layout::{
     BodyEditorPresentation, LayoutCache, LayoutComposition, ScreenplayLayout,
 };
+use scriptcraft_core::preservation;
 use scriptcraft_core::persistence::{FileSystem, StdFileSystem};
 use scriptcraft_core::{Project, Role, StableId};
 use scriptcraft_commands::DiagnosticMessage;
@@ -24,6 +25,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 mod app_commands;
+mod editor_feedback;
 mod document_font;
 mod document_lifecycle;
 mod focus_mode;
@@ -1319,8 +1321,17 @@ impl PerformanceDiagnostics {
         };
         let totals = self.totals;
         let benchmark = self.benchmark_delta();
+        // Core diagnostics are process-global, unlike the app-owned benchmark
+        // counters above. Keep their labels explicit so they cannot be mistaken
+        // for per-operation deltas.
+        let edit_validation = scriptcraft_core::editing::edit_validation_diagnostics();
+        let managed_index = preservation::managed_paragraph_index_diagnostics();
+        let source_use = preservation::source_identity_use_index_diagnostics();
+        let reconciliation = preservation::preservation_reconciliation_diagnostics();
+        let copy_on_write = preservation::copy_on_write_diagnostics();
+        let project_validation = scriptcraft_core::project_validation_diagnostics();
         format!(
-            "profile={build_profile} operation={} frames={} events={} layouts={} cache-hits={} layout-identity-changes={} pages-considered={} pages-culled={} pages-painted={} lines={} selection-spans={} galleys-built={} galleys-reused={} wraps-built={} wraps-reused={} caret-lookups={} interaction-indexed={} interaction-linear={} interaction-index-entries={} derived-attempted={} derived-completed={} derived-skipped={} derived-irrelevant-skips={} derived-changed={} derived-unchanged={} derived-deferred={} derived-failed={} derived-scenes-requested={} derived-scenes-attempted={} derived-scenes-changed={} derived-scenes-unchanged={} derived-scenes-deferred={} derived-project-candidates={} derived-scene-candidates={} derived-redundant-preservation-clones={} zoom-anchor-capture-success={} zoom-anchor-capture-miss={} zoom-scroll-canceled={} zoom-compensation-queued={} zoom-geometry-published={} zoom-anchor-consumed={} frame-ns={} event-ns={} layout-lookup-ns={} element-wrap-ns={} page-paint-ns={} caret-lookup-ns={} derived-refresh-ns={} benchmark-frames={} benchmark-layouts={} benchmark-pages-painted={} benchmark-wraps-built={} benchmark-linear-queries={} benchmark-indexed-queries={} benchmark-index-entries={}",
+            "profile={build_profile} operation={} frames={} events={} layouts={} cache-hits={} layout-identity-changes={} pages-considered={} pages-culled={} pages-painted={} lines={} selection-spans={} galleys-built={} galleys-reused={} wraps-built={} wraps-reused={} caret-lookups={} interaction-indexed={} interaction-linear={} interaction-index-entries={} derived-attempted={} derived-completed={} derived-skipped={} derived-irrelevant-skips={} derived-changed={} derived-unchanged={} derived-deferred={} derived-failed={} derived-scenes-requested={} derived-scenes-attempted={} derived-scenes-changed={} derived-scenes-unchanged={} derived-scenes-deferred={} derived-project-candidates={} derived-scene-candidates={} derived-redundant-preservation-clones={} zoom-anchor-capture-success={} zoom-anchor-capture-miss={} zoom-scroll-canceled={} zoom-compensation-queued={} zoom-geometry-published={} zoom-anchor-consumed={} frame-ns={} event-ns={} layout-lookup-ns={} element-wrap-ns={} page-paint-ns={} caret-lookup-ns={} derived-refresh-ns={} benchmark-frames={} benchmark-layouts={} benchmark-pages-painted={} benchmark-wraps-built={} benchmark-linear-queries={} benchmark-indexed-queries={} benchmark-index-entries={} process-project-validations={} process-edit-scoped-attempts={} process-edit-scoped-accepts={} process-edit-full-validations={} process-edit-full-fallbacks={} process-managed-index-rebuilds={} process-managed-index-source-nodes={} process-managed-index-lookups={} process-managed-index-entry-examinations={} process-managed-index-fallback-node-examinations={} process-source-use-index-rebuilds={} process-source-use-index-source-nodes={} process-source-use-identity-queries={} process-source-use-reserved-id-queries={} process-body-survivors-visited={} process-body-unchanged-survivors-skipped={} process-body-owners-projected={} process-body-owners-removed={} process-body-owners-inserted={} process-title-survivors-visited={} process-title-unchanged-survivors-skipped={} process-title-owners-projected={} process-title-owners-removed={} process-title-owners-inserted={} process-source-text-byte-delta-updates={} process-cow-shared-vector-clones={} process-cow-detached-vectors={} process-cow-shared-text-payload-clones={} process-cow-detached-text-payloads={} process-cow-shared-source-byte-clones={} process-cow-detached-source-byte-payloads={} process-cow-shared-image-payload-clones={} process-cow-detached-image-payloads={}",
             self.benchmark_operation.label(),
             totals.frames,
             totals.events,
@@ -1375,7 +1386,40 @@ impl PerformanceDiagnostics {
             benchmark.element_wraps_built,
             benchmark.linear_interaction_queries,
             benchmark.indexed_interaction_queries,
-            benchmark.interaction_index_entries_examined
+            benchmark.interaction_index_entries_examined,
+            project_validation.complete_project_validations,
+            edit_validation.scoped_candidate_attempts,
+            edit_validation.scoped_candidate_accepts,
+            edit_validation.full_candidate_validations,
+            edit_validation.full_validation_fallbacks,
+            managed_index.rebuilds,
+            managed_index.source_nodes_indexed,
+            managed_index.lookups,
+            managed_index.indexed_entries_examined,
+            managed_index.fallback_tree_nodes_examined,
+            source_use.rebuilds,
+            source_use.source_nodes_indexed,
+            source_use.identity_queries,
+            source_use.reserved_id_queries,
+            reconciliation.body_survivors_visited,
+            reconciliation.body_unchanged_survivors_skipped,
+            reconciliation.body_owners_projected,
+            reconciliation.body_owners_removed,
+            reconciliation.body_owners_inserted,
+            reconciliation.title_survivors_visited,
+            reconciliation.title_unchanged_survivors_skipped,
+            reconciliation.title_owners_projected,
+            reconciliation.title_owners_removed,
+            reconciliation.title_owners_inserted,
+            reconciliation.source_text_byte_delta_updates,
+            copy_on_write.shared_vector_clones,
+            copy_on_write.detached_vectors,
+            copy_on_write.shared_text_payload_clones,
+            copy_on_write.detached_text_payloads,
+            copy_on_write.shared_source_byte_clones,
+            copy_on_write.detached_source_byte_payloads,
+            copy_on_write.shared_image_payload_clones,
+            copy_on_write.detached_image_payloads
         )
     }
 }
@@ -1542,7 +1586,7 @@ fn session_activation_failure_code(error: &EditError) -> &'static str {
         EditError::TextTooLong => "EDIT_TEXT_LIMIT",
         EditError::TooManyElements => "EDIT_ELEMENT_LIMIT",
         EditError::UnsupportedTransition { .. } => "EDIT_UNSUPPORTED_TRANSITION",
-        EditError::InlineAltsRoleChange => "EDIT_INLINE_ALTS_ROLE_CHANGE",
+        EditError::IncompatibleParagraphJoin => "EDIT_INCOMPATIBLE_PARAGRAPH_JOIN",
         EditError::Preservation(_) => "EDIT_PRESERVATION_CONSTRAINT",
         EditError::CastList(_) => "EDIT_CAST_LIST_CONSTRAINT",
         EditError::FormattedText(_) => "EDIT_FORMATTING_CONSTRAINT",
@@ -2308,9 +2352,7 @@ impl ScriptCraftApp {
         &mut self,
         surface: EditorSurface,
     ) -> Result<std::sync::Arc<ScreenplayLayout>, scriptcraft_core::layout::LayoutError> {
-        let revision = self.session.revision();
         let started = Instant::now();
-        let composition = editor_layout_composition(surface);
         if surface == EditorSurface::Body {
             self.reconcile_body_active_group();
         }
@@ -2323,19 +2365,9 @@ impl ScriptCraftApp {
                 self.session.project(),
                 self.active_body_dual_dialogue_group.clone(),
             );
-            cache.get_or_build_body_editor(
-                revision,
-                self.session.project(),
-                self.session.layout_inputs(),
-                &presentation,
-            )?
+            cache.get_or_build_body_editor_for_session(&self.session, &presentation)?
         } else {
-            cache.get_or_build_with_composition(
-                revision,
-                self.session.project(),
-                self.session.layout_inputs(),
-                composition,
-            )?
+            cache.get_or_build_title_page_editor_for_session(&self.session)?
         };
         add_performance_nanos(
             &mut self.performance.layout_lookup_nanos,
@@ -3090,20 +3122,7 @@ impl ScriptCraftApp {
                 "EDIT_MANAGED_TEXT_MISMATCH: {category}; document unchanged"
             ));
         } else {
-            let code = match error {
-                EditError::InvalidElement => "EDIT_INVALID_ELEMENT",
-                EditError::InvalidUtf8Boundary => "EDIT_INVALID_TEXT_BOUNDARY",
-                EditError::InvalidSelection => "EDIT_INVALID_SELECTION",
-                EditError::EmptyHistory => "EDIT_EMPTY_HISTORY",
-                EditError::TextTooLong => "EDIT_TEXT_LIMIT",
-                EditError::TooManyElements => "EDIT_ELEMENT_LIMIT",
-                EditError::UnsupportedTransition { .. } => "EDIT_UNSUPPORTED_TRANSITION",
-                EditError::InlineAltsRoleChange => "EDIT_INLINE_ALTS_ROLE_CHANGE",
-                EditError::Preservation(_) => "EDIT_PRESERVATION_CONSTRAINT",
-                EditError::CastList(_) => "EDIT_CAST_LIST_CONSTRAINT",
-                EditError::FormattedText(_) => "EDIT_FORMATTING_CONSTRAINT",
-                EditError::Model(_) => "EDIT_MODEL_VALIDATION",
-            };
+            let code = session_activation_failure_code(&error);
             self.show_error(format!("{code}; document unchanged"));
         }
     }
@@ -3536,6 +3555,68 @@ impl eframe::App for ScriptCraftApp {
         #[cfg(target_os = "windows")]
         self.update_windows_print_session(ui, frame);
         ScriptCraftApp::update(self, ui, frame);
+    }
+}
+
+#[cfg(test)]
+mod performance_summary_tests {
+    use super::{BenchmarkOperation, PerformanceDiagnostics, PerformanceMeasurements};
+
+    #[test]
+    fn safe_summary_exposes_each_core_counter_with_a_numeric_process_total() {
+        let summary = PerformanceDiagnostics {
+            totals: PerformanceMeasurements::default(),
+            benchmark_start: PerformanceMeasurements::default(),
+            benchmark_operation: BenchmarkOperation::General,
+        }
+        .safe_summary();
+        let labels = [
+            "process-project-validations",
+            "process-edit-scoped-attempts",
+            "process-edit-scoped-accepts",
+            "process-edit-full-validations",
+            "process-edit-full-fallbacks",
+            "process-managed-index-rebuilds",
+            "process-managed-index-source-nodes",
+            "process-managed-index-lookups",
+            "process-managed-index-entry-examinations",
+            "process-managed-index-fallback-node-examinations",
+            "process-source-use-index-rebuilds",
+            "process-source-use-index-source-nodes",
+            "process-source-use-identity-queries",
+            "process-source-use-reserved-id-queries",
+            "process-body-survivors-visited",
+            "process-body-unchanged-survivors-skipped",
+            "process-body-owners-projected",
+            "process-body-owners-removed",
+            "process-body-owners-inserted",
+            "process-title-survivors-visited",
+            "process-title-unchanged-survivors-skipped",
+            "process-title-owners-projected",
+            "process-title-owners-removed",
+            "process-title-owners-inserted",
+            "process-source-text-byte-delta-updates",
+            "process-cow-shared-vector-clones",
+            "process-cow-detached-vectors",
+            "process-cow-shared-text-payload-clones",
+            "process-cow-detached-text-payloads",
+            "process-cow-shared-source-byte-clones",
+            "process-cow-detached-source-byte-payloads",
+            "process-cow-shared-image-payload-clones",
+            "process-cow-detached-image-payloads",
+        ];
+
+        for label in labels {
+            let prefix = format!("{label}=");
+            assert!(
+                summary.split_whitespace().any(|field| {
+                    field
+                        .strip_prefix(&prefix)
+                        .is_some_and(|value| value.parse::<u64>().is_ok())
+                }),
+                "summary is missing stable numeric field {label}"
+            );
+        }
     }
 }
 
@@ -4514,6 +4595,10 @@ mod safe_result_category_tests {
             assert_eq!(safe_layout_error_category(&LayoutError { kind }), expected);
         }
         assert_eq!(session_activation_failure_code(&EditError::InvalidSelection), "EDIT_INVALID_SELECTION");
+        assert_eq!(
+            session_activation_failure_code(&EditError::IncompatibleParagraphJoin),
+            "EDIT_INCOMPATIBLE_PARAGRAPH_JOIN",
+        );
     }
 }
 

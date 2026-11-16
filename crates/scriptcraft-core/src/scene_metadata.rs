@@ -1,12 +1,22 @@
-//! Preservation-safe derived SceneProperties and scene-cast arc projection.
+//! Owner-local derived SceneProperties and scene-cast arc projection.
 
 use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
 use crate::preservation::{
-    ForeignIdDomain, ForeignIdentity, PreservationError, PreservationState, PreservedAttribute,
-    PreservedElement, PreservedNode, SourceName, SourceOwnership,
+    AnchorTarget, ForeignIdDomain, ForeignIdentity, PreservationError, PreservationState,
+    PreservedAttribute, PreservedElement, PreservedNode, SourceName, SourceOwnership,
 };
 use crate::{ModelError, Project, Role, ScreenplayElement, StableId};
 use std::collections::{BTreeMap, BTreeSet};
+
+pub(crate) trait SceneParagraphIdAllocator {
+    fn allocate(&mut self) -> Result<String, ParagraphIdAllocationError>;
+}
+
+impl SceneParagraphIdAllocator for ParagraphIdAllocator {
+    fn allocate(&mut self) -> Result<String, ParagraphIdAllocationError> {
+        ParagraphIdAllocator::allocate(self)
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct ReconcileOutcome {
@@ -15,6 +25,14 @@ pub(crate) struct ReconcileOutcome {
     pub changed_scenes: BTreeSet<String>,
     pub scene_candidates: u64,
     pub preservation_state_clones: u64,
+}
+
+/// Read-only classification of one scene's generated projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SceneCurrency {
+    Current,
+    NeedsUpdate,
+    Deferred,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,8 +65,155 @@ pub(crate) fn reconcile_project_candidate_with_scope(
         .as_mut()
         .ok_or(SceneMetadataError::UnsupportedSceneMetadata)?;
     state.ensure_managed_paragraph_index();
+    let mut paragraph_ids = paragraph_id_allocator(state);
+    let mut deferred_scenes = BTreeSet::new();
+    let mut changed_scenes = BTreeSet::new();
+    let mut changed = false;
+    let mut scene_candidates = 0u64;
+    for (heading_id, names) in scenes {
+        let original_heading = match state.managed_element(&heading_id) {
+            Ok(Some(heading)) => heading,
+            Ok(None) | Err(_) => {
+                deferred_scenes.insert(heading_id.as_str().to_owned());
+                continue;
+            }
+        };
+        let mut scene_candidate = original_heading.clone();
+        scene_candidates = scene_candidates.saturating_add(1);
+        let Some((heading_depth, inherited_space_preserve)) = state
+            .managed_element_context(&heading_id)
+            .ok()
+            .flatten()
+        else {
+            deferred_scenes.insert(heading_id.as_str().to_owned());
+            continue;
+        };
+        match reconcile_heading(
+            &mut scene_candidate,
+            heading_depth,
+            inherited_space_preserve,
+            &names,
+            &mut paragraph_ids,
+        ) {
+            Ok((removed, allocated)) => {
+                let scene_changed = scene_candidate != *original_heading;
+                if scene_changed {
+                    let new_identities = allocated
+                        .iter()
+                        .map(|id| ForeignIdentity::new(ForeignIdDomain::Paragraph, id.clone()))
+                        .collect::<Result<Vec<_>, _>>();
+                    let Ok(new_identities) = new_identities else {
+                        deferred_scenes.insert(heading_id.as_str().to_owned());
+                        continue;
+                    };
+                    let Ok(target) = state.managed_element_mut_indexed(&heading_id) else {
+                        deferred_scenes.insert(heading_id.as_str().to_owned());
+                        continue;
+                    };
+                    *target = scene_candidate;
+                    state.identities.retain(|identity| {
+                        !(identity.domain == ForeignIdDomain::Paragraph
+                            && removed.contains(&identity.value))
+                    });
+                    state.anchors.retain(|anchor| {
+                        !matches!(&anchor.target,
+                            AnchorTarget::Foreign(identity)
+                                if identity.domain == ForeignIdDomain::Paragraph
+                                    && removed.contains(&identity.value))
+                    });
+                    state.references.retain(|reference| {
+                        let removed_endpoint = [&reference.source, &reference.target]
+                            .into_iter()
+                            .any(|identity| {
+                                identity.domain == ForeignIdDomain::Paragraph
+                                    && removed.contains(&identity.value)
+                            });
+                        !removed_endpoint
+                    });
+                    state.identities.extend(new_identities);
+                    changed = true;
+                    changed_scenes.insert(heading_id.as_str().to_owned());
+                }
+            }
+            // Derived state is an owner-local best-effort projection. A source
+            // shape or allocation problem defers this scene without vetoing
+            // screenplay edits, Save, or refreshes of independent scenes.
+            Err(_) => {
+                deferred_scenes.insert(heading_id.as_str().to_owned());
+            }
+        }
+    }
+    if changed {
+        state.rebuild_managed_paragraph_index();
+    }
+    Ok(ReconcileOutcome {
+        changed,
+        deferred_scenes,
+        changed_scenes,
+        scene_candidates,
+        preservation_state_clones: 0,
+    })
+}
+
+/// Compares one managed heading with its canonical generated arc projection
+/// without publishing the detached reconciliation candidate.
+pub(crate) fn classify_scene_metadata_currency(
+    project: &mut Project,
+    heading_id: &StableId,
+    names: &[(String, String)],
+) -> SceneCurrency {
+    let Some(state) = project.preservation.as_mut() else {
+        return SceneCurrency::Deferred;
+    };
+    // Keep the same lazy index lifecycle and collision domain as the mutating
+    // reconciler. These indexes are disposable lookup caches; source content,
+    // identity registrations, and the detached scene candidate remain untouched.
+    state.ensure_managed_paragraph_index();
     state.ensure_source_identity_use_index();
-    let removable = safe_paragraph_removals(state);
+    let original_heading = match state.managed_element(heading_id) {
+        Ok(Some(heading)) => heading.clone(),
+        Ok(None) | Err(_) => return SceneCurrency::Deferred,
+    };
+    let Some((heading_depth, inherited_space_preserve)) = state
+        .managed_element_context(heading_id)
+        .ok()
+        .flatten()
+    else {
+        return SceneCurrency::Deferred;
+    };
+    let mut paragraph_ids = paragraph_id_allocator(state);
+    classify_heading_metadata_currency(
+        &original_heading,
+        heading_depth,
+        inherited_space_preserve,
+        names,
+        &mut paragraph_ids,
+    )
+}
+
+pub(crate) fn classify_heading_metadata_currency(
+    original_heading: &PreservedElement,
+    heading_depth: usize,
+    inherited_space_preserve: bool,
+    names: &[(String, String)],
+    paragraph_ids: &mut impl SceneParagraphIdAllocator,
+) -> SceneCurrency {
+    let mut candidate = original_heading.clone();
+    match reconcile_heading(
+        &mut candidate,
+        heading_depth,
+        inherited_space_preserve,
+        names,
+        paragraph_ids,
+    ) {
+        Ok(_) if candidate == *original_heading => SceneCurrency::Current,
+        Ok(_) => SceneCurrency::NeedsUpdate,
+        Err(_) => SceneCurrency::Deferred,
+    }
+}
+
+fn paragraph_id_allocator(state: &mut PreservationState) -> ParagraphIdAllocator {
+    state.ensure_source_identity_use_index();
     let mut reserved_ids = state.indexed_source_id_values();
     reserved_ids.extend(
         state
@@ -75,80 +240,7 @@ pub(crate) fn reconcile_project_candidate_with_scope(
             reference.target.value.clone(),
         ]
     }));
-    let mut paragraph_ids = ParagraphIdAllocator::new(reserved_ids);
-    let known_paragraph_ids = state
-        .identities
-        .iter()
-        .filter(|identity| identity.domain == ForeignIdDomain::Paragraph)
-        .map(|identity| identity.value.clone())
-        .collect::<BTreeSet<_>>();
-    let mut deferred_scenes = BTreeSet::new();
-    let mut changed_scenes = BTreeSet::new();
-    let mut changed = false;
-    let mut scene_candidates = 0u64;
-    for (heading_id, names) in scenes {
-        let Some(original_heading) = state
-            .managed_element(&heading_id)
-            .map_err(SceneMetadataError::Preservation)?
-        else {
-            return Err(SceneMetadataError::Preservation(
-                PreservationError::ManagedAnchorMissing,
-            ));
-        };
-        let mut scene_candidate = original_heading.clone();
-        scene_candidates = scene_candidates.saturating_add(1);
-        let (heading_depth, inherited_space_preserve) = state
-            .managed_element_context(&heading_id)
-            .map_err(SceneMetadataError::Preservation)?
-            .ok_or(SceneMetadataError::Preservation(
-                PreservationError::ManagedAnchorMissing,
-            ))?;
-        match reconcile_heading(
-            &mut scene_candidate,
-            heading_depth,
-            inherited_space_preserve,
-            &names,
-            &removable,
-            &known_paragraph_ids,
-            &mut paragraph_ids,
-        ) {
-            Ok((removed, allocated)) => {
-                let scene_changed = scene_candidate != *original_heading;
-                if scene_changed {
-                    let target = state
-                        .managed_element_mut_indexed(&heading_id)
-                        .map_err(SceneMetadataError::Preservation)?;
-                    *target = scene_candidate;
-                    state.identities.retain(|identity| {
-                        !(identity.domain == ForeignIdDomain::Paragraph
-                            && removed.contains(&identity.value))
-                    });
-                    for id in allocated {
-                        state.identities.push(
-                            ForeignIdentity::new(ForeignIdDomain::Paragraph, id)
-                                .map_err(SceneMetadataError::Preservation)?,
-                        );
-                    }
-                    changed = true;
-                    changed_scenes.insert(heading_id.as_str().to_owned());
-                }
-            }
-            Err(SceneMetadataError::UnsupportedSceneMetadata) => {
-                deferred_scenes.insert(heading_id.as_str().to_owned());
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    if changed {
-        state.rebuild_managed_paragraph_index();
-    }
-    Ok(ReconcileOutcome {
-        changed,
-        deferred_scenes,
-        changed_scenes,
-        scene_candidates,
-        preservation_state_clones: 0,
-    })
+    ParagraphIdAllocator::new(reserved_ids)
 }
 
 /// Reads the recognized CharacterArcBeat projection for a managed heading.
@@ -416,9 +508,7 @@ fn reconcile_heading(
     heading_depth: usize,
     inherited_space_preserve: bool,
     names: &[(String, String)],
-    safely_removable: &BTreeSet<String>,
-    known_paragraph_ids: &BTreeSet<String>,
-    paragraph_ids: &mut ParagraphIdAllocator,
+    paragraph_ids: &mut impl SceneParagraphIdAllocator,
 ) -> Result<(Vec<String>, Vec<String>), SceneMetadataError> {
     let mut allocated = Vec::new();
     let mut removed = Vec::new();
@@ -470,16 +560,23 @@ fn reconcile_heading(
         if properties.name.namespace_uri != namespace {
             return Err(SceneMetadataError::UnsupportedSceneMetadata);
         }
+        if !generated_scene_properties_attributes(properties, &generated_scene_properties(&heading.name))
+        {
+            return Err(SceneMetadataError::UnsupportedSceneMetadata);
+        }
         for (index, child) in properties.children.iter().enumerate() {
-            if let PreservedNode::Element(element) = child {
-                if element.name.local_name == "SceneArcBeats" {
-                    if element.name.namespace_uri != namespace {
-                        return Err(SceneMetadataError::UnsupportedSceneMetadata);
-                    }
-                    if arcs_index.replace(index).is_some() {
+            match child {
+                PreservedNode::Element(element) if element.name.local_name == "SceneArcBeats" => {
+                    if element.name.namespace_uri != namespace
+                        || !element.attributes.is_empty()
+                        || arcs_index.replace(index).is_some()
+                    {
                         return Err(SceneMetadataError::UnsupportedSceneMetadata);
                     }
                 }
+                PreservedNode::Text(text) | PreservedNode::CData(text)
+                    if text.chars().all(char::is_whitespace) => {}
+                _ => return Err(SceneMetadataError::UnsupportedSceneMetadata),
             }
         }
     }
@@ -510,7 +607,7 @@ fn reconcile_heading(
                 let Some((key, _, id)) = recognized_beat(beat, &namespace) else {
                     return Err(SceneMetadataError::UnsupportedSceneMetadata);
                 };
-                if !seen.insert(key.clone()) || !known_paragraph_ids.contains(&id) {
+                if !seen.insert(key.clone()) {
                     return Err(SceneMetadataError::UnsupportedSceneMetadata);
                 }
                 existing.push((key, id));
@@ -526,9 +623,6 @@ fn reconcile_heading(
     let desired_keys = desired.iter().map(|(key, _)| *key).collect::<BTreeSet<_>>();
     for (key, id) in &existing {
         if !desired_keys.contains(key.as_str()) {
-            if !safely_removable.contains(id) {
-                return Err(SceneMetadataError::UnsupportedSceneMetadata);
-            }
             removed.push(id.clone());
         }
     }
@@ -820,7 +914,7 @@ fn generated_scene_properties(parent: &SourceName) -> PreservedElement {
 
 fn new_character_arc(
     name: &str,
-    paragraph_ids: &mut ParagraphIdAllocator,
+    paragraph_ids: &mut impl SceneParagraphIdAllocator,
 ) -> Result<PreservedElement, SceneMetadataError> {
     let id = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
     Ok(character_arc_element(name, id, None))
@@ -829,7 +923,7 @@ fn new_character_arc(
 fn new_character_arc_for(
     parent: &SourceName,
     name: &str,
-    paragraph_ids: &mut ParagraphIdAllocator,
+    paragraph_ids: &mut impl SceneParagraphIdAllocator,
     allocated: &mut Vec<String>,
 ) -> Result<PreservedElement, SceneMetadataError> {
     let id = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
@@ -938,21 +1032,6 @@ fn recognized_arc_paragraph_content(
         | PreservedNode::ProcessingInstruction { .. } => true,
         _ => false,
     })
-}
-
-fn safe_paragraph_removals(state: &PreservationState) -> BTreeSet<String> {
-    state
-        .identities
-        .iter()
-        .filter_map(|identity| {
-            if identity.domain != ForeignIdDomain::Paragraph {
-                return None;
-            }
-            state
-                .paragraph_identity_safely_removable(&identity.value)
-                .then(|| identity.value.clone())
-        })
-        .collect()
 }
 
 fn projected_character_name(cue: &str) -> Option<(String, &str)> {

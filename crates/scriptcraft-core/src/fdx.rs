@@ -681,7 +681,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     }
     preservation.rebuild_managed_paragraph_index();
     project.preservation = Some(preservation);
-    project.validate().map_err(map_model_error)?;
+    project.validate_current_state().map_err(map_model_error)?;
     let text_state = raw_root_text_state(&root_for_text_state, &project);
     Ok(FdxDocument {
         project,
@@ -796,8 +796,11 @@ fn write_v6_inner(
             .as_ref()
             .ok_or_else(|| SaveDiagnosticCode::WriteOriginalPreservationMissing.error())?;
         if !same_non_paragraph_identities(&state.identities, &original_state.identities)
-            || state.references != original_state.references
-            || state.board_graph != original_state.board_graph
+            || !same_non_paragraph_references(&state.references, &original_state.references)
+            || !same_board_graph_except_paragraph_references(
+                &state.board_graph,
+                &original_state.board_graph,
+            )
         {
             return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
         }
@@ -913,6 +916,19 @@ fn same_non_paragraph_identities(left: &[ForeignIdentity], right: &[ForeignIdent
         .eq(right
             .iter()
             .filter(|identity| identity.domain != ForeignIdDomain::Paragraph))
+}
+
+fn same_non_paragraph_references(left: &[ForeignReference], right: &[ForeignReference]) -> bool {
+    let is_non_paragraph = |reference: &&ForeignReference| {
+        reference.source.domain != ForeignIdDomain::Paragraph
+            && reference.target.domain != ForeignIdDomain::Paragraph
+    };
+    left.iter().filter(is_non_paragraph).eq(right.iter().filter(is_non_paragraph))
+}
+
+fn same_board_graph_except_paragraph_references(left: &BoardGraph, right: &BoardGraph) -> bool {
+    left.entities == right.entities
+        && same_non_paragraph_references(&left.references, &right.references)
 }
 
 fn identity_set(identities: &[ForeignIdentity]) -> BTreeSet<ForeignIdentity> {

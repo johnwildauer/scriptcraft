@@ -904,6 +904,12 @@ impl ScriptCraftApp {
             command,
             active_surface,
         );
+        // Keep the rejection sound supplemental to the typed error and its
+        // existing bounded diagnostic; no other outcome reaches the adapter.
+        super::editor_feedback::route_editor_outcome(
+            &outcome,
+            &mut super::editor_feedback::NativeRejectionSound,
+        );
         match &outcome {
             CommandOutcome::Changed => {
                 self.mutate(Ok(()), reveal_intent);

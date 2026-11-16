@@ -369,6 +369,9 @@ pub struct LayoutBuildDiagnostics {
     /// Complete Project validations performed by this layout request.
     pub complete_project_validations: u64,
     pub layout_builds: u64,
+    /// Document-sized semantic signatures constructed by the generic cache path.
+    /// Validated-session lookups must leave this at zero on both hits and misses.
+    pub semantic_signature_constructions: u64,
     pub element_wraps_built: u64,
     pub element_wrap_misses: u64,
     pub element_wraps_reused: u64,
@@ -675,6 +678,71 @@ impl LayoutCache {
         )
     }
 
+    /// Looks up a Body-editor layout using the validated revision published by
+    /// the editing session. The transient presentation remains part of the key.
+    pub fn get_or_build_body_editor_for_session(
+        &mut self,
+        session: &crate::editing::EditingSession,
+        presentation: &BodyEditorPresentation,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        self.get_or_build_body_editor_for_session_with_diagnostics(
+            session,
+            presentation,
+            &mut LayoutBuildDiagnostics::default(),
+        )
+    }
+
+    /// Diagnostic counterpart to [`Self::get_or_build_body_editor_for_session`].
+    pub fn get_or_build_body_editor_for_session_with_diagnostics(
+        &mut self,
+        session: &crate::editing::EditingSession,
+        presentation: &BodyEditorPresentation,
+        diagnostics: &mut LayoutBuildDiagnostics,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        *diagnostics = LayoutBuildDiagnostics::default();
+        self.get_or_build_with_optional_diagnostics(
+            session.revision(),
+            session.project(),
+            session.layout_inputs(),
+            LayoutPurpose::Editor,
+            LayoutComposition::BodyEditor,
+            Some(diagnostics),
+            true,
+            presentation.clone(),
+        )
+    }
+
+    /// Looks up the Title-page-editor layout using the session's validated
+    /// revision and the title-editor composition.
+    pub fn get_or_build_title_page_editor_for_session(
+        &mut self,
+        session: &crate::editing::EditingSession,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        self.get_or_build_title_page_editor_for_session_with_diagnostics(
+            session,
+            &mut LayoutBuildDiagnostics::default(),
+        )
+    }
+
+    /// Diagnostic counterpart to [`Self::get_or_build_title_page_editor_for_session`].
+    pub fn get_or_build_title_page_editor_for_session_with_diagnostics(
+        &mut self,
+        session: &crate::editing::EditingSession,
+        diagnostics: &mut LayoutBuildDiagnostics,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        *diagnostics = LayoutBuildDiagnostics::default();
+        self.get_or_build_with_optional_diagnostics(
+            session.revision(),
+            session.project(),
+            session.layout_inputs(),
+            LayoutPurpose::Editor,
+            LayoutComposition::TitlePageEditor,
+            Some(diagnostics),
+            true,
+            BodyEditorPresentation::default(),
+        )
+    }
+
     /// Diagnostic counterpart to the ordinary cache lookup. A cache hit
     /// returns zero build measurements; a miss reports wrapping work separately
     /// from validation, pagination, and cache lookup.
@@ -746,21 +814,6 @@ impl LayoutCache {
         source_settings
             .direct_paragraph_overrides
             .extend(project.direct_paragraph_overrides.clone());
-        let mut signature_hasher = std::collections::hash_map::DefaultHasher::new();
-        format!(
-            "{:?}{:?}{:?}{:?}{:?}",
-            project.elements,
-            project.title_page,
-            project.direct_paragraph_overrides,
-            project.dual_dialogue_groups,
-            project.dual_dialogue_paragraph_overrides,
-        )
-            .hash(&mut signature_hasher);
-        let project_layout_signature = signature_hasher.finish();
-        let source_settings_match = self
-            .source_settings
-            .as_ref()
-            .is_some_and(|cached| cached == &source_settings);
         let same_document = self
             .project_identity
             .as_ref()
@@ -776,22 +829,52 @@ impl LayoutCache {
             self.layout = None;
             self.element_wraps.clear();
         }
-        if self.revision == Some(revision)
+        let source_settings_match = self
+            .source_settings
+            .as_ref()
+            .is_some_and(|cached| cached == &source_settings);
+        let cache_keys_match = self.revision == Some(revision)
             && self.inputs.as_ref() == Some(inputs)
             && source_settings_match
             && same_document
             && self.purpose == Some(purpose)
             && self.composition == Some(composition)
-            && self.body_presentation.as_ref() == Some(&body_presentation)
-            && self.project_layout_signature == Some(project_layout_signature)
-        {
-            return self
-                .layout
-                .clone()
-                .ok_or(LayoutError {
-                    kind: LayoutErrorKind::NoGeometry,
-                })
-                .map(|layout| (layout, true));
+            && self.body_presentation.as_ref() == Some(&body_presentation);
+        let mut project_layout_signature = None;
+        if cache_keys_match {
+            if validated_session {
+                return self
+                    .layout
+                    .clone()
+                    .ok_or(LayoutError {
+                        kind: LayoutErrorKind::NoGeometry,
+                    })
+                    .map(|layout| (layout, true));
+            }
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.semantic_signature_constructions = diagnostics
+                    .semantic_signature_constructions
+                    .saturating_add(1);
+            }
+            let signature = semantic_project_layout_signature(project);
+            if self.project_layout_signature == Some(signature) {
+                return self
+                    .layout
+                    .clone()
+                    .ok_or(LayoutError {
+                        kind: LayoutErrorKind::NoGeometry,
+                    })
+                    .map(|layout| (layout, true));
+            }
+            project_layout_signature = Some(signature);
+        }
+        if !validated_session && project_layout_signature.is_none() {
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.semantic_signature_constructions = diagnostics
+                    .semantic_signature_constructions
+                    .saturating_add(1);
+            }
+            project_layout_signature = Some(semantic_project_layout_signature(project));
         }
         self.element_wraps.start_generation();
         let layout = Arc::new(
@@ -814,11 +897,25 @@ impl LayoutCache {
         self.purpose = Some(purpose);
         self.composition = Some(composition);
         self.body_presentation = Some(body_presentation);
-        self.project_layout_signature = Some(project_layout_signature);
+        self.project_layout_signature = project_layout_signature;
         self.layout = Some(layout.clone());
         self.project_identity = Some(project.layout_identity().clone());
         Ok((layout, false))
     }
+}
+
+fn semantic_project_layout_signature(project: &Project) -> u64 {
+    let mut signature_hasher = std::collections::hash_map::DefaultHasher::new();
+    format!(
+        "{:?}{:?}{:?}{:?}{:?}",
+        project.elements,
+        project.title_page,
+        project.direct_paragraph_overrides,
+        project.dual_dialogue_groups,
+        project.dual_dialogue_paragraph_overrides,
+    )
+    .hash(&mut signature_hasher);
+    signature_hasher.finish()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3022,5 +3119,99 @@ fn wrap_segment(
         });
         *first_visual_line = false;
         start = end;
+    }
+}
+
+#[cfg(test)]
+mod session_layout_cache_tests {
+    use super::{
+        BodyEditorPresentation, LayoutBuildDiagnostics, LayoutCache, LayoutComposition,
+        LayoutPurpose,
+    };
+    use crate::{editing::EditingSession, Project};
+    use std::sync::Arc;
+
+    #[test]
+    fn validated_session_wrappers_preserve_surface_keys_and_share_hits() {
+        let project = Project::new().expect("default project is valid");
+        let session = EditingSession::new(project).expect("valid project opens in a session");
+
+        let presentation = BodyEditorPresentation::for_project(session.project(), None);
+        let mut body_cache = LayoutCache::default();
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+        let (body_layout, body_hit) = body_cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("validated Body layout builds");
+        assert!(!body_hit);
+        assert_eq!(diagnostics.complete_project_validations, 0);
+        assert_eq!(diagnostics.layout_builds, 1);
+        assert_eq!(body_cache.composition, Some(LayoutComposition::BodyEditor));
+        assert_eq!(body_cache.body_presentation.as_ref(), Some(&presentation));
+        assert_eq!(body_cache.project_layout_signature, None);
+
+        let (cached_body_layout, body_hit) = body_cache
+            .get_or_build_body_editor_for_session_with_diagnostics(
+                &session,
+                &presentation,
+                &mut diagnostics,
+            )
+            .expect("validated Body layout hits");
+        assert!(body_hit);
+        assert!(Arc::ptr_eq(&body_layout, &cached_body_layout));
+        assert_eq!(diagnostics.complete_project_validations, 0);
+        assert_eq!(diagnostics.layout_builds, 0);
+        assert_eq!(body_cache.project_layout_signature, None);
+
+        let mut title_cache = LayoutCache::default();
+        let (title_layout, title_hit) = title_cache
+            .get_or_build_title_page_editor_for_session_with_diagnostics(
+                &session,
+                &mut diagnostics,
+            )
+            .expect("validated Title layout builds");
+        assert!(!title_hit);
+        assert_eq!(diagnostics.complete_project_validations, 0);
+        assert_eq!(diagnostics.layout_builds, 1);
+        assert_eq!(
+            title_cache.composition,
+            Some(LayoutComposition::TitlePageEditor)
+        );
+        assert_eq!(title_cache.body_presentation.as_ref(), Some(&BodyEditorPresentation::default()));
+        assert_eq!(title_cache.project_layout_signature, None);
+
+        let (cached_title_layout, title_hit) = title_cache
+            .get_or_build_title_page_editor_for_session_with_diagnostics(
+                &session,
+                &mut diagnostics,
+            )
+            .expect("validated Title layout hits");
+        assert!(title_hit);
+        assert!(Arc::ptr_eq(&title_layout, &cached_title_layout));
+        assert_eq!(diagnostics.complete_project_validations, 0);
+        assert_eq!(diagnostics.layout_builds, 0);
+        assert_eq!(title_cache.project_layout_signature, None);
+    }
+
+    #[test]
+    fn generic_cache_retains_same_revision_project_mutation_defense() {
+        let mut project = Project::new().expect("default project is valid");
+        let inputs = project.session_layout_inputs();
+        let mut cache = LayoutCache::default();
+        let (first_layout, first_hit) = cache
+            .get_or_build_with_inputs_for_purpose(0, &project, &inputs, LayoutPurpose::Editor)
+            .expect("generic layout builds");
+        assert!(!first_hit);
+
+        project.elements[0].text.push_str("changed without a revision");
+        let (mutated_layout, mutated_hit) = cache
+            .get_or_build_with_inputs_for_purpose(0, &project, &inputs, LayoutPurpose::Editor)
+            .expect("generic cache rebuilds after same-revision mutation");
+        assert!(!mutated_hit);
+        assert!(!Arc::ptr_eq(&first_layout, &mutated_layout));
+        assert!(cache.project_layout_signature.is_some());
     }
 }

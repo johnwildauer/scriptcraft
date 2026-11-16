@@ -3,9 +3,17 @@
 use scriptcraft_core::dual_dialogue::{DualDialogueGroup, DualDialogueSide, DualDialogueWrapperProvenance};
 use scriptcraft_core::exports::{export_pdf, export_pdf_with_options, export_text, PdfExportOptions};
 use scriptcraft_core::fdx::read_v6;
-use scriptcraft_core::formatting::{SourceLayoutSettings, SourceParagraphOverrides, SourceParagraphSpec};
-use scriptcraft_core::layout::{LayoutComposition, ScreenplayLayout};
-use scriptcraft_core::{FixedPoint, LayoutInputs, Project, Role, ScreenplayElement, StableId};
+use scriptcraft_core::formatting::{
+    ParagraphAlignment, SourceLayoutSettings, SourceParagraphOverrides, SourceParagraphSpec,
+};
+use scriptcraft_core::layout::{
+    BodyEditorPresentation, Caret, LayoutBuildDiagnostics, LayoutCache, LayoutComposition,
+    LayoutPurpose, ScreenplayLayout,
+};
+use scriptcraft_core::{
+    editing::{EditingSession, Position, Selection}, FixedPoint, LayoutInputs, Project, Role,
+    ScreenplayElement, StableId,
+};
 use std::ops::Range;
 
 fn valid<T, E>(result: Result<T, E>) -> T {
@@ -174,4 +182,477 @@ fn plain_text_exports_each_dual_side_in_order_without_synthetic_wrapper_text() {
     let right = output.text.find("你好").expect("right dialogue appears");
     assert!(left < right);
     assert!(!output.text.contains("DualDialogue"));
+}
+
+fn effective_source_settings(project: &Project) -> SourceLayoutSettings {
+    let mut settings = project
+        .preservation
+        .as_ref()
+        .map(|preservation| preservation.source_layout_settings().clone())
+        .unwrap_or_default();
+    settings
+        .direct_paragraph_overrides
+        .extend(project.direct_paragraph_overrides.clone());
+    settings
+}
+
+#[test]
+fn session_layout_cache_hits_and_key_misses_keep_fresh_geometry_and_wrap_reuse() {
+    let project = project_with(&[
+        (Role::Action, "an opening action paragraph with enough words to wrap around"),
+        (Role::Dialogue, "another unchanged element remains available for wrap reuse"),
+    ]);
+    let mut session = valid(EditingSession::new(project));
+    let presentation = BodyEditorPresentation::for_project(session.project(), None);
+    let mut cache = LayoutCache::default();
+    let mut diagnostics = LayoutBuildDiagnostics::default();
+
+    let (first, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &presentation,
+        &mut diagnostics,
+    ));
+    assert!(!hit);
+    assert_eq!(diagnostics.complete_project_validations, 0);
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert_eq!(diagnostics.layout_builds, 1);
+
+    let (same, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &presentation,
+        &mut diagnostics,
+    ));
+    assert!(hit);
+    assert!(std::sync::Arc::ptr_eq(&first, &same));
+    assert_eq!(diagnostics.complete_project_validations, 0);
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert_eq!(diagnostics.layout_builds, 0);
+
+    let mut title_cache = LayoutCache::default();
+    let (initial_title, hit) = valid(
+        title_cache.get_or_build_title_page_editor_for_session_with_diagnostics(
+            &session,
+            &mut diagnostics,
+        ),
+    );
+    assert!(!hit);
+    let (same_title, hit) = valid(
+        title_cache.get_or_build_title_page_editor_for_session_with_diagnostics(
+            &session,
+            &mut diagnostics,
+        ),
+    );
+    assert!(hit);
+    assert!(std::sync::Arc::ptr_eq(&initial_title, &same_title));
+    assert_eq!(diagnostics.complete_project_validations, 0);
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert_eq!(diagnostics.layout_builds, 0);
+
+    // The full profile remains an equality key even when an identifying field
+    // does not change the resulting geometry.
+    let mut alternate_profile = session.layout_inputs().clone();
+    alternate_profile.name.push_str("-cache-key");
+    valid(session.set_layout_inputs(alternate_profile));
+    let (profile_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &presentation,
+        &mut diagnostics,
+    ));
+    assert!(!hit);
+    assert_eq!(diagnostics.complete_project_validations, 0);
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert_eq!(diagnostics.layout_builds, 1);
+    assert_eq!(
+        *profile_layout,
+        valid(ScreenplayLayout::build_with_body_presentation(
+            session.project(),
+            session.layout_inputs(),
+            &effective_source_settings(session.project()),
+            &presentation,
+        )),
+    );
+    assert!(diagnostics.element_wraps_reused > 0);
+    let (profile_title, hit) = valid(
+        title_cache.get_or_build_title_page_editor_for_session_with_diagnostics(
+            &session,
+            &mut diagnostics,
+        ),
+    );
+    assert!(!hit, "Title also keys on the complete profile");
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert_eq!(
+        *profile_title,
+        valid(ScreenplayLayout::build_with_composition(
+            session.project(),
+            session.layout_inputs(),
+            &effective_source_settings(session.project()),
+            LayoutComposition::TitlePageEditor,
+        )),
+    );
+
+    valid(session.set_selection(Selection::caret(Position {
+        element: 0,
+        offset: 0,
+    })));
+    valid(session.insert("edited "));
+    let (revision_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &presentation,
+        &mut diagnostics,
+    ));
+    assert!(!hit);
+    assert_eq!(diagnostics.complete_project_validations, 0);
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert_eq!(diagnostics.layout_builds, 1);
+    assert!(diagnostics.element_wraps_reused > 0);
+    assert_eq!(
+        *revision_layout,
+        valid(ScreenplayLayout::build_with_body_presentation(
+            session.project(),
+            session.layout_inputs(),
+            &effective_source_settings(session.project()),
+            &presentation,
+        )),
+    );
+    let (revision_title, hit) = valid(
+        title_cache.get_or_build_title_page_editor_for_session_with_diagnostics(
+            &session,
+            &mut diagnostics,
+        ),
+    );
+    assert!(!hit, "Title revision changes invalidate its complete layout");
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert_eq!(
+        *revision_title,
+        valid(ScreenplayLayout::build_with_composition(
+            session.project(),
+            session.layout_inputs(),
+            &effective_source_settings(session.project()),
+            LayoutComposition::TitlePageEditor,
+        )),
+    );
+}
+
+#[test]
+fn session_cache_misses_for_document_source_settings_and_canonical_direct_settings() {
+    let first_project = project_with(&[(Role::Action, "same canonical screenplay")]);
+    let first_session = valid(EditingSession::new(first_project));
+    let first_presentation = BodyEditorPresentation::for_project(first_session.project(), None);
+    let mut cache = LayoutCache::default();
+    let mut diagnostics = LayoutBuildDiagnostics::default();
+    let (_, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &first_session,
+        &first_presentation,
+        &mut diagnostics,
+    ));
+    assert!(!hit);
+
+    // Replacing the document with an equal-looking but separately owned project
+    // cannot return the prior layout identity.
+    let replacement = valid(EditingSession::new(project_with(&[(
+        Role::Action,
+        "same canonical screenplay",
+    )])));
+    let replacement_presentation =
+        BodyEditorPresentation::for_project(replacement.project(), None);
+    let (replacement_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &replacement,
+        &replacement_presentation,
+        &mut diagnostics,
+    ));
+    assert!(!hit);
+    assert_eq!(diagnostics.complete_project_validations, 0);
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert_eq!(
+        *replacement_layout,
+        valid(ScreenplayLayout::build_with_body_presentation(
+            replacement.project(),
+            replacement.layout_inputs(),
+            &effective_source_settings(replacement.project()),
+            &replacement_presentation,
+        )),
+    );
+
+    // A source-backed import with a different retained Paragraph setting is a
+    // distinct effective source-settings key. The canonical body is unchanged.
+    let source_left = valid(read_v6(include_bytes!("fixtures/dual_dialogue_basic.fdx"))).project;
+    let source_left = valid(EditingSession::new(source_left));
+    let left_presentation = BodyEditorPresentation::for_project(source_left.project(), None);
+    let _ = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &source_left,
+        &left_presentation,
+        &mut diagnostics,
+    ));
+    let source_right_bytes = include_bytes!("fixtures/dual_dialogue_basic.fdx");
+    let source_right_text = std::str::from_utf8(source_right_bytes).expect("fixture is UTF-8");
+    let changed_source = source_right_text.replacen(
+        "Type=\"Action\"",
+        "Type=\"Action\" Alignment=\"Center\"",
+        1,
+    );
+    let source_right = valid(read_v6(changed_source.as_bytes())).project;
+    let source_right = valid(EditingSession::new(source_right));
+    let right_presentation = BodyEditorPresentation::for_project(source_right.project(), None);
+    let (source_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &source_right,
+        &right_presentation,
+        &mut diagnostics,
+    ));
+    assert!(!hit);
+    assert_eq!(diagnostics.complete_project_validations, 0);
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert_eq!(
+        *source_layout,
+        valid(ScreenplayLayout::build_with_body_presentation(
+            source_right.project(),
+            source_right.layout_inputs(),
+            &effective_source_settings(source_right.project()),
+            &right_presentation,
+        )),
+    );
+
+    // Canonical direct-paragraph settings participate in the same complete key.
+    let mut direct_project = project_with(&[(Role::Action, "direct override geometry")]);
+    let direct_id = direct_project.elements[0].id.clone();
+    direct_project.direct_paragraph_overrides.insert(
+        direct_id,
+        SourceParagraphOverrides {
+            paragraph: SourceParagraphSpec {
+                alignment: Some(ParagraphAlignment::Right),
+                ..SourceParagraphSpec::default()
+            },
+            ..SourceParagraphOverrides::default()
+        },
+    );
+    let direct_session = valid(EditingSession::new(direct_project));
+    let direct_presentation = BodyEditorPresentation::for_project(direct_session.project(), None);
+    let (direct_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &direct_session,
+        &direct_presentation,
+        &mut diagnostics,
+    ));
+    assert!(!hit);
+    assert_eq!(diagnostics.complete_project_validations, 0);
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert_eq!(
+        *direct_layout,
+        valid(ScreenplayLayout::build_with_body_presentation(
+            direct_session.project(),
+            direct_session.layout_inputs(),
+            &effective_source_settings(direct_session.project()),
+            &direct_presentation,
+        )),
+    );
+}
+
+#[test]
+fn body_active_group_and_title_print_compositions_miss_without_partial_pagination() {
+    let project = valid(read_v6(include_bytes!("fixtures/dual_dialogue_basic.fdx"))).project;
+    let session = valid(EditingSession::new(project));
+    let inactive = BodyEditorPresentation::for_project(session.project(), None);
+    let group_id = session.project().dual_dialogue_groups[0].id.clone();
+    let active = BodyEditorPresentation::for_project(session.project(), Some(group_id));
+    let mut cache = LayoutCache::default();
+    let mut diagnostics = LayoutBuildDiagnostics::default();
+    let (_, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &inactive,
+        &mut diagnostics,
+    ));
+    assert!(!hit);
+    let (active_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &active,
+        &mut diagnostics,
+    ));
+    assert!(!hit);
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert!(!active_layout.editor_group_boundaries.is_empty());
+    assert_eq!(
+        *active_layout,
+        valid(ScreenplayLayout::build_with_body_presentation(
+            session.project(),
+            session.layout_inputs(),
+            &effective_source_settings(session.project()),
+            &active,
+        )),
+    );
+    assert!(diagnostics.element_wraps_reused > 0);
+
+    let (title_layout, hit) = valid(cache.get_or_build_title_page_editor_for_session_with_diagnostics(
+        &session,
+        &mut diagnostics,
+    ));
+    assert!(!hit);
+    assert_eq!(title_layout.composition, LayoutComposition::TitlePageEditor);
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    assert_eq!(
+        *title_layout,
+        valid(ScreenplayLayout::build_with_composition(
+            session.project(),
+            session.layout_inputs(),
+            &effective_source_settings(session.project()),
+            LayoutComposition::TitlePageEditor,
+        )),
+    );
+
+    let print_composition = LayoutComposition::Print {
+        include_title_page: false,
+    };
+    let (print_layout, hit) = valid(cache.get_or_build_with_composition(
+        session.revision(),
+        session.project(),
+        session.layout_inputs(),
+        print_composition,
+    ));
+    assert!(!hit);
+    assert_eq!(print_layout.composition, print_composition);
+    assert_eq!(
+        *print_layout,
+        valid(ScreenplayLayout::build_with_composition(
+            session.project(),
+            session.layout_inputs(),
+            &effective_source_settings(session.project()),
+            print_composition,
+        )),
+    );
+    assert!(print_layout.pages.iter().all(|page| !page.title_page));
+}
+
+#[test]
+fn generic_signature_defense_and_session_metadata_transitions_remain_distinct() {
+    let mut project = project_with(&[(Role::Action, "generic cache defenses")]);
+    let inputs = LayoutInputs::default();
+    let mut cache = LayoutCache::default();
+    let mut diagnostics = LayoutBuildDiagnostics::default();
+    let (_, hit) = valid(cache.get_or_build_with_inputs_for_purpose_and_diagnostics(
+        0,
+        &project,
+        &inputs,
+        LayoutPurpose::Editor,
+        &mut diagnostics,
+    ));
+    assert!(!hit);
+    assert_eq!(diagnostics.semantic_signature_constructions, 1);
+
+    let session = valid(EditingSession::new(project.clone()));
+    let unbound = BodyEditorPresentation::default();
+    let (session_layout, hit) = valid(
+        cache.get_or_build_body_editor_for_session_with_diagnostics(
+            &session,
+            &unbound,
+            &mut diagnostics,
+        ),
+    );
+    assert!(hit);
+    assert_eq!(diagnostics.complete_project_validations, 0);
+    assert_eq!(diagnostics.semantic_signature_constructions, 0);
+    let (_, hit) = valid(cache.get_or_build_with_inputs_for_purpose_and_diagnostics(
+        0,
+        &project,
+        &inputs,
+        LayoutPurpose::Editor,
+        &mut diagnostics,
+    ));
+    assert!(hit, "the session hit preserves the generic defensive signature metadata");
+    assert_eq!(diagnostics.semantic_signature_constructions, 1);
+
+    project.direct_paragraph_overrides.insert(
+        project.elements[0].id.clone(),
+        SourceParagraphOverrides {
+            paragraph: SourceParagraphSpec {
+                alignment: Some(ParagraphAlignment::Center),
+                ..SourceParagraphSpec::default()
+            },
+            ..SourceParagraphOverrides::default()
+        },
+    );
+    let (mutated, hit) = valid(cache.get_or_build_with_inputs_for_purpose_and_diagnostics(
+        0,
+        &project,
+        &inputs,
+        LayoutPurpose::Editor,
+        &mut diagnostics,
+    ));
+    assert!(!hit, "same-revision canonical override mutation is defended");
+    assert_eq!(diagnostics.semantic_signature_constructions, 1);
+    assert_ne!(*mutated, *session_layout);
+}
+
+#[test]
+fn cached_layout_remains_the_deterministic_caret_hit_page_and_export_authority() {
+    let long_text = format!("{} end", "A deterministic screenplay line ".repeat(120));
+    let project = project_with(&[
+        (Role::Action, long_text.as_str()),
+        (Role::Dialogue, "a second body element"),
+    ]);
+    let session = valid(EditingSession::new(project));
+    let presentation = BodyEditorPresentation::for_project(session.project(), None);
+    let mut cache = LayoutCache::default();
+    let mut diagnostics = LayoutBuildDiagnostics::default();
+    let (first, _) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &presentation,
+        &mut diagnostics,
+    ));
+    let (cached, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &presentation,
+        &mut diagnostics,
+    ));
+    assert!(hit);
+    assert!(std::sync::Arc::ptr_eq(&first, &cached));
+
+    let fresh = valid(ScreenplayLayout::build_with_body_presentation(
+        session.project(),
+        session.layout_inputs(),
+        &effective_source_settings(session.project()),
+        &presentation,
+    ));
+    assert_eq!(*cached, fresh);
+    assert!(cached.pages.len() > 1);
+    assert_eq!(cached.pages.len(), fresh.pages.len());
+    let caret = Caret {
+        element: 0,
+        offset: 8,
+    };
+    assert_eq!(cached.caret_geometry(caret.clone()), fresh.caret_geometry(caret.clone()));
+    let page = cached.page_for_position_with_diagnostics(
+        caret.element,
+        caret.offset,
+        &mut Default::default(),
+    );
+    assert_eq!(page, fresh.page_for_position_with_diagnostics(
+        caret.element,
+        caret.offset,
+        &mut Default::default(),
+    ));
+    let line = cached.line_for_caret_with_diagnostics(&caret, &mut Default::default());
+    let fresh_line = fresh.line_for_caret_with_diagnostics(&caret, &mut Default::default());
+    assert_eq!(line.unwrap().line, fresh_line.unwrap().line);
+    let body_line_index = cached.body_line_index_for_position_with_diagnostics(
+        caret.element,
+        caret.offset,
+        &mut Default::default(),
+    );
+    assert_eq!(
+        body_line_index,
+        fresh.body_line_index_for_position_with_diagnostics(
+            caret.element,
+            caret.offset,
+            &mut Default::default(),
+        ),
+    );
+    assert_eq!(cached.body_line(body_line_index.unwrap()), fresh.body_line(body_line_index.unwrap()));
+    let visible_line = cached.pages[0].lines.first().expect("first page has a line");
+    let x = FixedPoint::from_raw(visible_line.geometry.x.raw() + 2);
+    let y = FixedPoint::from_raw(visible_line.paragraph_bounds.y.raw() + 1);
+    assert_eq!(
+        cached.hit_test_fixed(0, x, y),
+        fresh.hit_test_fixed(0, x, y),
+    );
+
+    // PDF export remains a deterministic projection of the same semantic
+    // document inputs; layout cache reads never mutate those inputs.
+    assert_eq!(valid(export_pdf(session.project())), valid(export_pdf(session.project())));
 }

@@ -357,3 +357,44 @@ fn invalid_wire_parameters_utf8_and_core_errors_roll_back_atomically() {
     );
     assert_eq!(editing, invalid_role_change);
 }
+
+#[test]
+fn delete_commands_propagate_incompatible_join_errors_and_report_final_empty_noops() {
+    let mut project = valid(Project::new());
+    project.elements = vec![
+        valid(ScreenplayElement::new("action", Role::Action, "left")),
+        valid(ScreenplayElement::new("dialogue", Role::Dialogue, "right")),
+    ];
+    let mut forward = valid(EditingSession::new(project.clone()));
+    valid(forward.set_selection(CoreSelection::caret(CorePosition {
+        element: 0,
+        offset: 4,
+    })));
+    let before_forward = forward.clone();
+    assert_eq!(
+        execute_editor_command(&mut forward, &Command::EditDelete),
+        CommandOutcome::Failed(EditError::IncompatibleParagraphJoin),
+    );
+    assert_eq!(forward, before_forward);
+
+    let mut backward = valid(EditingSession::new(project));
+    valid(backward.set_selection(CoreSelection::caret(CorePosition { element: 1, offset: 0 })));
+    let before_backward = backward.clone();
+    assert_eq!(
+        execute_editor_command(&mut backward, &Command::EditorDeleteBackward),
+        CommandOutcome::Failed(EditError::IncompatibleParagraphJoin),
+    );
+    assert_eq!(backward, before_backward);
+
+    let mut final_empty = session();
+    let before_noop = final_empty.clone();
+    assert_eq!(
+        execute_editor_command(&mut final_empty, &Command::EditDelete),
+        CommandOutcome::NoOp,
+    );
+    assert_eq!(
+        execute_editor_command(&mut final_empty, &Command::EditorDeleteBackward),
+        CommandOutcome::NoOp,
+    );
+    assert_eq!(final_empty, before_noop);
+}

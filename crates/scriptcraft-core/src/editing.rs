@@ -5,8 +5,9 @@ use crate::{
     clear_paragraph_run_styles, project_style_at_caret, set_paragraph_alignments,
     toggle_paragraph_run_styles,
     validate_layout_inputs, LayoutInputs, ModelError, ParagraphAlignment, ParagraphTarget, Project,
-    Role, RunBoundaryAffinity, RunStyle, RunStyleFlags, ScreenplayElement, StableId, TextRun,
-    TitlePageParagraph, MAX_ELEMENTS, MAX_TEXT_BYTES,
+    Role, RunBoundaryAffinity, RunStyle, RunStyleFlags, ScreenplayElement,
+    ScopedEditValidationOutcome, StableId, TextRun, TitlePageParagraph, MAX_ELEMENTS,
+    MAX_TEXT_BYTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -113,7 +114,43 @@ fn validate_full_candidate(project: &Project) -> Result<(), ModelError> {
     let _ = FULL_CANDIDATE_VALIDATIONS.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
         Some(value.saturating_add(1))
     });
-    project.validate()
+    project.validate_current_state()
+}
+
+/// Identifies a provably single-owner, nonstructural Body candidate before any
+/// structural preservation reconciliation. The model validator remains the
+/// authority for preservation/global invariants; this only decides whether the
+/// ordinary-edit scoped path is worth attempting.
+fn scoped_body_edit_target(baseline: &Project, candidate: &Project) -> Option<usize> {
+    if baseline.elements.len() != candidate.elements.len()
+        || baseline.title_page != candidate.title_page
+        || baseline.dual_dialogue_groups != candidate.dual_dialogue_groups
+        || baseline.direct_paragraph_overrides != candidate.direct_paragraph_overrides
+        || baseline.dual_dialogue_paragraph_overrides
+            != candidate.dual_dialogue_paragraph_overrides
+        || baseline.legacy_json_state != candidate.legacy_json_state
+        || !std::sync::Arc::ptr_eq(&baseline.layout_identity, &candidate.layout_identity)
+    {
+        return None;
+    }
+
+    let mut changed_owner = None;
+    for (index, (before, after)) in baseline
+        .elements
+        .iter()
+        .zip(&candidate.elements)
+        .enumerate()
+    {
+        if before.id != after.id || before.role != after.role {
+            return None;
+        }
+        if before != after {
+            if changed_owner.replace(index).is_some() {
+                return None;
+            }
+        }
+    }
+    changed_owner
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,9 +228,7 @@ pub enum EditError {
     TextTooLong,
     TooManyElements,
     UnsupportedTransition { from: Role },
-    /// Inline Alts is valid only while its exact source owner remains Dialogue.
-    /// This failure is intentionally not eligible for automatic dual unwrap.
-    InlineAltsRoleChange,
+    IncompatibleParagraphJoin,
     Preservation(crate::preservation::PreservationError),
     CastList(CastListError),
     FormattedText(crate::FormattedTextError),
@@ -623,7 +658,7 @@ impl EditingSession {
             }
             self.project = project;
             self.revision = self.revision.saturating_add(1);
-            if was_clean && !outcome.deferred {
+            if was_clean {
                 self.clean_project = self.project.clone();
             }
             self.dirty = self.project != self.clean_project;
@@ -635,14 +670,28 @@ impl EditingSession {
 
     /// Builds corrected detached data for Save or Save As preflight. This does
     /// not mutate the live session; the storage owner controls publication.
-    pub fn prepare_cast_list_save_candidate(&self) -> Result<Project, EditError> {
-        cast_list::prepare_save_candidate(&self.project).map_err(EditError::CastList)
+    pub fn prepare_cast_list_save_candidate(
+        &self,
+    ) -> Result<Project, EditError> {
+        self.prepare_cast_list_save_candidate_with_deferrals()
+            .map(|(project, _)| project)
+    }
+
+    pub(crate) fn prepare_cast_list_save_candidate_with_deferrals(
+        &self,
+    ) -> Result<(Project, BTreeSet<String>), EditError> {
+        cast_list::prepare_save_candidate_with_deferrals(&self.project)
+            .map_err(EditError::CastList)
     }
 
     /// Builds a detached session representing a successfully serialized and
     /// re-read project. This is prepared before storage publication; callers
     /// must install it only after the destination has been replaced.
-    pub(crate) fn prepare_saved_rebase(&self, mut project: Project) -> Result<Self, EditError> {
+    pub(crate) fn prepare_saved_rebase(
+        &self,
+        mut project: Project,
+        deferred_derived_scenes: BTreeSet<String>,
+    ) -> Result<Self, EditError> {
         validate_full_candidate(&project)?;
         if let Some(preservation) = project.preservation.as_mut() {
             preservation.rebuild_managed_paragraph_index();
@@ -677,8 +726,12 @@ impl EditingSession {
         rebased.last_validation_was_scoped = false;
         // The detached save candidate has already passed complete derived
         // preparation; do not schedule a duplicate timer pass after publish.
-        rebased.pending_derived_invalidation = PendingDerivedInvalidation::None;
-        rebased.deferred_derived_scenes.clear();
+        rebased.pending_derived_invalidation = if deferred_derived_scenes.is_empty() {
+            PendingDerivedInvalidation::None
+        } else {
+            PendingDerivedInvalidation::Scenes(deferred_derived_scenes.clone())
+        };
+        rebased.deferred_derived_scenes = deferred_derived_scenes;
         rebased.failed_derived_complete = false;
         rebased.failed_derived_scenes.clear();
         // Saving changes the preservation baseline and therefore invalidates
@@ -780,6 +833,19 @@ impl EditingSession {
                 .ok_or(EditError::InvalidElement)?
                 .text
                 .clone();
+            if paragraph_text.is_empty() && project.title_page.len() > 1 {
+                project.title_page.remove(start.element);
+                let caret = if start.element < project.title_page.len() {
+                    Position { element: start.element, offset: 0 }
+                } else {
+                    let previous = start.element.saturating_sub(1);
+                    Position {
+                        element: previous,
+                        offset: project.title_page[previous].text.len(),
+                    }
+                };
+                return Ok(Selection::caret(caret));
+            }
                 if start.offset == paragraph_text.len() {
                     if start.element + 1 < project.title_page.len() {
                     join_title_at(project, start.element)?;
@@ -806,6 +872,19 @@ impl EditingSession {
                 .ok_or(EditError::InvalidElement)?
                 .text
                 .clone();
+            if paragraph_text.is_empty() && project.title_page.len() > 1 {
+                project.title_page.remove(start.element);
+                let caret = if start.element > 0 {
+                    let previous = start.element - 1;
+                    Position {
+                        element: previous,
+                        offset: project.title_page[previous].text.len(),
+                    }
+                } else {
+                    Position { element: 0, offset: 0 }
+                };
+                return Ok(Selection::caret(caret));
+            }
             if start.offset == 0 {
                 if start.element > 0 {
                     let left = start.element - 1;
@@ -857,10 +936,13 @@ impl EditingSession {
                     .chain(pattern.right.member_ids())
                     .cloned()
                     .collect::<Vec<_>>();
+                let members = member_ids.iter().filter_map(|id| {
+                    project.elements.iter().find(|element| &element.id == id).cloned()
+                }).collect::<Vec<_>>();
                 let mut wrapper = crate::dual_dialogue::DualDialogueWrapperProvenance::default();
                 if let Some(preservation) = project.preservation.as_mut() {
                     let (foreign_id, anchor, ordinal) = preservation
-                        .wrap_dual_dialogue_members(&group_id, &member_ids, None)
+                        .wrap_dual_dialogue_members(&group_id, &member_ids, &members, None)
                         .map_err(EditError::Preservation)?;
                     wrapper.outer_foreign_id = Some(foreign_id.clone());
                     wrapper.source = Some(crate::SourceProvenance {
@@ -890,16 +972,14 @@ impl EditingSession {
                     .ok_or(EditError::InvalidSelection)?;
                 let group = project.dual_dialogue_groups[group_index].clone();
                 if let Some(preservation) = project.preservation.as_mut() {
-                    let anchor = group.wrapper.preservation_anchor.as_ref()
-                        .ok_or(EditError::Preservation(
-                            crate::preservation::PreservationError::ManagedAnchorMissing,
-                        ))?;
+                    let body_order = project.elements.iter().map(|element| element.id.clone()).collect::<Vec<_>>();
                     let members = group.member_ids().cloned().collect::<Vec<_>>();
                     preservation
                         .unwrap_dual_dialogue_members(
                             &group.id,
                             &members,
-                            anchor,
+                            &body_order,
+                            group.wrapper.preservation_anchor.as_ref(),
                             group.wrapper.outer_foreign_id.as_deref(),
                         )
                         .map_err(EditError::Preservation)?;
@@ -1030,7 +1110,7 @@ impl EditingSession {
         let (start, end) = self.selection.ordered();
         let operation = |project: &mut Project,
                          selection: &Selection,
-                         _generated: &mut BTreeSet<String>,
+                         generated: &mut BTreeSet<String>,
                          _policy: &EditPolicy| {
                 let (start, end) = selection.ordered();
                 let insertion_style = if start == end {
@@ -1045,7 +1125,7 @@ impl EditingSession {
                         typing,
                     ).map_err(EditError::FormattedText)?
                 };
-                replace_range(project, start, end, text)?;
+                replace_range(project, generated, start, end, text)?;
                 if !text.is_empty() {
                     synchronize_body_typing_style(project, start, text, insertion_style)?;
                 }
@@ -1088,6 +1168,13 @@ impl EditingSession {
                 })
                 .map(|(_, element)| element.id.clone())
                 .collect()
+        } else if selection_start == selection_end {
+            deletion_candidate_empty_element(&self.project, selection_start, DeleteDirection::Forward)
+                .into_iter()
+                .filter_map(|index| self.project.elements.get(index))
+                .filter(|element| element.role == Role::SceneHeading)
+                .map(|element| element.id.clone())
+                .collect()
         } else {
             BTreeSet::new()
         };
@@ -1097,22 +1184,34 @@ impl EditingSession {
             |project, selection, generated, _policy| {
                 let (start, end) = selection.ordered();
                 if start != end {
-                    replace_range(project, start, end, "")?;
+                    replace_range(project, generated, start, end, "")?;
                     return Ok(Selection::caret(start));
                 }
                 let item = project
                     .elements
                     .get(start.element)
                     .ok_or(EditError::InvalidElement)?;
+                if item.text.is_empty() {
+                    if project.elements.len() == 1 {
+                        return Ok(Selection::caret(start));
+                    }
+                    return Ok(remove_empty_body_element(
+                        project,
+                        generated,
+                        start.element,
+                        DeleteDirection::Forward,
+                    ));
+                }
                 if item.role == Role::Parenthetical
                     && is_delimiter_only_parenthetical(item.text.as_str())
                 {
                     let item_text_len = item.text.len();
                     let id = item.id.as_str().to_owned();
-                    generated.remove(&id);
                     if start.element == 0 || project.elements.len() == 1 {
+                        generated.remove(&id);
                         replace_range(
                             project,
+                            generated,
                             Position {
                                 element: 0,
                                 offset: 0,
@@ -1123,8 +1222,8 @@ impl EditingSession {
                             },
                             "",
                         )?;
-                        update_preserved_role(project, 0, Role::Parenthetical, Role::Dialogue)?;
                         project.elements[0].role = Role::Dialogue;
+                        update_preserved_role(project, 0, Role::Dialogue)?;
                         return Ok(Selection::caret(Position {
                             element: 0,
                             offset: 0,
@@ -1132,7 +1231,7 @@ impl EditingSession {
                     }
                     let previous = start.element.saturating_sub(1);
                     let offset = project.elements[previous].text.len();
-                    project.elements.remove(start.element);
+                    remove_body_owner(project, generated, start.element);
                     return Ok(Selection::caret(Position {
                         element: previous,
                         offset,
@@ -1142,6 +1241,7 @@ impl EditingSession {
                     let next = next_boundary(&item.text, start.offset);
                     replace_range(
                         project,
+                        generated,
                         start,
                         Position {
                             offset: next,
@@ -1151,7 +1251,15 @@ impl EditingSession {
                     )?;
                 } else if start.element + 1 < project.elements.len() {
                     let offset = item.text.len();
-                    join_at(project, start.element)?;
+                    if project.elements[start.element + 1].text.is_empty() {
+                        remove_body_owner(project, generated, start.element + 1);
+                        return Ok(Selection::caret(Position {
+                            element: start.element,
+                            offset,
+                        }));
+                    }
+                    ensure_join_roles_match(project, start.element)?;
+                    join_at(project, generated, start.element)?;
                     return Ok(Selection::caret(Position {
                         element: start.element,
                         offset,
@@ -1163,25 +1271,48 @@ impl EditingSession {
     }
 
     pub fn backspace(&mut self) -> Result<(), EditError> {
-        self.mutate_structural(
+        let (start, end) = self.selection.ordered();
+        let generated_scene_heading_deletions = if start == end {
+            deletion_candidate_empty_element(&self.project, start, DeleteDirection::Backward)
+                .into_iter()
+                .filter_map(|index| self.project.elements.get(index))
+                .filter(|element| element.role == Role::SceneHeading)
+                .map(|element| element.id.clone())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+        self.mutate_structural_with_scene_heading_deletions(
             MutationValidationScope::SingleParagraph,
-            |project, selection, _generated, _policy| {
+            generated_scene_heading_deletions,
+            |project, selection, generated, _policy| {
                 let (start, end) = selection.ordered();
                 if start != end {
-                    replace_range(project, start, end, "")?;
+                    replace_range(project, generated, start, end, "")?;
                     return Ok(Selection::caret(start));
                 }
+                let item = project
+                    .elements
+                    .get(start.element)
+                    .ok_or(EditError::InvalidElement)?;
+                if start.offset == 0 && item.text.is_empty() {
+                    if project.elements.len() == 1 {
+                        return Ok(Selection::caret(start));
+                    }
+                    return Ok(remove_empty_body_element(
+                        project,
+                        generated,
+                        start.element,
+                        DeleteDirection::Backward,
+                    ));
+                }
                 if start.offset > 0 {
-                    let item = project
-                        .elements
-                        .get(start.element)
-                        .ok_or(EditError::InvalidElement)?;
                     let previous = previous_boundary(&item.text, start.offset);
                     let from = Position {
                         offset: previous,
                         ..start
                     };
-                    replace_range(project, from, start, "")?;
+                    replace_range(project, generated, from, start, "")?;
                     return Ok(Selection::caret(from));
                 }
                 if start.element > 0 {
@@ -1189,8 +1320,16 @@ impl EditingSession {
                         .elements
                         .get(start.element - 1)
                         .ok_or(EditError::InvalidElement)?;
+                    if previous.text.is_empty() {
+                        remove_body_owner(project, generated, start.element - 1);
+                        return Ok(Selection::caret(Position {
+                            element: start.element - 1,
+                            offset: 0,
+                        }));
+                    }
                     let offset = previous.text.len();
-                    join_at(project, start.element - 1)?;
+                    ensure_join_roles_match(project, start.element - 1)?;
+                    join_at(project, generated, start.element - 1)?;
                     return Ok(Selection::caret(Position {
                         element: start.element - 1,
                         offset,
@@ -1298,17 +1437,13 @@ impl EditingSession {
                         let text_len = project.elements[element].text.len();
                         replace_range(
                             project,
+                            generated,
                             Position { element, offset: 0 },
                             Position { element, offset: text_len },
                             "",
                         )?;
-                        update_preserved_role(
-                            project,
-                            element,
-                            Role::Parenthetical,
-                            Role::Dialogue,
-                        )?;
                         project.elements[element].role = Role::Dialogue;
+                        update_preserved_role(project, element, Role::Dialogue)?;
                         generated.remove(project.elements[element].id.as_str());
                         Ok(Selection::caret(Position { element, offset: 0 }))
                     }
@@ -1328,8 +1463,8 @@ impl EditingSession {
                         }
                         let old_role = project.elements[position.element].role;
                         if old_role != role {
-                            update_preserved_role(project, position.element, old_role, role)?;
                             project.elements[position.element].role = role;
+                            update_preserved_role(project, position.element, role)?;
                         }
                         if policy.auto_parenthetical
                             && role == Role::Parenthetical
@@ -1337,6 +1472,7 @@ impl EditingSession {
                         {
                             replace_range(
                                 project,
+                                generated,
                                 Position { element: position.element, offset: 0 },
                                 Position { element: position.element, offset: 0 },
                                 "()",
@@ -1356,19 +1492,19 @@ impl EditingSession {
         )
     }
 
-    /// Joins adjacent paragraphs while retaining the left source identity. Any
-    /// opaque attachment or unsafe reference prevents the candidate from being
-    /// published.
+    /// Joins adjacent paragraphs while retaining the left semantic/source owner.
+    /// The semantic role rule determines eligibility; removed-owner source data
+    /// is discarded with that owner and cannot veto a legal join.
     pub fn join_with_next(&mut self) -> Result<(), EditError> {
         self.mutate_structural(
             MutationValidationScope::Complete,
-            |project, selection, _generated, _policy| {
+            |project, selection, generated, _policy| {
                 let (start, end) = selection.ordered();
                 if start != end || start.offset != project.elements[start.element].text.len() {
                     return Err(EditError::InvalidSelection);
                 }
                 let offset = project.elements[start.element].text.len();
-                join_at(project, start.element)?;
+                join_at(project, generated, start.element)?;
                 Ok(Selection::caret(Position {
                     element: start.element,
                     offset,
@@ -1377,22 +1513,8 @@ impl EditingSession {
         )
     }
 
-    /// Changes a known role and its exact mapped source Type attribute together.
-    /// A role change that would invalidate attached scene data is rejected.
+    /// Changes a canonical role and deterministically projects its source Type.
     pub fn change_role(&mut self, role: Role) -> Result<(), EditError> {
-        let (start, end) = self.selection.ordered();
-        if start.element == end.element
-            && self.project.elements.get(start.element).is_some_and(|element| {
-                element.role == Role::Dialogue
-                    && role != Role::Dialogue
-                    && self.project.preservation.as_ref()
-                        .is_some_and(|state| state.has_inline_alts(&element.id))
-            })
-        {
-            // Reject before entering the structural planner: role changes are
-            // not repaired by unwrapping an otherwise-valid dual group.
-            return Err(EditError::InlineAltsRoleChange);
-        }
         self.mutate_structural(
             MutationValidationScope::SingleParagraph,
             |project, selection, generated, policy| {
@@ -1402,9 +1524,9 @@ impl EditingSession {
                 }
                 let old_role = project.elements[start.element].role;
                 if old_role != role {
-                    update_preserved_role(project, start.element, old_role, role)?;
+                    project.elements[start.element].role = role;
+                    update_preserved_role(project, start.element, role)?;
                 }
-                project.elements[start.element].role = role;
                 if role != Role::Parenthetical {
                     generated.remove(project.elements[start.element].id.as_str());
                 } else if policy.auto_parenthetical
@@ -1412,6 +1534,7 @@ impl EditingSession {
                 {
                     replace_range(
                         project,
+                        generated,
                         Position {
                             element: start.element,
                             offset: 0,
@@ -1591,16 +1714,6 @@ impl EditingSession {
             &EditPolicy,
         ) -> Result<Selection, EditError>,
     {
-        let (scope_start, scope_end) = self.selection.ordered();
-        let requested_element = (requested_scope == MutationValidationScope::SingleParagraph
-            && scope_start.element == scope_end.element)
-            .then(|| {
-                self.project
-                    .elements
-                    .get(scope_start.element)
-                    .map(|element| element.id.clone())
-            })
-            .flatten();
         let baseline = self.project.clone();
         let baseline_generated = self.generated_parentheticals.clone();
         let mut first_project = baseline.clone();
@@ -1613,7 +1726,6 @@ impl EditingSession {
         );
         let (mut project, mut generated, selection) = match first_result {
             Ok(selection) => {
-                crate::dual_dialogue::prune_removed_group_paragraphs(&baseline, &mut first_project);
                 let plan = if structural {
                     crate::dual_dialogue::classify_structural_result(
                         &baseline,
@@ -1650,7 +1762,7 @@ impl EditingSession {
                     (retry_project, retry_generated, selection)
                 }
             }
-            Err(error @ EditError::InlineAltsRoleChange) => return Err(error),
+            Err(error @ EditError::IncompatibleParagraphJoin) => return Err(error),
             Err(first_error) if structural => {
                 let unwrap_ids = groups_touched_by_selection(&baseline, self.selection);
                 if unwrap_ids.is_empty() {
@@ -1675,12 +1787,6 @@ impl EditingSession {
             Err(error) => return Err(error),
         };
         let prior_generated = baseline_generated;
-        crate::dual_dialogue::prune_removed_group_paragraphs(&self.project, &mut project);
-        if let Some(preservation) = project.preservation.as_mut() {
-            if !preservation.has_source_identity_use_index() {
-                preservation.rebuild_managed_paragraph_index();
-            }
-        }
         invalidate_changed_generated_parentheticals(
             &self.project,
             &project,
@@ -1693,29 +1799,37 @@ impl EditingSession {
                 .iter()
                 .any(|element| element.id.as_str() == id && element.role == Role::Parenthetical)
         });
-        let scoped_preconditions = !structural
-            && self.validated_baseline
-            && requested_element.as_ref().is_some_and(|id| {
-                project.elements.len() == self.project.elements.len()
-                    && project
-                        .elements
-                        .get(scope_start.element)
-                        .is_some_and(|element| &element.id == id)
-                    && selection.anchor.element == scope_start.element
-                    && selection.focus.element == scope_start.element
-                    && project
-                        .preservation
-                        .as_ref()
-                        .is_none_or(|state| state.has_managed_paragraph_index())
-            });
-        let scoped_valid = if scoped_preconditions {
+        let scoped_target = (requested_scope == MutationValidationScope::SingleParagraph
+            && self.validated_baseline)
+            .then(|| scoped_body_edit_target(&baseline, &project))
+            .flatten();
+        // Delete/Backspace enter through the structural-capable transaction
+        // because they may remove/join owners. If the actual candidate proves
+        // to be one stable owner text/run edit, its projection was already
+        // staged by the operation and full structural reconciliation is not
+        // needed. All uncertain and genuinely structural cases retain it.
+        if (structural || requested_scope != MutationValidationScope::SingleParagraph)
+            && scoped_target.is_none()
+        {
+            if let Some(preservation) = project.preservation.as_mut() {
+                preservation
+                    .reconcile_body_structure(
+                        &self.project.elements,
+                        &mut project.elements,
+                        &generated_scene_heading_deletions,
+                        &mut project.dual_dialogue_groups,
+                    )
+                    .map_err(EditError::Preservation)?;
+            }
+        }
+        let scoped_valid = if let Some(element_index) = scoped_target {
             let _ = SCOPED_CANDIDATE_ATTEMPTS.try_update(
                 Ordering::Relaxed,
                 Ordering::Relaxed,
                 |value| Some(value.saturating_add(1)),
             );
-            match project.validate_scoped_single_element_edit(&self.project, scope_start.element) {
-                Ok(true) if validate_selection(&project, selection).is_ok() => {
+            match project.validate_scoped_single_element_edit(&baseline, element_index)? {
+                ScopedEditValidationOutcome::Validated => {
                     let _ = SCOPED_CANDIDATE_ACCEPTS.try_update(
                         Ordering::Relaxed,
                         Ordering::Relaxed,
@@ -1723,8 +1837,7 @@ impl EditingSession {
                     );
                     true
                 }
-                Ok(_) => false,
-                Err(error) => return Err(EditError::Model(error)),
+                ScopedEditValidationOutcome::CompleteValidationRequired => false,
             }
         } else {
             false
@@ -1737,24 +1850,9 @@ impl EditingSession {
                     |value| Some(value.saturating_add(1)),
                 );
             }
-            if let Some(preservation) = project.preservation.as_mut() {
-                preservation
-                    .reconcile_body_structure(
-                        &self.project.elements,
-                        &mut project.elements,
-                        &generated_scene_heading_deletions,
-                        &project.dual_dialogue_groups,
-                    )
-                    .map_err(EditError::Preservation)?;
-            }
             validate_full_candidate(&project)?;
-            if let Some(preservation) = project.preservation.as_mut() {
-                if !preservation.has_source_identity_use_index() {
-                    preservation.rebuild_managed_paragraph_index();
-                }
-            }
-            validate_selection(&project, selection)?;
         }
+        validate_selection(&project, selection)?;
         if project == self.project && selection == self.selection {
             self.last_validation_was_scoped = scoped_valid;
             return Ok(());
@@ -1817,17 +1915,6 @@ impl EditingSession {
                 preservation
                     .reconcile_title_structure(&before_title, &mut project.title_page)
                     .map_err(EditError::Preservation)?;
-            } else if before_title.iter().any(|paragraph| paragraph.source_provenance.is_some())
-                || project.title_page.iter().any(|paragraph| paragraph.source_provenance.is_some())
-            {
-                return Err(EditError::Preservation(
-                    crate::preservation::PreservationError::ManagedAnchorMissing,
-                ));
-            }
-        }
-        if let Some(preservation) = project.preservation.as_mut() {
-            if !preservation.has_source_identity_use_index() {
-                preservation.rebuild_managed_paragraph_index();
             }
         }
         validate_full_candidate(&project)?;
@@ -2370,10 +2457,6 @@ fn selection_paragraph_targets(
         .collect()
 }
 
-fn unsupported_title_structure() -> EditError {
-    EditError::Preservation(crate::preservation::PreservationError::UnsupportedTextMapping)
-}
-
 fn effective_title_runs(paragraph: &TitlePageParagraph) -> Vec<TextRun> {
     if paragraph.runs.is_empty() {
         if paragraph.text.is_empty() {
@@ -2496,8 +2579,8 @@ fn replace_title_range(
         return Err(EditError::TextTooLong);
     }
     if project.title_page.is_empty() {
-        if start != end || project.preservation.is_some() {
-            return Err(unsupported_title_structure());
+        if start != end {
+            return Err(EditError::InvalidSelection);
         }
         let id = project.allocate_element_id()?;
         let mut paragraph = TitlePageParagraph::new(
@@ -2521,33 +2604,8 @@ fn replace_title_range(
         if combined_len > MAX_TEXT_BYTES {
             return Err(EditError::TextTooLong);
         }
+        let original_text = old.text.clone();
         let has_runs = !old.runs.is_empty();
-        let mut has_source_mapping = false;
-        if let Some(preservation) = project.preservation.as_mut() {
-            if preservation.has_managed_element(&old.id) {
-                has_source_mapping = true;
-                if has_runs {
-                    preservation.ensure_run_range_is_contiguous(
-                        &old.id,
-                        start.offset..end.offset,
-                    )
-                        .map_err(EditError::Preservation)?;
-                }
-                let expected = old.runs.iter().map(|run| run.text.clone()).collect::<Vec<_>>();
-                preservation.replace_managed_text(
-                    &old.id,
-                    &old.text,
-                    start.offset,
-                    end.offset,
-                    inserted,
-                    has_runs.then_some(expected.as_slice()),
-                ).map_err(EditError::Preservation)?;
-            } else if old.source_provenance.is_some() {
-                return Err(EditError::Preservation(crate::preservation::PreservationError::ManagedAnchorMissing));
-            }
-        } else if old.source_provenance.is_some() {
-            return Err(EditError::Preservation(crate::preservation::PreservationError::ManagedAnchorMissing));
-        }
         let text = format!("{}{}{}", &old.text[..start.offset], inserted, &old.text[end.offset..]);
         let mut updated = old;
         if has_runs {
@@ -2570,13 +2628,17 @@ fn replace_title_range(
             updated.runs = runs;
         }
         updated.text = text;
-        if has_source_mapping {
-            let sync_text = updated.text.clone();
-            let sync_runs = updated.runs.clone();
-            project.preservation.as_mut()
-                .ok_or(EditError::Preservation(crate::preservation::PreservationError::ManagedAnchorMissing))?
-                .sync_managed_text_runs(&updated.id, &sync_text, &sync_runs)
-                .map_err(EditError::Preservation)?;
+        if let Some(preservation) = project.preservation.as_mut() {
+            if let Some(provenance) = preservation.project_managed_text_runs(
+                &updated.id,
+                &original_text,
+                &updated.text,
+                &updated.runs,
+                updated.source_provenance.as_ref(),
+                None,
+            ).map_err(EditError::Preservation)? {
+                updated.source_provenance = Some(provenance);
+            }
         }
         project.title_page[start.element] = updated;
         return Ok(());
@@ -2604,6 +2666,7 @@ fn replace_title_range(
 
 fn replace_range(
     project: &mut Project,
+    generated: &mut BTreeSet<String>,
     start: Position,
     end: Position,
     inserted: &str,
@@ -2631,7 +2694,9 @@ fn replace_range(
     let runs = replace_cross_element_runs(project, start, end, inserted, &combined)?;
     project.elements[start.element].text = combined;
     project.elements[start.element].runs = runs;
-    project.elements.drain(start.element + 1..=end.element);
+    for _ in start.element + 1..=end.element {
+        remove_body_owner(project, generated, start.element + 1);
+    }
     Ok(())
 }
 
@@ -2659,35 +2724,8 @@ fn replace_element_text(
         return Err(EditError::TextTooLong);
     }
     let id = item.id.clone();
-    let has_source_mapping = project
-        .preservation
-        .as_ref()
-        .is_some_and(|state| state.has_managed_element(&id));
-    if has_source_mapping {
-        let expected_run_text = old_runs
-            .iter()
-            .map(|run| run.text.clone())
-            .collect::<Vec<_>>();
-        project
-            .preservation
-            .as_mut()
-            .ok_or(EditError::Preservation(
-                crate::preservation::PreservationError::ManagedAnchorMissing,
-            ))?
-            .replace_managed_text(
-                &id,
-                &old_text,
-                start,
-                end,
-                inserted,
-                (!old_runs.is_empty()).then_some(expected_run_text.as_slice()),
-            )
-            .map_err(EditError::Preservation)?;
-    } else if item.source_provenance.is_some() {
-        return Err(EditError::Preservation(
-            crate::preservation::PreservationError::ManagedAnchorMissing,
-        ));
-    }
+    let provenance = item.source_provenance.clone();
+    let role_name = fdx_role_name(item.role);
     {
         let item = &mut project.elements[element_index];
         item.text = new_text;
@@ -2699,11 +2737,17 @@ fn replace_element_text(
             }
         }
     }
-    if has_source_mapping {
-        project.preservation.as_mut()
-            .ok_or(EditError::Preservation(crate::preservation::PreservationError::ManagedAnchorMissing))?
-            .sync_managed_text_runs(&id, &project.elements[element_index].text, &project.elements[element_index].runs)
-            .map_err(EditError::Preservation)?;
+    if let Some(preservation) = project.preservation.as_mut() {
+        if let Some(provenance) = preservation.project_managed_text_runs(
+            &id,
+            &old_text,
+            &project.elements[element_index].text,
+            &project.elements[element_index].runs,
+            provenance.as_ref(),
+            Some(role_name),
+        ).map_err(EditError::Preservation)? {
+            project.elements[element_index].source_provenance = Some(provenance);
+        }
     }
     Ok(())
 }
@@ -2779,9 +2823,7 @@ fn replace_cross_element_runs(
         .map(|run| run.text.as_str())
         .collect::<String>();
     if actual != combined {
-        return Err(EditError::Preservation(
-            crate::preservation::PreservationError::UnsupportedTextMapping,
-        ));
+        return Err(EditError::Model(ModelError::InvalidRunProjection));
     }
     Ok(result)
 }
@@ -2857,7 +2899,6 @@ fn coalesce_runs(runs: &mut Vec<TextRun>) {
 fn update_preserved_role(
     project: &mut Project,
     element_index: usize,
-    old_role: Role,
     new_role: Role,
 ) -> Result<(), EditError> {
     let element = project
@@ -2865,41 +2906,36 @@ fn update_preserved_role(
         .get(element_index)
         .ok_or(EditError::InvalidElement)?;
     let id = element.id.clone();
-    let old_fdx_role = fdx_role_name(old_role);
-    if element
-        .source_provenance
-        .as_ref()
-        .and_then(|provenance| provenance.foreign_role.as_deref())
-        .is_some_and(|source_role| source_role != old_fdx_role)
-    {
-        return Err(EditError::Preservation(
-            crate::preservation::PreservationError::UnsupportedRoleMapping,
-        ));
-    }
-    let has_source_mapping = project
-        .preservation
-        .as_ref()
-        .is_some_and(|state| state.has_managed_element(&id));
-    if new_role != Role::Dialogue
-        && project.preservation.as_ref().is_some_and(|state| state.has_inline_alts(&id))
-    {
-        return Err(EditError::InlineAltsRoleChange);
-    }
-    if has_source_mapping {
-        project
-            .preservation
-            .as_mut()
-            .ok_or(EditError::Preservation(
-                crate::preservation::PreservationError::ManagedAnchorMissing,
-            ))?
-            .change_managed_role(&id, old_fdx_role, fdx_role_name(new_role))
-            .map_err(EditError::Preservation)?;
-    } else if element.source_provenance.is_some() {
-        return Err(EditError::Preservation(
-            crate::preservation::PreservationError::ManagedAnchorMissing,
-        ));
-    }
-    if let Some(provenance) = &mut project.elements[element_index].source_provenance {
+    let source_provenance = element.source_provenance.clone();
+    let ordinal = source_provenance.as_ref().map_or(0, |provenance| provenance.ordinal);
+    if let Some(preservation) = project.preservation.as_mut() {
+        if let Some(mut provenance) = preservation.change_managed_role(
+            &id,
+            fdx_role_name(new_role),
+            source_provenance.as_ref(),
+            ordinal,
+        ).map_err(EditError::Preservation)? {
+            provenance.foreign_role = Some(fdx_role_name(new_role).to_owned());
+            project.elements[element_index].source_provenance = Some(provenance);
+        } else if let Some(provenance) = &mut project.elements[element_index].source_provenance {
+            provenance.foreign_role = Some(fdx_role_name(new_role).to_owned());
+        }
+        let element = &project.elements[element_index];
+        let id = element.id.clone();
+        let text = element.text.clone();
+        let runs = element.runs.clone();
+        let provenance = element.source_provenance.clone();
+        if let Some(recovered) = preservation.project_managed_text_runs(
+            &id,
+            &text,
+            &text,
+            &runs,
+            provenance.as_ref(),
+            Some(fdx_role_name(new_role)),
+        ).map_err(EditError::Preservation)? {
+            project.elements[element_index].source_provenance = Some(recovered);
+        }
+    } else if let Some(provenance) = &mut project.elements[element_index].source_provenance {
         provenance.foreign_role = Some(fdx_role_name(new_role).to_owned());
     }
     Ok(())
@@ -3242,14 +3278,13 @@ fn unwrap_dual_dialogue_groups(
             .ok_or(EditError::InvalidSelection)?;
         let group = project.dual_dialogue_groups[index].clone();
         if let Some(preservation) = project.preservation.as_mut() {
-            let anchor = group.wrapper.preservation_anchor.as_ref().ok_or(
-                EditError::Preservation(crate::preservation::PreservationError::ManagedAnchorMissing),
-            )?;
+            let body_order = project.elements.iter().map(|element| element.id.clone()).collect::<Vec<_>>();
             let members = group.member_ids().cloned().collect::<Vec<_>>();
             preservation.unwrap_dual_dialogue_members(
                 &group.id,
                 &members,
-                anchor,
+                &body_order,
+                group.wrapper.preservation_anchor.as_ref(),
                 group.wrapper.outer_foreign_id.as_deref(),
             ).map_err(EditError::Preservation)?;
         }
@@ -3293,20 +3328,115 @@ fn split_id(project: &Project) -> Result<String, ModelError> {
     Ok(project.allocate_element_id()?.as_str().to_owned())
 }
 
-fn join_at(project: &mut Project, index: usize) -> Result<(), EditError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeleteDirection {
+    Forward,
+    Backward,
+}
+
+fn deletion_candidate_empty_element(
+    project: &Project,
+    position: Position,
+    direction: DeleteDirection,
+) -> Option<usize> {
+    let current = project.elements.get(position.element)?;
+    if current.text.is_empty() && project.elements.len() > 1 {
+        return Some(position.element);
+    }
+    match direction {
+        DeleteDirection::Forward if position.offset == current.text.len() => {
+            let next_index = position.element.checked_add(1)?;
+            project
+                .elements
+                .get(next_index)
+                .is_some_and(|element| element.text.is_empty())
+                .then_some(next_index)
+        }
+        DeleteDirection::Backward if position.offset == 0 && position.element > 0 => {
+            let previous_index = position.element - 1;
+            project.elements[previous_index]
+                .text
+                .is_empty()
+                .then_some(previous_index)
+        }
+        _ => None,
+    }
+}
+
+fn remove_empty_body_element(
+    project: &mut Project,
+    generated: &mut BTreeSet<String>,
+    index: usize,
+    direction: DeleteDirection,
+) -> Selection {
+    let (caret_element, caret_offset) = match direction {
+        DeleteDirection::Forward if index + 1 < project.elements.len() => (index, 0),
+        DeleteDirection::Forward => (index - 1, project.elements[index - 1].text.len()),
+        DeleteDirection::Backward if index > 0 => (index - 1, project.elements[index - 1].text.len()),
+        DeleteDirection::Backward => (index, 0),
+    };
+    remove_body_owner(project, generated, index);
+    Selection::caret(Position {
+        element: caret_element,
+        offset: caret_offset,
+    })
+}
+
+fn ensure_join_roles_match(project: &Project, index: usize) -> Result<(), EditError> {
+    let left = project.elements.get(index).ok_or(EditError::InvalidElement)?;
+    let right = project
+        .elements
+        .get(index + 1)
+        .ok_or(EditError::InvalidElement)?;
+    if left.role != right.role {
+        return Err(EditError::IncompatibleParagraphJoin);
+    }
+    Ok(())
+}
+
+fn remove_body_owner(
+    project: &mut Project,
+    generated: &mut BTreeSet<String>,
+    index: usize,
+) -> ScreenplayElement {
+    let removed = project.elements.remove(index);
+    let removed_id = removed.id.clone();
+    generated.remove(removed_id.as_str());
+    project.direct_paragraph_overrides.remove(&removed_id);
+
+    let removed_cue_group_ids = project
+        .dual_dialogue_groups
+        .iter()
+        .filter(|group| {
+            group.left.character == removed_id || group.right.character == removed_id
+        })
+        .map(|group| group.id.clone())
+        .collect::<Vec<_>>();
+    if removed_cue_group_ids.is_empty() {
+        for group in &mut project.dual_dialogue_groups {
+            group.left.paragraphs.retain(|id| id != &removed_id);
+            group.right.paragraphs.retain(|id| id != &removed_id);
+        }
+    } else {
+        project
+            .dual_dialogue_groups
+            .retain(|group| !removed_cue_group_ids.contains(&group.id));
+        for group_id in removed_cue_group_ids {
+            project.dual_dialogue_paragraph_overrides.remove(&group_id);
+        }
+    }
+    removed
+}
+
+fn join_at(
+    project: &mut Project,
+    generated: &mut BTreeSet<String>,
+    index: usize,
+) -> Result<(), EditError> {
     if index + 1 >= project.elements.len() {
         return Err(EditError::InvalidElement);
     }
-    let removed_id = &project.elements[index + 1].id;
-    if project
-        .preservation
-        .as_ref()
-        .is_some_and(|state| state.has_direct_paragraph_formatting(removed_id))
-    {
-        return Err(EditError::Preservation(
-            crate::preservation::PreservationError::StructuralAttachmentConflict,
-        ));
-    }
+    ensure_join_roles_match(project, index)?;
     let right = project.elements[index + 1].text.clone();
     let joined_runs =
         if project.elements[index].runs.is_empty() && project.elements[index + 1].runs.is_empty() {
@@ -3326,7 +3456,7 @@ fn join_at(project: &mut Project, index: usize) -> Result<(), EditError> {
     }
     item.text.push_str(&right);
     item.runs = joined_runs;
-    project.elements.remove(index + 1);
+    remove_body_owner(project, generated, index + 1);
     Ok(())
 }
 
@@ -3375,4 +3505,29 @@ fn role_for_native_behavior_target(target: &str) -> Option<Role> {
         .iter()
         .find(|formatting| formatting.fdx_label == target)
         .map(|formatting| formatting.role)
+}
+
+#[cfg(test)]
+mod scoped_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_scoped_current_candidate_rolls_back_the_detached_transaction() {
+        let mut session = EditingSession::new(Project::new().expect("new project is valid"))
+            .expect("valid baseline creates a session");
+        let before = session.clone();
+
+        let result = session.mutate(MutationValidationScope::SingleParagraph, |project, selection, _, _| {
+            let target = &mut project.elements[selection.focus.element];
+            target.text.push('x');
+            target.runs.push(TextRun {
+                text: "not the canonical projection".to_owned(),
+                attributes: Vec::new(),
+            });
+            Ok(*selection)
+        });
+
+        assert!(result.is_err(), "invalid current-model state is an error, not a fallback");
+        assert_eq!(session, before, "candidate failure leaves history, selection, and dirty state untouched");
+    }
 }
