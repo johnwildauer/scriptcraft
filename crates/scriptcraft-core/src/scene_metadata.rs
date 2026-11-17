@@ -5,8 +5,9 @@ use crate::preservation::{
     AnchorTarget, ForeignIdDomain, ForeignIdentity, PreservationError, PreservationState,
     PreservedAttribute, PreservedElement, PreservedNode, SourceName, SourceOwnership,
 };
-use crate::{ModelError, Project, Role, ScreenplayElement, StableId};
+use crate::{BodyOwner, ModelError, Project, Role, StableId};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub(crate) trait SceneParagraphIdAllocator {
     fn allocate(&mut self) -> Result<String, ParagraphIdAllocationError>;
@@ -429,7 +430,7 @@ fn generated_scene_properties_attributes(
 /// Projects canonical Character cues into normalized association keys and
 /// uppercase names for generated and imported scene metadata.
 pub(crate) fn derived_character_projection(
-    elements: &[ScreenplayElement],
+    elements: &[Arc<BodyOwner>],
 ) -> Vec<(String, String)> {
     let mut seen = BTreeSet::new();
     let mut projection = Vec::new();
@@ -451,7 +452,7 @@ type SceneProjection = (StableId, Vec<(String, String)>);
 type ActiveSceneProjection = (StableId, Vec<(String, String)>, BTreeSet<String>);
 
 fn scene_casts_with_scope(
-    elements: &[ScreenplayElement],
+    elements: &[Arc<BodyOwner>],
     requested_scenes: Option<&BTreeSet<String>>,
 ) -> Vec<SceneProjection> {
     let mut scenes = Vec::new();
@@ -1032,6 +1033,19 @@ fn recognized_arc_paragraph_content(
         | PreservedNode::ProcessingInstruction { .. } => true,
         _ => false,
     })
+}
+
+fn safe_paragraph_removals(state: &mut PreservationState) -> BTreeSet<String> {
+    let paragraph_ids = state
+        .identities
+        .iter()
+        .filter(|identity| identity.domain == ForeignIdDomain::Paragraph)
+        .map(|identity| identity.value.clone())
+        .collect::<Vec<_>>();
+    paragraph_ids
+        .into_iter()
+        .filter(|id| state.paragraph_identity_safely_removable(id))
+        .collect()
 }
 
 fn projected_character_name(cue: &str) -> Option<(String, &str)> {

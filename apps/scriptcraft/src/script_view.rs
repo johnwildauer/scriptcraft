@@ -2,6 +2,7 @@ use super::{
     add_performance_counter, add_performance_nanos, document_font, status_bar, theme,
     PerformanceDiagnostics, RevealIntent, ScriptCraftApp,
 };
+use super::status_bar::PresentedPage;
 use crate::presentation_style::AdvanceMode;
 use super::app_commands::CommandInvocation;
 use super::shortcuts::{editor_command_for_key_event, ShortcutPlatform};
@@ -36,8 +37,6 @@ enum CaretPresentation {
     Fixed(FixedRect),
     Projected(super::presentation_geometry::ProjectedCaretRect),
 }
-
-type PresentedPage = status_bar::PresentedPageGeometry;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PresentedPagePolicy {
@@ -1687,6 +1686,23 @@ impl ScriptCraftApp {
     }
 
     pub(super) fn live_document_surface(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
+        let phase_started = self
+            .development_mode
+            .then(|| (Instant::now(), self.performance.paint_nanos));
+        if self.development_mode {
+            self.responsiveness.begin_document_surface(surface);
+        }
+        self.live_document_surface_inner(ui, surface);
+        if let Some((started, paint_nanos_before)) = phase_started {
+            self.responsiveness.record_document_surface(
+                started.elapsed(),
+                paint_nanos_before,
+                self.performance.paint_nanos,
+            );
+        }
+    }
+
+    fn live_document_surface_inner(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
         let presentation_mode =
             resolve_presentation_mode(surface, || self.script_view_mode);
         let layout = match self.layout_for_render(surface) {
@@ -1711,6 +1727,7 @@ impl ScriptCraftApp {
                 Option<Vec<Option<super::presentation_geometry::PresentationLine<'_>>>>,
             >>();
         let mut rendered_scale = 1.0;
+        let mut visible_pages = 0;
         let reveal_intent = self.reveal_intent;
         let pending_zoom_anchor = self.pending_zoom_anchor;
         let zoom_plan_started = pending_zoom_anchor.map(|_| Instant::now());
@@ -1834,11 +1851,12 @@ impl ScriptCraftApp {
             );
             let visible_range_started = Instant::now();
             let paint_range = viewport_paint_page_range(&presented_pages, editor_clip);
-            add_performance_counter(&mut self.performance.visible_range_selections, 1);
-            add_performance_nanos(
-                &mut self.performance.visible_range_selection_nanos,
-                visible_range_started.elapsed().as_nanos(),
-            );
+            if self.development_mode {
+                visible_pages = presented_pages
+                    .iter()
+                    .filter(|page| page.rect.intersects(editor_clip))
+                    .count();
+            }
             let painted_in_range = paint_range.map_or(0, |(first, last)| {
                 last.saturating_sub(first).saturating_add(1)
             });
@@ -2044,6 +2062,14 @@ impl ScriptCraftApp {
                 }
             }
         });
+        if self.development_mode {
+            self.responsiveness
+                .note_revision_painted(self.session.revision(), Instant::now());
+            if surface == EditorSurface::Body {
+                self.responsiveness
+                    .note_pages(visible_pages, layout.pages.len());
+            }
+        }
         ui.style_mut().spacing.scroll.fade = scroll_fade;
         let scale = rendered_scale;
         let published_scroll_offset = scroll_output.state.offset;
@@ -2061,7 +2087,7 @@ impl ScriptCraftApp {
                 self.session.revision(),
                 ui.ctx().content_rect(),
                 scale,
-                presented_pages,
+                &presented_pages,
                 actual_clip,
                 published_scroll_offset,
             );
@@ -2895,7 +2921,7 @@ fn prepaint_zoom_scroll_offset(
     paper_width: f32,
     paper_height: f32,
     mode: ScriptViewMode,
-    page_content_bounds: impl ExactSizeIterator<Item = (f32, f32)>,
+    page_content_bounds: impl ExactSizeIterator<Item = (f32, f32)> + Clone,
     base_font_size: f32,
     zoom_percent: u16,
     outer_rect: egui::Rect,
@@ -2908,6 +2934,9 @@ fn prepaint_zoom_scroll_offset(
         || !paper_height.is_finite()
         || !base_font_size.is_finite()
         || !vertical_item_spacing.is_finite()
+        || page_content_bounds
+            .clone()
+            .any(|(top, height)| !top.is_finite() || !height.is_finite())
     {
         return None;
     }
@@ -2924,11 +2953,9 @@ fn prepaint_zoom_scroll_offset(
     let mut content_height = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING
         + SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING;
     let mut target_policy = None;
-    let mut target_page_origin = None;
-    for (page_index, (content_top, content_page_height)) in page_content_bounds.enumerate() {
-        if !content_top.is_finite() || !content_page_height.is_finite() {
-            return None;
-        }
+    for (page_index, (content_top, content_page_height)) in
+        page_content_bounds.enumerate()
+    {
         let policy = presented_page_policy(
             mode,
             paper_height,

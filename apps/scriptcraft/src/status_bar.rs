@@ -817,8 +817,7 @@ fn valid_rect(rect: Rect) -> bool {
 
 /// Select the rendered sheet with the greatest vertical overlap against the
 /// actual editor clip. Empty overlap selects the nearest sheet interval.
-pub(super) fn select_visible_page(pages: &[PresentedPageGeometry], clip: Rect) -> VisiblePage {
-    let _measurement = VisiblePageSelectionMeasurement(Instant::now());
+pub(super) fn select_visible_page(pages: &[PresentedPage], clip: Rect) -> VisiblePage {
     if pages.is_empty()
         || !valid_rect(clip)
         || pages.iter().any(|page| !valid_rect(page.rect))
@@ -832,7 +831,7 @@ pub(super) fn select_visible_page(pages: &[PresentedPageGeometry], clip: Rect) -
     let mut best_overlap = 0.0_f32;
 
     for (index, page) in pages.iter().enumerate() {
-        let page = &page.rect;
+        let page = page.rect;
         let overlap = (page.bottom().min(clip_bottom) - page.top().max(clip_top)).max(0.0);
         if overlap > best_overlap {
             best_overlap = overlap;
@@ -841,7 +840,8 @@ pub(super) fn select_visible_page(pages: &[PresentedPageGeometry], clip: Rect) -
     }
 
     if best_overlap == 0.0 {
-        let distance = |page: &Rect| {
+        let distance = |page: &PresentedPage| {
+            let page = page.rect;
             if clip_bottom < page.top() {
                 page.top() - clip_bottom
             } else if clip_top > page.bottom() {
@@ -852,7 +852,6 @@ pub(super) fn select_visible_page(pages: &[PresentedPageGeometry], clip: Rect) -
         };
         let mut nearest = f32::INFINITY;
         for (index, page) in pages.iter().enumerate() {
-            let page = &page.rect;
             let candidate = distance(page);
             if candidate < nearest {
                 nearest = candidate;
@@ -870,13 +869,19 @@ pub(super) fn select_visible_page(pages: &[PresentedPageGeometry], clip: Rect) -
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PresentedPage {
+    pub(super) rect: Rect,
+    pub(super) document_y_offset: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct GeometrySnapshot {
     published_frame: u64,
     layout_revision: u64,
     viewport_rect: Rect,
     scale: f32,
-    pages: Vec<PresentedPageGeometry>,
+    pages: Vec<PresentedPage>,
     clip: Rect,
     scroll_offset: Vec2,
 }
@@ -941,21 +946,19 @@ impl ViewportPageTracker {
         // egui 0.29 lays out ScrollArea children from `inner_rect.min - offset`,
         // so allocated rectangles move with the viewport. Normalize them into
         // content coordinates before comparing with the offset-adjusted center.
-        let (page_index, page, page_rect) = snapshot
+        let (page_index, page_rect) = snapshot
             .pages
             .iter()
             .enumerate()
-            .map(|(index, page)| (index, *page, page.rect.translate(snapshot.scroll_offset)))
-            .find(|(_, _, rect)| rect.contains(content_point))
+            .map(|(index, page)| (index, page.rect.translate(snapshot.scroll_offset)))
+            .find(|(_, rect)| rect.contains(content_point))
             .or_else(|| {
                 snapshot
                     .pages
                     .iter()
                     .enumerate()
-                    .map(|(index, page)| {
-                        (index, *page, page.rect.translate(snapshot.scroll_offset))
-                    })
-                    .min_by(|(_, _, left), (_, _, right)| {
+                    .map(|(index, page)| (index, page.rect.translate(snapshot.scroll_offset)))
+                    .min_by(|(_, left), (_, right)| {
                         distance_squared_to_rect(content_point, *left)
                             .total_cmp(&distance_squared_to_rect(content_point, *right))
                     })
@@ -965,6 +968,7 @@ impl ViewportPageTracker {
             content_point.x.clamp(page_rect.left(), page_rect.right()),
             content_point.y.clamp(page_rect.top(), page_rect.bottom()),
         );
+        let page_document_y_offset = snapshot.pages.get(page_index)?.document_y_offset;
         Some(ViewportCenterAnchor {
             page_index,
             page_local_document_point: Vec2::new(
@@ -1017,8 +1021,7 @@ impl ViewportPageTracker {
         }
     }
 
-    // Keep the split-vector adapter for existing non-frame callers; live frame
-    // publication transfers the complete page representation below.
+    // One combined page allocation replaces parallel rectangle/offset vectors.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn publish(
         &mut self,
@@ -1026,15 +1029,13 @@ impl ViewportPageTracker {
         layout_revision: u64,
         viewport_rect: Rect,
         scale: f32,
-        page_rects: Vec<Rect>,
-        page_document_y_offsets: Vec<f32>,
+        pages: &[PresentedPage],
         clip: Rect,
         scroll_offset: Vec2,
     ) -> bool {
-        if page_rects.len() != page_document_y_offsets.len()
-            || page_document_y_offsets
-                .iter()
-                .any(|offset| !offset.is_finite())
+        if pages
+            .iter()
+            .any(|page| !page.document_y_offset.is_finite())
         {
             self.published = None;
             self.repaint_after_publish = true;
@@ -1082,7 +1083,7 @@ impl ViewportPageTracker {
             layout_revision,
             viewport_rect,
             scale,
-            pages,
+            pages: pages.to_vec(),
             clip,
             scroll_offset,
         };
@@ -1151,7 +1152,7 @@ fn distance_squared_to_rect(point: Pos2, rect: Rect) -> f32 {
 
 #[cfg(test)]
 mod viewport_page_tracker_tests {
-    use super::{PresentedPageGeometry, VisiblePage, ViewportPageTracker};
+    use super::{PresentedPage, VisiblePage, ViewportPageTracker};
     use eframe::egui::{pos2, vec2, Rect, Vec2};
 
     fn publish_one_page(
@@ -1166,7 +1167,7 @@ mod viewport_page_tracker_tests {
             7,
             Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0)),
             1.0,
-            vec![PresentedPageGeometry {
+            &[PresentedPage {
                 rect: page_rect,
                 document_y_offset,
             }],
@@ -1217,7 +1218,7 @@ mod viewport_page_tracker_tests {
     }
 
     #[test]
-    fn invalid_or_mismatched_offsets_reject_publication_and_offset_changes_repaint() {
+    fn invalid_offsets_reject_publication_and_offset_changes_repaint() {
         let viewport = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
         let page = Rect::from_min_size(pos2(20.0, 20.0), vec2(200.0, 100.0));
         let mut tracker = ViewportPageTracker::default();
@@ -1249,8 +1250,7 @@ mod viewport_page_tracker_tests {
             7,
             viewport,
             1.0,
-            vec![page],
-            Vec::new(),
+            &[],
             viewport,
             Vec2::ZERO,
         ));
@@ -1260,8 +1260,10 @@ mod viewport_page_tracker_tests {
             7,
             viewport,
             1.0,
-            vec![page],
-            vec![f32::NAN],
+            &[PresentedPage {
+                rect: page,
+                document_y_offset: f32::NAN,
+            }],
             viewport,
             Vec2::ZERO,
         ));
@@ -1279,12 +1281,12 @@ mod viewport_page_tracker_tests {
             9,
             viewport,
             1.0,
-            vec![
-                PresentedPageGeometry {
+            &[
+                PresentedPage {
                     rect: first,
                     document_y_offset: 24.0,
                 },
-                PresentedPageGeometry {
+                PresentedPage {
                     rect: second,
                     document_y_offset: 18.0,
                 },
@@ -1299,6 +1301,39 @@ mod viewport_page_tracker_tests {
                 total: 2,
             }
         );
+    }
+
+    #[test]
+    fn combined_publication_preserves_each_page_offset_for_center_anchors() {
+        let viewport = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 100.0));
+        let first = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 50.0));
+        let second = first.translate(vec2(0.0, 50.0));
+        let mut tracker = ViewportPageTracker::default();
+        tracker.publish(
+            4,
+            9,
+            viewport,
+            1.0,
+            &[
+                PresentedPage {
+                    rect: first,
+                    document_y_offset: 24.0,
+                },
+                PresentedPage {
+                    rect: second,
+                    document_y_offset: 18.0,
+                },
+            ],
+            Rect::from_min_max(pos2(0.0, 50.0), pos2(200.0, 100.0)),
+            Vec2::ZERO,
+        );
+
+        let anchor = tracker
+            .capture_center_anchor(5, 9, viewport, 1.0)
+            .expect("second page center produces an anchor");
+        assert_eq!(anchor.page_index, 1);
+        assert_eq!(anchor.page_local_document_point, vec2(100.0, 43.0));
+        assert_eq!(anchor.outside_page_offset_points, Vec2::ZERO);
     }
 }
 
@@ -1538,48 +1573,38 @@ fn paint_page_counter(ui: &egui::Ui, text: &str, rect: Rect, color: Color32) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DiagnosticProjection<'a> {
-    pub(super) focused: bool,
-    pub(super) focus_lock: bool,
-    pub(super) dispatch_enabled: bool,
-    pub(super) received_events: u32,
-    pub(super) dispatched_frames: u32,
-    pub(super) pointer_activations: u32,
-    pub(super) last_event_category: &'a str,
-    pub(super) performance_events: u64,
-    pub(super) layout_builds: u64,
-    pub(super) layout_cache_hits: u64,
-    pub(super) painted_pages: u64,
-    pub(super) repaint_requests: u64,
     pub(super) performance_summary: &'a str,
+    pub(super) phase_summary: &'a str,
+    pub(super) command_detail_summaries: [&'a str; 3],
+    pub(super) aligned_edit_update_summaries: [&'a str; 2],
+    pub(super) aligned_edit_update_other_detail_summary: &'a str,
+    pub(super) layout_build_detail_summary: &'a str,
     pub(super) diagnostic_message: Option<&'a str>,
 }
 
 impl DiagnosticProjection<'_> {
     pub(super) fn safe_summary(self) -> String {
-        let summary = format!(
-            "focus={} lock={} dispatch={} received-events={} dispatched-frames={} pointer-activations={} last-category={} performance-events={} layouts={} cache-hits={} painted-pages={} repaint-requests={}",
-            self.focused,
-            self.focus_lock,
-            self.dispatch_enabled,
-            self.received_events,
-            self.dispatched_frames,
-            self.pointer_activations,
-            if self.last_event_category.is_empty() {
-                "none"
-            } else {
-                self.last_event_category
-            },
-            self.performance_events,
-            self.layout_builds,
-            self.layout_cache_hits,
-            self.painted_pages,
-            self.repaint_requests
-        );
-        if self.performance_summary.is_empty() {
-            summary
-        } else {
-            format!("{summary} {}", self.performance_summary)
-        }
+        self.performance_summary.to_owned()
+    }
+
+    pub(super) fn safe_phase_summary(self) -> String {
+        self.phase_summary.to_owned()
+    }
+
+    pub(super) fn safe_command_detail_summaries(self) -> [String; 3] {
+        self.command_detail_summaries.map(str::to_owned)
+    }
+
+    pub(super) fn safe_aligned_edit_update_summaries(self) -> [String; 2] {
+        self.aligned_edit_update_summaries.map(str::to_owned)
+    }
+
+    pub(super) fn safe_aligned_edit_update_other_detail_summary(self) -> String {
+        self.aligned_edit_update_other_detail_summary.to_owned()
+    }
+
+    pub(super) fn safe_layout_build_detail_summary(self) -> String {
+        self.layout_build_detail_summary.to_owned()
     }
 }
 
@@ -1948,6 +1973,14 @@ fn show_impl_with_appearance(
                 .open(diagnostics_open)
                 .show(ui, |ui| {
                     let summary = diagnostics.safe_summary();
+                    let phase_summary = diagnostics.safe_phase_summary();
+                    let command_detail_summaries = diagnostics.safe_command_detail_summaries();
+                    let aligned_edit_update_summaries =
+                        diagnostics.safe_aligned_edit_update_summaries();
+                    let aligned_edit_update_other_detail_summary =
+                        diagnostics.safe_aligned_edit_update_other_detail_summary();
+                    let layout_build_detail_summary =
+                        diagnostics.safe_layout_build_detail_summary();
                     let summary_height = ui.text_style_height(&egui::TextStyle::Body);
                     let summary_width = ui.available_width();
                     one_line_region(
@@ -1959,6 +1992,77 @@ fn show_impl_with_appearance(
                                 "status-diagnostics-summary",
                                 &summary,
                                 presentation::default_foreground(summary_ui),
+                            );
+                        },
+                    );
+                    one_line_region(
+                        ui,
+                        egui::vec2(summary_width, summary_height),
+                        |phase_ui| {
+                            paint_noninteractive_text(
+                                phase_ui,
+                                "status-diagnostics-phases",
+                                &phase_summary,
+                                presentation::default_foreground(phase_ui),
+                            );
+                        },
+                    );
+                    for (summary, id_source) in command_detail_summaries.iter().zip([
+                        "status-diagnostics-command-core",
+                        "status-diagnostics-command-checks",
+                        "status-diagnostics-command-publish",
+                    ]) {
+                        one_line_region(
+                            ui,
+                            egui::vec2(summary_width, summary_height),
+                            |detail_ui| {
+                                paint_noninteractive_text(
+                                    detail_ui,
+                                    id_source,
+                                    summary,
+                                    presentation::default_foreground(detail_ui),
+                                );
+                            },
+                        );
+                    }
+                    for (summary, id_source) in aligned_edit_update_summaries.iter().zip([
+                        "status-diagnostics-edit-update",
+                        "status-diagnostics-edit-update-nested",
+                    ]) {
+                        one_line_region(
+                            ui,
+                            egui::vec2(summary_width, summary_height),
+                            |detail_ui| {
+                                paint_noninteractive_text(
+                                    detail_ui,
+                                    id_source,
+                                    summary,
+                                    presentation::default_foreground(detail_ui),
+                                );
+                            },
+                        );
+                    }
+                    one_line_region(
+                        ui,
+                        egui::vec2(summary_width, summary_height),
+                        |detail_ui| {
+                            paint_noninteractive_text(
+                                detail_ui,
+                                "status-diagnostics-edit-update-other-detail",
+                                &aligned_edit_update_other_detail_summary,
+                                presentation::default_foreground(detail_ui),
+                            );
+                        },
+                    );
+                    one_line_region(
+                        ui,
+                        egui::vec2(summary_width, summary_height),
+                        |detail_ui| {
+                            paint_noninteractive_text(
+                                detail_ui,
+                                "status-diagnostics-layout-build-detail",
+                                &layout_build_detail_summary,
+                                presentation::default_foreground(detail_ui),
                             );
                         },
                     );
@@ -2004,7 +2108,7 @@ mod diagnostic_status_tests {
     use super::{
         diagnostics_disclosure_enabled, element_hint_bindings, fitted_modifier_hint_font_size,
         modifier_list_text, plan_status_row, project_center, ready_center, CenterProjection,
-        ElementHintChord, StatusSurfaceOptions,
+        DiagnosticProjection, ElementHintChord, StatusSurfaceOptions,
     };
     use crate::shortcuts::ShortcutPlatform;
     use eframe::egui;
@@ -2018,8 +2122,10 @@ mod diagnostic_status_tests {
 
     fn session(role: Role, text: &str, anchor: usize, focus: usize) -> EditingSession {
         let mut project = valid(Project::new());
-        project.elements[0].role = role;
-        project.elements[0].text = text.to_owned();
+        scriptcraft_core::BodyOwner::update(&mut project.elements[0], |element| {
+            element.role = role;
+            element.text = text.to_owned();
+        });
         let mut session = valid(EditingSession::with_policy(project, EditPolicy::default()));
         valid(session.set_selection(Selection {
             anchor: Position { element: 0, offset: anchor },
@@ -2151,6 +2257,66 @@ mod diagnostic_status_tests {
                 assert!(rect.left() >= row.left());
                 assert!(rect.right() <= row.right());
             }
+        }
+    }
+
+    #[test]
+    fn diagnostics_keep_responsiveness_phases_and_error_reporting_separate() {
+        let responsiveness = "Update FPS 60.0 | Update ms avg/p95/max 1.00/2.00/3.00 | Edit to app paint ms avg/p95/max 4.00/5.00/6.00 | Pages visible/total 2/90";
+        let phases = "Phases ms avg/p95/max | Command 1.00/2.00/3.00 | Layout hit 4.00/5.00/6.00 | Layout build 40.00/50.00/60.00 | Surface 7.00/8.00/9.00 | Page paint 2.00/3.00/4.00";
+        let command_details = [
+            "Cmd core ms avg/p95/max | Executor 1.00/2.00/3.00",
+            "Cmd checks ms avg/p95/max | Scoped collecting",
+            "Cmd publish ms avg/p95/max | Dirty collecting",
+        ];
+        let aligned_details = [
+            "Edit update ms avg/p95/max | Update 10.00/11.00/12.00 | Other collecting",
+            "Edit update nested ms avg/p95/max | Build Surface 5.00/6.00/7.00 | Layout collecting",
+        ];
+        let other_detail = "Edit update Other detail ms avg/p95/max | Input/dispatch collecting | Derived collecting | Chrome collecting | Diagnostics nested collecting | Host collecting | Remainder collecting";
+        let layout_detail = "Layout build detail ms avg/p95/max | Prep/lookup collecting h/m 0/0 | Rebase nested collecting | Sort nested collecting";
+        let projection = DiagnosticProjection {
+            performance_summary: responsiveness,
+            phase_summary: phases,
+            command_detail_summaries: [
+                command_details[0],
+                command_details[1],
+                command_details[2],
+            ],
+            aligned_edit_update_summaries: [aligned_details[0], aligned_details[1]],
+            aligned_edit_update_other_detail_summary: other_detail,
+            layout_build_detail_summary: layout_detail,
+            diagnostic_message: Some("EDIT_FAILED: bounded category"),
+        };
+        assert_eq!(projection.safe_summary(), responsiveness);
+        assert_eq!(projection.safe_phase_summary(), phases);
+        assert_eq!(projection.safe_command_detail_summaries(), command_details);
+        assert_eq!(projection.safe_aligned_edit_update_summaries(), aligned_details);
+        assert_eq!(
+            projection.safe_aligned_edit_update_other_detail_summary(),
+            other_detail
+        );
+        assert_eq!(projection.safe_layout_build_detail_summary(), layout_detail);
+        assert!(!projection.safe_summary().contains("Phases ms"));
+        assert!(!projection.safe_phase_summary().contains("Update FPS"));
+        assert!(!projection.safe_summary().contains("Cmd core"));
+        assert!(!projection.safe_phase_summary().contains("Cmd checks"));
+        assert!(!projection.safe_summary().contains("Edit update ms"));
+        assert!(!projection.safe_phase_summary().contains("Edit update Other detail"));
+        assert!(!projection.safe_phase_summary().contains("Layout build detail"));
+        assert_eq!(
+            projection.diagnostic_message,
+            Some("EDIT_FAILED: bounded category")
+        );
+        for legacy in [
+            "focus=",
+            "lock=",
+            "dispatch=",
+            "received-events=",
+            "painted-pages=",
+            "profile=",
+        ] {
+            assert!(!projection.safe_summary().contains(legacy));
         }
     }
 }

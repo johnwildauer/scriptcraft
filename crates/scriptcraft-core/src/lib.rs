@@ -19,7 +19,8 @@ pub mod scene_metadata;
 pub mod title_page;
 pub mod text_state;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -29,6 +30,11 @@ pub struct ProjectValidationDiagnostics {
 }
 
 static COMPLETE_PROJECT_VALIDATIONS: AtomicU64 = AtomicU64::new(0);
+static NEXT_BODY_OWNER_REVISION: AtomicU64 = AtomicU64::new(1);
+
+fn next_body_owner_revision() -> u64 {
+    NEXT_BODY_OWNER_REVISION.fetch_add(1, Ordering::Relaxed)
+}
 
 pub fn project_validation_diagnostics() -> ProjectValidationDiagnostics {
     ProjectValidationDiagnostics {
@@ -400,6 +406,86 @@ impl ScreenplayElement {
     }
 }
 
+/// Immutable canonical Body content plus its ephemeral local revision.
+///
+/// `Project` stores each owner in an `Arc`, so project/candidate/history clones
+/// share allocations. There is deliberately no mutable dereference: semantic
+/// updates go through `BodyOwner::update`, which allocates only the changed
+/// owner. Revisions never participate in equality or serialization.
+#[derive(Debug)]
+pub struct BodyOwner {
+    element: ScreenplayElement,
+    revision: u64,
+}
+
+impl BodyOwner {
+    pub fn new(element: ScreenplayElement) -> Self {
+        Self {
+            element,
+            revision: next_body_owner_revision(),
+        }
+    }
+
+    pub fn shared(element: ScreenplayElement) -> Arc<Self> {
+        Arc::new(Self::new(element))
+    }
+
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn as_element(&self) -> &ScreenplayElement {
+        &self.element
+    }
+
+    /// Applies copy-on-write to one shared owner. A no-op retains both pointer
+    /// identity and revision; a semantic change receives a fresh allocation.
+    pub fn update<R>(owner: &mut Arc<Self>, update: impl FnOnce(&mut ScreenplayElement) -> R) -> R {
+        let mut candidate = owner.element.clone();
+        let result = update(&mut candidate);
+        if candidate != owner.element {
+            *owner = Self::shared(candidate);
+        }
+        result
+    }
+
+    /// Direct Body formatting lives in the project's override maps rather than
+    /// in `ScreenplayElement`; callers invoke this only when that state changed.
+    pub(crate) fn revise(owner: &mut Arc<Self>) {
+        *owner = Self::shared(owner.element.clone());
+    }
+}
+
+impl Deref for BodyOwner {
+    type Target = ScreenplayElement;
+
+    fn deref(&self) -> &Self::Target {
+        &self.element
+    }
+}
+
+impl From<ScreenplayElement> for BodyOwner {
+    fn from(element: ScreenplayElement) -> Self {
+        Self::new(element)
+    }
+}
+
+impl PartialEq for BodyOwner {
+    fn eq(&self, other: &Self) -> bool {
+        self.element == other.element
+    }
+}
+
+impl Eq for BodyOwner {}
+
+pub(crate) fn body_owners_equal(left: &[Arc<BodyOwner>], right: &[Arc<BodyOwner>]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| Arc::ptr_eq(left, right) || left == right)
+}
+
 /// Legacy fields kept only while an unchanged JSON-origin document uses the
 /// transitional JSON adapter. These are not part of the FDX semantic model.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -495,10 +581,10 @@ impl Default for LayoutInputs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Project {
     pub title_page: Vec<TitlePageParagraph>,
-    pub elements: Vec<ScreenplayElement>,
+    pub elements: Vec<Arc<BodyOwner>>,
     /// Ordered semantic groups; members remain in `elements` in visible order.
     pub dual_dialogue_groups: Vec<dual_dialogue::DualDialogueGroup>,
     /// Direct body paragraph overrides not yet backed by imported FDX source.
@@ -516,14 +602,19 @@ pub struct Project {
     pub(crate) layout_identity: Arc<()>,
 }
 
-/// Outcome of the narrow ordinary-edit candidate validator. Invalid current
-/// candidates are returned as `Err(ModelError)`; scope uncertainty is not an
-/// error and requires the caller to run complete current-state validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScopedEditValidationOutcome {
-    Validated,
-    CompleteValidationRequired,
+impl PartialEq for Project {
+    fn eq(&self, other: &Self) -> bool {
+        self.title_page == other.title_page
+            && body_owners_equal(&self.elements, &other.elements)
+            && self.dual_dialogue_groups == other.dual_dialogue_groups
+            && self.direct_paragraph_overrides == other.direct_paragraph_overrides
+            && self.dual_dialogue_paragraph_overrides == other.dual_dialogue_paragraph_overrides
+            && self.preservation == other.preservation
+            && self.legacy_json_state == other.legacy_json_state
+    }
 }
+
+impl Eq for Project {}
 
 impl Project {
     pub fn new() -> Result<Self, ModelError> {
@@ -536,7 +627,7 @@ impl Project {
         )?;
         Ok(Self {
             title_page,
-            elements: vec![start],
+            elements: vec![BodyOwner::shared(start)],
             dual_dialogue_groups: Vec::new(),
             direct_paragraph_overrides: std::collections::BTreeMap::new(),
             dual_dialogue_paragraph_overrides: std::collections::BTreeMap::new(),
@@ -654,7 +745,9 @@ impl Project {
                 .zip(&baseline.elements)
                 .enumerate()
                 .any(|(index, (candidate, original))| {
-                    index != element_index && candidate != original
+                    index != element_index
+                        && !Arc::ptr_eq(candidate, original)
+                        && candidate != original
                 })
         {
             return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
@@ -786,6 +879,23 @@ impl Project {
     /// Runtime layout inputs for a newly constructed session. Legacy JSON keeps
     /// its original geometry only inside the transitional adapter; FDX projects
     /// start from deterministic application defaults.
+    /// Reuses exact semantic owners after a validated persistence round trip.
+    /// Changed identities/content retain their freshly decoded allocations.
+    pub(crate) fn share_unchanged_body_owners_from(&mut self, previous: &Project) {
+        let previous_by_id = previous
+            .elements
+            .iter()
+            .map(|owner| (owner.id.clone(), owner))
+            .collect::<BTreeMap<_, _>>();
+        for owner in &mut self.elements {
+            if let Some(previous) = previous_by_id.get(&owner.id) {
+                if previous.element == owner.element {
+                    *owner = (*previous).clone();
+                }
+            }
+        }
+    }
+
     pub(crate) fn session_layout_inputs(&self) -> LayoutInputs {
         self.legacy_json_state
             .as_ref()
@@ -972,6 +1082,13 @@ fn element_json(e: &ScreenplayElement) -> String {
 fn elements_json(items: &[ScreenplayElement]) -> String {
     items.iter().map(element_json).collect::<Vec<_>>().join(",")
 }
+fn body_elements_json(items: &[Arc<BodyOwner>]) -> String {
+    items
+        .iter()
+        .map(|owner| element_json(owner))
+        .collect::<Vec<_>>()
+        .join(",")
+}
 fn encode_envelope(
     p: &Project,
     legacy: &LegacyJsonState,
@@ -985,7 +1102,7 @@ fn encode_envelope(
         .collect::<Vec<_>>()
         .join(",");
     // Emit legacy identity/metadata only for an unchanged JSON-origin session.
-    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"uppercase_cues\":true,\"auto_parenthetical\":true,\"strict_transition_boundaries\":true,\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(legacy.project_id.as_str()), legacy.project_schema_version, quote(&legacy.metadata.title), quote(&legacy.metadata.author), quote(&legacy.metadata.contact), quote(&legacy.metadata.created_at), quote(&legacy.metadata.updated_at), elements_json(legacy_title_page), quote(&layout_inputs.name), layout_inputs.format_version, layout_inputs.paper_width, layout_inputs.paper_height, layout_inputs.margin_top, layout_inputs.margin_bottom, layout_inputs.margin_left, layout_inputs.margin_right, layout_inputs.chars_per_line, layout_inputs.lines_per_page, layout_inputs.line_advance, layout_inputs.boundary_gap, quote(&layout_inputs.font_family), layout_inputs.font_size, layout_inputs.char_width, role_boxes, elements_json(&p.elements))
+    format!("{{\"schema_version\":{},\"project\":{{\"id\":{},\"schema_version\":{},\"metadata\":{{\"title\":{},\"author\":{},\"contact\":{},\"created_at\":{},\"updated_at\":{}}},\"title_page\":[{}],\"page_profile\":{{\"name\":{},\"format_version\":{},\"paper_width\":{},\"paper_height\":{},\"margin_top\":{},\"margin_bottom\":{},\"margin_left\":{},\"margin_right\":{},\"chars_per_line\":{},\"lines_per_page\":{},\"line_advance\":{},\"boundary_gap\":{},\"uppercase_cues\":true,\"auto_parenthetical\":true,\"strict_transition_boundaries\":true,\"font_family\":{},\"font_size\":{},\"char_width\":{},\"role_boxes\":[{}]}},\"elements\":[{}]}}}}", CURRENT_SCHEMA_VERSION, quote(legacy.project_id.as_str()), legacy.project_schema_version, quote(&legacy.metadata.title), quote(&legacy.metadata.author), quote(&legacy.metadata.contact), quote(&legacy.metadata.created_at), quote(&legacy.metadata.updated_at), elements_json(legacy_title_page), quote(&layout_inputs.name), layout_inputs.format_version, layout_inputs.paper_width, layout_inputs.paper_height, layout_inputs.margin_top, layout_inputs.margin_bottom, layout_inputs.margin_left, layout_inputs.margin_right, layout_inputs.chars_per_line, layout_inputs.lines_per_page, layout_inputs.line_advance, layout_inputs.boundary_gap, quote(&layout_inputs.font_family), layout_inputs.font_size, layout_inputs.char_width, role_boxes, body_elements_json(&p.elements))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1345,7 +1462,10 @@ fn decode_project(root: Json) -> Result<Project, ModelError> {
             .into_iter()
             .map(TitlePageParagraph::from_legacy_element)
             .collect::<Result<Vec<_>, _>>()?,
-        elements: decode_elements(obj(envelope, "elements")?)?,
+        elements: decode_elements(obj(envelope, "elements")?)?
+            .into_iter()
+            .map(BodyOwner::shared)
+            .collect(),
         dual_dialogue_groups: Vec::new(),
         dual_dialogue_paragraph_overrides: std::collections::BTreeMap::new(),
         direct_paragraph_overrides: std::collections::BTreeMap::new(),

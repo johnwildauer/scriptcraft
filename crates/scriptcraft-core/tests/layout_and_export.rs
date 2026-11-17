@@ -1,20 +1,21 @@
 #![forbid(unsafe_code)]
 
 use scriptcraft_core::dual_dialogue::{DualDialogueGroup, DualDialogueSide, DualDialogueWrapperProvenance};
+use scriptcraft_core::editing::{EditingSession, Position, Selection};
 use scriptcraft_core::exports::{export_pdf, export_pdf_with_options, export_text, PdfExportOptions};
-use scriptcraft_core::fdx::read_v6;
+use scriptcraft_core::fdx::{read_v6, write_v6};
 use scriptcraft_core::formatting::{
     ParagraphAlignment, SourceLayoutSettings, SourceParagraphOverrides, SourceParagraphSpec,
 };
 use scriptcraft_core::layout::{
-    BodyEditorPresentation, Caret, LayoutBuildDiagnostics, LayoutCache, LayoutComposition,
-    LayoutPurpose, ScreenplayLayout,
+    BodyEditorPresentation, Caret, InteractionQueryDiagnostics, LayoutBuildDiagnostics, LayoutCache,
+    LayoutComposition, LayoutPurpose, ScreenplayLayout,
 };
 use scriptcraft_core::{
-    editing::{EditingSession, Position, Selection}, FixedPoint, LayoutInputs, Project, Role,
-    ScreenplayElement, StableId,
+    FixedPoint, LayoutInputs, Project, Role, RunAttribute, ScreenplayElement, StableId, TextRun,
 };
 use std::ops::Range;
+use std::sync::Arc;
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("layout/export scenario is valid"))
@@ -41,7 +42,7 @@ fn project_with(roles: &[(Role, &str)]) -> Project {
     project.elements = roles
         .iter()
         .enumerate()
-        .map(|(index, (role, text))| valid(ScreenplayElement::new(format!("layout-{index}"), *role, *text)))
+        .map(|(index, (role, text))| scriptcraft_core::BodyOwner::shared(valid(ScreenplayElement::new(format!("layout-{index}"), *role, *text))))
         .collect();
     project
 }
@@ -53,6 +54,22 @@ fn build(project: &Project, composition: LayoutComposition, inputs: &LayoutInput
         .map(|preservation| preservation.source_layout_settings().clone())
         .unwrap_or_default();
     valid(ScreenplayLayout::build_with_composition(project, inputs, &source, composition))
+}
+
+fn assert_revision_reuse_matches_fresh(
+    project: &Project,
+    composition: LayoutComposition,
+    inputs: &LayoutInputs,
+    fresh: &ScreenplayLayout,
+) {
+    let mut cache = LayoutCache::default();
+    let (cold, cold_hit) = valid(cache.get_or_build_with_composition(0, project, inputs, composition));
+    let (reused, reused_hit) = valid(cache.get_or_build_with_composition(1, project, inputs, composition));
+    assert!(!cold_hit);
+    assert!(!reused_hit);
+    assert_eq!(cold.as_ref(), fresh);
+    assert_eq!(reused.as_ref(), fresh);
+    assert!(!Arc::ptr_eq(&cold, &reused));
 }
 
 fn pdf_text(bytes: &[u8]) -> &str {
@@ -93,6 +110,325 @@ fn layout_is_repeatable_and_maps_wrapped_utf8_display_back_to_canonical_bytes() 
 }
 
 #[test]
+fn ordinary_lines_preserve_pages_mappings_indexes_and_cached_print_output() {
+    let first = "a".repeat(70);
+    let second = "b".repeat(70);
+    let project = project_with(&[
+        (Role::Action, &first),
+        (Role::Action, &second),
+        (Role::Action, "after"),
+    ]);
+    let inputs = LayoutInputs {
+        paper_height: 52,
+        margin_top: 8,
+        margin_bottom: 8,
+        lines_per_page: 3,
+        ..LayoutInputs::default()
+    };
+    let layout = build(&project, LayoutComposition::BodyEditor, &inputs);
+    assert_eq!(layout.pages.len(), 2);
+    assert_eq!(layout.pages[0].occupied_lines, 3);
+    assert_eq!(layout.pages[1].occupied_lines, 2);
+
+    let lines = layout
+        .pages
+        .iter()
+        .flat_map(|page| &page.lines)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines.iter().map(|line| line.element).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 2]
+    );
+    assert_eq!(
+        lines.iter().map(|line| line.page).collect::<Vec<_>>(),
+        [0, 0, 0, 1, 1]
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| (line.source.start, line.source.end))
+            .collect::<Vec<_>>(),
+        [(0, 61), (61, 70), (0, 61), (61, 70), (0, 5)]
+    );
+
+    for (body_index, line) in lines.iter().enumerate() {
+        let caret = Caret {
+            element: line.element,
+            offset: line.source.start.saturating_add(1),
+        };
+        let mut diagnostics = InteractionQueryDiagnostics::default();
+        let located = valid(layout.line_for_caret_with_diagnostics(&caret, &mut diagnostics));
+        assert_eq!(located.page_index, line.page);
+        assert_eq!(located.line, *line);
+        assert_eq!(layout.body_line(body_index), Some(*line));
+        assert_eq!(
+            layout.page_for_position_with_diagnostics(
+                caret.element,
+                caret.offset,
+                &mut diagnostics,
+            ),
+            Some(line.page)
+        );
+        assert_eq!(line.display_char_for_source(line.source.start, false), 0);
+        assert_eq!(line.source_for_display_char(0), line.source.start);
+        assert_eq!(
+            line.source_for_display_char(line.display_text.chars().count()),
+            line.source.end
+        );
+        assert_eq!(
+            line.spans
+                .iter()
+                .map(|span| span.display_text.as_ref())
+                .collect::<String>(),
+            line.display_text.as_ref()
+        );
+        assert!(line.spans.iter().all(|span| {
+            span.source.element == line.element && span.geometry.y == line.geometry.y
+        }));
+    }
+
+    let source = SourceLayoutSettings::default();
+    let mut cache = LayoutCache::default();
+    let (fresh, fresh_hit) = valid(cache.get_or_build_with_composition(
+        11,
+        &project,
+        &inputs,
+        LayoutComposition::BodyEditor,
+    ));
+    assert!(!fresh_hit);
+    assert_eq!(fresh.as_ref(), &layout);
+    let (cached, cached_hit) = valid(cache.get_or_build_with_composition(
+        11,
+        &project,
+        &inputs,
+        LayoutComposition::BodyEditor,
+    ));
+    assert!(cached_hit);
+    assert!(Arc::ptr_eq(&fresh, &cached));
+    assert_eq!(cached, fresh);
+
+    let print_composition = LayoutComposition::Print {
+        include_title_page: false,
+    };
+    let print = build(&project, print_composition, &inputs);
+    let mut print_cache = LayoutCache::default();
+    let (fresh_print, print_fresh_hit) = valid(print_cache.get_or_build_with_composition(
+        11,
+        &project,
+        &inputs,
+        print_composition,
+    ));
+    assert!(!print_fresh_hit);
+    assert_eq!(fresh_print.as_ref(), &print);
+    let (cached_print, print_cached_hit) = valid(print_cache.get_or_build_with_composition(
+        11,
+        &project,
+        &inputs,
+        print_composition,
+    ));
+    assert!(print_cached_hit);
+    assert!(Arc::ptr_eq(&fresh_print, &cached_print));
+    assert_eq!(cached_print, fresh_print);
+
+    let options = PdfExportOptions {
+        include_title_page: false,
+    };
+    let pdf = valid(export_pdf_with_options(&project, options));
+    assert_eq!(valid(export_pdf_with_options(&project, options)), pdf);
+}
+
+#[test]
+fn oversized_ordinary_element_preserves_spill_geometry_and_source_order() {
+    let text = "x".repeat(400);
+    let project = project_with(&[(Role::Action, &text)]);
+    let inputs = LayoutInputs {
+        paper_height: 40,
+        margin_top: 8,
+        margin_bottom: 8,
+        lines_per_page: 2,
+        ..LayoutInputs::default()
+    };
+    let layout = build(&project, LayoutComposition::BodyEditor, &inputs);
+    let lines = layout
+        .pages
+        .iter()
+        .flat_map(|page| &page.lines)
+        .collect::<Vec<_>>();
+    assert!(lines.len() > inputs.lines_per_page as usize);
+    assert!(layout.pages.len() > 1);
+    assert!(lines.iter().all(|line| line.oversized));
+
+    let mut source_offset = 0;
+    let mut display_text = String::new();
+    for line in lines {
+        assert_eq!(line.source.start, source_offset);
+        source_offset = line.source.end;
+        display_text.push_str(&line.display_text);
+        assert_eq!(line.display_char_for_source(line.source.start, false), 0);
+        assert_eq!(
+            line.source_for_display_char(line.display_text.chars().count()),
+            line.source.end
+        );
+    }
+    assert_eq!(source_offset, text.len());
+    assert_eq!(display_text, text);
+
+    for (page_index, page) in layout.pages.iter().enumerate() {
+        assert_eq!(page.number, page_index);
+        assert_eq!(page.occupied_lines as usize, page.lines.len());
+        assert!(page.lines.len() <= inputs.lines_per_page as usize);
+        for (line_index, line) in page.lines.iter().enumerate() {
+            assert_eq!(line.page, page_index);
+            assert_eq!(
+                line.geometry.y,
+                FixedPoint::from_points(8 + 12 * line_index as i64)
+            );
+        }
+    }
+    assert_revision_reuse_matches_fresh(
+        &project,
+        LayoutComposition::BodyEditor,
+        &inputs,
+        &layout,
+    );
+}
+
+#[test]
+fn expansion_wrapping_preserves_alignment_spill_cache_interaction_and_exports() {
+    let plain = "plain é🙂 words ".repeat(12);
+    let expanded = "ßﬃ styled words ".repeat(12);
+    let tail = "\r\nnext line\nlast line ".repeat(8);
+    let text = format!("{plain}{expanded}{tail}");
+    let mut project = project_with(&[(Role::Action, &text)]);
+    scriptcraft_core::BodyOwner::update(&mut project.elements[0], |element| {
+        element.runs = vec![
+            TextRun {
+                text: plain,
+                attributes: Vec::new(),
+            },
+            TextRun {
+                text: expanded,
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Bold+AllCaps".into(),
+                }],
+            },
+            TextRun {
+                text: tail,
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Italic".into(),
+                }],
+            },
+        ];
+    });
+    let inputs = LayoutInputs {
+        paper_height: 40,
+        margin_top: 8,
+        margin_bottom: 8,
+        lines_per_page: 2,
+        ..LayoutInputs::default()
+    };
+
+    for alignment in [
+        ParagraphAlignment::Left,
+        ParagraphAlignment::Right,
+        ParagraphAlignment::Center,
+        ParagraphAlignment::Justified,
+    ] {
+        let mut aligned = project.clone();
+        aligned.direct_paragraph_overrides.insert(
+            aligned.elements[0].id.clone(),
+            SourceParagraphOverrides {
+                paragraph: SourceParagraphSpec {
+                    alignment: Some(alignment),
+                    ..SourceParagraphSpec::default()
+                },
+                starts_new_page: None,
+            },
+        );
+        let before = aligned.clone();
+        let fresh = build(&aligned, LayoutComposition::BodyEditor, &inputs);
+        let lines = fresh
+            .pages
+            .iter()
+            .flat_map(|page| &page.lines)
+            .filter(|line| line.element == 0)
+            .collect::<Vec<_>>();
+        assert!(fresh.pages.len() > 1);
+        assert!(lines.iter().any(|line| line.oversized));
+        assert!(lines.iter().all(|line| line.alignment == alignment));
+        assert!(lines.iter().any(|line| line.display_text.contains("SS")));
+        assert!(lines.iter().any(|line| line.display_text.contains("FFI")));
+        for line in &lines {
+            let mut display_offset = 0;
+            let mut source_offset = line.source.start;
+            for segment in line.display_source_map.iter() {
+                assert_eq!(segment.display_start, display_offset);
+                assert!(segment.display_end > segment.display_start);
+                assert_eq!(segment.source_start, source_offset);
+                assert!(segment.source_end > segment.source_start);
+                display_offset = segment.display_end;
+                source_offset = segment.source_end;
+            }
+            assert_eq!(display_offset, line.display_text.chars().count());
+            assert_eq!(source_offset, line.source.end);
+        }
+
+        let mut cache = LayoutCache::default();
+        let (cold, cold_hit) = valid(cache.get_or_build_with_composition(
+            0,
+            &aligned,
+            &inputs,
+            LayoutComposition::BodyEditor,
+        ));
+        assert!(!cold_hit);
+        assert_eq!(cold.as_ref(), &fresh);
+        let (complete_hit, complete_hit_flag) = valid(cache.get_or_build_with_composition(
+            0,
+            &aligned,
+            &inputs,
+            LayoutComposition::BodyEditor,
+        ));
+        assert!(complete_hit_flag);
+        assert!(Arc::ptr_eq(&cold, &complete_hit));
+        let (reused, reused_hit) = valid(cache.get_or_build_with_composition(
+            1,
+            &aligned,
+            &inputs,
+            LayoutComposition::BodyEditor,
+        ));
+        assert!(!reused_hit);
+        assert_eq!(reused.as_ref(), &fresh);
+
+        for line in lines.iter().filter(|line| !line.display_source_map.is_empty()) {
+            let caret = Caret {
+                element: line.element,
+                offset: line.display_source_map[0].source_end,
+            };
+            assert_eq!(fresh.caret_geometry(caret.clone()), reused.caret_geometry(caret.clone()));
+            let mut diagnostics = InteractionQueryDiagnostics::default();
+            let located = valid(reused.line_for_caret_with_diagnostics(&caret, &mut diagnostics));
+            assert_eq!(located.line, *line);
+            assert_eq!(
+                fresh.hit_test_fixed(line.page, line.geometry.x, line.geometry.y),
+                reused.hit_test_fixed(line.page, line.geometry.x, line.geometry.y),
+            );
+        }
+
+        let plain = valid(export_text(&aligned));
+        assert!(plain.text.contains("plain é🙂"));
+        assert!(plain.text.contains("ßﬃ"));
+        let options = PdfExportOptions {
+            include_title_page: false,
+        };
+        let pdf = valid(export_pdf_with_options(&aligned, options));
+        assert_eq!(valid(export_pdf_with_options(&aligned, options)), pdf);
+        assert_eq!(aligned, before);
+    }
+}
+
+#[test]
 fn dual_block_exact_fit_and_one_fixed_point_unit_overflow_paginate_atomically() {
     let mut fitting = project_with(&[
         (Role::Character, "LEFT"), (Role::Dialogue, "left"),
@@ -124,6 +460,86 @@ fn dual_block_exact_fit_and_one_fixed_point_unit_overflow_paginate_atomically() 
     assert!(members.iter().all(|line| line.page == 1 && line.source.element == line.element));
     assert_eq!(members[0].paragraph_bounds.y, FixedPoint::from_points(8));
     assert_eq!(moved.pages[1].lines.last().map(|line| line.element), Some(5));
+}
+
+#[test]
+fn oversized_dual_spill_preserves_side_order_pages_and_fallback_output() {
+    let left_dialogue = "l".repeat(300);
+    let right_dialogue = "r".repeat(140);
+    let mut project = project_with(&[
+        (Role::Action, "before"),
+        (Role::Character, "LEFT"),
+        (Role::Dialogue, &left_dialogue),
+        (Role::Character, "RIGHT"),
+        (Role::Dialogue, &right_dialogue),
+        (Role::Action, "after"),
+    ]);
+    add_group(&mut project, "spill", 1..3, 3..5);
+    let inputs = LayoutInputs {
+        paper_height: 40,
+        margin_top: 8,
+        margin_bottom: 8,
+        lines_per_page: 2,
+        ..LayoutInputs::default()
+    };
+    let layout = build(&project, LayoutComposition::BodyEditor, &inputs);
+    assert_eq!(
+        layout.pages[0]
+            .lines
+            .iter()
+            .map(|line| line.element)
+            .collect::<Vec<_>>(),
+        [0]
+    );
+
+    let left_lines = layout
+        .pages
+        .iter()
+        .flat_map(|page| &page.lines)
+        .filter(|line| line.element == 1 || line.element == 2)
+        .collect::<Vec<_>>();
+    let right_lines = layout
+        .pages
+        .iter()
+        .flat_map(|page| &page.lines)
+        .filter(|line| line.element == 3 || line.element == 4)
+        .collect::<Vec<_>>();
+    assert!(left_lines.len() > inputs.lines_per_page as usize);
+    assert!(right_lines.len() > inputs.lines_per_page as usize);
+    assert!(left_lines.iter().chain(&right_lines).all(|line| {
+        line.oversized && !line.keep_with_next && line.page > 0
+    }));
+    assert!(
+        left_lines.iter().map(|line| line.page).max()
+            > right_lines.iter().map(|line| line.page).max()
+    );
+
+    for (page_index, page) in layout.pages.iter().enumerate() {
+        assert_eq!(page.number, page_index);
+        let mut seen_right = false;
+        for line in &page.lines {
+            assert_eq!(line.page, page_index);
+            if line.element == 3 || line.element == 4 {
+                seen_right = true;
+            } else if line.element == 1 || line.element == 2 {
+                assert!(!seen_right, "left spill lines precede right spill lines");
+            }
+        }
+    }
+    assert_eq!(
+        layout
+            .pages
+            .last()
+            .and_then(|page| page.lines.last())
+            .map(|line| line.element),
+        Some(5)
+    );
+    assert_revision_reuse_matches_fresh(
+        &project,
+        LayoutComposition::BodyEditor,
+        &inputs,
+        &layout,
+    );
 }
 
 #[test]
@@ -184,475 +600,180 @@ fn plain_text_exports_each_dual_side_in_order_without_synthetic_wrapper_text() {
     assert!(!output.text.contains("DualDialogue"));
 }
 
-fn effective_source_settings(project: &Project) -> SourceLayoutSettings {
-    let mut settings = project
-        .preservation
-        .as_ref()
-        .map(|preservation| preservation.source_layout_settings().clone())
-        .unwrap_or_default();
-    settings
-        .direct_paragraph_overrides
-        .extend(project.direct_paragraph_overrides.clone());
-    settings
+#[test]
+fn shared_owner_layout_and_exports_keep_title_body_and_owner_identity_exact() {
+    let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" id="body"><Text>Body text</Text></Paragraph></Content><TitlePage><Content><Paragraph id="title"><Text>Exact Title</Text></Paragraph></Content></TitlePage></FinalDraft>"#;
+    let project = valid(read_v6(source)).project;
+    let before = project.clone();
+    let inputs = LayoutInputs::default();
+    let body = build(&project, LayoutComposition::BodyEditor, &inputs);
+    let title = build(&project, LayoutComposition::TitlePageEditor, &inputs);
+    let print = build(&project, LayoutComposition::Print { include_title_page: true }, &inputs);
+    assert_eq!(body, build(&project, LayoutComposition::BodyEditor, &inputs));
+    assert_eq!(title, build(&project, LayoutComposition::TitlePageEditor, &inputs));
+    assert_eq!(print, build(&project, LayoutComposition::Print { include_title_page: true }, &inputs));
+    assert!(body.pages.iter().all(|page| !page.title_page));
+    assert!(title.pages.iter().all(|page| page.title_page));
+    assert!(print.pages.first().is_some_and(|page| page.title_page));
+
+    let plain = valid(export_text(&project));
+    assert!(plain.text.contains("Exact Title"));
+    assert!(plain.text.contains("Body text"));
+    let pdf = valid(export_pdf(&project));
+    assert_eq!(valid(export_pdf(&project)), pdf);
+    assert_eq!(project, before);
+    for index in 0..before.elements.len() {
+        assert!(Arc::ptr_eq(&before.elements[index], &project.elements[index]));
+        assert_eq!(before.elements[index].revision(), project.elements[index].revision());
+    }
 }
 
 #[test]
-fn session_layout_cache_hits_and_key_misses_keep_fresh_geometry_and_wrap_reuse() {
-    let project = project_with(&[
-        (Role::Action, "an opening action paragraph with enough words to wrap around"),
-        (Role::Dialogue, "another unchanged element remains available for wrap reuse"),
-    ]);
+fn prepared_body_revision_reuse_isolates_title_print_and_export_composition() {
+    let project = valid(read_v6(include_bytes!("fixtures/dual_dialogue_basic.fdx"))).project;
+    let inputs = LayoutInputs::default();
+    let fresh_body = build(&project, LayoutComposition::BodyEditor, &inputs);
+    let fresh_title = build(&project, LayoutComposition::TitlePageEditor, &inputs);
+    let print_composition = LayoutComposition::Print { include_title_page: true };
+    let fresh_print = build(&project, print_composition, &inputs);
+    let plain_before = valid(export_text(&project));
+    let pdf_before = valid(export_pdf(&project));
+    let mut cache = LayoutCache::default();
+
+    let (body, body_hit) = valid(cache.get_or_build_with_composition(
+        0,
+        &project,
+        &inputs,
+        LayoutComposition::BodyEditor,
+    ));
+    assert!(!body_hit);
+    assert_eq!(body.as_ref(), &fresh_body);
+    let (title, title_hit) = valid(cache.get_or_build_with_composition(
+        1,
+        &project,
+        &inputs,
+        LayoutComposition::TitlePageEditor,
+    ));
+    assert!(!title_hit);
+    assert_eq!(title.as_ref(), &fresh_title);
+    assert!(title.pages.iter().all(|page| page.title_page));
+    let (body_reused, body_reused_hit) = valid(cache.get_or_build_with_composition(
+        2,
+        &project,
+        &inputs,
+        LayoutComposition::BodyEditor,
+    ));
+    assert!(!body_reused_hit);
+    assert_eq!(body_reused, body);
+    let (print, print_hit) = valid(cache.get_or_build_with_composition(
+        3,
+        &project,
+        &inputs,
+        print_composition,
+    ));
+    assert!(!print_hit);
+    assert_eq!(print.as_ref(), &fresh_print);
+    assert!(print.pages.first().is_some_and(|page| page.title_page));
+    assert_revision_reuse_matches_fresh(&project, print_composition, &inputs, &fresh_print);
+
+    assert_eq!(valid(export_text(&project)), plain_before);
+    assert_eq!(valid(export_pdf(&project)), pdf_before);
+}
+
+#[test]
+fn incremental_preparation_matches_fresh_print_history_reopen_and_exports() {
+    let source = format!(
+        "<FinalDraft DocumentType=\"Script\" Version=\"6\"><Content><Paragraph Type=\"Action\" id=\"body\"><Text>{}</Text></Paragraph></Content></FinalDraft>",
+        "source lorem é🙂 words ".repeat(1_024)
+    );
+    let project = valid(read_v6(source.as_bytes())).project;
     let mut session = valid(EditingSession::new(project));
     let presentation = BodyEditorPresentation::for_project(session.project(), None);
-    let mut cache = LayoutCache::default();
-    let mut diagnostics = LayoutBuildDiagnostics::default();
-
-    let (first, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+    let inputs = session.layout_inputs().clone();
+    let mut body_cache = LayoutCache::default();
+    let mut body_diagnostics = LayoutBuildDiagnostics::default();
+    let (initial, _) = valid(body_cache.get_or_build_body_editor_for_session_with_diagnostics(
         &session,
         &presentation,
-        &mut diagnostics,
+        &mut body_diagnostics,
     ));
-    assert!(!hit);
-    assert_eq!(diagnostics.complete_project_validations, 0);
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert_eq!(diagnostics.layout_builds, 1);
-
-    let (same, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+    let mut print_cache = LayoutCache::default();
+    let mut print_diagnostics = LayoutBuildDiagnostics::default();
+    let (initial_print, _) = valid(print_cache.get_or_build_for_session_with_diagnostics(
+        0,
         &session,
-        &presentation,
-        &mut diagnostics,
+        LayoutPurpose::Print,
+        &mut print_diagnostics,
     ));
-    assert!(hit);
-    assert!(std::sync::Arc::ptr_eq(&first, &same));
-    assert_eq!(diagnostics.complete_project_validations, 0);
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert_eq!(diagnostics.layout_builds, 0);
-
-    let mut title_cache = LayoutCache::default();
-    let (initial_title, hit) = valid(
-        title_cache.get_or_build_title_page_editor_for_session_with_diagnostics(
-            &session,
-            &mut diagnostics,
-        ),
-    );
-    assert!(!hit);
-    let (same_title, hit) = valid(
-        title_cache.get_or_build_title_page_editor_for_session_with_diagnostics(
-            &session,
-            &mut diagnostics,
-        ),
-    );
-    assert!(hit);
-    assert!(std::sync::Arc::ptr_eq(&initial_title, &same_title));
-    assert_eq!(diagnostics.complete_project_validations, 0);
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert_eq!(diagnostics.layout_builds, 0);
-
-    // The full profile remains an equality key even when an identifying field
-    // does not change the resulting geometry.
-    let mut alternate_profile = session.layout_inputs().clone();
-    alternate_profile.name.push_str("-cache-key");
-    valid(session.set_layout_inputs(alternate_profile));
-    let (profile_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
-        &session,
-        &presentation,
-        &mut diagnostics,
-    ));
-    assert!(!hit);
-    assert_eq!(diagnostics.complete_project_validations, 0);
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert_eq!(diagnostics.layout_builds, 1);
-    assert_eq!(
-        *profile_layout,
-        valid(ScreenplayLayout::build_with_body_presentation(
-            session.project(),
-            session.layout_inputs(),
-            &effective_source_settings(session.project()),
-            &presentation,
-        )),
-    );
-    assert!(diagnostics.element_wraps_reused > 0);
-    let (profile_title, hit) = valid(
-        title_cache.get_or_build_title_page_editor_for_session_with_diagnostics(
-            &session,
-            &mut diagnostics,
-        ),
-    );
-    assert!(!hit, "Title also keys on the complete profile");
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert_eq!(
-        *profile_title,
-        valid(ScreenplayLayout::build_with_composition(
-            session.project(),
-            session.layout_inputs(),
-            &effective_source_settings(session.project()),
-            LayoutComposition::TitlePageEditor,
-        )),
-    );
+    assert!(initial_print.pages.len() > 1);
 
     valid(session.set_selection(Selection::caret(Position {
         element: 0,
-        offset: 0,
+        offset: session.project().elements[0].text.len(),
     })));
-    valid(session.insert("edited "));
-    let (revision_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+    valid(session.insert(" append é你🙂ßﬃ"));
+    let (edited, _) = valid(body_cache.get_or_build_body_editor_for_session_with_diagnostics(
         &session,
         &presentation,
-        &mut diagnostics,
+        &mut body_diagnostics,
     ));
-    assert!(!hit);
-    assert_eq!(diagnostics.complete_project_validations, 0);
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert_eq!(diagnostics.layout_builds, 1);
-    assert!(diagnostics.element_wraps_reused > 0);
-    assert_eq!(
-        *revision_layout,
-        valid(ScreenplayLayout::build_with_body_presentation(
-            session.project(),
-            session.layout_inputs(),
-            &effective_source_settings(session.project()),
-            &presentation,
-        )),
-    );
-    let (revision_title, hit) = valid(
-        title_cache.get_or_build_title_page_editor_for_session_with_diagnostics(
-            &session,
-            &mut diagnostics,
-        ),
-    );
-    assert!(!hit, "Title revision changes invalidate its complete layout");
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert_eq!(
-        *revision_title,
-        valid(ScreenplayLayout::build_with_composition(
-            session.project(),
-            session.layout_inputs(),
-            &effective_source_settings(session.project()),
-            LayoutComposition::TitlePageEditor,
-        )),
-    );
-}
+    assert_eq!(body_diagnostics.prepared_incremental_hits, 1);
+    assert_eq!(body_diagnostics.prepared_incremental_fallbacks, 0);
+    let fresh = build(session.project(), LayoutComposition::BodyEditor, &inputs);
+    assert_eq!(edited.as_ref(), &fresh);
+    for line in fresh.pages.iter().flat_map(|page| &page.lines) {
+        for offset in [line.source.start, line.source.end] {
+            let caret = Caret {
+                element: line.element,
+                offset,
+            };
+            assert_eq!(fresh.caret_geometry(caret.clone()), edited.caret_geometry(caret.clone()));
+            let mut queries = InteractionQueryDiagnostics::default();
+            assert_eq!(
+                valid(fresh.line_for_caret_with_diagnostics(&caret, &mut queries)).line,
+                valid(edited.line_for_caret_with_diagnostics(&caret, &mut queries)).line
+            );
+        }
+        assert_eq!(
+            fresh.hit_test_fixed(line.page, line.geometry.x, line.geometry.y),
+            edited.hit_test_fixed(line.page, line.geometry.x, line.geometry.y)
+        );
+    }
 
-#[test]
-fn session_cache_misses_for_document_source_settings_and_canonical_direct_settings() {
-    let first_project = project_with(&[(Role::Action, "same canonical screenplay")]);
-    let first_session = valid(EditingSession::new(first_project));
-    let first_presentation = BodyEditorPresentation::for_project(first_session.project(), None);
-    let mut cache = LayoutCache::default();
-    let mut diagnostics = LayoutBuildDiagnostics::default();
-    let (_, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
-        &first_session,
-        &first_presentation,
-        &mut diagnostics,
-    ));
-    assert!(!hit);
-
-    // Replacing the document with an equal-looking but separately owned project
-    // cannot return the prior layout identity.
-    let replacement = valid(EditingSession::new(project_with(&[(
-        Role::Action,
-        "same canonical screenplay",
-    )])));
-    let replacement_presentation =
-        BodyEditorPresentation::for_project(replacement.project(), None);
-    let (replacement_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
-        &replacement,
-        &replacement_presentation,
-        &mut diagnostics,
-    ));
-    assert!(!hit);
-    assert_eq!(diagnostics.complete_project_validations, 0);
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert_eq!(
-        *replacement_layout,
-        valid(ScreenplayLayout::build_with_body_presentation(
-            replacement.project(),
-            replacement.layout_inputs(),
-            &effective_source_settings(replacement.project()),
-            &replacement_presentation,
-        )),
-    );
-
-    // A source-backed import with a different retained Paragraph setting is a
-    // distinct effective source-settings key. The canonical body is unchanged.
-    let source_left = valid(read_v6(include_bytes!("fixtures/dual_dialogue_basic.fdx"))).project;
-    let source_left = valid(EditingSession::new(source_left));
-    let left_presentation = BodyEditorPresentation::for_project(source_left.project(), None);
-    let _ = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
-        &source_left,
-        &left_presentation,
-        &mut diagnostics,
-    ));
-    let source_right_bytes = include_bytes!("fixtures/dual_dialogue_basic.fdx");
-    let source_right_text = std::str::from_utf8(source_right_bytes).expect("fixture is UTF-8");
-    let changed_source = source_right_text.replacen(
-        "Type=\"Action\"",
-        "Type=\"Action\" Alignment=\"Center\"",
-        1,
-    );
-    let source_right = valid(read_v6(changed_source.as_bytes())).project;
-    let source_right = valid(EditingSession::new(source_right));
-    let right_presentation = BodyEditorPresentation::for_project(source_right.project(), None);
-    let (source_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
-        &source_right,
-        &right_presentation,
-        &mut diagnostics,
-    ));
-    assert!(!hit);
-    assert_eq!(diagnostics.complete_project_validations, 0);
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert_eq!(
-        *source_layout,
-        valid(ScreenplayLayout::build_with_body_presentation(
-            source_right.project(),
-            source_right.layout_inputs(),
-            &effective_source_settings(source_right.project()),
-            &right_presentation,
-        )),
-    );
-
-    // Canonical direct-paragraph settings participate in the same complete key.
-    let mut direct_project = project_with(&[(Role::Action, "direct override geometry")]);
-    let direct_id = direct_project.elements[0].id.clone();
-    direct_project.direct_paragraph_overrides.insert(
-        direct_id,
-        SourceParagraphOverrides {
-            paragraph: SourceParagraphSpec {
-                alignment: Some(ParagraphAlignment::Right),
-                ..SourceParagraphSpec::default()
-            },
-            ..SourceParagraphOverrides::default()
-        },
-    );
-    let direct_session = valid(EditingSession::new(direct_project));
-    let direct_presentation = BodyEditorPresentation::for_project(direct_session.project(), None);
-    let (direct_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
-        &direct_session,
-        &direct_presentation,
-        &mut diagnostics,
-    ));
-    assert!(!hit);
-    assert_eq!(diagnostics.complete_project_validations, 0);
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert_eq!(
-        *direct_layout,
-        valid(ScreenplayLayout::build_with_body_presentation(
-            direct_session.project(),
-            direct_session.layout_inputs(),
-            &effective_source_settings(direct_session.project()),
-            &direct_presentation,
-        )),
-    );
-}
-
-#[test]
-fn body_active_group_and_title_print_compositions_miss_without_partial_pagination() {
-    let project = valid(read_v6(include_bytes!("fixtures/dual_dialogue_basic.fdx"))).project;
-    let session = valid(EditingSession::new(project));
-    let inactive = BodyEditorPresentation::for_project(session.project(), None);
-    let group_id = session.project().dual_dialogue_groups[0].id.clone();
-    let active = BodyEditorPresentation::for_project(session.project(), Some(group_id));
-    let mut cache = LayoutCache::default();
-    let mut diagnostics = LayoutBuildDiagnostics::default();
-    let (_, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+    valid(session.undo());
+    let (undone, _) = valid(body_cache.get_or_build_body_editor_for_session_with_diagnostics(
         &session,
-        &inactive,
-        &mut diagnostics,
+        &presentation,
+        &mut body_diagnostics,
     ));
-    assert!(!hit);
-    let (active_layout, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
+    assert_eq!(undone, initial);
+    assert_eq!(body_diagnostics.prepared_incremental_hits, 0);
+    valid(session.redo());
+    let (redone, _) = valid(body_cache.get_or_build_body_editor_for_session_with_diagnostics(
         &session,
-        &active,
-        &mut diagnostics,
+        &presentation,
+        &mut body_diagnostics,
     ));
-    assert!(!hit);
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert!(!active_layout.editor_group_boundaries.is_empty());
-    assert_eq!(
-        *active_layout,
-        valid(ScreenplayLayout::build_with_body_presentation(
-            session.project(),
-            session.layout_inputs(),
-            &effective_source_settings(session.project()),
-            &active,
-        )),
-    );
-    assert!(diagnostics.element_wraps_reused > 0);
+    assert_eq!(redone, edited);
+    assert_eq!(body_diagnostics.prepared_incremental_hits, 0);
 
-    let (title_layout, hit) = valid(cache.get_or_build_title_page_editor_for_session_with_diagnostics(
-        &session,
-        &mut diagnostics,
-    ));
-    assert!(!hit);
-    assert_eq!(title_layout.composition, LayoutComposition::TitlePageEditor);
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    assert_eq!(
-        *title_layout,
-        valid(ScreenplayLayout::build_with_composition(
-            session.project(),
-            session.layout_inputs(),
-            &effective_source_settings(session.project()),
-            LayoutComposition::TitlePageEditor,
-        )),
-    );
-
-    let print_composition = LayoutComposition::Print {
-        include_title_page: false,
-    };
-    let (print_layout, hit) = valid(cache.get_or_build_with_composition(
+    let (printed, _) = valid(print_cache.get_or_build_for_session_with_diagnostics(
         session.revision(),
-        session.project(),
-        session.layout_inputs(),
-        print_composition,
-    ));
-    assert!(!hit);
-    assert_eq!(print_layout.composition, print_composition);
-    assert_eq!(
-        *print_layout,
-        valid(ScreenplayLayout::build_with_composition(
-            session.project(),
-            session.layout_inputs(),
-            &effective_source_settings(session.project()),
-            print_composition,
-        )),
-    );
-    assert!(print_layout.pages.iter().all(|page| !page.title_page));
-}
-
-#[test]
-fn generic_signature_defense_and_session_metadata_transitions_remain_distinct() {
-    let mut project = project_with(&[(Role::Action, "generic cache defenses")]);
-    let inputs = LayoutInputs::default();
-    let mut cache = LayoutCache::default();
-    let mut diagnostics = LayoutBuildDiagnostics::default();
-    let (_, hit) = valid(cache.get_or_build_with_inputs_for_purpose_and_diagnostics(
-        0,
-        &project,
-        &inputs,
-        LayoutPurpose::Editor,
-        &mut diagnostics,
-    ));
-    assert!(!hit);
-    assert_eq!(diagnostics.semantic_signature_constructions, 1);
-
-    let session = valid(EditingSession::new(project.clone()));
-    let unbound = BodyEditorPresentation::default();
-    let (session_layout, hit) = valid(
-        cache.get_or_build_body_editor_for_session_with_diagnostics(
-            &session,
-            &unbound,
-            &mut diagnostics,
-        ),
-    );
-    assert!(hit);
-    assert_eq!(diagnostics.complete_project_validations, 0);
-    assert_eq!(diagnostics.semantic_signature_constructions, 0);
-    let (_, hit) = valid(cache.get_or_build_with_inputs_for_purpose_and_diagnostics(
-        0,
-        &project,
-        &inputs,
-        LayoutPurpose::Editor,
-        &mut diagnostics,
-    ));
-    assert!(hit, "the session hit preserves the generic defensive signature metadata");
-    assert_eq!(diagnostics.semantic_signature_constructions, 1);
-
-    project.direct_paragraph_overrides.insert(
-        project.elements[0].id.clone(),
-        SourceParagraphOverrides {
-            paragraph: SourceParagraphSpec {
-                alignment: Some(ParagraphAlignment::Center),
-                ..SourceParagraphSpec::default()
-            },
-            ..SourceParagraphOverrides::default()
-        },
-    );
-    let (mutated, hit) = valid(cache.get_or_build_with_inputs_for_purpose_and_diagnostics(
-        0,
-        &project,
-        &inputs,
-        LayoutPurpose::Editor,
-        &mut diagnostics,
-    ));
-    assert!(!hit, "same-revision canonical override mutation is defended");
-    assert_eq!(diagnostics.semantic_signature_constructions, 1);
-    assert_ne!(*mutated, *session_layout);
-}
-
-#[test]
-fn cached_layout_remains_the_deterministic_caret_hit_page_and_export_authority() {
-    let long_text = format!("{} end", "A deterministic screenplay line ".repeat(120));
-    let project = project_with(&[
-        (Role::Action, long_text.as_str()),
-        (Role::Dialogue, "a second body element"),
-    ]);
-    let session = valid(EditingSession::new(project));
-    let presentation = BodyEditorPresentation::for_project(session.project(), None);
-    let mut cache = LayoutCache::default();
-    let mut diagnostics = LayoutBuildDiagnostics::default();
-    let (first, _) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
         &session,
-        &presentation,
-        &mut diagnostics,
+        LayoutPurpose::Print,
+        &mut print_diagnostics,
     ));
-    let (cached, hit) = valid(cache.get_or_build_body_editor_for_session_with_diagnostics(
-        &session,
-        &presentation,
-        &mut diagnostics,
-    ));
-    assert!(hit);
-    assert!(std::sync::Arc::ptr_eq(&first, &cached));
-
-    let fresh = valid(ScreenplayLayout::build_with_body_presentation(
-        session.project(),
-        session.layout_inputs(),
-        &effective_source_settings(session.project()),
-        &presentation,
-    ));
-    assert_eq!(*cached, fresh);
-    assert!(cached.pages.len() > 1);
-    assert_eq!(cached.pages.len(), fresh.pages.len());
-    let caret = Caret {
-        element: 0,
-        offset: 8,
-    };
-    assert_eq!(cached.caret_geometry(caret.clone()), fresh.caret_geometry(caret.clone()));
-    let page = cached.page_for_position_with_diagnostics(
-        caret.element,
-        caret.offset,
-        &mut Default::default(),
-    );
-    assert_eq!(page, fresh.page_for_position_with_diagnostics(
-        caret.element,
-        caret.offset,
-        &mut Default::default(),
-    ));
-    let line = cached.line_for_caret_with_diagnostics(&caret, &mut Default::default());
-    let fresh_line = fresh.line_for_caret_with_diagnostics(&caret, &mut Default::default());
-    assert_eq!(line.unwrap().line, fresh_line.unwrap().line);
-    let body_line_index = cached.body_line_index_for_position_with_diagnostics(
-        caret.element,
-        caret.offset,
-        &mut Default::default(),
-    );
+    assert_eq!(print_diagnostics.prepared_incremental_hits, 1);
+    assert_eq!(print_diagnostics.prepared_incremental_fallbacks, 0);
     assert_eq!(
-        body_line_index,
-        fresh.body_line_index_for_position_with_diagnostics(
-            caret.element,
-            caret.offset,
-            &mut Default::default(),
-        ),
-    );
-    assert_eq!(cached.body_line(body_line_index.unwrap()), fresh.body_line(body_line_index.unwrap()));
-    let visible_line = cached.pages[0].lines.first().expect("first page has a line");
-    let x = FixedPoint::from_raw(visible_line.geometry.x.raw() + 2);
-    let y = FixedPoint::from_raw(visible_line.paragraph_bounds.y.raw() + 1);
-    assert_eq!(
-        cached.hit_test_fixed(0, x, y),
-        fresh.hit_test_fixed(0, x, y),
+        printed.as_ref(),
+        &build(session.project(), LayoutComposition::Print { include_title_page: true }, &inputs)
     );
 
-    // PDF export remains a deterministic projection of the same semantic
-    // document inputs; layout cache reads never mutate those inputs.
-    assert_eq!(valid(export_pdf(session.project())), valid(export_pdf(session.project())));
+    let plain = valid(export_text(session.project()));
+    let pdf = valid(export_pdf(session.project()));
+    let reopened = valid(read_v6(&valid(write_v6(session.project())))).project;
+    assert_eq!(build(&reopened, LayoutComposition::BodyEditor, &inputs), fresh);
+    assert_eq!(valid(export_text(&reopened)), plain);
+    assert_eq!(valid(export_pdf(&reopened)), pdf);
 }

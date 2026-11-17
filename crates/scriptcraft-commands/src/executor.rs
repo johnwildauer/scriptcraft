@@ -69,7 +69,7 @@ pub fn execute_editor_command_on_surface(
         }
     }
 
-    let before = session.clone();
+    let before = session.mutation_token();
     let result = match command {
         Command::EditorTextInsert { text, surface } => insert(session, *surface, text, false),
         Command::EditorTextPaste { text, surface } => insert(session, *surface, text, true),
@@ -137,7 +137,7 @@ pub fn execute_editor_command_on_surface(
         other => return rejected(other),
     };
 
-    outcome_from_edit_result(result, *session != before)
+    outcome_from_edit_result(result, session.mutation_token() != before)
 }
 
 fn outcome_from_edit_result(

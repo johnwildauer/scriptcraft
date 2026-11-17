@@ -3,7 +3,7 @@
 
 use crate::preservation::PreservationError;
 use crate::{
-    ModelError, ParagraphAlignment, Project, RunAttribute, TextRun, TitlePageAlignment,
+    BodyOwner, ModelError, ParagraphAlignment, Project, RunAttribute, TextRun, TitlePageAlignment,
     MAX_RUNS_PER_ELEMENT,
 };
 use std::ops::Range;
@@ -759,10 +759,15 @@ pub fn set_paragraph_alignments(
     for target in targets {
         match *target {
             ParagraphTarget::Body(index) => {
-                let element = candidate.elements.get(index).ok_or(FormattedTextError::ParagraphOutOfRange)?;
+                let element = candidate
+                    .elements
+                    .get(index)
+                    .ok_or(FormattedTextError::ParagraphOutOfRange)?;
                 let id = element.id.clone();
-                let text = element.text.clone();
-                let runs = element.runs.clone();
+                let previous_alignment = candidate
+                    .direct_paragraph_overrides
+                    .get(&id)
+                    .and_then(|overrides| overrides.paragraph.alignment);
                 let overrides = candidate
                     .direct_paragraph_overrides
                     .entry(id.clone())
@@ -785,6 +790,9 @@ pub fn set_paragraph_alignments(
                         Some(alignment.fdx_value()),
                     )?;
                     preservation.set_direct_paragraph_alignment(&id, alignment);
+                }
+                if previous_alignment != Some(alignment) {
+                    BodyOwner::revise(&mut candidate.elements[index]);
                 }
             }
             ParagraphTarget::TitlePage(index) => {
@@ -904,8 +912,10 @@ pub fn toggle_paragraph_run_style(
     if edit.changed {
         match target {
             ParagraphTarget::Body(index) => {
-                candidate.elements[index].runs = edit.runs.clone();
-                candidate.elements[index].text = text.clone();
+                BodyOwner::update(&mut candidate.elements[index], |element| {
+                    element.runs = edit.runs.clone();
+                    element.text = text.clone();
+                });
             }
             ParagraphTarget::TitlePage(index) => {
                 candidate.title_page[index].runs = edit.runs.clone();
@@ -973,8 +983,10 @@ pub fn toggle_paragraph_run_styles(
         changed = true;
         match *target {
             ParagraphTarget::Body(index) => {
-                candidate.elements[index].text = text.clone();
-                candidate.elements[index].runs = edit.runs.clone();
+                BodyOwner::update(&mut candidate.elements[index], |element| {
+                    element.text = text.clone();
+                    element.runs = edit.runs.clone();
+                });
             }
             ParagraphTarget::TitlePage(index) => {
                 candidate.title_page[index].text = text.clone();
@@ -1041,8 +1053,10 @@ pub fn clear_paragraph_run_styles(
         changed = true;
         match *target {
             ParagraphTarget::Body(index) => {
-                candidate.elements[index].text = text.clone();
-                candidate.elements[index].runs = edit.runs.clone();
+                BodyOwner::update(&mut candidate.elements[index], |element| {
+                    element.text = text.clone();
+                    element.runs = edit.runs.clone();
+                });
             }
             ParagraphTarget::TitlePage(index) => {
                 candidate.title_page[index].text = text.clone();

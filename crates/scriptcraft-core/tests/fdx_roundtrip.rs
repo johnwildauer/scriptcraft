@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 
 use scriptcraft_core::fdx::{read_v6, write_v6};
-use scriptcraft_core::Project;
+use scriptcraft_core::{BodyOwner, Project};
+use std::sync::Arc;
 
 const BASIC: &[u8] = include_bytes!("fixtures/dual_dialogue_basic.fdx");
 const EMPTY_SIDES: &[u8] = include_bytes!("fixtures/dual_dialogue_empty_sides.fdx");
@@ -95,4 +96,52 @@ fn repeated_title_source_ids_get_distinct_transient_ids_without_body_shadowing()
     }));
     let saved = write_v6(&imported.project).expect("title/body identity projection serializes");
     assert_eq!(read_v6(&saved).expect("title/body output reimports").project.title_page.len(), 2);
+}
+
+#[test]
+fn shared_owner_equality_and_fdx_roundtrip_ignore_revisions_but_not_semantics() {
+    let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" id="body" vendor-body="retained"><Text Style="Bold">Body</Text></Paragraph></Content><TitlePage><Content><Paragraph id="title" vendor-title="retained"><Text>Title</Text></Paragraph></Content></TitlePage></FinalDraft>"#;
+    let left = read_v6(source).expect("owner equality fixture imports").project;
+    let right = read_v6(source).expect("independent owner equality fixture imports").project;
+    assert_eq!(left, right);
+    assert!(!Arc::ptr_eq(&left.elements[0], &right.elements[0]));
+    assert_ne!(left.elements[0].revision(), right.elements[0].revision());
+
+    let mut collision = right.clone();
+    let same_semantics = collision.elements[0].as_element().clone();
+    collision.elements[0] = BodyOwner::shared(same_semantics);
+    assert!(!Arc::ptr_eq(&left.elements[0], &collision.elements[0]));
+    assert_eq!(left, collision);
+
+    let mut changed_body = collision.clone();
+    BodyOwner::update(&mut changed_body.elements[0], |element| {
+        element.text.push_str(" changed");
+    });
+    assert_ne!(left, changed_body);
+    let mut changed_runs = collision.clone();
+    BodyOwner::update(&mut changed_runs.elements[0], |element| {
+        element.runs[0].attributes[0].value = "Italic".to_owned();
+    });
+    assert_ne!(left, changed_runs);
+    let mut changed_title = collision.clone();
+    changed_title.title_page[0].text.push_str(" changed");
+    assert_ne!(left, changed_title);
+    let mut changed_preservation = collision.clone();
+    changed_preservation.preservation = None;
+    assert_ne!(left, changed_preservation);
+
+    let saved = write_v6(&left).expect("shared-owner project serializes");
+    let xml = String::from_utf8(saved.clone()).expect("FDX output is UTF-8");
+    assert!(xml.contains("vendor-body=\"retained\""));
+    assert!(xml.contains("vendor-title=\"retained\""));
+    let reopened = read_v6(&saved).expect("shared-owner output reimports").project;
+    assert_eq!(reopened.elements, left.elements);
+    assert_eq!(reopened.title_page, left.title_page);
+    assert_eq!(reopened.dual_dialogue_groups, left.dual_dialogue_groups);
+    assert!(reopened.preservation.is_some());
+    assert!(!Arc::ptr_eq(&left.elements[0], &reopened.elements[0]));
+    let reopened_xml = String::from_utf8(write_v6(&reopened).expect("reopened project serializes"))
+        .expect("reopened FDX output is UTF-8");
+    assert!(reopened_xml.contains("vendor-body=\"retained\""));
+    assert!(reopened_xml.contains("vendor-title=\"retained\""));
 }

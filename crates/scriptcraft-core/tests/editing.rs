@@ -1,18 +1,19 @@
 #![forbid(unsafe_code)]
 
-use scriptcraft_core::editing::{EditingSession, ParagraphKeyTarget, Position, Selection};
-use scriptcraft_core::dual_dialogue::{
-    DualDialogueError, DualDialogueGroup, DualDialogueSide, DualDialogueWrapperProvenance,
-};
-use scriptcraft_core::formatting::SourceParagraphOverrides;
+use scriptcraft_core::editing::{EditError, EditingSession, ParagraphKeyTarget, Position, Selection};
+use scriptcraft_core::fdx::read_v6;
 use scriptcraft_core::{
-    ModelError, ParagraphAlignment, Project, Role, RunAttribute, RunStyle, ScreenplayElement,
-    StableId, TextRun,
+    BodyOwner, ParagraphAlignment, Project, Role, RunStyle, ScreenplayElement, MAX_TEXT_BYTES,
 };
-use std::ops::Range;
+use std::sync::Arc;
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("editing case uses valid input"))
+}
+
+fn assert_same_owner(left: &Project, right: &Project, index: usize) {
+    assert!(Arc::ptr_eq(&left.elements[index], &right.elements[index]));
+    assert_eq!(left.elements[index].revision(), right.elements[index].revision());
 }
 
 fn two_sided_project() -> Project {
@@ -24,7 +25,7 @@ fn two_sided_project() -> Project {
         ("right-line", Role::Dialogue, "你好"),
     ]
     .into_iter()
-    .map(|(id, role, text)| valid(ScreenplayElement::new(id, role, text)))
+    .map(|(id, role, text)| BodyOwner::shared(valid(ScreenplayElement::new(id, role, text))))
     .collect();
     project
 }
@@ -53,6 +54,42 @@ fn group_from_ranges(
         },
         wrapper: DualDialogueWrapperProvenance::default(),
     }
+}
+
+#[test]
+fn development_mutation_diagnostics_record_only_actual_body_candidate_invocations() {
+    let mut session = valid(EditingSession::new(valid(Project::new())));
+    assert!(session.take_mutation_diagnostics().is_none());
+
+    session.begin_mutation_diagnostics();
+    valid(session.insert(""));
+    let Some(no_op) = session.take_mutation_diagnostics() else {
+        unreachable!("an actual Body candidate invocation produces one observation")
+    };
+    assert!(no_op.no_op);
+    assert_eq!(no_op.scoped_candidate_attempts, 1);
+    assert_eq!(no_op.scoped_candidate_accepts, 1);
+    assert!(no_op.scoped_validation_nanos.is_some());
+    assert!(no_op.no_op_equality_nanos.is_some());
+    assert!(no_op.derived_classification_nanos.is_none());
+    assert!(no_op.dirty_comparison_nanos.is_none());
+    assert!(no_op.history_publication_nanos.is_none());
+
+    session.begin_mutation_diagnostics();
+    valid(session.set_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    assert!(session.take_mutation_diagnostics().is_none());
+
+    session.begin_mutation_diagnostics();
+    valid(session.insert("x"));
+    let Some(changed) = session.take_mutation_diagnostics() else {
+        unreachable!("a changed Body candidate invocation produces one observation")
+    };
+    assert!(!changed.no_op);
+    assert!(changed.no_op_equality_nanos.is_some());
+    assert!(changed.derived_classification_nanos.is_some());
+    assert!(changed.dirty_comparison_nanos.is_some());
+    assert!(changed.history_publication_nanos.is_some());
+    assert!(session.take_mutation_diagnostics().is_none());
 }
 
 #[test]
@@ -172,99 +209,26 @@ fn group_unwrap_preserves_visible_members_and_invalid_selection_rolls_back() {
     assert!(session.can_undo());
 }
 
-fn deletion_project(empty_index: usize) -> Project {
-    let mut project = valid(Project::new());
-    let elements = [
-        ("left", Role::Action, "left"),
-        ("middle", Role::Dialogue, "middle"),
-        ("right", Role::Transition, "right"),
-    ];
-    project.elements = elements
-        .into_iter()
-        .enumerate()
-        .map(|(index, (id, role, text))| {
-            valid(ScreenplayElement::new(
-                id,
-                role,
-                if index == empty_index { "" } else { text },
-            ))
-        })
-        .collect();
-    project
-}
-
-#[test]
-fn collapsed_delete_and_backspace_remove_empty_current_at_each_position_with_directional_carets() {
-    for index in 0..3 {
-        let mut forward = valid(EditingSession::new(deletion_project(index)));
-        valid(forward.set_selection(Selection::caret(Position { element: index, offset: 0 })));
-        let before_forward = forward.clone();
-        valid(forward.delete());
-        let forward_after = forward.clone();
-        let expected_forward = match index {
-            0 => (0, 0, "middle"),
-            1 => (1, 0, "right"),
-            _ => (1, "middle".len(), "middle"),
-        };
-        assert_eq!(forward.project().elements.len(), 2);
-        assert_eq!(forward.project().elements[expected_forward.0].id.as_str(), expected_forward.2);
-        assert_eq!(
-            forward.selection(),
-            Selection::caret(Position {
-                element: expected_forward.0,
-                offset: expected_forward.1,
-            })
-        );
-        valid(forward.undo());
-        assert_eq!(forward, before_forward);
-        valid(forward.redo());
-        assert_eq!(forward, forward_after);
-
-        let mut backward = valid(EditingSession::new(deletion_project(index)));
-        valid(backward.set_selection(Selection::caret(Position { element: index, offset: 0 })));
-        let before_backward = backward.clone();
-        valid(backward.backspace());
-        let backward_after = backward.clone();
-        let expected_backward = match index {
-            0 => (0, 0, "middle"),
-            1 => (0, "left".len(), "left"),
-            _ => (1, "middle".len(), "middle"),
-        };
-        assert_eq!(backward.project().elements.len(), 2);
-        assert_eq!(backward.project().elements[expected_backward.0].id.as_str(), expected_backward.2);
-        assert_eq!(
-            backward.selection(),
-            Selection::caret(Position {
-                element: expected_backward.0,
-                offset: expected_backward.1,
-            })
-        );
-        valid(backward.undo());
-        assert_eq!(backward, before_backward);
-        valid(backward.redo());
-        assert_eq!(backward, backward_after);
-    }
-}
-
 #[test]
 fn empty_neighbors_are_removed_before_role_checks_and_preserve_the_surviving_caret() {
     let mut forward_project = valid(Project::new());
     forward_project.elements = vec![
-        valid(ScreenplayElement::new("action", Role::Action, "keep")),
-        valid(ScreenplayElement::new("empty-dialogue", Role::Dialogue, "")),
-        valid(ScreenplayElement::new("empty-transition", Role::Transition, "")),
+        BodyOwner::shared(valid(ScreenplayElement::new("action", Role::Action, "keep"))),
+        BodyOwner::shared(valid(ScreenplayElement::new("empty-dialogue", Role::Dialogue, ""))),
+        BodyOwner::shared(valid(ScreenplayElement::new("right", Role::Transition, "right"))),
     ];
     let mut forward = valid(EditingSession::new(forward_project));
     valid(forward.set_selection(Selection::caret(Position { element: 0, offset: 4 })));
     valid(forward.delete());
     assert_eq!(forward.project().elements.len(), 2);
     assert_eq!(forward.project().elements[0].id.as_str(), "action");
+    assert_eq!(forward.project().elements[1].id.as_str(), "right");
     assert_eq!(forward.selection(), Selection::caret(Position { element: 0, offset: 4 }));
 
     let mut backward_project = valid(Project::new());
     backward_project.elements = vec![
-        valid(ScreenplayElement::new("empty-action", Role::Action, "")),
-        valid(ScreenplayElement::new("dialogue", Role::Dialogue, "café")),
+        BodyOwner::shared(valid(ScreenplayElement::new("empty-action", Role::Action, ""))),
+        BodyOwner::shared(valid(ScreenplayElement::new("dialogue", Role::Dialogue, "café"))),
     ];
     let mut backward = valid(EditingSession::new(backward_project));
     valid(backward.set_selection(Selection::caret(Position { element: 1, offset: 0 })));
@@ -273,82 +237,6 @@ fn empty_neighbors_are_removed_before_role_checks_and_preserve_the_surviving_car
     assert_eq!(backward.project().elements[0].id.as_str(), "dialogue");
     assert_eq!(backward.project().elements[0].text, "café");
     assert_eq!(backward.selection(), Selection::caret(Position { element: 0, offset: 0 }));
-
-    let mut both_empty_project = valid(Project::new());
-    both_empty_project.elements = vec![
-        valid(ScreenplayElement::new("empty-action", Role::Action, "")),
-        valid(ScreenplayElement::new("empty-dialogue", Role::Dialogue, "")),
-        valid(ScreenplayElement::new("right", Role::Transition, "right")),
-    ];
-    let mut both_empty = valid(EditingSession::new(both_empty_project));
-    valid(both_empty.set_selection(Selection::caret(Position { element: 1, offset: 0 })));
-    valid(both_empty.delete());
-    assert_eq!(both_empty.project().elements.len(), 2);
-    assert_eq!(both_empty.project().elements[0].id.as_str(), "empty-action");
-    assert_eq!(both_empty.project().elements[1].id.as_str(), "right");
-    assert_eq!(both_empty.selection(), Selection::caret(Position { element: 1, offset: 0 }));
-}
-
-fn join_project() -> Project {
-    let mut project = valid(Project::new());
-    let bold = vec![RunAttribute { name: "Style".into(), value: "Bold".into() }];
-    let italic = vec![RunAttribute { name: "Style".into(), value: "Italic".into() }];
-    let mut left = valid(ScreenplayElement::new("kept", Role::Action, "é"));
-    left.runs = vec![TextRun { text: "é".into(), attributes: bold.clone() }];
-    let mut right = valid(ScreenplayElement::new("removed", Role::Action, "界!"));
-    right.runs = vec![
-        TextRun { text: "界".into(), attributes: bold },
-        TextRun { text: "!".into(), attributes: italic },
-    ];
-    project.elements = vec![left, right];
-    project
-}
-
-fn assert_joined_unicode_and_runs(session: &EditingSession) {
-    assert_eq!(session.project().elements.len(), 1);
-    assert_eq!(session.project().elements[0].id.as_str(), "kept");
-    assert_eq!(session.project().elements[0].role, Role::Action);
-    assert_eq!(session.project().elements[0].text, "é界!");
-    assert_eq!(
-        session.project().elements[0].runs,
-        vec![
-            TextRun {
-                text: "é界".into(),
-                attributes: vec![RunAttribute { name: "Style".into(), value: "Bold".into() }],
-            },
-            TextRun {
-                text: "!".into(),
-                attributes: vec![RunAttribute { name: "Style".into(), value: "Italic".into() }],
-            },
-        ]
-    );
-}
-
-#[test]
-fn same_role_unicode_boundary_joins_keep_left_identity_coalesce_runs_and_restore_history() {
-    for backward in [false, true] {
-        let mut session = valid(EditingSession::new(join_project()));
-        let before = session.clone();
-        valid(session.set_selection(Selection::caret(if backward {
-            Position { element: 1, offset: 0 }
-        } else {
-            Position { element: 0, offset: "é".len() }
-        })));
-        let before_join = session.clone();
-        if backward {
-            valid(session.backspace());
-        } else {
-            valid(session.delete());
-        }
-        assert_joined_unicode_and_runs(&session);
-        assert_eq!(session.selection(), Selection::caret(Position { element: 0, offset: "é".len() }));
-        let after_join = session.clone();
-        valid(session.undo());
-        assert_eq!(session, before_join);
-        valid(session.redo());
-        assert_eq!(session, after_join);
-        assert_ne!(before, after_join);
-    }
 }
 
 #[test]
@@ -356,8 +244,8 @@ fn incompatible_nonempty_boundary_joins_reject_transactionally_in_both_direction
     for backward in [false, true] {
         let mut project = valid(Project::new());
         project.elements = vec![
-            valid(ScreenplayElement::new("left", Role::Action, "left")),
-            valid(ScreenplayElement::new("right", Role::Dialogue, "right")),
+            BodyOwner::shared(valid(ScreenplayElement::new("left", Role::Action, "left"))),
+            BodyOwner::shared(valid(ScreenplayElement::new("right", Role::Dialogue, "right"))),
         ];
         let mut session = valid(EditingSession::new(project));
         valid(session.set_selection(Selection::caret(if backward {
@@ -366,266 +254,597 @@ fn incompatible_nonempty_boundary_joins_reject_transactionally_in_both_direction
             Position { element: 0, offset: 4 }
         })));
         let before = session.clone();
-        let result = if backward { session.backspace() } else { session.delete() };
-        assert_eq!(result, Err(scriptcraft_core::editing::EditError::IncompatibleParagraphJoin));
+        let result = if backward {
+            session.backspace()
+        } else {
+            session.delete()
+        };
+        assert_eq!(result, Err(scriptcraft_core::editing::EditError::InvalidSelection));
         assert_eq!(session, before);
     }
 }
 
 #[test]
-fn one_final_empty_element_and_document_edges_are_silent_noops() {
-    let mut only_empty = valid(EditingSession::new(valid(Project::new())));
-    for backspace in [false, true] {
-        let before = only_empty.clone();
-        if backspace {
-            valid(only_empty.backspace());
-        } else {
-            valid(only_empty.delete());
-        }
-        assert_eq!(only_empty, before);
-        assert!(!only_empty.can_undo());
-        assert!(!only_empty.dirty());
-        assert_eq!(only_empty.revision(), before.revision());
-    }
-
-    let mut project = valid(Project::new());
-    project.elements = vec![
-        valid(ScreenplayElement::new("first", Role::Action, "first")),
-        valid(ScreenplayElement::new("last", Role::Action, "last")),
-    ];
-    for (backspace, position) in [
-        (true, Position { element: 0, offset: 0 }),
-        (false, Position { element: 1, offset: 4 }),
-    ] {
-        let mut session = valid(EditingSession::new(project.clone()));
-        valid(session.set_selection(Selection::caret(position)));
+fn one_final_empty_element_is_a_silent_noop_in_both_directions() {
+    let mut session = valid(EditingSession::new(valid(Project::new())));
+    for backward in [false, true] {
         let before = session.clone();
-        if backspace {
+        if backward {
             valid(session.backspace());
         } else {
             valid(session.delete());
         }
         assert_eq!(session, before);
         assert!(!session.can_undo());
+        assert!(!session.dirty());
         assert_eq!(session.revision(), before.revision());
     }
 }
 
 #[test]
-fn delimiter_parenthetical_special_case_and_noncollapsed_cross_role_deletion_remain_unchanged() {
+fn one_final_empty_title_paragraph_is_a_silent_noop_in_both_directions() {
     let mut project = valid(Project::new());
-    project.elements = vec![
-        valid(ScreenplayElement::new("action", Role::Action, "before")),
-        valid(ScreenplayElement::new("existing-aside", Role::Parenthetical, "()")),
-    ];
-    let mut parenthetical = valid(EditingSession::new(project));
-    valid(parenthetical.set_selection(Selection::caret(Position { element: 1, offset: 0 })));
-    valid(parenthetical.enter());
-    assert_eq!(parenthetical.project().elements[1].text, "()");
-    assert_eq!(parenthetical.project().elements[2].id.as_str(), "existing-aside");
-    let before_parenthetical = parenthetical.clone();
-    valid(parenthetical.delete());
-    assert_eq!(parenthetical.project().elements.len(), 2);
-    assert_eq!(parenthetical.project().elements[0].id.as_str(), "action");
-    assert_eq!(parenthetical.selection(), Selection::caret(Position { element: 0, offset: 6 }));
-    let after_parenthetical = parenthetical.clone();
-    valid(parenthetical.undo());
-    assert_eq!(parenthetical, before_parenthetical);
-    valid(parenthetical.redo());
-    assert_eq!(parenthetical, after_parenthetical);
-
-    let mut cross_role_project = valid(Project::new());
-    cross_role_project.elements = vec![
-        valid(ScreenplayElement::new("action", Role::Action, "abc")),
-        valid(ScreenplayElement::new("dialogue", Role::Dialogue, "def")),
-    ];
-    let mut cross_role = valid(EditingSession::new(cross_role_project));
-    valid(cross_role.set_selection(Selection {
-        anchor: Position { element: 0, offset: 1 },
-        focus: Position { element: 1, offset: 2 },
-    }));
-    valid(cross_role.delete());
-    assert_eq!(cross_role.project().elements.len(), 1);
-    assert_eq!(cross_role.project().elements[0].text, "af");
-    assert_eq!(cross_role.project().elements[0].role, Role::Action);
+    project.title_page.truncate(1);
+    project.title_page[0].text.clear();
+    project.title_page[0].runs.clear();
+    let mut session = valid(EditingSession::new(project));
+    valid(session.set_title_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    for backward in [false, true] {
+        let before = session.clone();
+        if backward {
+            valid(session.backspace_title());
+        } else {
+            valid(session.delete_title());
+        }
+        assert_eq!(session, before);
+        assert!(!session.can_undo());
+        assert!(!session.dirty());
+        assert_eq!(session.revision(), before.revision());
+    }
 }
 
 #[test]
-fn body_owner_removal_cleans_dual_members_cues_and_wrapper_registrations_with_history() {
+fn irrelevant_action_edits_skip_derived_work_while_character_and_heading_edits_invalidate_one_scene() {
     let mut project = valid(Project::new());
-    project.elements = vec![
-        valid(ScreenplayElement::new("left-cue", Role::Character, "")),
-        valid(ScreenplayElement::new("left-line", Role::Dialogue, "")),
-        valid(ScreenplayElement::new("right-cue", Role::Character, "RIGHT")),
-        valid(ScreenplayElement::new("right-line", Role::Dialogue, "line")),
-    ];
-    let group_id = valid(StableId::new("dual-wrapper"));
-    project.dual_dialogue_groups.push(DualDialogueGroup {
-        id: group_id.clone(),
-        left: DualDialogueSide {
-            character: project.elements[0].id.clone(),
-            paragraphs: vec![project.elements[1].id.clone()],
-        },
-        right: DualDialogueSide {
-            character: project.elements[2].id.clone(),
-            paragraphs: vec![project.elements[3].id.clone()],
-        },
-        wrapper: DualDialogueWrapperProvenance::default(),
-    });
-    project
-        .direct_paragraph_overrides
-        .insert(project.elements[1].id.clone(), SourceParagraphOverrides::default());
-    project
-        .direct_paragraph_overrides
-        .insert(project.elements[0].id.clone(), SourceParagraphOverrides::default());
-    project
-        .dual_dialogue_paragraph_overrides
-        .insert(group_id.clone(), SourceParagraphOverrides::default());
+    project.elements = [
+        ("heading", Role::SceneHeading, "INT. ROOM - DAY"),
+        ("action", Role::Action, "Action"),
+        ("cue", Role::Character, "ALICE"),
+        ("dialogue", Role::Dialogue, "Hello"),
+    ]
+    .into_iter()
+    .map(|(id, role, text)| BodyOwner::shared(valid(ScreenplayElement::new(id, role, text))))
+    .collect();
     let mut session = valid(EditingSession::new(project));
+    valid(session.refresh_cast_lists());
+    assert!(!session.pending_derived_work_summary().pending);
 
-    valid(session.set_selection(Selection::caret(Position { element: 1, offset: 0 })));
-    let before_member_removal = session.clone();
-    valid(session.delete());
-    assert_eq!(session.project().dual_dialogue_groups.len(), 1);
-    assert!(session.project().dual_dialogue_groups[0].left.paragraphs.is_empty());
-    assert!(!session.project().direct_paragraph_overrides.contains_key(&valid(StableId::new("left-line"))));
-    assert_eq!(session.project().validate(), Ok(()));
-    let after_member_removal = session.clone();
+    valid(session.set_selection(Selection::caret(Position { element: 1, offset: 6 })));
+    valid(session.insert(" changed"));
+    assert!(session.last_edit_used_scoped_validation());
+    assert!(!session.pending_derived_work_summary().pending);
+
+    valid(session.set_selection(Selection::caret(Position { element: 2, offset: 5 })));
+    valid(session.insert("X"));
+    assert!(session.last_edit_used_scoped_validation());
+    let character_work = session.pending_derived_work_summary();
+    assert!(character_work.pending);
+    assert!(!character_work.complete);
+    assert_eq!(character_work.affected_scene_count, 1);
+    valid(session.refresh_cast_lists());
+    assert!(!session.pending_derived_work_summary().pending);
+
+    let heading_offset = session.project().elements[0].text.len();
+    valid(session.set_selection(Selection::caret(Position {
+        element: 0,
+        offset: heading_offset,
+    })));
+    valid(session.insert("!"));
+    assert!(session.last_edit_used_scoped_validation());
+    let heading_work = session.pending_derived_work_summary();
+    assert!(heading_work.pending);
+    assert!(!heading_work.complete);
+    assert_eq!(heading_work.affected_scene_count, 1);
+}
+
+fn assert_publication_state_unchanged(actual: &EditingSession, expected: &EditingSession) {
+    assert_eq!(actual, expected);
+    assert_eq!(actual.project(), expected.project());
+    assert_eq!(actual.selection(), expected.selection());
+    assert_eq!(actual.title_selection(), expected.title_selection());
+    assert_eq!(actual.body_typing_style(), expected.body_typing_style());
+    assert_eq!(actual.title_typing_style(), expected.title_typing_style());
+    assert_eq!(actual.revision(), expected.revision());
+    assert_eq!(actual.mutation_token(), expected.mutation_token());
+    assert_eq!(actual.dirty(), expected.dirty());
+    assert_eq!(actual.can_undo(), expected.can_undo());
+    assert_eq!(actual.can_redo(), expected.can_redo());
+}
+
+#[test]
+fn ordinary_body_insert_delete_publish_exact_candidates_and_restore_exact_history() {
+    let original = valid(Project::new());
+    let original_selection = Selection::caret(Position { element: 0, offset: 0 });
+    let mut session = valid(EditingSession::new(original.clone()));
+    let initial_revision = session.revision();
+    let initial_token = session.mutation_token();
+
+    valid(session.insert("alpha"));
+    let mut expected_inserted = original.clone();
+    BodyOwner::update(&mut expected_inserted.elements[0], |element| {
+        element.text = "alpha".to_owned();
+    });
+    assert_eq!(session.project(), &expected_inserted);
+    assert_eq!(
+        session.selection(),
+        Selection::caret(Position { element: 0, offset: "alpha".len() })
+    );
+    assert_eq!(session.revision(), initial_revision + 1);
+    assert_eq!(session.mutation_token(), initial_token + 1);
+    assert!(session.dirty());
+    assert!(session.can_undo());
+    assert!(!session.can_redo());
+
     valid(session.undo());
-    assert_eq!(session, before_member_removal);
+    assert_eq!(session.project(), &original);
+    assert_eq!(session.selection(), original_selection);
+    assert!(!session.dirty());
+    assert!(session.can_redo());
     valid(session.redo());
-    assert_eq!(session, after_member_removal);
+    assert_eq!(session.project(), &expected_inserted);
+    let inserted = session.project().clone();
+    let inserted_selection = session.selection();
+
+    valid(session.backspace());
+    let mut expected_deleted = inserted.clone();
+    BodyOwner::update(&mut expected_deleted.elements[0], |element| {
+        element.text = "alph".to_owned();
+    });
+    assert_eq!(session.project(), &expected_deleted);
+    assert_eq!(
+        session.selection(),
+        Selection::caret(Position { element: 0, offset: "alph".len() })
+    );
+    valid(session.undo());
+    assert_eq!(session.project(), &inserted);
+    assert_eq!(session.selection(), inserted_selection);
+    valid(session.redo());
+    assert_eq!(session.project(), &expected_deleted);
+}
+
+#[test]
+fn repeated_body_edits_preserve_history_eviction_dirty_redo_and_mutation_order() {
+    let mut session = valid(EditingSession::with_history_limit(valid(Project::new()), 2));
+    valid(session.insert("a"));
+    let project_a = session.project().clone();
+    session.mark_saved();
+    assert!(!session.dirty());
+
+    valid(session.insert("b"));
+    let project_ab = session.project().clone();
+    valid(session.insert("c"));
+    let project_abc = session.project().clone();
+    assert_eq!(project_abc.elements[0].text, "abc");
+    let revision = session.revision();
+    let token = session.mutation_token();
+
+    valid(session.undo());
+    assert_eq!(session.project(), &project_ab);
+    assert!(session.dirty());
+    valid(session.undo());
+    assert_eq!(session.project(), &project_a);
+    assert!(!session.dirty());
+    assert!(session.can_redo());
+    let evicted = session.clone();
+    assert_eq!(session.undo(), Err(EditError::EmptyHistory));
+    assert_publication_state_unchanged(&session, &evicted);
+    assert_eq!(session.revision(), revision + 2);
+    assert_eq!(session.mutation_token(), token + 2);
+
+    valid(session.redo());
+    assert_eq!(session.project(), &project_ab);
+    assert!(session.dirty());
+    valid(session.redo());
+    assert_eq!(session.project(), &project_abc);
+    valid(session.undo());
+    assert_eq!(session.project(), &project_ab);
+    assert!(session.can_redo());
+
+    let revision_before_branch = session.revision();
+    let token_before_branch = session.mutation_token();
+    valid(session.insert("!"));
+    assert_eq!(session.project().elements[0].text, "ab!");
+    assert!(!session.can_redo());
+    assert!(session.dirty());
+    assert_eq!(session.revision(), revision_before_branch + 1);
+    assert_eq!(session.mutation_token(), token_before_branch + 1);
+    let branched = session.project().clone();
+    valid(session.undo());
+    assert_eq!(session.project(), &project_ab);
+    valid(session.redo());
+    assert_eq!(session.project(), &branched);
+}
+
+#[test]
+fn body_noops_and_practical_failures_preserve_project_history_redo_revision_and_token() {
+    let mut session = valid(EditingSession::new(valid(Project::new())));
+    valid(session.insert("seed"));
+    let seeded = session.project().clone();
+    valid(session.undo());
+    assert!(session.can_redo());
+
+    let before_noop = session.clone();
+    valid(session.insert(""));
+    assert_publication_state_unchanged(&session, &before_noop);
+
+    let oversized = "x".repeat(MAX_TEXT_BYTES + 1);
+    assert_eq!(session.insert(&oversized), Err(EditError::TextTooLong));
+    assert_publication_state_unchanged(&session, &before_noop);
+    valid(session.redo());
+    assert_eq!(session.project(), &seeded);
 
     valid(session.set_selection(Selection::caret(Position { element: 0, offset: 0 })));
-    valid(session.delete());
-    assert!(session.project().dual_dialogue_groups.is_empty());
-    assert!(!session.project().dual_dialogue_paragraph_overrides.contains_key(&group_id));
-    assert!(!session.project().direct_paragraph_overrides.contains_key(&valid(StableId::new("left-cue"))));
-    assert!(session.project().dual_dialogue_groups.iter().all(|group| {
-        group.member_ids().all(|member| session.project().elements.iter().any(|element| &element.id == member))
-    }));
-    assert_eq!(session.project().validate(), Ok(()));
-}
+    let before_boundary = session.clone();
+    valid(session.backspace());
+    assert_publication_state_unchanged(&session, &before_boundary);
 
-#[test]
-fn dual_group_position_lookup_preserves_member_error_categories() {
-    let mut missing = two_sided_project();
-    missing
-        .dual_dialogue_groups
-        .push(group_from_ranges(&missing, "missing-group", 0..2, 2..4));
-    missing.dual_dialogue_groups[0].left.character = valid(StableId::new("missing-member"));
-    assert_eq!(
-        missing.validate_current_state(),
-        Err(ModelError::InvalidDualDialogue(DualDialogueError::MissingMember)),
-    );
-
-    let mut duplicate_member = two_sided_project();
-    duplicate_member
-        .dual_dialogue_groups
-        .push(group_from_ranges(&duplicate_member, "duplicate-member-group", 0..2, 2..4));
-    let repeated = duplicate_member.dual_dialogue_groups[0].left.paragraphs[0].clone();
-    duplicate_member.dual_dialogue_groups[0]
-        .left
-        .paragraphs
-        .push(repeated);
-    assert_eq!(
-        duplicate_member.validate_current_state(),
-        Err(ModelError::InvalidDualDialogue(DualDialogueError::DuplicateMember)),
-    );
-
-    let mut noncontiguous = valid(Project::new());
-    noncontiguous.elements = [
-        ("gap-left-cue", Role::Character),
-        ("gap-left-line", Role::Dialogue),
-        ("outside-group", Role::Action),
-        ("gap-right-cue", Role::Character),
-        ("gap-right-line", Role::Dialogue),
-    ]
-    .into_iter()
-    .map(|(id, role)| valid(ScreenplayElement::new(id, role, "")))
-    .collect();
-    noncontiguous
-        .dual_dialogue_groups
-        .push(group_from_ranges(&noncontiguous, "noncontiguous-group", 0..2, 3..5));
-    assert_eq!(
-        noncontiguous.validate_current_state(),
-        Err(ModelError::InvalidDualDialogue(
-            DualDialogueError::NonContiguousMembers,
-        )),
-    );
-
-    let mut out_of_order = valid(Project::new());
-    out_of_order.elements = (0..8)
-        .map(|index| {
-            let role = match index % 4 {
-                0 | 2 => Role::Character,
-                _ => Role::Dialogue,
-            };
-            valid(ScreenplayElement::new(format!("ordered-{index}"), role, ""))
-        })
-        .collect();
-    out_of_order.dual_dialogue_groups.push(group_from_ranges(
-        &out_of_order,
-        "later-group",
-        4..6,
-        6..8,
-    ));
-    out_of_order.dual_dialogue_groups.push(group_from_ranges(
-        &out_of_order,
-        "earlier-group",
-        0..2,
-        2..4,
-    ));
-    assert_eq!(
-        out_of_order.validate_current_state(),
-        Err(ModelError::InvalidDualDialogue(DualDialogueError::GroupsOutOfOrder)),
-    );
-
-    let mut invalid_role = valid(Project::new());
-    invalid_role.elements = [
-        ("role-left-cue", Role::Character),
-        ("role-left-line", Role::Action),
-        ("role-right-cue", Role::Character),
-        ("role-right-line", Role::Dialogue),
-    ]
-    .into_iter()
-    .map(|(id, role)| valid(ScreenplayElement::new(id, role, "")))
-    .collect();
-    invalid_role
-        .dual_dialogue_groups
-        .push(group_from_ranges(&invalid_role, "invalid-role-group", 0..2, 2..4));
-    assert_eq!(
-        invalid_role.validate_current_state(),
-        Err(ModelError::InvalidDualDialogue(DualDialogueError::InvalidRolePattern)),
-    );
-}
-
-#[test]
-fn many_dual_groups_validate_without_reordering_or_changing_membership() {
-    const GROUP_COUNT: usize = 64;
     let mut project = valid(Project::new());
-    project.elements = (0..GROUP_COUNT)
-        .flat_map(|group_index| {
-            [
-                (format!("many-{group_index}-left-cue"), Role::Character),
-                (format!("many-{group_index}-left-line"), Role::Dialogue),
-                (format!("many-{group_index}-right-cue"), Role::Character),
-                (format!("many-{group_index}-right-line"), Role::Dialogue),
-            ]
-        })
-        .map(|(id, role)| valid(ScreenplayElement::new(id, role, "")))
-        .collect();
-    for group_index in 0..GROUP_COUNT {
-        let start = group_index * 4;
-        project.dual_dialogue_groups.push(group_from_ranges(
-            &project,
-            &format!("many-group-{group_index}"),
-            start..start + 2,
-            start + 2..start + 4,
-        ));
-    }
-    let original_groups = project.dual_dialogue_groups.clone();
+    project.elements = vec![
+        BodyOwner::shared(valid(ScreenplayElement::new("left", Role::Action, "left"))),
+        BodyOwner::shared(valid(ScreenplayElement::new("right", Role::Dialogue, "right"))),
+    ];
+    let mut invalid = valid(EditingSession::new(project));
+    valid(invalid.change_role(Role::General));
+    valid(invalid.undo());
+    assert!(invalid.can_redo());
+    valid(invalid.set_selection(Selection::caret(Position { element: 0, offset: 4 })));
+    let before_invalid = invalid.clone();
+    assert_eq!(invalid.delete(), Err(EditError::InvalidSelection));
+    assert_publication_state_unchanged(&invalid, &before_invalid);
+}
 
-    assert_eq!(project.validate_current_state(), Ok(()));
-    assert_eq!(project.dual_dialogue_groups, original_groups);
+#[test]
+fn structural_dual_unwrap_retries_from_the_grouped_pre_edit_baseline() {
+    let original = two_sided_project();
+    let mut grouped = valid(EditingSession::new(original.clone()));
+    valid(grouped.set_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    valid(grouped.toggle_dual_dialogue());
+    let grouped_baseline = grouped.project().clone();
+    assert_eq!(grouped_baseline.dual_dialogue_groups.len(), 1);
+
+    valid(grouped.set_selection(Selection::caret(Position { element: 1, offset: 0 })));
+    let grouped_selection = grouped.selection();
+    let mut reference = valid(EditingSession::new(original));
+    valid(reference.set_selection(Selection::caret(Position { element: 1, offset: 0 })));
+    valid(reference.change_role(Role::Action));
+    let expected = reference.project().clone();
+
+    valid(grouped.change_role(Role::Action));
+    assert_eq!(grouped.project(), &expected);
+    assert_eq!(grouped.selection(), reference.selection());
+    assert!(grouped.project().dual_dialogue_groups.is_empty());
+    valid(grouped.undo());
+    assert_eq!(grouped.project(), &grouped_baseline);
+    assert_eq!(grouped.selection(), grouped_selection);
+    valid(grouped.redo());
+    assert_eq!(grouped.project(), &expected);
+}
+
+#[test]
+fn source_backed_publication_restores_source_and_preservation_failure_keeps_redo() {
+    let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="Action" id="body"><Text>Opening <InlineOpaque/>action.</Text><Text> tail</Text></Paragraph></Content></FinalDraft>"#;
+    let project = valid(read_v6(source)).project;
+    let initial = project.clone();
+    let mut session = valid(EditingSession::new(project));
+    let text_len = session.project().elements[0].text.len();
+    valid(session.set_selection(Selection::caret(Position {
+        element: 0,
+        offset: text_len,
+    })));
+    valid(session.insert("!"));
+    let inserted = session.project().clone();
+    assert!(inserted.preservation.is_some());
+    assert_eq!(inserted.elements[0].text.len(), text_len + 1);
+
+    valid(session.undo());
+    assert_eq!(session.project(), &initial);
+    assert!(Arc::ptr_eq(&initial.elements[0], &session.project().elements[0]));
+    assert_eq!(initial.elements[0].revision(), session.project().elements[0].revision());
+    assert!(session.can_redo());
+    valid(session.set_selection(Selection {
+        anchor: Position {
+            element: 0,
+            offset: "Opening".len(),
+        },
+        focus: Position {
+            element: 0,
+            offset: "Opening a".len(),
+        },
+    }));
+    let before_failure = session.clone();
+    assert!(session.insert("").is_err());
+    assert_publication_state_unchanged(&session, &before_failure);
+    valid(session.redo());
+    assert_eq!(session.project(), &inserted);
+    assert!(Arc::ptr_eq(&inserted.elements[0], &session.project().elements[0]));
+    assert_eq!(inserted.elements[0].revision(), session.project().elements[0].revision());
+}
+
+#[test]
+fn generated_parenthetical_provenance_survives_move_to_history_and_undo_redo() {
+    let mut session = valid(EditingSession::new(valid(Project::new())));
+    valid(session.change_role(Role::Dialogue));
+    valid(session.tab());
+    assert_eq!(session.project().elements[0].role, Role::Parenthetical);
+    assert_eq!(session.project().elements[0].text, "()");
+    assert_eq!(
+        session.selection(),
+        Selection::caret(Position { element: 0, offset: 1 })
+    );
+    let generated_project = session.project().clone();
+    let generated_selection = session.selection();
+
+    valid(session.insert("quiet"));
+    assert_eq!(session.project().elements[0].text, "(quiet)");
+    valid(session.undo());
+    assert_eq!(session.project(), &generated_project);
+    assert_eq!(session.selection(), generated_selection);
+
+    valid(session.enter());
+    assert_eq!(session.project().elements.len(), 2);
+    assert_eq!(session.project().elements[0].text, "");
+    assert_eq!(session.project().elements[1].role, Role::Dialogue);
+    let entered = session.project().clone();
+    valid(session.undo());
+    assert_eq!(session.project(), &generated_project);
+    assert_eq!(session.selection(), generated_selection);
+    valid(session.redo());
+    assert_eq!(session.project(), &entered);
+}
+
+#[test]
+fn ordinary_body_publication_has_one_candidate_clone_and_moves_history_project() {
+    let source = include_str!("../src/editing.rs");
+    let function = source
+        .split("fn mutate_with_scene_heading_deletions<F>")
+        .nth(1)
+        .and_then(|tail| tail.split("\n    fn mutate_title<F>").next())
+        .unwrap_or_else(|| unreachable!("Body mutation helper remains present"));
+    assert!(function.contains("let baseline = &self.project;"));
+    assert!(function.contains("let mut first_project = baseline.clone();"));
+    assert!(function.contains("std::mem::replace(&mut self.project, project)"));
+    assert!(!function.contains("let baseline = self.project.clone();"));
+    assert!(!function.contains("project: self.project.clone(),"));
+}
+
+#[test]
+fn body_owner_clones_candidates_history_and_clean_restoration_share_exact_survivors() {
+    let project = two_sided_project();
+    let cloned = project.clone();
+    for index in 0..project.elements.len() {
+        assert_same_owner(&project, &cloned, index);
+    }
+
+    let mut session = valid(EditingSession::new(project));
+    let before = session.project().clone();
+    valid(session.set_selection(Selection::caret(Position { element: 1, offset: 4 })));
+    valid(session.insert("!"));
+    let edited = session.project().clone();
+    assert!(!Arc::ptr_eq(&before.elements[1], &edited.elements[1]));
+    assert_ne!(before.elements[1].revision(), edited.elements[1].revision());
+    for index in [0, 2, 3] {
+        assert_same_owner(&before, &edited, index);
+    }
+
+    let save_candidate = valid(session.prepare_cast_list_save_candidate());
+    for index in 0..edited.elements.len() {
+        assert_same_owner(&edited, &save_candidate, index);
+    }
+
+    valid(session.undo());
+    for index in 0..before.elements.len() {
+        assert_same_owner(&before, session.project(), index);
+    }
+    valid(session.redo());
+    for index in 0..edited.elements.len() {
+        assert_same_owner(&edited, session.project(), index);
+    }
+
+    session.mark_saved();
+    valid(session.backspace());
+    assert!(session.dirty());
+    valid(session.insert("!"));
+    assert!(!session.dirty());
+    assert_eq!(session.project(), &edited);
+    assert!(!Arc::ptr_eq(&edited.elements[1], &session.project().elements[1]));
+    assert_ne!(edited.elements[1].revision(), session.project().elements[1].revision());
+    for index in [0, 2, 3] {
+        assert_same_owner(&edited, session.project(), index);
+    }
+
+    let before_title = session.project().clone();
+    valid(session.insert_title("Title edit"));
+    for index in 0..before_title.elements.len() {
+        assert_same_owner(&before_title, session.project(), index);
+    }
+
+    let mut no_op = session.project().clone();
+    for owner in &mut no_op.elements {
+        BodyOwner::update(owner, |_| {});
+    }
+    for index in 0..no_op.elements.len() {
+        assert_same_owner(session.project(), &no_op, index);
+    }
+}
+
+#[test]
+fn body_owner_revisions_follow_split_join_delete_move_and_history_lifecycles() {
+    let mut project = valid(Project::new());
+    project.elements = [
+        ("left", Role::Action, "left"),
+        ("right", Role::Action, "right"),
+        ("tail", Role::Note, "tail"),
+    ]
+    .into_iter()
+    .map(|(id, role, text)| BodyOwner::shared(valid(ScreenplayElement::new(id, role, text))))
+    .collect();
+    let mut session = valid(EditingSession::new(project));
+    let before = session.project().clone();
+    let removed_id = before.elements[1].id.clone();
+    let prior_revisions = before.elements.iter().map(|owner| owner.revision()).collect::<Vec<_>>();
+
+    valid(session.set_selection(Selection::caret(Position { element: 0, offset: 3 })));
+    valid(session.split());
+    assert!(!session.last_edit_used_scoped_validation());
+    let split = session.project().clone();
+    assert!(!Arc::ptr_eq(&before.elements[0], &split.elements[0]));
+    assert_ne!(before.elements[0].revision(), split.elements[0].revision());
+    assert_ne!(split.elements[1].id, split.elements[0].id);
+    assert!(!prior_revisions.contains(&split.elements[1].revision()));
+    assert!(Arc::ptr_eq(&before.elements[2], &split.elements[3]));
+    assert_eq!(before.elements[2].revision(), split.elements[3].revision());
+
+    let mut moved = split.clone();
+    moved.elements.swap(0, 1);
+    assert!(Arc::ptr_eq(&split.elements[0], &moved.elements[1]));
+    assert!(Arc::ptr_eq(&split.elements[1], &moved.elements[0]));
+    assert_eq!(split.elements[0].revision(), moved.elements[1].revision());
+    assert_eq!(split.elements[1].revision(), moved.elements[0].revision());
+
+    valid(session.set_selection(Selection::caret(Position { element: 0, offset: 3 })));
+    valid(session.join_with_next());
+    let joined = session.project().clone();
+    assert_eq!(joined.elements[0].text, "left");
+    assert_ne!(split.elements[0].revision(), joined.elements[0].revision());
+    assert!(Arc::ptr_eq(&split.elements[3], &joined.elements[2]));
+    assert_eq!(split.elements[3].revision(), joined.elements[2].revision());
+    valid(session.undo());
+    for index in 0..split.elements.len() {
+        assert_same_owner(&split, session.project(), index);
+    }
+    valid(session.redo());
+    for index in 0..joined.elements.len() {
+        assert_same_owner(&joined, session.project(), index);
+    }
+
+    valid(session.set_selection(Selection {
+        anchor: Position { element: 0, offset: 0 },
+        focus: Position { element: 1, offset: 0 },
+    }));
+    valid(session.delete());
+    let deleted = session.project().clone();
+    assert_eq!(deleted.elements.len(), 2);
+    assert!(deleted.elements.iter().all(|owner| owner.id != removed_id));
+    assert!(Arc::ptr_eq(&joined.elements[2], &deleted.elements[1]));
+    assert_eq!(joined.elements[2].revision(), deleted.elements[1].revision());
+    valid(session.undo());
+    for index in 0..joined.elements.len() {
+        assert_same_owner(&joined, session.project(), index);
+    }
+    valid(session.redo());
+    for index in 0..deleted.elements.len() {
+        assert_same_owner(&deleted, session.project(), index);
+    }
+}
+
+#[test]
+fn body_owner_formatting_roles_dual_dialogue_and_noops_have_local_revisions() {
+    let mut session = valid(EditingSession::new(two_sided_project()));
+    let before = session.project().clone();
+    valid(session.set_selection(Selection {
+        anchor: Position { element: 1, offset: 0 },
+        focus: Position { element: 1, offset: 4 },
+    }));
+    valid(session.toggle_body_run_style(RunStyle::Bold));
+    let formatted = session.project().clone();
+    assert_ne!(before.elements[1].revision(), formatted.elements[1].revision());
+    for index in [0, 2, 3] {
+        assert_same_owner(&before, &formatted, index);
+    }
+
+    valid(session.set_body_alignment(ParagraphAlignment::Right));
+    let aligned = session.project().clone();
+    assert_eq!(formatted.elements[1].as_element(), aligned.elements[1].as_element());
+    assert!(!Arc::ptr_eq(&formatted.elements[1], &aligned.elements[1]));
+    assert_ne!(formatted.elements[1].revision(), aligned.elements[1].revision());
+    for index in [0, 2, 3] {
+        assert_same_owner(&formatted, &aligned, index);
+    }
+    valid(session.set_body_alignment(ParagraphAlignment::Right));
+    for index in 0..aligned.elements.len() {
+        assert_same_owner(&aligned, session.project(), index);
+    }
+
+    valid(session.set_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    valid(session.change_role(Role::Action));
+    let role_changed = session.project().clone();
+    assert_ne!(aligned.elements[0].revision(), role_changed.elements[0].revision());
+    for index in 1..role_changed.elements.len() {
+        assert_same_owner(&aligned, &role_changed, index);
+    }
+    valid(session.change_role(Role::Action));
+    for index in 0..role_changed.elements.len() {
+        assert_same_owner(&role_changed, session.project(), index);
+    }
+    valid(session.undo());
+    for index in 0..aligned.elements.len() {
+        assert_same_owner(&aligned, session.project(), index);
+    }
+    valid(session.redo());
+    for index in 0..role_changed.elements.len() {
+        assert_same_owner(&role_changed, session.project(), index);
+    }
+
+    let mut dual = valid(EditingSession::new(two_sided_project()));
+    let before_dual = dual.project().clone();
+    valid(dual.set_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    valid(dual.toggle_dual_dialogue());
+    assert_eq!(dual.project().dual_dialogue_groups.len(), 1);
+    for index in 0..before_dual.elements.len() {
+        assert_same_owner(&before_dual, dual.project(), index);
+    }
+}
+
+#[test]
+fn derived_cast_updates_replace_only_derived_owners_and_reuse_unchanged_results() {
+    let mut project = valid(Project::new());
+    project.elements = [
+        ("heading", Role::SceneHeading, "INT. ROOM - DAY"),
+        ("cue", Role::Character, "Alice"),
+        ("cast", Role::CastList, ""),
+        ("tail", Role::Action, "tail"),
+    ]
+    .into_iter()
+    .map(|(id, role, text)| BodyOwner::shared(valid(ScreenplayElement::new(id, role, text))))
+    .collect();
+    let mut session = valid(EditingSession::new(project));
+    let before = session.project().clone();
+    assert_eq!(valid(session.refresh_cast_lists()), true);
+    let corrected = session.project().clone();
+    assert_eq!(corrected.elements[2].text, "(ALICE)");
+    for index in [0, 1, 3] {
+        assert_same_owner(&before, &corrected, index);
+    }
+    assert_ne!(before.elements[2].revision(), corrected.elements[2].revision());
+    assert_eq!(valid(session.refresh_cast_lists()), false);
+    for index in 0..corrected.elements.len() {
+        assert_same_owner(&corrected, session.project(), index);
+    }
+
+    valid(session.set_selection(Selection {
+        anchor: Position { element: 1, offset: 0 },
+        focus: Position { element: 1, offset: 5 },
+    }));
+    valid(session.insert("Bob"));
+    assert!(session.last_edit_used_scoped_validation());
+    let character_edited = session.project().clone();
+    for index in [0, 2, 3] {
+        assert_same_owner(&corrected, &character_edited, index);
+    }
+    assert_eq!(valid(session.refresh_cast_lists()), true);
+    assert_eq!(session.project().elements[2].text, "(BOB)");
+    for index in [0, 1, 3] {
+        assert_same_owner(&character_edited, session.project(), index);
+    }
+    assert_ne!(character_edited.elements[2].revision(), session.project().elements[2].revision());
 }

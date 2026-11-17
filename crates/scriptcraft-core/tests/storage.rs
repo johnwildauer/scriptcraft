@@ -1008,6 +1008,67 @@ fn opaque_edit_save_rebases_session_without_detaching_owner_source() {
 }
 
 #[test]
+fn destructive_owner_removal_save_save_as_reopen_preserves_orphan_raw_source() {
+    let directory = TestDirectory::new();
+    let source = directory.path("owner-removal.fdx");
+    let save_as = directory.path("owner-removal-save-as.fdx");
+    let fixture = br#"<FinalDraft DocumentType="Script" Version="6"><Content>
+      <Paragraph Type="Action" id="empty-owner" Bookmark="discarded"><Text></Text><ScriptNote ID="discarded-note">private note</ScriptNote><UserParagraphData owner="discarded"><Opaque id="discarded-id"/></UserParagraphData></Paragraph>
+      <Paragraph Type="Action" id="survivor"><Text>Keep</Text></Paragraph>
+      <Paragraph Type="Action" id="raw-use" vendor-ref="empty-owner"><Text>Orphan remains raw</Text></Paragraph>
+    </Content></FinalDraft>"#;
+    fs::write(&source, fixture)
+        .unwrap_or_else(|_| unreachable!("isolated lifecycle source can be created"));
+
+    let opened = valid(open(&StdFdxStorageFileSystem, &source));
+    let mut session = valid(EditingSession::new(opened.document.project));
+    valid(session.set_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    valid(session.delete());
+    let mut target = FdxSaveTarget::from_baseline(opened.baseline);
+    valid(save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::Save,
+    ));
+
+    let reopened = valid(open(&StdFdxStorageFileSystem, &source));
+    let source_text = String::from_utf8(valid(fs::read(&source)))
+        .unwrap_or_else(|_| unreachable!("saved FDX remains UTF-8"));
+    assert!(source_text.contains("vendor-ref=\"empty-owner\""));
+    assert!(!source_text.contains("discarded-note"));
+    assert!(!source_text.contains("discarded-id"));
+    let elements = preserved_elements(&reopened.document.project);
+    assert!(!elements.iter().any(|element| {
+        element.name.local_name == "Paragraph" && source_id(element) == Some("empty-owner")
+    }));
+    assert!(elements.iter().any(|element| {
+        element.name.local_name == "Paragraph"
+            && source_id(element) == Some("raw-use")
+            && raw_attribute(element, "vendor-ref") == Some("empty-owner")
+    }));
+
+    let mut session = valid(EditingSession::new(reopened.document.project));
+    let mut target = FdxSaveTarget::from_baseline(reopened.baseline);
+    valid(save_session(
+        &StdFdxStorageFileSystem,
+        &mut session,
+        &mut target,
+        FdxSaveMode::SaveAs(save_as.clone()),
+    ));
+    assert!(!session.dirty());
+    assert_eq!(target.path(), Some(save_as.as_path()));
+    let save_as_reopened = valid(open(&StdFdxStorageFileSystem, &save_as));
+    let save_as_text = String::from_utf8(valid(fs::read(&save_as)))
+        .unwrap_or_else(|_| unreachable!("Save As FDX remains UTF-8"));
+    assert!(save_as_text.contains("vendor-ref=\"empty-owner\""));
+    assert!(!save_as_text.contains("discarded-note"));
+    assert!(!preserved_elements(&save_as_reopened.document.project).iter().any(|element| {
+        element.name.local_name == "Paragraph" && source_id(element) == Some("empty-owner")
+    }));
+}
+
+#[test]
 fn opaque_save_as_conflict_preserves_source_destination_and_live_session() {
     let directory = TestDirectory::new();
     let source = directory.path("opaque-conflict-source.fdx");

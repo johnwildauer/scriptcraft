@@ -2,8 +2,9 @@
 
 use crate::preservation::PreservationError;
 use crate::scene_metadata::SceneMetadataError;
-use crate::{ModelError, Project, Role, ScreenplayElement, StableId, TextRun, MAX_TEXT_BYTES};
+use crate::{BodyOwner, ModelError, Project, Role, TextRun, MAX_TEXT_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The desktop refresh cadence for derived scene cast lists.
@@ -264,10 +265,30 @@ fn correct_cast_lists_candidate(
     Ok((outcome, deferred_scenes, completed_scenes))
 }
 
+fn scene_needs_cast_list_update(scene: &[Arc<BodyOwner>]) -> Result<bool, CastListError> {
+    if !scene.iter().any(|element| element.role == Role::CastList) {
+        return Ok(false);
+    }
+    let names = crate::scene_metadata::derived_character_projection(scene)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect::<Vec<_>>();
+    let replacement = scene_cast_text(&names)?;
+    Ok(scene
+        .iter()
+        .any(|element| element.role == Role::CastList && element.text != replacement))
+}
+
 fn cast_list_source_is_replaceable(
-    scene: &[crate::ScreenplayElement],
-    replacement: &str,
-) -> bool {
+    project: &Project,
+    scene: &[Arc<BodyOwner>],
+) -> Result<bool, CastListError> {
+    let names = crate::scene_metadata::derived_character_projection(scene)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect::<Vec<_>>();
+    let replacement = scene_cast_text(&names)?;
+    let mut supported = true;
     for element in scene
         .iter()
         .filter(|element| element.role == Role::CastList)
@@ -414,27 +435,50 @@ fn replace_cast_list_text(
     }
 
     let id = element.id.clone();
-    let provenance = element.source_provenance.clone();
-    let original_text = element.text.clone();
-    let element = &mut project.elements[element_index];
-    element.text = replacement.to_owned();
-    element.runs = if replacement.is_empty() {
-        Vec::new()
-    } else {
-        vec![TextRun { text: replacement.to_owned(), attributes: Vec::new() }]
-    };
-    if let Some(preservation) = project.preservation.as_mut() {
-        if let Some(recovered) = preservation.project_managed_text_runs(
-            &id,
-            &original_text,
-            &element.text,
-            &element.runs,
-            provenance.as_ref(),
-            Some("Cast List"),
-        ).map_err(CastListError::Preservation)? {
-            element.source_provenance = Some(recovered);
-        }
+    let old_runs = element.runs.clone();
+    let has_source_mapping = project
+        .preservation
+        .as_ref()
+        .is_some_and(|state| state.has_managed_element(&id));
+    if has_source_mapping {
+        let expected_runs = old_runs
+            .iter()
+            .map(|run| run.text.clone())
+            .collect::<Vec<_>>();
+        project
+            .preservation
+            .as_mut()
+            .ok_or(CastListError::Preservation(
+                PreservationError::ManagedAnchorMissing,
+            ))?
+            .replace_managed_text_elements(&id, &expected_runs, replacement)
+            .map_err(CastListError::Preservation)?;
+    } else if element.source_provenance.is_some() {
+        return Err(CastListError::Preservation(
+            PreservationError::ManagedAnchorMissing,
+        ));
     }
+
+    BodyOwner::update(&mut project.elements[element_index], |element| {
+        element.text = replacement.to_owned();
+        if element.text.is_empty() {
+            element.runs.clear();
+        } else if let Some((first, remaining)) = element.runs.split_first_mut() {
+            first.text = replacement.to_owned();
+            for run in remaining {
+                run.text.clear();
+            }
+        } else {
+            // A newly inserted managed Cast List can have no semantic runs yet.
+            // Source replacement creates its first `<Text>` run, so publish the
+            // matching semantic run in the same candidate rather than leaving the
+            // next preflight to compare an empty projection with nonempty source.
+            element.runs.push(TextRun {
+                text: replacement.to_owned(),
+                attributes: Vec::new(),
+            });
+        }
+    });
     Ok(())
 }
 
