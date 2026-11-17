@@ -490,6 +490,16 @@ pub fn resolve_toggle_target(
     selection: Selection,
 ) -> Result<Option<ToggleTarget>, ModelError> {
     project.validate()?;
+    resolve_toggle_target_for_validated_session(project, surface, selection)
+}
+
+/// Resolve against a project whose complete validity is maintained by its
+/// EditingSession construction and accepted-candidate publication boundary.
+pub(crate) fn resolve_toggle_target_for_validated_session(
+    project: &Project,
+    surface: SelectionSurface,
+    selection: Selection,
+) -> Result<Option<ToggleTarget>, ModelError> {
     if surface != SelectionSurface::Body || selection.anchor != selection.focus {
         return Ok(None);
     }

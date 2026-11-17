@@ -1081,6 +1081,51 @@ impl SourceIdentityUseIndex {
     }
 }
 
+/// Collects only managed source locations. Recognized user-payload subtrees are
+/// skipped exactly as in the complete identity-use walk, so opaque descendants
+/// cannot acquire managed meaning merely from their stored ownership value.
+fn collect_managed_paragraph_locations(
+    nodes: &[PreservedNode],
+    section_index: usize,
+    parent: Option<&PreservedElement>,
+    path: &mut Vec<usize>,
+    managed_index: &mut BTreeMap<StableId, Vec<ManagedParagraphLocation>>,
+    visited: &mut u64,
+) {
+    for (node_index, node) in nodes.iter().enumerate() {
+        *visited = visited.saturating_add(1);
+        let PreservedNode::Element(element) = node else {
+            continue;
+        };
+        path.push(node_index);
+        if parent.is_some_and(|owner| {
+            owner.name.local_name == "Paragraph"
+                && is_user_paragraph_data_name(&element.name, &owner.name)
+        }) {
+            path.pop();
+            continue;
+        }
+        if let SourceOwnership::Managed(id) = &element.ownership {
+            managed_index
+                .entry(id.clone())
+                .or_default()
+                .push(ManagedParagraphLocation {
+                    section_index,
+                    node_path: path.clone(),
+                });
+        }
+        collect_managed_paragraph_locations(
+            &element.children,
+            section_index,
+            Some(element),
+            path,
+            managed_index,
+            visited,
+        );
+        path.pop();
+    }
+}
+
 impl PartialEq for PreservationState {
     fn eq(&self, other: &Self) -> bool {
         self.source == other.source
@@ -1413,14 +1458,41 @@ impl PreservationState {
 
     /// Reconstructs all transient preservation indexes after direct edits to
     /// the publicly exposed source tree or identity/reference collections.
-    /// Managed editing APIs maintain these indexes transactionally.
+    /// Managed editing APIs maintain paragraph locations transactionally and
+    /// rebuild identity uses only when an identity-sensitive consumer needs them.
     pub fn rebuild_indexes(&mut self) {
-        self.rebuild_managed_paragraph_index();
+        self.rebuild_source_identity_use_index();
     }
 
-    /// Rebuilds the transient source-tree location map from the authoritative
-    /// ordered preservation tree. Call after any out-of-band structural update.
+    /// Rebuilds only the transient source-tree location map from the
+    /// authoritative ordered preservation tree. Source text and attributes are
+    /// not scanned for identity uses, and the prior byte total remains the
+    /// baseline for scoped single-paragraph delta validation. Any such explicit
+    /// rebuild invalidates identity-use freshness because direct tree edits may
+    /// have changed source text, IDs, or references.
     pub(crate) fn rebuild_managed_paragraph_index(&mut self) {
+        let mut managed_index = BTreeMap::new();
+        let mut visited = 0u64;
+        for (section_index, section) in self.sections.iter().enumerate() {
+            collect_managed_paragraph_locations(
+                &section.children,
+                section_index,
+                None,
+                &mut Vec::new(),
+                &mut managed_index,
+                &mut visited,
+            );
+        }
+        increment_counter(&MANAGED_INDEX_REBUILDS);
+        add_counter(&MANAGED_INDEX_SOURCE_NODES, visited);
+        self.managed_paragraph_index = Some(managed_index);
+        self.invalidate_source_identity_use_index();
+    }
+
+    /// Rebuilds both transient indexes for an identity-sensitive consumer. The
+    /// complete source walk retains the established managed-location behavior,
+    /// raw-ID reservation, lexical-use detection, and source byte accounting.
+    fn rebuild_source_identity_use_index(&mut self) {
         let mut managed_index = BTreeMap::new();
         let mut text_bytes = 0usize;
         let (source_index, visited) = SourceIdentityUseIndex::build(
@@ -1679,27 +1751,32 @@ impl PreservationState {
 
     pub(crate) fn ensure_source_identity_use_index(&mut self) {
         if self.source_identity_use_index.is_none() {
-            self.rebuild_managed_paragraph_index();
+            self.rebuild_source_identity_use_index();
         }
     }
 
-    pub(crate) fn has_source_identity_use_index(&self) -> bool {
-        self.source_identity_use_index.is_some()
-    }
-
-    pub(crate) fn paragraph_identity_safely_removable(&self, id: &str) -> bool {
+    /// Answers a removal-safety query only from a current complete source-use
+    /// index. Mutable managed-source access invalidates that index, so this
+    /// method never interprets absence as permission to remove an identity.
+    pub(crate) fn paragraph_identity_safely_removable(&mut self, id: &str) -> bool {
         increment_counter(&SOURCE_USE_INDEX_IDENTITY_QUERIES);
+        self.ensure_source_identity_use_index();
         self.source_identity_use_index
             .as_ref()
-            .is_some_and(|index| index.paragraph_is_safely_removable(id))
+            .expect("identity-use ensure installs a current index")
+            .paragraph_is_safely_removable(id)
     }
 
-    pub(crate) fn indexed_source_id_values(&self) -> BTreeSet<String> {
+    /// Returns raw source IDs only after refreshing collision-reservation state.
+    /// An absent index is never equivalent to an empty reservation set.
+    pub(crate) fn indexed_source_id_values(&mut self) -> BTreeSet<String> {
         increment_counter(&SOURCE_USE_INDEX_RESERVED_QUERIES);
+        self.ensure_source_identity_use_index();
         self.source_identity_use_index
             .as_ref()
-            .map(|index| index.source_id_values.clone())
-            .unwrap_or_default()
+            .expect("identity-use ensure installs a current index")
+            .source_id_values
+            .clone()
     }
 
     pub(crate) fn ensure_managed_paragraph_index(&mut self) {
@@ -1762,7 +1839,8 @@ impl PreservationState {
     }
 
     /// Mutable indexed access for a detached candidate. The source-use index is
-    /// invalidated before mutation; callers rebuild both indexes before publish.
+    /// invalidated before mutation; identity-sensitive consumers refresh it on
+    /// demand while paragraph locations remain available for scoped validation.
     pub(crate) fn managed_element_mut_indexed(
         &mut self,
         id: &StableId,
@@ -3495,6 +3573,7 @@ impl PreservationState {
 
     fn fresh_foreign_paragraph_id(&mut self) -> Result<String, PreservationError> {
         self.ensure_source_identity_use_index();
+        let indexed_source_ids = self.indexed_source_id_values();
         let reserved = self
             .identities
             .iter()
@@ -3517,7 +3596,7 @@ impl PreservationState {
                     reference.target.value.clone(),
                 ]
             }))
-            .chain(self.indexed_source_id_values());
+            .chain(indexed_source_ids);
         let mut allocator = ParagraphIdAllocator::new(reserved);
         allocator.allocate().map_err(|error| match error {
             ParagraphIdAllocationError::EntropyUnavailable => {

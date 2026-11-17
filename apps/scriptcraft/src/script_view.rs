@@ -1576,6 +1576,23 @@ impl ScriptCraftApp {
     }
 
     pub(super) fn live_document_surface(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
+        let phase_started = self
+            .development_mode
+            .then(|| (Instant::now(), self.performance.paint_nanos));
+        if self.development_mode {
+            self.responsiveness.begin_document_surface(surface);
+        }
+        self.live_document_surface_inner(ui, surface);
+        if let Some((started, paint_nanos_before)) = phase_started {
+            self.responsiveness.record_document_surface(
+                started.elapsed(),
+                paint_nanos_before,
+                self.performance.paint_nanos,
+            );
+        }
+    }
+
+    fn live_document_surface_inner(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
         let presentation_mode =
             resolve_presentation_mode(surface, || self.script_view_mode);
         let layout = match self.layout_for_render(surface) {

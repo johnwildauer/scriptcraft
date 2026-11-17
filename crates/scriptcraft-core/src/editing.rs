@@ -11,6 +11,50 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
+
+/// One development-only Body candidate-mutation observation. Durations are
+/// value-free nanoseconds; optional stages are absent when their work did not
+/// run. Retry time is a raw nested subset of setup plus edit-operation time.
+/// Explicit preservation time covers post-operation index/reconciliation work;
+/// the edit operation can also perform its own nested source reconciliation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EditMutationDiagnostics {
+    pub total_nanos: u64,
+    pub candidate_setup_nanos: u64,
+    pub edit_operation_nanos: u64,
+    pub structural_retry_nanos: Option<u64>,
+    pub preservation_nanos: u64,
+    pub scoped_validation_nanos: Option<u64>,
+    pub full_validation_nanos: Option<u64>,
+    pub no_op_equality_nanos: Option<u64>,
+    pub derived_classification_nanos: Option<u64>,
+    pub dirty_comparison_nanos: Option<u64>,
+    pub history_publication_nanos: Option<u64>,
+    pub structural_retries: u64,
+    pub scoped_candidate_attempts: u64,
+    pub scoped_candidate_accepts: u64,
+    pub full_candidate_validations: u64,
+    pub full_validation_fallbacks: u64,
+    pub no_op: bool,
+}
+
+fn diagnostic_duration_nanos(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
+fn add_diagnostic_duration(target: &mut u64, started: Option<Instant>) {
+    if let Some(started) = started {
+        *target = target.saturating_add(diagnostic_duration_nanos(started));
+    }
+}
+
+fn add_optional_diagnostic_duration(target: &mut Option<u64>, started: Option<Instant>) {
+    if let Some(started) = started {
+        let elapsed = diagnostic_duration_nanos(started);
+        *target = Some(target.unwrap_or(0).saturating_add(elapsed));
+    }
+}
 
 /// Session edit-validation work counts. These are structural counters, not
 /// timings, and do not expose document values.
@@ -289,6 +333,10 @@ pub struct EditingSession {
     history_limit: usize,
     validated_baseline: bool,
     last_validation_was_scoped: bool,
+    /// Transient desktop-controlled capture; never serialized or compared as
+    /// semantic session state and disabled unless the development host opts in.
+    capture_mutation_diagnostics: bool,
+    last_mutation_diagnostics: Option<EditMutationDiagnostics>,
     pending_derived_invalidation: PendingDerivedInvalidation,
     deferred_derived_scenes: BTreeSet<String>,
     failed_derived_complete: bool,
@@ -361,7 +409,7 @@ impl EditingSession {
     ) -> Result<Self, EditError> {
         validate_full_candidate(&project)?;
         if let Some(preservation) = project.preservation.as_mut() {
-            preservation.rebuild_managed_paragraph_index();
+            preservation.rebuild_indexes();
         }
         validate_layout_inputs(&layout_inputs)?;
         let selection = Selection::caret(Position {
@@ -406,6 +454,8 @@ impl EditingSession {
             history_limit: 100,
             validated_baseline: true,
             last_validation_was_scoped: false,
+            capture_mutation_diagnostics: false,
+            last_mutation_diagnostics: None,
             pending_derived_invalidation: PendingDerivedInvalidation::Complete,
             deferred_derived_scenes: BTreeSet::new(),
             failed_derived_complete: false,
@@ -571,6 +621,20 @@ impl EditingSession {
         self.last_validation_was_scoped
     }
 
+    /// Arms one development-only observation for the next actual Body candidate
+    /// mutation. Selection-only commands and Title mutations produce no sample.
+    pub fn begin_mutation_diagnostics(&mut self) {
+        self.capture_mutation_diagnostics = true;
+        self.last_mutation_diagnostics = None;
+    }
+
+    /// Ends the opt-in capture and transfers only the completed value-free
+    /// observation. No timer or document content crosses the core/UI boundary.
+    pub fn take_mutation_diagnostics(&mut self) -> Option<EditMutationDiagnostics> {
+        self.capture_mutation_diagnostics = false;
+        self.last_mutation_diagnostics.take()
+    }
+
     /// Revalidates the live semantic project and selection without mutating it.
     pub fn validate(&self) -> Result<(), EditError> {
         validate_full_candidate(&self.project)?;
@@ -634,9 +698,7 @@ impl EditingSession {
             };
         if outcome.changed {
             if let Some(preservation) = project.preservation.as_mut() {
-                if !preservation.has_source_identity_use_index() {
-                    preservation.rebuild_managed_paragraph_index();
-                }
+                preservation.ensure_source_identity_use_index();
             }
             self.project = project;
             self.revision = self.revision.saturating_add(1);
@@ -663,7 +725,7 @@ impl EditingSession {
         validate_full_candidate(&project)?;
         project.share_unchanged_body_owners_from(&self.project);
         if let Some(preservation) = project.preservation.as_mut() {
-            preservation.rebuild_managed_paragraph_index();
+            preservation.rebuild_indexes();
         }
         let mut rebased = self.clone();
         let selection = map_selection_to_project(self.selection, &self.project, &project)
@@ -900,8 +962,12 @@ impl EditingSession {
             crate::dual_dialogue::SelectionSurface::Body => self.selection,
             crate::dual_dialogue::SelectionSurface::TitlePage => self.title_selection,
         };
-        crate::dual_dialogue::resolve_toggle_target(&self.project, surface, selection)
-            .map_err(EditError::Model)
+        crate::dual_dialogue::resolve_toggle_target_for_validated_session(
+            &self.project,
+            surface,
+            selection,
+        )
+        .map_err(EditError::Model)
     }
 
     /// Atomically enables a valid ungrouped dual sequence or disables the group
@@ -975,7 +1041,7 @@ impl EditingSession {
 
         validate_full_candidate(&project)?;
         if let Some(preservation) = project.preservation.as_mut() {
-            preservation.rebuild_managed_paragraph_index();
+            preservation.rebuild_indexes();
         }
         validate_selection(&project, self.selection)?;
         let snapshot = Snapshot {
@@ -1575,7 +1641,7 @@ impl EditingSession {
         let _ = cast_list::correct_cast_lists(&mut snapshot.project);
         validate_full_candidate(&snapshot.project)?;
         if let Some(preservation) = snapshot.project.preservation.as_mut() {
-            preservation.rebuild_managed_paragraph_index();
+            preservation.rebuild_indexes();
         }
         validate_selection(&snapshot.project, snapshot.selection)?;
         validate_title_selection(&snapshot.project, snapshot.title_selection)?;
@@ -1612,7 +1678,7 @@ impl EditingSession {
         let _ = cast_list::correct_cast_lists(&mut snapshot.project);
         validate_full_candidate(&snapshot.project)?;
         if let Some(preservation) = snapshot.project.preservation.as_mut() {
-            preservation.rebuild_managed_paragraph_index();
+            preservation.rebuild_indexes();
         }
         validate_selection(&snapshot.project, snapshot.selection)?;
         validate_title_selection(&snapshot.project, snapshot.title_selection)?;
@@ -1723,221 +1789,295 @@ impl EditingSession {
             &EditPolicy,
         ) -> Result<Selection, EditError>,
     {
-        let (scope_start, scope_end) = self.selection.ordered();
-        let requested_element = (requested_scope == MutationValidationScope::SingleParagraph
-            && scope_start.element == scope_end.element)
-            .then(|| {
-                self.project
-                    .elements
-                    .get(scope_start.element)
-                    .map(|element| element.id.clone())
-            })
-            .flatten();
-        let baseline = &self.project;
-        let baseline_generated = self.generated_parentheticals.clone();
-        let mut first_project = baseline.clone();
-        let mut first_generated = baseline_generated.clone();
-        let first_result = operation(
-            &mut first_project,
-            &self.selection,
-            &mut first_generated,
-            &self.policy,
-        );
-        let (mut project, mut generated, selection) = match first_result {
-            Ok(selection) => {
-                crate::dual_dialogue::prune_removed_group_paragraphs(&baseline, &mut first_project);
-                let plan = if structural {
-                    crate::dual_dialogue::classify_structural_result(
-                        &baseline,
-                        self.selection,
-                        &first_project,
-                    )
-                } else {
-                    Vec::new()
-                };
-                let unwrap_ids = plan.into_iter().filter_map(|classification| {
-                    matches!(
-                        classification.outcome,
-                        crate::dual_dialogue::StructuralGroupOutcome::Removed
-                            | crate::dual_dialogue::StructuralGroupOutcome::InvalidRequiresUnwrap
-                    ).then_some(classification.group_id)
-                }).collect::<Vec<_>>();
-                if unwrap_ids.is_empty() {
-                    (first_project, first_generated, selection)
-                } else {
-                    let mut retry_project = baseline.clone();
-                    unwrap_dual_dialogue_groups(&mut retry_project, &unwrap_ids)?;
-                    let retry_selection = remap_selection_by_identity(
-                        &baseline,
-                        &retry_project,
-                        self.selection,
-                    )?;
-                    let mut retry_generated = baseline_generated.clone();
-                    let selection = operation(
-                        &mut retry_project,
-                        &retry_selection,
-                        &mut retry_generated,
-                        &self.policy,
-                    )?;
-                    (retry_project, retry_generated, selection)
-                }
-            }
-            Err(error @ EditError::InlineAltsRoleChange) => return Err(error),
-            Err(first_error) if structural => {
-                let unwrap_ids = groups_touched_by_selection(&baseline, self.selection);
-                if unwrap_ids.is_empty() {
-                    return Err(first_error);
-                }
-                let mut retry_project = baseline.clone();
-                unwrap_dual_dialogue_groups(&mut retry_project, &unwrap_ids)?;
-                let retry_selection = remap_selection_by_identity(
-                    &baseline,
-                    &retry_project,
-                    self.selection,
-                )?;
-                let mut retry_generated = baseline_generated.clone();
-                let selection = operation(
-                    &mut retry_project,
-                    &retry_selection,
-                    &mut retry_generated,
-                    &self.policy,
-                )?;
-                (retry_project, retry_generated, selection)
-            }
-            Err(error) => return Err(error),
-        };
-        let prior_generated = baseline_generated;
-        crate::dual_dialogue::prune_removed_group_paragraphs(&self.project, &mut project);
-        if let Some(preservation) = project.preservation.as_mut() {
-            if !preservation.has_source_identity_use_index() {
-                preservation.rebuild_managed_paragraph_index();
-            }
-        }
-        invalidate_changed_generated_parentheticals(
-            &self.project,
-            &project,
-            &prior_generated,
-            &mut generated,
-        );
-        generated.retain(|id| {
-            project
-                .elements
-                .iter()
-                .any(|element| element.id.as_str() == id && element.role == Role::Parenthetical)
-        });
-        let scoped_preconditions = !structural
-            && self.validated_baseline
-            && requested_element.as_ref().is_some_and(|id| {
-                project.elements.len() == self.project.elements.len()
-                    && project
+        let capture_diagnostics = self.capture_mutation_diagnostics;
+        let total_started = capture_diagnostics.then(Instant::now);
+        let mut diagnostics = EditMutationDiagnostics::default();
+        let result = (|| {
+            let setup_started = capture_diagnostics.then(Instant::now);
+            let (scope_start, scope_end) = self.selection.ordered();
+            let requested_element = (requested_scope == MutationValidationScope::SingleParagraph
+                && scope_start.element == scope_end.element)
+                .then(|| {
+                    self.project
                         .elements
                         .get(scope_start.element)
-                        .is_some_and(|element| &element.id == id)
-                    && selection.anchor.element == scope_start.element
-                    && selection.focus.element == scope_start.element
-                    && project
-                        .preservation
-                        .as_ref()
-                        .is_none_or(|state| state.has_managed_paragraph_index())
-            });
-        let scoped_valid = if scoped_preconditions {
-            let _ = SCOPED_CANDIDATE_ATTEMPTS.try_update(
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-                |value| Some(value.saturating_add(1)),
+                        .map(|element| element.id.clone())
+                })
+                .flatten();
+            let baseline = &self.project;
+            let baseline_generated = self.generated_parentheticals.clone();
+            let mut first_project = baseline.clone();
+            let mut first_generated = baseline_generated.clone();
+            add_diagnostic_duration(&mut diagnostics.candidate_setup_nanos, setup_started);
+
+            let edit_started = capture_diagnostics.then(Instant::now);
+            let first_result = operation(
+                &mut first_project,
+                &self.selection,
+                &mut first_generated,
+                &self.policy,
             );
-            match project.validate_scoped_single_element_edit(&self.project, scope_start.element) {
-                Ok(true) if validate_selection(&project, selection).is_ok() => {
-                    let _ = SCOPED_CANDIDATE_ACCEPTS.try_update(
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                        |value| Some(value.saturating_add(1)),
-                    );
-                    true
+            add_diagnostic_duration(&mut diagnostics.edit_operation_nanos, edit_started);
+            let (mut project, mut generated, selection) = match first_result {
+                Ok(selection) => {
+                    crate::dual_dialogue::prune_removed_group_paragraphs(&baseline, &mut first_project);
+                    let plan = if structural {
+                        crate::dual_dialogue::classify_structural_result(
+                            &baseline,
+                            self.selection,
+                            &first_project,
+                        )
+                    } else {
+                        Vec::new()
+                    };
+                    let unwrap_ids = plan.into_iter().filter_map(|classification| {
+                        matches!(
+                            classification.outcome,
+                            crate::dual_dialogue::StructuralGroupOutcome::Removed
+                                | crate::dual_dialogue::StructuralGroupOutcome::InvalidRequiresUnwrap
+                        ).then_some(classification.group_id)
+                    }).collect::<Vec<_>>();
+                    if unwrap_ids.is_empty() {
+                        (first_project, first_generated, selection)
+                    } else {
+                        diagnostics.structural_retries = diagnostics.structural_retries.saturating_add(1);
+                        let retry_started = capture_diagnostics.then(Instant::now);
+                        let retry_result = (|| -> Result<(Project, BTreeSet<String>, Selection), EditError> {
+                            let setup_started = capture_diagnostics.then(Instant::now);
+                            let mut retry_project = baseline.clone();
+                            unwrap_dual_dialogue_groups(&mut retry_project, &unwrap_ids)?;
+                            let retry_selection = remap_selection_by_identity(
+                                &baseline,
+                                &retry_project,
+                                self.selection,
+                            )?;
+                            let mut retry_generated = baseline_generated.clone();
+                            add_diagnostic_duration(&mut diagnostics.candidate_setup_nanos, setup_started);
+                            let edit_started = capture_diagnostics.then(Instant::now);
+                            let selection_result = operation(
+                                &mut retry_project,
+                                &retry_selection,
+                                &mut retry_generated,
+                                &self.policy,
+                            );
+                            add_diagnostic_duration(&mut diagnostics.edit_operation_nanos, edit_started);
+                            let selection = selection_result?;
+                            Ok((retry_project, retry_generated, selection))
+                        })();
+                        add_optional_diagnostic_duration(&mut diagnostics.structural_retry_nanos, retry_started);
+                        let (retry_project, retry_generated, selection) = retry_result?;
+                        (retry_project, retry_generated, selection)
+                    }
                 }
-                Ok(_) => false,
-                Err(error) => return Err(EditError::Model(error)),
+                Err(error @ EditError::InlineAltsRoleChange) => return Err(error),
+                Err(first_error) if structural => {
+                    let unwrap_ids = groups_touched_by_selection(&baseline, self.selection);
+                    if unwrap_ids.is_empty() {
+                        return Err(first_error);
+                    }
+                    diagnostics.structural_retries = diagnostics.structural_retries.saturating_add(1);
+                    let retry_started = capture_diagnostics.then(Instant::now);
+                    let retry_result = (|| -> Result<(Project, BTreeSet<String>, Selection), EditError> {
+                        let setup_started = capture_diagnostics.then(Instant::now);
+                        let mut retry_project = baseline.clone();
+                        unwrap_dual_dialogue_groups(&mut retry_project, &unwrap_ids)?;
+                        let retry_selection = remap_selection_by_identity(
+                            &baseline,
+                            &retry_project,
+                            self.selection,
+                        )?;
+                        let mut retry_generated = baseline_generated.clone();
+                        add_diagnostic_duration(&mut diagnostics.candidate_setup_nanos, setup_started);
+                        let edit_started = capture_diagnostics.then(Instant::now);
+                        let selection_result = operation(
+                            &mut retry_project,
+                            &retry_selection,
+                            &mut retry_generated,
+                            &self.policy,
+                        );
+                        add_diagnostic_duration(&mut diagnostics.edit_operation_nanos, edit_started);
+                        let selection = selection_result?;
+                        Ok((retry_project, retry_generated, selection))
+                    })();
+                    add_optional_diagnostic_duration(&mut diagnostics.structural_retry_nanos, retry_started);
+                    let (retry_project, retry_generated, selection) = retry_result?;
+                    (retry_project, retry_generated, selection)
+                }
+                Err(error) => return Err(error),
+            };
+            let prior_generated = baseline_generated;
+            crate::dual_dialogue::prune_removed_group_paragraphs(&self.project, &mut project);
+            let preservation_started = capture_diagnostics.then(Instant::now);
+            if let Some(preservation) = project.preservation.as_mut() {
+                preservation.ensure_managed_paragraph_index();
             }
-        } else {
-            false
-        };
-        if !scoped_valid {
-            if requested_scope == MutationValidationScope::SingleParagraph {
-                let _ = FULL_VALIDATION_FALLBACKS.try_update(
+            add_diagnostic_duration(&mut diagnostics.preservation_nanos, preservation_started);
+            invalidate_changed_generated_parentheticals(
+                &self.project,
+                &project,
+                &prior_generated,
+                &mut generated,
+            );
+            generated.retain(|id| {
+                project
+                    .elements
+                    .iter()
+                    .any(|element| element.id.as_str() == id && element.role == Role::Parenthetical)
+            });
+            let scoped_preconditions = !structural
+                && self.validated_baseline
+                && requested_element.as_ref().is_some_and(|id| {
+                    project.elements.len() == self.project.elements.len()
+                        && project
+                            .elements
+                            .get(scope_start.element)
+                            .is_some_and(|element| &element.id == id)
+                        && selection.anchor.element == scope_start.element
+                        && selection.focus.element == scope_start.element
+                        && project
+                            .preservation
+                            .as_ref()
+                            .is_none_or(|state| state.has_managed_paragraph_index())
+                });
+            let scoped_valid = if scoped_preconditions {
+                diagnostics.scoped_candidate_attempts = diagnostics.scoped_candidate_attempts.saturating_add(1);
+                let _ = SCOPED_CANDIDATE_ATTEMPTS.try_update(
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                     |value| Some(value.saturating_add(1)),
                 );
-            }
-            if let Some(preservation) = project.preservation.as_mut() {
-                preservation
-                    .reconcile_body_structure(
-                        &self.project.elements,
-                        &mut project.elements,
-                        &generated_scene_heading_deletions,
-                        &project.dual_dialogue_groups,
-                    )
-                    .map_err(EditError::Preservation)?;
-            }
-            validate_full_candidate(&project)?;
-            if let Some(preservation) = project.preservation.as_mut() {
-                if !preservation.has_source_identity_use_index() {
-                    preservation.rebuild_managed_paragraph_index();
+                let scoped_started = capture_diagnostics.then(Instant::now);
+                let scoped_result = (|| {
+                    match project.validate_scoped_single_element_edit(&self.project, scope_start.element) {
+                        Ok(true) if validate_selection(&project, selection).is_ok() => {
+                            diagnostics.scoped_candidate_accepts = diagnostics.scoped_candidate_accepts.saturating_add(1);
+                            let _ = SCOPED_CANDIDATE_ACCEPTS.try_update(
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                                |value| Some(value.saturating_add(1)),
+                            );
+                            Ok(true)
+                        }
+                        Ok(_) => Ok(false),
+                        Err(error) => Err(EditError::Model(error)),
+                    }
+                })();
+                add_optional_diagnostic_duration(&mut diagnostics.scoped_validation_nanos, scoped_started);
+                scoped_result?
+            } else {
+                false
+            };
+            if !scoped_valid {
+                if requested_scope == MutationValidationScope::SingleParagraph {
+                    diagnostics.full_validation_fallbacks = diagnostics.full_validation_fallbacks.saturating_add(1);
+                    let _ = FULL_VALIDATION_FALLBACKS.try_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |value| Some(value.saturating_add(1)),
+                    );
                 }
+                let preservation_started = capture_diagnostics.then(Instant::now);
+                let preservation_result = (|| -> Result<(), EditError> {
+                    if let Some(preservation) = project.preservation.as_mut() {
+                        preservation
+                            .reconcile_body_structure(
+                                &self.project.elements,
+                                &mut project.elements,
+                                &generated_scene_heading_deletions,
+                                &project.dual_dialogue_groups,
+                            )
+                            .map_err(EditError::Preservation)?;
+                    }
+                    Ok(())
+                })();
+                add_diagnostic_duration(&mut diagnostics.preservation_nanos, preservation_started);
+                preservation_result?;
+
+                diagnostics.full_candidate_validations = diagnostics.full_candidate_validations.saturating_add(1);
+                let full_started = capture_diagnostics.then(Instant::now);
+                let full_result = validate_full_candidate(&project);
+                add_optional_diagnostic_duration(&mut diagnostics.full_validation_nanos, full_started);
+                full_result?;
+
+                let preservation_started = capture_diagnostics.then(Instant::now);
+                if let Some(preservation) = project.preservation.as_mut() {
+                    preservation.ensure_source_identity_use_index();
+                }
+                add_diagnostic_duration(&mut diagnostics.preservation_nanos, preservation_started);
+                let selection_started = capture_diagnostics.then(Instant::now);
+                let selection_result = validate_selection(&project, selection);
+                add_optional_diagnostic_duration(&mut diagnostics.full_validation_nanos, selection_started);
+                selection_result?;
             }
-            validate_selection(&project, selection)?;
-        }
-        if project == self.project && selection == self.selection {
+            let no_op_started = capture_diagnostics.then(Instant::now);
+            let no_op = project == self.project && selection == self.selection;
+            add_optional_diagnostic_duration(&mut diagnostics.no_op_equality_nanos, no_op_started);
+            if no_op {
+                diagnostics.no_op = true;
+                self.last_validation_was_scoped = scoped_valid;
+                return Ok(());
+            }
+            let derived_started = capture_diagnostics.then(Instant::now);
+            let derived_invalidation = if can_skip_derived_invalidation(
+                &self.project,
+                &project,
+                scope_start.element,
+                scoped_valid,
+            ) {
+                PendingDerivedInvalidation::None
+            } else {
+                classify_derived_invalidation(&self.project, &project)
+            };
+            add_optional_diagnostic_duration(&mut diagnostics.derived_classification_nanos, derived_started);
+            match &derived_invalidation {
+                PendingDerivedInvalidation::Scenes(scenes) => {
+                    self.deferred_derived_scenes
+                        .retain(|scene| !scenes.contains(scene));
+                    self.failed_derived_scenes
+                        .retain(|scene| !scenes.contains(scene));
+                    // A new relevant scoped invalidation permits the previously
+                    // failed complete candidate to be attempted again.
+                    self.failed_derived_complete = false;
+                }
+                PendingDerivedInvalidation::Complete => {
+                    self.deferred_derived_scenes.clear();
+                    self.failed_derived_complete = false;
+                    self.failed_derived_scenes.clear();
+                }
+                PendingDerivedInvalidation::None => {}
+            }
+            let publication_started = capture_diagnostics.then(Instant::now);
+            let replaced_project = std::mem::replace(&mut self.project, project);
+            self.push_history(Snapshot {
+                project: replaced_project,
+                selection: self.selection,
+                title_selection: self.title_selection,
+                title_typing_style: self.title_typing_style,
+                body_typing_style: self.body_typing_style,
+                generated_parentheticals: self.generated_parentheticals.clone(),
+            });
+            self.selection = selection;
+            self.generated_parentheticals = generated;
+            self.redo.clear();
+            self.revision = self.revision.saturating_add(1);
+            add_optional_diagnostic_duration(&mut diagnostics.history_publication_nanos, publication_started);
+            let dirty_started = capture_diagnostics.then(Instant::now);
+            self.dirty = self.project != self.clean_project;
+            add_optional_diagnostic_duration(&mut diagnostics.dirty_comparison_nanos, dirty_started);
+            let publication_started = capture_diagnostics.then(Instant::now);
+            self.validated_baseline = true;
             self.last_validation_was_scoped = scoped_valid;
-            return Ok(());
+            self.pending_derived_invalidation
+                .merge(derived_invalidation);
+            self.mark_mutated();
+            add_optional_diagnostic_duration(&mut diagnostics.history_publication_nanos, publication_started);
+            Ok(())
+        })();
+        if capture_diagnostics {
+            add_diagnostic_duration(&mut diagnostics.total_nanos, total_started);
+            self.last_mutation_diagnostics = Some(diagnostics);
         }
-        let derived_invalidation = if can_skip_derived_invalidation(
-            &self.project,
-            &project,
-            scope_start.element,
-            scoped_valid,
-        ) {
-            PendingDerivedInvalidation::None
-        } else {
-            classify_derived_invalidation(&self.project, &project)
-        };
-        match &derived_invalidation {
-            PendingDerivedInvalidation::Scenes(scenes) => {
-                self.deferred_derived_scenes
-                    .retain(|scene| !scenes.contains(scene));
-                self.failed_derived_scenes
-                    .retain(|scene| !scenes.contains(scene));
-                // A new relevant scoped invalidation permits the previously
-                // failed complete candidate to be attempted again.
-                self.failed_derived_complete = false;
-            }
-            PendingDerivedInvalidation::Complete => {
-                self.deferred_derived_scenes.clear();
-                self.failed_derived_complete = false;
-                self.failed_derived_scenes.clear();
-            }
-            PendingDerivedInvalidation::None => {}
-        }
-        let replaced_project = std::mem::replace(&mut self.project, project);
-        self.push_history(Snapshot {
-            project: replaced_project,
-            selection: self.selection,
-            title_selection: self.title_selection,
-            title_typing_style: self.title_typing_style,
-            body_typing_style: self.body_typing_style,
-            generated_parentheticals: self.generated_parentheticals.clone(),
-        });
-        self.selection = selection;
-        self.generated_parentheticals = generated;
-        self.redo.clear();
-        self.revision = self.revision.saturating_add(1);
-        self.dirty = self.project != self.clean_project;
-        self.validated_baseline = true;
-        self.last_validation_was_scoped = scoped_valid;
-        self.pending_derived_invalidation
-            .merge(derived_invalidation);
-        self.mark_mutated();
-        Ok(())
+        result
     }
 
     fn mutate_title<F>(&mut self, operation: F) -> Result<(), EditError>
@@ -1968,9 +2108,7 @@ impl EditingSession {
             }
         }
         if let Some(preservation) = project.preservation.as_mut() {
-            if !preservation.has_source_identity_use_index() {
-                preservation.rebuild_managed_paragraph_index();
-            }
+            preservation.ensure_source_identity_use_index();
         }
         validate_full_candidate(&project)?;
         validate_title_selection(&project, selection)?;
@@ -3728,5 +3866,34 @@ mod body_owner_persistence_tests {
         for (live, clean) in rebased.project.elements.iter().zip(&rebased.clean_project.elements) {
             assert!(Arc::ptr_eq(live, clean));
         }
+    }
+}
+
+#[cfg(test)]
+mod validated_session_dual_dialogue_tests {
+    use super::{EditError, EditingSession, Position, Selection};
+    use crate::dual_dialogue::{resolve_toggle_target, SelectionSurface};
+    use crate::{BodyOwner, Role, ScreenplayElement};
+
+    #[test]
+    fn session_and_public_resolution_match_for_an_invalid_stored_utf8_caret() {
+        let mut project = crate::Project::new().expect("default project is valid");
+        project.elements = vec![BodyOwner::shared(
+            ScreenplayElement::new("cue", Role::Character, "é")
+                .expect("Unicode cue is valid"),
+        )];
+        let mut session = EditingSession::new(project).expect("session baseline is valid");
+        session.selection = Selection::caret(Position { element: 0, offset: 1 });
+
+        let expected = resolve_toggle_target(
+            session.project(),
+            SelectionSurface::Body,
+            session.selection,
+        )
+        .map_err(EditError::Model);
+        assert_eq!(
+            session.dual_dialogue_toggle_target(SelectionSurface::Body),
+            expected
+        );
     }
 }

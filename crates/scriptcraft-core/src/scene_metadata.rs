@@ -941,18 +941,16 @@ fn recognized_arc_paragraph_content(
     })
 }
 
-fn safe_paragraph_removals(state: &PreservationState) -> BTreeSet<String> {
-    state
+fn safe_paragraph_removals(state: &mut PreservationState) -> BTreeSet<String> {
+    let paragraph_ids = state
         .identities
         .iter()
-        .filter_map(|identity| {
-            if identity.domain != ForeignIdDomain::Paragraph {
-                return None;
-            }
-            state
-                .paragraph_identity_safely_removable(&identity.value)
-                .then(|| identity.value.clone())
-        })
+        .filter(|identity| identity.domain == ForeignIdDomain::Paragraph)
+        .map(|identity| identity.value.clone())
+        .collect::<Vec<_>>();
+    paragraph_ids
+        .into_iter()
+        .filter(|id| state.paragraph_identity_safely_removable(id))
         .collect()
 }
 

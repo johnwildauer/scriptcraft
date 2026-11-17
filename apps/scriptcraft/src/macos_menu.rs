@@ -52,6 +52,28 @@ impl RetainedNativeCommandItem {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeMenuProjection {
+    availability: AppCommandAvailability,
+    script_view_mode: ScriptViewMode,
+    say_undual: bool,
+}
+
+#[derive(Debug, Default)]
+struct NativeMenuSynchronizationState {
+    last_synchronized: Option<NativeMenuProjection>,
+}
+
+impl NativeMenuSynchronizationState {
+    fn should_synchronize(&mut self, projection: NativeMenuProjection) -> bool {
+        if self.last_synchronized == Some(projection) {
+            return false;
+        }
+        self.last_synchronized = Some(projection);
+        true
+    }
+}
+
 /// Retains the complete installed native tree and each item handle for the
 /// lifetime of `ScriptCraftApp`. The `Rc` marker makes main-thread confinement
 /// explicit in addition to the non-Send muda handles.
@@ -65,6 +87,7 @@ pub(super) struct NativeMenuController {
     _predefined_items: Vec<PredefinedMenuItem>,
     _sf_symbols: super::macos_sf_symbols::SfSymbolsAdapter,
     event_inbox: NativeEventInbox,
+    synchronization: NativeMenuSynchronizationState,
     _main_thread_only: PhantomData<Rc<()>>,
 }
 
@@ -187,6 +210,7 @@ impl NativeMenuController {
             _predefined_items: retained_predefined_items,
             _sf_symbols: sf_symbols,
             event_inbox,
+            synchronization: NativeMenuSynchronizationState::default(),
             _main_thread_only: PhantomData,
         })
     }
@@ -210,14 +234,22 @@ impl NativeMenuController {
         }
     }
 
-    /// Reprojects native labels and enabled state from the shared catalog and
-    /// current application availability after each application update.
+    /// Reprojects native labels and enabled state only when an effective native
+    /// input changes. Event draining remains independent of this presentation gate.
     pub(super) fn synchronize(
-        &self,
+        &mut self,
         availability: AppCommandAvailability,
         script_view_mode: ScriptViewMode,
         say_undual: bool,
     ) {
+        let projection = NativeMenuProjection {
+            availability,
+            script_view_mode,
+            say_undual,
+        };
+        if !self.synchronization.should_synchronize(projection) {
+            return;
+        }
         // Keep the macOS primary Application menu independent of the active
         // document's native window title. The item text also supplies its
         // accessible name in the native menu tree.
@@ -504,7 +536,11 @@ fn native_key(key: ShortcutKey) -> Code {
 
 #[cfg(test)]
 mod tests {
-    use super::{menu_item_is_checked, requires_checked_native_item};
+    use super::{
+        menu_item_is_checked, requires_checked_native_item, NativeMenuProjection,
+        NativeMenuSynchronizationState,
+    };
+    use crate::app_commands::AppCommandAvailability;
     use crate::menu_items::{MenuEntrySpec, MenuItemSpec, MENU_CATALOG};
     use scriptcraft_commands::ScriptViewMode;
 
@@ -553,5 +589,59 @@ mod tests {
                 ScriptViewMode::Speed => checked_views[0] == "view.script-speed",
             });
         }
+    }
+
+    #[test]
+    fn native_synchronization_skips_only_a_completely_unchanged_projection() {
+        let availability = AppCommandAvailability {
+            modal_blocked: false,
+            native_output_active: false,
+            replacement_pending: false,
+            title_page_only_close: false,
+            undo: false,
+            redo: false,
+            delete: true,
+            select_all: true,
+            cut: false,
+            copy: false,
+            paste: true,
+            body_only: true,
+            dual_dialogue_toggle: false,
+            title_open: true,
+            title_close: false,
+        };
+        let initial = NativeMenuProjection {
+            availability,
+            script_view_mode: ScriptViewMode::Page,
+            say_undual: false,
+        };
+        let mut state = NativeMenuSynchronizationState::default();
+        assert!(state.should_synchronize(initial));
+        assert!(!state.should_synchronize(initial));
+
+        let availability_changed = NativeMenuProjection {
+            availability: AppCommandAvailability {
+                undo: true,
+                ..availability
+            },
+            ..initial
+        };
+        assert!(state.should_synchronize(availability_changed));
+        assert!(!state.should_synchronize(availability_changed));
+
+        let mode_changed = NativeMenuProjection {
+            script_view_mode: ScriptViewMode::Normal,
+            ..availability_changed
+        };
+        assert!(state.should_synchronize(mode_changed));
+        assert!(!state.should_synchronize(mode_changed));
+
+        let label_changed = NativeMenuProjection {
+            say_undual: true,
+            ..mode_changed
+        };
+        assert!(state.should_synchronize(label_changed));
+        assert!(!state.should_synchronize(label_changed));
+        assert!(state.should_synchronize(initial));
     }
 }

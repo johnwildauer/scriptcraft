@@ -379,15 +379,51 @@ pub struct LayoutBuildDiagnostics {
     pub element_wrap_misses: u64,
     pub element_wraps_reused: u64,
     pub element_wrap_nanos: u128,
+    /// Complete cache-request work through a successful actual build, including
+    /// preflight, lookup, placement, indexes, eviction, and publication.
+    pub whole_build_nanos: u128,
+    /// Effective prepared-environment resolution and cache lookup, excluding
+    /// all miss preparation. Hits and misses have separate paragraph counts.
+    pub prepared_lookup_nanos: u128,
+    pub prepared_hits: u64,
+    pub prepared_misses: u64,
+    /// Owner-local misses that reused a proven unchanged prepared-line prefix.
+    pub prepared_incremental_hits: u64,
+    /// Owner-local misses that used complete preparation instead.
+    pub prepared_incremental_fallbacks: u64,
+    /// Aggregate preparation after prepared-cache misses only.
+    pub prepared_miss_nanos: u128,
+    /// Ordinary, Title, dual-dialogue, and oversized placement/reflow work.
+    /// Prepared line/span rebase is nested and is not additive with this total.
+    pub placement_nanos: u128,
+    pub rebase_nanos: u128,
+    /// Complete interaction-index construction. Body Y-order/sort is nested.
+    pub interaction_index_nanos: u128,
+    pub body_y_sort_nanos: u128,
 }
 
 impl LayoutBuildDiagnostics {
+    fn record_prepared_lookup(&mut self, started: Option<Instant>, cache_hit: bool) {
+        if cache_hit {
+            self.prepared_hits = self.prepared_hits.saturating_add(1);
+        } else {
+            self.prepared_misses = self.prepared_misses.saturating_add(1);
+        }
+        add_elapsed_nanos(&mut self.prepared_lookup_nanos, started);
+    }
+
     fn record_element_wrap(&mut self, started: Instant) {
         self.element_wraps_built = self.element_wraps_built.saturating_add(1);
         self.element_wrap_misses = self.element_wrap_misses.saturating_add(1);
         self.element_wrap_nanos = self
             .element_wrap_nanos
             .saturating_add(started.elapsed().as_nanos());
+    }
+}
+
+fn add_elapsed_nanos(total: &mut u128, started: Option<Instant>) {
+    if let Some(started) = started {
+        *total = total.saturating_add(started.elapsed().as_nanos());
     }
 }
 
@@ -489,6 +525,9 @@ struct PreparedBodyEntry {
 #[derive(Debug, Default)]
 struct PreparedBodyCache {
     buckets: HashMap<u64, Vec<PreparedBodyEntry>>,
+    /// Latest retained entry for each stable-element/environment identity.
+    /// Values are (collision-bucket fingerprint, unique insertion order).
+    previous_by_identity: HashMap<u64, (u64, u64)>,
     usage_order: BTreeSet<(u64, u64, u64)>,
     generation: u64,
     next_order: u64,
@@ -536,6 +575,7 @@ impl PreparedBodyCache {
 
     fn clear(&mut self) {
         self.buckets.clear();
+        self.previous_by_identity.clear();
         self.usage_order.clear();
         self.generation = 0;
         self.next_order = 0;
@@ -549,6 +589,34 @@ impl PreparedBodyCache {
         owner.revision().hash(&mut hasher);
         environment.hash(&mut hasher);
         hasher.finish()
+    }
+
+    fn identity_fingerprint(
+        owner: &Arc<BodyOwner>,
+        environment: &PreparedBodyEnvironment,
+    ) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        owner.id.hash(&mut hasher);
+        environment.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn previous(
+        &self,
+        owner: &Arc<BodyOwner>,
+        environment: &PreparedBodyEnvironment,
+    ) -> Option<(Arc<BodyOwner>, Arc<PreparedBodyParagraph>)> {
+        let identity = Self::identity_fingerprint(owner, environment);
+        let (fingerprint, insertion_order) = *self.previous_by_identity.get(&identity)?;
+        self.buckets
+            .get(&fingerprint)?
+            .iter()
+            .find(|entry| {
+                entry.insertion_order == insertion_order
+                    && entry.owner.id == owner.id
+                    && entry.environment == *environment
+            })
+            .map(|entry| (Arc::clone(&entry.owner), Arc::clone(&entry.prepared)))
     }
 
     fn lookup(
@@ -587,6 +655,7 @@ impl PreparedBodyCache {
         prepared: Arc<PreparedBodyParagraph>,
     ) {
         let fingerprint = Self::fingerprint(owner, &environment);
+        let identity = Self::identity_fingerprint(owner, &environment);
         let byte_cost = prepared_body_entry_byte_cost(owner, &environment, &prepared);
         if byte_cost > MAX_CACHED_PREPARED_BODY_BYTES {
             return;
@@ -607,6 +676,8 @@ impl PreparedBodyCache {
             });
         self.usage_order
             .insert((self.generation, insertion_order, fingerprint));
+        self.previous_by_identity
+            .insert(identity, (fingerprint, insertion_order));
         self.entry_count = self.entry_count.saturating_add(1);
         self.retained_bytes = self.retained_bytes.saturating_add(byte_cost);
     }
@@ -622,22 +693,29 @@ impl PreparedBodyCache {
             };
             self.usage_order.remove(&oldest);
             let (_, insertion_order, fingerprint) = oldest;
-            let (removed_bytes, remove_bucket) =
-                if let Some(bucket) = self.buckets.get_mut(&fingerprint) {
-                    let removed = bucket
-                        .iter()
-                        .position(|entry| entry.insertion_order == insertion_order)
-                        .map(|index| bucket.remove(index));
-                    let remove_bucket = bucket.is_empty();
-                    (
-                        removed.map_or(0, |entry| entry.byte_cost),
-                        remove_bucket,
-                    )
-                } else {
-                    (0, false)
-                };
+            let (removed, remove_bucket) = if let Some(bucket) = self.buckets.get_mut(&fingerprint) {
+                let removed = bucket
+                    .iter()
+                    .position(|entry| entry.insertion_order == insertion_order)
+                    .map(|index| bucket.remove(index));
+                let remove_bucket = bucket.is_empty();
+                (removed, remove_bucket)
+            } else {
+                (None, false)
+            };
             if remove_bucket {
                 self.buckets.remove(&fingerprint);
+            }
+            let removed_bytes = removed.as_ref().map_or(0, |entry| entry.byte_cost);
+            if let Some(entry) = removed {
+                let identity = Self::identity_fingerprint(&entry.owner, &entry.environment);
+                if self
+                    .previous_by_identity
+                    .get(&identity)
+                    .is_some_and(|(_, latest_order)| *latest_order == insertion_order)
+                {
+                    self.previous_by_identity.remove(&identity);
+                }
             }
             self.entry_count = self.entry_count.saturating_sub(1);
             self.retained_bytes = self.retained_bytes.saturating_sub(removed_bytes);
@@ -783,6 +861,7 @@ impl ElementWrapCache {
         char_width: FixedPoint,
         runs: &[TextRun],
         atomic_ranges: &[std::ops::Range<usize>],
+        atomic_boundaries: &[std::ops::Range<usize>],
         purpose: LayoutPurpose,
         title_page: bool,
         geometry_mode: EffectiveGeometryMode,
@@ -835,7 +914,15 @@ impl ElementWrapCache {
         let started = diagnostics.as_ref().map(|_| Instant::now());
         let context = ElementWrapContext::from_identity(identity);
         let lines = wrap_element(
-            text, element, role, paragraph, text_style, char_width, atomic_ranges,
+            text,
+            element,
+            role,
+            paragraph,
+            text_style,
+            char_width,
+            atomic_boundaries,
+            true,
+            0,
         );
         if let (Some(diagnostics), Some(started)) = (diagnostics, started) {
             diagnostics.record_element_wrap(started);
@@ -970,12 +1057,15 @@ impl LayoutCache {
         inputs: &LayoutInputs,
         presentation: &BodyEditorPresentation,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
-        self.get_or_build_body_editor_with_diagnostics(
+        self.get_or_build_with_optional_diagnostics(
             revision,
             project,
             inputs,
-            presentation,
-            &mut LayoutBuildDiagnostics::default(),
+            LayoutPurpose::Editor,
+            LayoutComposition::BodyEditor,
+            None,
+            false,
+            presentation.clone(),
         )
     }
 
@@ -1007,10 +1097,15 @@ impl LayoutCache {
         session: &crate::editing::EditingSession,
         presentation: &BodyEditorPresentation,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
-        self.get_or_build_body_editor_for_session_with_diagnostics(
-            session,
-            presentation,
-            &mut LayoutBuildDiagnostics::default(),
+        self.get_or_build_with_optional_diagnostics(
+            session.revision(),
+            session.project(),
+            session.layout_inputs(),
+            LayoutPurpose::Editor,
+            LayoutComposition::BodyEditor,
+            None,
+            true,
+            presentation.clone(),
         )
     }
 
@@ -1040,9 +1135,15 @@ impl LayoutCache {
         &mut self,
         session: &crate::editing::EditingSession,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
-        self.get_or_build_title_page_editor_for_session_with_diagnostics(
-            session,
-            &mut LayoutBuildDiagnostics::default(),
+        self.get_or_build_with_optional_diagnostics(
+            session.revision(),
+            session.project(),
+            session.layout_inputs(),
+            LayoutPurpose::Editor,
+            LayoutComposition::TitlePageEditor,
+            None,
+            true,
+            BodyEditorPresentation::default(),
         )
     }
 
@@ -1122,6 +1223,7 @@ impl LayoutCache {
         validated_session: bool,
         body_presentation: BodyEditorPresentation,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        let whole_build_started = diagnostics.as_ref().map(|_| Instant::now());
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             diagnostics.complete_project_validations = if validated_session { 0 } else { 1 };
         }
@@ -1208,7 +1310,7 @@ impl LayoutCache {
                 &source_settings,
                 purpose,
                 composition,
-                diagnostics,
+                diagnostics.as_deref_mut(),
                 Some(&mut self.element_wraps),
                 Some(&mut self.prepared_body),
                 true,
@@ -1226,6 +1328,9 @@ impl LayoutCache {
         self.project_layout_signature = project_layout_signature;
         self.layout = Some(layout.clone());
         self.project_identity = Some(project.layout_identity().clone());
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            add_elapsed_nanos(&mut diagnostics.whole_build_nanos, whole_build_started);
+        }
         Ok((layout, false))
     }
 }
@@ -1540,6 +1645,7 @@ impl ScreenplayLayout {
                         page.next_line_y.raw().saturating_add(paragraph.space_before.raw().max(0)),
                     );
                 }
+                let placement_started = diagnostics.as_ref().map(|_| Instant::now());
                 for line in lines {
                     let line_advance = line.paragraph.line_advance.raw();
                     let laid_out = output.make_line(page.number, line, true, page.next_line_y);
@@ -1547,6 +1653,9 @@ impl ScreenplayLayout {
                     page.occupied_lines = page.occupied_lines.saturating_add(1);
                     page.next_line_y =
                         FixedPoint::from_raw(page.next_line_y.raw().saturating_add(line_advance));
+                }
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    add_elapsed_nanos(&mut diagnostics.placement_nanos, placement_started);
                 }
             }
             output.pages.push(page);
@@ -1656,12 +1765,17 @@ impl ScreenplayLayout {
                             .max(first_visible_space_before(&left))
                             .max(first_visible_space_before(&right)),
                     );
+                    let placement_started = diagnostics.as_ref().map(|_| Instant::now());
                     output.place_dual_block(
                         &left,
                         &right,
                         starts_new_page,
                         space_before,
+                        &mut diagnostics,
                     );
+                    if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                        add_elapsed_nanos(&mut diagnostics.placement_nanos, placement_started);
+                    }
                 }
                 index = crate::dual_dialogue::last_member(project, group)
                     .map_or(index.saturating_add(1), |last| last.saturating_add(1));
@@ -1669,6 +1783,7 @@ impl ScreenplayLayout {
                 }
             }
 
+            let prepared_lookup_started = diagnostics.as_ref().map(|_| Instant::now());
             let text_style = output.source_settings.text_style(element.role);
             if purpose == LayoutPurpose::Print && text_style.hidden_text {
                 index = index.saturating_add(1);
@@ -1707,8 +1822,13 @@ impl ScreenplayLayout {
                 &output,
                 element,
                 environment,
+                prepared_lookup_started,
             );
-            output.place_element(prepared, index, element.role, paragraph);
+            let placement_started = diagnostics.as_ref().map(|_| Instant::now());
+            output.place_element(prepared, index, element.role, paragraph, &mut diagnostics);
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                add_elapsed_nanos(&mut diagnostics.placement_nanos, placement_started);
+            }
             index = index.saturating_add(1);
         }
         if output.pages.is_empty() {
@@ -1719,7 +1839,7 @@ impl ScreenplayLayout {
                 output.editor_group_boundaries = active_group_boundaries(&output, project, group);
             }
         }
-        output.rebuild_interaction_indexes();
+        output.rebuild_interaction_indexes(diagnostics.as_deref_mut());
         Ok(output)
     }
 
@@ -2043,7 +2163,11 @@ impl ScreenplayLayout {
         self.caret_geometry(caret)
     }
 
-    fn rebuild_interaction_indexes(&mut self) {
+    fn rebuild_interaction_indexes(
+        &mut self,
+        mut diagnostics: Option<&mut LayoutBuildDiagnostics>,
+    ) {
+        let started = diagnostics.as_ref().map(|_| Instant::now());
         let max_element = self
             .pages
             .iter()
@@ -2099,11 +2223,16 @@ impl ScreenplayLayout {
                 }
             }
         }
+        let sort_started = diagnostics.as_ref().map(|_| Instant::now());
         self.body_line_y_order = (0..self.body_line_index.len()).collect();
         self.body_line_y_order.sort_by_key(|index| {
             let entry = self.body_line_index[*index];
             (entry.absolute_y, entry.location.page, entry.location.line)
         });
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            add_elapsed_nanos(&mut diagnostics.body_y_sort_nanos, sort_started);
+            add_elapsed_nanos(&mut diagnostics.interaction_index_nanos, started);
+        }
     }
 
     fn new_page(&self, title_page: bool) -> LayoutPage {
@@ -2254,6 +2383,7 @@ impl ScreenplayLayout {
         page_number: usize,
         side: &WrappedDualSide,
         block_top: FixedPoint,
+        diagnostics: &mut Option<&mut LayoutBuildDiagnostics>,
     ) -> Vec<LayoutLine> {
         let mut y = block_top;
         let mut placed = Vec::with_capacity(side.line_count);
@@ -2266,7 +2396,13 @@ impl ScreenplayLayout {
             }
             for wrapped in paragraph.prepared.lines.iter() {
                 let advance = paragraph.prepared.paragraph.line_advance;
-                let mut line = rebase_prepared_line(wrapped, paragraph.element, page_number, y);
+                let mut line = rebase_prepared_line(
+                    wrapped,
+                    paragraph.element,
+                    page_number,
+                    y,
+                    diagnostics.as_deref_mut(),
+                );
                 line.keep_with_next = false;
                 placed.push(line);
                 y = FixedPoint::from_raw(y.raw().saturating_add(advance.raw()));
@@ -2281,6 +2417,7 @@ impl ScreenplayLayout {
         right: &WrappedDualSide,
         starts_new_page: bool,
         space_before: FixedPoint,
+        diagnostics: &mut Option<&mut LayoutBuildDiagnostics>,
     ) {
         if self.pages.is_empty() || self.pages.last().is_some_and(|page| page.title_page) {
             self.pages.push(self.new_page(false));
@@ -2331,7 +2468,7 @@ impl ScreenplayLayout {
             if !self.pages[current_page].lines.is_empty() {
                 self.pages.push(self.new_page(false));
             }
-            self.spill_oversized_dual_block(left, right);
+            self.spill_oversized_dual_block(left, right, diagnostics);
             return;
         }
 
@@ -2353,8 +2490,8 @@ impl ScreenplayLayout {
                 .saturating_add(applied_gap),
         );
         let page_number = self.pages[page_index].number;
-        let left_lines = self.place_dual_side(page_number, left, block_top);
-        let right_lines = self.place_dual_side(page_number, right, block_top);
+        let left_lines = self.place_dual_side(page_number, left, block_top, diagnostics);
+        let right_lines = self.place_dual_side(page_number, right, block_top, diagnostics);
         self.pages[page_index].lines.extend(left_lines);
         self.pages[page_index].lines.extend(right_lines);
         self.pages[page_index].occupied_lines = self.pages[page_index]
@@ -2369,6 +2506,7 @@ impl ScreenplayLayout {
         &mut self,
         left: &WrappedDualSide,
         right: &WrappedDualSide,
+        diagnostics: &mut Option<&mut LayoutBuildDiagnostics>,
     ) {
         let start_page = self.pages.len() - 1;
         let capacity = self.inputs.lines_per_page as usize;
@@ -2410,6 +2548,7 @@ impl ScreenplayLayout {
                     placement.element,
                     page_number,
                     placement.y,
+                    diagnostics.as_deref_mut(),
                 );
                 line.oversized = true;
                 line.keep_with_next = false;
@@ -2431,6 +2570,7 @@ impl ScreenplayLayout {
         element: usize,
         role: Role,
         paragraph: EffectiveParagraph,
+        diagnostics: &mut Option<&mut LayoutBuildDiagnostics>,
     ) {
         let lines = &prepared.lines;
         let keep = keep_with_next(role);
@@ -2508,7 +2648,13 @@ impl ScreenplayLayout {
             }
             let page_number = self.pages[page_index].number;
             let next_line_y = self.pages[page_index].next_line_y;
-            let mut line = rebase_prepared_line(wrapped, element, page_number, next_line_y);
+            let mut line = rebase_prepared_line(
+                wrapped,
+                element,
+                page_number,
+                next_line_y,
+                diagnostics.as_deref_mut(),
+            );
             line.oversized |= oversized_element;
             self.pages[page_index].lines.push(line);
             self.pages[page_index].occupied_lines =
@@ -2528,7 +2674,11 @@ fn rebase_prepared_line(
     element: usize,
     page: usize,
     y: FixedPoint,
+    diagnostics: Option<&mut LayoutBuildDiagnostics>,
 ) -> LayoutLine {
+    // Per-line timing is intentionally limited to an active optional carrier.
+    // Development readings include this measurement overhead.
+    let started = diagnostics.as_ref().map(|_| Instant::now());
     let mut line = prepared.clone();
     let vertical_delta = y.raw().saturating_sub(prepared.paragraph_bounds.y.raw());
     line.page = page;
@@ -2540,6 +2690,9 @@ fn rebase_prepared_line(
     for span in Arc::make_mut(&mut line.spans) {
         span.source.element = element;
         span.geometry.y = FixedPoint::from_raw(span.geometry.y.raw().saturating_add(vertical_delta));
+    }
+    if let Some(diagnostics) = diagnostics {
+        add_elapsed_nanos(&mut diagnostics.rebase_nanos, started);
     }
     line
 }
@@ -2994,6 +3147,7 @@ fn wrap_dual_side(
         else {
             continue;
         };
+        let prepared_lookup_started = diagnostics.as_ref().map(|_| Instant::now());
         let text_style = source.text_style(element.role);
         if purpose == LayoutPurpose::Print && text_style.hidden_text {
             continue;
@@ -3027,6 +3181,7 @@ fn wrap_dual_side(
             layout,
             element,
             environment,
+            prepared_lookup_started,
         );
         if !paragraphs.is_empty() {
             height = height.saturating_add(paragraph.space_before.raw().max(0));
@@ -3214,46 +3369,246 @@ fn is_boundary_in_line(line: &LayoutLine, offset: usize) -> bool {
 fn prepare_body_for_layout(
     mut prepared_cache: Option<&mut PreparedBodyCache>,
     wrap_cache: Option<&mut ElementWrapCache>,
-    diagnostics: Option<&mut LayoutBuildDiagnostics>,
+    mut diagnostics: Option<&mut LayoutBuildDiagnostics>,
     layout: &ScreenplayLayout,
     owner: &Arc<BodyOwner>,
     environment: PreparedBodyEnvironment,
+    environment_started: Option<Instant>,
 ) -> Arc<PreparedBodyParagraph> {
-    if let Some(cache) = prepared_cache.as_deref_mut() {
-        if let Some(prepared) = cache.lookup(owner, &environment) {
-            return prepared;
+    let cache_attempted = prepared_cache.is_some();
+    let cached = prepared_cache
+        .as_deref_mut()
+        .and_then(|cache| cache.lookup(owner, &environment));
+    if cache_attempted {
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            diagnostics.record_prepared_lookup(environment_started, cached.is_some());
         }
     }
+    if let Some(prepared) = cached {
+        return prepared;
+    }
+    let miss_started = (cache_attempted && diagnostics.is_some()).then(Instant::now);
 
+    let previous = prepared_cache
+        .as_deref_mut()
+        .and_then(|cache| cache.previous(owner, &environment));
+    let incremental = previous.as_ref().and_then(|(previous_owner, previous)| {
+        prepare_incremental_body_for_layout(
+            diagnostics.as_deref_mut(),
+            layout,
+            owner,
+            previous_owner,
+            previous,
+            &environment,
+        )
+    });
+    if cache_attempted {
+        if let Some(diagnostics) = diagnostics.as_deref_mut() {
+            if incremental.is_some() {
+                diagnostics.prepared_incremental_hits =
+                    diagnostics.prepared_incremental_hits.saturating_add(1);
+            } else {
+                diagnostics.prepared_incremental_fallbacks =
+                    diagnostics.prepared_incremental_fallbacks.saturating_add(1);
+            }
+        }
+    }
     let element = owner.as_element();
     let paragraph = environment.paragraph;
-    let lines = wrap_for_layout(
-        wrap_cache,
+    let prepared = if let Some(prepared) = incremental {
+        prepared
+    } else {
+        let lines = wrap_for_layout(
+            wrap_cache,
+            diagnostics.as_deref_mut(),
+            &element.id,
+            &element.text,
+            0,
+            element.role,
+            paragraph,
+            environment.text_style.clone(),
+            &element.runs,
+            environment.char_width,
+            environment.purpose,
+            false,
+            environment.geometry_mode,
+        );
+        Arc::new(PreparedBodyParagraph {
+            paragraph,
+            lines: lines
+                .into_iter()
+                .map(|line| layout.make_line(0, line, false, FixedPoint::default()))
+                .collect::<Vec<_>>()
+                .into(),
+        })
+    };
+    if let Some(cache) = prepared_cache {
+        cache.insert(owner, environment, Arc::clone(&prepared));
+    }
+    if let Some(diagnostics) = diagnostics.as_deref_mut() {
+        add_elapsed_nanos(&mut diagnostics.prepared_miss_nanos, miss_started);
+    }
+    prepared
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SingleTextEdit {
+    start: usize,
+    old_end: usize,
+    new_end: usize,
+}
+
+fn single_insertion_or_deletion(old: &str, new: &str) -> Option<SingleTextEdit> {
+    if old == new {
+        return None;
+    }
+    let old_bytes = old.as_bytes();
+    let new_bytes = new.as_bytes();
+    let shared = old_bytes.len().min(new_bytes.len());
+    let mut start = 0usize;
+    while start < shared && old_bytes[start] == new_bytes[start] {
+        start = start.saturating_add(1);
+    }
+    let mut suffix = 0usize;
+    while suffix < shared.saturating_sub(start)
+        && old_bytes[old_bytes.len() - 1 - suffix] == new_bytes[new_bytes.len() - 1 - suffix]
+    {
+        suffix = suffix.saturating_add(1);
+    }
+    let old_end = old_bytes.len().saturating_sub(suffix);
+    let new_end = new_bytes.len().saturating_sub(suffix);
+    if !old.is_char_boundary(start)
+        || !new.is_char_boundary(start)
+        || !old.is_char_boundary(old_end)
+        || !new.is_char_boundary(new_end)
+        || (start < old_end && start < new_end)
+    {
+        return None;
+    }
+    Some(SingleTextEdit {
+        start,
+        old_end,
+        new_end,
+    })
+}
+
+fn runs_match_single_edit(
+    old: &crate::ScreenplayElement,
+    new: &crate::ScreenplayElement,
+    edit: SingleTextEdit,
+) -> bool {
+    if old.runs.is_empty() || new.runs.is_empty() {
+        return old.runs.is_empty() && new.runs.is_empty();
+    }
+    if old.runs.len() != new.runs.len() {
+        return false;
+    }
+    let shift = new.text.len() as i128 - old.text.len() as i128;
+    let mut old_base = 0usize;
+    let mut new_base = 0usize;
+    for (old_run, new_run) in old.runs.iter().zip(&new.runs) {
+        if old_run.attributes != new_run.attributes {
+            return false;
+        }
+        let old_end = old_base.saturating_add(old_run.text.len());
+        let new_end = new_base.saturating_add(new_run.text.len());
+        let before_edit = old_end <= edit.start || new_end <= edit.start;
+        if before_edit {
+            let shared_end = old_end.min(new_end).min(edit.start);
+            let shared_len = shared_end.saturating_sub(old_base);
+            if old_base != new_base
+                || old_run.text[..shared_len] != new_run.text[..shared_len]
+                || (old_end != new_end && (old_end < edit.start || new_end < edit.start))
+            {
+                return false;
+            }
+        }
+        let after_edit = old_base >= edit.old_end || new_base >= edit.new_end;
+        if after_edit {
+            let shifted_old_base = old_base as i128 + shift;
+            if old_base < edit.old_end
+                || new_base < edit.new_end
+                || shifted_old_base != new_base as i128
+                || old_run.text != new_run.text
+            {
+                return false;
+            }
+        }
+        old_base = old_end;
+        new_base = new_end;
+    }
+    old_base == old.text.len() && new_base == new.text.len()
+}
+
+fn prepare_incremental_body_for_layout(
+    diagnostics: Option<&mut LayoutBuildDiagnostics>,
+    layout: &ScreenplayLayout,
+    owner: &Arc<BodyOwner>,
+    previous_owner: &Arc<BodyOwner>,
+    previous: &Arc<PreparedBodyParagraph>,
+    environment: &PreparedBodyEnvironment,
+) -> Option<Arc<PreparedBodyParagraph>> {
+    let old = previous_owner.as_element();
+    let new = owner.as_element();
+    if old.id != new.id
+        || old.role != new.role
+        || old.source_provenance != new.source_provenance
+        || previous.paragraph != environment.paragraph
+    {
+        return None;
+    }
+    let edit = single_insertion_or_deletion(&old.text, &new.text)?;
+    if !runs_match_single_edit(old, new, edit) {
+        return None;
+    }
+    let first_affected = previous
+        .lines
+        .iter()
+        .position(|line| line.source.end >= edit.start)
+        .unwrap_or(previous.lines.len().saturating_sub(1));
+    // Rebuild the affected line and its predecessor so backward whitespace
+    // selection, source-boundary affinity, and final-line justification cannot
+    // inherit a stale break context. Empty prefixes use complete preparation.
+    let reused_lines = first_affected.checked_sub(1)?;
+    let suffix_start = previous.lines.get(reused_lines)?.source.start;
+    if suffix_start > edit.start
+        || !old.text.is_char_boundary(suffix_start)
+        || !new.text.is_char_boundary(suffix_start)
+        || old.text[..suffix_start] != new.text[..suffix_start]
+        || previous.lines[..reused_lines]
+            .iter()
+            .any(|line| line.source.end > edit.start)
+    {
+        return None;
+    }
+    let suffix = wrap_for_layout_range(
+        None,
         diagnostics,
-        &element.id,
-        &element.text,
+        &new.id,
+        &new.text,
+        suffix_start..new.text.len(),
+        false,
+        reused_lines,
         0,
-        element.role,
-        paragraph,
+        new.role,
+        environment.paragraph,
         environment.text_style.clone(),
-        &element.runs,
+        &new.runs,
         environment.char_width,
         environment.purpose,
         false,
         environment.geometry_mode,
     );
-    let prepared = Arc::new(PreparedBodyParagraph {
-        paragraph,
-        lines: lines
+    let mut lines = previous.lines[..reused_lines].to_vec();
+    lines.extend(
+        suffix
             .into_iter()
-            .map(|line| layout.make_line(0, line, false, FixedPoint::default()))
-            .collect::<Vec<_>>()
-            .into(),
-    });
-    if let Some(cache) = prepared_cache {
-        cache.insert(owner, environment, Arc::clone(&prepared));
-    }
-    prepared
+            .map(|line| layout.make_line(0, line, false, FixedPoint::default())),
+    );
+    Some(Arc::new(PreparedBodyParagraph {
+        paragraph: environment.paragraph,
+        lines: lines.into(),
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3262,6 +3617,45 @@ fn wrap_for_layout(
     diagnostics: Option<&mut LayoutBuildDiagnostics>,
     element_id: &crate::StableId,
     text: &str,
+    element: usize,
+    role: Role,
+    paragraph: EffectiveParagraph,
+    text_style: EffectiveTextStyle,
+    runs: &[TextRun],
+    char_width: FixedPoint,
+    purpose: LayoutPurpose,
+    title_page: bool,
+    geometry_mode: EffectiveGeometryMode,
+) -> Vec<WrappedLine> {
+    wrap_for_layout_range(
+        cache,
+        diagnostics,
+        element_id,
+        text,
+        0..text.len(),
+        true,
+        0,
+        element,
+        role,
+        paragraph,
+        text_style,
+        runs,
+        char_width,
+        purpose,
+        title_page,
+        geometry_mode,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wrap_for_layout_range(
+    cache: Option<&mut ElementWrapCache>,
+    diagnostics: Option<&mut LayoutBuildDiagnostics>,
+    element_id: &crate::StableId,
+    text: &str,
+    source_range: std::ops::Range<usize>,
+    first_visual_line: bool,
+    line_offset: usize,
     element: usize,
     role: Role,
     paragraph: EffectiveParagraph,
@@ -3299,7 +3693,8 @@ fn wrap_for_layout(
         char_width.raw().saturating_mul(maximum_run_size).div_euclid(base_size).max(1),
     );
     let mut run_index = 0usize;
-    for (source_start, scalar) in text.char_indices() {
+    for (local_start, scalar) in text[source_range.clone()].char_indices() {
+        let source_start = source_range.start.saturating_add(local_start);
         let source_end = source_start + scalar.len_utf8();
         while run_styles
             .get(run_index)
@@ -3321,6 +3716,15 @@ fn wrap_for_layout(
         projected_text.push_str(&displayed);
         source_map.push((start..projected_text.len(), source_start..source_end));
     }
+    // The complete ranges remain cache identity; only genuine display expansions
+    // need an interior-boundary lookup. The noncache path avoids the full temporary.
+    let atomic_ranges = cache.is_some().then(|| {
+        source_map
+            .iter()
+            .map(|(display, _)| display.clone())
+            .collect::<Vec<_>>()
+    });
+    let atomic_boundaries = atomic_boundary_index(&projected_text, &source_map);
     let mut lines = if let Some(cache) = cache {
         cache.wrap(
             element_id,
@@ -3335,7 +3739,8 @@ fn wrap_for_layout(
             },
             wrapping_char_width,
             runs,
-            &source_map.iter().map(|(display, _)| display.clone()).collect::<Vec<_>>(),
+            atomic_ranges.as_deref().expect("cached wrapping retains complete ranges"),
+            &atomic_boundaries,
             purpose,
             title_page,
             geometry_mode,
@@ -3346,8 +3751,15 @@ fn wrap_for_layout(
         let mut wrapping_style = text_style.clone();
         wrapping_style.all_caps = false;
         let lines = wrap_element(
-            &projected_text, element, role, paragraph, wrapping_style, wrapping_char_width,
-            &source_map.iter().map(|(display, _)| display.clone()).collect::<Vec<_>>(),
+            &projected_text,
+            element,
+            role,
+            paragraph,
+            wrapping_style,
+            wrapping_char_width,
+            &atomic_boundaries,
+            first_visual_line,
+            line_offset,
         );
         if let (Some(diagnostics), Some(started)) = (diagnostics, started) {
             diagnostics.record_element_wrap(started);
@@ -3432,6 +3844,29 @@ fn source_end_for_display_offset(
         .map(|(_, source)| source.end)
 }
 
+fn atomic_boundary_index(
+    text: &str,
+    source_map: &[(std::ops::Range<usize>, std::ops::Range<usize>)],
+) -> Vec<std::ops::Range<usize>> {
+    let mut index = Vec::new();
+    for (display, _) in source_map {
+        if text[display.clone()].char_indices().nth(1).is_some() {
+            index.push(display.clone());
+        }
+    }
+    index
+}
+
+fn atomic_boundary_is_forbidden(
+    atomic_boundaries: &[std::ops::Range<usize>],
+    boundary: usize,
+) -> bool {
+    let candidate = atomic_boundaries.partition_point(|range| range.end <= boundary);
+    atomic_boundaries
+        .get(candidate)
+        .is_some_and(|range| range.start < boundary)
+}
+
 fn wrap_element(
     text: &str,
     element: usize,
@@ -3439,7 +3874,9 @@ fn wrap_element(
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
     char_width: FixedPoint,
-    atomic_ranges: &[std::ops::Range<usize>],
+    atomic_boundaries: &[std::ops::Range<usize>],
+    first_visual_line: bool,
+    line_offset: usize,
 ) -> Vec<WrappedLine> {
     let cell = char_width.raw().max(1);
     let first_left = paragraph
@@ -3459,7 +3896,7 @@ fn wrap_element(
         .div_euclid(cell)
         .max(1) as usize;
     let mut output = Vec::new();
-    let mut first_visual_line = true;
+    let mut first_visual_line = first_visual_line;
     let mut paragraph_start = 0;
     let mut delimiters = text.char_indices().peekable();
     while let Some((newline, delimiter)) = delimiters.next() {
@@ -3476,8 +3913,9 @@ fn wrap_element(
             paragraph,
             &text_style,
             char_width,
-            atomic_ranges,
+            atomic_boundaries,
             &mut first_visual_line,
+            line_offset,
             &mut output,
         );
         paragraph_start = newline + delimiter.len_utf8();
@@ -3496,8 +3934,9 @@ fn wrap_element(
         paragraph,
             &text_style,
             char_width,
-            atomic_ranges,
+            atomic_boundaries,
             &mut first_visual_line,
+        line_offset,
         &mut output,
     );
     if output.is_empty() {
@@ -3512,7 +3951,7 @@ fn wrap_element(
         text_style,
         runs: Arc::from([]),
         char_width,
-            first_visual_line: true,
+            first_visual_line,
             final_visual_line: true,
             paragraph,
             oversized: false,
@@ -3543,8 +3982,9 @@ fn wrap_segment(
     paragraph: EffectiveParagraph,
     text_style: &EffectiveTextStyle,
     char_width: FixedPoint,
-    atomic_ranges: &[std::ops::Range<usize>],
+    atomic_boundaries: &[std::ops::Range<usize>],
     first_visual_line: &mut bool,
+    line_offset: usize,
     output: &mut Vec<WrappedLine>,
 ) {
     if text.is_empty() {
@@ -3595,7 +4035,7 @@ fn wrap_segment(
         }
     }
     let mut start = 0;
-    while start < cells.len() && output.len() < MAX_LINES_PER_ELEMENT {
+    while start < cells.len() && line_offset.saturating_add(output.len()) < MAX_LINES_PER_ELEMENT {
         let first_line = *first_visual_line;
         let limit = if first_line { first_limit } else { rest_limit };
         let mut hard_end = (start + limit).min(cells.len());
@@ -3607,7 +4047,7 @@ fn wrap_segment(
         }
         while hard_end < cells.len() && hard_end > start {
             let boundary = base.saturating_add(cells[hard_end].local_start);
-            if atomic_ranges.iter().any(|range| boundary > range.start && boundary < range.end) {
+            if atomic_boundary_is_forbidden(atomic_boundaries, boundary) {
                 hard_end += 1;
             } else {
                 break;
@@ -3719,6 +4159,9 @@ mod session_layout_cache_tests {
         assert!(Arc::ptr_eq(&body_layout, &cached_body_layout));
         assert_eq!(diagnostics.complete_project_validations, 0);
         assert_eq!(diagnostics.layout_builds, 0);
+        assert_eq!(diagnostics.whole_build_nanos, 0);
+        assert_eq!(diagnostics.prepared_hits, 0);
+        assert_eq!(diagnostics.prepared_misses, 0);
         assert_eq!(diagnostics.semantic_signature_constructions, 0);
         assert_eq!(body_cache.project_layout_signature, None);
 
@@ -4155,6 +4598,293 @@ mod wrap_run_preparation_tests {
 }
 
 #[cfg(test)]
+mod atomic_boundary_index_tests {
+    use super::{
+        atomic_boundary_index, atomic_boundary_is_forbidden, wrap_for_layout,
+        EffectiveGeometryMode, EffectiveParagraph, ElementWrapCache, LayoutBuildDiagnostics,
+        LayoutPurpose, WrappedLine,
+    };
+    use crate::formatting::{EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment};
+    use crate::{Role, StableId, TextRun};
+    use std::ops::Range;
+
+    fn projected_source_map(text: &str) -> (String, Vec<(Range<usize>, Range<usize>)>) {
+        let mut projected = String::new();
+        let mut source_map = Vec::new();
+        for (source_start, scalar) in text.char_indices() {
+            let display_start = projected.len();
+            projected.extend(scalar.to_uppercase());
+            source_map.push((
+                display_start..projected.len(),
+                source_start..source_start + scalar.len_utf8(),
+            ));
+        }
+        (projected, source_map)
+    }
+
+    fn legacy_boundary_is_forbidden(atomic_ranges: &[Range<usize>], boundary: usize) -> bool {
+        atomic_ranges
+            .iter()
+            .any(|range| boundary > range.start && boundary < range.end)
+    }
+
+    fn paragraph(cell_capacity: usize) -> EffectiveParagraph {
+        let char_width = FixedPoint::from_points(7);
+        EffectiveParagraph {
+            left: FixedPoint::default(),
+            right: FixedPoint::from_points(7 * cell_capacity as i64),
+            first_indent: FixedPoint::default(),
+            alignment: ParagraphAlignment::Left,
+            space_before: FixedPoint::default(),
+            line_advance: FixedPoint::from_points(12),
+            char_width,
+        }
+    }
+
+    fn text_style(all_caps: bool) -> EffectiveTextStyle {
+        EffectiveTextStyle {
+            declared_family: "Courier Prime".into(),
+            family: FontFallback::CourierPrime,
+            size: 12,
+            bold: false,
+            italic: false,
+            underline: false,
+            all_caps,
+            hidden_text: false,
+            source_color: None,
+        }
+    }
+
+    fn assert_wrapped_lines_equal(actual: &[WrappedLine], expected: &[WrappedLine]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(actual.element, expected.element);
+            assert_eq!(actual.role, expected.role);
+            assert_eq!(actual.start, expected.start);
+            assert_eq!(actual.end, expected.end);
+            assert_eq!(actual.text, expected.text);
+            assert_eq!(actual.display_text, expected.display_text);
+            assert_eq!(actual.display_source_map, expected.display_source_map);
+            assert_eq!(actual.text_style, expected.text_style);
+            assert_eq!(actual.runs, expected.runs);
+            assert_eq!(actual.char_width, expected.char_width);
+            assert_eq!(actual.first_visual_line, expected.first_visual_line);
+            assert_eq!(actual.final_visual_line, expected.final_visual_line);
+            assert_eq!(actual.paragraph, expected.paragraph);
+            assert_eq!(actual.oversized, expected.oversized);
+        }
+    }
+
+    #[test]
+    fn binary_predicate_matches_legacy_scan_at_plain_and_expansion_boundaries() {
+        let plain = "lorem ipsum dolor sit amet ".repeat(2_048);
+        let (plain_projected, plain_map) = projected_source_map(&plain);
+        let plain_ranges = plain_map
+            .iter()
+            .map(|(display, _)| display.clone())
+            .collect::<Vec<_>>();
+        let plain_index = atomic_boundary_index(&plain_projected, &plain_map);
+        assert!(plain_index.is_empty(), "ordinary text has no internal display-cell boundary");
+        for boundary in 0..=plain_projected.len() {
+            assert_eq!(
+                atomic_boundary_is_forbidden(&plain_index, boundary),
+                legacy_boundary_is_forbidden(&plain_ranges, boundary),
+            );
+        }
+
+        let (single_projected, single_map) = projected_source_map("é你🙂");
+        assert!(single_map.iter().any(|(display, _)| display.len() > 1));
+        assert!(
+            atomic_boundary_index(&single_projected, &single_map).is_empty(),
+            "UTF-8 bytes do not create display-scalar boundaries",
+        );
+
+        let (projected, source_map) = projected_source_map("aé你🙂ßﬃΐ z");
+        let atomic_ranges = source_map
+            .iter()
+            .map(|(display, _)| display.clone())
+            .collect::<Vec<_>>();
+        let index = atomic_boundary_index(&projected, &source_map);
+        assert!(index.windows(2).all(|ranges| ranges[0].end <= ranges[1].start));
+        let mut expansions = 0;
+        for (display, _) in &source_map {
+            let displayed = &projected[display.clone()];
+            if displayed.char_indices().nth(1).is_some() {
+                expansions += 1;
+                assert!(index.contains(display));
+                assert!(!atomic_boundary_is_forbidden(&index, display.start));
+                assert!(!atomic_boundary_is_forbidden(&index, display.end));
+                for (interior, _) in displayed.char_indices().skip(1) {
+                    let boundary = display.start + interior;
+                    assert!(legacy_boundary_is_forbidden(&atomic_ranges, boundary));
+                    assert!(atomic_boundary_is_forbidden(&index, boundary));
+                }
+            } else {
+                assert!(!index.contains(display));
+            }
+        }
+        assert!(expansions >= 2, "the fixture contains genuine one-to-many expansions");
+        for boundary in (0..=projected.len()).filter(|offset| projected.is_char_boundary(*offset)) {
+            assert_eq!(
+                atomic_boundary_is_forbidden(&index, boundary),
+                legacy_boundary_is_forbidden(&atomic_ranges, boundary),
+                "display byte boundary {boundary} differs before/at/after an expansion",
+            );
+        }
+    }
+
+    #[test]
+    fn giant_plain_paragraph_has_empty_index_and_exact_fresh_cached_lines() {
+        let text = "lorem ipsum dolor sit amet ".repeat(300);
+        let runs = vec![TextRun {
+            text: text.clone(),
+            attributes: Vec::new(),
+        }];
+        let element_id = StableId::new("giant-plain-wrap").expect("stable ID is valid");
+        let fresh = wrap_for_layout(
+            None,
+            None,
+            &element_id,
+            &text,
+            0,
+            Role::Action,
+            paragraph(4),
+            text_style(false),
+            &runs,
+            FixedPoint::from_points(7),
+            LayoutPurpose::Editor,
+            false,
+            EffectiveGeometryMode::Sequential,
+        );
+        assert!(fresh.len() > 1_000, "the fixture exercises many output lines");
+
+        let mut expected_source = 0;
+        let mut display_text = String::new();
+        for (index, line) in fresh.iter().enumerate() {
+            assert_eq!(line.start, expected_source);
+            expected_source = line.end;
+            assert_eq!(line.text.as_ref(), &text[line.start..line.end]);
+            assert_eq!(line.first_visual_line, index == 0);
+            assert_eq!(line.final_visual_line, index + 1 == fresh.len());
+            display_text.push_str(&line.display_text);
+            let mut expected_display = 0;
+            for segment in line.display_source_map.iter() {
+                assert_eq!(segment.display_start, expected_display);
+                assert!(segment.display_end > segment.display_start);
+                expected_display = segment.display_end;
+            }
+            assert_eq!(expected_display, line.display_text.chars().count());
+        }
+        assert_eq!(expected_source, text.len());
+        assert_eq!(display_text, text);
+
+        let mut cache = ElementWrapCache::default();
+        cache.start_generation();
+        let cold = wrap_for_layout(
+            Some(&mut cache),
+            None,
+            &element_id,
+            &text,
+            0,
+            Role::Action,
+            paragraph(4),
+            text_style(false),
+            &runs,
+            FixedPoint::from_points(7),
+            LayoutPurpose::Editor,
+            false,
+            EffectiveGeometryMode::Sequential,
+        );
+        assert_wrapped_lines_equal(&cold, &fresh);
+        cache.start_generation();
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+        let reused = wrap_for_layout(
+            Some(&mut cache),
+            Some(&mut diagnostics),
+            &element_id,
+            &text,
+            0,
+            Role::Action,
+            paragraph(4),
+            text_style(false),
+            &runs,
+            FixedPoint::from_points(7),
+            LayoutPurpose::Editor,
+            false,
+            EffectiveGeometryMode::Sequential,
+        );
+        assert_eq!(diagnostics.element_wraps_reused, 1);
+        assert_wrapped_lines_equal(&reused, &fresh);
+    }
+
+    #[test]
+    fn expansions_remain_indivisible_with_identical_source_maps_across_cache_paths() {
+        let text = "aßbc def ﬃé🙂tail";
+        let runs = vec![TextRun {
+            text: text.into(),
+            attributes: Vec::new(),
+        }];
+        let element_id = StableId::new("expansion-wrap").expect("stable ID is valid");
+        let fresh = wrap_for_layout(
+            None,
+            None,
+            &element_id,
+            text,
+            0,
+            Role::Action,
+            paragraph(4),
+            text_style(true),
+            &runs,
+            FixedPoint::from_points(7),
+            LayoutPurpose::Editor,
+            false,
+            EffectiveGeometryMode::Sequential,
+        );
+        assert!(fresh.len() > 1);
+        assert_eq!(
+            fresh.iter().map(|line| line.display_text.as_ref()).collect::<String>(),
+            text.to_uppercase(),
+        );
+
+        let mut source_offset = 0;
+        for (source_start, scalar) in text.char_indices() {
+            assert_eq!(source_start, source_offset);
+            source_offset += scalar.len_utf8();
+            let expected_display = scalar.to_uppercase().count();
+            let matching = fresh
+                .iter()
+                .flat_map(|line| line.display_source_map.iter())
+                .filter(|segment| {
+                    segment.source_start == source_start && segment.source_end == source_offset
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1, "one canonical scalar maps within one output line");
+            assert_eq!(matching[0].display_end - matching[0].display_start, expected_display);
+        }
+        assert_eq!(source_offset, text.len());
+
+        let mut cache = ElementWrapCache::default();
+        cache.start_generation();
+        let cached = wrap_for_layout(
+            Some(&mut cache),
+            None,
+            &element_id,
+            text,
+            0,
+            Role::Action,
+            paragraph(4),
+            text_style(true),
+            &runs,
+            FixedPoint::from_points(7),
+            LayoutPurpose::Editor,
+            false,
+            EffectiveGeometryMode::Sequential,
+        );
+        assert_wrapped_lines_equal(&cached, &fresh);
+    }
+}
+
+#[cfg(test)]
 mod wrap_cache_identity_tests {
     use super::{
         EffectiveGeometryMode, EffectiveParagraph, ElementWrapCache, ElementWrapIdentity,
@@ -4227,6 +4957,11 @@ mod wrap_cache_identity_tests {
             atomic_ranges: &[Range<usize>],
             diagnostics: Option<&mut LayoutBuildDiagnostics>,
         ) -> Vec<WrappedLine> {
+            let source_map = atomic_ranges
+                .iter()
+                .map(|range| (range.clone(), 0..0))
+                .collect::<Vec<_>>();
+            let atomic_boundaries = super::atomic_boundary_index(text, &source_map);
             cache.wrap(
                 &self.element_id,
                 text,
@@ -4237,6 +4972,7 @@ mod wrap_cache_identity_tests {
                 self.char_width,
                 runs,
                 atomic_ranges,
+                &atomic_boundaries,
                 LayoutPurpose::Editor,
                 false,
                 EffectiveGeometryMode::Sequential,
@@ -4433,6 +5169,7 @@ mod wrap_cache_eviction_tests {
             char_width,
             &[],
             &[],
+            &[],
             LayoutPurpose::Editor,
             false,
             EffectiveGeometryMode::Sequential,
@@ -4453,6 +5190,7 @@ mod wrap_cache_eviction_tests {
             paragraph,
             text_style,
             char_width,
+            &[],
             &[],
             &[],
             LayoutPurpose::Editor,
@@ -4580,6 +5318,59 @@ mod prepared_body_cache_tests {
             .expect("the requested prepared owner is retained")
     }
 
+    fn initial_cached_layout(
+        cache: &mut LayoutCache,
+        project: &Project,
+        inputs: &LayoutInputs,
+    ) -> LayoutBuildDiagnostics {
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+        let (_, hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                0,
+                project,
+                inputs,
+                super::LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("initial cached layout builds");
+        assert!(!hit);
+        diagnostics
+    }
+
+    fn assert_cached_edit_matches_fresh(
+        cache: &mut LayoutCache,
+        project: &Project,
+        inputs: &LayoutInputs,
+        revision: u64,
+        incremental: bool,
+    ) -> LayoutBuildDiagnostics {
+        let fresh = ScreenplayLayout::build_with_composition(
+            project,
+            inputs,
+            &SourceLayoutSettings::default(),
+            LayoutComposition::BodyEditor,
+        )
+        .expect("complete fresh comparison layout builds");
+        let mut diagnostics = LayoutBuildDiagnostics::default();
+        let (cached, hit) = cache
+            .get_or_build_with_inputs_for_purpose_and_diagnostics(
+                revision,
+                project,
+                inputs,
+                super::LayoutPurpose::Editor,
+                &mut diagnostics,
+            )
+            .expect("cached edit layout builds");
+        assert!(!hit);
+        assert_interaction_equal(&fresh, &cached);
+        assert_eq!(diagnostics.prepared_incremental_hits, u64::from(incremental));
+        assert_eq!(
+            diagnostics.prepared_incremental_fallbacks,
+            u64::from(!incremental)
+        );
+        diagnostics
+    }
+
     fn assert_interaction_equal(fresh: &ScreenplayLayout, cached: &ScreenplayLayout) {
         assert_eq!(fresh, cached);
         for line in fresh.pages.iter().flat_map(|page| &page.lines) {
@@ -4637,6 +5428,9 @@ mod prepared_body_cache_tests {
             .expect("initial prepared layout builds");
         assert!(!hit);
         assert_eq!(diagnostics.element_wraps_built, 2);
+        assert_eq!(diagnostics.layout_builds, 1);
+        assert_eq!(diagnostics.prepared_hits, 0);
+        assert_eq!(diagnostics.prepared_misses, 2);
         let first_prepared = cached_prepared(
             &cache,
             &project.elements[0],
@@ -4660,6 +5454,9 @@ mod prepared_body_cache_tests {
         assert!(!hit);
         assert_eq!(diagnostics.element_wraps_built, 0);
         assert_eq!(diagnostics.element_wraps_reused, 0);
+        assert_eq!(diagnostics.prepared_hits, 2);
+        assert_eq!(diagnostics.prepared_misses, 0);
+        assert_eq!(diagnostics.prepared_miss_nanos, 0);
         assert!(Arc::ptr_eq(
             &first_prepared,
             &cached_prepared(
@@ -4695,6 +5492,8 @@ mod prepared_body_cache_tests {
         assert!(!hit);
         assert_eq!(diagnostics.element_wraps_built, 1);
         assert_eq!(diagnostics.element_wraps_reused, 0);
+        assert_eq!(diagnostics.prepared_hits, 1);
+        assert_eq!(diagnostics.prepared_misses, 1);
         assert!(!Arc::ptr_eq(
             &first_prepared,
             &cached_prepared(
@@ -4900,6 +5699,10 @@ mod prepared_body_cache_tests {
             cache.prepared_body.usage_order.len(),
             cache.prepared_body.entry_count
         );
+        assert!(
+            cache.prepared_body.previous_by_identity.len()
+                <= cache.prepared_body.entry_count
+        );
         assert_eq!(
             cache
                 .prepared_body
@@ -4923,6 +5726,7 @@ mod prepared_body_cache_tests {
         assert!(weak.upgrade().is_some());
         cache.prepared_body.clear();
         assert!(weak.upgrade().is_none());
+        assert!(cache.prepared_body.previous_by_identity.is_empty());
         assert_eq!(cache.prepared_body.entry_count, 0);
         assert_eq!(cache.prepared_body.retained_bytes, 0);
         assert!(cache.prepared_body.usage_order.is_empty());
@@ -5150,6 +5954,262 @@ mod prepared_body_cache_tests {
         )
         .expect("fresh deleted layout builds");
         assert_interaction_equal(&deleted_fresh, &deleted);
+    }
+
+    #[test]
+    fn incremental_plain_edits_reuse_long_prefixes_and_match_complete_layouts() {
+        let text = "lorem ipsum dolor sit amet whitespace selected breaks ".repeat(2_048);
+        let mut project = project_with(&[&text]);
+        let inputs = LayoutInputs::default();
+        let mut cache = LayoutCache::default();
+        let initial = initial_cached_layout(&mut cache, &project, &inputs);
+        assert_eq!(initial.prepared_incremental_fallbacks, 1);
+        let before = cached_prepared(
+            &cache,
+            &project.elements[0],
+            EffectiveGeometryMode::Sequential,
+        );
+        assert!(before.lines.len() > 100);
+
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.text.push_str(" append at end");
+        });
+        assert_cached_edit_matches_fresh(&mut cache, &project, &inputs, 1, true);
+        let appended = cached_prepared(
+            &cache,
+            &project.elements[0],
+            EffectiveGeometryMode::Sequential,
+        );
+        let reused = before.lines.len() - 2;
+        assert!(reused > 100);
+        for index in 0..reused {
+            assert!(Arc::ptr_eq(
+                &before.lines[index].display_text,
+                &appended.lines[index].display_text
+            ));
+            assert!(Arc::ptr_eq(
+                &before.lines[index].spans,
+                &appended.lines[index].spans
+            ));
+        }
+
+        let middle = project.elements[0].text.len() / 2;
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.text.insert_str(middle, " middle insertion");
+        });
+        assert_cached_edit_matches_fresh(&mut cache, &project, &inputs, 2, true);
+
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.text.insert_str(0, "beginning fallback ");
+        });
+        assert_cached_edit_matches_fresh(&mut cache, &project, &inputs, 3, false);
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.text.replace_range(0.."beginning".len(), "");
+        });
+        assert_cached_edit_matches_fresh(&mut cache, &project, &inputs, 4, false);
+
+        let end = project.elements[0].text.len();
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.text.replace_range(end - 7..end, "");
+        });
+        assert_cached_edit_matches_fresh(&mut cache, &project, &inputs, 5, true);
+
+        for step in 0..4u64 {
+            let revision = 6 + step * 2;
+            let offset = project.elements[0].text.len() / 3;
+            BodyOwner::update(&mut project.elements[0], |element| {
+                element.text.insert_str(offset, " sequential");
+            });
+            assert_cached_edit_matches_fresh(&mut cache, &project, &inputs, revision, true);
+            BodyOwner::update(&mut project.elements[0], |element| {
+                element.text.replace_range(offset..offset + " sequential".len(), "");
+            });
+            assert_cached_edit_matches_fresh(
+                &mut cache,
+                &project,
+                &inputs,
+                revision + 1,
+                true,
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_break_context_newlines_empty_and_whitespace_match_complete_layouts() {
+        let text = format!(
+            "{}\r\n{}\n{}",
+            "alpha beta gamma delta ".repeat(48),
+            "epsilon zeta eta theta ".repeat(48),
+            "final whitespace selected words ".repeat(48)
+        );
+        let mut project = project_with(&[&text]);
+        let inputs = LayoutInputs::default();
+        let mut cache = LayoutCache::default();
+        initial_cached_layout(&mut cache, &project, &inputs);
+        let boundary = cached_prepared(
+            &cache,
+            &project.elements[0],
+            EffectiveGeometryMode::Sequential,
+        )
+        .lines[8]
+        .source
+        .start;
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.text.insert_str(boundary, "before boundary ");
+        });
+        assert_cached_edit_matches_fresh(&mut cache, &project, &inputs, 1, true);
+
+        let crlf = project.elements[0].text.find("\r\n").expect("CRLF remains");
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.text.replace_range(crlf..crlf + 2, "");
+        });
+        assert_cached_edit_matches_fresh(&mut cache, &project, &inputs, 2, true);
+
+        let after_lf = project.elements[0].text.find('\n').expect("LF remains") + 1;
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.text.insert_str(after_lf, "after existing break ");
+        });
+        assert_cached_edit_matches_fresh(&mut cache, &project, &inputs, 3, true);
+
+        let mut empty = project_with(&[""]);
+        let mut empty_cache = LayoutCache::default();
+        initial_cached_layout(&mut empty_cache, &empty, &inputs);
+        BodyOwner::update(&mut empty.elements[0], |element| {
+            element.text.push_str("no reusable prefix");
+        });
+        assert_cached_edit_matches_fresh(&mut empty_cache, &empty, &inputs, 1, false);
+
+        let whitespace = " ".repeat(240);
+        let mut whitespace = project_with(&[&whitespace]);
+        let mut whitespace_cache = LayoutCache::default();
+        initial_cached_layout(&mut whitespace_cache, &whitespace, &inputs);
+        BodyOwner::update(&mut whitespace.elements[0], |element| {
+            element.text.push_str("     ");
+        });
+        assert_cached_edit_matches_fresh(&mut whitespace_cache, &whitespace, &inputs, 1, true);
+        BodyOwner::update(&mut whitespace.elements[0], |element| {
+            element.text.clear();
+        });
+        assert_cached_edit_matches_fresh(&mut whitespace_cache, &whitespace, &inputs, 2, false);
+    }
+
+    #[test]
+    fn incremental_unicode_mixed_runs_alignments_metrics_and_fallbacks_match_complete_layouts() {
+        let plain = "plain é你🙂 words ".repeat(64);
+        let expanded = "ßﬃ styled words ".repeat(64);
+        let tail = "tail italic words ".repeat(64);
+        for (alignment_index, alignment) in [
+            ParagraphAlignment::Left,
+            ParagraphAlignment::Right,
+            ParagraphAlignment::Center,
+            ParagraphAlignment::Justified,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut project = project_with(&[""]);
+            project.elements[0] = BodyOwner::shared(
+                ScreenplayElement::with_runs(
+                    "prepared-0",
+                    Role::Action,
+                    vec![
+                        TextRun {
+                            text: plain.clone(),
+                            attributes: Vec::new(),
+                        },
+                        TextRun {
+                            text: expanded.clone(),
+                            attributes: vec![RunAttribute {
+                                name: "Style".into(),
+                                value: "Bold+AllCaps".into(),
+                            }],
+                        },
+                        TextRun {
+                            text: tail.clone(),
+                            attributes: vec![RunAttribute {
+                                name: "Style".into(),
+                                value: "Italic".into(),
+                            }],
+                        },
+                    ],
+                    None,
+                )
+                .expect("mixed runs are valid"),
+            );
+            project.direct_paragraph_overrides.insert(
+                project.elements[0].id.clone(),
+                SourceParagraphOverrides {
+                    paragraph: SourceParagraphSpec {
+                        alignment: Some(alignment),
+                        first_indent: Some(FixedPoint::from_points(14)),
+                        left_indent: Some(FixedPoint::from_points(100)),
+                        right_indent: Some(FixedPoint::from_points(530)),
+                        leading_regular: Some(true),
+                        space_before: Some(FixedPoint::from_points(3)),
+                        spacing_single: Some(true),
+                    },
+                    starts_new_page: None,
+                },
+            );
+            let inputs = compact_inputs();
+            let mut cache = LayoutCache::default();
+            initial_cached_layout(&mut cache, &project, &inputs);
+            let offset = cached_prepared(
+                &cache,
+                &project.elements[0],
+                EffectiveGeometryMode::Sequential,
+            )
+            .lines
+            .iter()
+            .find(|line| line.source.start > plain.len() + expanded.len() / 2)
+            .expect("an expanded-run wrap boundary exists")
+            .source
+            .start;
+            let inserted = "é🙂ßﬃ";
+            BodyOwner::update(&mut project.elements[0], |element| {
+                element.text.insert_str(offset, inserted);
+                element.runs[1].text.insert_str(offset - plain.len(), inserted);
+            });
+            assert_cached_edit_matches_fresh(
+                &mut cache,
+                &project,
+                &inputs,
+                alignment_index as u64 + 1,
+                true,
+            );
+        }
+
+        let mut project = project_with(&[&plain]);
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.runs = vec![TextRun {
+                text: plain.clone(),
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Bold".into(),
+                }],
+            }];
+        });
+        let inputs = LayoutInputs::default();
+        let mut cache = LayoutCache::default();
+        initial_cached_layout(&mut cache, &project, &inputs);
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.runs[0].attributes[0].value = "Italic".into();
+        });
+        assert_cached_edit_matches_fresh(&mut cache, &project, &inputs, 1, false);
+        let combined = project.elements[0].text.clone();
+        BodyOwner::update(&mut project.elements[0], |element| {
+            element.runs = vec![
+                TextRun {
+                    text: combined[..10].to_owned(),
+                    attributes: Vec::new(),
+                },
+                TextRun {
+                    text: combined[10..].to_owned(),
+                    attributes: Vec::new(),
+                },
+            ];
+        });
+        assert_cached_edit_matches_fresh(&mut cache, &project, &inputs, 2, false);
     }
 
     #[test]

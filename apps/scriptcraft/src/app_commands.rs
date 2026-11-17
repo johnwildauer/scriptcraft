@@ -84,6 +84,33 @@ pub(super) struct AppCommandAvailability {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AppCommandProjection {
+    pub(super) availability: AppCommandAvailability,
+    pub(super) say_undual: bool,
+}
+
+/// Every non-session input to the shared availability/label projection. Session
+/// content, selections, typing styles, and histories are covered by the session
+/// mutation token; platform-specific native-output state is reduced to its
+/// effective boolean before entering this key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AppCommandProjectionKey {
+    session_mutation_token: u64,
+    active_editor_surface: EditorSurface,
+    migration_pending: bool,
+    replacement_pending: bool,
+    native_output_active: bool,
+    title_page_window_open: bool,
+    title_viewport_unsupported: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CachedAppCommandProjection {
+    key: AppCommandProjectionKey,
+    projection: AppCommandProjection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DesktopUnavailableReason {
     ModalBlocked,
     UndoHistory,
@@ -310,15 +337,82 @@ impl ScriptCraftApp {
         }
     }
 
-    pub(super) fn app_command_availability(&self) -> AppCommandAvailability {
+    fn native_output_active(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            self.native_output_modal_active
+                || self.windows_print_preparation.is_some()
+                || self.windows_print_session.is_some()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.native_output_modal_active
+        }
+    }
+
+    fn app_command_projection_key(&self) -> AppCommandProjectionKey {
+        AppCommandProjectionKey {
+            session_mutation_token: self.session.mutation_token(),
+            active_editor_surface: self.active_editor_surface,
+            migration_pending: self.pending_fdx_open.is_some(),
+            replacement_pending: self.replacement_open_pending(),
+            native_output_active: self.native_output_active(),
+            title_page_window_open: self.title_page_window_open,
+            title_viewport_unsupported: self.title_viewport_unsupported,
+        }
+    }
+
+    pub(super) fn app_command_projection(&mut self) -> AppCommandProjection {
+        let key = self.app_command_projection_key();
+        if let Some(cached) = self.command_projection_cache {
+            if cached.key == key {
+                return cached.projection;
+            }
+        }
+
+        let dual_dialogue_target = self.dual_dialogue_toggle_target();
+        let mut availability = self.app_command_availability_without_dual_dialogue();
+        availability.dual_dialogue_toggle =
+            !availability.replacement_pending && dual_dialogue_target.is_some();
+        let projection = AppCommandProjection {
+            availability,
+            say_undual: matches!(
+                dual_dialogue_target,
+                Some(scriptcraft_core::dual_dialogue::ToggleTarget::Disable(_))
+            ),
+        };
+        self.command_projection_cache = Some(CachedAppCommandProjection { key, projection });
+        #[cfg(test)]
+        {
+            self.command_projection_builds = self.command_projection_builds.saturating_add(1);
+        }
+        projection
+    }
+
+    pub(super) fn app_command_availability(&mut self) -> AppCommandAvailability {
+        self.app_command_projection().availability
+    }
+
+    pub(super) fn dual_dialogue_menu_should_say_undual(&mut self) -> bool {
+        self.app_command_projection().say_undual
+    }
+
+    /// Dispatch always observes current gates. Most commands do not consume the
+    /// dual-dialogue target, so their fresh availability check need not perform
+    /// that target resolution and candidate scan.
+    fn command_dispatch_availability(&mut self, command: CommandId) -> AppCommandAvailability {
+        let mut availability = self.app_command_availability_without_dual_dialogue();
+        if command == CommandId::EditorDualDialogueToggle {
+            availability.dual_dialogue_toggle = !availability.replacement_pending
+                && self.dual_dialogue_toggle_target().is_some();
+        }
+        availability
+    }
+
+    fn app_command_availability_without_dual_dialogue(&self) -> AppCommandAvailability {
         let migration_pending = self.pending_fdx_open.is_some();
         let replacement_pending = self.replacement_open_pending();
-        #[cfg(target_os = "windows")]
-        let native_output_active = self.native_output_modal_active
-            || self.windows_print_preparation.is_some()
-            || self.windows_print_session.is_some();
-        #[cfg(not(target_os = "windows"))]
-        let native_output_active = self.native_output_modal_active;
+        let native_output_active = self.native_output_active();
         let (selection, text_len, role_is_empty_parenthetical, element_count) = match self.active_editor_surface {
             EditorSurface::Body => {
                 let selection = self.session.selection();
@@ -337,7 +431,6 @@ impl ScriptCraftApp {
             selection.focus.offset < text_len || role_is_empty_parenthetical
         };
 
-        let dual_dialogue_target = self.dual_dialogue_toggle_target();
         AppCommandAvailability {
             modal_blocked: migration_pending && !replacement_pending,
             native_output_active,
@@ -354,7 +447,7 @@ impl ScriptCraftApp {
             // Clipboard state is read only when Paste is activated, never per frame.
             paste: !migration_pending && !replacement_pending,
             body_only: self.active_editor_surface == EditorSurface::Body,
-            dual_dialogue_toggle: !replacement_pending && dual_dialogue_target.is_some(),
+            dual_dialogue_toggle: false,
             // In-app Open is a selected-path replacement request and is blocked
             // while the current document is resolving another lifecycle gate.
             title_open: !migration_pending && !replacement_pending && !self.title_viewport_unsupported,
@@ -364,21 +457,19 @@ impl ScriptCraftApp {
         }
     }
 
-    pub(super) fn dual_dialogue_menu_should_say_undual(&self) -> bool {
-        matches!(
-            self.dual_dialogue_toggle_target(),
-            Some(scriptcraft_core::dual_dialogue::ToggleTarget::Disable(_))
-        )
-    }
-
     fn dual_dialogue_toggle_target(
-        &self,
+        &mut self,
     ) -> Option<scriptcraft_core::dual_dialogue::ToggleTarget> {
-        (self.active_editor_surface == EditorSurface::Body)
-            .then(|| self.session.dual_dialogue_toggle_target(
-                scriptcraft_core::dual_dialogue::SelectionSurface::Body,
-            ).ok().flatten())
-            .flatten()
+        if self.active_editor_surface != EditorSurface::Body {
+            return None;
+        }
+        #[cfg(test)]
+        {
+            self.dual_dialogue_target_queries = self.dual_dialogue_target_queries.saturating_add(1);
+        }
+        self.session.dual_dialogue_toggle_target(
+            scriptcraft_core::dual_dialogue::SelectionSurface::Body,
+        ).ok().flatten()
     }
 
     fn with_native_output_modal(&mut self, operation: impl FnOnce(&mut ScriptCraftApp)) {
@@ -461,7 +552,7 @@ impl ScriptCraftApp {
         resolve_pdf_options: impl FnOnce(&mut ScriptCraftApp, scriptcraft_commands::PdfExportOptions),
         open_print_panel: impl FnOnce(&mut ScriptCraftApp),
     ) -> DesktopCommandOutcome {
-        let availability = self.app_command_availability();
+        let availability = self.command_dispatch_availability(command.id());
         if !availability.is_enabled(command.id()) {
             if matches!(
                 command.id(),
@@ -893,6 +984,23 @@ impl ScriptCraftApp {
         reveal_intent: super::RevealIntent,
         ctx: &egui::Context,
     ) -> DesktopCommandOutcome {
+        let started = self.development_mode.then(std::time::Instant::now);
+        if self.development_mode {
+            self.responsiveness.begin_editor_command();
+        }
+        let outcome = self.execute_editor_inner(command, reveal_intent, ctx);
+        if let Some(started) = started {
+            self.responsiveness.end_editor_command(started.elapsed());
+        }
+        outcome
+    }
+
+    fn execute_editor_inner(
+        &mut self,
+        command: &Command,
+        reveal_intent: super::RevealIntent,
+        ctx: &egui::Context,
+    ) -> DesktopCommandOutcome {
         // Defense in depth for stale/direct editor calls that bypass command
         // availability after a replacement handoff has engaged the lock.
         if self.replacement_open_pending() {
@@ -902,11 +1010,27 @@ impl ScriptCraftApp {
             && super::responsiveness::is_text_editing_command(command.id()))
         .then(std::time::Instant::now);
         let active_surface = self.active_editor_surface();
+        if self.development_mode {
+            self.session.begin_mutation_diagnostics();
+        }
+        let executor_started = self.development_mode.then(std::time::Instant::now);
         let outcome = execute_editor_command_on_surface(
             &mut self.session,
             command,
             active_surface,
         );
+        let executor_duration = executor_started.map(|started| started.elapsed());
+        let mutation_diagnostics = if self.development_mode {
+            self.session.take_mutation_diagnostics()
+        } else {
+            None
+        };
+        if let (Some(executor_duration), Some(observation)) =
+            (executor_duration, mutation_diagnostics)
+        {
+            self.responsiveness
+                .record_command_detail(executor_duration, observation);
+        }
         match &outcome {
             CommandOutcome::Changed => {
                 if let Some(accepted_at) = edit_input_started {
@@ -1362,6 +1486,26 @@ mod surface_command_availability_tests {
     };
     use super::super::sprint_timer::{NotificationFeedback, SprintTimer};
 
+    fn install_dual_dialogue_candidate(app: &mut ScriptCraftApp) {
+        let mut project = scriptcraft_core::Project::new().expect("default project is valid");
+        project.elements = [
+            ("left-cue", scriptcraft_core::Role::Character, "LEFT"),
+            ("left-line", scriptcraft_core::Role::Dialogue, "left"),
+            ("right-cue", scriptcraft_core::Role::Character, "RIGHT"),
+            ("right-line", scriptcraft_core::Role::Dialogue, "right"),
+        ]
+        .into_iter()
+        .map(|(id, role, text)| {
+            scriptcraft_core::BodyOwner::shared(
+                scriptcraft_core::ScreenplayElement::new(id, role, text)
+                    .expect("candidate element is valid"),
+            )
+        })
+        .collect();
+        app.session = scriptcraft_core::editing::EditingSession::new(project)
+            .expect("candidate session is valid");
+    }
+
     #[test]
     fn file_close_targets_only_the_focused_viewport() {
         assert_eq!(
@@ -1397,6 +1541,225 @@ mod surface_command_availability_tests {
             EditorSurface::TitlePage,
         );
         assert!(matches!(external, Command::EditorStyleClear { surface: EditorSurface::Body }));
+    }
+
+    #[test]
+    fn shared_projection_reuses_one_target_query_and_invalidates_after_content_and_selection() {
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        install_dual_dialogue_candidate(&mut app);
+        let context = eframe::egui::Context::default();
+        let initial = app.app_command_projection();
+        assert!(initial.availability.dual_dialogue_toggle);
+        assert!(!initial.say_undual);
+        assert_eq!(app.app_command_availability(), initial.availability);
+        assert_eq!(app.dual_dialogue_menu_should_say_undual(), initial.say_undual);
+        assert_eq!(app.command_projection_builds, 1);
+        assert_eq!(app.dual_dialogue_target_queries, 1);
+
+        // Dispatch does not trust the cached UI projection: a newly raised host
+        // gate blocks ordinary input without performing a dual-target query.
+        app.native_output_modal_active = true;
+        let blocked = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorTextInsert {
+                    text: "blocked".to_owned(),
+                    surface: EditorSurface::Body,
+                },
+                CommandOrigin::Keyboard,
+            ),
+            &context,
+        );
+        assert!(matches!(
+            blocked.outcome,
+            DesktopCommandOutcome::Unavailable(super::DesktopUnavailableReason::ModalBlocked)
+        ));
+        assert_eq!(app.dual_dialogue_target_queries, 1);
+
+        app.native_output_modal_active = false;
+        let inserted = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorTextInsert {
+                    text: "x".to_owned(),
+                    surface: EditorSurface::Body,
+                },
+                CommandOrigin::Keyboard,
+            ),
+            &context,
+        );
+        assert!(matches!(
+            inserted.outcome,
+            DesktopCommandOutcome::Editor(scriptcraft_commands::CommandOutcome::Changed)
+        ));
+        assert_eq!(app.dual_dialogue_target_queries, 1);
+
+        let edited = app.app_command_projection();
+        assert!(edited.availability.dual_dialogue_toggle);
+        assert!(!edited.say_undual);
+        assert_eq!(app.app_command_projection(), edited);
+        assert_eq!(app.command_projection_builds, 2);
+        assert_eq!(app.dual_dialogue_target_queries, 2);
+
+        app.session
+            .set_selection(crate::Selection::caret(crate::Position {
+                element: 0,
+                offset: 0,
+            }))
+            .expect("the edited body caret is valid");
+        let moved = app.app_command_projection();
+        assert!(moved.availability.dual_dialogue_toggle);
+        assert!(!moved.say_undual);
+        assert_eq!(app.app_command_projection(), moved);
+        assert_eq!(app.command_projection_builds, 3);
+        assert_eq!(app.dual_dialogue_target_queries, 3);
+
+        app.session
+            .set_selection(crate::Selection::caret(crate::Position {
+                element: 1,
+                offset: 0,
+            }))
+            .expect("the Dialogue caret is valid");
+        let ineligible = app.app_command_projection();
+        assert!(!ineligible.availability.dual_dialogue_toggle);
+        assert!(!ineligible.say_undual);
+        assert_eq!(app.app_command_availability(), ineligible.availability);
+        assert_eq!(app.dual_dialogue_menu_should_say_undual(), ineligible.say_undual);
+        assert_eq!(app.command_projection_builds, 4);
+        assert_eq!(app.dual_dialogue_target_queries, 4);
+    }
+
+    #[test]
+    fn shared_projection_invalidates_for_active_surface_and_window_gates() {
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        let body = app.app_command_projection();
+        assert!(body.availability.body_only);
+        assert_eq!(app.command_projection_builds, 1);
+        assert_eq!(app.dual_dialogue_target_queries, 1);
+
+        app.set_active_editor_surface(EditorSurface::TitlePage);
+        let title = app.app_command_projection();
+        assert!(!title.availability.body_only);
+        assert!(!title.availability.dual_dialogue_toggle);
+        assert_eq!(app.command_projection_builds, 2);
+        assert_eq!(app.dual_dialogue_target_queries, 1);
+
+        app.set_title_page_window_open(true);
+        let opened = app.app_command_projection();
+        assert!(opened.availability.title_close);
+        assert!(opened.availability.title_page_only_close);
+        assert_eq!(app.command_projection_builds, 3);
+
+        app.title_viewport_unsupported = true;
+        let unsupported = app.app_command_projection();
+        assert!(!unsupported.availability.title_open);
+        assert_eq!(app.command_projection_builds, 4);
+
+        app.native_output_modal_active = true;
+        let output = app.app_command_projection();
+        assert!(output.availability.native_output_active);
+        assert!(!output.availability.is_enabled(CommandId::EditPaste));
+        assert_eq!(app.command_projection_builds, 5);
+    }
+
+    #[test]
+    fn projection_key_covers_every_non_session_effective_input() {
+        let Ok(app) = ScriptCraftApp::new() else { return };
+        let key = app.app_command_projection_key();
+        let variants = [
+            super::AppCommandProjectionKey {
+                session_mutation_token: key.session_mutation_token.wrapping_add(1),
+                ..key
+            },
+            super::AppCommandProjectionKey {
+                active_editor_surface: EditorSurface::TitlePage,
+                ..key
+            },
+            super::AppCommandProjectionKey {
+                migration_pending: !key.migration_pending,
+                ..key
+            },
+            super::AppCommandProjectionKey {
+                replacement_pending: !key.replacement_pending,
+                ..key
+            },
+            super::AppCommandProjectionKey {
+                native_output_active: !key.native_output_active,
+                ..key
+            },
+            super::AppCommandProjectionKey {
+                title_page_window_open: !key.title_page_window_open,
+                ..key
+            },
+            super::AppCommandProjectionKey {
+                title_viewport_unsupported: !key.title_viewport_unsupported,
+                ..key
+            },
+        ];
+        for variant in variants {
+            assert_ne!(variant, key);
+        }
+    }
+
+    #[test]
+    fn dual_dialogue_dispatch_refreshes_its_target_independently_of_cached_ui_projection() {
+        let Ok(mut app) = ScriptCraftApp::new() else { return };
+        install_dual_dialogue_candidate(&mut app);
+        let context = eframe::egui::Context::default();
+        let cached = app.app_command_projection();
+        assert!(cached.availability.dual_dialogue_toggle);
+        assert!(!cached.say_undual);
+        assert_eq!(app.app_command_projection(), cached);
+        assert_eq!(app.command_projection_builds, 1);
+        assert_eq!(app.dual_dialogue_target_queries, 1);
+
+        // Make the cached Enable/Dual projection stale without rebuilding it.
+        // Activation must resolve Disable fresh rather than trusting that cache.
+        app.session.toggle_dual_dialogue().expect("candidate wraps");
+        assert_eq!(app.session.project().dual_dialogue_groups.len(), 1);
+        let _ = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorDualDialogueToggle,
+                CommandOrigin::NativeMenu,
+            ),
+            &context,
+        );
+        assert!(app.session.project().dual_dialogue_groups.is_empty());
+        assert_eq!(app.dual_dialogue_target_queries, 2);
+        assert_eq!(app.command_projection_builds, 1);
+
+        let ungrouped = app.app_command_projection();
+        assert!(ungrouped.availability.dual_dialogue_toggle);
+        assert!(!ungrouped.say_undual);
+        assert_eq!(app.command_projection_builds, 2);
+        assert_eq!(app.dual_dialogue_target_queries, 3);
+
+        let _ = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorDualDialogueToggle,
+                CommandOrigin::NativeMenu,
+            ),
+            &context,
+        );
+        assert_eq!(app.session.project().dual_dialogue_groups.len(), 1);
+        assert_eq!(app.dual_dialogue_target_queries, 4);
+        assert_eq!(app.command_projection_builds, 2);
+
+        let grouped = app.app_command_projection();
+        assert!(grouped.availability.dual_dialogue_toggle);
+        assert!(grouped.say_undual);
+        assert_eq!(app.dual_dialogue_menu_should_say_undual(), grouped.say_undual);
+        assert_eq!(app.command_projection_builds, 3);
+        assert_eq!(app.dual_dialogue_target_queries, 5);
+
+        let _ = app.dispatch_command(
+            CommandInvocation::new(
+                Command::EditorDualDialogueToggle,
+                CommandOrigin::NativeMenu,
+            ),
+            &context,
+        );
+        assert!(app.session.project().dual_dialogue_groups.is_empty());
+        assert_eq!(app.dual_dialogue_target_queries, 6);
+        assert_eq!(app.command_projection_builds, 3);
     }
 
     #[test]

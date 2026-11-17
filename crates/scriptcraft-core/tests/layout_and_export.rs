@@ -1,13 +1,19 @@
 #![forbid(unsafe_code)]
 
 use scriptcraft_core::dual_dialogue::{DualDialogueGroup, DualDialogueSide, DualDialogueWrapperProvenance};
+use scriptcraft_core::editing::{EditingSession, Position, Selection};
 use scriptcraft_core::exports::{export_pdf, export_pdf_with_options, export_text, PdfExportOptions};
-use scriptcraft_core::fdx::read_v6;
-use scriptcraft_core::formatting::{SourceLayoutSettings, SourceParagraphOverrides, SourceParagraphSpec};
-use scriptcraft_core::layout::{
-    Caret, InteractionQueryDiagnostics, LayoutCache, LayoutComposition, ScreenplayLayout,
+use scriptcraft_core::fdx::{read_v6, write_v6};
+use scriptcraft_core::formatting::{
+    ParagraphAlignment, SourceLayoutSettings, SourceParagraphOverrides, SourceParagraphSpec,
 };
-use scriptcraft_core::{FixedPoint, LayoutInputs, Project, Role, ScreenplayElement, StableId};
+use scriptcraft_core::layout::{
+    BodyEditorPresentation, Caret, InteractionQueryDiagnostics, LayoutBuildDiagnostics, LayoutCache,
+    LayoutComposition, LayoutPurpose, ScreenplayLayout,
+};
+use scriptcraft_core::{
+    FixedPoint, LayoutInputs, Project, Role, RunAttribute, ScreenplayElement, StableId, TextRun,
+};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -288,6 +294,141 @@ fn oversized_ordinary_element_preserves_spill_geometry_and_source_order() {
 }
 
 #[test]
+fn expansion_wrapping_preserves_alignment_spill_cache_interaction_and_exports() {
+    let plain = "plain é🙂 words ".repeat(12);
+    let expanded = "ßﬃ styled words ".repeat(12);
+    let tail = "\r\nnext line\nlast line ".repeat(8);
+    let text = format!("{plain}{expanded}{tail}");
+    let mut project = project_with(&[(Role::Action, &text)]);
+    scriptcraft_core::BodyOwner::update(&mut project.elements[0], |element| {
+        element.runs = vec![
+            TextRun {
+                text: plain,
+                attributes: Vec::new(),
+            },
+            TextRun {
+                text: expanded,
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Bold+AllCaps".into(),
+                }],
+            },
+            TextRun {
+                text: tail,
+                attributes: vec![RunAttribute {
+                    name: "Style".into(),
+                    value: "Italic".into(),
+                }],
+            },
+        ];
+    });
+    let inputs = LayoutInputs {
+        paper_height: 40,
+        margin_top: 8,
+        margin_bottom: 8,
+        lines_per_page: 2,
+        ..LayoutInputs::default()
+    };
+
+    for alignment in [
+        ParagraphAlignment::Left,
+        ParagraphAlignment::Right,
+        ParagraphAlignment::Center,
+        ParagraphAlignment::Justified,
+    ] {
+        let mut aligned = project.clone();
+        aligned.direct_paragraph_overrides.insert(
+            aligned.elements[0].id.clone(),
+            SourceParagraphOverrides {
+                paragraph: SourceParagraphSpec {
+                    alignment: Some(alignment),
+                    ..SourceParagraphSpec::default()
+                },
+                starts_new_page: None,
+            },
+        );
+        let before = aligned.clone();
+        let fresh = build(&aligned, LayoutComposition::BodyEditor, &inputs);
+        let lines = fresh
+            .pages
+            .iter()
+            .flat_map(|page| &page.lines)
+            .filter(|line| line.element == 0)
+            .collect::<Vec<_>>();
+        assert!(fresh.pages.len() > 1);
+        assert!(lines.iter().any(|line| line.oversized));
+        assert!(lines.iter().all(|line| line.alignment == alignment));
+        assert!(lines.iter().any(|line| line.display_text.contains("SS")));
+        assert!(lines.iter().any(|line| line.display_text.contains("FFI")));
+        for line in &lines {
+            let mut display_offset = 0;
+            let mut source_offset = line.source.start;
+            for segment in line.display_source_map.iter() {
+                assert_eq!(segment.display_start, display_offset);
+                assert!(segment.display_end > segment.display_start);
+                assert_eq!(segment.source_start, source_offset);
+                assert!(segment.source_end > segment.source_start);
+                display_offset = segment.display_end;
+                source_offset = segment.source_end;
+            }
+            assert_eq!(display_offset, line.display_text.chars().count());
+            assert_eq!(source_offset, line.source.end);
+        }
+
+        let mut cache = LayoutCache::default();
+        let (cold, cold_hit) = valid(cache.get_or_build_with_composition(
+            0,
+            &aligned,
+            &inputs,
+            LayoutComposition::BodyEditor,
+        ));
+        assert!(!cold_hit);
+        assert_eq!(cold.as_ref(), &fresh);
+        let (complete_hit, complete_hit_flag) = valid(cache.get_or_build_with_composition(
+            0,
+            &aligned,
+            &inputs,
+            LayoutComposition::BodyEditor,
+        ));
+        assert!(complete_hit_flag);
+        assert!(Arc::ptr_eq(&cold, &complete_hit));
+        let (reused, reused_hit) = valid(cache.get_or_build_with_composition(
+            1,
+            &aligned,
+            &inputs,
+            LayoutComposition::BodyEditor,
+        ));
+        assert!(!reused_hit);
+        assert_eq!(reused.as_ref(), &fresh);
+
+        for line in lines.iter().filter(|line| !line.display_source_map.is_empty()) {
+            let caret = Caret {
+                element: line.element,
+                offset: line.display_source_map[0].source_end,
+            };
+            assert_eq!(fresh.caret_geometry(caret.clone()), reused.caret_geometry(caret.clone()));
+            let mut diagnostics = InteractionQueryDiagnostics::default();
+            let located = valid(reused.line_for_caret_with_diagnostics(&caret, &mut diagnostics));
+            assert_eq!(located.line, *line);
+            assert_eq!(
+                fresh.hit_test_fixed(line.page, line.geometry.x, line.geometry.y),
+                reused.hit_test_fixed(line.page, line.geometry.x, line.geometry.y),
+            );
+        }
+
+        let plain = valid(export_text(&aligned));
+        assert!(plain.text.contains("plain é🙂"));
+        assert!(plain.text.contains("ßﬃ"));
+        let options = PdfExportOptions {
+            include_title_page: false,
+        };
+        let pdf = valid(export_pdf_with_options(&aligned, options));
+        assert_eq!(valid(export_pdf_with_options(&aligned, options)), pdf);
+        assert_eq!(aligned, before);
+    }
+}
+
+#[test]
 fn dual_block_exact_fit_and_one_fixed_point_unit_overflow_paginate_atomically() {
     let mut fitting = project_with(&[
         (Role::Character, "LEFT"), (Role::Dialogue, "left"),
@@ -537,4 +678,102 @@ fn prepared_body_revision_reuse_isolates_title_print_and_export_composition() {
 
     assert_eq!(valid(export_text(&project)), plain_before);
     assert_eq!(valid(export_pdf(&project)), pdf_before);
+}
+
+#[test]
+fn incremental_preparation_matches_fresh_print_history_reopen_and_exports() {
+    let source = format!(
+        "<FinalDraft DocumentType=\"Script\" Version=\"6\"><Content><Paragraph Type=\"Action\" id=\"body\"><Text>{}</Text></Paragraph></Content></FinalDraft>",
+        "source lorem é🙂 words ".repeat(1_024)
+    );
+    let project = valid(read_v6(source.as_bytes())).project;
+    let mut session = valid(EditingSession::new(project));
+    let presentation = BodyEditorPresentation::for_project(session.project(), None);
+    let inputs = session.layout_inputs().clone();
+    let mut body_cache = LayoutCache::default();
+    let mut body_diagnostics = LayoutBuildDiagnostics::default();
+    let (initial, _) = valid(body_cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &presentation,
+        &mut body_diagnostics,
+    ));
+    let mut print_cache = LayoutCache::default();
+    let mut print_diagnostics = LayoutBuildDiagnostics::default();
+    let (initial_print, _) = valid(print_cache.get_or_build_for_session_with_diagnostics(
+        0,
+        &session,
+        LayoutPurpose::Print,
+        &mut print_diagnostics,
+    ));
+    assert!(initial_print.pages.len() > 1);
+
+    valid(session.set_selection(Selection::caret(Position {
+        element: 0,
+        offset: session.project().elements[0].text.len(),
+    })));
+    valid(session.insert(" append é你🙂ßﬃ"));
+    let (edited, _) = valid(body_cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &presentation,
+        &mut body_diagnostics,
+    ));
+    assert_eq!(body_diagnostics.prepared_incremental_hits, 1);
+    assert_eq!(body_diagnostics.prepared_incremental_fallbacks, 0);
+    let fresh = build(session.project(), LayoutComposition::BodyEditor, &inputs);
+    assert_eq!(edited.as_ref(), &fresh);
+    for line in fresh.pages.iter().flat_map(|page| &page.lines) {
+        for offset in [line.source.start, line.source.end] {
+            let caret = Caret {
+                element: line.element,
+                offset,
+            };
+            assert_eq!(fresh.caret_geometry(caret.clone()), edited.caret_geometry(caret.clone()));
+            let mut queries = InteractionQueryDiagnostics::default();
+            assert_eq!(
+                valid(fresh.line_for_caret_with_diagnostics(&caret, &mut queries)).line,
+                valid(edited.line_for_caret_with_diagnostics(&caret, &mut queries)).line
+            );
+        }
+        assert_eq!(
+            fresh.hit_test_fixed(line.page, line.geometry.x, line.geometry.y),
+            edited.hit_test_fixed(line.page, line.geometry.x, line.geometry.y)
+        );
+    }
+
+    valid(session.undo());
+    let (undone, _) = valid(body_cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &presentation,
+        &mut body_diagnostics,
+    ));
+    assert_eq!(undone, initial);
+    assert_eq!(body_diagnostics.prepared_incremental_hits, 0);
+    valid(session.redo());
+    let (redone, _) = valid(body_cache.get_or_build_body_editor_for_session_with_diagnostics(
+        &session,
+        &presentation,
+        &mut body_diagnostics,
+    ));
+    assert_eq!(redone, edited);
+    assert_eq!(body_diagnostics.prepared_incremental_hits, 0);
+
+    let (printed, _) = valid(print_cache.get_or_build_for_session_with_diagnostics(
+        session.revision(),
+        &session,
+        LayoutPurpose::Print,
+        &mut print_diagnostics,
+    ));
+    assert_eq!(print_diagnostics.prepared_incremental_hits, 1);
+    assert_eq!(print_diagnostics.prepared_incremental_fallbacks, 0);
+    assert_eq!(
+        printed.as_ref(),
+        &build(session.project(), LayoutComposition::Print { include_title_page: true }, &inputs)
+    );
+
+    let plain = valid(export_text(session.project()));
+    let pdf = valid(export_pdf(session.project()));
+    let reopened = valid(read_v6(&valid(write_v6(session.project())))).project;
+    assert_eq!(build(&reopened, LayoutComposition::BodyEditor, &inputs), fresh);
+    assert_eq!(valid(export_text(&reopened)), plain);
+    assert_eq!(valid(export_pdf(&reopened)), pdf);
 }

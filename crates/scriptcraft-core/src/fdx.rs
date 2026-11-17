@@ -679,7 +679,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
                 .insert(group.id.clone(), overrides.clone());
         }
     }
-    preservation.rebuild_managed_paragraph_index();
+    preservation.rebuild_indexes();
     project.preservation = Some(preservation);
     project.validate().map_err(map_model_error)?;
     let text_state = raw_root_text_state(&root_for_text_state, &project);

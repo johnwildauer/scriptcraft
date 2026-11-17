@@ -1493,12 +1493,37 @@ fn paint_page_counter(ui: &egui::Ui, text: &str, rect: Rect, color: Color32) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DiagnosticProjection<'a> {
     pub(super) performance_summary: &'a str,
+    pub(super) phase_summary: &'a str,
+    pub(super) command_detail_summaries: [&'a str; 3],
+    pub(super) aligned_edit_update_summaries: [&'a str; 2],
+    pub(super) aligned_edit_update_other_detail_summary: &'a str,
+    pub(super) layout_build_detail_summary: &'a str,
     pub(super) diagnostic_message: Option<&'a str>,
 }
 
 impl DiagnosticProjection<'_> {
     pub(super) fn safe_summary(self) -> String {
         self.performance_summary.to_owned()
+    }
+
+    pub(super) fn safe_phase_summary(self) -> String {
+        self.phase_summary.to_owned()
+    }
+
+    pub(super) fn safe_command_detail_summaries(self) -> [String; 3] {
+        self.command_detail_summaries.map(str::to_owned)
+    }
+
+    pub(super) fn safe_aligned_edit_update_summaries(self) -> [String; 2] {
+        self.aligned_edit_update_summaries.map(str::to_owned)
+    }
+
+    pub(super) fn safe_aligned_edit_update_other_detail_summary(self) -> String {
+        self.aligned_edit_update_other_detail_summary.to_owned()
+    }
+
+    pub(super) fn safe_layout_build_detail_summary(self) -> String {
+        self.layout_build_detail_summary.to_owned()
     }
 }
 
@@ -1867,6 +1892,14 @@ fn show_impl_with_appearance(
                 .open(diagnostics_open)
                 .show(ui, |ui| {
                     let summary = diagnostics.safe_summary();
+                    let phase_summary = diagnostics.safe_phase_summary();
+                    let command_detail_summaries = diagnostics.safe_command_detail_summaries();
+                    let aligned_edit_update_summaries =
+                        diagnostics.safe_aligned_edit_update_summaries();
+                    let aligned_edit_update_other_detail_summary =
+                        diagnostics.safe_aligned_edit_update_other_detail_summary();
+                    let layout_build_detail_summary =
+                        diagnostics.safe_layout_build_detail_summary();
                     let summary_height = ui.text_style_height(&egui::TextStyle::Body);
                     let summary_width = ui.available_width();
                     one_line_region(
@@ -1878,6 +1911,77 @@ fn show_impl_with_appearance(
                                 "status-diagnostics-summary",
                                 &summary,
                                 presentation::default_foreground(summary_ui),
+                            );
+                        },
+                    );
+                    one_line_region(
+                        ui,
+                        egui::vec2(summary_width, summary_height),
+                        |phase_ui| {
+                            paint_noninteractive_text(
+                                phase_ui,
+                                "status-diagnostics-phases",
+                                &phase_summary,
+                                presentation::default_foreground(phase_ui),
+                            );
+                        },
+                    );
+                    for (summary, id_source) in command_detail_summaries.iter().zip([
+                        "status-diagnostics-command-core",
+                        "status-diagnostics-command-checks",
+                        "status-diagnostics-command-publish",
+                    ]) {
+                        one_line_region(
+                            ui,
+                            egui::vec2(summary_width, summary_height),
+                            |detail_ui| {
+                                paint_noninteractive_text(
+                                    detail_ui,
+                                    id_source,
+                                    summary,
+                                    presentation::default_foreground(detail_ui),
+                                );
+                            },
+                        );
+                    }
+                    for (summary, id_source) in aligned_edit_update_summaries.iter().zip([
+                        "status-diagnostics-edit-update",
+                        "status-diagnostics-edit-update-nested",
+                    ]) {
+                        one_line_region(
+                            ui,
+                            egui::vec2(summary_width, summary_height),
+                            |detail_ui| {
+                                paint_noninteractive_text(
+                                    detail_ui,
+                                    id_source,
+                                    summary,
+                                    presentation::default_foreground(detail_ui),
+                                );
+                            },
+                        );
+                    }
+                    one_line_region(
+                        ui,
+                        egui::vec2(summary_width, summary_height),
+                        |detail_ui| {
+                            paint_noninteractive_text(
+                                detail_ui,
+                                "status-diagnostics-edit-update-other-detail",
+                                &aligned_edit_update_other_detail_summary,
+                                presentation::default_foreground(detail_ui),
+                            );
+                        },
+                    );
+                    one_line_region(
+                        ui,
+                        egui::vec2(summary_width, summary_height),
+                        |detail_ui| {
+                            paint_noninteractive_text(
+                                detail_ui,
+                                "status-diagnostics-layout-build-detail",
+                                &layout_build_detail_summary,
+                                presentation::default_foreground(detail_ui),
                             );
                         },
                     );
@@ -2076,13 +2180,49 @@ mod diagnostic_status_tests {
     }
 
     #[test]
-    fn diagnostics_keep_responsiveness_first_and_error_reporting_separate() {
+    fn diagnostics_keep_responsiveness_phases_and_error_reporting_separate() {
         let responsiveness = "Update FPS 60.0 | Update ms avg/p95/max 1.00/2.00/3.00 | Edit to app paint ms avg/p95/max 4.00/5.00/6.00 | Pages visible/total 2/90";
+        let phases = "Phases ms avg/p95/max | Command 1.00/2.00/3.00 | Layout hit 4.00/5.00/6.00 | Layout build 40.00/50.00/60.00 | Surface 7.00/8.00/9.00 | Page paint 2.00/3.00/4.00";
+        let command_details = [
+            "Cmd core ms avg/p95/max | Executor 1.00/2.00/3.00",
+            "Cmd checks ms avg/p95/max | Scoped collecting",
+            "Cmd publish ms avg/p95/max | Dirty collecting",
+        ];
+        let aligned_details = [
+            "Edit update ms avg/p95/max | Update 10.00/11.00/12.00 | Other collecting",
+            "Edit update nested ms avg/p95/max | Build Surface 5.00/6.00/7.00 | Layout collecting",
+        ];
+        let other_detail = "Edit update Other detail ms avg/p95/max | Input/dispatch collecting | Derived collecting | Chrome collecting | Diagnostics nested collecting | Host collecting | Remainder collecting";
+        let layout_detail = "Layout build detail ms avg/p95/max | Prep/lookup collecting h/m 0/0 | Rebase nested collecting | Sort nested collecting";
         let projection = DiagnosticProjection {
             performance_summary: responsiveness,
+            phase_summary: phases,
+            command_detail_summaries: [
+                command_details[0],
+                command_details[1],
+                command_details[2],
+            ],
+            aligned_edit_update_summaries: [aligned_details[0], aligned_details[1]],
+            aligned_edit_update_other_detail_summary: other_detail,
+            layout_build_detail_summary: layout_detail,
             diagnostic_message: Some("EDIT_FAILED: bounded category"),
         };
         assert_eq!(projection.safe_summary(), responsiveness);
+        assert_eq!(projection.safe_phase_summary(), phases);
+        assert_eq!(projection.safe_command_detail_summaries(), command_details);
+        assert_eq!(projection.safe_aligned_edit_update_summaries(), aligned_details);
+        assert_eq!(
+            projection.safe_aligned_edit_update_other_detail_summary(),
+            other_detail
+        );
+        assert_eq!(projection.safe_layout_build_detail_summary(), layout_detail);
+        assert!(!projection.safe_summary().contains("Phases ms"));
+        assert!(!projection.safe_phase_summary().contains("Update FPS"));
+        assert!(!projection.safe_summary().contains("Cmd core"));
+        assert!(!projection.safe_phase_summary().contains("Cmd checks"));
+        assert!(!projection.safe_summary().contains("Edit update ms"));
+        assert!(!projection.safe_phase_summary().contains("Edit update Other detail"));
+        assert!(!projection.safe_phase_summary().contains("Layout build detail"));
         assert_eq!(
             projection.diagnostic_message,
             Some("EDIT_FAILED: bounded category")

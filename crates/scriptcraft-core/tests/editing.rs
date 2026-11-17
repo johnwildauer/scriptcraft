@@ -31,6 +31,42 @@ fn two_sided_project() -> Project {
 }
 
 #[test]
+fn development_mutation_diagnostics_record_only_actual_body_candidate_invocations() {
+    let mut session = valid(EditingSession::new(valid(Project::new())));
+    assert!(session.take_mutation_diagnostics().is_none());
+
+    session.begin_mutation_diagnostics();
+    valid(session.insert(""));
+    let Some(no_op) = session.take_mutation_diagnostics() else {
+        unreachable!("an actual Body candidate invocation produces one observation")
+    };
+    assert!(no_op.no_op);
+    assert_eq!(no_op.scoped_candidate_attempts, 1);
+    assert_eq!(no_op.scoped_candidate_accepts, 1);
+    assert!(no_op.scoped_validation_nanos.is_some());
+    assert!(no_op.no_op_equality_nanos.is_some());
+    assert!(no_op.derived_classification_nanos.is_none());
+    assert!(no_op.dirty_comparison_nanos.is_none());
+    assert!(no_op.history_publication_nanos.is_none());
+
+    session.begin_mutation_diagnostics();
+    valid(session.set_selection(Selection::caret(Position { element: 0, offset: 0 })));
+    assert!(session.take_mutation_diagnostics().is_none());
+
+    session.begin_mutation_diagnostics();
+    valid(session.insert("x"));
+    let Some(changed) = session.take_mutation_diagnostics() else {
+        unreachable!("a changed Body candidate invocation produces one observation")
+    };
+    assert!(!changed.no_op);
+    assert!(changed.no_op_equality_nanos.is_some());
+    assert!(changed.derived_classification_nanos.is_some());
+    assert!(changed.dirty_comparison_nanos.is_some());
+    assert!(changed.history_publication_nanos.is_some());
+    assert!(session.take_mutation_diagnostics().is_none());
+}
+
+#[test]
 fn body_and_title_history_share_one_timeline_and_restore_dirty_state() {
     let mut session = valid(EditingSession::new(valid(Project::new())));
     valid(session.set_title_selection(Selection::caret(Position { element: 17, offset: 0 })));
