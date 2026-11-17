@@ -394,159 +394,34 @@ pub(super) enum NaturalGalleyTopology {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum NaturalGalleyError {
     NotProportional,
-    InvalidScale,
     UnsupportedTopology(NaturalGalleyTopology),
 }
 
-const NATURAL_GEOMETRY_CACHE_CAPACITY: usize = 96;
-const NATURAL_GEOMETRY_MAX_CACHED_CHARS: usize = 4096;
-
-#[derive(Clone, Debug, PartialEq)]
-struct NaturalGeometryPlanKey {
-    text: String,
-    font: FontId,
-    advance_mode: AdvanceMode,
-    scale_bits: u32,
-    pixels_per_point_bits: u32,
-    ordinary_color: Color32,
-}
-
-/// Atlas-independent horizontal geometry only. No galley, row, mesh, texture
-/// handle, or UV data survives the egui pass that produced it.
-#[derive(Debug)]
-struct NaturalGeometryPlan {
-    key: NaturalGeometryPlanKey,
-    natural_advance: f32,
-    display_boundary_offsets: Arc<[f32]>,
-    glyph_advances: Arc<[f32]>,
-}
-
-#[derive(Default)]
-struct NaturalGeometryPlanCache {
-    entries: std::collections::VecDeque<Arc<NaturalGeometryPlan>>,
-}
-
-/// Builds a pass-local galley and reuses only previously validated natural
-/// boundaries. The context-temporary bounded cache follows the fixed-cell
-/// lifetime policy: exact effective inputs key atlas-independent plans, while
-/// every call obtains its UV-bearing galley from the current painter. A plan is
-/// admitted only after cursor boundaries match glyph positions; a later hit
-/// must match the same complete horizontal glyph-position/advance signature.
+/// Builds one natural single-line galley and its cursor-derived display
+/// boundaries. Selection is deliberately absent from both the signature and
+/// geometry. The UV-bearing result is scoped to the current egui pass; egui's
+/// own layout cache remains responsible for atlas-aware text layout reuse.
 pub(super) fn natural_singleline_geometry(
     painter: &egui::Painter,
     text: &str,
     font: &FontId,
     advance_mode: AdvanceMode,
     ordinary_color: Color32,
-    scale: f32,
 ) -> Result<(Arc<NaturalGalleyGeometry>, bool), NaturalGalleyError> {
     if advance_mode != AdvanceMode::Proportional {
         return Err(NaturalGalleyError::NotProportional);
     }
-    if !scale.is_finite() || scale <= 0.0 {
-        return Err(NaturalGalleyError::InvalidScale);
-    }
 
-    let pixels_per_point = painter.ctx().pixels_per_point();
-    let key = NaturalGeometryPlanKey {
-        text: text.to_owned(),
-        font: font.clone(),
-        advance_mode,
-        scale_bits: scale.to_bits(),
-        pixels_per_point_bits: pixels_per_point.to_bits(),
-        ordinary_color,
-    };
-    let cache = natural_geometry_plan_cache(painter);
-    let cached = natural_geometry_plan_lookup(&cache, &key);
     let job = LayoutJob::simple_singleline(text.to_owned(), font.clone(), ordinary_color);
     let galley = painter.layout_job(job);
-    let result = geometry_from_galley(text, galley, cached.as_deref());
-    let (geometry, reused) = match result {
-        Ok(result) => result,
-        Err(error) => {
-            natural_geometry_plan_remove(&cache, &key);
-            return Err(error);
-        }
-    };
-
-    if !reused && text.chars().count() <= NATURAL_GEOMETRY_MAX_CACHED_CHARS {
-        let glyph_advances = geometry
-            .galley
-            .rows
-            .first()
-            .map(|row| {
-                row.row
-                    .glyphs
-                    .iter()
-                    .map(|glyph| glyph.advance_width)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let plan = Arc::new(NaturalGeometryPlan {
-            key: key.clone(),
-            natural_advance: geometry.natural_advance,
-            display_boundary_offsets: geometry.display_boundary_offsets.clone(),
-            glyph_advances: glyph_advances.into(),
-        });
-        natural_geometry_plan_insert(&cache, plan);
-    }
-    Ok((Arc::new(geometry), reused))
-}
-
-fn natural_geometry_plan_cache(
-    painter: &egui::Painter,
-) -> Arc<std::sync::Mutex<NaturalGeometryPlanCache>> {
-    let cache_id = egui::Id::new("scriptcraft-natural-geometry-plans");
-    painter.ctx().data_mut(|data| {
-        data.get_temp::<Arc<std::sync::Mutex<NaturalGeometryPlanCache>>>(cache_id)
-            .unwrap_or_else(|| {
-                let cache = Arc::new(std::sync::Mutex::new(NaturalGeometryPlanCache::default()));
-                data.insert_temp(cache_id, cache.clone());
-                cache
-            })
-    })
-}
-
-fn natural_geometry_plan_lookup(
-    cache: &Arc<std::sync::Mutex<NaturalGeometryPlanCache>>,
-    key: &NaturalGeometryPlanKey,
-) -> Option<Arc<NaturalGeometryPlan>> {
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let index = cache.entries.iter().position(|entry| entry.key == *key)?;
-    let plan = cache.entries.remove(index)?;
-    cache.entries.push_front(plan.clone());
-    Some(plan)
-}
-
-fn natural_geometry_plan_insert(
-    cache: &Arc<std::sync::Mutex<NaturalGeometryPlanCache>>,
-    plan: Arc<NaturalGeometryPlan>,
-) {
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache.entries.retain(|entry| entry.key != plan.key);
-    cache.entries.push_front(plan);
-    cache.entries.truncate(NATURAL_GEOMETRY_CACHE_CAPACITY);
-}
-
-fn natural_geometry_plan_remove(
-    cache: &Arc<std::sync::Mutex<NaturalGeometryPlanCache>>,
-    key: &NaturalGeometryPlanKey,
-) {
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache.entries.retain(|entry| entry.key != *key);
+    let geometry = Arc::new(geometry_from_galley(text, galley)?);
+    Ok((geometry, false))
 }
 
 fn geometry_from_galley(
     display_text: &str,
     galley: Arc<Galley>,
-    cached: Option<&NaturalGeometryPlan>,
-) -> Result<(NaturalGalleyGeometry, bool), NaturalGalleyError> {
+) -> Result<NaturalGalleyGeometry, NaturalGalleyError> {
     use NaturalGalleyTopology as Topology;
     let fail = |reason| Err(NaturalGalleyError::UnsupportedTopology(reason));
     if galley.elided {
@@ -595,36 +470,6 @@ fn geometry_from_galley(
         return fail(Topology::InvalidGlyphGeometry);
     }
 
-    if let Some(cached) = cached {
-        let boundaries_match = cached.natural_advance == natural_advance
-            && cached.display_boundary_offsets.len() == chars.len() + 1
-            && cached.glyph_advances.len() == chars.len()
-            && cached.display_boundary_offsets.first().copied() == Some(0.0)
-            && cached.display_boundary_offsets.last().copied() == Some(natural_advance)
-            && cached
-                .display_boundary_offsets
-                .windows(2)
-                .all(|pair| pair[0].is_finite() && pair[0] <= pair[1])
-            && row
-                .glyphs
-                .iter()
-                .enumerate()
-                .all(|(index, glyph)| {
-                    glyph.pos.x == cached.display_boundary_offsets[index]
-                        && glyph.advance_width == cached.glyph_advances[index]
-                });
-        if boundaries_match {
-            return Ok((
-                NaturalGalleyGeometry {
-                    galley,
-                    display_boundary_offsets: cached.display_boundary_offsets.clone(),
-                    natural_advance: cached.natural_advance,
-                },
-                true,
-            ));
-        }
-    }
-
     let mut offsets = Vec::with_capacity(chars.len() + 1);
     for boundary in 0..=chars.len() {
         // CCursor indexes Unicode scalar boundaries, not UTF-8 bytes. epaint's
@@ -653,14 +498,11 @@ fn geometry_from_galley(
         return fail(Topology::InvalidOriginOrAdvance);
     }
 
-    Ok((
-        NaturalGalleyGeometry {
-            galley,
-            display_boundary_offsets: offsets.into(),
-            natural_advance,
-        },
-        false,
-    ))
+    Ok(NaturalGalleyGeometry {
+        galley,
+        display_boundary_offsets: offsets.into(),
+        natural_advance,
+    })
 }
 
 #[cfg(test)]
@@ -1196,13 +1038,11 @@ mod tests {
         assert_eq!(actual.text(), expected.text());
         assert_eq!(actual.elided, expected.elided);
         assert_eq!(actual.rect, expected.rect);
-        assert_eq!(actual.mesh_bounds, expected.mesh_bounds);
         assert_eq!(actual.rows.len(), expected.rows.len());
         for (actual_placed, expected_placed) in actual.rows.iter().zip(&expected.rows) {
             assert_eq!(actual_placed.pos, expected_placed.pos);
             let actual_row = &actual_placed.row;
             let expected_row = &expected_placed.row;
-            assert_eq!(actual_row.size, expected_row.size);
             assert_eq!(actual_row.glyphs.len(), expected_row.glyphs.len());
             for (actual_glyph, expected_glyph) in
                 actual_row.glyphs.iter().zip(&expected_row.glyphs)
@@ -1213,7 +1053,6 @@ mod tests {
                 assert_eq!(actual_glyph.uv_rect, expected_glyph.uv_rect);
             }
             assert_eq!(actual_row.visuals.glyph_vertex_range, expected_row.visuals.glyph_vertex_range);
-            assert_eq!(actual_row.visuals.mesh.texture_id, expected_row.visuals.mesh.texture_id);
             assert_eq!(actual_row.visuals.mesh.indices, expected_row.visuals.mesh.indices);
             assert_eq!(actual_row.visuals.mesh.vertices.len(), expected_row.visuals.mesh.vertices.len());
             for (actual_vertex, expected_vertex) in actual_row
@@ -1231,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn natural_geometry_reuses_only_boundaries_across_appearance_passes() {
+    fn natural_galley_variants_never_reuse_geometry_from_an_earlier_appearance_pass() {
         let context = egui::Context::default();
         let font = FontId::new(22.0, FontFamily::Proportional);
         let ordinary_color = Color32::WHITE;
@@ -1256,18 +1095,13 @@ mod tests {
                         &font,
                         AdvanceMode::Proportional,
                         ordinary_color,
-                        1.0,
                     )
                     .expect("the single-line proportional text has supported topology");
-                    assert_eq!(
-                        reused,
-                        pass > 0,
-                        "pass {pass} should reuse only the atlas-independent natural plan"
-                    );
+                    assert!(!reused, "pass {pass} returned application-cached natural geometry");
                     if let Some(previous) = previous.as_ref() {
                         assert!(
                             !Arc::ptr_eq(previous, &geometry),
-                            "pass {pass} retained NaturalGalleyGeometry from an earlier egui pass"
+                            "pass {pass} reused NaturalGalleyGeometry from an earlier egui pass"
                         );
                     }
 
@@ -1280,10 +1114,8 @@ mod tests {
                     let fresh_geometry = super::geometry_from_galley(
                         "Natural AV text",
                         fresh_ordinary.clone(),
-                        None,
                     )
-                    .expect("fresh natural layout should preserve supported topology")
-                    .0;
+                    .expect("fresh natural layout should preserve supported topology");
                     assert_eq!(geometry.display_boundary_offsets, fresh_geometry.display_boundary_offsets);
                     assert_eq!(geometry.natural_advance, fresh_geometry.natural_advance);
 
@@ -1306,343 +1138,5 @@ mod tests {
             });
             assert!(generated.is_some(), "pass {pass} should build natural geometry");
         }
-    }
-
-    #[test]
-    fn natural_geometry_cache_keys_each_effective_layout_input() {
-        let context = egui::Context::default();
-        let font = FontId::new(22.0, FontFamily::Proportional);
-        let alternate_font = FontId::new(23.0, FontFamily::Proportional);
-        let alternate_color = Color32::from_rgb(0x31, 0x72, 0xd0);
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let painter = ui.painter();
-                let (_, first_reused) = super::natural_singleline_geometry(
-                    painter,
-                    "Natural key",
-                    &font,
-                    AdvanceMode::Proportional,
-                    Color32::WHITE,
-                    1.0,
-                )
-                .expect("base natural geometry should be supported");
-                assert!(!first_reused);
-                let (_, exact_reused) = super::natural_singleline_geometry(
-                    painter,
-                    "Natural key",
-                    &font,
-                    AdvanceMode::Proportional,
-                    Color32::WHITE,
-                    1.0,
-                )
-                .expect("repeated natural geometry should be supported");
-                assert!(exact_reused);
-
-                for (text, font, color, scale) in [
-                    ("Other natural key", font.clone(), Color32::WHITE, 1.0),
-                    ("Natural key", alternate_font, Color32::WHITE, 1.0),
-                    ("Natural key", font.clone(), alternate_color, 1.0),
-                    ("Natural key", font.clone(), Color32::WHITE, 1.25),
-                ] {
-                    let (_, reused) = super::natural_singleline_geometry(
-                        painter,
-                        text,
-                        &font,
-                        AdvanceMode::Proportional,
-                        color,
-                        scale,
-                    )
-                    .expect("changed natural key should still have supported topology");
-                    assert!(!reused, "changed effective input unexpectedly reused a plan");
-                }
-
-                let (_, exact_reused_again) = super::natural_singleline_geometry(
-                    painter,
-                    "Natural key",
-                    &font,
-                    AdvanceMode::Proportional,
-                    Color32::WHITE,
-                    1.0,
-                )
-                .expect("the original natural geometry should remain supported");
-                assert!(exact_reused_again);
-            });
-        });
-    }
-
-    #[test]
-    fn natural_plan_never_retains_atlas_mesh_across_font_generation_change() {
-        let context = egui::Context::default();
-        let font = FontId::new(22.0, FontFamily::Proportional);
-        let text = "Font generation café";
-        let mut prior_geometry = None;
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let (geometry, _) = super::natural_singleline_geometry(
-                    ui.painter(),
-                    text,
-                    &font,
-                    AdvanceMode::Proportional,
-                    Color32::WHITE,
-                    1.0,
-                )
-                .expect("initial natural topology is supported");
-                prior_geometry = Some(geometry);
-            });
-        });
-
-        // Replacing font definitions advances the renderer's font/atlas state.
-        // Reuse may retain only matching horizontal boundaries; every galley
-        // and its UV mesh are acquired from this pass's painter.
-        context.set_fonts(egui::FontDefinitions::default());
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let painter = ui.painter();
-                let (geometry, _) = super::natural_singleline_geometry(
-                    painter,
-                    text,
-                    &font,
-                    AdvanceMode::Proportional,
-                    Color32::WHITE,
-                    1.0,
-                )
-                .expect("natural topology remains supported after font generation change");
-                if let Some(previous) = prior_geometry.as_ref() {
-                    assert!(!Arc::ptr_eq(previous, &geometry));
-                }
-                let fresh = painter.layout_job(LayoutJob::simple_singleline(
-                    text.to_owned(),
-                    font.clone(),
-                    Color32::WHITE,
-                ));
-                assert_galley_mesh_matches(&geometry.galley, &fresh);
-                let fresh_geometry = super::geometry_from_galley(text, fresh, None)
-                    .expect("fresh current-generation natural topology is supported")
-                    .0;
-                assert_eq!(geometry.display_boundary_offsets, fresh_geometry.display_boundary_offsets);
-                assert_eq!(geometry.natural_advance, fresh_geometry.natural_advance);
-            });
-        });
-    }
-
-    #[test]
-    fn natural_geometry_cache_misses_after_pixels_per_point_changes() {
-        let context = egui::Context::default();
-        let font = FontId::new(22.0, FontFamily::Proportional);
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let (_, reused) = super::natural_singleline_geometry(
-                    ui.painter(),
-                    "Natural scale key",
-                    &font,
-                    AdvanceMode::Proportional,
-                    Color32::WHITE,
-                    1.0,
-                )
-                .expect("initial natural geometry should be supported");
-                assert!(!reused);
-            });
-        });
-
-        context.set_pixels_per_point(1.5);
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let (_, reused) = super::natural_singleline_geometry(
-                    ui.painter(),
-                    "Natural scale key",
-                    &font,
-                    AdvanceMode::Proportional,
-                    Color32::WHITE,
-                    1.0,
-                )
-                .expect("scaled natural geometry should be supported");
-                assert!(!reused, "changed pixels-per-point unexpectedly reused a plan");
-            });
-        });
-    }
-
-    #[test]
-    fn natural_plan_retention_is_bounded_and_replacement_content_is_keyed() {
-        let context = egui::Context::default();
-        let font = FontId::new(22.0, FontFamily::Proportional);
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let painter = ui.painter();
-                let (_, first_reused) = super::natural_singleline_geometry(
-                    painter,
-                    "Old document café",
-                    &font,
-                    AdvanceMode::Proportional,
-                    Color32::WHITE,
-                    1.0,
-                )
-                .expect("old-document text has supported natural topology");
-                assert!(!first_reused);
-
-                for index in 0..super::NATURAL_GEOMETRY_CACHE_CAPACITY {
-                    let text = format!("Replacement {index}");
-                    let (_, reused) = super::natural_singleline_geometry(
-                        painter,
-                        &text,
-                        &font,
-                        AdvanceMode::Proportional,
-                        Color32::WHITE,
-                        1.0,
-                    )
-                    .expect("short replacement text has supported natural topology");
-                    assert!(!reused);
-                }
-                let (_, evicted_reused) = super::natural_singleline_geometry(
-                    painter,
-                    "Old document café",
-                    &font,
-                    AdvanceMode::Proportional,
-                    Color32::WHITE,
-                    1.0,
-                )
-                .expect("evicted old-document text remains buildable");
-                assert!(!evicted_reused, "the least-recently-used plan was evicted");
-
-                let (_, replacement_reused) = super::natural_singleline_geometry(
-                    painter,
-                    "New document café",
-                    &font,
-                    AdvanceMode::Proportional,
-                    Color32::WHITE,
-                    1.0,
-                )
-                .expect("replacement document text has supported natural topology");
-                assert!(!replacement_reused, "different replacement content misses");
-                let (_, identical_reused) = super::natural_singleline_geometry(
-                    painter,
-                    "New document café",
-                    &font,
-                    AdvanceMode::Proportional,
-                    Color32::WHITE,
-                    1.0,
-                )
-                .expect("identical replacement text remains supported");
-                assert!(identical_reused, "identical content can reuse only its atlas-free plan");
-            });
-        });
-    }
-
-    #[test]
-    fn cached_natural_plan_does_not_override_rejected_topology() {
-        let source = layout("Natural AV text");
-        let (geometry, reused) =
-            super::geometry_from_galley("Natural AV text", source.clone(), None)
-                .expect("source geometry should have supported topology");
-        assert!(!reused);
-        let glyph_advances = geometry.galley.rows[0]
-            .row
-            .glyphs
-            .iter()
-            .map(|glyph| glyph.advance_width)
-            .collect::<Vec<_>>();
-        let cached = super::NaturalGeometryPlan {
-            key: super::NaturalGeometryPlanKey {
-                text: "Natural AV text".to_owned(),
-                font: FontId::new(22.0, FontFamily::Proportional),
-                advance_mode: AdvanceMode::Proportional,
-                scale_bits: 1.0_f32.to_bits(),
-                pixels_per_point_bits: 1.0_f32.to_bits(),
-                ordinary_color: Color32::BLACK,
-            },
-            natural_advance: geometry.natural_advance,
-            display_boundary_offsets: geometry.display_boundary_offsets,
-            glyph_advances: glyph_advances.into(),
-        };
-        let mut unsupported = (*source).clone();
-        unsupported.rows.clear();
-        assert_eq!(
-            super::geometry_from_galley(
-                "Natural AV text",
-                Arc::new(unsupported),
-                Some(&cached),
-            )
-            .err(),
-            Some(super::NaturalGalleyError::UnsupportedTopology(
-                super::NaturalGalleyTopology::RowCount,
-            )),
-        );
-
-        let rejects = |candidate: Galley,
-                       requested_text: &str,
-                       expected: super::NaturalGalleyTopology| {
-            assert_eq!(
-                super::geometry_from_galley(requested_text, Arc::new(candidate), Some(&cached))
-                    .err(),
-                Some(super::NaturalGalleyError::UnsupportedTopology(expected)),
-            );
-        };
-
-        let mut elided = (*source).clone();
-        elided.elided = true;
-        rejects(elided, "Natural AV text", super::NaturalGalleyTopology::Elided);
-        rejects(
-            (*source).clone(),
-            "different requested text",
-            super::NaturalGalleyTopology::TextMismatch,
-        );
-
-        let mut newline = (*source).clone();
-        Arc::make_mut(&mut newline.rows[0].row).ends_with_newline = true;
-        rejects(newline, "Natural AV text", super::NaturalGalleyTopology::Newline);
-
-        let mut glyph_count = (*source).clone();
-        Arc::make_mut(&mut glyph_count.rows[0].row).glyphs.pop();
-        rejects(
-            glyph_count,
-            "Natural AV text",
-            super::NaturalGalleyTopology::GlyphCount,
-        );
-
-        let mut glyph_character = (*source).clone();
-        if let Some(glyph) = Arc::make_mut(&mut glyph_character.rows[0].row)
-            .glyphs
-            .first_mut()
-        {
-            glyph.chr = 'Z';
-        }
-        rejects(
-            glyph_character,
-            "Natural AV text",
-            super::NaturalGalleyTopology::GlyphCharacter,
-        );
-
-        let mut invalid_origin = (*source).clone();
-        invalid_origin.rows[0].pos.x = 1.0;
-        rejects(
-            invalid_origin,
-            "Natural AV text",
-            super::NaturalGalleyTopology::InvalidOriginOrAdvance,
-        );
-
-        let mut invalid_glyph = (*source).clone();
-        if let Some(glyph) = Arc::make_mut(&mut invalid_glyph.rows[0].row)
-            .glyphs
-            .first_mut()
-        {
-            glyph.pos.x = f32::NAN;
-        }
-        rejects(
-            invalid_glyph,
-            "Natural AV text",
-            super::NaturalGalleyTopology::InvalidGlyphGeometry,
-        );
-
-        let mut cursor_mismatch = (*source).clone();
-        if let Some(glyph) = Arc::make_mut(&mut cursor_mismatch.rows[0].row)
-            .glyphs
-            .first_mut()
-        {
-            glyph.pos.x += 0.5;
-        }
-        rejects(
-            cursor_mismatch,
-            "Natural AV text",
-            super::NaturalGalleyTopology::CursorMismatch,
-        );
     }
 }

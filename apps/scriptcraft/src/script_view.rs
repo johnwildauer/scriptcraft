@@ -214,7 +214,7 @@ mod presented_page_policy_tests {
         presented_page_policy, presentation_metrics_at_zoom, resolve_presentation_mode,
         screen_y_to_document, viewport_caret_rect, CaretPresentation,
         normal_view_page_bottom_rule_geometry, normal_view_page_bottom_rule_visible,
-        prepaint_zoom_scroll_offset, script_view_backdrop, PresentedPage,
+        prepaint_zoom_scroll_offset, script_view_backdrop, PrepaintZoomPlan, PresentedPage,
         NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH, PAGE_VERTICAL_GAP,
         page_scroll_geometry, SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING,
     };
@@ -722,18 +722,18 @@ mod presented_page_policy_tests {
         }
     }
 
-    fn assert_zoom_offset_matches_vector_policy(
-        actual_offset: Vec2,
+    fn assert_plan_matches_allocation_policy(
+        plan: &PrepaintZoomPlan,
         mode: ScriptViewMode,
         zoom_percent: u16,
         page_content: &[(f32, f32)],
         anchor: super::super::status_bar::ViewportCenterAnchor,
-        outer: egui::Rect,
-    ) -> Vec2 {
+    ) {
         let paper_width = 612.0;
         let paper_height = 792.0;
         let base_font_size = 12.0;
         let vertical_spacing = 8.0;
+        let outer = egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(900.0, 600.0));
         let metrics = presentation_metrics_at_zoom(
             outer.width(),
             paper_width,
@@ -744,10 +744,6 @@ mod presented_page_policy_tests {
         let mut next_top = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING;
         let mut total_height =
             SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING + super::SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING;
-        let mut page_origins = Vec::with_capacity(page_content.len());
-        let mut page_heights = Vec::with_capacity(page_content.len());
-        let mut page_strides = Vec::with_capacity(page_content.len());
-        let mut target_policy = None;
         let mut expected_target = None;
         for (index, (content_top, content_height)) in page_content.iter().copied().enumerate() {
             let policy = presented_page_policy(
@@ -759,129 +755,44 @@ mod presented_page_policy_tests {
                 vertical_spacing,
             );
             let stride = policy.page_height + policy.explicit_gap + policy.vertical_item_spacing;
-            page_origins.push(next_top);
-            page_heights.push(policy.page_height);
-            page_strides.push(stride);
+            assert_eq!(plan.page_origins[index], next_top);
+            assert_eq!(plan.page_heights[index], policy.page_height);
+            assert_eq!(plan.page_strides[index], stride);
             if index == anchor.page_index {
-                target_policy = Some((policy, content_top, content_height));
+                let target_document_y = if mode == ScriptViewMode::Speed {
+                    anchor
+                        .page_local_document_point
+                        .y
+                        .clamp(content_top, content_top + content_height)
+                } else {
+                    anchor.page_local_document_point.y.clamp(0.0, paper_height)
+                };
+                expected_target = Some(
+                    outer.min
+                        + vec2(horizontal.leading_padding, next_top)
+                        + vec2(
+                            anchor.page_local_document_point.x,
+                            target_document_y - policy.document_y_offset,
+                        ) * metrics.scale,
+                );
             }
             next_top += stride;
+            total_height += stride;
         }
-        total_height += page_strides.iter().sum::<f32>();
-        let content_size = vec2(horizontal.content_width, total_height);
-        assert_eq!(page_origins.len(), page_heights.len());
-        assert_eq!(page_heights.len(), page_strides.len());
-        let (policy, content_top, content_height) = target_policy.expect("anchor page exists");
-        assert_eq!(page_heights[anchor.page_index], policy.page_height);
-        let target_document_y = if mode == ScriptViewMode::Speed {
-            anchor
-                .page_local_document_point
-                .y
-                .clamp(content_top, content_top + content_height)
-        } else {
-            anchor.page_local_document_point.y.clamp(0.0, paper_height)
-        };
-        expected_target = Some(
-            outer.min
-                + vec2(
-                    horizontal.leading_padding,
-                    page_origins[anchor.page_index],
-                )
-                + vec2(
-                    anchor.page_local_document_point.x,
-                    target_document_y - policy.document_y_offset,
-                ) * metrics.scale,
+        assert_eq!(
+            plan.content_size,
+            vec2(horizontal.content_width, total_height),
         );
         let viewport_center = outer.center();
         let requested = expected_target.expect("anchor page is represented") - viewport_center;
-        let maximum = (content_size - outer.size()).max(Vec2::ZERO);
-        let expected_offset = vec2(
-            requested.x.clamp(0.0, maximum.x),
-            requested.y.clamp(0.0, maximum.y),
-        );
+        let maximum = (plan.content_size - outer.size()).max(Vec2::ZERO);
         assert_eq!(
-            actual_offset,
-            expected_offset,
+            plan.scroll_offset,
+            vec2(
+                requested.x.clamp(0.0, maximum.x),
+                requested.y.clamp(0.0, maximum.y),
+            ),
         );
-        content_size
-    }
-
-    #[test]
-    fn pending_zoom_offset_matches_vector_policy_for_first_middle_and_last_pages() {
-        let page_content = [(35.0, 650.0), (50.0, 620.0), (42.0, 660.0), (30.0, 670.0)];
-        let outer = egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(400.0, 350.0));
-        for mode in [ScriptViewMode::Page, ScriptViewMode::Normal, ScriptViewMode::Speed] {
-            for page_index in [0, 2, page_content.len() - 1] {
-                let anchor = viewport_anchor(page_index, 315.25);
-                let offset = prepaint_zoom_scroll_offset(
-                    anchor,
-                    page_content.len(),
-                    612.0,
-                    792.0,
-                    mode,
-                    page_content.iter().copied(),
-                    12.0,
-                    137,
-                    outer,
-                    8.0,
-                )
-                .expect("valid fractional zoom input yields an offset");
-                assert_zoom_offset_matches_vector_policy(
-                    offset,
-                    mode,
-                    137,
-                    &page_content,
-                    anchor,
-                    outer,
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn pending_zoom_offset_rejects_empty_invalid_and_out_of_range_page_plans() {
-        let outer = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(900.0, 600.0));
-        let anchor = viewport_anchor(0, 300.0);
-        let inputs = (612.0, 792.0, ScriptViewMode::Page, 12.0, 100, outer, 8.0);
-        assert!(prepaint_zoom_scroll_offset(
-            anchor,
-            0,
-            inputs.0,
-            inputs.1,
-            inputs.2,
-            std::iter::empty(),
-            inputs.3,
-            inputs.4,
-            inputs.5,
-            inputs.6,
-        )
-        .is_none());
-        assert!(prepaint_zoom_scroll_offset(
-            anchor,
-            1,
-            inputs.0,
-            inputs.1,
-            inputs.2,
-            [(f32::NAN, 612.0)].into_iter(),
-            inputs.3,
-            inputs.4,
-            inputs.5,
-            inputs.6,
-        )
-        .is_none());
-        assert!(prepaint_zoom_scroll_offset(
-            viewport_anchor(1, 300.0),
-            1,
-            inputs.0,
-            inputs.1,
-            inputs.2,
-            [(0.0, 612.0)].into_iter(),
-            inputs.3,
-            inputs.4,
-            inputs.5,
-            inputs.6,
-        )
-        .is_none());
     }
 
     #[test]
@@ -890,8 +801,7 @@ mod presented_page_policy_tests {
         for mode in [ScriptViewMode::Page, ScriptViewMode::Normal, ScriptViewMode::Speed] {
             for zoom_percent in [75, 100, 300] {
                 let anchor = viewport_anchor(2, 315.0);
-                let outer = egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(900.0, 600.0));
-                let offset = prepaint_zoom_scroll_offset(
+                let plan = prepaint_zoom_scroll_offset(
                     anchor,
                     page_content.len(),
                     612.0,
@@ -900,18 +810,24 @@ mod presented_page_policy_tests {
                     page_content.iter().copied(),
                     12.0,
                     zoom_percent,
-                    outer,
+                    egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(900.0, 600.0)),
                     8.0,
                 )
-                .expect("finite page allocation yields a zoom offset");
-                assert_zoom_offset_matches_vector_policy(
-                    offset,
+                .expect("finite page allocation yields a zoom plan");
+                assert_plan_matches_allocation_policy(
+                    &plan,
                     mode,
                     zoom_percent,
                     &page_content,
                     anchor,
-                    outer,
                 );
+                if mode == ScriptViewMode::Speed {
+                    assert!(plan
+                        .page_strides
+                        .iter()
+                        .zip(&plan.page_heights)
+                        .all(|(stride, height)| stride == height));
+                }
             }
         }
     }
@@ -935,13 +851,12 @@ mod presented_page_policy_tests {
                 8.0,
             )
             .expect("Speed target policy is valid");
-            assert_zoom_offset_matches_vector_policy(
-                speed,
+            assert_plan_matches_allocation_policy(
+                &speed,
                 ScriptViewMode::Speed,
                 100,
                 &page_content,
                 anchor,
-                outer,
             );
             let speed_policy = presented_page_policy(
                 ScriptViewMode::Speed,
@@ -958,6 +873,7 @@ mod presented_page_policy_tests {
                 ),
                 expected_target_y,
             );
+            assert_eq!(speed.page_origins.len(), page_content.len());
             assert_eq!(speed_policy.document_y_offset, page_content[1].0);
 
             let page = prepaint_zoom_scroll_offset(
@@ -973,13 +889,13 @@ mod presented_page_policy_tests {
                 8.0,
             )
             .expect("Page target policy is valid");
-            assert_zoom_offset_matches_vector_policy(
-                page,
+            assert_eq!(page.page_origins.len(), page_content.len());
+            assert_plan_matches_allocation_policy(
+                &page,
                 ScriptViewMode::Page,
                 100,
                 &page_content,
                 anchor,
-                outer,
             );
         }
     }
@@ -990,7 +906,6 @@ mod presented_page_policy_tests {
         let anchor = viewport_anchor(3, 640.0);
         let original_anchor = anchor;
         let original_pages = page_content;
-        let outer = egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(400.0, 260.0));
         let deep = prepaint_zoom_scroll_offset(
             anchor,
             page_content.len(),
@@ -1000,27 +915,19 @@ mod presented_page_policy_tests {
             page_content.iter().copied(),
             12.0,
             300,
-            outer,
+            egui::Rect::from_min_size(egui::pos2(20.0, 30.0), vec2(400.0, 260.0)),
             8.0,
         )
-        .expect("deep multi-page overflow has a finite offset");
-        let deep_content_size = assert_zoom_offset_matches_vector_policy(
-            deep,
-            ScriptViewMode::Speed,
-            300,
-            &page_content,
-            anchor,
-            outer,
-        );
-        assert!(deep_content_size.x > 400.0);
-        assert!(deep.x > 0.0);
-        assert!(deep.y > 0.0);
-        assert!(deep.y <= deep_content_size.y - 260.0);
+        .expect("deep multi-page overflow has a finite plan");
+        assert!(deep.content_size.x > 400.0);
+        assert!(deep.scroll_offset.x > 0.0);
+        assert!(deep.scroll_offset.y > 0.0);
+        assert!(deep.scroll_offset.y <= deep.content_size.y - 260.0);
         assert_eq!(anchor, original_anchor);
         assert_eq!(page_content, original_pages);
 
         let one_page = [(42.0, 612.0)];
-        let one_page_offset = prepaint_zoom_scroll_offset(
+        let one_page_plan = prepaint_zoom_scroll_offset(
             viewport_anchor(0, 300.0),
             1,
             612.0,
@@ -1032,15 +939,9 @@ mod presented_page_policy_tests {
             egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(900.0, 700.0)),
             8.0,
         )
-        .expect("one-page allocation has a finite offset");
-        assert_zoom_offset_matches_vector_policy(
-            one_page_offset,
-            ScriptViewMode::Speed,
-            100,
-            &one_page,
-            viewport_anchor(0, 300.0),
-            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(900.0, 700.0)),
-        );
+        .expect("one-page allocation has a finite plan");
+        assert_eq!(one_page_plan.page_origins.len(), 1);
+        assert_eq!(one_page_plan.page_strides[0], one_page_plan.page_heights[0]);
     }
 }
 
@@ -1173,21 +1074,18 @@ impl ScriptCraftApp {
         let mut natural = Vec::with_capacity(line.spans.len());
         for (span, paint) in line.spans.iter().zip(&resolved) {
             if paint.advance_mode == AdvanceMode::Proportional {
-                let geometry_result = super::presentation_geometry::natural_singleline_geometry(
+                let (geometry, reused) = super::presentation_geometry::natural_singleline_geometry(
                     &painter,
                     &span.display_text,
                     &paint.font,
                     paint.advance_mode,
                     paint.color,
-                    scale,
-                );
-                record_pass_galley_layout_request(&mut self.performance);
-                self.performance.natural_geometry_requests = self
-                    .performance
-                    .natural_geometry_requests
-                    .saturating_add(1);
-                let (geometry, reused) = geometry_result.map_err(|_| ())?;
-                record_natural_geometry_plan_result(&mut self.performance, reused);
+                ).map_err(|_| ())?;
+                if reused {
+                    self.performance.galleys_reused = self.performance.galleys_reused.saturating_add(1);
+                } else {
+                    self.performance.galleys_built = self.performance.galleys_built.saturating_add(1);
+                }
                 natural.push(Some(geometry));
             } else {
                 natural.push(None);
@@ -1480,10 +1378,6 @@ impl ScriptCraftApp {
                         } else {
                             projected.advance / display_count as f32
                         };
-                        self.performance.fixed_cell_transformations = self
-                            .performance
-                            .fixed_cell_transformations
-                            .saturating_add(1);
                         paint_fixed_metric_text_with_selection(
                             &line_painter,
                             span_origin,
@@ -1567,10 +1461,6 @@ impl ScriptCraftApp {
                 }
                 let span_font = resolved_paint.font.clone();
                 let color = resolved_paint.color;
-                self.performance.fixed_cell_transformations = self
-                    .performance
-                    .fixed_cell_transformations
-                    .saturating_add(1);
                 paint_fixed_metric_text_with_selection(
                     &painter,
                     egui::pos2(span_x, span_y),
@@ -1730,7 +1620,6 @@ impl ScriptCraftApp {
         let mut visible_pages = 0;
         let reveal_intent = self.reveal_intent;
         let pending_zoom_anchor = self.pending_zoom_anchor;
-        let zoom_plan_started = pending_zoom_anchor.map(|_| Instant::now());
         let zoom_compensation_offset = pending_zoom_anchor.and_then(|anchor| {
             prepaint_zoom_scroll_offset(
                 anchor,
@@ -1749,15 +1638,8 @@ impl ScriptCraftApp {
                 scroll_outer_rect,
                 ui.spacing().item_spacing.y,
             )
+            .map(|plan| plan.scroll_offset)
         });
-        if let Some(started) = zoom_plan_started {
-            self.performance.pending_zoom_plans =
-                self.performance.pending_zoom_plans.saturating_add(1);
-            add_performance_nanos(
-                &mut self.performance.pending_zoom_planning_nanos,
-                started.elapsed().as_nanos(),
-            );
-        }
         let zoom_compensation_queued = zoom_compensation_offset.is_some();
         if zoom_compensation_queued {
             add_performance_counter(&mut self.performance.zoom_compensations_queued, 1);
@@ -1809,10 +1691,8 @@ impl ScriptCraftApp {
                 // before paint/reveal widgets and leave the shared context intact.
                 ui.spacing_mut().item_spacing.y = 0.0;
             }
-            let page_rows_started = Instant::now();
             for (page_index, page) in layout.pages.iter().enumerate() {
                 add_performance_counter(&mut self.performance.pages_considered, 1);
-                add_performance_counter(&mut self.performance.page_row_allocations, 1);
                 let policy = presented_page_policy(
                     presentation_mode,
                     layout.inputs.paper_height as f32,
@@ -1845,11 +1725,6 @@ impl ScriptCraftApp {
             if presentation_mode == ScriptViewMode::Speed {
                 ui.spacing_mut().item_spacing.y = vertical_item_spacing;
             }
-            add_performance_nanos(
-                &mut self.performance.page_row_allocation_nanos,
-                page_rows_started.elapsed().as_nanos(),
-            );
-            let visible_range_started = Instant::now();
             let paint_range = viewport_paint_page_range(&presented_pages, editor_clip);
             if self.development_mode {
                 visible_pages = presented_pages
@@ -1927,7 +1802,6 @@ impl ScriptCraftApp {
                     pages_to_project.push(page_index);
                 }
             }
-            let frame_projection_started = Instant::now();
             for page_index in pages_to_project {
                 if frame_projections[page_index].is_none() {
                     frame_projections[page_index] = Some(
@@ -1941,13 +1815,8 @@ impl ScriptCraftApp {
                             })
                             .collect(),
                     );
-                    add_performance_counter(&mut self.performance.frame_projection_pages, 1);
                 }
             }
-            add_performance_nanos(
-                &mut self.performance.frame_projection_nanos,
-                frame_projection_started.elapsed().as_nanos(),
-            );
             let caret_geometry = if resolve_caret {
                 let caret_started = Instant::now();
                 self.performance.caret_lookups = self.performance.caret_lookups.saturating_add(1);
@@ -2080,9 +1949,8 @@ impl ScriptCraftApp {
         let actual_clip = scroll_output.inner_rect.intersect(ui.clip_rect());
         let geometry_count_matches = presented_pages.len() == layout.pages.len();
         let zoom_anchor_was_pending = pending_zoom_anchor.is_some();
-        let snapshot_publication_started = Instant::now();
         let needs_repaint = if geometry_count_matches {
-            let needs_repaint = self.page_geometry.publish_presented_pages(
+            self.page_geometry.publish(
                 self.performance.frames,
                 self.session.revision(),
                 ui.ctx().content_rect(),
@@ -2090,19 +1958,11 @@ impl ScriptCraftApp {
                 &presented_pages,
                 actual_clip,
                 published_scroll_offset,
-            );
-            add_performance_counter(&mut self.performance.page_snapshot_publications, 1);
-            needs_repaint
+            )
         } else {
             self.page_geometry.invalidate();
             true
         };
-        if geometry_count_matches {
-            add_performance_nanos(
-                &mut self.performance.page_snapshot_publication_nanos,
-                snapshot_publication_started.elapsed().as_nanos(),
-            );
-        }
         if geometry_count_matches {
             // The request is consumed only after the scaled page geometry has
             // been published. Invalid/missing anchors simply preserve old behavior.
@@ -2157,16 +2017,13 @@ impl ScriptCraftApp {
                     CommandInvocation::new(Command::EditorFocus, CommandOrigin::Pointer),
                     ui.ctx(),
                 );
-                let pointer_page = self.page_geometry.presented_pages().and_then(|pages| {
-                    Self::pointer_surface_page(&layout, pages, pointer, surface).and_then(
-                        |page_index| pages.get(page_index).copied().map(|page| (page_index, page)),
-                    )
-                });
-                if let Some((page_index, presented_page)) = pointer_page {
+                if let Some(page_index) =
+                    Self::pointer_surface_page(&layout, &presented_pages, pointer, surface)
+                {
                     if let Some(position) = self.caret_from_pointer(
                         &layout,
                         page_index,
-                        presented_page,
+                        presented_pages[page_index],
                         scale,
                         pointer,
                         Some(&frame_projections),
@@ -2841,6 +2698,15 @@ struct PageScrollGeometry {
     horizontal_overflow: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct PrepaintZoomPlan {
+    page_origins: Vec<f32>,
+    page_heights: Vec<f32>,
+    page_strides: Vec<f32>,
+    content_size: Vec2,
+    scroll_offset: Vec2,
+}
+
 fn paint_dotted_boundary(
     painter: &egui::Painter,
     start_x: f32,
@@ -2926,7 +2792,7 @@ fn prepaint_zoom_scroll_offset(
     zoom_percent: u16,
     outer_rect: egui::Rect,
     vertical_item_spacing: f32,
-) -> Option<Vec2> {
+) -> Option<PrepaintZoomPlan> {
     if anchor.page_index >= page_count
         || page_count == 0
         || page_content_bounds.len() != page_count
@@ -2949,6 +2815,9 @@ fn prepaint_zoom_scroll_offset(
     if !metrics.scale.is_finite() || metrics.scale <= 0.0 {
         return None;
     }
+    let mut page_origins = Vec::with_capacity(page_count);
+    let mut page_heights = Vec::with_capacity(page_count);
+    let mut page_strides = Vec::with_capacity(page_count);
     let mut next_page_top = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING;
     let mut content_height = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING
         + SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING;
@@ -2974,18 +2843,19 @@ fn prepaint_zoom_scroll_offset(
         }
         if page_index == anchor.page_index {
             target_policy = Some((policy, content_top, content_page_height));
-            target_page_origin = Some(next_page_top);
         }
         let page_stride =
             policy.page_height + policy.explicit_gap + policy.vertical_item_spacing;
         if !page_stride.is_finite() || page_stride <= 0.0 {
             return None;
         }
+        page_origins.push(next_page_top);
+        page_heights.push(policy.page_height);
+        page_strides.push(page_stride);
         next_page_top += page_stride;
         content_height += page_stride;
     }
     let (target_policy, target_content_top, target_content_height) = target_policy?;
-    let target_page_origin = target_page_origin?;
     let content_size = Vec2::new(
         geometry.content_width,
         content_height,
@@ -3003,7 +2873,7 @@ fn prepaint_zoom_scroll_offset(
     };
     let target_presented_y = target_document_y - target_policy.document_y_offset;
     let content_target = outer_rect.min
-        + Vec2::new(geometry.leading_padding, target_page_origin)
+        + Vec2::new(geometry.leading_padding, page_origins[anchor.page_index])
         + Vec2::new(
             anchor.page_local_document_point.x,
             target_presented_y,
@@ -3013,10 +2883,17 @@ fn prepaint_zoom_scroll_offset(
     let requested_offset = content_target - viewport_center;
     let max_offset = (content_size - inner_size).max(Vec2::ZERO);
     (requested_offset.x.is_finite() && requested_offset.y.is_finite()).then(|| {
-        Vec2::new(
+        let scroll_offset = Vec2::new(
             requested_offset.x.clamp(0.0, max_offset.x),
             requested_offset.y.clamp(0.0, max_offset.y),
-        )
+        );
+        PrepaintZoomPlan {
+            page_origins,
+            page_heights,
+            page_strides,
+            content_size,
+            scroll_offset,
+        }
     })
 }
 
@@ -3033,44 +2910,6 @@ impl FixedMetricTextStyle {
         } else {
             self.color
         }
-    }
-}
-
-fn record_pass_galley_layout_request(performance: &mut PerformanceDiagnostics) {
-    performance.pass_galley_layout_requests = performance
-        .pass_galley_layout_requests
-        .saturating_add(1);
-}
-
-fn record_fixed_cell_plan_result(
-    performance: &mut PerformanceDiagnostics,
-    supported: bool,
-    reused: bool,
-) {
-    if !supported {
-        return;
-    }
-    if reused {
-        performance.fixed_cell_plan_hits = performance.fixed_cell_plan_hits.saturating_add(1);
-    } else {
-        performance.fixed_cell_plan_builds = performance
-            .fixed_cell_plan_builds
-            .saturating_add(1);
-    }
-}
-
-fn record_natural_geometry_plan_result(
-    performance: &mut PerformanceDiagnostics,
-    reused: bool,
-) {
-    if reused {
-        performance.natural_geometry_plan_hits = performance
-            .natural_geometry_plan_hits
-            .saturating_add(1);
-    } else {
-        performance.natural_geometry_plan_builds = performance
-            .natural_geometry_plan_builds
-            .saturating_add(1);
     }
 }
 
@@ -3119,18 +2958,20 @@ fn paint_fixed_metric_text_with_selection(
         }
         let color = style.color_for(selected);
         let span_origin = egui::pos2(fixed_metric_x(origin.x, start_column, char_width), origin.y);
-        let (mesh, reused) = fixed_cell_span_mesh(
+        let (galley, reused, fixed_geometry) = fixed_cell_span_galley(
             painter,
             span_text,
             &font,
             char_width,
             color,
         );
-        record_pass_galley_layout_request(performance);
-        record_fixed_cell_plan_result(performance, mesh.is_some(), reused);
-        if let Some(mut mesh) = mesh {
-            mesh.translate(span_origin.to_vec2());
-            painter.add(egui::Shape::mesh(mesh));
+        if reused {
+            performance.galleys_reused = performance.galleys_reused.saturating_add(1);
+        } else {
+            performance.galleys_built = performance.galleys_built.saturating_add(1);
+        }
+        if fixed_geometry {
+            painter.galley(span_origin, galley, color);
         } else {
             // Keep output geometry exact if a later epaint version changes its
             // single-row glyph/mesh contract; this compatibility path is not used
@@ -3151,169 +2992,29 @@ fn paint_fixed_metric_text_with_selection(
     }
 }
 
-const FIXED_CELL_LAYOUT_PLAN_CACHE_CAPACITY: usize = 96;
-const FIXED_CELL_LAYOUT_PLAN_MAX_CACHED_CHARS: usize = 4096;
-
-#[derive(Debug)]
-struct FixedCellLayoutPlan {
-    text: String,
-    font: FontId,
-    char_width_bits: u32,
-    pixels_per_point_bits: u32,
-    color: Color32,
-    glyph_x: Vec<f32>,
-}
-
-#[derive(Default)]
-struct FixedCellLayoutPlanCache {
-    entries: std::collections::VecDeque<std::sync::Arc<FixedCellLayoutPlan>>,
-}
-
-fn fixed_cell_span_mesh(
+fn fixed_cell_span_galley(
     painter: &egui::Painter,
     text: &str,
     font: &FontId,
     char_width: f32,
     color: Color32,
-) -> (Option<egui::epaint::Mesh>, bool) {
-    // Keep only atlas-independent cell positions across passes. The galley and
-    // its UV-bearing mesh always come from this pass's painter/font atlas.
+) -> (std::sync::Arc<Galley>, bool, bool) {
+    // Keep ScriptCraft's fixed-cell transformation local to this egui pass.
+    // Painter::layout_job can use egui's own atlas-aware layout cache, while no
+    // UV-bearing transformed galley is retained by the application.
     let job = LayoutJob::simple_singleline(text.to_owned(), font.clone(), color);
-    let galley = painter.layout_job(job);
-    if galley.rows.len() != 1 {
-        return (None, false);
-    }
-    let placed_row = &galley.rows[0];
-    let row = &placed_row.row;
-    let char_count = galley.job.text.chars().count();
-    if row.glyphs.len() != char_count {
+    let mut galley = painter.layout_job(job).as_ref().clone();
+    if !position_galley_in_fixed_cells(&mut galley, char_width) {
         // The epaint 0.29 single-row galley contract is one glyph record per
         // Unicode scalar and four mesh vertices per textured glyph. Preserve
         // correctness if a future backend violates that contract by leaving its
         // host layout untouched; the caller records the requested build.
-        return (None, false);
+        return (std::sync::Arc::new(galley), false, false);
     }
-    let expected_vertex_count = row
-        .glyphs
-        .iter()
-        .filter(|glyph| !glyph.uv_rect.is_nothing())
-        .count()
-        .saturating_mul(4);
-    let vertex_range = &row.visuals.glyph_vertex_range;
-    if vertex_range.len() != expected_vertex_count
-        || vertex_range.end > row.visuals.mesh.vertices.len()
-    {
-        return (None, false);
-    }
-
-    let (plan, reused) = fixed_cell_layout_plan(
-        painter,
-        text,
-        font,
-        char_width,
-        color,
-        char_count,
-    );
-    if plan.glyph_x.len() != char_count {
-        return (None, false);
-    }
-
-    // Clone only the pass-local mesh needed for painting, not the host galley
-    // and its row/glyph structures. UVs, texture id, indices, and colors all
-    // originate from the current atlas-backed layout.
-    let mut mesh = row.visuals.mesh.clone();
-    let mut vertex_index = vertex_range.start;
-    for (column, glyph) in row.glyphs.iter().enumerate() {
-        if !glyph.uv_rect.is_nothing() {
-            let Some(vertices) = mesh
-                .vertices
-                .get_mut(vertex_index..vertex_index.saturating_add(4))
-            else {
-                return (None, false);
-            };
-            let round_to_pixel = |value: f32| {
-                (value * galley.pixels_per_point).round() / galley.pixels_per_point
-            };
-            let left = plan.glyph_x[column] + round_to_pixel(glyph.uv_rect.offset.x);
-            let right = left + glyph.uv_rect.size.x;
-            vertices[0].pos.x = left;
-            vertices[1].pos.x = right;
-            vertices[2].pos.x = left;
-            vertices[3].pos.x = right;
-            vertex_index = vertex_index.saturating_add(4);
-        }
-    }
-    if vertex_index != vertex_range.end {
-        return (None, false);
-    }
-    mesh.translate(placed_row.pos.to_vec2());
-    (Some(mesh), reused)
+    let galley = std::sync::Arc::new(galley);
+    (galley, false, true)
 }
 
-fn fixed_cell_layout_plan(
-    painter: &egui::Painter,
-    text: &str,
-    font: &FontId,
-    char_width: f32,
-    color: Color32,
-    char_count: usize,
-) -> (std::sync::Arc<FixedCellLayoutPlan>, bool) {
-    // The exact text/style key means a replacement document with different
-    // content cannot hit old data. Identical content remains safe across a
-    // replacement because plans contain only cell x positions, never document-
-    // or atlas-derived geometry. Context lifetime and entry/length limits bound
-    // retention. Effective font, scale, and color inputs select a new key; an
-    // atlas generation change is safe because each call lays out and consumes
-    // the current painter's UV-bearing mesh rather than retaining one here.
-    let pixels_per_point = painter.ctx().pixels_per_point();
-    let cache_id = egui::Id::new("scriptcraft-fixed-cell-layout-plans");
-    let cache = painter.ctx().data_mut(|data| {
-        data.get_temp::<std::sync::Arc<std::sync::Mutex<FixedCellLayoutPlanCache>>>(cache_id)
-            .unwrap_or_else(|| {
-                let cache = std::sync::Arc::new(std::sync::Mutex::new(
-                    FixedCellLayoutPlanCache::default(),
-                ));
-                data.insert_temp(cache_id, cache.clone());
-                cache
-            })
-    });
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let matching_entry = cache.entries.iter().position(|entry| {
-        entry.text == text
-            && entry.font == *font
-            && entry.char_width_bits == char_width.to_bits()
-            && entry.pixels_per_point_bits == pixels_per_point.to_bits()
-            && entry.color == color
-    });
-    if let Some(index) = matching_entry {
-        let plan = cache.entries.remove(index).expect("located cache entry");
-        cache.entries.push_front(plan.clone());
-        return (plan, true);
-    }
-
-    let plan = std::sync::Arc::new(FixedCellLayoutPlan {
-        text: text.to_owned(),
-        font: font.clone(),
-        char_width_bits: char_width.to_bits(),
-        pixels_per_point_bits: pixels_per_point.to_bits(),
-        color,
-        glyph_x: (0..char_count)
-            .map(|column| column as f32 * char_width)
-            .collect(),
-    });
-    if char_count > FIXED_CELL_LAYOUT_PLAN_MAX_CACHED_CHARS {
-        return (plan, false);
-    }
-    cache.entries.push_front(plan.clone());
-    cache
-        .entries
-        .truncate(FIXED_CELL_LAYOUT_PLAN_CACHE_CAPACITY);
-    (plan, false)
-}
-
-#[cfg(test)]
 fn position_galley_in_fixed_cells(galley: &mut Galley, char_width: f32) -> bool {
     if galley.rows.len() != 1 {
         return false;
@@ -3526,31 +3227,55 @@ mod imported_role_color_paint_tests {
 
 #[cfg(test)]
 mod fixed_cell_atlas_lifetime_tests {
-    use super::{fixed_cell_span_mesh, position_galley_in_fixed_cells};
+    use super::{fixed_cell_span_galley, position_galley_in_fixed_cells};
     use eframe::egui::{self, Color32, FontFamily, FontId};
     use egui::epaint::text::{Galley, LayoutJob};
-    use egui::epaint::Mesh;
+    use std::sync::Arc;
 
-    fn assert_mesh_matches(actual: &Mesh, expected: &Mesh) {
-        assert_eq!(actual.texture_id, expected.texture_id);
-        assert_eq!(actual.indices, expected.indices);
-        assert_eq!(actual.vertices.len(), expected.vertices.len());
-        for (actual_vertex, expected_vertex) in actual.vertices.iter().zip(&expected.vertices) {
-            assert_eq!(actual_vertex.pos, expected_vertex.pos);
-            assert_eq!(actual_vertex.uv, expected_vertex.uv);
-            assert_eq!(actual_vertex.color, expected_vertex.color);
+    fn assert_galley_mesh_matches(actual: &Galley, expected: &Galley) {
+        assert_eq!(actual.text(), expected.text());
+        assert_eq!(actual.elided, expected.elided);
+        assert_eq!(actual.rect, expected.rect);
+        assert_eq!(actual.rows.len(), expected.rows.len());
+        for (actual_placed, expected_placed) in actual.rows.iter().zip(&expected.rows) {
+            assert_eq!(actual_placed.pos, expected_placed.pos);
+            let actual_row = &actual_placed.row;
+            let expected_row = &expected_placed.row;
+            assert_eq!(actual_row.glyphs.len(), expected_row.glyphs.len());
+            for (actual_glyph, expected_glyph) in
+                actual_row.glyphs.iter().zip(&expected_row.glyphs)
+            {
+                assert_eq!(actual_glyph.chr, expected_glyph.chr);
+                assert_eq!(actual_glyph.pos, expected_glyph.pos);
+                assert_eq!(actual_glyph.advance_width, expected_glyph.advance_width);
+                assert_eq!(actual_glyph.uv_rect, expected_glyph.uv_rect);
+            }
+            assert_eq!(actual_row.visuals.glyph_vertex_range, expected_row.visuals.glyph_vertex_range);
+            assert_eq!(actual_row.visuals.mesh.indices, expected_row.visuals.mesh.indices);
+            assert_eq!(actual_row.visuals.mesh.vertices.len(), expected_row.visuals.mesh.vertices.len());
+            for (actual_vertex, expected_vertex) in actual_row
+                .visuals
+                .mesh
+                .vertices
+                .iter()
+                .zip(&expected_row.visuals.mesh.vertices)
+            {
+                assert_eq!(actual_vertex.pos, expected_vertex.pos);
+                assert_eq!(actual_vertex.uv, expected_vertex.uv);
+                assert_eq!(actual_vertex.color, expected_vertex.color);
+            }
         }
     }
 
     #[test]
-    fn fixed_cell_plan_reuse_rebuilds_current_pass_uv_mesh_for_each_variant() {
+    fn fixed_cell_variants_never_hit_a_previous_pass_cache_for_any_foreground() {
         let context = egui::Context::default();
         let font = FontId::new(18.0, FontFamily::Monospace);
         let colors = [Color32::WHITE, Color32::from_rgb(0x31, 0x72, 0xd0)];
-        let texts = ["Fixed AV text", "Unicode: Å界🙂"];
+        let mut previous: [Option<Arc<Galley>>; 2] = [None, None];
 
         // The first five passes exercise Day → Night → Day → Night → Day;
-        // the final identical Day appearance exercises an exact-key cache hit.
+        // the final identical Day appearance proves lifetime is pass-based.
         for (pass, dark) in [false, true, false, true, false, false].into_iter().enumerate() {
             context.set_visuals(if dark {
                 egui::Visuals::dark()
@@ -3561,301 +3286,36 @@ mod fixed_cell_atlas_lifetime_tests {
             let _ = context.run(egui::RawInput::default(), |context| {
                 egui::CentralPanel::default().show(context, |ui| {
                     for (color_index, color) in colors.into_iter().enumerate() {
-                        for (text_index, text) in texts.into_iter().enumerate() {
-                            let (mesh, reused) = fixed_cell_span_mesh(
-                                ui.painter(), text, &font, 9.0, color,
-                            );
-                            assert!(mesh.is_some(), "pass {pass} text {text_index} keeps fixed-cell topology");
-                            assert_eq!(
-                                reused,
-                                pass > 0,
-                                "pass {pass} text {text_index} variant {color_index} has expected exact-key reuse"
-                            );
-
-                            // The helper always lays out the current pass and only
-                            // reuses atlas-independent fixed-cell positions.
-                            let mut fresh = ui.painter().layout_job(LayoutJob::simple_singleline(
-                                text.to_owned(), font.clone(), color,
-                            )).as_ref().clone();
-                            assert!(position_galley_in_fixed_cells(&mut fresh, 9.0));
-                            assert_eq!(fresh.text(), text);
-                            assert_eq!(fresh.rows.len(), 1);
-                            assert_eq!(fresh.rows[0].row.glyphs.len(), text.chars().count());
-                            for (column, glyph) in fresh.rows[0].row.glyphs.iter().enumerate() {
-                                assert_eq!(glyph.pos.x, column as f32 * 9.0);
-                                assert_eq!(glyph.advance_width, 9.0);
-                            }
-                            assert_mesh_matches(
-                                mesh.as_ref().expect("supported single-row mesh"),
-                                &fresh.rows[0].row.visuals.mesh,
-                            );
-
-                            let (same_pass_mesh, same_pass_reused) = fixed_cell_span_mesh(
-                                ui.painter(), text, &font, 9.0, color,
-                            );
-                            assert!(same_pass_reused, "identical span reuses its plan in the same pass");
-                            assert_mesh_matches(
-                                same_pass_mesh.as_ref().expect("supported single-row mesh"),
-                                &fresh.rows[0].row.visuals.mesh,
+                        let (galley, reused, fixed_geometry) = fixed_cell_span_galley(
+                            ui.painter(),
+                            "Fixed AV text",
+                            &font,
+                            9.0,
+                            color,
+                        );
+                        assert!(!reused, "pass {pass} returned a custom cache hit");
+                        assert!(fixed_geometry, "pass {pass} should preserve fixed-cell geometry");
+                        if let Some(previous) = previous[color_index].as_ref() {
+                            assert!(
+                                !Arc::ptr_eq(previous, &galley),
+                                "pass {pass} reused a UV-bearing fixed-cell galley from an earlier egui pass"
                             );
                         }
+
+                        let mut fresh = ui.painter().layout_job(LayoutJob::simple_singleline(
+                            "Fixed AV text".to_owned(),
+                            font.clone(),
+                            color,
+                        )).as_ref().clone();
+                        assert!(position_galley_in_fixed_cells(&mut fresh, 9.0));
+                        assert_galley_mesh_matches(&galley, &fresh);
+                        previous[color_index] = Some(galley);
                         built += 1;
                     }
                 });
             });
-            assert_eq!(built, colors.len(), "pass {pass} exercises ordinary and selected variants");
+            assert_eq!(built, colors.len(), "pass {pass} builds ordinary and selected variants");
         }
-    }
-
-    #[test]
-    fn fixed_cell_plan_misses_when_effective_layout_inputs_change() {
-        let context = egui::Context::default();
-        let font = FontId::new(18.0, FontFamily::Monospace);
-        let alternate_font = FontId::new(19.0, FontFamily::Proportional);
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let painter = ui.painter();
-                let (base, base_reused) = super::fixed_cell_layout_plan(
-                    painter, "key inputs", &font, 9.0, Color32::WHITE, 10,
-                );
-                assert!(!base_reused);
-                let (exact, exact_reused) = super::fixed_cell_layout_plan(
-                    painter, "key inputs", &font, 9.0, Color32::WHITE, 10,
-                );
-                assert!(exact_reused);
-                assert!(std::sync::Arc::ptr_eq(&base, &exact));
-
-                for (text, font, width, color) in [
-                    ("other text", font.clone(), 9.0, Color32::WHITE),
-                    ("key inputs", alternate_font, 9.0, Color32::WHITE),
-                    ("key inputs", font.clone(), 10.0, Color32::WHITE),
-                    (
-                        "key inputs",
-                        font.clone(),
-                        9.0,
-                        Color32::from_rgb(0x31, 0x72, 0xd0),
-                    ),
-                ] {
-                    let (_, reused) = super::fixed_cell_layout_plan(
-                        painter, text, &font, width, color, text.chars().count(),
-                    );
-                    assert!(!reused, "changed effective input unexpectedly hit");
-                }
-            });
-        });
-    }
-
-    #[test]
-    fn fixed_cell_plan_misses_when_pixels_per_point_changes() {
-        let context = egui::Context::default();
-        let font = FontId::new(18.0, FontFamily::Monospace);
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let (_, reused) = super::fixed_cell_layout_plan(
-                    ui.painter(), "fixed ppp", &font, 9.0, Color32::WHITE, 9,
-                );
-                assert!(!reused);
-            });
-        });
-
-        context.set_pixels_per_point(1.5);
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let (_, reused) = super::fixed_cell_layout_plan(
-                    ui.painter(), "fixed ppp", &font, 9.0, Color32::WHITE, 9,
-                );
-                assert!(!reused, "changed pixels-per-point must select a fresh plan");
-            });
-        });
-    }
-
-    #[test]
-    fn fixed_cell_plan_retention_is_bounded_and_document_content_keyed() {
-        let context = egui::Context::default();
-        let font = FontId::new(18.0, FontFamily::Monospace);
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let painter = ui.painter();
-                let (old_document, reused) = super::fixed_cell_layout_plan(
-                    painter,
-                    "old document text",
-                    &font,
-                    9.0,
-                    Color32::WHITE,
-                    17,
-                );
-                assert!(!reused);
-
-                for index in 0..super::FIXED_CELL_LAYOUT_PLAN_CACHE_CAPACITY {
-                    let text = format!("replacement content {index}");
-                    let (_, reused) = super::fixed_cell_layout_plan(
-                        painter,
-                        &text,
-                        &font,
-                        9.0,
-                        Color32::WHITE,
-                        text.chars().count(),
-                    );
-                    assert!(!reused);
-                }
-                let (evicted, reused) = super::fixed_cell_layout_plan(
-                    painter,
-                    "old document text",
-                    &font,
-                    9.0,
-                    Color32::WHITE,
-                    17,
-                );
-                assert!(!reused, "the least-recently-used entry was evicted");
-                assert!(!std::sync::Arc::ptr_eq(&old_document, &evicted));
-
-                let (replacement, reused) = super::fixed_cell_layout_plan(
-                    painter,
-                    "new document text",
-                    &font,
-                    9.0,
-                    Color32::WHITE,
-                    17,
-                );
-                assert!(!reused, "different replacement content cannot consume the old plan");
-                let (same_replacement_text, reused) = super::fixed_cell_layout_plan(
-                    painter,
-                    "new document text",
-                    &font,
-                    9.0,
-                    Color32::WHITE,
-                    17,
-                );
-                assert!(reused, "identical content may safely share atlas-independent positions");
-                assert!(std::sync::Arc::ptr_eq(&replacement, &same_replacement_text));
-            });
-        });
-    }
-
-    #[test]
-    fn fixed_cell_plan_hit_uses_current_font_generation_mesh() {
-        let context = egui::Context::default();
-        let font = FontId::new(18.0, FontFamily::Monospace);
-        let text = "Fixed generation Å界";
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let (mesh, reused) = fixed_cell_span_mesh(
-                    ui.painter(), text, &font, 9.0, Color32::WHITE,
-                );
-                assert!(!reused);
-                assert!(mesh.is_some());
-            });
-        });
-
-        // The cached value contains only cell x positions. After font/atlas
-        // replacement the paint mesh must still come from the current painter.
-        context.set_fonts(egui::FontDefinitions::default());
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let painter = ui.painter();
-                let (mesh, reused) = fixed_cell_span_mesh(
-                    painter, text, &font, 9.0, Color32::WHITE,
-                );
-                assert!(mesh.is_some());
-                assert!(reused, "atlas-independent cell positions remain reusable");
-
-                let mut fresh = painter
-                    .layout_job(LayoutJob::simple_singleline(
-                        text.to_owned(), font.clone(), Color32::WHITE,
-                    ))
-                    .as_ref()
-                    .clone();
-                assert!(position_galley_in_fixed_cells(&mut fresh, 9.0));
-                assert_mesh_matches(
-                    mesh.as_ref().expect("supported current-pass mesh"),
-                    &fresh.rows[0].row.visuals.mesh,
-                );
-            });
-        });
-    }
-
-    #[test]
-    fn unsupported_fixed_cell_topology_keeps_the_host_galley_untouched() {
-        let context = egui::Context::default();
-        let font = FontId::new(18.0, FontFamily::Monospace);
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let mut unsupported = ui
-                    .painter()
-                    .layout_job(LayoutJob::simple_singleline(
-                        "unsupported".to_owned(),
-                        font.clone(),
-                        Color32::WHITE,
-                    ))
-                    .as_ref()
-                    .clone();
-                let original_text = unsupported.text().to_owned();
-                unsupported.rows.clear();
-                assert!(!position_galley_in_fixed_cells(&mut unsupported, 9.0));
-                assert!(unsupported.rows.is_empty());
-                assert_eq!(unsupported.text(), original_text);
-
-                let (fallback_mesh, reused) = fixed_cell_span_mesh(
-                    ui.painter(),
-                    "first line\nsecond line",
-                    &font,
-                    9.0,
-                    Color32.WHITE,
-                );
-                assert!(fallback_mesh.is_none(), "unsupported multi-row text stays fresh-only");
-                assert!(!reused, "unsupported topology is never counted as a plan hit");
-            });
-        });
-    }
-
-    #[test]
-    fn renderer_counters_follow_real_fixed_and_natural_plan_hits() {
-        let context = egui::Context::default();
-        let font = FontId::new(18.0, FontFamily::Proportional);
-        let mut diagnostics = super::super::PerformanceDiagnostics::default();
-
-        let _ = context.run(egui::RawInput::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                for _ in 0..2 {
-                    let (mesh, reused) = fixed_cell_span_mesh(
-                        ui.painter(),
-                        "counter fixed AV界",
-                        &font,
-                        9.0,
-                        Color32::WHITE,
-                    );
-                    super::record_pass_galley_layout_request(&mut diagnostics);
-                    super::record_fixed_cell_plan_result(
-                        &mut diagnostics,
-                        mesh.is_some(),
-                        reused,
-                    );
-                }
-
-                for _ in 0..2 {
-                    let (_, reused) = super::super::presentation_geometry::natural_singleline_geometry(
-                        ui.painter(),
-                        "counter natural café",
-                        &font,
-                        crate::presentation_style::AdvanceMode::Proportional,
-                        Color32::WHITE,
-                        1.0,
-                    )
-                    .expect("single-line proportional geometry has supported topology");
-                    super::record_pass_galley_layout_request(&mut diagnostics);
-                    super::record_natural_geometry_plan_result(&mut diagnostics, reused);
-                }
-            });
-        });
-
-        let delta = diagnostics
-            .totals
-            .delta_since(super::super::PerformanceMeasurements::default());
-        assert_eq!(delta.pass_galley_layout_requests, 4);
-        assert_eq!(delta.fixed_cell_plan_builds, 1);
-        assert_eq!(delta.fixed_cell_plan_hits, 1);
-        assert_eq!(delta.natural_geometry_plan_builds, 1);
-        assert_eq!(delta.natural_geometry_plan_hits, 1);
     }
 }
 

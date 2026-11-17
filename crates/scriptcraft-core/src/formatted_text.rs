@@ -709,44 +709,10 @@ pub fn styled_display_spans(
     Ok(spans)
 }
 
-fn project_target_text_runs(
-    project: &mut Project,
-    target: ParagraphTarget,
-    original_text: &str,
-    text: &str,
-    runs: &[TextRun],
-) -> Result<(), FormattedTextError> {
-    let (id, provenance, role_name) = match target {
-        ParagraphTarget::Body(index) => {
-            let element = project.elements.get(index).ok_or(FormattedTextError::ParagraphOutOfRange)?;
-            (element.id.clone(), element.source_provenance.clone(), Some(crate::formatting::formatting_for_role(element.role).fdx_label))
-        }
-        ParagraphTarget::TitlePage(index) => {
-            let paragraph = project.title_page.get(index).ok_or(FormattedTextError::ParagraphOutOfRange)?;
-            (paragraph.id.clone(), paragraph.source_provenance.clone(), None)
-        }
-    };
-    if let Some(preservation) = project.preservation.as_mut() {
-        if let Some(recovered) = preservation.project_managed_text_runs(
-            &id,
-            original_text,
-            text,
-            runs,
-            provenance.as_ref(),
-            role_name,
-        )? {
-            match target {
-                ParagraphTarget::Body(index) => project.elements[index].source_provenance = Some(recovered),
-                ParagraphTarget::TitlePage(index) => project.title_page[index].source_provenance = Some(recovered),
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Change paragraph alignment for an explicit set of body/title paragraph
-/// targets. Recognized direct fields are deterministic source upserts; unknown
-/// source attributes remain attached to their owner.
+/// targets. Source attributes are updated in-place by expanded name, preserving
+/// all other attribute values and their order. The candidate publishes only
+/// after complete project validation succeeds.
 pub fn set_paragraph_alignments(
     project: &mut Project,
     targets: &[ParagraphTarget],
@@ -774,16 +740,6 @@ pub fn set_paragraph_alignments(
                     .or_default();
                 overrides.paragraph.alignment = Some(alignment);
                 if let Some(preservation) = candidate.preservation.as_mut() {
-                    if let Some(recovered) = preservation.project_managed_text_runs(
-                        &id,
-                        &text,
-                        &text,
-                        &runs,
-                        candidate.elements[index].source_provenance.as_ref(),
-                        Some(crate::formatting::formatting_for_role(candidate.elements[index].role).fdx_label),
-                    )? {
-                        candidate.elements[index].source_provenance = Some(recovered);
-                    }
                     preservation.set_managed_paragraph_attribute(
                         &id,
                         "Alignment",
@@ -796,28 +752,18 @@ pub fn set_paragraph_alignments(
                 }
             }
             ParagraphTarget::TitlePage(index) => {
-                let paragraph = candidate.title_page.get(index).ok_or(FormattedTextError::ParagraphOutOfRange)?;
-                let id = paragraph.id.clone();
-                let text = paragraph.text.clone();
-                let runs = paragraph.runs.clone();
-                candidate.title_page[index].formatting.alignment = Some(alignment.into());
+                let paragraph = candidate
+                    .title_page
+                    .get_mut(index)
+                    .ok_or(FormattedTextError::ParagraphOutOfRange)?;
                 if let Some(preservation) = candidate.preservation.as_mut() {
-                    if let Some(recovered) = preservation.project_managed_text_runs(
-                        &id,
-                        &text,
-                        &text,
-                        &runs,
-                        candidate.title_page[index].source_provenance.as_ref(),
-                        None,
-                    )? {
-                        candidate.title_page[index].source_provenance = Some(recovered);
-                    }
                     preservation.set_managed_paragraph_attribute(
-                        &id,
+                        &paragraph.id,
                         "Alignment",
                         Some(alignment.fdx_value()),
                     )?;
                 }
+                paragraph.formatting.alignment = Some(alignment.into());
             }
         }
     }
@@ -892,22 +838,27 @@ pub fn toggle_paragraph_run_style(
     style: RunStyle,
 ) -> Result<RunStyleEdit, FormattedTextError> {
     let mut candidate = project.clone();
-    let (text, runs) = match target {
+    let (id, text, runs) = match target {
         ParagraphTarget::Body(index) => {
             let element = candidate
                 .elements
                 .get(index)
                 .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-            (element.text.clone(), element.runs.clone())
+            (element.id.clone(), element.text.clone(), element.runs.clone())
         }
         ParagraphTarget::TitlePage(index) => {
             let paragraph = candidate
                 .title_page
                 .get(index)
                 .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-            (paragraph.text.clone(), paragraph.runs.clone())
+            (paragraph.id.clone(), paragraph.text.clone(), paragraph.runs.clone())
         }
     };
+    if !range.is_empty() {
+        if let Some(preservation) = candidate.preservation.as_ref() {
+            preservation.ensure_run_range_is_contiguous(&id, range.clone())?;
+        }
+    }
     let edit = toggle_style_for_range(&text, &runs, range, active_style, style)?;
     if edit.changed {
         match target {
@@ -922,7 +873,25 @@ pub fn toggle_paragraph_run_style(
                 candidate.title_page[index].text = text.clone();
             }
         }
-        project_target_text_runs(&mut candidate, target, &text, &text, &edit.runs)?;
+        if let Some(preservation) = candidate.preservation.as_mut() {
+            let (id, has_provenance) = match target {
+                ParagraphTarget::Body(index) => {
+                    let element = &candidate.elements[index];
+                    (element.id.clone(), element.source_provenance.is_some())
+                }
+                ParagraphTarget::TitlePage(index) => {
+                    let paragraph = &candidate.title_page[index];
+                    (paragraph.id.clone(), paragraph.source_provenance.is_some())
+                }
+            };
+            if preservation.has_managed_element(&id) {
+                preservation.sync_managed_text_runs(&id, &text, &edit.runs)?;
+            } else if has_provenance {
+                return Err(FormattedTextError::Preservation(
+                    PreservationError::ManagedAnchorMissing,
+                ));
+            }
+        }
         candidate.validate()?;
         *project = candidate;
     }
@@ -948,22 +917,27 @@ pub fn toggle_paragraph_run_styles(
     let mut candidate = project.clone();
     let mut snapshots = Vec::with_capacity(selections.len());
     for (target, range) in selections {
-        let (text, runs) = match *target {
+        let (id, text, runs) = match *target {
             ParagraphTarget::Body(index) => {
                 let element = candidate
                     .elements
                     .get(index)
                     .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-                (element.text.clone(), element.runs.clone())
+                (element.id.clone(), element.text.clone(), element.runs.clone())
             }
             ParagraphTarget::TitlePage(index) => {
                 let paragraph = candidate
                     .title_page
                     .get(index)
                     .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-                (paragraph.text.clone(), paragraph.runs.clone())
+                (paragraph.id.clone(), paragraph.text.clone(), paragraph.runs.clone())
             }
         };
+        if !range.is_empty() {
+            if let Some(preservation) = candidate.preservation.as_ref() {
+                preservation.ensure_run_range_is_contiguous(&id, range.clone())?;
+            }
+        }
         snapshots.push((*target, text, runs, range.clone()));
     }
     let ranges = snapshots
@@ -993,7 +967,25 @@ pub fn toggle_paragraph_run_styles(
                 candidate.title_page[index].runs = edit.runs.clone();
             }
         }
-        project_target_text_runs(&mut candidate, *target, text, text, &edit.runs)?;
+        if let Some(preservation) = candidate.preservation.as_mut() {
+            let (id, has_provenance) = match *target {
+                ParagraphTarget::Body(index) => {
+                    let element = &candidate.elements[index];
+                    (element.id.clone(), element.source_provenance.is_some())
+                }
+                ParagraphTarget::TitlePage(index) => {
+                    let paragraph = &candidate.title_page[index];
+                    (paragraph.id.clone(), paragraph.source_provenance.is_some())
+                }
+            };
+            if preservation.has_managed_element(&id) {
+                preservation.sync_managed_text_runs(&id, text, &edit.runs)?;
+            } else if has_provenance {
+                return Err(FormattedTextError::Preservation(
+                    PreservationError::ManagedAnchorMissing,
+                ));
+            }
+        }
     }
     if changed {
         candidate.validate()?;
@@ -1018,22 +1010,27 @@ pub fn clear_paragraph_run_styles(
     let mut candidate = project.clone();
     let mut snapshots = Vec::with_capacity(selections.len());
     for (target, range) in selections {
-        let (text, runs) = match *target {
+        let (id, text, runs) = match *target {
             ParagraphTarget::Body(index) => {
                 let element = candidate
                     .elements
                     .get(index)
                     .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-                (element.text.clone(), element.runs.clone())
+                (element.id.clone(), element.text.clone(), element.runs.clone())
             }
             ParagraphTarget::TitlePage(index) => {
                 let paragraph = candidate
                     .title_page
                     .get(index)
                     .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-                (paragraph.text.clone(), paragraph.runs.clone())
+                (paragraph.id.clone(), paragraph.text.clone(), paragraph.runs.clone())
             }
         };
+        if !range.is_empty() {
+            if let Some(preservation) = candidate.preservation.as_ref() {
+                preservation.ensure_run_range_is_contiguous(&id, range.clone())?;
+            }
+        }
         snapshots.push((*target, text, runs, range.clone()));
     }
     let ranges = snapshots
@@ -1063,7 +1060,25 @@ pub fn clear_paragraph_run_styles(
                 candidate.title_page[index].runs = edit.runs.clone();
             }
         }
-        project_target_text_runs(&mut candidate, *target, text, text, &edit.runs)?;
+        if let Some(preservation) = candidate.preservation.as_mut() {
+            let (id, has_provenance) = match *target {
+                ParagraphTarget::Body(index) => {
+                    let element = &candidate.elements[index];
+                    (element.id.clone(), element.source_provenance.is_some())
+                }
+                ParagraphTarget::TitlePage(index) => {
+                    let paragraph = &candidate.title_page[index];
+                    (paragraph.id.clone(), paragraph.source_provenance.is_some())
+                }
+            };
+            if preservation.has_managed_element(&id) {
+                preservation.sync_managed_text_runs(&id, text, &edit.runs)?;
+            } else if has_provenance {
+                return Err(FormattedTextError::Preservation(
+                    PreservationError::ManagedAnchorMissing,
+                ));
+            }
+        }
     }
     if changed {
         candidate.validate()?;

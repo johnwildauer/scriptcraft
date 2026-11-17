@@ -636,10 +636,7 @@ impl Project {
             layout_identity: Arc::new(()),
         })
     }
-    /// Validates canonical semantics and the projection currently owned by this
-    /// project. Imported source is checked as current retained data; original
-    /// bytes are not used as an edit-time authority.
-    pub fn validate_current_state(&self) -> Result<(), ModelError> {
+    pub fn validate(&self) -> Result<(), ModelError> {
         let _ = COMPLETE_PROJECT_VALIDATIONS.try_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
@@ -660,7 +657,6 @@ impl Project {
         }
         let mut ids = BTreeSet::new();
         let mut element_ids = BTreeSet::new();
-        let mut body_positions = std::collections::BTreeMap::new();
         for item in &self.title_page {
             item.validate()?;
             if !ids.insert(&item.id) {
@@ -668,20 +664,18 @@ impl Project {
             }
             element_ids.insert(item.id.clone());
         }
-        for (index, item) in self.elements.iter().enumerate() {
+        for item in &self.elements {
             validate_element(item)?;
             if !ids.insert(&item.id) {
                 return Err(ModelError::DuplicateId);
             }
             element_ids.insert(item.id.clone());
-            body_positions.insert(item.id.clone(), index);
         }
-        dual_dialogue::validate_groups(self, &body_positions)
-            .map_err(ModelError::InvalidDualDialogue)?;
+        dual_dialogue::validate_groups(self).map_err(ModelError::InvalidDualDialogue)?;
         if self
             .direct_paragraph_overrides
             .keys()
-            .any(|id| !body_positions.contains_key(id))
+            .any(|id| !self.elements.iter().any(|element| &element.id == id))
         {
             return Err(ModelError::InvalidParagraphOverride);
         }
@@ -689,7 +683,7 @@ impl Project {
         dual_dialogue::validate_wrapper_overrides(self).map_err(ModelError::InvalidDualDialogue)?;
         if let Some(preservation) = &self.preservation {
             preservation
-                .validate_current_projection(&element_ids, &group_ids)
+                .validate_project_elements(&element_ids, &group_ids)
                 .map_err(ModelError::InvalidPreservationState)?;
             for group in &self.dual_dialogue_groups {
                 let wrapper_anchor = preservation.dual_dialogue_wrapper_anchor(&group.id);
@@ -703,22 +697,14 @@ impl Project {
         Ok(())
     }
 
-    /// Performs the full public model validation. This remains strict for
-    /// explicitly supplied/malformed projects and shares the current-state
-    /// invariants used by editing transactions.
-    pub fn validate(&self) -> Result<(), ModelError> {
-        self.validate_current_state()
-    }
-
-    /// Validates one ordinary Body owner edit against a baseline that has
-    /// already passed complete current-state validation. `CompleteValidationRequired`
-    /// means the unchanged-state proof was inconclusive; callers must run full
-    /// validation. An invalid current candidate is always returned as an error.
-    pub fn validate_scoped_single_element_edit(
+    /// Validates one ordinary-edit candidate element against a complete valid
+    /// baseline. `Ok(false)` means scope preconditions were not established and
+    /// the caller must perform complete validation.
+    pub(crate) fn validate_scoped_single_element_edit(
         &mut self,
         baseline: &Project,
         element_index: usize,
-    ) -> Result<ScopedEditValidationOutcome, ModelError> {
+    ) -> Result<bool, ModelError> {
         if self.elements.len() != baseline.elements.len()
             || self.title_page.len() != baseline.title_page.len()
             || self.dual_dialogue_groups != baseline.dual_dialogue_groups
@@ -727,16 +713,16 @@ impl Project {
             || self.legacy_json_state != baseline.legacy_json_state
             || !Arc::ptr_eq(&self.layout_identity, &baseline.layout_identity)
         {
-            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
+            return Ok(false);
         }
         let Some(before) = baseline.elements.get(element_index) else {
-            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
+            return Ok(false);
         };
         let Some(after) = self.elements.get(element_index) else {
-            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
+            return Ok(false);
         };
         if before.id != after.id {
-            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
+            return Ok(false);
         }
         if self.title_page != baseline.title_page
             || self
@@ -750,87 +736,32 @@ impl Project {
                         && candidate != original
                 })
         {
-            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
+            return Ok(false);
         }
-        Self::validate_scoped_single_element_edit_after_owner_proof(
-            &mut self.preservation,
-            baseline,
-            after,
-        )
-    }
-
-    /// Descriptor-authorized variant for the transactional editing path. The
-    /// caller has already proved the operation's declared owner/range/field
-    /// boundary; this method rechecks global state and stable owner identity,
-    /// then retains the same current-owner and preservation proof as the public
-    /// defensive validator without rediscovering changed semantic owners.
-    pub(crate) fn validate_scoped_single_element_edit_for_descriptor(
-        &mut self,
-        baseline: &Project,
-        element_index: usize,
-        expected_owner: &StableId,
-    ) -> Result<ScopedEditValidationOutcome, ModelError> {
-        if self.elements.len() != baseline.elements.len()
-            || self.title_page != baseline.title_page
-            || self.dual_dialogue_groups != baseline.dual_dialogue_groups
-            || self.dual_dialogue_paragraph_overrides != baseline.dual_dialogue_paragraph_overrides
-            || self.direct_paragraph_overrides != baseline.direct_paragraph_overrides
-            || self.legacy_json_state != baseline.legacy_json_state
-            || !Arc::ptr_eq(&self.layout_identity, &baseline.layout_identity)
-        {
-            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
-        }
-        let Some(before) = baseline.elements.get(element_index) else {
-            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
-        };
-        let Some(after) = self.elements.get(element_index) else {
-            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
-        };
-        if &before.id != expected_owner || &after.id != expected_owner {
-            return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
-        }
-        Self::validate_scoped_single_element_edit_after_owner_proof(
-            &mut self.preservation,
-            baseline,
-            after,
-        )
-    }
-
-    fn validate_scoped_single_element_edit_after_owner_proof(
-        candidate_preservation: &mut Option<preservation::PreservationState>,
-        baseline: &Project,
-        after: &ScreenplayElement,
-    ) -> Result<ScopedEditValidationOutcome, ModelError> {
         validate_element(after)?;
-        let updated_source_text_bytes = match (candidate_preservation.as_ref(), &baseline.preservation) {
+        let updated_source_text_bytes = match (&self.preservation, &baseline.preservation) {
             (Some(candidate), Some(valid_baseline)) => {
                 if !candidate.has_managed_paragraph_index()
                     || !valid_baseline.has_managed_paragraph_index()
                     || !candidate.scoped_global_invariants_match(valid_baseline)
                 {
-                    return Ok(ScopedEditValidationOutcome::CompleteValidationRequired);
+                    return Ok(false);
                 }
-                match candidate
-                    .validate_scoped_managed_edit(valid_baseline, after)
-                    .map_err(ModelError::InvalidPreservationState)?
-                {
-                    preservation::ScopedManagedEditResult::Validated { source_text_bytes } => {
-                        Some(source_text_bytes)
-                    }
-                    preservation::ScopedManagedEditResult::CompleteValidationRequired => {
-                        return Ok(ScopedEditValidationOutcome::CompleteValidationRequired)
-                    }
-                }
+                Some(
+                    candidate
+                        .validate_scoped_managed_edit(valid_baseline, after)
+                        .map_err(ModelError::InvalidPreservationState)?,
+                )
             }
             (None, None) => None,
-            _ => return Ok(ScopedEditValidationOutcome::CompleteValidationRequired),
+            _ => return Ok(false),
         };
         if let Some(byte_count) = updated_source_text_bytes {
-            if let Some(preservation) = candidate_preservation.as_mut() {
+            if let Some(preservation) = self.preservation.as_mut() {
                 preservation.set_validated_source_text_bytes(byte_count);
             }
         }
-        Ok(ScopedEditValidationOutcome::Validated)
+        Ok(true)
     }
     pub fn to_json(&self) -> Result<String, ModelError> {
         self.validate()?;

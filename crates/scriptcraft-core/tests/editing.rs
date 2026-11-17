@@ -30,32 +30,6 @@ fn two_sided_project() -> Project {
     project
 }
 
-fn group_from_ranges(
-    project: &Project,
-    id: &str,
-    left: Range<usize>,
-    right: Range<usize>,
-) -> DualDialogueGroup {
-    DualDialogueGroup {
-        id: valid(StableId::new(id)),
-        left: DualDialogueSide {
-            character: project.elements[left.start].id.clone(),
-            paragraphs: project.elements[left.start + 1..left.end]
-                .iter()
-                .map(|element| element.id.clone())
-                .collect(),
-        },
-        right: DualDialogueSide {
-            character: project.elements[right.start].id.clone(),
-            paragraphs: project.elements[right.start + 1..right.end]
-                .iter()
-                .map(|element| element.id.clone())
-                .collect(),
-        },
-        wrapper: DualDialogueWrapperProvenance::default(),
-    }
-}
-
 #[test]
 fn development_mutation_diagnostics_record_only_actual_body_candidate_invocations() {
     let mut session = valid(EditingSession::new(valid(Project::new())));
@@ -125,10 +99,6 @@ fn utf8_editing_formatting_and_navigation_keep_byte_offsets_and_roles() {
     let before_invalid = session.clone();
     assert!(session
         .set_selection(Selection::caret(Position { element: 0, offset: 4 }))
-        .is_err());
-    assert_eq!(session, before_invalid);
-    assert!(session
-        .set_selection(Selection::caret(Position { element: 1, offset: 0 }))
         .is_err());
     assert_eq!(session, before_invalid);
 

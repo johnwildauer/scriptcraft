@@ -18,37 +18,6 @@ use crate::shortcuts::{
     element_hint_bindings, element_hint_chord, modifiers_are_none, ElementHintChord,
     ShortcutPlatform,
 };
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
-
-static VISIBLE_PAGE_SELECTIONS: AtomicU64 = AtomicU64::new(0);
-static VISIBLE_PAGE_SELECTION_NANOS: AtomicU64 = AtomicU64::new(0);
-
-struct VisiblePageSelectionMeasurement(Instant);
-
-impl Drop for VisiblePageSelectionMeasurement {
-    fn drop(&mut self) {
-        let elapsed = self.0.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-        let _ = VISIBLE_PAGE_SELECTIONS.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |value| Some(value.saturating_add(1)),
-        );
-        let _ = VISIBLE_PAGE_SELECTION_NANOS.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |value| Some(value.saturating_add(elapsed)),
-        );
-    }
-}
-
-pub(super) fn visible_page_selection_diagnostics() -> (u64, u64) {
-    (
-        VISIBLE_PAGE_SELECTIONS.load(Ordering::Relaxed),
-        VISIBLE_PAGE_SELECTION_NANOS.load(Ordering::Relaxed),
-    )
-}
-
 pub(super) const MIN_ZOOM_PERCENT: u16 = 75;
 pub(super) const MAX_ZOOM_PERCENT: u16 = 300;
 pub(super) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250, 300];
@@ -788,13 +757,6 @@ pub(super) enum VisiblePage {
     Unavailable,
 }
 
-/// Complete geometry for one page in the current presented frame.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct PresentedPageGeometry {
-    pub(super) rect: Rect,
-    pub(super) document_y_offset: f32,
-}
-
 impl VisiblePage {
     pub(super) fn label(self) -> String {
         match self {
@@ -973,7 +935,7 @@ impl ViewportPageTracker {
             page_index,
             page_local_document_point: Vec2::new(
                 (bounded_point.x - page_rect.left()) / scale,
-                page.document_y_offset + (bounded_point.y - page_rect.top()) / scale,
+                page_document_y_offset + (bounded_point.y - page_rect.top()) / scale,
             ),
             outside_page_offset_points: (content_point - bounded_point),
             viewport_center,
@@ -1041,43 +1003,6 @@ impl ViewportPageTracker {
             self.repaint_after_publish = true;
             return true;
         }
-        let pages = page_rects
-            .into_iter()
-            .zip(page_document_y_offsets)
-            .map(|(rect, document_y_offset)| PresentedPageGeometry {
-                rect,
-                document_y_offset,
-            })
-            .collect();
-        self.publish_presented_pages(
-            frame,
-            layout_revision,
-            viewport_rect,
-            scale,
-            pages,
-            clip,
-            scroll_offset,
-        )
-    }
-
-    pub(super) fn publish_presented_pages(
-        &mut self,
-        frame: u64,
-        layout_revision: u64,
-        viewport_rect: Rect,
-        scale: f32,
-        pages: Vec<PresentedPageGeometry>,
-        clip: Rect,
-        scroll_offset: Vec2,
-    ) -> bool {
-        if pages
-            .iter()
-            .any(|page| !page.document_y_offset.is_finite())
-        {
-            self.published = None;
-            self.repaint_after_publish = true;
-            return true;
-        }
         let next = GeometrySnapshot {
             published_frame: frame,
             layout_revision,
@@ -1099,12 +1024,6 @@ impl ViewportPageTracker {
         let request_repaint = changed || self.repaint_after_publish;
         self.repaint_after_publish = false;
         request_repaint
-    }
-
-    pub(super) fn presented_pages(&self) -> Option<&[PresentedPageGeometry]> {
-        self.published
-            .as_ref()
-            .map(|snapshot| snapshot.pages.as_slice())
     }
 
     pub(super) fn invalidate(&mut self) {
@@ -1162,7 +1081,7 @@ mod viewport_page_tracker_tests {
         clip: Rect,
         scroll_offset: Vec2,
     ) -> bool {
-        tracker.publish_presented_pages(
+        tracker.publish(
             10,
             7,
             Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0)),
@@ -1276,7 +1195,7 @@ mod viewport_page_tracker_tests {
         let first = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 50.0));
         let second = first.translate(vec2(0.0, 50.0));
         let mut tracker = ViewportPageTracker::default();
-        tracker.publish_presented_pages(
+        tracker.publish(
             4,
             9,
             viewport,

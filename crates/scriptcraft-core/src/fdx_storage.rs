@@ -332,7 +332,7 @@ fn session_error_category(error: &EditError) -> &'static str {
         EditError::TextTooLong => "text size limit",
         EditError::TooManyElements => "element count limit",
         EditError::UnsupportedTransition { .. } => "unsupported role transition",
-        EditError::IncompatibleParagraphJoin => "incompatible paragraph roles",
+        EditError::InlineAltsRoleChange => "inline Alts role constraint",
         EditError::Preservation(_) => "source preservation constraint",
         EditError::CastList(_) => "cast-list reconciliation constraint",
         EditError::FormattedText(_) => "formatted-text constraint",
@@ -492,8 +492,8 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
         FdxSaveMode::SaveAsOverwrite(destination) => (destination, None, true),
     };
 
-    let (corrected, deferred_derived_scenes) = session
-        .prepare_cast_list_save_candidate_with_deferrals()
+    let corrected = session
+        .prepare_cast_list_save_candidate()
         .map_err(TransactionalSaveError::Session)?;
     let prepared = codec.serialize(&corrected, &mut context)?;
     let rebased_project = codec
@@ -505,7 +505,7 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
         ));
     }
     let publishable_session = session
-        .prepare_saved_rebase(rebased_project, deferred_derived_scenes)
+        .prepare_saved_rebase(rebased_project)
         .map_err(TransactionalSaveError::Session)?;
 
     // The destination and all session work are now prepared. No fallible

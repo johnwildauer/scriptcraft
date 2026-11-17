@@ -405,6 +405,18 @@ pub(crate) fn insert_group_member_at_flat_index(
     Ok(())
 }
 
+/// Removes deleted Dialogue/Parenthetical identities from membership lists.
+/// Cue identities intentionally remain required, so deleting a cue is rejected
+/// by complete group validation rather than silently changing group identity.
+pub(crate) fn prune_removed_group_paragraphs(before: &Project, after: &mut Project) {
+    let retained = after.elements.iter().map(|item| item.id.clone()).collect::<std::collections::BTreeSet<_>>();
+    let prior = before.elements.iter().map(|item| item.id.clone()).collect::<std::collections::BTreeSet<_>>();
+    for group in &mut after.dual_dialogue_groups {
+        group.left.paragraphs.retain(|id| !prior.contains(id) || retained.contains(id));
+        group.right.paragraphs.retain(|id| !prior.contains(id) || retained.contains(id));
+    }
+}
+
 /// Recognize a complete candidate beginning at `start`; this never mutates or repairs the project.
 pub fn recognize_candidate(
     project: &Project,
@@ -500,10 +512,7 @@ pub(crate) fn resolve_toggle_target_for_validated_session(
     Ok(recognize_candidate_unchecked(project, selection.focus.element)?.map(ToggleTarget::Enable))
 }
 
-pub(crate) fn validate_groups(
-    project: &Project,
-    body_positions: &std::collections::BTreeMap<crate::StableId, usize>,
-) -> Result<(), DualDialogueError> {
+pub(crate) fn validate_groups(project: &Project) -> Result<(), DualDialogueError> {
     if project.dual_dialogue_groups.len() > MAX_ELEMENTS { return Err(DualDialogueError::TooManyGroups) }
     let mut ids = std::collections::BTreeSet::new();
     for item in project.title_page.iter().map(|item| &item.id).chain(project.elements.iter().map(|item| &item.id)) {
@@ -524,10 +533,9 @@ pub(crate) fn validate_groups(
         let mut indexes = Vec::with_capacity(member_ids.len());
         for id in member_ids {
             if !membership.insert(id.clone()) { return Err(DualDialogueError::DuplicateMember) }
-            let Some(index) = body_positions.get(&id).copied() else {
-                return Err(DualDialogueError::MissingMember);
-            };
-            indexes.push(index);
+            let matches = project.elements.iter().enumerate().filter(|(_, item)| item.id == id).map(|(index, _)| index).collect::<Vec<_>>();
+            if matches.len() != 1 { return Err(DualDialogueError::MissingMember) }
+            indexes.push(matches[0]);
         }
         if indexes.windows(2).any(|pair| pair[1] != pair[0].saturating_add(1)) {
             return Err(DualDialogueError::NonContiguousMembers)
