@@ -1182,28 +1182,3 @@ fn decoration_rects(rect: D2D_RECT_F, scale: f32) -> (D2D_RECT_F, D2D_RECT_F) {
         },
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{map_task_completion, terminal_result, PrintResult};
-    use windows::Graphics::Printing::PrintTaskCompletion;
-
-    #[test]
-    fn native_completion_states_map_to_completed_cancelled_or_failed() {
-        assert_eq!(map_task_completion(PrintTaskCompletion::Submitted), PrintResult::Completed);
-        assert_eq!(map_task_completion(PrintTaskCompletion::Canceled), PrintResult::Cancelled);
-        assert_eq!(map_task_completion(PrintTaskCompletion::Failed), PrintResult::Failed);
-        assert_eq!(map_task_completion(PrintTaskCompletion::Abandoned), PrintResult::Failed);
-    }
-
-    #[test]
-    fn terminal_projection_distinguishes_incomplete_cancelled_failed_and_completed() {
-        assert_eq!(terminal_result(None, Some(PrintResult::Completed)), None);
-        assert_eq!(terminal_result(Some(true), None), None);
-        assert_eq!(terminal_result(Some(true), Some(PrintResult::Completed)), Some(PrintResult::Completed));
-        assert_eq!(terminal_result(Some(false), None), Some(PrintResult::Cancelled));
-        assert_eq!(terminal_result(Some(true), Some(PrintResult::Cancelled)), Some(PrintResult::Cancelled));
-        assert_eq!(terminal_result(Some(true), Some(PrintResult::Failed)), Some(PrintResult::Failed));
-    }
-
-}

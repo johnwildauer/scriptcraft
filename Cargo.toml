@@ -4,6 +4,8 @@ members = [
     "apps/scriptcraft",
     "crates/scriptcraft-commands",
     "crates/scriptcraft-core",
+    "crates/scriptcraft-fdx",
+    "crates/scriptcraft-model",
 ]
 
 [workspace.package]

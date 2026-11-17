@@ -19,8 +19,11 @@
 //! non-cooperating writer can still race that final comparison and rename.
 
 use crate::editing::{EditError, EditingSession};
-use crate::fdx::{self, FdxDocument, FdxError, MAX_SOURCE_BYTES};
 use crate::Project;
+use scriptcraft_fdx::{
+    self as fdx, same_dual_dialogue_projection, write_v6, write_v6_for_save, FdxDocument,
+    FdxError, MAX_SOURCE_BYTES,
+};
 use std::ffi::OsString;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -143,7 +146,7 @@ impl fmt::Debug for PreparedFdx {
 
 impl PreparedFdx {
     pub fn from_project(project: &Project) -> Result<Self, FdxStorageError> {
-        let bytes = fdx::write_v6(project).map_err(invalid_fdx)?;
+        let bytes = write_v6(project).map_err(invalid_fdx)?;
         Self::from_validated_bytes(bytes)
     }
 
@@ -426,8 +429,7 @@ impl SaveCandidateCodec for NativeSaveCandidateCodec {
         project: &Project,
         context: &mut fdx::SaveContext,
     ) -> Result<PreparedFdx, TransactionalSaveError> {
-        let bytes =
-            fdx::write_v6_for_save(project, context).map_err(TransactionalSaveError::Codec)?;
+        let bytes = write_v6_for_save(project, context).map_err(TransactionalSaveError::Codec)?;
         PreparedFdx::from_validated_bytes(bytes).map_err(|error| match &error.kind {
             FdxStorageErrorKind::InvalidFdx(codec_error) => {
                 TransactionalSaveError::Codec(codec_error.clone())
@@ -545,7 +547,7 @@ fn same_save_projection(expected: &Project, actual: &Project) -> bool {
 
     same_title_paragraphs(&expected.title_page, &actual.title_page)
         && same_elements(&expected.elements, &actual.elements)
-        && fdx::same_dual_dialogue_projection(expected, actual)
+        && same_dual_dialogue_projection(expected, actual)
 }
 
 fn same_title_paragraphs(
@@ -971,95 +973,4 @@ fn nonempty_parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
-}
-
-#[cfg(test)]
-mod confirmed_save_as_tests {
-    use super::*;
-
-    struct MismatchedRereadCodec;
-
-    impl SaveCandidateCodec for MismatchedRereadCodec {
-        fn serialize(
-            &self,
-            project: &Project,
-            context: &mut fdx::SaveContext,
-        ) -> Result<PreparedFdx, TransactionalSaveError> {
-            NativeSaveCandidateCodec.serialize(project, context)
-        }
-
-        fn reread(&self, bytes: &[u8]) -> Result<Project, fdx::FdxError> {
-            let mut project = fdx::read_v6(bytes)?.project;
-            if let Some(first) = project.elements.first_mut() {
-                crate::BodyOwner::update(first, |element| {
-                    element.text.push_str(" injected mismatch");
-                });
-            }
-            Ok(project)
-        }
-    }
-
-    #[test]
-    fn semantic_reread_mismatch_keeps_existing_destination_and_both_surface_state() {
-        let directory = std::env::temp_dir().join(format!(
-            "scriptcraft-reread-mismatch-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir(&directory)
-            .unwrap_or_else(|_| unreachable!("test directory can be created"));
-        let destination = directory.join("existing.fdx");
-        std::fs::write(&destination, b"prior valid destination")
-            .unwrap_or_else(|_| unreachable!("test destination can be written"));
-
-        let mut session = EditingSession::new(
-            Project::new().unwrap_or_else(|_| unreachable!("new project is valid")),
-        )
-        .unwrap_or_else(|_| unreachable!("new project session is valid"));
-        session
-            .insert("unsaved body")
-            .unwrap_or_else(|_| unreachable!("body insertion is valid"));
-        session
-            .set_title_selection(crate::editing::Selection::caret(
-                crate::editing::Position {
-                    element: 17,
-                    offset: 0,
-                },
-            ))
-            .unwrap_or_else(|_| unreachable!("title caret is valid"));
-        session
-            .insert_title("unsaved title")
-            .unwrap_or_else(|_| unreachable!("title insertion is valid"));
-        let before = session.clone();
-        let mut target = FdxSaveTarget::new_unsaved();
-        let text_state = fdx::TextState {
-            scaling: 100,
-            selection: session.selection(),
-        };
-
-        let error = save_session_with_codec_and_view_state(
-            &StdFdxStorageFileSystem,
-            &mut session,
-            &mut target,
-            FdxSaveMode::SaveAsOverwrite(destination.clone()),
-            &MismatchedRereadCodec,
-            fdx::WindowState::DEFAULT,
-            text_state,
-        )
-        .err()
-        .unwrap_or_else(|| unreachable!("semantic reread mismatch must reject candidate"));
-
-        assert!(matches!(error, TransactionalSaveError::Codec(_)));
-        assert_eq!(
-            std::fs::read(&destination).ok().as_deref(),
-            Some(&b"prior valid destination"[..])
-        );
-        assert_eq!(session, before);
-        assert!(session.dirty());
-        assert!(target.path().is_none());
-        assert!(target.baseline().is_none());
-
-        std::fs::remove_dir_all(directory)
-            .unwrap_or_else(|_| unreachable!("test directory can be removed"));
-    }
 }

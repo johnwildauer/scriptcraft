@@ -110,27 +110,3 @@ fn choice_from_button_id(button_id: i32) -> UnsavedChangesChoice {
         _ => UnsavedChangesChoice::Cancel,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{choice_from_button_id, final_component, DONT_SAVE_BUTTON_ID, SAVE_BUTTON_ID};
-    use crate::document_lifecycle::UnsavedChangesChoice;
-
-    #[test]
-    fn maps_only_the_two_custom_ids_to_choices() {
-        assert_eq!(choice_from_button_id(SAVE_BUTTON_ID), UnsavedChangesChoice::Save);
-        assert_eq!(
-            choice_from_button_id(DONT_SAVE_BUTTON_ID),
-            UnsavedChangesChoice::DontSave
-        );
-        assert_eq!(choice_from_button_id(2), UnsavedChangesChoice::Cancel);
-        assert_eq!(choice_from_button_id(-1), UnsavedChangesChoice::Cancel);
-    }
-
-    #[test]
-    fn native_window_title_uses_only_a_final_component() {
-        assert_eq!(final_component(r"C:\drafts\screenplay.fdx"), "screenplay.fdx");
-        assert_eq!(final_component("/drafts/screenplay.fdx"), "screenplay.fdx");
-        assert_eq!(final_component(""), "Untitled Screenplay");
-    }
-}

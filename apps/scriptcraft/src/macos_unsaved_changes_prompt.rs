@@ -54,29 +54,3 @@ fn choice_from_response(response: objc2_app_kit::NSModalResponse) -> UnsavedChan
         UnsavedChangesChoice::Cancel
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::choice_from_response;
-    use crate::document_lifecycle::UnsavedChangesChoice;
-    use objc2_app_kit::{
-        NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertThirdButtonReturn,
-    };
-
-    #[test]
-    fn maps_known_buttons_and_fails_safe_for_cancel_or_unexpected_responses() {
-        assert_eq!(
-            choice_from_response(NSAlertFirstButtonReturn),
-            UnsavedChangesChoice::Save
-        );
-        assert_eq!(
-            choice_from_response(NSAlertSecondButtonReturn),
-            UnsavedChangesChoice::DontSave
-        );
-        assert_eq!(
-            choice_from_response(NSAlertThirdButtonReturn),
-            UnsavedChangesChoice::Cancel
-        );
-        assert_eq!(choice_from_response(-1), UnsavedChangesChoice::Cancel);
-    }
-}

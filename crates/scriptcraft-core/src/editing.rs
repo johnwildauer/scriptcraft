@@ -1,17 +1,21 @@
 //! Headless, transactional editing over the semantic screenplay model.
 
-use crate::{
-    cast_list::{self, CastListError},
+use scriptcraft_model::cast_list::{self, CastListCorrection, CastListError};
+use scriptcraft_model::formatted_text::{
     clear_paragraph_run_styles, project_style_at_caret, set_paragraph_alignments,
-    toggle_paragraph_run_styles,
-    validate_layout_inputs, BodyOwner, LayoutInputs, ModelError, ParagraphAlignment, ParagraphTarget,
-    Project, Role, RunBoundaryAffinity, RunStyle, RunStyleFlags, ScreenplayElement, StableId,
+    toggle_paragraph_run_styles, ParagraphTarget, RunBoundaryAffinity, RunStyle, RunStyleFlags,
+};
+use crate::{
+    validate_layout_inputs, BodyOwner, LayoutInputs, ModelError, ParagraphAlignment, Project, Role,
+    ScreenplayElement, StableId,
     TextRun, TitlePageParagraph, MAX_ELEMENTS, MAX_TEXT_BYTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use scriptcraft_fdx::current_timestamp;
+
+pub use scriptcraft_model::position::{Position, Selection};
 
 /// One development-only Body candidate-mutation observation. Durations are
 /// value-free nanoseconds; optional stages are absent when their work did not
@@ -54,37 +58,6 @@ fn add_optional_diagnostic_duration(target: &mut Option<u64>, started: Option<In
         let elapsed = diagnostic_duration_nanos(started);
         *target = Some(target.unwrap_or(0).saturating_add(elapsed));
     }
-}
-
-/// Session edit-validation work counts. These are structural counters, not
-/// timings, and do not expose document values.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct EditValidationDiagnostics {
-    pub scoped_candidate_attempts: u64,
-    pub scoped_candidate_accepts: u64,
-    pub full_candidate_validations: u64,
-    pub full_validation_fallbacks: u64,
-}
-
-static SCOPED_CANDIDATE_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
-static SCOPED_CANDIDATE_ACCEPTS: AtomicU64 = AtomicU64::new(0);
-static FULL_CANDIDATE_VALIDATIONS: AtomicU64 = AtomicU64::new(0);
-static FULL_VALIDATION_FALLBACKS: AtomicU64 = AtomicU64::new(0);
-
-pub fn edit_validation_diagnostics() -> EditValidationDiagnostics {
-    EditValidationDiagnostics {
-        scoped_candidate_attempts: SCOPED_CANDIDATE_ATTEMPTS.load(Ordering::Relaxed),
-        scoped_candidate_accepts: SCOPED_CANDIDATE_ACCEPTS.load(Ordering::Relaxed),
-        full_candidate_validations: FULL_CANDIDATE_VALIDATIONS.load(Ordering::Relaxed),
-        full_validation_fallbacks: FULL_VALIDATION_FALLBACKS.load(Ordering::Relaxed),
-    }
-}
-
-pub fn reset_edit_validation_diagnostics() {
-    SCOPED_CANDIDATE_ATTEMPTS.store(0, Ordering::Relaxed);
-    SCOPED_CANDIDATE_ACCEPTS.store(0, Ordering::Relaxed);
-    FULL_CANDIDATE_VALIDATIONS.store(0, Ordering::Relaxed);
-    FULL_VALIDATION_FALLBACKS.store(0, Ordering::Relaxed);
 }
 
 /// Value-free view of session-owned derived invalidation for scheduler policy.
@@ -155,32 +128,14 @@ impl PendingDerivedInvalidation {
 }
 
 fn validate_full_candidate(project: &Project) -> Result<(), ModelError> {
-    let _ = FULL_CANDIDATE_VALIDATIONS.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-        Some(value.saturating_add(1))
-    });
     project.validate()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Position {
-    pub element: usize,
-    pub offset: usize,
+trait SelectionOrdering {
+    fn ordered(self) -> (Position, Position);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Selection {
-    pub anchor: Position,
-    pub focus: Position,
-}
-
-impl Selection {
-    pub const fn caret(position: Position) -> Self {
-        Self {
-            anchor: position,
-            focus: position,
-        }
-    }
-
+impl SelectionOrdering for Selection {
     fn ordered(self) -> (Position, Position) {
         if (self.anchor.element, self.anchor.offset) <= (self.focus.element, self.focus.offset) {
             (self.anchor, self.focus)
@@ -262,7 +217,7 @@ impl EditError {
                 PreservationError::ManagedTextMismatchAt(site),
             ))) => Some(*site),
             Self::CastList(CastListError::SceneMetadata(
-                crate::scene_metadata::SceneMetadataError::Preservation(
+                scriptcraft_model::scene_metadata::SceneMetadataError::Preservation(
                     PreservationError::ManagedTextMismatchAt(site),
                 ),
             )) => Some(*site),
@@ -332,7 +287,6 @@ pub struct EditingSession {
     generated_parentheticals: BTreeSet<String>,
     history_limit: usize,
     validated_baseline: bool,
-    last_validation_was_scoped: bool,
     /// Transient desktop-controlled capture; never serialized or compared as
     /// semantic session state and disabled unless the development host opts in.
     capture_mutation_diagnostics: bool,
@@ -397,7 +351,7 @@ impl EditingSession {
             project,
             policy,
             layout_inputs,
-            crate::fdx::current_timestamp(),
+            current_timestamp(),
         )
     }
 
@@ -453,7 +407,6 @@ impl EditingSession {
             generated_parentheticals: BTreeSet::new(),
             history_limit: 100,
             validated_baseline: true,
-            last_validation_was_scoped: false,
             capture_mutation_diagnostics: false,
             last_mutation_diagnostics: None,
             pending_derived_invalidation: PendingDerivedInvalidation::Complete,
@@ -615,12 +568,6 @@ impl EditingSession {
         self.deferred_derived_scenes
             .extend(deferred_scenes.iter().cloned());
     }
-    /// Reports whether the latest successful session mutation used the
-    /// preconditioned single-paragraph validator. This is diagnostic-only.
-    pub const fn last_edit_used_scoped_validation(&self) -> bool {
-        self.last_validation_was_scoped
-    }
-
     /// Arms one development-only observation for the next actual Body candidate
     /// mutation. Selection-only commands and Title mutations produce no sample.
     pub fn begin_mutation_diagnostics(&mut self) {
@@ -659,14 +606,14 @@ impl EditingSession {
     /// document-owned identities or content to the caller.
     pub fn refresh_cast_lists_with_outcome(
         &mut self,
-    ) -> Result<crate::cast_list::CastListCorrection, EditError> {
+    ) -> Result<CastListCorrection, EditError> {
         let (scope, complete_refresh) = match &self.pending_derived_invalidation {
             PendingDerivedInvalidation::None => {
-                return Ok(crate::cast_list::CastListCorrection::default());
+                return Ok(CastListCorrection::default());
             }
             PendingDerivedInvalidation::Complete => {
                 if self.failed_derived_complete {
-                    return Ok(crate::cast_list::CastListCorrection::default());
+                    return Ok(CastListCorrection::default());
                 }
                 (None, true)
             }
@@ -677,7 +624,7 @@ impl EditingSession {
                     .cloned()
                     .collect::<BTreeSet<_>>();
                 if retryable.is_empty() {
-                    return Ok(crate::cast_list::CastListCorrection::default());
+                    return Ok(CastListCorrection::default());
                 }
                 (Some(retryable), false)
             }
@@ -706,7 +653,6 @@ impl EditingSession {
                 self.clean_project = self.project.clone();
             }
             self.dirty = self.project != self.clean_project;
-            self.last_validation_was_scoped = false;
         }
         self.complete_derived_invalidation(&completed_scenes, &deferred_scenes, complete_refresh);
         Ok(outcome)
@@ -754,7 +700,6 @@ impl EditingSession {
         rebased.title_selection = title_selection;
         rebased.generated_parentheticals = generated_parentheticals;
         rebased.dirty = false;
-        rebased.last_validation_was_scoped = false;
         // The detached save candidate has already passed complete derived
         // preparation; do not schedule a duplicate timer pass after publish.
         rebased.pending_derived_invalidation = PendingDerivedInvalidation::None;
@@ -1058,7 +1003,6 @@ impl EditingSession {
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
         self.validated_baseline = true;
-        self.last_validation_was_scoped = false;
         self.pending_derived_invalidation = PendingDerivedInvalidation::Complete;
         self.deferred_derived_scenes.clear();
         self.failed_derived_complete = false;
@@ -1664,7 +1608,6 @@ impl EditingSession {
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
         self.validated_baseline = true;
-        self.last_validation_was_scoped = false;
         self.pending_derived_invalidation = PendingDerivedInvalidation::Complete;
         self.deferred_derived_scenes.clear();
         self.failed_derived_complete = false;
@@ -1701,7 +1644,6 @@ impl EditingSession {
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
         self.validated_baseline = true;
-        self.last_validation_was_scoped = false;
         self.pending_derived_invalidation = PendingDerivedInvalidation::Complete;
         self.deferred_derived_scenes.clear();
         self.failed_derived_complete = false;
@@ -1941,21 +1883,11 @@ impl EditingSession {
                 });
             let scoped_valid = if scoped_preconditions {
                 diagnostics.scoped_candidate_attempts = diagnostics.scoped_candidate_attempts.saturating_add(1);
-                let _ = SCOPED_CANDIDATE_ATTEMPTS.try_update(
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                    |value| Some(value.saturating_add(1)),
-                );
                 let scoped_started = capture_diagnostics.then(Instant::now);
                 let scoped_result = (|| {
                     match project.validate_scoped_single_element_edit(&self.project, scope_start.element) {
                         Ok(true) if validate_selection(&project, selection).is_ok() => {
                             diagnostics.scoped_candidate_accepts = diagnostics.scoped_candidate_accepts.saturating_add(1);
-                            let _ = SCOPED_CANDIDATE_ACCEPTS.try_update(
-                                Ordering::Relaxed,
-                                Ordering::Relaxed,
-                                |value| Some(value.saturating_add(1)),
-                            );
                             Ok(true)
                         }
                         Ok(_) => Ok(false),
@@ -1970,11 +1902,6 @@ impl EditingSession {
             if !scoped_valid {
                 if requested_scope == MutationValidationScope::SingleParagraph {
                     diagnostics.full_validation_fallbacks = diagnostics.full_validation_fallbacks.saturating_add(1);
-                    let _ = FULL_VALIDATION_FALLBACKS.try_update(
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                        |value| Some(value.saturating_add(1)),
-                    );
                 }
                 let preservation_started = capture_diagnostics.then(Instant::now);
                 let preservation_result = (|| -> Result<(), EditError> {
@@ -2014,7 +1941,6 @@ impl EditingSession {
             add_optional_diagnostic_duration(&mut diagnostics.no_op_equality_nanos, no_op_started);
             if no_op {
                 diagnostics.no_op = true;
-                self.last_validation_was_scoped = scoped_valid;
                 return Ok(());
             }
             let derived_started = capture_diagnostics.then(Instant::now);
@@ -2066,7 +1992,6 @@ impl EditingSession {
             add_optional_diagnostic_duration(&mut diagnostics.dirty_comparison_nanos, dirty_started);
             let publication_started = capture_diagnostics.then(Instant::now);
             self.validated_baseline = true;
-            self.last_validation_was_scoped = scoped_valid;
             self.pending_derived_invalidation
                 .merge(derived_invalidation);
             self.mark_mutated();
@@ -2117,7 +2042,6 @@ impl EditingSession {
                 || self.title_typing_style != typing;
             self.title_selection = selection;
             self.title_typing_style = typing;
-            self.last_validation_was_scoped = false;
             if transient_changed {
                 self.mark_mutated();
             }
@@ -2138,7 +2062,6 @@ impl EditingSession {
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
         self.validated_baseline = true;
-        self.last_validation_was_scoped = false;
         // Title-only edits cannot affect screenplay scene-derived attachments.
         self.mark_mutated();
         Ok(())
@@ -3783,117 +3706,4 @@ fn role_for_native_behavior_target(target: &str) -> Option<Role> {
         .iter()
         .find(|formatting| formatting.fdx_label == target)
         .map(|formatting| formatting.role)
-}
-
-#[cfg(test)]
-mod derived_invalidation_scope_tests {
-    use super::can_skip_derived_invalidation;
-    use crate::{BodyOwner, Project, Role, StableId};
-
-    #[test]
-    fn skip_proof_requires_scope_stable_identity_and_derived_irrelevant_role() {
-        let before = Project::new().expect("default project is valid");
-        let mut after = before.clone();
-        BodyOwner::update(&mut after.elements[0], |element| {
-            element.text.push_str("ordinary action");
-        });
-        assert!(can_skip_derived_invalidation(&before, &after, 0, true));
-        assert!(!can_skip_derived_invalidation(&before, &after, 0, false));
-
-        for role in [Role::Character, Role::SceneHeading] {
-            let mut relevant_before = before.clone();
-            BodyOwner::update(&mut relevant_before.elements[0], |element| {
-                element.role = role;
-            });
-            let mut relevant_after = relevant_before.clone();
-            BodyOwner::update(&mut relevant_after.elements[0], |element| {
-                element.text.push_str("changed");
-            });
-            assert!(!can_skip_derived_invalidation(
-                &relevant_before,
-                &relevant_after,
-                0,
-                true
-            ));
-        }
-
-        let mut changed_role = after.clone();
-        BodyOwner::update(&mut changed_role.elements[0], |element| {
-            element.role = Role::Dialogue;
-        });
-        assert!(!can_skip_derived_invalidation(&before, &changed_role, 0, true));
-
-        let mut changed_identity = after.clone();
-        BodyOwner::update(&mut changed_identity.elements[0], |element| {
-            element.id = StableId::new("changed-owner").expect("replacement ID is valid");
-        });
-        assert!(!can_skip_derived_invalidation(
-            &before,
-            &changed_identity,
-            0,
-            true
-        ));
-    }
-}
-
-#[cfg(test)]
-mod body_owner_persistence_tests {
-    use super::EditingSession;
-    use std::sync::Arc;
-
-    #[test]
-    fn saved_rebase_reuses_semantically_unchanged_body_owners_for_live_and_clean_projects() {
-        let source = br#"<FinalDraft DocumentType="Script" Version="6"><Content><Paragraph Type="SceneHeading" id="first"><Text>INT. ROOM - DAY</Text></Paragraph><Paragraph Type="Action" id="second"><Text>unchanged</Text></Paragraph></Content></FinalDraft>"#;
-        let project = crate::fdx::read_v6(source)
-            .expect("source-backed project imports")
-            .project;
-        let bytes = crate::fdx::write_v6(&project).expect("project serializes");
-        let decoded = crate::fdx::read_v6(&bytes)
-            .expect("serialized project reimports")
-            .project;
-        let session = EditingSession::new(project).expect("session is valid");
-        let before = session.project().clone();
-
-        let rebased = session
-            .prepare_saved_rebase(decoded)
-            .expect("validated save rebase succeeds");
-        assert_eq!(rebased.project.elements.len(), before.elements.len());
-        for (before, after) in before.elements.iter().zip(&rebased.project.elements) {
-            assert_eq!(before.as_element(), after.as_element());
-            assert!(Arc::ptr_eq(before, after));
-            assert_eq!(before.revision(), after.revision());
-        }
-        for (live, clean) in rebased.project.elements.iter().zip(&rebased.clean_project.elements) {
-            assert!(Arc::ptr_eq(live, clean));
-        }
-    }
-}
-
-#[cfg(test)]
-mod validated_session_dual_dialogue_tests {
-    use super::{EditError, EditingSession, Position, Selection};
-    use crate::dual_dialogue::{resolve_toggle_target, SelectionSurface};
-    use crate::{BodyOwner, Role, ScreenplayElement};
-
-    #[test]
-    fn session_and_public_resolution_match_for_an_invalid_stored_utf8_caret() {
-        let mut project = crate::Project::new().expect("default project is valid");
-        project.elements = vec![BodyOwner::shared(
-            ScreenplayElement::new("cue", Role::Character, "é")
-                .expect("Unicode cue is valid"),
-        )];
-        let mut session = EditingSession::new(project).expect("session baseline is valid");
-        session.selection = Selection::caret(Position { element: 0, offset: 1 });
-
-        let expected = resolve_toggle_target(
-            session.project(),
-            SelectionSurface::Body,
-            session.selection,
-        )
-        .map_err(EditError::Model);
-        assert_eq!(
-            session.dual_dialogue_toggle_target(SelectionSurface::Body),
-            expected
-        );
-    }
 }

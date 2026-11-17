@@ -3031,11 +3031,29 @@ dependencies = [
 name = "scriptcraft-core"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.4.3",
- "quick-xml",
- "time",
+ "scriptcraft-fdx",
+ "scriptcraft-model",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "scriptcraft-fdx"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "quick-xml",
+ "scriptcraft-model",
+ "time",
+ "uuid",
+]
+
+[[package]]
+name = "scriptcraft-model"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "uuid",
 ]
 
 [[package]]

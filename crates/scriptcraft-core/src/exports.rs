@@ -132,7 +132,7 @@ pub fn export_pdf_with_layout_inputs_and_options(
     let source_settings = project
         .preservation
         .as_ref()
-        .map(|preservation| preservation.source_layout_settings.clone())
+        .map(|preservation| preservation.source_layout_settings().clone())
         .unwrap_or_default();
     let layout = ScreenplayLayout::build_with_composition(
         project,

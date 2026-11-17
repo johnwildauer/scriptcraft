@@ -1,0 +1,95 @@
+use crate::text_state::TextState;
+use scriptcraft_model::Project;
+
+/// A Version 6 reader result. `project` is an editing projection only; runtime
+/// layout uses deterministic application defaults where the FDX samples do not
+/// establish reversible geometry mappings. The source-owned preservation state
+/// retains the actual FDX settings and values independently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FdxDocument {
+    pub project: Project,
+    /// Valid root DocumentRef DateTime observed during deserialization. This is
+    /// source metadata, not the ephemeral session-open timestamp used for XRefs.
+    /// Malformed or ambiguous values remain source-preserved but are not typed.
+    pub document_ref_datetime: Option<String>,
+    /// Valid direct-root disposable native geometry. Invalid or ambiguous source
+    /// state remains preserved but is not projected.
+    pub window_state: Option<WindowState>,
+    /// Direct-root disposable zoom and body-editor selection, with safe defaults.
+    pub text_state: TextState,
+}
+
+/// Supported native-window geometry in OS logical coordinates. FDX V6 currently
+/// emits only Normal mode; unknown imported modes safely project as Normal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowState {
+    pub left: i32,
+    pub top: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl WindowState {
+    pub const DEFAULT: Self = Self {
+        left: 0,
+        top: 75,
+        width: 870,
+        height: 874,
+    };
+
+    pub fn new(left: i32, top: i32, width: i32, height: i32) -> Option<Self> {
+        (width > 0 && height > 0).then_some(Self {
+            left,
+            top,
+            width,
+            height,
+        })
+    }
+}
+
+/// Result of bounded version preflight. Non-6 numeric versions are explicit
+/// migration candidates; the caller must present the migration warning and
+/// obtain consent before invoking the conversion path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FdxVersionStatus {
+    Version6,
+    ExplicitNon6 {
+        declared: String,
+        direction: FdxVersionDirection,
+    },
+    Missing,
+    Malformed,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdxVersionDirection {
+    Older,
+    Newer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdxMigrationConsent {
+    Continue,
+    Cancel,
+}
+
+/// Indicates the bounded conversion attempted for an imported candidate. This
+/// is not a claim of native save/reopen safety or Final Draft compatibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FdxMigrationKind {
+    OlderLossy { declared: String },
+    NewerBestEffort { declared: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FdxImportCandidate {
+    pub document: FdxDocument,
+    pub migration: Option<FdxMigrationKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FdxImportOutcome {
+    Cancelled { declared_version: String },
+    Candidate(Box<FdxImportCandidate>),
+}

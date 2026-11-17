@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FinalDraft DocumentType="Script" Version="6">
+  <FutureData marker="smoke-root">
+    <Payload>retained root opaque data</Payload>
+  </FutureData>
+  <Content>
+    <Paragraph Type="Scene Heading" id="smoke-scene">
+      <Text>INT. STUDIO — DAY</Text>
+    </Paragraph>
+    <Paragraph Type="Action" id="smoke-action" vendor-owner="retained">
+      <Text>Café </Text><Text Style="Bold+Italic">lights</Text>
+      <UserParagraphData>
+        <VendorPayload marker="smoke-attachment">retained attachment opaque data</VendorPayload>
+      </UserParagraphData>
+    </Paragraph>
+  </Content>
+  <TitlePage>
+    <Content>
+      <Paragraph Type="Title" id="smoke-title">
+        <Text>Smoke Story</Text>
+      </Paragraph>
+    </Content>
+  </TitlePage>
+</FinalDraft>

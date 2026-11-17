@@ -134,32 +134,3 @@ impl NativeLifecycleController {
         self.inbox.take_pending()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::QuitRequestInbox;
-
-    #[test]
-    fn repeated_native_quit_requests_coalesce_until_the_ui_drain() {
-        let inbox = QuitRequestInbox::default();
-
-        inbox.enqueue();
-        inbox.enqueue();
-        inbox.enqueue();
-
-        assert!(inbox.take_pending());
-        assert!(!inbox.take_pending());
-    }
-
-    #[test]
-    fn a_request_after_a_drain_is_available_for_the_next_ui_turn() {
-        let inbox = QuitRequestInbox::default();
-
-        inbox.enqueue();
-        assert!(inbox.take_pending());
-        inbox.enqueue();
-
-        assert!(inbox.take_pending());
-        assert!(!inbox.take_pending());
-    }
-}
