@@ -1,7 +1,7 @@
 use super::{LayoutCache, Position, Project, ScriptCraftApp, Selection};
 use super::document_lifecycle::SaveOutcome;
 use eframe::egui;
-use scriptcraft_core::editing::EditError;
+use scriptcraft_session::editing::EditError;
 use scriptcraft_commands::{
     execute_editor_command_on_surface, pointer_selection, Appearance, Command, CommandId, CommandOrigin, CommandOutcome,
     CommandRejection, DiagnosticMessage, EditorSurface, HorizontalDirection, HostEffectDescription, ScriptViewMode,
@@ -378,7 +378,7 @@ impl ScriptCraftApp {
             availability,
             say_undual: matches!(
                 dual_dialogue_target,
-                Some(scriptcraft_core::dual_dialogue::ToggleTarget::Disable(_))
+                Some(scriptcraft_model::dual_dialogue::ToggleTarget::Disable(_))
             ),
         };
         self.command_projection_cache = Some(CachedAppCommandProjection { key, projection });
@@ -455,12 +455,12 @@ impl ScriptCraftApp {
 
     fn dual_dialogue_toggle_target(
         &mut self,
-    ) -> Option<scriptcraft_core::dual_dialogue::ToggleTarget> {
+    ) -> Option<scriptcraft_model::dual_dialogue::ToggleTarget> {
         if self.active_editor_surface != EditorSurface::Body {
             return None;
         }
         self.session.dual_dialogue_toggle_target(
-            scriptcraft_core::dual_dialogue::SelectionSurface::Body,
+            scriptcraft_model::dual_dialogue::SelectionSurface::Body,
         ).ok().flatten()
     }
 

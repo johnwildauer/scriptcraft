@@ -4,10 +4,10 @@ use scriptcraft_commands::{
     execute_editor_command, Command, CommandOutcome, CommandRejection, EditorSurface, Position,
     Selection, SelectionError,
 };
-use scriptcraft_core::editing::{
+use scriptcraft_session::editing::{
     EditingSession, Position as CorePosition, Selection as CoreSelection,
 };
-use scriptcraft_core::Project;
+use scriptcraft_model::Project;
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("command smoke uses valid bounded input"))

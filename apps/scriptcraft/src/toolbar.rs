@@ -9,11 +9,11 @@ use super::app_commands::AppCommandAvailability;
 use scriptcraft_commands::{
     Command, CommandOrigin, EditorSurface, ParagraphAlignmentValue, RoleValue, TitleTextStyle,
 };
-use scriptcraft_core::{
-    formatted_text::{project_lit_styles, project_paragraph_alignment, project_style_at_caret},
-    formatting::formatting_for_role,
-    ParagraphAlignment, RunBoundaryAffinity, RunStyleFlags,
+use scriptcraft_model::formatted_text::{
+    project_lit_styles, project_paragraph_alignment, project_style_at_caret, RunBoundaryAffinity,
+    RunStyleFlags,
 };
+use scriptcraft_model::formatting::{formatting_for_role, ParagraphAlignment};
 use egui_material_icons::icons::{
     ICON_FORMAT_ALIGN_CENTER, ICON_FORMAT_ALIGN_JUSTIFY, ICON_FORMAT_ALIGN_LEFT,
     ICON_FORMAT_ALIGN_RIGHT, ICON_FORMAT_BOLD, ICON_FORMAT_ITALIC,
@@ -1753,7 +1753,7 @@ const ALIGNMENT_CHOICES: [FormattingChoiceSpec; 4] = [
     },
 ];
 
-fn ordered_editor_selection(selection: scriptcraft_core::editing::Selection) -> (Position, Position) {
+fn ordered_editor_selection(selection: scriptcraft_session::editing::Selection) -> (Position, Position) {
     if (selection.anchor.element, selection.anchor.offset)
         <= (selection.focus.element, selection.focus.offset)
     {

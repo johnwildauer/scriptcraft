@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
-use scriptcraft_core::formatting::SourceLayoutSettings;
-use scriptcraft_core::layout::{Caret, LayoutComposition, ScreenplayLayout};
-use scriptcraft_core::{BodyOwner, LayoutInputs, Project, Role, ScreenplayElement};
+use scriptcraft_layout::{Caret, LayoutComposition, ScreenplayLayout};
+use scriptcraft_model::formatting::SourceLayoutSettings;
+use scriptcraft_model::{BodyOwner, LayoutInputs, Project, Role, ScreenplayElement};
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("layout smoke scenario is valid"))

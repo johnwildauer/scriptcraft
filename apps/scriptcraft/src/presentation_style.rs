@@ -1,7 +1,7 @@
 //! Pure desktop presentation resolution for declared screenplay font families
 //! and bounded FDX source colors. This module does not load fonts or paint.
 
-use scriptcraft_core::formatting::EffectiveTextStyle;
+use scriptcraft_model::formatting::EffectiveTextStyle;
 
 /// Horizontal layout policy selected from the actual renderer face.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,4 +63,3 @@ fn parse_channel(channels: &str, start: usize) -> Option<u8> {
     let value = u16::from_str_radix(channel, 16).ok()?;
     Some((value >> 8) as u8)
 }
-

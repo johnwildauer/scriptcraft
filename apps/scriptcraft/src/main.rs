@@ -3,18 +3,19 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::egui::{self, Color32, FontId, RichText, Sense, TextStyle, TextWrapMode, Vec2, WidgetText};
-use scriptcraft_core::cast_list::CAST_LIST_REFRESH_INTERVAL;
-use scriptcraft_core::editing::{EditError, EditPolicy, EditingSession, Position, Selection};
-use scriptcraft_core::exports;
-use scriptcraft_core::fdx::{self, FdxImportOutcome, FdxMigrationConsent, FdxVersionStatus};
-use scriptcraft_core::fdx_storage::{
-    self, FdxBaseline, FdxSaveMode, FdxSaveTarget, OpenedFdxSource, StdFdxStorageFileSystem,
+use scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL;
+use scriptcraft_session::editing::{EditError, EditPolicy, EditingSession, Position, Selection};
+use scriptcraft_export as exports;
+use scriptcraft_fdx::{self as fdx, FdxImportOutcome, FdxMigrationConsent, FdxVersionStatus};
+use scriptcraft_session::storage::{
+    self as fdx_storage, FdxBaseline, FdxSaveMode, FdxSaveTarget, OpenedFdxSource,
+    StdFdxStorageFileSystem,
 };
-use scriptcraft_core::layout::{
+use scriptcraft_layout::{
     BodyEditorPresentation, LayoutBuildDiagnostics, LayoutCache, ScreenplayLayout,
 };
-use scriptcraft_core::persistence::{FileSystem, StdFileSystem};
-use scriptcraft_core::{Project, Role, StableId};
+use scriptcraft_session::persistence::{FileSystem, StdFileSystem};
+use scriptcraft_model::{Project, Role, StableId};
 use scriptcraft_commands::DiagnosticMessage;
 use std::collections::VecDeque;
 use std::ffi::OsString;
@@ -567,7 +568,7 @@ enum PdfExportAdapterError {
     Picker(pdf_export::PdfExportPickerFailure),
     Path,
     Export(exports::ExportError),
-    Write(scriptcraft_core::persistence::PersistenceError),
+    Write(scriptcraft_session::persistence::PersistenceError),
 }
 
 fn export_pdf_to_selected_path<F: FileSystem>(
@@ -596,9 +597,9 @@ fn export_pdf_to_selected_path<F: FileSystem>(
 }
 
 pub(crate) fn safe_layout_error_category(
-    error: &scriptcraft_core::layout::LayoutError,
+    error: &scriptcraft_layout::LayoutError,
 ) -> &'static str {
-    use scriptcraft_core::layout::LayoutErrorKind;
+    use scriptcraft_layout::LayoutErrorKind;
     match &error.kind {
         LayoutErrorKind::Model(_) => "model validation",
         LayoutErrorKind::InvalidProfile => "invalid layout profile",
@@ -1227,7 +1228,7 @@ impl ScriptCraftApp {
             && self.pending_fdx_open.is_none()
             && !self.replacement_open_pending()
         {
-            scriptcraft_core::dual_dialogue::group_at_element_index(
+            scriptcraft_model::dual_dialogue::group_at_element_index(
                 self.session.project(),
                 self.session.selection().focus.element,
             )
@@ -1901,7 +1902,7 @@ impl ScriptCraftApp {
     fn layout_for_render(
         &mut self,
         surface: EditorSurface,
-    ) -> Result<std::sync::Arc<ScreenplayLayout>, scriptcraft_core::layout::LayoutError> {
+    ) -> Result<std::sync::Arc<ScreenplayLayout>, scriptcraft_layout::LayoutError> {
         let started = Instant::now();
         if surface == EditorSurface::Body {
             self.reconcile_body_active_group();
@@ -2051,12 +2052,12 @@ impl ScriptCraftApp {
                 self.native_path = target.path().map(PathBuf::from);
                 self.fdx_baseline = target.baseline().cloned();
                 let rebased_active = active_before_save.and_then(|old_id| {
-                    let new_id = scriptcraft_core::dual_dialogue::map_group_identity(
+                    let new_id = scriptcraft_model::dual_dialogue::map_group_identity(
                         &before_save_project,
                         self.session.project(),
                         &old_id,
                     )?;
-                    let focused_group = scriptcraft_core::dual_dialogue::group_at_element_index(
+                    let focused_group = scriptcraft_model::dual_dialogue::group_at_element_index(
                         self.session.project(),
                         self.session.selection().focus.element,
                     )?;
@@ -2113,8 +2114,8 @@ impl ScriptCraftApp {
         };
         fdx::TextState {
             scaling: body_zoom.clamp(
-                scriptcraft_core::text_state::MIN_TEXT_SCALING,
-                scriptcraft_core::text_state::MAX_TEXT_SCALING,
+                scriptcraft_fdx::MIN_TEXT_SCALING,
+                scriptcraft_fdx::MAX_TEXT_SCALING,
             ),
             selection: self.session.selection(),
         }
@@ -2378,8 +2379,8 @@ impl ScriptCraftApp {
         self.surface_focused = false;
         self.session = replacement;
         self.zoom_percent = text_state.scaling.clamp(
-            scriptcraft_core::text_state::MIN_TEXT_SCALING,
-            scriptcraft_core::text_state::MAX_TEXT_SCALING,
+        scriptcraft_fdx::MIN_TEXT_SCALING,
+        scriptcraft_fdx::MAX_TEXT_SCALING,
         );
         self.sync_pinch_zoom_from_controls();
         self.pending_zoom_anchor = None;
@@ -3178,7 +3179,7 @@ impl eframe::App for ScriptCraftApp {
 #[cfg(target_os = "windows")]
 struct WindowsPrintRequestSnapshot {
     project: Project,
-    layout_inputs: scriptcraft_core::LayoutInputs,
+    layout_inputs: scriptcraft_model::LayoutInputs,
     revision: u64,
     job_title: String,
 }
@@ -3892,7 +3893,6 @@ fn main() -> eframe::Result {
         }),
     )
 }
-
 
 
 

@@ -1,0 +1,164 @@
+use super::{
+    inputs::{EditorGroupBoundary, LayoutComposition, LayoutPurpose},
+    interaction::{BodyLineIndexEntry, LineLocation},
+};
+use scriptcraft_model::{
+    formatting::{EffectiveTextStyle, FixedPoint, ParagraphAlignment, SourceLayoutSettings},
+    LayoutInputs, ModelError, Role, StableId,
+};
+use std::sync::Arc;
+
+pub const FONT_FAMILY: &str = "Courier-family fixed metrics (12 pt target)";
+pub const CHAR_WIDTH: u32 = 7;
+pub const LINE_HEIGHT: u32 = 12;
+pub const POINTS_PER_INCH: u32 = 72;
+pub(super) const DUAL_DIALOGUE_COLUMN_GAP_POINTS: i64 = 18;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Precise signed rectangle in hundredths of a point. `Rect` remains as the
+/// integer compatibility projection; all layout and output consumers use this
+/// representation and its single conversion rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedRect {
+    pub x: FixedPoint,
+    pub y: FixedPoint,
+    pub width: FixedPoint,
+    pub height: FixedPoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceRange {
+    pub element: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutLine {
+    pub page: usize,
+    pub role: Role,
+    pub element: usize,
+    pub source: SourceRange,
+    pub text: Arc<str>,
+    /// Display-only text; canonical `text` and source byte ranges are untouched.
+    pub display_text: Arc<str>,
+    /// Source-character to display-character spans, relative to this line's
+    /// display text and absolute within the canonical element text.
+    pub display_source_map: Arc<[DisplaySourceSegment]>,
+    /// Per-run display and fixed-cell geometry. `geometry` and `text_style` are
+    /// retained as line-level compatibility projections; mixed-style consumers
+    /// must use these positioned spans.
+    pub spans: Arc<[PositionedStyledSpan]>,
+    pub text_style: EffectiveTextStyle,
+    pub char_width: FixedPoint,
+    /// Effective paragraph alignment before fixed-width text alignment is applied.
+    pub alignment: ParagraphAlignment,
+    /// Left anchor before alignment shifts the line; includes a first-visual-line indent.
+    pub unaligned_line_left: FixedPoint,
+    /// Text extent after first-line indent and alignment.
+    pub geometry: FixedRect,
+    /// Full paragraph bounds, retained separately for hit testing and measure.
+    pub paragraph_bounds: FixedRect,
+    /// Rounded integer-point compatibility geometry for older callers.
+    pub rect: Rect,
+    pub keep_with_next: bool,
+    pub oversized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositionedStyledSpan {
+    pub display_text: Arc<str>,
+    pub source: SourceRange,
+    pub display_source_map: Arc<[DisplaySourceSegment]>,
+    pub text_style: EffectiveTextStyle,
+    pub char_width: FixedPoint,
+    pub geometry: FixedRect,
+    pub underline: bool,
+    pub strikethrough: bool,
+}
+
+/// A borrowed core line selected by an immutable location query.
+///
+/// The page index is the line's owning page in `ScreenplayLayout::pages`; no
+/// internal line-index representation is exposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocatedLayoutLine<'a> {
+    pub page_index: usize,
+    pub line: &'a LayoutLine,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplaySourceSegment {
+    pub display_start: usize,
+    pub display_end: usize,
+    pub source_start: usize,
+    pub source_end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutPage {
+    pub number: usize,
+    pub title_page: bool,
+    pub bounds: Rect,
+    pub content_bounds: Rect,
+    pub lines: Vec<LayoutLine>,
+    pub occupied_lines: u32,
+    pub(super) next_line_y: FixedPoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenplayLayout {
+    pub inputs: LayoutInputs,
+    pub source_settings: SourceLayoutSettings,
+    pub font_family: String,
+    pub char_width: u32,
+    pub line_height: u32,
+    pub purpose: LayoutPurpose,
+    pub composition: LayoutComposition,
+    /// The identity resolved against this project's current group records.
+    /// Print and stale Body identities always expose `None`.
+    pub active_group_id: Option<StableId>,
+    /// Editor-only boundary metadata; always empty for Print and inactive Body.
+    pub editor_group_boundaries: Vec<EditorGroupBoundary>,
+    pub pages: Vec<LayoutPage>,
+    pub(super) element_line_index: Vec<Vec<LineLocation>>,
+    pub(super) body_line_index: Vec<BodyLineIndexEntry>,
+    pub(super) body_line_y_order: Vec<usize>,
+    pub(super) body_lines_by_element: Vec<Vec<usize>>,
+    pub(super) title_line_index: Vec<BodyLineIndexEntry>,
+    pub(super) title_lines_by_element: Vec<Vec<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Caret {
+    pub element: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutError {
+    pub kind: LayoutErrorKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutErrorKind {
+    Model(ModelError),
+    InvalidProfile,
+    InvalidPosition,
+    NoGeometry,
+}
+
+impl From<ModelError> for LayoutError {
+    fn from(error: ModelError) -> Self {
+        Self {
+            kind: LayoutErrorKind::Model(error),
+        }
+    }
+}

@@ -3012,7 +3012,11 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "scriptcraft-commands",
- "scriptcraft-core",
+ "scriptcraft-export",
+ "scriptcraft-fdx",
+ "scriptcraft-layout",
+ "scriptcraft-model",
+ "scriptcraft-session",
  "windows",
  "windows-core",
  "windows-future",
@@ -3022,18 +3026,18 @@ dependencies = [
 name = "scriptcraft-commands"
 version = "0.1.0"
 dependencies = [
- "scriptcraft-core",
+ "scriptcraft-model",
+ "scriptcraft-session",
  "serde",
  "unicode-segmentation",
 ]
 
 [[package]]
-name = "scriptcraft-core"
+name = "scriptcraft-export"
 version = "0.1.0"
 dependencies = [
- "scriptcraft-fdx",
+ "scriptcraft-layout",
  "scriptcraft-model",
- "scriptcraft-session",
 ]
 
 [[package]]
@@ -3045,6 +3049,14 @@ dependencies = [
  "scriptcraft-model",
  "time",
  "uuid",
+]
+
+[[package]]
+name = "scriptcraft-layout"
+version = "0.1.0"
+dependencies = [
+ "scriptcraft-model",
+ "scriptcraft-session",
 ]
 
 [[package]]

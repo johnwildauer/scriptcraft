@@ -5,8 +5,8 @@
 //! latency. Histories and pending state have fixed bounds.
 
 use scriptcraft_commands::{CommandId, EditorSurface};
-use scriptcraft_core::editing::EditMutationDiagnostics;
-use scriptcraft_core::layout::LayoutBuildDiagnostics;
+use scriptcraft_session::editing::EditMutationDiagnostics;
+use scriptcraft_layout::LayoutBuildDiagnostics;
 use std::time::{Duration, Instant};
 
 const HISTORY_CAPACITY: usize = 120;
@@ -930,4 +930,3 @@ pub(super) fn is_text_editing_command(command: CommandId) -> bool {
             | CommandId::EditorParagraphEnter
     )
 }
-

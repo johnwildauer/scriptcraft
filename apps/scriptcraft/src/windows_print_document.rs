@@ -5,11 +5,11 @@
 //! records into Direct2D command lists and pass them to the
 //! `ID2D1PrintControl::AddPage` route without rebuilding the screenplay layout.
 
-use scriptcraft_core::formatting::FixedPoint;
-use scriptcraft_core::layout::{
+use scriptcraft_model::formatting::FixedPoint;
+use scriptcraft_layout::{
     FixedRect, LayoutComposition, LayoutError, ScreenplayLayout,
 };
-use scriptcraft_core::{LayoutInputs, Project};
+use scriptcraft_model::{LayoutInputs, Project};
 use std::sync::Arc;
 
 const MAX_PACKAGE_PAGES: usize = 512;
@@ -262,4 +262,3 @@ fn package_from_layout(
         text_bytes,
     })
 }
-

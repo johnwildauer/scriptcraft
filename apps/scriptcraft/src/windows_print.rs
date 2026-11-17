@@ -151,8 +151,8 @@ pub(super) struct PrintPreparation {
 
 impl PrintPreparation {
     pub(super) fn start(
-        project: scriptcraft_core::Project,
-        inputs: scriptcraft_core::LayoutInputs,
+        project: scriptcraft_model::Project,
+        inputs: scriptcraft_model::LayoutInputs,
         request_revision: u64,
         job_title: String,
     ) -> Result<Self, StartFailure> {
@@ -1140,7 +1140,7 @@ fn draw_vector_page(
     Ok(())
 }
 
-fn scaled_run_rect(geometry: scriptcraft_core::layout::FixedRect, transform: PageTransform) -> Option<D2D_RECT_F> {
+fn scaled_run_rect(geometry: scriptcraft_layout::FixedRect, transform: PageTransform) -> Option<D2D_RECT_F> {
     let point_to_dip = 96.0 / 72.0;
     let rect = D2D_RECT_F {
         left: transform.offset_x + geometry.x.to_points_f32() * point_to_dip * transform.scale,

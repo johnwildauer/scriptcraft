@@ -12,13 +12,13 @@ use scriptcraft_commands::{
     Command, CommandId, CommandOrigin, EditorSurface, HorizontalDirection, LineEdge,
     PointerPhase, ScriptViewMode, VerticalDirection,
 };
-use scriptcraft_core::editing::{EditError, Position, Selection};
-use scriptcraft_core::formatting::EffectiveTextStyle;
-use scriptcraft_core::layout::{
+use scriptcraft_session::editing::{EditError, Position, Selection};
+use scriptcraft_model::formatting::EffectiveTextStyle;
+use scriptcraft_layout::{
     Caret, FixedRect, InteractionQueryDiagnostics, LayoutLine, PositionedStyledSpan,
     ScreenplayLayout,
 };
-use scriptcraft_core::FixedPoint;
+use scriptcraft_model::formatting::FixedPoint;
 use std::time::{Duration, Instant};
 
 const EDITOR_SURFACE_ID: &str = "page-editor-surface";
@@ -159,14 +159,14 @@ fn viewport_caret_rect(
 }
 
 fn dual_group_navigation_edge(
-    project: &scriptcraft_core::Project,
-    group: &scriptcraft_core::dual_dialogue::DualDialogueGroup,
+    project: &scriptcraft_model::Project,
+    group: &scriptcraft_model::dual_dialogue::DualDialogueGroup,
     forward: bool,
 ) -> Option<Position> {
     let element = if forward {
-        scriptcraft_core::dual_dialogue::first_member(project, group)?
+        scriptcraft_model::dual_dialogue::first_member(project, group)?
     } else {
-        scriptcraft_core::dual_dialogue::last_member(project, group)?
+        scriptcraft_model::dual_dialogue::last_member(project, group)?
     };
     let offset = if forward {
         0
@@ -408,7 +408,7 @@ impl ScriptCraftApp {
     }
 
     fn span_for_caret<'a>(
-        line: &'a scriptcraft_core::layout::LayoutLine,
+        line: &'a scriptcraft_layout::LayoutLine,
         offset: usize,
     ) -> Option<&'a PositionedStyledSpan> {
         line.spans
@@ -471,7 +471,7 @@ impl ScriptCraftApp {
         }
 
         if surface == EditorSurface::Body
-            && layout.purpose == scriptcraft_core::layout::LayoutPurpose::Editor
+            && layout.purpose == scriptcraft_layout::LayoutPurpose::Editor
         {
             if let Some(active_group_id) = layout.active_group_id.as_ref() {
                 for boundary in layout
@@ -1576,7 +1576,7 @@ impl ScriptCraftApp {
         }
         let position = selection.focus;
         let project = self.session.project();
-        let origin_group = scriptcraft_core::dual_dialogue::group_at_element_index(
+        let origin_group = scriptcraft_model::dual_dialogue::group_at_element_index(
             project,
             position.element,
         );
@@ -1615,7 +1615,7 @@ impl ScriptCraftApp {
         } else {
             position
         };
-        let target_group = scriptcraft_core::dual_dialogue::group_at_element_index(
+        let target_group = scriptcraft_model::dual_dialogue::group_at_element_index(
             project,
             next.element,
         );
@@ -1716,11 +1716,11 @@ impl ScriptCraftApp {
             return Ok(selection);
         };
         let project = self.session.project();
-        let origin_group = scriptcraft_core::dual_dialogue::group_at_element_index(
+        let origin_group = scriptcraft_model::dual_dialogue::group_at_element_index(
             project,
             current.element,
         );
-        let target_group = scriptcraft_core::dual_dialogue::group_at_element_index(
+        let target_group = scriptcraft_model::dual_dialogue::group_at_element_index(
             project,
             target_line.element,
         );
@@ -2412,4 +2412,3 @@ pub(super) fn central_panel_frame(
 fn document_cursor_icon() -> egui::CursorIcon {
     egui::CursorIcon::Text
 }
-

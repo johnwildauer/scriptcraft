@@ -3,7 +3,8 @@
 //! Native viewport and dialog intents are typed in the command vocabulary but
 //! remain host effects; this executor never performs them.
 
-use scriptcraft_core::editing::{EditError, EditingSession, Position as CorePosition, Selection as CoreSelection};
+use scriptcraft_model::{Position as CorePosition, Selection as CoreSelection};
+use scriptcraft_session::editing::{EditError, EditingSession};
 
 use crate::{
     Command, CommandId, EditorSurface, PointerPhase, PositionError, SelectionError,

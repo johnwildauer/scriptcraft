@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 
-use scriptcraft_core::exports::{
+use scriptcraft_export::{
     export_pdf, export_pdf_with_options, export_text, PdfExportOptions,
 };
-use scriptcraft_core::{BodyOwner, Project, Role, ScreenplayElement, TitlePageParagraph};
+use scriptcraft_model::{BodyOwner, Project, Role, ScreenplayElement, TitlePageParagraph};
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("export smoke scenario is valid"))

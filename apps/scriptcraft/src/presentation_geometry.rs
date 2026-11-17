@@ -4,9 +4,8 @@
 use crate::presentation_style::AdvanceMode;
 use eframe::egui::{self, Color32, FontId};
 use egui::epaint::text::{Galley, LayoutJob};
-use scriptcraft_core::formatting::ParagraphAlignment;
-use scriptcraft_core::layout::{Caret, LayoutLine, PositionedStyledSpan};
-use scriptcraft_core::FixedPoint;
+use scriptcraft_model::formatting::{FixedPoint, ParagraphAlignment};
+use scriptcraft_layout::{Caret, LayoutLine, PositionedStyledSpan};
 use std::sync::Arc;
 
 /// An unmodified full-span galley and boundary x offsets derived from its own
@@ -504,4 +503,3 @@ fn geometry_from_galley(
         natural_advance,
     })
 }
-

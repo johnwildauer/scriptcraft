@@ -2,7 +2,7 @@
 
 use eframe::egui;
 use scriptcraft_commands::{Command, EditorSurface, RoleValue};
-use scriptcraft_core::Role;
+use scriptcraft_model::Role;
 
 /// Platform is explicit so the focused editor resolver can be exercised for
 /// either supported desktop platform independently of the host OS.
@@ -413,4 +413,3 @@ pub(super) fn modifiers_are_none(modifiers: egui::Modifiers) -> bool {
 pub(super) const fn shortcut_input_allowed(ime_active: bool, ime_event_in_frame: bool) -> bool {
     !ime_active && !ime_event_in_frame
 }
-

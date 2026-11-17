@@ -12,8 +12,8 @@ use egui_material_icons::{
     MaterialIcon,
 };
 use scriptcraft_commands::{Appearance, Command, ZoomPercent};
-use scriptcraft_core::editing::{EditingSession, ParagraphKeyTarget};
-use scriptcraft_core::formatting::formatting_for_role;
+use scriptcraft_session::editing::{EditingSession, ParagraphKeyTarget};
+use scriptcraft_model::formatting::formatting_for_role;
 use crate::shortcuts::{
     element_hint_bindings, element_hint_chord, modifiers_are_none, ElementHintChord,
     ShortcutPlatform,
@@ -1835,5 +1835,4 @@ fn show_impl_with_appearance(
         timer_button_rect: timer_rect,
     }
 }
-
 
