@@ -12,6 +12,7 @@ use crate::{
     validate_layout_inputs, BodyOwner, LayoutInputs, ModelError, Project, Role, RunAttribute,
     SourceLayoutSettings, StableId, TextRun,
 };
+use scriptcraft_session::editing::EditingSession;
 use std::time::Instant;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -1094,7 +1095,7 @@ impl LayoutCache {
     /// the editing session. The transient presentation remains part of the key.
     pub fn get_or_build_body_editor_for_session(
         &mut self,
-        session: &crate::editing::EditingSession,
+        session: &EditingSession,
         presentation: &BodyEditorPresentation,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
         self.get_or_build_with_optional_diagnostics(
@@ -1112,7 +1113,7 @@ impl LayoutCache {
     /// Diagnostic counterpart to [`Self::get_or_build_body_editor_for_session`].
     pub fn get_or_build_body_editor_for_session_with_diagnostics(
         &mut self,
-        session: &crate::editing::EditingSession,
+        session: &EditingSession,
         presentation: &BodyEditorPresentation,
         diagnostics: &mut LayoutBuildDiagnostics,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
@@ -1133,7 +1134,7 @@ impl LayoutCache {
     /// revision and the title-editor composition.
     pub fn get_or_build_title_page_editor_for_session(
         &mut self,
-        session: &crate::editing::EditingSession,
+        session: &EditingSession,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
         self.get_or_build_with_optional_diagnostics(
             session.revision(),
@@ -1150,7 +1151,7 @@ impl LayoutCache {
     /// Diagnostic counterpart to [`Self::get_or_build_title_page_editor_for_session`].
     pub fn get_or_build_title_page_editor_for_session_with_diagnostics(
         &mut self,
-        session: &crate::editing::EditingSession,
+        session: &EditingSession,
         diagnostics: &mut LayoutBuildDiagnostics,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
         *diagnostics = LayoutBuildDiagnostics::default();
@@ -1195,7 +1196,7 @@ impl LayoutCache {
     pub fn get_or_build_for_session_with_diagnostics(
         &mut self,
         revision: u64,
-        session: &crate::editing::EditingSession,
+        session: &EditingSession,
         purpose: LayoutPurpose,
         diagnostics: &mut LayoutBuildDiagnostics,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {

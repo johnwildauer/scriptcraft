@@ -1,0 +1,270 @@
+//! Transactional native save preparation, verification, publication, and rebase.
+
+use super::candidate::PreparedFdx;
+use super::error::{
+    FdxStorageErrorKind, TransactionalSaveError, TransactionalSaveOutcome,
+};
+use super::filesystem::FdxStorageFileSystem;
+use super::publication::{replace, save_as, save_as_overwrite};
+use super::target::{FdxSaveMode, FdxSaveTarget};
+use crate::editing::{
+    map_selection_to_project, map_title_selection_to_project, EditError, EditingSession,
+};
+use scriptcraft_fdx::{self as fdx, same_dual_dialogue_projection, write_v6_for_save, FdxError};
+use scriptcraft_model::{cast_list, BodyOwner, Project, TitlePageParagraph};
+
+/// Save against the session's opened/saved target, or create a new target using
+/// the mode's Save As policy. Session and target state change only after publish.
+pub fn save_session<F: FdxStorageFileSystem>(
+    fs: &F,
+    session: &mut EditingSession,
+    target: &mut FdxSaveTarget,
+    mode: FdxSaveMode,
+) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
+    let text_state = fdx::TextState {
+        scaling: 100,
+        selection: session.selection(),
+    };
+    save_session_with_view_state(
+        fs,
+        session,
+        target,
+        mode,
+        fdx::WindowState::DEFAULT,
+        text_state,
+    )
+}
+
+/// Save using the latest desktop-reported logical native geometry. Geometry is
+/// save-scoped disposable FDX view state and never enters the editing session.
+pub fn save_session_with_window_state<F: FdxStorageFileSystem>(
+    fs: &F,
+    session: &mut EditingSession,
+    target: &mut FdxSaveTarget,
+    mode: FdxSaveMode,
+    window_state: fdx::WindowState,
+) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
+    let text_state = fdx::TextState {
+        scaling: 100,
+        selection: session.selection(),
+    };
+    save_session_with_view_state(fs, session, target, mode, window_state, text_state)
+}
+
+/// Save with the editor selection and persisted whole-percent page zoom. Both
+/// values are captured in the detached save candidate only.
+pub fn save_session_with_view_state<F: FdxStorageFileSystem>(
+    fs: &F,
+    session: &mut EditingSession,
+    target: &mut FdxSaveTarget,
+    mode: FdxSaveMode,
+    window_state: fdx::WindowState,
+    text_state: fdx::TextState,
+) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
+    save_session_with_codec_and_view_state(
+        fs,
+        session,
+        target,
+        mode,
+        &NativeSaveCandidateCodec,
+        window_state,
+        text_state,
+    )
+}
+
+trait SaveCandidateCodec {
+    fn serialize(
+        &self,
+        project: &Project,
+        context: &mut fdx::SaveContext,
+    ) -> Result<PreparedFdx, TransactionalSaveError>;
+    fn reread(&self, bytes: &[u8]) -> Result<Project, FdxError>;
+}
+
+struct NativeSaveCandidateCodec;
+
+impl SaveCandidateCodec for NativeSaveCandidateCodec {
+    fn serialize(
+        &self,
+        project: &Project,
+        context: &mut fdx::SaveContext,
+    ) -> Result<PreparedFdx, TransactionalSaveError> {
+        let bytes = write_v6_for_save(project, context).map_err(TransactionalSaveError::Codec)?;
+        PreparedFdx::from_validated_bytes(bytes).map_err(|error| match &error.kind {
+            FdxStorageErrorKind::InvalidFdx(codec_error) => {
+                TransactionalSaveError::Codec(codec_error.clone())
+            }
+            _ => TransactionalSaveError::Storage(error),
+        })
+    }
+
+    fn reread(&self, bytes: &[u8]) -> Result<Project, FdxError> {
+        fdx::read_v6(bytes)
+            .map(|document| document.project)
+            .map_err(|error| {
+                fdx::save_diagnostic_at(error, fdx::SaveDiagnosticCode::StorageRereadPropagation)
+            })
+    }
+}
+
+fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
+    fs: &F,
+    session: &mut EditingSession,
+    target: &mut FdxSaveTarget,
+    mode: FdxSaveMode,
+    codec: &C,
+    window_state: fdx::WindowState,
+    text_state: fdx::TextState,
+) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
+    let operation = match &mode {
+        FdxSaveMode::Save => fdx::SaveOperation::Save,
+        FdxSaveMode::SaveAs(_) | FdxSaveMode::SaveAsOverwrite(_) => fdx::SaveOperation::SaveAs,
+    };
+    let context = fdx::SaveContext::new(operation)
+        .with_session_open_timestamp(session.session_open_timestamp().to_owned())
+        .with_window_state(window_state)
+        .with_text_state(text_state);
+    save_session_with_context(fs, session, target, mode, context, codec)
+}
+
+fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
+    fs: &F,
+    session: &mut EditingSession,
+    target: &mut FdxSaveTarget,
+    mode: FdxSaveMode,
+    mut context: fdx::SaveContext,
+    codec: &C,
+) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
+    let (destination, existing_baseline, overwrite_consent) = match mode {
+        FdxSaveMode::Save => {
+            let path = target
+                .path
+                .clone()
+                .ok_or(TransactionalSaveError::MissingBaseline)?;
+            let baseline = target
+                .baseline
+                .as_ref()
+                .ok_or(TransactionalSaveError::MissingBaseline)?
+                .clone();
+            (path, Some(baseline), false)
+        }
+        FdxSaveMode::SaveAs(destination) => (destination, None, false),
+        FdxSaveMode::SaveAsOverwrite(destination) => (destination, None, true),
+    };
+
+    let corrected = session
+        .prepare_cast_list_save_candidate()
+        .map_err(TransactionalSaveError::Session)?;
+    let prepared = codec.serialize(&corrected, &mut context)?;
+    let rebased_project = codec
+        .reread(&prepared.bytes)
+        .map_err(TransactionalSaveError::Codec)?;
+    if !same_save_projection(&corrected, &rebased_project) {
+        return Err(TransactionalSaveError::Codec(
+            fdx::SaveDiagnosticCode::StorageSemanticProjectionMismatch.error(),
+        ));
+    }
+    let publishable_session = session
+        .prepare_saved_rebase(rebased_project)
+        .map_err(TransactionalSaveError::Session)?;
+
+    // The destination and all session work are now prepared. No fallible
+    // application transition follows successful filesystem publication.
+    let receipt = match existing_baseline.as_ref() {
+        Some(baseline) => replace(fs, &destination, &prepared, baseline),
+        None if overwrite_consent => save_as_overwrite(fs, &destination, &prepared),
+        None => save_as(fs, &destination, &prepared),
+    }
+    .map_err(TransactionalSaveError::Storage)?;
+
+    let outcome = TransactionalSaveOutcome {
+        temporary_cleanup_warning: receipt.temporary_cleanup_failed,
+    };
+    target.path = Some(destination);
+    target.baseline = Some(receipt.baseline);
+    *session = publishable_session;
+    Ok(outcome)
+}
+
+fn same_save_projection(expected: &Project, actual: &Project) -> bool {
+    fn same_elements(
+        expected: &[std::sync::Arc<BodyOwner>],
+        actual: &[std::sync::Arc<BodyOwner>],
+    ) -> bool {
+        expected.len() == actual.len()
+            && expected.iter().zip(actual).all(|(expected, actual)| {
+                expected.role == actual.role
+                    && expected.text == actual.text
+                    && if expected.runs.is_empty() {
+                        actual.runs.iter().all(|run| run.attributes.is_empty())
+                    } else {
+                        expected.runs == actual.runs
+                    }
+            })
+    }
+
+    same_title_paragraphs(&expected.title_page, &actual.title_page)
+        && same_elements(&expected.elements, &actual.elements)
+        && same_dual_dialogue_projection(expected, actual)
+}
+
+fn same_title_paragraphs(
+    expected: &[TitlePageParagraph],
+    actual: &[TitlePageParagraph],
+) -> bool {
+    expected.len() == actual.len()
+        && expected.iter().zip(actual).all(|(expected, actual)| {
+            expected.role == actual.role
+                && expected.text == actual.text
+                && expected.formatting == actual.formatting
+                && if expected.runs.is_empty() {
+                    actual.runs.iter().all(|run| run.attributes.is_empty())
+                } else {
+                    expected.runs == actual.runs
+                }
+        })
+}
+
+impl EditingSession {
+    pub(crate) fn prepare_cast_list_save_candidate(&self) -> Result<Project, EditError> {
+        cast_list::prepare_save_candidate(self.project()).map_err(EditError::CastList)
+    }
+
+    pub(crate) fn prepare_saved_rebase(&self, mut project: Project) -> Result<Self, EditError> {
+        project.validate()?;
+        project.share_unchanged_body_owners_from(self.project());
+        if let Some(preservation) = project.preservation.as_mut() {
+            preservation.rebuild_indexes();
+        }
+        let mut rebased = self.clone();
+        let selection = map_selection_to_project(self.selection, self.project(), &project)
+            .ok_or(EditError::InvalidSelection)?;
+        let title_selection =
+            map_title_selection_to_project(self.title_selection, self.project(), &project);
+        let generated_parentheticals = self
+            .project()
+            .elements
+            .iter()
+            .zip(&project.elements)
+            .filter(|(old, new)| {
+                old.role == scriptcraft_model::Role::Parenthetical
+                    && new.role == scriptcraft_model::Role::Parenthetical
+                    && self.generated_parentheticals.contains(old.id.as_str())
+            })
+            .map(|(_, new)| new.id.as_str().to_owned())
+            .collect();
+
+        rebased.project = project.clone();
+        rebased.clean_project = project;
+        rebased.selection = selection;
+        rebased.title_selection = title_selection;
+        rebased.generated_parentheticals = generated_parentheticals;
+        rebased.dirty = false;
+        rebased.reset_derived_after_saved_rebase();
+        // Saving changes the preservation baseline and therefore invalidates
+        // render caches even when the visible semantic text did not change.
+        rebased.revision = rebased.revision.saturating_add(1);
+        rebased.validate()?;
+        Ok(rebased)
+    }
+}

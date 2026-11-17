@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
-use scriptcraft_core::editing::EditingSession;
-use scriptcraft_core::fdx_storage::{
+use scriptcraft_model::Project;
+use scriptcraft_session::editing::EditingSession;
+use scriptcraft_session::storage::{
     open, save_session, FdxSaveMode, FdxSaveTarget, StdFdxStorageFileSystem,
 };
-use scriptcraft_core::Project;
 use std::fs;
 use std::path::PathBuf;
 

@@ -6,6 +6,7 @@ members = [
     "crates/scriptcraft-core",
     "crates/scriptcraft-fdx",
     "crates/scriptcraft-model",
+    "crates/scriptcraft-session",
 ]
 
 [workspace.package]

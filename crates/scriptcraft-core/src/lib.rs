@@ -14,7 +14,9 @@ pub mod formatted_text;
 pub mod formatting;
 pub mod layout;
 mod paragraph_id;
-pub mod persistence;
+pub mod persistence {
+    pub use scriptcraft_session::persistence::*;
+}
 pub mod preservation;
 pub mod scene_metadata;
 pub mod title_page;

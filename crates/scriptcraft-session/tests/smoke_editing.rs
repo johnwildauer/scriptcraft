@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
-use scriptcraft_core::editing::{EditingSession, Position, Selection};
-use scriptcraft_core::Project;
+use scriptcraft_model::{Position, Project, Selection};
+use scriptcraft_session::editing::EditingSession;
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("editing smoke uses valid bounded input"))
