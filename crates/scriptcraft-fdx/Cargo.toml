@@ -1,0 +1,16 @@
+[package]
+name = "scriptcraft-fdx"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+quick-xml = "=0.41.0"
+getrandom = "=0.4.3"
+scriptcraft-model = { path = "../scriptcraft-model" }
+time = { version = "=0.3.41", features = ["local-offset"] }
+uuid = { version = "=1.29.0", features = ["v4"] }
+
+[lints]
+workspace = true

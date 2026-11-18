@@ -1,0 +1,354 @@
+use crate::{
+    app::{add_performance_counter, ScriptCraftApp},
+    chrome::{status_bar::PresentedPage, theme},
+    presentation::geometry as presentation_geometry,
+};
+use eframe::egui::{self, Sense, Vec2};
+use scriptcraft_commands::{EditorSurface, ScriptViewMode};
+use std::time::Instant;
+
+use super::page_policy::{
+    presented_page_policy, resolve_presentation_mode, viewport_paint_page_range,
+};
+use super::reveal;
+use super::zoom_scroll::{
+    page_scroll_geometry, prepaint_zoom_scroll_offset, presentation_metrics_at_zoom,
+    SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING, SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING,
+};
+
+const EDITOR_SURFACE_ID: &str = "page-editor-surface";
+
+pub(crate) fn chrome_clear_color(
+    mode: ScriptViewMode,
+    palette: theme::ScriptWorkspacePalette,
+) -> [f32; 4] {
+    super::page_policy::script_view_backdrop(mode, palette).to_normalized_gamma_f32()
+}
+
+pub(crate) fn central_panel_frame(
+    _ctx: &egui::Context,
+    mode: ScriptViewMode,
+    palette: theme::ScriptWorkspacePalette,
+) -> egui::Frame {
+    // Keep the resolved Script View surface color without a fixed viewport inset.
+    egui::Frame::NONE.fill(super::page_policy::script_view_backdrop(mode, palette))
+}
+
+impl ScriptCraftApp {
+    pub(crate) fn live_document_surface(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
+        let phase_started = self
+            .development_mode
+            .then(|| (Instant::now(), self.performance.paint_nanos));
+        if self.development_mode {
+            self.responsiveness.begin_document_surface(surface);
+        }
+        self.live_document_surface_inner(ui, surface);
+        if let Some((started, paint_nanos_before)) = phase_started {
+            self.responsiveness.record_document_surface(
+                started.elapsed(),
+                paint_nanos_before,
+                self.performance.paint_nanos,
+            );
+        }
+    }
+
+    fn live_document_surface_inner(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
+        let presentation_mode =
+            resolve_presentation_mode(surface, || self.script_view_mode);
+        let layout = match self.layout_for_render(surface) {
+            Ok(layout) => layout,
+            Err(error) => {
+                self.page_geometry.invalidate();
+                self.page_scale = None;
+                self.show_error(format!(
+                    "LAYOUT_BUILD_FAILED: {}; document unchanged",
+                    crate::app::diagnostics::safe_layout_error_category(&error)
+                ));
+                return;
+            }
+        };
+        self.rendered_revision = Some(self.session.revision());
+        let editor_id = ui.id().with(EDITOR_SURFACE_ID);
+        let scroll_outer_rect = ui.available_rect_before_wrap();
+        let mut presented_pages = Vec::with_capacity(layout.pages.len());
+        let mut frame_projections = std::iter::repeat_with(|| None)
+            .take(layout.pages.len())
+            .collect::<Vec<
+                Option<Vec<Option<presentation_geometry::PresentationLine<'_>>>>,
+            >>();
+        let mut rendered_scale = 1.0;
+        let mut visible_pages = 0;
+        let reveal_intent = self.reveal_intent;
+        let pending_zoom_anchor = self.pending_zoom_anchor;
+        let zoom_compensation_offset = pending_zoom_anchor.and_then(|anchor| {
+            prepaint_zoom_scroll_offset(
+                anchor,
+                layout.pages.len(),
+                layout.inputs.paper_width as f32,
+                layout.inputs.paper_height as f32,
+                presentation_mode,
+                layout.pages.iter().map(|page| {
+                    (
+                        page.content_bounds.y as f32,
+                        page.content_bounds.height as f32,
+                    )
+                }),
+                layout.inputs.font_size as f32,
+                self.zoom_percent,
+                scroll_outer_rect,
+                ui.spacing().item_spacing.y,
+            )
+            .map(|plan| plan.scroll_offset)
+        });
+        let zoom_compensation_queued = zoom_compensation_offset.is_some();
+        if zoom_compensation_queued {
+            add_performance_counter(&mut self.performance.zoom_compensations_queued, 1);
+        }
+        let selection = match surface {
+            EditorSurface::Body => self.session.selection(),
+            EditorSurface::TitlePage => self.session.title_selection(),
+        };
+        // Temporarily override the current surface Ui style; keep the shared
+        // context style and this ScrollArea's persistent identity unchanged.
+        let scroll_fade = ui.style().spacing.scroll.fade;
+        ui.style_mut().spacing.scroll.fade.strength = 0.0;
+        let mut scroll_area = egui::ScrollArea::both()
+            .id_salt("page-editor-scroll")
+            .content_margin(egui::Margin {
+                left: 0,
+                right: 0,
+                top: SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING as i8,
+                bottom: SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING as i8,
+            });
+        if let Some(offset) = zoom_compensation_offset {
+            scroll_area = scroll_area.scroll_offset(offset);
+        }
+        let scroll_output = scroll_area.show(ui, |ui| {
+            // ScrollArea's child max rect is the actual inner viewport after
+            // reserved scrollbar width and parent clipping have been applied.
+            let viewport_width = ui.available_width().max(0.0);
+            let metrics = presentation_metrics_at_zoom(
+                viewport_width,
+                layout.inputs.paper_width as f32,
+                layout.inputs.font_size as f32,
+                self.zoom_percent,
+            );
+            let geometry = page_scroll_geometry(viewport_width, metrics.page_width);
+            debug_assert_eq!(
+                geometry.horizontal_overflow,
+                geometry.content_width > geometry.viewport_width
+            );
+            let scale = metrics.scale;
+            rendered_scale = scale;
+            self.page_scale = Some(scale);
+            ui.set_min_width(geometry.content_width);
+            // Allocate every page row to preserve full scroll extent and source geometry;
+            // page painting is a separate viewport-bounded pass below.
+            let editor_clip = ui.clip_rect();
+            let vertical_item_spacing = ui.spacing().item_spacing.y;
+            if presentation_mode == ScriptViewMode::Speed {
+                // Only page-row allocation uses this local Ui style; restore it
+                // before paint/reveal widgets and leave the shared context intact.
+                ui.spacing_mut().item_spacing.y = 0.0;
+            }
+            for (page_index, page) in layout.pages.iter().enumerate() {
+                add_performance_counter(&mut self.performance.pages_considered, 1);
+                let policy = presented_page_policy(
+                    presentation_mode,
+                    layout.inputs.paper_height as f32,
+                    page.content_bounds.y as f32,
+                    page.content_bounds.height as f32,
+                    scale,
+                    vertical_item_spacing,
+                );
+                ui.horizontal(|ui| {
+                    // Explicit geometry owns all horizontal spacing; default
+                    // row gaps would inflate measured scroll content.
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.add_space(geometry.leading_padding);
+                    let page_rect = ui
+                        .allocate_space(Vec2::new(metrics.page_width, policy.page_height))
+                        .1;
+                    let trailing_padding =
+                        (geometry.content_width - geometry.leading_padding - metrics.page_width)
+                            .max(0.0);
+                    ui.add_space(trailing_padding);
+                    presented_pages.push(PresentedPage {
+                        rect: page_rect,
+                        document_y_offset: policy.document_y_offset,
+                    });
+                });
+                if policy.explicit_gap > 0.0 {
+                    ui.add_space(policy.explicit_gap);
+                }
+            }
+            if presentation_mode == ScriptViewMode::Speed {
+                ui.spacing_mut().item_spacing.y = vertical_item_spacing;
+            }
+            let paint_range = viewport_paint_page_range(&presented_pages, editor_clip);
+            if self.development_mode {
+                visible_pages = presented_pages
+                    .iter()
+                    .filter(|page| page.rect.intersects(editor_clip))
+                    .count();
+            }
+            let painted_in_range = paint_range.map_or(0, |(first, last)| {
+                last.saturating_sub(first).saturating_add(1)
+            });
+            add_performance_counter(
+                &mut self.performance.pages_culled,
+                presented_pages.len().saturating_sub(painted_in_range) as u64,
+            );
+            let caret_page_index =
+                self.caret_page_index(&layout, surface, selection, reveal_intent, paint_range);
+            let mut pages_to_project = paint_range
+                .map(|(first, last)| (first..=last).collect::<Vec<_>>())
+                .unwrap_or_default();
+            if let Some(page_index) = caret_page_index {
+                if !pages_to_project.contains(&page_index) {
+                    pages_to_project.push(page_index);
+                }
+            }
+            for page_index in pages_to_project {
+                if frame_projections[page_index].is_none() {
+                    frame_projections[page_index] = Some(
+                        layout.pages[page_index]
+                            .lines
+                            .iter()
+                            .map(|line| {
+                                self.project_line_for_interaction(ui.ctx(), line, scale)
+                                    .ok()
+                                    .flatten()
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            let caret_geometry = self.resolve_caret_geometry(
+                &layout,
+                surface,
+                selection,
+                reveal_intent,
+                caret_page_index,
+                &frame_projections,
+                scale,
+            );
+            let caret_paint_page_index = (selection.anchor == selection.focus)
+                .then_some(caret_page_index)
+                .flatten();
+            reveal::reveal_caret_if_needed(
+                ui,
+                reveal_intent,
+                zoom_compensation_queued,
+                caret_page_index,
+                caret_geometry,
+                &presented_pages,
+                scale,
+                editor_clip,
+            );
+            if let Some((first, last)) = paint_range {
+                for (page_index, presented_page) in presented_pages
+                    .iter()
+                    .enumerate()
+                    .take(last.saturating_add(1))
+                    .skip(first)
+                {
+                    self.paint_page(
+                        ui,
+                        &layout,
+                        page_index,
+                        *presented_page,
+                        metrics,
+                        frame_projections[page_index].as_deref().unwrap_or(&[]),
+                        editor_id,
+                        caret_paint_page_index,
+                        caret_geometry,
+                        surface,
+                        presentation_mode,
+                    );
+                }
+            }
+        });
+        if self.development_mode {
+            self.responsiveness
+                .note_revision_painted(self.session.revision(), Instant::now());
+            if surface == EditorSurface::Body {
+                self.responsiveness
+                    .note_pages(visible_pages, layout.pages.len());
+            }
+        }
+        ui.style_mut().spacing.scroll.fade = scroll_fade;
+        let scale = rendered_scale;
+        let published_scroll_offset = scroll_output.state.offset;
+        self.reveal_intent_after_frame(zoom_compensation_queued);
+
+        let actual_clip = scroll_output.inner_rect.intersect(ui.clip_rect());
+        let geometry_count_matches = presented_pages.len() == layout.pages.len();
+        let zoom_anchor_was_pending = pending_zoom_anchor.is_some();
+        let needs_repaint = if geometry_count_matches {
+            self.page_geometry.publish(
+                self.performance.frames,
+                self.session.revision(),
+                ui.ctx().content_rect(),
+                scale,
+                &presented_pages,
+                actual_clip,
+                published_scroll_offset,
+            )
+        } else {
+            self.page_geometry.invalidate();
+            true
+        };
+        if geometry_count_matches {
+            // The request is consumed only after the scaled page geometry has
+            // been published. Invalid/missing anchors simply preserve old behavior.
+            if zoom_anchor_was_pending {
+                add_performance_counter(&mut self.performance.zoom_geometry_published, 1);
+                add_performance_counter(&mut self.performance.zoom_anchor_consumed, 1);
+            }
+            self.pending_zoom_anchor = None;
+        }
+        if needs_repaint {
+            self.request_repaint(ui.ctx());
+        }
+
+        // This is the only interactive response in the painted editor. Pages remain
+        // source-mapped geometry, not independent focusable widgets.
+        let response = ui
+            .interact(scroll_output.inner_rect, editor_id, Sense::click_and_drag())
+            .on_hover_cursor(document_cursor_icon());
+        self.handle_pointer_response(
+            ui,
+            editor_id,
+            &response,
+            &layout,
+            &presented_pages,
+            scale,
+            &frame_projections,
+            surface,
+        );
+        self.native_input_diagnostics.focused = self.surface_focused;
+        if self.surface_focused {
+            ui.ctx().memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    editor_id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                );
+            });
+            self.native_input_diagnostics.focus_lock_installed = true;
+        } else {
+            self.native_input_diagnostics.focus_lock_installed = false;
+        }
+    }
+
+
+}
+
+fn document_cursor_icon() -> egui::CursorIcon {
+    egui::CursorIcon::Text
+}

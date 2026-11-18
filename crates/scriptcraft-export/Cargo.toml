@@ -1,0 +1,13 @@
+[package]
+name = "scriptcraft-export"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+scriptcraft-layout = { path = "../scriptcraft-layout" }
+scriptcraft-model = { path = "../scriptcraft-model" }
+
+[lints]
+workspace = true

@@ -3,7 +3,11 @@ resolver = "2"
 members = [
     "apps/scriptcraft",
     "crates/scriptcraft-commands",
-    "crates/scriptcraft-core",
+    "crates/scriptcraft-export",
+    "crates/scriptcraft-fdx",
+    "crates/scriptcraft-layout",
+    "crates/scriptcraft-model",
+    "crates/scriptcraft-session",
 ]
 
 [workspace.package]
