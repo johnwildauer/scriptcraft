@@ -2,8 +2,8 @@
 
 pub(crate) mod document_font;
 pub(crate) mod material_font;
-// This primitive is intentionally prepared for WO-001a.3 and not yet wired
-// into visible painting.
+// Shared app presentation geometry; Script View modules consume these primitives
+// for painting and interaction.
 #[allow(dead_code)]
 pub(crate) mod geometry;
 pub(crate) mod style;

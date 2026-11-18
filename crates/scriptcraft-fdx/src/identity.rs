@@ -166,7 +166,7 @@ pub(crate) fn validate_user_paragraph_data_locations(
 }
 
 /// Collect supported typed definitions and board references in source order.
-/// Raw-codec visibility is transitional for core read_v6 and is narrowed in
+/// FDX import uses these results to analyze source identities and board references.
 pub(crate) fn collect_identities(root: &RawElement) -> Result<(Vec<ForeignIdentity>, BoardGraph), FdxError> {
     let mut identities = Vec::new();
     let mut board_graph = BoardGraph::default();

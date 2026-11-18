@@ -1,7 +1,5 @@
 //! FDX title-page semantic paragraph and direct-formatting mapping.
-//!
-//! The raw import helper is transitional for core's root import orchestration
-//! and is intentionally hidden from the stable package API until WO-002.28.
+//! The FDX package owns this mapping between source title-page data and model values.
 
 use crate::diagnostics::{
     map_model_error, map_paragraph_id_error, FdxError, SaveDiagnosticCode,

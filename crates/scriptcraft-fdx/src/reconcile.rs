@@ -1,7 +1,5 @@
 //! Source-backed projection of canonical model state into retained FDX nodes.
-//!
-//! Public functions are transitional for core's top-level writer and will be
-//! narrowed after writer orchestration moves into this package.
+//! The FDX writer owns this reconciliation between model state and retained source nodes.
 
 use crate::constants::FDX_ROOT;
 use crate::diagnostics::{save_diagnostic_at, FdxError, SaveDiagnosticCode};

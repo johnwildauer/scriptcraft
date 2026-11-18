@@ -1,7 +1,5 @@
 //! FDX body content and supported dual-dialogue semantic mapping.
-//!
-//! The raw helpers are transitional for core's root import orchestration and are
-//! intentionally hidden from the stable package API until WO-002.28.
+//! The FDX package owns this mapping between source content and model values.
 
 use crate::diagnostics::{map_model_error, map_paragraph_id_error, FdxError, SaveDiagnosticCode};
 use crate::identity::raw_identity_attribute as identity_attribute;

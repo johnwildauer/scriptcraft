@@ -34,9 +34,4 @@ pub use identity::{StableId, StableIdAllocator};
 pub use position::{Position, Selection};
 pub use title_page::{TitlePageAlignment, TitlePageParagraph, TitlePageParagraphFormatting};
 
-pub const FOUNDATION_STATUS: &str = "scriptcraft foundation ready";
 pub const MAX_TEXT_BYTES: usize = 262_144;
-
-pub const fn foundation_status() -> &'static str {
-    FOUNDATION_STATUS
-}

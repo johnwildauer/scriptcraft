@@ -609,7 +609,7 @@ pub fn resolve_toggle_target(
     resolve_toggle_target_for_validated_session(project, surface, selection)
 }
 
-/// Transitional post-validation entry point for the core EditingSession adapter.
+/// Post-validation entry point for the scriptcraft-session editing-session consumer.
 /// Callers must maintain complete project validity at their construction and
 /// accepted-candidate publication boundaries; this is not an arbitrary-project API.
 #[doc(hidden)]

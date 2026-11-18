@@ -1,7 +1,5 @@
 //! Shared source-preserving whitespace formatting for FDX writer paths.
-//!
-//! Public functions are transitional for core's top-level writer and will be
-//! narrowed after writer orchestration moves into this package.
+//! The FDX writer owns formatting generated structure while preserving source whitespace.
 
 use crate::constants::FDX_ROOT;
 use scriptcraft_model::preservation::{PreservedElement, PreservedNode, PreservedSection, SourceOwnership};

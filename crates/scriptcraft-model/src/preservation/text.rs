@@ -1,4 +1,4 @@
-//! Temporary core ownership for managed preservation text projection and topology.
+//! Model-owned operations for managed preservation text projection and topology.
 
 use super::*;
 use crate::formatting::ParagraphAlignment;

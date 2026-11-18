@@ -1,9 +1,9 @@
 //! Immutable vector-page package derived from the canonical Print layout.
 //!
 //! The page model deliberately contains no editor/egui state and keeps geometry
-//! in the core's exact hundredths-of-a-point units. WO-006.3 can turn these
-//! records into Direct2D command lists and pass them to the
-//! `ID2D1PrintControl::AddPage` route without rebuilding the screenplay layout.
+//! in the core's exact hundredths-of-a-point units. The completed Windows Print
+//! adapter turns these records into Direct2D command lists and submits them
+//! through `ID2D1PrintControl::AddPage` without rebuilding the screenplay layout.
 
 use scriptcraft_model::formatting::FixedPoint;
 use scriptcraft_layout::{
