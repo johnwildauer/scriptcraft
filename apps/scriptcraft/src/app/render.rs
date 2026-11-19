@@ -2,7 +2,10 @@
 
 use super::{diagnostics::add_performance_nanos, responsiveness, ScriptCraftApp};
 use scriptcraft_commands::EditorSurface;
-use scriptcraft_layout::{BodyEditorPresentation, LayoutBuildDiagnostics, ScreenplayLayout};
+use scriptcraft_layout::{
+    BodyEditorPresentation, LayoutBuildDiagnostics, LayoutEnvironment, LayoutErrorKind,
+    ScreenplayLayout,
+};
 use std::time::Instant;
 
 impl ScriptCraftApp {
@@ -14,6 +17,17 @@ impl ScriptCraftApp {
         if surface == EditorSurface::Body {
             self.reconcile_body_active_group();
         }
+        let prepared_fonts = self
+            .document_font_store
+            .prepare_document(self.session.project())
+            .map_err(|_| scriptcraft_layout::LayoutError {
+                kind: LayoutErrorKind::NoGeometry,
+            })?;
+        let layout_environment = LayoutEnvironment::new(
+            self.session.layout_inputs().page_only(),
+            prepared_fonts.environment.clone(),
+        );
+        self.prepared_document_fonts = Some(prepared_fonts);
         let cache = match surface {
             EditorSurface::Body => &mut self.layout_cache,
             EditorSurface::TitlePage => &mut self.title_layout_cache,
@@ -25,21 +39,30 @@ impl ScriptCraftApp {
                 self.active_body_dual_dialogue_group.clone(),
             );
             if let Some(diagnostics) = build_diagnostics.as_mut() {
-                cache.get_or_build_body_editor_for_session_with_diagnostics(
+                cache.get_or_build_body_editor_for_session_with_environment_and_diagnostics(
                     &self.session,
                     &presentation,
+                    &layout_environment,
                     diagnostics,
                 )?
             } else {
-                cache.get_or_build_body_editor_for_session(&self.session, &presentation)?
+                cache.get_or_build_body_editor_for_session_with_environment(
+                    &self.session,
+                    &presentation,
+                    &layout_environment,
+                )?
             }
         } else if let Some(diagnostics) = build_diagnostics.as_mut() {
-            cache.get_or_build_title_page_editor_for_session_with_diagnostics(
+            cache.get_or_build_title_page_editor_for_session_with_environment_and_diagnostics(
                 &self.session,
+                &layout_environment,
                 diagnostics,
             )?
         } else {
-            cache.get_or_build_title_page_editor_for_session(&self.session)?
+            cache.get_or_build_title_page_editor_for_session_with_environment(
+                &self.session,
+                &layout_environment,
+            )?
         };
         let elapsed = started.elapsed();
         add_performance_nanos(

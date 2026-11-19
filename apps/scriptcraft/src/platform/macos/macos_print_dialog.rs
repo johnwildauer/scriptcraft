@@ -91,6 +91,11 @@ pub(crate) enum PrintDeliveryResult {
     PrintOperationUnavailable,
 }
 
+pub(crate) struct PrintDeliveryOutcome {
+    pub(crate) result: PrintDeliveryResult,
+    pub(crate) fallback_summary: Option<String>,
+}
+
 struct PrintOperationResources<Settings, Request, Data, Document, Operation> {
     _settings: Settings,
     _request: Request,
@@ -124,16 +129,27 @@ fn run_once_after_preparation<Prepared>(
 /// Builds and submits one PDFKit-backed operation from the accepted settings
 /// and request-time snapshot. A false AppKit Boolean is intentionally not
 /// classified further: the API does not distinguish cancellation from failure.
-pub(crate) fn deliver_print(settings: AcceptedPrintSettings) -> PrintDeliveryResult {
+pub(crate) fn deliver_print(settings: AcceptedPrintSettings) -> PrintDeliveryOutcome {
     let Some(main_thread) = MainThreadMarker::new() else {
-        return PrintDeliveryResult::MainThreadUnavailable;
+        return PrintDeliveryOutcome {
+            result: PrintDeliveryResult::MainThreadUnavailable,
+            fallback_summary: None,
+        };
     };
 
     let prepared = prepare_print_operation(settings, main_thread);
-    run_once_after_preparation(prepared, |resources| {
+    let fallback_summary = prepared
+        .as_ref()
+        .ok()
+        .map(|resources| resources._request.fallback_summary());
+    let result = run_once_after_preparation(prepared, |resources| {
         run_retaining_resources(resources, |operation| operation.runOperation())
     })
-    .unwrap_or_else(|error| error)
+    .unwrap_or_else(|error| error);
+    PrintDeliveryOutcome {
+        result,
+        fallback_summary,
+    }
 }
 
 fn prepare_print_operation(

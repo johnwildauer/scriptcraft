@@ -10,7 +10,7 @@ use crate::tree::preserved_element;
 use crate::window_state::window_state_element;
 use scriptcraft_model::paragraph_id::ParagraphIdAllocator;
 use scriptcraft_model::preservation::{ForeignIdDomain, PreservedNode};
-use scriptcraft_model::Project;
+use scriptcraft_model::{BodyOwner, Project, SemanticCapabilities};
 use std::collections::BTreeSet;
 
 /// Construct a complete new-document tree without source-preservation input.
@@ -110,12 +110,17 @@ pub(crate) fn make_new_document_nodes(
 
         let direct_overrides = project.direct_paragraph_overrides.get(&element.id).copied();
         let mut paragraph = new_paragraph(element, direct_overrides, &mut paragraph_ids)?;
-        if element.element_type().as_str() == "Scene Heading" {
+        if has_capability(project, element, |capabilities| capabilities.scene_boundary) {
             let scene_end = project.elements[index + 1..]
                 .iter()
-                .position(|candidate| candidate.element_type().as_str() == "Scene Heading")
+                .position(|candidate| {
+                    has_capability(project, candidate, |capabilities| {
+                        capabilities.scene_boundary
+                    })
+                })
                 .map_or(project.elements.len(), |offset| index + 1 + offset);
             let names = scriptcraft_model::scene_metadata::derived_character_projection(
+                project,
                 &project.elements[index + 1..scene_end],
             )
             .into_iter()
@@ -193,6 +198,16 @@ pub(crate) fn make_new_document_nodes(
         )));
     root.children.push(PreservedNode::Element(title_page));
     Ok(vec![PreservedNode::Element(root)])
+}
+
+fn has_capability(
+    project: &Project,
+    element: &BodyOwner,
+    capability: impl FnOnce(SemanticCapabilities) -> bool,
+) -> bool {
+    project
+        .element_semantics(&element.element_type())
+        .is_some_and(|semantics| capability(semantics.capabilities()))
 }
 
 fn project_source_paragraph_ids(project: &Project) -> BTreeSet<String> {

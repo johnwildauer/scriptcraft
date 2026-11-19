@@ -123,10 +123,10 @@ pub struct SourceParagraphOverrides {
     pub starts_new_page: Option<bool>,
 }
 
-/// Recognized role-level FontSpec values. Unknown FDX attributes and style
-/// tokens stay in the preservation tree; `None` means use the shared default.
-/// `color` is retained as a source projection for API compatibility, but does
-/// not override the app-owned color in effective role styling.
+/// Transitional partial FontSpec projection. Unknown FDX attributes and style
+/// tokens stay in the preservation tree; the complete current definition is
+/// authoritative. `color` retains source spelling for the later effective
+/// typography resolver.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceFontSpec {
     pub family: Option<String>,
@@ -144,9 +144,9 @@ pub enum FontFallback {
     CourierPrime,
 }
 
-/// Effective application presentation for one semantic role. The declared FDX
-/// family and color are retained for diagnostics/source projection only; the
-/// renderer deliberately uses the documented fixed-cell Courier Prime fallback.
+/// Transitional Role-era style used by the existing layout consumers until
+/// WO-005.4 migrates them to `typography::EffectiveTextStyle`. New typography
+/// resolution must use the backend-neutral resolved-font values in that module.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EffectiveTextStyle {
     pub declared_family: String,

@@ -9,7 +9,7 @@ use super::{
 };
 use scriptcraft_model::{
     formatting::{FixedPoint, ParagraphAlignment, SourceLayoutSettings},
-    validate_layout_inputs, LayoutInputs, Project, Role,
+    validate_layout_inputs, LayoutInputs, Project,
 };
 use std::{sync::Arc, time::Instant};
 
@@ -74,6 +74,7 @@ impl ScreenplayLayout {
             None,
             false,
             &BodyEditorPresentation::default(),
+            None,
         )
     }
 
@@ -94,6 +95,38 @@ impl ScreenplayLayout {
             None,
             false,
             &BodyEditorPresentation::default(),
+            None,
+        )
+    }
+
+    /// Builds output composition with the same explicit resolved-font
+    /// environment used by desktop preparation. The legacy geometry pipeline
+    /// is still transitional; callers must not infer metric parity from this
+    /// environment being present.
+    pub fn build_with_composition_and_environment(
+        project: &Project,
+        inputs: &LayoutInputs,
+        source_settings: &SourceLayoutSettings,
+        composition: LayoutComposition,
+        environment: &crate::inputs::LayoutEnvironment,
+    ) -> Result<Self, LayoutError> {
+        if environment.page != inputs.page_only() {
+            return Err(LayoutError {
+                kind: LayoutErrorKind::InvalidProfile,
+            });
+        }
+        Self::build_with_effective_inputs_for_purpose_internal(
+            project,
+            inputs,
+            source_settings,
+            composition.purpose(),
+            composition,
+            None,
+            None,
+            None,
+            false,
+            &BodyEditorPresentation::default(),
+            Some(Arc::new(environment.clone())),
         )
     }
 
@@ -119,6 +152,7 @@ impl ScreenplayLayout {
             None,
             false,
             presentation,
+            None,
         )
     }
 
@@ -149,6 +183,7 @@ impl ScreenplayLayout {
             None,
             false,
             &BodyEditorPresentation::default(),
+            None,
         )
     }
 
@@ -163,6 +198,7 @@ impl ScreenplayLayout {
         mut prepared_body_cache: Option<&mut PreparedBodyCache>,
         validated_session: bool,
         body_presentation: &BodyEditorPresentation,
+        layout_environment: Option<Arc<crate::inputs::LayoutEnvironment>>,
     ) -> Result<Self, LayoutError> {
         if !validated_session {
             project.validate()?;
@@ -196,6 +232,7 @@ impl ScreenplayLayout {
         let font_family = inputs.font_family.clone();
         let mut output = Self {
             inputs: inputs.clone(),
+            layout_environment,
             source_settings: source_settings.clone(),
             font_family,
             char_width,
@@ -279,6 +316,15 @@ impl ScreenplayLayout {
                 paragraph,
                 text_style,
                 char_width: paragraph.char_width,
+                element_key: Some(element.element_type()),
+                layout_environment: output.layout_environment.clone(),
+                effective_color: scriptcraft_model::typography::parse_effective_text_color(
+                    output
+                        .source_settings
+                        .text_style(role)
+                        .source_color
+                        .as_deref(),
+                ),
             };
             let prepared = prepare_body_for_layout(
                 prepared_body_cache.as_deref_mut(),
@@ -290,7 +336,7 @@ impl ScreenplayLayout {
                 prepared_lookup_started,
             );
             let placement_started = diagnostics.as_ref().map(|_| Instant::now());
-            output.place_element(prepared, index, role, paragraph, &mut diagnostics);
+            output.place_element(prepared, index, paragraph, &mut diagnostics);
             if let Some(diagnostics) = diagnostics.as_deref_mut() {
                 add_elapsed_nanos(&mut diagnostics.placement_nanos, placement_started);
             }
@@ -442,14 +488,21 @@ impl ScreenplayLayout {
             let mut shift = 0i64;
             for span in &mut spans {
                 let count = span.display_text.chars().count();
-                let internal = (display_index..display_index.saturating_add(count))
-                    .map(gap_adjustment)
-                    .sum::<i64>();
+                let span_end = display_index.saturating_add(count);
+                let before = (0..display_index).map(gap_adjustment).sum::<i64>();
+                let internal = (display_index..span_end).map(gap_adjustment).sum::<i64>();
                 span.geometry.x = FixedPoint::from_raw(span.geometry.x.raw().saturating_add(shift));
+                let offsets = Arc::make_mut(&mut span.display_boundary_offsets);
+                for (boundary, offset) in offsets.iter_mut().enumerate() {
+                    let absolute_boundary = display_index.saturating_add(boundary);
+                    let adjustment = (0..absolute_boundary).map(gap_adjustment).sum::<i64>();
+                    *offset =
+                        FixedPoint::from_raw(offset.raw().saturating_add(adjustment - before));
+                }
                 span.geometry.width =
-                    FixedPoint::from_raw(span.geometry.width.raw().saturating_add(internal));
+                    FixedPoint::from_raw(offsets.last().map_or(0, |offset| offset.raw()));
                 shift = shift.saturating_add(internal);
-                display_index = display_index.saturating_add(count);
+                display_index = span_end;
             }
         }
         LayoutLine {
@@ -472,7 +525,8 @@ impl ScreenplayLayout {
             geometry,
             paragraph_bounds,
             rect: compat_rect(paragraph_bounds),
-            keep_with_next: !title_page && keep_with_next(line.role),
+            keep_with_next: !title_page
+                && line.paragraph.pagination == super::inputs::PaginationPolicy::KeepWithNext,
             oversized: line.oversized,
         }
     }
@@ -481,17 +535,23 @@ impl ScreenplayLayout {
         &mut self,
         prepared: Arc<PreparedBodyParagraph>,
         element: usize,
-        role: Role,
         paragraph: EffectiveParagraph,
         diagnostics: &mut Option<&mut LayoutBuildDiagnostics>,
     ) {
         let lines = &prepared.lines;
-        let keep = keep_with_next(role);
+        let keep = paragraph.pagination == super::inputs::PaginationPolicy::KeepWithNext;
         let minimum = if keep { 2 } else { 1 };
         if self.pages.is_empty() {
             self.pages.push(self.new_page(false));
         }
-        let capacity = self.inputs.lines_per_page as usize;
+        if paragraph.starts_new_page
+            && self
+                .pages
+                .last()
+                .is_some_and(|page| !page.title_page && !page.lines.is_empty())
+        {
+            self.pages.push(self.new_page(false));
+        }
         let has_boundary = self.pages.last().is_some_and(|page| !page.lines.is_empty());
         let extra_gap = if has_boundary {
             paragraph.space_before.raw().max(0)
@@ -514,13 +574,7 @@ impl ScreenplayLayout {
         if !lines.is_empty()
             && !self.pages.last().is_some_and(|page| page.title_page)
             && has_boundary
-            && (self
-                .pages
-                .last()
-                .map_or(0, |page| page.occupied_lines as usize)
-                .saturating_add(minimum)
-                > capacity
-                || !vertical_fit)
+            && !vertical_fit
         {
             self.pages.push(self.new_page(false));
         }
@@ -541,16 +595,15 @@ impl ScreenplayLayout {
             .saturating_add(applied_gap);
         let content_height =
             content_bottom.raw() - FixedPoint::from_points(i64::from(self.inputs.margin_top)).raw();
-        let oversized_element = lines.len() > capacity || total_height > content_height;
+        let oversized_element = total_height > content_height;
         for wrapped in lines.iter() {
             let current_fits = self.pages.last().is_some_and(|page| {
-                (page.occupied_lines as usize) < capacity
-                    && (page.lines.is_empty()
-                        || page
-                            .next_line_y
-                            .raw()
-                            .saturating_add(paragraph.line_advance.raw())
-                            <= content_bottom.raw())
+                page.lines.is_empty()
+                    || page
+                        .next_line_y
+                        .raw()
+                        .saturating_add(paragraph.line_advance.raw())
+                        <= content_bottom.raw()
             });
             if !current_fits {
                 self.pages.push(self.new_page(false));
@@ -620,11 +673,4 @@ pub(super) fn compat_rect(rect: FixedRect) -> Rect {
         width: rounded(rect.width),
         height: rounded(rect.height),
     }
-}
-
-fn keep_with_next(role: Role) -> bool {
-    matches!(
-        role,
-        Role::SceneHeading | Role::Character | Role::Parenthetical
-    )
 }

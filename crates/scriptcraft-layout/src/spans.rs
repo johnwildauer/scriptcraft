@@ -133,6 +133,7 @@ pub(super) fn positioned_spans(
                     width: cell,
                     height: line_geometry.height,
                 },
+                display_boundary_offsets: vec![FixedPoint::default(), cell],
                 underline: style.underline,
                 strikethrough,
             });
@@ -152,6 +153,7 @@ struct PositionedSpanBuilder {
     text_style: EffectiveTextStyle,
     char_width: FixedPoint,
     geometry: FixedRect,
+    display_boundary_offsets: Vec<FixedPoint>,
     underline: bool,
     strikethrough: bool,
 }
@@ -167,6 +169,7 @@ impl PositionedSpanBuilder {
         self.geometry.width =
             FixedPoint::from_raw(self.geometry.width.raw().saturating_add(cell.raw()));
         self.char_width = cell;
+        self.display_boundary_offsets.push(self.geometry.width);
         self.display_source_map.push(DisplaySourceSegment {
             display_start,
             display_end: display_start.saturating_add(1),
@@ -183,6 +186,7 @@ impl PositionedSpanBuilder {
             text_style: self.text_style,
             char_width: self.char_width,
             geometry: self.geometry,
+            display_boundary_offsets: self.display_boundary_offsets.into(),
             underline: self.underline,
             strikethrough: self.strikethrough,
         }

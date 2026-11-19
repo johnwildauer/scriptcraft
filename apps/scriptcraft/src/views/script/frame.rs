@@ -66,6 +66,34 @@ impl ScriptCraftApp {
                 return;
             }
         };
+        let Some(prepared_fonts) = self.prepared_document_fonts.clone() else {
+            self.show_error(
+                "FONT_PREPARATION_FAILED: no prepared environment; document unchanged".to_owned(),
+            );
+            return;
+        };
+        let fonts_ready = self
+            .document_font_store
+            .register_prepared_fonts(ui.ctx(), &prepared_fonts)
+            .map_err(|_| ());
+        match fonts_ready {
+            Err(()) => {
+                self.show_error(
+                    "FONT_PREPARATION_FAILED: resolved face registration failed; document unchanged"
+                        .to_owned(),
+                );
+                return;
+            }
+            Ok(false) => {
+                // add_font publishes at the next egui pass. Do not allow either
+                // editor surface to build a galley with a merely queued family.
+                self.page_geometry.invalidate();
+                self.page_scale = None;
+                ui.ctx().request_repaint();
+                return;
+            }
+            Ok(true) => {}
+        }
         self.rendered_revision = Some(self.session.revision());
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let scroll_outer_rect = ui.available_rect_before_wrap();

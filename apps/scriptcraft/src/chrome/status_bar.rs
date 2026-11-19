@@ -15,6 +15,7 @@ use egui_material_icons::{
 };
 use scriptcraft_commands::{Appearance, Command, ZoomPercent};
 use scriptcraft_model::formatting::formatting_for_role;
+use scriptcraft_model::ElementTypeKey;
 use scriptcraft_session::editing::{EditingSession, ParagraphKeyTarget};
 
 pub(crate) fn status_modifiers_changed(
@@ -1118,11 +1119,11 @@ pub(crate) fn project_center(
 
     let targets = session.paragraph_key_targets();
     let mut parts = Vec::with_capacity(3);
-    if let ParagraphKeyTarget::Target(role) = targets.tab {
-        parts.push(format!("[Tab] {}", formatting_for_role(role).fdx_label));
+    if let Some(label) = paragraph_key_target_label(&targets.tab) {
+        parts.push(format!("[Tab] {label}"));
     }
-    if let ParagraphKeyTarget::Target(role) = targets.enter {
-        parts.push(format!("[Enter] {}", formatting_for_role(role).fdx_label));
+    if let Some(label) = paragraph_key_target_label(&targets.enter) {
+        parts.push(format!("[Enter] {label}"));
     }
     if parts.is_empty() {
         return ready_center();
@@ -1139,6 +1140,35 @@ pub(crate) fn project_center(
     CenterProjection {
         text: parts.join(", "),
         modifier_list: false,
+    }
+}
+
+fn paragraph_key_target_label(target: &ParagraphKeyTarget) -> Option<&str> {
+    match target {
+        ParagraphKeyTarget::Target(key) => Some(key.as_str()),
+        ParagraphKeyTarget::NoOp | ParagraphKeyTarget::Unavailable => None,
+    }
+}
+
+#[cfg(test)]
+mod behavior_guidance_tests {
+    use super::*;
+
+    #[test]
+    fn paragraph_key_guidance_preserves_exact_open_label_without_role_lookup() {
+        let Ok(key) = ElementTypeKey::new("stage Cue") else {
+            assert!(false, "bounded open label should be valid");
+            return;
+        };
+        assert_eq!(
+            paragraph_key_target_label(&ParagraphKeyTarget::Target(key)),
+            Some("stage Cue")
+        );
+        assert_eq!(paragraph_key_target_label(&ParagraphKeyTarget::NoOp), None);
+        assert_eq!(
+            paragraph_key_target_label(&ParagraphKeyTarget::Unavailable),
+            None
+        );
     }
 }
 

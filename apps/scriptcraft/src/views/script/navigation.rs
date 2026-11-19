@@ -211,26 +211,33 @@ impl ScriptCraftApp {
             .project_line_for_interaction(ctx, target_line, scale)
             .map_err(|_| EditError::InvalidElement)?;
         let existing_goal = self.preferred_vertical_x;
+        let current_fallback = current_projection
+            .is_none()
+            .then(|| presentation_geometry::project_line(current_line, scale).ok());
+        let current_projection = current_projection
+            .as_ref()
+            .or_else(|| current_fallback.as_ref().and_then(Option::as_ref));
         let goal = existing_goal.unwrap_or_else(|| {
             presentation_geometry::preferred_vertical_document_x(
                 current_line,
                 current.offset,
-                current_projection.as_ref(),
+                current_projection,
                 scale,
             )
             .unwrap_or(current_line.geometry.x.raw())
         });
         self.preferred_vertical_x = Some(goal);
-        let target_display = if let Some(projection) = target_projection.as_ref() {
-            presentation_geometry::projected_target_boundary(projection, goal, scale)
-                .ok_or(EditError::InvalidElement)?
-        } else {
-            let cell = target_line.char_width.raw().max(1);
-            (goal
-                .saturating_sub(target_line.geometry.x.raw())
-                .saturating_add(cell / 2)
-                / cell) as u32 as usize
-        };
+        let target_fallback = target_projection
+            .is_none()
+            .then(|| presentation_geometry::project_line(target_line, scale).ok());
+        let target_projection = target_projection
+            .as_ref()
+            .or_else(|| target_fallback.as_ref().and_then(Option::as_ref));
+        let target_display = target_projection
+            .and_then(|projection| {
+                presentation_geometry::projected_target_boundary(projection, goal, scale)
+            })
+            .ok_or(EditError::InvalidElement)?;
         let next = Position {
             element: target_line.element,
             offset: target_line.source_for_display_char(target_display),

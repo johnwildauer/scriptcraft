@@ -7,7 +7,7 @@ use super::{
 use scriptcraft_model::{
     formatted_text::parse_style_attribute,
     formatting::{EffectiveTextStyle, FixedPoint},
-    Role, StableId, TextRun,
+    ElementTypeKey, Role, StableId, TextRun,
 };
 use std::{sync::Arc, time::Instant};
 
@@ -39,6 +39,7 @@ pub(super) fn wrap_for_layout(
     text: &str,
     element: usize,
     role: Role,
+    element_key: Option<&ElementTypeKey>,
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
     runs: &[TextRun],
@@ -57,6 +58,7 @@ pub(super) fn wrap_for_layout(
         0,
         element,
         role,
+        element_key,
         paragraph,
         text_style,
         runs,
@@ -78,6 +80,7 @@ pub(super) fn wrap_for_layout_range(
     line_offset: usize,
     element: usize,
     role: Role,
+    element_key: Option<&ElementTypeKey>,
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
     runs: &[TextRun],
@@ -154,6 +157,7 @@ pub(super) fn wrap_for_layout_range(
     let mut lines = if let Some(cache) = cache {
         cache.wrap(
             element_id,
+            element_key,
             &projected_text,
             element,
             role,
@@ -300,31 +304,58 @@ pub(super) fn wrap_element(
     first_visual_line: bool,
     line_offset: usize,
 ) -> Vec<WrappedLine> {
-    let cell = char_width.raw().max(1);
+    let advances = vec![char_width; text.chars().count()];
+    wrap_element_with_advances(
+        text,
+        element,
+        role,
+        paragraph,
+        text_style,
+        char_width,
+        &advances,
+        atomic_boundaries,
+        first_visual_line,
+        line_offset,
+    )
+}
+
+/// Metric-driven wrapping primitive. `scalar_advances` contains one canonical
+/// advance per input scalar; all width decisions use their sum rather than a
+/// character count. The resolved caller supplies the exact effective advance
+/// for each displayed scalar, including all-caps expansions.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn wrap_element_with_advances(
+    text: &str,
+    element: usize,
+    role: Role,
+    paragraph: EffectiveParagraph,
+    text_style: EffectiveTextStyle,
+    char_width: FixedPoint,
+    scalar_advances: &[FixedPoint],
+    atomic_boundaries: &[std::ops::Range<usize>],
+    first_visual_line: bool,
+    line_offset: usize,
+) -> Vec<WrappedLine> {
     let first_left = paragraph
         .left
         .raw()
         .saturating_add(paragraph.first_indent.raw());
-    let first_limit = paragraph
-        .right
-        .raw()
-        .saturating_sub(first_left)
-        .div_euclid(cell)
-        .max(1) as usize;
+    let first_limit = paragraph.right.raw().saturating_sub(first_left).max(1);
     let rest_limit = paragraph
         .right
         .raw()
         .saturating_sub(paragraph.left.raw())
-        .div_euclid(cell)
-        .max(1) as usize;
+        .max(1);
     let mut output = Vec::new();
     let mut first_visual_line = first_visual_line;
     let mut paragraph_start = 0;
     let mut delimiters = text.char_indices().peekable();
+    let mut scalar_offset = 0usize;
     while let Some((newline, delimiter)) = delimiters.next() {
         if delimiter != '\n' && delimiter != '\r' {
             continue;
         }
+        let segment_scalars = text[paragraph_start..newline].chars().count();
         wrap_segment(
             &text[paragraph_start..newline],
             paragraph_start,
@@ -335,15 +366,21 @@ pub(super) fn wrap_element(
             paragraph,
             &text_style,
             char_width,
+            scalar_advances
+                .get(scalar_offset..scalar_offset.saturating_add(segment_scalars))
+                .unwrap_or(&[]),
             atomic_boundaries,
             &mut first_visual_line,
             line_offset,
             &mut output,
         );
+        scalar_offset = scalar_offset.saturating_add(segment_scalars);
         paragraph_start = newline + delimiter.len_utf8();
+        scalar_offset = scalar_offset.saturating_add(1);
         if delimiter == '\r' && delimiters.peek().is_some_and(|(_, next)| *next == '\n') {
             let _ = delimiters.next();
             paragraph_start += 1;
+            scalar_offset = scalar_offset.saturating_add(1);
         }
     }
     wrap_segment(
@@ -356,6 +393,7 @@ pub(super) fn wrap_element(
         paragraph,
         &text_style,
         char_width,
+        scalar_advances.get(scalar_offset..).unwrap_or(&[]),
         atomic_boundaries,
         &mut first_visual_line,
         line_offset,
@@ -389,6 +427,7 @@ struct DisplayCell {
     local_end: usize,
     source_start: usize,
     source_end: usize,
+    advance: FixedPoint,
 }
 
 // Segment wrapping keeps source ranges and layout constraints explicit at the
@@ -399,11 +438,12 @@ fn wrap_segment(
     base: usize,
     element: usize,
     role: Role,
-    first_limit: usize,
-    rest_limit: usize,
+    first_limit: i64,
+    rest_limit: i64,
     paragraph: EffectiveParagraph,
     text_style: &EffectiveTextStyle,
     char_width: FixedPoint,
+    scalar_advances: &[FixedPoint],
     atomic_boundaries: &[std::ops::Range<usize>],
     first_visual_line: &mut bool,
     line_offset: usize,
@@ -430,10 +470,14 @@ fn wrap_segment(
         return;
     }
     let mut cells = Vec::new();
-    for (local_start, source_character) in text.char_indices() {
+    for (scalar_index, (local_start, source_character)) in text.char_indices().enumerate() {
         let local_end = local_start + source_character.len_utf8();
         let source_start = base + local_start;
         let source_end = base + local_end;
+        let advance = scalar_advances
+            .get(scalar_index)
+            .copied()
+            .unwrap_or(char_width);
         if text_style.all_caps {
             cells.extend(
                 source_character
@@ -444,6 +488,7 @@ fn wrap_segment(
                         local_end,
                         source_start,
                         source_end,
+                        advance,
                     }),
             );
         } else {
@@ -453,6 +498,7 @@ fn wrap_segment(
                 local_end,
                 source_start,
                 source_end,
+                advance,
             });
         }
     }
@@ -460,19 +506,32 @@ fn wrap_segment(
     while start < cells.len() && line_offset.saturating_add(output.len()) < MAX_LINES_PER_ELEMENT {
         let first_line = *first_visual_line;
         let limit = if first_line { first_limit } else { rest_limit };
-        let mut hard_end = (start + limit).min(cells.len());
-        while hard_end < cells.len()
-            && hard_end > start
-            && cells[hard_end - 1].source_start == cells[hard_end].source_start
-        {
-            hard_end += 1;
-        }
-        while hard_end < cells.len() && hard_end > start {
-            let boundary = base.saturating_add(cells[hard_end].local_start);
-            if atomic_boundary_is_forbidden(atomic_boundaries, boundary) {
-                hard_end += 1;
-            } else {
+        let mut hard_end = start;
+        let mut measured_width = 0i64;
+        while hard_end < cells.len() {
+            let source_start = cells[hard_end].source_start;
+            let mut candidate_end = hard_end.saturating_add(1);
+            while candidate_end < cells.len() && cells[candidate_end].source_start == source_start {
+                candidate_end = candidate_end.saturating_add(1);
+            }
+            let candidate_width = cells[hard_end..candidate_end]
+                .iter()
+                .map(|cell| cell.advance.raw().max(0))
+                .fold(0i64, i64::saturating_add);
+            if hard_end > start && measured_width.saturating_add(candidate_width) > limit {
                 break;
+            }
+            measured_width = measured_width.saturating_add(candidate_width);
+            hard_end = candidate_end;
+            while hard_end < cells.len() && hard_end > start {
+                let boundary = base.saturating_add(cells[hard_end].local_start);
+                if atomic_boundary_is_forbidden(atomic_boundaries, boundary) {
+                    measured_width =
+                        measured_width.saturating_add(cells[hard_end].advance.raw().max(0));
+                    hard_end = hard_end.saturating_add(1);
+                } else {
+                    break;
+                }
             }
         }
         let mut end = hard_end;
@@ -494,6 +553,7 @@ fn wrap_segment(
             local_end: 0,
             source_start: base,
             source_end: base,
+            advance: char_width,
         });
         let last_cell = selected.last().copied().unwrap_or(first_cell);
         let source_start = first_cell.source_start;
@@ -531,9 +591,94 @@ fn wrap_segment(
             first_visual_line: first_line,
             final_visual_line: end == cells.len(),
             paragraph,
-            oversized: selected.len() > limit,
+            oversized: selected
+                .iter()
+                .map(|cell| cell.advance.raw().max(0))
+                .fold(0i64, i64::saturating_add)
+                > limit,
         });
         *first_visual_line = false;
         start = end;
+    }
+}
+
+#[cfg(test)]
+mod metric_wrap_tests {
+    use super::*;
+    use crate::inputs::PaginationPolicy;
+    use scriptcraft_model::formatting::{FontFallback, ParagraphAlignment};
+
+    fn paragraph(width: i64) -> EffectiveParagraph {
+        EffectiveParagraph {
+            left: FixedPoint::default(),
+            right: FixedPoint::from_raw(width),
+            first_indent: FixedPoint::default(),
+            alignment: ParagraphAlignment::Left,
+            space_before: FixedPoint::default(),
+            line_advance: FixedPoint::from_points(12),
+            char_width: FixedPoint::default(),
+            starts_new_page: false,
+            pagination: PaginationPolicy::Ordinary,
+        }
+    }
+
+    fn style() -> EffectiveTextStyle {
+        EffectiveTextStyle {
+            declared_family: "Synthetic".to_owned(),
+            family: FontFallback::CourierPrime,
+            size: 12,
+            bold: false,
+            italic: false,
+            underline: false,
+            all_caps: false,
+            hidden_text: false,
+            source_color: None,
+        }
+    }
+
+    #[test]
+    fn wraps_by_the_sum_of_explicit_scalar_advances() {
+        let text = "abc";
+        let advances = [
+            FixedPoint::from_raw(600),
+            FixedPoint::from_raw(100),
+            FixedPoint::from_raw(600),
+        ];
+        let lines = wrap_element_with_advances(
+            text,
+            0,
+            Role::Action,
+            paragraph(1_000),
+            style(),
+            FixedPoint::from_points(7),
+            &advances,
+            &[],
+            true,
+            0,
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].display_text.as_ref(), "ab");
+        assert_eq!(lines[1].display_text.as_ref(), "c");
+        assert_eq!((lines[0].start, lines[0].end), (0, 2));
+        assert_eq!((lines[1].start, lines[1].end), (2, 3));
+    }
+
+    #[test]
+    fn oversized_scalar_is_emitted_once_and_marked() {
+        let lines = wrap_element_with_advances(
+            "界",
+            0,
+            Role::Action,
+            paragraph(100),
+            style(),
+            FixedPoint::from_points(7),
+            &[FixedPoint::from_raw(500)],
+            &[],
+            true,
+            0,
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].oversized);
+        assert_eq!(lines[0].display_text.as_ref(), "界");
     }
 }

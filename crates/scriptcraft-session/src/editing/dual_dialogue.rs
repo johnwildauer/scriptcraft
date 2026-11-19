@@ -7,7 +7,9 @@ use scriptcraft_model::{Project, SourceFormat, SourceProvenance, SourceSection};
 
 impl EditingSession {
     /// Read-only resolution for the current selection on the requested surface.
-    /// TitlePage is always ineligible for the Body-only dual-dialogue toggle.
+    /// Candidate recognition uses current exact capabilities; existing groups
+    /// remain explicitly disableable from ordered source membership while
+    /// inactive. TitlePage is always ineligible for the Body-only toggle.
     pub fn dual_dialogue_toggle_target(
         &self,
         surface: dual_dialogue::SelectionSurface,

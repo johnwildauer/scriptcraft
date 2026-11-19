@@ -1,10 +1,9 @@
 //! Script View pointer hit testing and selection activation.
 
-use super::{page_policy::screen_y_to_document, text::resolve_span_paint, ScriptCraftApp};
+use super::{page_policy::screen_y_to_document, ScriptCraftApp};
 use crate::chrome::status_bar::PresentedPage;
 use crate::commands::CommandInvocation;
 use crate::presentation::geometry as presentation_geometry;
-use crate::presentation::style::AdvanceMode;
 use eframe::egui;
 use scriptcraft_commands::{Command, CommandOrigin, EditorSurface, PointerPhase};
 use scriptcraft_layout::{InteractionQueryDiagnostics, ScreenplayLayout};
@@ -55,23 +54,18 @@ impl ScriptCraftApp {
                             .and_then(|lines| lines.get(index))
                     })
                     .and_then(Option::as_ref);
+                let fallback_projection = projected
+                    .is_none()
+                    .then(|| presentation_geometry::project_line(located.line, scale).ok());
+                let projected =
+                    projected.or_else(|| fallback_projection.as_ref().and_then(Option::as_ref));
                 if let Some(projected) = projected {
                     let screen_x = pointer.x - presented_page.rect.left();
                     Some(presentation_geometry::projected_caret_for_x(
                         projected, screen_x,
                     ))
                 } else {
-                    let has_proportional = located.line.spans.iter().any(|span| {
-                        resolve_span_paint(
-                            &span.text_style,
-                            span.text_style.size as f32 * scale,
-                            self.theme_palette.script_workspace.page,
-                            &self.document_font_availability,
-                        )
-                        .advance_mode
-                            == AdvanceMode::Proportional
-                    });
-                    (!has_proportional).then(|| located.fixed_caret_for_x(local_x))
+                    None
                 }
             })
             .map(|caret| Position {

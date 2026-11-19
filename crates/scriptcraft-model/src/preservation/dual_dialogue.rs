@@ -2,10 +2,13 @@ use super::*;
 use crate::formatting::FixedPoint;
 use crate::{BodyOwner, ScreenplayElement, SourceProvenance, SourceSection};
 use crate::{SourceFormat, StableId};
+use std::collections::BTreeSet;
 
 use super::navigation::element_at_path_mut;
 use super::reconciliation::{
-    managed_child_index, paragraph_template, plain_source_name, ManagedParagraphTemplate,
+    clear_stale_anchor_bindings, managed_child_index, paragraph_foreign_id,
+    paragraph_id_attribute_count, paragraph_reference_touches, paragraph_template,
+    plain_source_name, ManagedParagraphTemplate,
 };
 use super::text::{semantic_text_runs, source_name_from_qname};
 
@@ -209,14 +212,25 @@ impl PreservationState {
         &mut self,
         group_id: &StableId,
         member_ids: &[StableId],
-        wrapper_anchor: &SourceAnchorId,
-        foreign_id: Option<&str>,
+        provenance: &crate::dual_dialogue::DualDialogueWrapperProvenance,
     ) -> Result<(), PreservationError> {
         if self.source.format != SourceFormat::Fdx || member_ids.len() < 2 {
             return Err(PreservationError::UnsupportedTextMapping);
         }
+        let wrapper_anchor = provenance
+            .preservation_anchor
+            .as_ref()
+            .ok_or(PreservationError::ManagedAnchorMissing)?;
+        let foreign_id = provenance.outer_foreign_id.as_deref();
+        if !provenance.source.as_ref().is_some_and(|source| {
+            source.format == SourceFormat::Fdx
+                && source.section == SourceSection::Content
+                && source.foreign_id.as_deref() == foreign_id
+                && source.foreign_role.as_deref() == Some("General")
+        }) {
+            return Err(PreservationError::ManagedAnchorMissing);
+        }
         self.ensure_managed_paragraph_index();
-        self.ensure_source_identity_use_index();
         let mut wrapper_locations = Vec::new();
         for (section_index, section) in self.sections.iter().enumerate() {
             for (root_index, root_node) in section.children.iter().enumerate() {
@@ -230,13 +244,16 @@ impl PreservationState {
                     let PreservedNode::Element(content) = content_node else {
                         continue;
                     };
-                    if content.name.local_name != "Content" {
+                    if content.name.local_name != "Content"
+                        || content.name.namespace_uri != root.name.namespace_uri
+                    {
                         continue;
                     }
                     for (outer_index, outer_node) in content.children.iter().enumerate() {
                         if matches!(outer_node, PreservedNode::Element(outer)
                             if matches!(&outer.ownership, SourceOwnership::DualDialogueWrapper(owner) if owner == group_id)
-                                && outer.anchor.as_ref() == Some(wrapper_anchor))
+                                && outer.name.local_name == "Paragraph"
+                                && outer.name.namespace_uri == content.name.namespace_uri)
                         {
                             wrapper_locations.push((
                                 section_index,
@@ -254,11 +271,6 @@ impl PreservationState {
         else {
             return Err(PreservationError::ManagedAnchorMissing);
         };
-        if let Some(foreign_id) = foreign_id {
-            if !self.paragraph_identity_safely_removable(foreign_id) {
-                return Err(PreservationError::PotentialReferenceConflict);
-            }
-        }
         let section = self
             .sections
             .get(*section_index)
@@ -284,6 +296,52 @@ impl PreservationState {
         else {
             return Err(PreservationError::ManagedAnchorMissing);
         };
+        let source_foreign_id = paragraph_foreign_id(outer);
+        let source_type_count = outer
+            .attributes
+            .iter()
+            .filter(|attribute| {
+                attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type"
+            })
+            .count();
+        if source_foreign_id != foreign_id
+            || paragraph_id_attribute_count(outer) != usize::from(foreign_id.is_some())
+            || outer.anchor.as_ref() != Some(wrapper_anchor)
+            || outer.source_type.as_deref() != Some("General")
+            || source_type_count != 1
+            || !outer.attributes.iter().any(|attribute| {
+                attribute.name.namespace_uri.is_none()
+                    && attribute.name.local_name == "Type"
+                    && attribute.value == "General"
+            })
+        {
+            return Err(PreservationError::ManagedAnchorMissing);
+        }
+        let wrapper_anchor_records = self
+            .anchors
+            .iter()
+            .filter(|anchor| anchor.id == *wrapper_anchor)
+            .collect::<Vec<_>>();
+        if !matches!(wrapper_anchor_records.as_slice(), [anchor]
+            if anchor.target == AnchorTarget::DualDialogueWrapper(group_id.clone())
+                && anchor.relation == AnchorRelation::Represents)
+        {
+            return Err(PreservationError::ManagedAnchorMissing);
+        }
+        let wrapper_identity = if let Some(foreign_id) = foreign_id {
+            let identity = ForeignIdentity::new(ForeignIdDomain::Paragraph, foreign_id)?;
+            let registrations = self
+                .identities
+                .iter()
+                .filter(|registered| **registered == identity)
+                .count();
+            if registrations != 1 {
+                return Err(PreservationError::ManagedAnchorMissing);
+            }
+            Some(identity)
+        } else {
+            None
+        };
         let duals = outer
             .children
             .iter()
@@ -296,6 +354,7 @@ impl PreservationState {
             })
             .collect::<Vec<_>>();
         if duals.len() != 1
+            || duals[0].name.namespace_uri != outer.name.namespace_uri
             || outer.children.iter().any(|node| match node {
                 PreservedNode::Element(element) => {
                     element.name.local_name == "DualDialogue"
@@ -333,6 +392,7 @@ impl PreservationState {
         if spell_count != 1 || found_members != member_ids {
             return Err(PreservationError::ManagedAnchorMissing);
         }
+
         let member_nodes = dual
             .children
             .iter()
@@ -345,6 +405,57 @@ impl PreservationState {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let mut member_identities = Vec::new();
+        let mut member_identity_values = BTreeSet::new();
+        for node in &member_nodes {
+            let PreservedNode::Element(member) = node else {
+                continue;
+            };
+            if paragraph_id_attribute_count(member) > 1 {
+                return Err(PreservationError::AmbiguousDirectAttribute);
+            }
+            let Some(foreign_id) = paragraph_foreign_id(member) else {
+                continue;
+            };
+            let identity = ForeignIdentity::new(ForeignIdDomain::Paragraph, foreign_id)?;
+            if wrapper_identity.as_ref() == Some(&identity)
+                || !member_identity_values.insert(identity.clone())
+            {
+                return Err(PreservationError::DuplicateIdentity);
+            }
+            member_identities.push(identity);
+        }
+        let new_member_identities = member_identities
+            .into_iter()
+            .filter(|identity| !self.identities.contains(identity))
+            .collect::<Vec<_>>();
+
+        let wrapper_identity_set = wrapper_identity.iter().cloned().collect::<BTreeSet<_>>();
+        if self.board_graph.references.iter().any(|reference| {
+            reference.policy == ReferencePolicy::RequiredInternal
+                && wrapper_identity_set
+                    .iter()
+                    .any(|identity| reference.source == *identity || reference.target == *identity)
+        }) {
+            return Err(PreservationError::PotentialReferenceConflict);
+        }
+
+        let mut stale_anchors = self
+            .anchors
+            .iter()
+            .filter(|anchor| {
+                anchor.id == *wrapper_anchor
+                    || matches!(&anchor.target,
+                        AnchorTarget::DualDialogueWrapper(target) if target == group_id)
+                    || wrapper_identity.as_ref().is_some_and(|identity| {
+                        matches!(&anchor.target, AnchorTarget::Foreign(target) if target == identity)
+                    })
+            })
+            .map(|anchor| anchor.id.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(identity) = &wrapper_identity {
+            collect_attached_anchor_ids(&self.sections, identity, &mut stale_anchors);
+        }
         let section = self
             .sections
             .get_mut(*section_index)
@@ -367,18 +478,67 @@ impl PreservationState {
         for (offset, member) in member_nodes.into_iter().enumerate() {
             content.children.insert(*outer_index + offset, member);
         }
-        if let Some(foreign_id) = foreign_id {
-            self.identities.retain(|identity| {
-                !(identity.domain == ForeignIdDomain::Paragraph && identity.value == foreign_id)
-            });
+        self.identities.extend(new_member_identities);
+        if let Some(identity) = wrapper_identity.as_ref() {
+            let removed_foreign_ids = BTreeSet::from([identity.value.clone()]);
+            for section in &mut self.sections {
+                clear_stale_anchor_bindings(
+                    &mut section.children,
+                    &stale_anchors,
+                    &removed_foreign_ids,
+                );
+            }
+            self.references
+                .retain(|reference| !paragraph_reference_touches(reference, &removed_foreign_ids));
+            self.board_graph
+                .references
+                .retain(|reference| !paragraph_reference_touches(reference, &removed_foreign_ids));
+            self.identities.retain(|registered| registered != identity);
+        } else {
+            for section in &mut self.sections {
+                clear_stale_anchor_bindings(
+                    &mut section.children,
+                    &stale_anchors,
+                    &BTreeSet::new(),
+                );
+            }
         }
-        self.anchors.retain(|anchor| anchor.id != *wrapper_anchor);
+        self.anchors
+            .retain(|anchor| !stale_anchors.contains(&anchor.id));
         self.source_layout_settings
             .direct_paragraph_overrides
             .remove(group_id);
         self.invalidate_source_identity_use_index();
         self.rebuild_managed_paragraph_index();
         Ok(())
+    }
+}
+
+fn collect_attached_anchor_ids(
+    sections: &[PreservedSection],
+    identity: &ForeignIdentity,
+    anchors: &mut BTreeSet<SourceAnchorId>,
+) {
+    fn collect_nodes(
+        nodes: &[PreservedNode],
+        identity: &ForeignIdentity,
+        anchors: &mut BTreeSet<SourceAnchorId>,
+    ) {
+        for node in nodes {
+            let PreservedNode::Element(element) = node else {
+                continue;
+            };
+            if matches!(&element.ownership, SourceOwnership::Attached(attached) if attached == identity)
+            {
+                if let Some(anchor) = &element.anchor {
+                    anchors.insert(anchor.clone());
+                }
+            }
+            collect_nodes(&element.children, identity, anchors);
+        }
+    }
+    for section in sections {
+        collect_nodes(&section.children, identity, anchors);
     }
 }
 

@@ -1,15 +1,35 @@
 #![forbid(unsafe_code)]
 
-use scriptcraft_model::dual_dialogue::{active_dual_dialogue_projection, DualDialogueGroup};
+use scriptcraft_model::dual_dialogue::{
+    active_dual_dialogue_projection, classify_structural_result, recognize_candidate,
+    DualDialogueGroup, SelectionSurface, StructuralGroupOutcome,
+};
 use scriptcraft_model::formatted_text::{parse_style_attribute, RunStyleFlags};
 use scriptcraft_model::{
-    BodyOwner, ElementTypeKey, ModelError, Project, Role, RunAttribute, ScreenplayElement,
-    SourceFormat, SourceProvenance, SourceSection, TextRun, TitlePageAlignment, TitlePageParagraph,
-    TitlePageParagraphFormatting,
+    BodyOwner, ElementTypeKey, ModelError, Position, Project, Role, RunAttribute,
+    ScreenplayElement, Selection, SourceFormat, SourceProvenance, SourceSection, TextRun,
+    TitlePageAlignment, TitlePageParagraph, TitlePageParagraphFormatting,
 };
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("model smoke uses valid bounded input"))
+}
+
+fn add_custom_type(project: &mut Project, label: &str, paginate_as: Option<&str>) {
+    let mut definitions = project
+        .element_definitions()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut definition = definitions
+        .iter()
+        .find(|definition| definition.key.as_str() == "Action")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("Project::new supplies the base Action definition"));
+    definition.key = valid(ElementTypeKey::new(label));
+    definition.behavior.paginate_as = paginate_as.map(str::to_owned);
+    definitions.push(definition);
+    valid(project.replace_element_definitions(definitions));
 }
 
 #[test]
@@ -350,16 +370,127 @@ fn dual_group_membership_survives_inactive_projection_and_reactivation() {
     assert_eq!(active.right.character.as_str(), "dual-right-cue");
     assert_eq!(active.right.paragraphs[0].as_str(), "dual-right-line");
 
+    let active_baseline = project.clone();
     BodyOwner::update(&mut project.elements[1], |element| {
         element.set_element_type(ElementTypeKey::from_role(Role::Action));
     });
     assert_eq!(project.validate(), Ok(()));
     assert_eq!(project.dual_dialogue_groups[0].members, source_members);
     assert!(active_dual_dialogue_projection(&project, &project.dual_dialogue_groups[0]).is_none());
+    assert_eq!(
+        classify_structural_result(
+            &active_baseline,
+            Selection::caret(Position {
+                element: 1,
+                offset: 0,
+            }),
+            &project,
+        )[0]
+        .outcome,
+        StructuralGroupOutcome::UpdatedValid
+    );
 
     BodyOwner::update(&mut project.elements[1], |element| {
         element.set_element_type(ElementTypeKey::from_role(Role::Dialogue));
     });
     assert_eq!(project.validate(), Ok(()));
     assert!(active_dual_dialogue_projection(&project, &project.dual_dialogue_groups[0]).is_some());
+}
+
+#[test]
+fn dual_recognition_uses_exact_capabilities_not_paginate_as_or_type_spelling() {
+    let mut project = valid(Project::new());
+    add_custom_type(&mut project, "character", Some("Character"));
+    add_custom_type(&mut project, "Dialogue-like", Some("Dialogue"));
+    add_custom_type(&mut project, "Parenthetical-like", Some("Parenthetical"));
+
+    project.elements = [
+        ("dual-cue-a", "Character", "A"),
+        ("dual-line-a", "Dialogue-like", "line A"),
+        ("dual-cue-b", "character", "B"),
+        ("dual-line-b", "Parenthetical-like", "(line B)"),
+    ]
+    .into_iter()
+    .map(|(id, element_type, text)| {
+        BodyOwner::shared(valid(ScreenplayElement::new(
+            id,
+            valid(ElementTypeKey::new(element_type)),
+            text,
+        )))
+    })
+    .collect();
+    let members = project
+        .elements
+        .iter()
+        .map(|element| element.id.clone())
+        .collect::<Vec<_>>();
+    project.dual_dialogue_groups.push(DualDialogueGroup {
+        id: valid(scriptcraft_model::StableId::new("dual-capability-group")),
+        members: members.clone(),
+        wrapper: Default::default(),
+    });
+
+    assert_eq!(project.validate(), Ok(()));
+    assert!(active_dual_dialogue_projection(&project, &project.dual_dialogue_groups[0]).is_none());
+    assert_eq!(project.dual_dialogue_groups[0].members, members);
+
+    // The same arbitrary pattern is not promoted to an active group when it
+    // has no source membership, nor is it a toggle candidate by label or
+    // PaginateAs resemblance alone.
+    project.dual_dialogue_groups.clear();
+    assert!(recognize_candidate(&project, 0).unwrap_or(None).is_none());
+    assert!(scriptcraft_model::dual_dialogue::resolve_toggle_target(
+        &project,
+        SelectionSurface::Body,
+        Selection::caret(Position {
+            element: 0,
+            offset: 0,
+        }),
+    )
+    .unwrap_or(None)
+    .is_none());
+}
+
+#[test]
+fn dual_projection_allows_empty_sides_and_rejects_a_third_cue() {
+    let mut project = valid(Project::new());
+    project.elements = [
+        ("empty-left-cue", "Character", "LEFT"),
+        ("empty-right-cue", "Character", "RIGHT"),
+    ]
+    .into_iter()
+    .map(|(id, element_type, text)| {
+        BodyOwner::shared(valid(ScreenplayElement::new(
+            id,
+            valid(ElementTypeKey::new(element_type)),
+            text,
+        )))
+    })
+    .collect();
+    let group = DualDialogueGroup {
+        id: valid(scriptcraft_model::StableId::new("empty-sides-group")),
+        members: project
+            .elements
+            .iter()
+            .map(|element| element.id.clone())
+            .collect(),
+        wrapper: Default::default(),
+    };
+    project.dual_dialogue_groups.push(group);
+    let projection = active_dual_dialogue_projection(&project, &project.dual_dialogue_groups[0])
+        .unwrap_or_else(|| unreachable!("two adjacent Character capabilities permit empty sides"));
+    assert!(projection.left.paragraphs.is_empty());
+    assert!(projection.right.paragraphs.is_empty());
+
+    let third_cue = BodyOwner::shared(valid(ScreenplayElement::new(
+        "third-dual-cue",
+        Role::Character,
+        "THIRD",
+    )));
+    project.elements.push(third_cue.clone());
+    project.dual_dialogue_groups[0]
+        .members
+        .push(third_cue.id.clone());
+    assert!(active_dual_dialogue_projection(&project, &project.dual_dialogue_groups[0]).is_none());
+    assert!(recognize_candidate(&project, 0).unwrap_or(None).is_none());
 }

@@ -23,5 +23,10 @@ pub use geometry::{
     LocatedLayoutLine, PositionedStyledSpan, Rect, ScreenplayLayout, SourceRange, CHAR_WIDTH,
     FONT_FAMILY, LINE_HEIGHT, POINTS_PER_INCH,
 };
-pub use inputs::{BodyEditorPresentation, EditorGroupBoundary, LayoutComposition, LayoutPurpose};
+pub use inputs::{
+    resolve_effective_dual_wrapper_paragraph, resolve_effective_paragraph,
+    resolve_effective_run_text_style, resolve_effective_text_style, resolve_effective_title,
+    BodyEditorPresentation, EditorGroupBoundary, EffectiveParagraph, LayoutComposition,
+    LayoutEnvironment, LayoutPurpose, NeutralTitleStyle, PaginationPolicy,
+};
 pub use interaction::InteractionQueryDiagnostics;

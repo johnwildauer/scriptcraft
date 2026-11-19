@@ -314,7 +314,7 @@ pub(crate) fn run() -> eframe::Result {
         Box::new(move |cc| {
             let startup_document = startup.startup_document;
 
-            let document_font_availability = document_font::install(&cc.egui_ctx);
+            let document_font_store = document_font::install(&cc.egui_ctx);
             material_font::install(&cc.egui_ctx, &toolbar_items::custom_material_icon_axes());
             ScriptCraftApp::new_with_startup(
                 menu_policy,
@@ -323,7 +323,7 @@ pub(crate) fn run() -> eframe::Result {
                 startup.development,
             )
                 .and_then(|mut app| {
-                    app.document_font_availability = document_font_availability;
+                    app.document_font_store = document_font_store;
                     #[cfg(target_os = "macos")]
                     {
                         native_open_documents.attach_repaint_context(cc.egui_ctx.clone());

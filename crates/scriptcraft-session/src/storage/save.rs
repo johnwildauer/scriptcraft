@@ -10,7 +10,7 @@ use crate::editing::{
 };
 use scriptcraft_fdx::{self as fdx, same_dual_dialogue_projection, write_v6_for_save, FdxError};
 use scriptcraft_model::{
-    cast_list, BodyOwner, ElementTypeKey, Project, Role, StableId, TitlePageParagraph,
+    cast_list, BodyOwner, ElementTypeKey, Project, StableId, TitlePageParagraph,
 };
 
 /// Save against the session's opened/saved target, or create a new target using
@@ -299,29 +299,25 @@ fn map_body_owner_identity<'a>(
         return None;
     }
 
-    let old_matches = old_project
+    // A source-less fallback is deliberately content-unique rather than
+    // positional or Type-dependent. Ambiguous repeated text is not identity.
+    let mut old_matches = old_project
         .elements
         .iter()
-        .filter(|owner| owner.element_type() == old.element_type() && owner.text == old.text)
-        .collect::<Vec<_>>();
-    let occurrence = old_matches.iter().position(|owner| owner.id == old.id)?;
-    let new_matches = new_project
-        .elements
-        .iter()
-        .enumerate()
-        .filter(|owner| {
-            let owner = owner.1;
-            owner.element_type() == old.element_type() && owner.text == old.text
-        })
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    if old_matches.len() != new_matches.len() {
+        .filter(|owner| owner.text == old.text);
+    let old_match = old_matches.next()?;
+    if old_matches.next().is_some() || old_match.id != old.id {
         return None;
     }
-    new_matches
-        .get(occurrence)
-        .and_then(|index| new_project.elements.get(*index))
-        .map(|owner| owner.as_ref())
+    let mut new_matches = new_project
+        .elements
+        .iter()
+        .filter(|owner| owner.text == old.text);
+    let owner = new_matches.next()?;
+    if new_matches.next().is_some() {
+        return None;
+    }
+    Some(owner.as_ref())
 }
 
 impl EditingSession {
@@ -340,7 +336,6 @@ impl EditingSession {
             .ok_or(EditError::InvalidSelection)?;
         let title_selection =
             map_title_selection_to_project(self.title_selection, self.project(), &project);
-        let parenthetical_key = ElementTypeKey::from_role(Role::Parenthetical);
         let generated_parentheticals = self
             .generated_parentheticals
             .iter()
@@ -350,12 +345,18 @@ impl EditingSession {
                     .elements
                     .iter()
                     .find(|owner| owner.id.as_str() == old_id)?;
-                if old.element_type() != parenthetical_key || old.text != "()" {
+                let old_is_parenthetical = self
+                    .project()
+                    .element_semantics(&old.element_type())
+                    .is_some_and(|semantics| semantics.capabilities().parenthetical);
+                if !old_is_parenthetical || old.text != "()" {
                     return None;
                 }
                 let new = map_body_owner_identity(self.project(), &old.id, &project)?;
-                (new.element_type() == parenthetical_key && new.text == "()")
-                    .then(|| new.id.as_str().to_owned())
+                let new_is_parenthetical = project
+                    .element_semantics(&new.element_type())
+                    .is_some_and(|semantics| semantics.capabilities().parenthetical);
+                (new_is_parenthetical && new.text == "()").then(|| new.id.as_str().to_owned())
             })
             .collect();
 
@@ -449,5 +450,42 @@ mod tests {
         assert_eq!(original.elements, changed_case.elements);
         assert_eq!(original.title_page, changed_case.title_page);
         assert!(!same_save_projection(&original, &changed_case));
+    }
+
+    #[test]
+    fn source_less_owner_rebase_uses_unique_text_not_type_or_position() {
+        fn source_less_project(rows: &[(&str, &str, &str)]) -> Project {
+            let mut project = Project::new().expect("the default project should be valid");
+            project.elements = rows
+                .iter()
+                .map(|(id, label, text)| {
+                    BodyOwner::shared(
+                        scriptcraft_model::ScreenplayElement::new(
+                            *id,
+                            ElementTypeKey::new(*label)
+                                .expect("the source-less test key should be valid"),
+                            *text,
+                        )
+                        .expect("the source-less test paragraph should be valid"),
+                    )
+                })
+                .collect();
+            project
+        }
+
+        let old_project = source_less_project(&[("old-generated", "Parenthetical", "()")]);
+        let new_project = source_less_project(&[("reread-generated", "Action", "()")]);
+        let old_id = StableId::new("old-generated").expect("the old stable ID should be valid");
+        let mapped = map_body_owner_identity(&old_project, &old_id, &new_project);
+        assert_eq!(
+            mapped.map(|owner| owner.id.as_str()),
+            Some("reread-generated")
+        );
+
+        let ambiguous_project = source_less_project(&[
+            ("first-generated", "Parenthetical", "()"),
+            ("second-generated", "Action", "()"),
+        ]);
+        assert!(map_body_owner_identity(&old_project, &old_id, &ambiguous_project).is_none());
     }
 }

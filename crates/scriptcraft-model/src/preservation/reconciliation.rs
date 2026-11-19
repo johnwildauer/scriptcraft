@@ -5,7 +5,7 @@ use super::text::{semantic_text_runs, source_name_from_qname};
 use super::*;
 use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
 use crate::{
-    BodyOwner, Role, ScreenplayElement, SourceFormat, SourceProvenance, SourceSection, StableId,
+    BodyOwner, Project, ScreenplayElement, SourceFormat, SourceProvenance, SourceSection, StableId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -73,6 +73,7 @@ impl PreservationState {
     /// subtrees are discarded, and unrelated raw references may become orphans.
     pub fn reconcile_body_structure(
         &mut self,
+        semantic_project: &Project,
         before: &[Arc<BodyOwner>],
         after: &mut [Arc<BodyOwner>],
         _generated_scene_heading_deletions: &BTreeSet<StableId>,
@@ -119,11 +120,15 @@ impl PreservationState {
             if !has_inline_attachment {
                 continue;
             }
-            if (self.has_inline_alts(&previous.id)
-                && previous.transitional_role() != Role::Dialogue)
-                || removed.iter().any(|item| {
-                    self.has_inline_alts(&item.id) && item.transitional_role() != Role::Dialogue
-                })
+            let has_dialogue_capability = |owner: &BodyOwner| {
+                semantic_project
+                    .element_semantics(&owner.element_type())
+                    .is_some_and(|semantics| semantics.capabilities().dialogue)
+            };
+            if (self.has_inline_alts(&previous.id) && !has_dialogue_capability(previous))
+                || removed
+                    .iter()
+                    .any(|item| self.has_inline_alts(&item.id) && !has_dialogue_capability(item))
             {
                 return Err(PreservationError::StructuralAttachmentConflict);
             }
@@ -618,7 +623,7 @@ fn collect_owner_registrations(
     );
 }
 
-fn clear_stale_anchor_bindings(
+pub(super) fn clear_stale_anchor_bindings(
     nodes: &mut [PreservedNode],
     stale_anchors: &BTreeSet<SourceAnchorId>,
     removed_foreign_ids: &BTreeSet<String>,
@@ -645,7 +650,7 @@ fn clear_stale_anchor_bindings(
     }
 }
 
-fn paragraph_reference_touches(
+pub(super) fn paragraph_reference_touches(
     reference: &ForeignReference,
     removed_foreign_ids: &BTreeSet<String>,
 ) -> bool {

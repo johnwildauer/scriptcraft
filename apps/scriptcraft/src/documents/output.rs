@@ -4,6 +4,7 @@ use super::{pdf, print};
 use crate::app::ScriptCraftApp;
 use eframe::egui;
 use scriptcraft_export as exports;
+use scriptcraft_layout::LayoutEnvironment;
 use scriptcraft_session::persistence::{FileSystem, StdFileSystem};
 use std::path::{Path, PathBuf};
 
@@ -47,10 +48,10 @@ fn export_pdf_to_selected_path<F: FileSystem>(
     filesystem: &F,
     build_pdf: impl FnOnce(
         scriptcraft_commands::PdfExportOptions,
-    ) -> Result<Vec<u8>, exports::ExportError>,
-) -> Result<bool, PdfExportAdapterError> {
+    ) -> Result<exports::PdfExport, exports::ExportError>,
+) -> Result<Option<exports::PdfTypographyReport>, PdfExportAdapterError> {
     let (path, options) = match picker_result {
-        pdf::PdfExportPickerResult::Cancel => return Ok(false),
+        pdf::PdfExportPickerResult::Cancel => return Ok(None),
         pdf::PdfExportPickerResult::Error(error) => {
             return Err(PdfExportAdapterError::Picker(error));
         }
@@ -62,11 +63,11 @@ fn export_pdf_to_selected_path<F: FileSystem>(
     if path.to_str().is_none() {
         return Err(PdfExportAdapterError::Path);
     }
-    let bytes = build_pdf(options).map_err(PdfExportAdapterError::Export)?;
+    let export = build_pdf(options).map_err(PdfExportAdapterError::Export)?;
     filesystem
-        .write(&path, &bytes)
+        .write(&path, &export.bytes)
         .map_err(PdfExportAdapterError::Write)?;
-    Ok(true)
+    Ok(Some(export.typography))
 }
 
 impl ScriptCraftApp {
@@ -124,8 +125,12 @@ impl ScriptCraftApp {
         match export_pdf_to_selected_path(picker_result, &StdFileSystem, |selected_options| {
             self.build_pdf_with_options(selected_options)
         }) {
-            Ok(false) => {}
-            Ok(true) => self.clear_error(),
+            Ok(None) => {}
+            Ok(Some(report)) if report.is_empty() => self.clear_error(),
+            Ok(Some(report)) => self.show_error(format!(
+                "PDF_EXPORT_COMPLETED: {}; screenplay unchanged",
+                report.summary()
+            )),
             Err(PdfExportAdapterError::Picker(pdf::PdfExportPickerFailure::Unavailable)) => {
                 self.show_error(
                     "PDF_EXPORT_PICKER_UNAVAILABLE: destination picker unavailable; screenplay unchanged",
@@ -153,39 +158,61 @@ impl ScriptCraftApp {
                     crate::app::diagnostics::safe_layout_error_category(&error)
                 ));
             }
+            Err(PdfExportAdapterError::Export(
+                exports::ExportError::InvalidTypographyEnvironment,
+            )) => self.show_error(
+                "PDF_EXPORT_TYPOGRAPHY_UNAVAILABLE: resolved typography environment was incomplete or mismatched; screenplay unchanged; no complete export produced",
+            ),
+            Err(PdfExportAdapterError::Export(exports::ExportError::InvalidLayoutGeometry)) => {
+                self.show_error(
+                    "PDF_EXPORT_GEOMETRY_INVALID: canonical display boundaries were inconsistent; screenplay unchanged; no complete export produced",
+                );
+            }
         }
     }
 
     fn build_pdf_with_options(
-        &self,
+        &mut self,
         options: scriptcraft_commands::PdfExportOptions,
-    ) -> Result<Vec<u8>, exports::ExportError> {
+    ) -> Result<exports::PdfExport, exports::ExportError> {
+        let environment = self.output_layout_environment()?;
         print::build_pdf_bytes(
             self.session.project(),
             self.session.layout_inputs(),
+            &environment,
             options,
         )
     }
 
-    fn build_print_request(
-        &self,
-        options: scriptcraft_commands::PdfExportOptions,
-    ) -> Result<print::PrintRequest, exports::ExportError> {
-        print::build_print_request(
-            self.session.project(),
-            self.session.layout_inputs(),
-            options,
-            self.native_path.as_deref(),
-        )
+    fn output_layout_environment(&mut self) -> Result<LayoutEnvironment, exports::ExportError> {
+        let prepared = self
+            .document_font_store
+            .prepare_document(self.session.project())
+            .map_err(|_| exports::ExportError::InvalidTypographyEnvironment)?;
+        self.prepared_document_fonts = Some(prepared.clone());
+        Ok(LayoutEnvironment::new(
+            self.session.layout_inputs().page_only(),
+            prepared.environment,
+        ))
     }
 
     pub(crate) fn open_print_panel(&mut self) {
         #[cfg(target_os = "macos")]
         {
             self.accepted_print_settings = None;
+            let environment = match self.output_layout_environment() {
+                Ok(environment) => environment,
+                Err(_) => {
+                    self.show_error(
+                        "PRINT_TYPOGRAPHY_UNAVAILABLE: resolved typography environment could not be prepared; no print panel opened",
+                    );
+                    return;
+                }
+            };
             let snapshot = print::PrintCompositionSnapshot::capture(
                 self.session.project(),
                 self.session.layout_inputs(),
+                &environment,
                 self.native_path.as_deref(),
             );
             let panel_result =
@@ -196,42 +223,30 @@ impl ScriptCraftApp {
                     self.accepted_print_settings = Some(settings);
                     match self.accepted_print_settings.take() {
                     Some(settings) => crate::platform::macos::macos_print_dialog::deliver_print(settings),
-                    None => crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PrintOperationUnavailable,
+                    None => crate::platform::macos::macos_print_dialog::PrintDeliveryOutcome {
+                        result: crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PrintOperationUnavailable,
+                        fallback_summary: None,
+                    },
                 }
                 },
             );
             match delivery {
                 crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Cancelled => self.clear_error(),
-                    crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Accepted(
-                    crate::platform::macos::macos_print_dialog::PrintDeliveryResult::OperationReportedSuccess,
-                ) => self.show_error(
-                    "PRINT_OPERATION_REPORTED_SUCCESS: macOS reported successful operation; physical printer delivery is unconfirmed; screenplay unchanged",
-                ),
-                    crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Accepted(
-                    crate::platform::macos::macos_print_dialog::PrintDeliveryResult::OperationCancelledOrFailed,
-                ) => self.show_error(
-                    "PRINT_OPERATION_CANCELLED_OR_FAILED: native print operation was cancelled or failed; AppKit does not distinguish these results; printer delivery is unknown; screenplay unchanged",
-                ),
-                    crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Accepted(
-                    crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PdfBuildFailed,
-                ) => self.show_error(
-                    "PRINT_PDF_BUILD_FAILED: Print-composed PDF could not be built; no operation submitted; screenplay unchanged",
-                ),
-                    crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Accepted(
-                    crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PdfDocumentInvalid,
-                ) => self.show_error(
-                    "PRINT_PDF_INVALID: PDFKit could not open the generated PDF; no operation submitted; screenplay unchanged",
-                ),
-                    crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Accepted(
-                    crate::platform::macos::macos_print_dialog::PrintDeliveryResult::MainThreadUnavailable,
-                ) => self.show_error(
-                    "PRINT_OPERATION_UNAVAILABLE: PDFKit printing requires the AppKit main thread; no operation submitted; screenplay unchanged",
-                ),
-                    crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Accepted(
-                    crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PrintOperationUnavailable,
-                ) => self.show_error(
-                    "PRINT_OPERATION_UNAVAILABLE: PDFKit could not prepare a native print operation; no operation submitted; screenplay unchanged",
-                ),
+                crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Accepted(outcome) => {
+                    let message = match outcome.result {
+                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::OperationReportedSuccess => "PRINT_OPERATION_REPORTED_SUCCESS: macOS reported successful operation; physical printer delivery is unconfirmed; screenplay unchanged",
+                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::OperationCancelledOrFailed => "PRINT_OPERATION_CANCELLED_OR_FAILED: native print operation was cancelled or failed; AppKit does not distinguish these results; printer delivery is unknown; screenplay unchanged",
+                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PdfBuildFailed => "PRINT_PDF_BUILD_FAILED: Print-composed PDF could not be built; no operation submitted; screenplay unchanged",
+                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PdfDocumentInvalid => "PRINT_PDF_INVALID: PDFKit could not open the generated PDF; no operation submitted; screenplay unchanged",
+                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::MainThreadUnavailable => "PRINT_OPERATION_UNAVAILABLE: PDFKit printing requires the AppKit main thread; no operation submitted; screenplay unchanged",
+                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PrintOperationUnavailable => "PRINT_OPERATION_UNAVAILABLE: PDFKit could not prepare a native print operation; no operation submitted; screenplay unchanged",
+                    };
+                    if let Some(summary) = outcome.fallback_summary {
+                        self.show_error(format!("{message}; {summary}"));
+                    } else {
+                        self.show_error(message);
+                    }
+                }
                 crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Unavailable => self.show_error(
                     "PRINT_PANEL_UNAVAILABLE: native print panel unavailable; screenplay unchanged",
                 ),
@@ -245,10 +260,20 @@ impl ScriptCraftApp {
             // Capture all mutable editor inputs synchronously at command
             // acceptance. Only detached project/layout data enters the worker;
             // the real owner HWND is acquired later from the live eframe frame.
-            let request = WindowsPrintRequestSnapshot::capture(self);
+            let request = match WindowsPrintRequestSnapshot::capture(self) {
+                Ok(request) => request,
+                Err(_) => {
+                    self.native_output_modal_active = false;
+                    self.show_error(
+                        "WINDOWS_PRINT_TYPOGRAPHY_UNAVAILABLE: resolved typography environment could not be prepared; no system print UI was opened",
+                    );
+                    return;
+                }
+            };
             match crate::platform::windows::windows_print::PrintPreparation::start(
                 request.project,
                 request.layout_inputs,
+                request.layout_environment,
                 request.revision,
                 request.job_title,
             ) {
@@ -269,19 +294,22 @@ impl ScriptCraftApp {
 struct WindowsPrintRequestSnapshot {
     project: Project,
     layout_inputs: scriptcraft_model::LayoutInputs,
+    layout_environment: LayoutEnvironment,
     revision: u64,
     job_title: String,
 }
 
 #[cfg(target_os = "windows")]
 impl WindowsPrintRequestSnapshot {
-    fn capture(app: &ScriptCraftApp) -> Self {
-        Self {
+    fn capture(app: &mut ScriptCraftApp) -> Result<Self, exports::ExportError> {
+        let layout_environment = app.output_layout_environment()?;
+        Ok(Self {
             project: app.session.project().clone(),
             layout_inputs: app.session.layout_inputs().clone(),
+            layout_environment,
             revision: app.session.revision(),
             job_title: print::print_job_title(app.native_path.as_deref()),
-        }
+        })
     }
 }
 
@@ -300,7 +328,7 @@ impl ScriptCraftApp {
             .as_mut()
             .is_some_and(crate::platform::windows::windows_print::PrintSession::take_submitted);
         if submitted {
-            self.show_error("WINDOWS_PRINT_SUBMITTED: Windows accepted the captured screenplay request; physical delivery is unconfirmed");
+            self.show_error("WINDOWS_PRINT_SUBMITTED: Windows accepted the captured screenplay request; physical delivery is unconfirmed; visual parity is not claimed");
         }
 
         let terminal = self
@@ -309,8 +337,8 @@ impl ScriptCraftApp {
             .and_then(crate::platform::windows::windows_print::PrintSession::poll);
         if let Some(result) = terminal {
             let message = match result {
-                crate::platform::windows::windows_print::PrintResult::Submitted => "WINDOWS_PRINT_SUBMITTED: system reported submission; physical delivery is unconfirmed",
-                crate::platform::windows::windows_print::PrintResult::Completed => "WINDOWS_PRINT_COMPLETED: native task reached its terminal callback; physical delivery is unconfirmed",
+                crate::platform::windows::windows_print::PrintResult::Submitted => "WINDOWS_PRINT_SUBMITTED: system reported submission; physical delivery is unconfirmed; visual parity is not claimed",
+                crate::platform::windows::windows_print::PrintResult::Completed => "WINDOWS_PRINT_COMPLETED: native task reached its terminal callback; physical delivery is unconfirmed; visual parity is not claimed",
                 crate::platform::windows::windows_print::PrintResult::Cancelled => "WINDOWS_PRINT_CANCELLED: system print task was cancelled before completion",
                 crate::platform::windows::windows_print::PrintResult::Failed => "WINDOWS_PRINT_FAILED: native print session failed or stopped reporting after a lifecycle callback",
                 crate::platform::windows::windows_print::PrintResult::Unsupported => "WINDOWS_PRINT_UNSUPPORTED: modern system print session is unavailable",
@@ -326,18 +354,26 @@ impl ScriptCraftApp {
         if let Some(prepared) = prepared {
             self.windows_print_preparation = None;
             match prepared {
-                Ok(packages) => match crate::platform::windows::windows_print::PrintSession::start(
-                    frame, packages,
-                ) {
-                    Ok(session) => {
-                        self.windows_print_session = Some(session);
-                        self.show_error("WINDOWS_PRINT_PREVIEW_REQUESTED: modern Windows print UI opened for the immutable request-time snapshot; later edits require a new request");
+                Ok(packages) => {
+                    let typography_summary = packages.typography_report_summary();
+                    match crate::platform::windows::windows_print::PrintSession::start(
+                        frame, packages,
+                    ) {
+                        Ok(session) => {
+                            self.windows_print_session = Some(session);
+                            let message = "WINDOWS_PRINT_PREVIEW_REQUESTED: modern Windows print UI opened for the immutable request-time snapshot; later edits require a new request; physical delivery is unconfirmed and visual parity is not claimed";
+                            if let Some(summary) = typography_summary {
+                                self.show_error(format!("{message}; {summary}"));
+                            } else {
+                                self.show_error(message);
+                            }
+                        }
+                        Err(failure) => {
+                            self.report_windows_print_start_failure(failure);
+                            self.finish_windows_print_session(&ctx);
+                        }
                     }
-                    Err(failure) => {
-                        self.report_windows_print_start_failure(failure);
-                        self.finish_windows_print_session(&ctx);
-                    }
-                },
+                }
                 Err(failure) => {
                     self.report_windows_print_start_failure(failure);
                     self.finish_windows_print_session(&ctx);

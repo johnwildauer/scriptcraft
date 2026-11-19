@@ -1,7 +1,8 @@
-use std::{ops::Range, sync::Arc};
+use std::ops::Range;
 
 use crate::{
-    ModelError, Position, Project, Role, Selection, SourceProvenance, StableId, MAX_ELEMENTS,
+    ModelError, Position, Project, Selection, SemanticCapabilities, SourceProvenance, StableId,
+    MAX_ELEMENTS,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +75,7 @@ pub struct ActiveDualDialogueProjection {
 }
 
 /// Derives the currently supported two-column split from ordered source
-/// membership and the members' current exact known roles.
+/// membership and the members' current exact-key capabilities.
 pub fn active_dual_dialogue_projection(
     project: &Project,
     group: &DualDialogueGroup,
@@ -83,7 +84,7 @@ pub fn active_dual_dialogue_projection(
     if members.len() < 2 {
         return None;
     }
-    let mut roles = Vec::with_capacity(members.len());
+    let mut capabilities = Vec::with_capacity(members.len());
     let mut positions = Vec::with_capacity(members.len());
     for id in members {
         let mut matches = project
@@ -96,26 +97,26 @@ pub fn active_dual_dialogue_projection(
             return None;
         }
         positions.push(position);
-        roles.push(element.transitional_role());
+        capabilities.push(element_capabilities(project, element)?);
     }
     if positions
         .windows(2)
         .any(|pair| pair[1] != pair[0].saturating_add(1))
-        || roles.first() != Some(&Role::Character)
+        || !capabilities.first()?.character_cue
     {
         return None;
     }
-    let right_cue = roles
+    let right_cue = capabilities
         .iter()
         .enumerate()
         .skip(1)
-        .find_map(|(index, role)| (*role == Role::Character).then_some(index))?;
-    if roles[1..right_cue]
+        .find_map(|(index, capability)| capability.character_cue.then_some(index))?;
+    if capabilities[1..right_cue]
         .iter()
-        .any(|role| !matches!(role, Role::Dialogue | Role::Parenthetical))
-        || roles[right_cue + 1..]
+        .any(|capability| !is_dual_body_member(*capability))
+        || capabilities[right_cue + 1..]
             .iter()
-            .any(|role| !matches!(role, Role::Dialogue | Role::Parenthetical))
+            .any(|capability| !is_dual_body_member(*capability))
     {
         return None;
     }
@@ -445,9 +446,10 @@ fn map_member_identity(before: &Project, after: &Project, id: &StableId) -> Opti
     Some(element.id.clone())
 }
 
-/// Classify all baseline groups against a proposed detached project. Structural
-/// edits retain the established unwrap retry when a changed group no longer
-/// has an active two-cue, zero-or-more Dialogue/Parenthetical projection.
+/// Classify all baseline groups against a proposed detached project. A changed
+/// or displaced member sequence that no longer has an active projection retains
+/// the established structural unwrap retry. Type-only projection changes do
+/// not unwrap an otherwise unchanged ordered source container.
 pub fn classify_structural_result(
     baseline: &Project,
     selection: Selection,
@@ -479,15 +481,19 @@ pub fn classify_structural_result(
             let outcome = if remaining == 0 {
                 StructuralGroupOutcome::Removed
             } else if before_members == after_members
-                && before_members.iter().all(|id| {
+                && source_members_are_contiguous(proposed, after)
+            {
+                let types_unchanged = before_members.iter().all(|id| {
                     let old = baseline.elements.iter().find(|element| &element.id == id);
                     let new = proposed.elements.iter().find(|element| &element.id == id);
-                    old.zip(new).is_some_and(|(old, new)| {
-                        old.transitional_role() == new.transitional_role()
-                    })
-                })
-            {
-                StructuralGroupOutcome::UnchangedValid
+                    old.zip(new)
+                        .is_some_and(|(old, new)| old.element_type() == new.element_type())
+                });
+                if types_unchanged {
+                    StructuralGroupOutcome::UnchangedValid
+                } else {
+                    StructuralGroupOutcome::UpdatedValid
+                }
             } else if active_dual_dialogue_projection(proposed, after).is_none() {
                 StructuralGroupOutcome::InvalidRequiresUnwrap
             } else {
@@ -500,6 +506,18 @@ pub fn classify_structural_result(
             }
         })
         .collect()
+}
+
+fn source_members_are_contiguous(project: &Project, group: &DualDialogueGroup) -> bool {
+    let Some(start) = first_member(project, group) else {
+        return false;
+    };
+    group.member_ids().enumerate().all(|(offset, id)| {
+        start
+            .checked_add(offset)
+            .and_then(|index| project.elements.get(index))
+            .is_some_and(|element| &element.id == id)
+    })
 }
 
 fn group_touched_by_selection(
@@ -535,9 +553,9 @@ fn group_touched_by_selection(
     }
 }
 
-/// Remove one staged member identity from either side list. Used only by the
-/// final-right Enter exception, where the new Action remains outside the
-/// retained wrapper.
+/// Remove one staged member identity from ordered source membership. Used only
+/// by the final-right Enter exception, where the Behavior-target paragraph
+/// remains outside the retained wrapper.
 pub fn remove_staged_group_member(project: &mut Project, id: &StableId) {
     for group in &mut project.dual_dialogue_groups {
         group.members.retain(|member| member != id);
@@ -682,40 +700,38 @@ fn recognize_candidate_unchecked(
     let Some(first) = project.elements.get(start) else {
         return Ok(None);
     };
-    if first.transitional_role() != Role::Character {
+    if !has_capability(project, first, |capabilities| capabilities.character_cue) {
         return Ok(None);
     }
     if (0..start).any(|prior| {
-        project
-            .elements
-            .get(prior)
-            .is_some_and(|element| element.transitional_role() == Role::Character)
-            && candidate_shape_end(&project.elements, prior).is_some_and(|end| start < end)
+        project.elements.get(prior).is_some_and(|element| {
+            has_capability(project, element, |capabilities| capabilities.character_cue)
+        }) && candidate_shape_end(project, prior).is_some_and(|end| start < end)
     }) {
         return Ok(None);
     }
     let left_begin = start.checked_add(1).ok_or(ModelError::InvalidNumber)?;
-    let Some(left_end) = run_end(&project.elements, left_begin) else {
+    let Some(left_end) = run_end(project, left_begin) else {
         return Ok(None);
     };
     let right_cue_index = left_end;
     let Some(right_cue) = project.elements.get(right_cue_index) else {
         return Ok(None);
     };
-    if right_cue.transitional_role() != Role::Character {
+    if !has_capability(project, right_cue, |capabilities| {
+        capabilities.character_cue
+    }) {
         return Ok(None);
     }
     let right_begin = right_cue_index
         .checked_add(1)
         .ok_or(ModelError::InvalidNumber)?;
-    let Some(end) = run_end(&project.elements, right_begin) else {
+    let Some(end) = run_end(project, right_begin) else {
         return Ok(None);
     };
-    if project
-        .elements
-        .get(end)
-        .is_some_and(|element| element.transitional_role() == Role::Character)
-    {
+    if project.elements.get(end).is_some_and(|element| {
+        has_capability(project, element, |capabilities| capabilities.character_cue)
+    }) {
         return Ok(None);
     }
     if project.dual_dialogue_groups.iter().any(|group| {
@@ -748,37 +764,62 @@ fn recognize_candidate_unchecked(
     }))
 }
 
-fn run_end(elements: &[Arc<crate::BodyOwner>], start: usize) -> Option<usize> {
-    if start > elements.len() {
+fn run_end(project: &Project, start: usize) -> Option<usize> {
+    if start > project.elements.len() {
         return None;
     }
     let mut end = start;
-    while elements.get(end).is_some_and(|element| {
-        matches!(
-            element.transitional_role(),
-            Role::Dialogue | Role::Parenthetical
-        )
-    }) {
+    while project
+        .elements
+        .get(end)
+        .is_some_and(|element| has_capability(project, element, is_dual_body_member))
+    {
         end = end.checked_add(1)?;
     }
     Some(end)
 }
 
-fn candidate_shape_end(elements: &[Arc<crate::BodyOwner>], start: usize) -> Option<usize> {
-    if elements.get(start)?.transitional_role() != Role::Character {
+fn candidate_shape_end(project: &Project, start: usize) -> Option<usize> {
+    if !project.elements.get(start).is_some_and(|element| {
+        has_capability(project, element, |capabilities| capabilities.character_cue)
+    }) {
         return None;
     }
-    let left_end = run_end(elements, start.checked_add(1)?)?;
-    if elements.get(left_end)?.transitional_role() != Role::Character {
+    let left_end = run_end(project, start.checked_add(1)?)?;
+    if !project.elements.get(left_end).is_some_and(|element| {
+        has_capability(project, element, |capabilities| capabilities.character_cue)
+    }) {
         return None;
     }
-    let end = run_end(elements, left_end.checked_add(1)?)?;
-    elements
+    let end = run_end(project, left_end.checked_add(1)?)?;
+    project
+        .elements
         .get(end)
         .map_or(true, |element| {
-            element.transitional_role() != Role::Character
+            !has_capability(project, element, |capabilities| capabilities.character_cue)
         })
         .then_some(end)
+}
+
+fn element_capabilities(
+    project: &Project,
+    element: &crate::BodyOwner,
+) -> Option<SemanticCapabilities> {
+    project
+        .element_semantics(&element.element_type())
+        .map(|semantics| semantics.capabilities())
+}
+
+fn has_capability(
+    project: &Project,
+    element: &crate::BodyOwner,
+    predicate: impl FnOnce(SemanticCapabilities) -> bool,
+) -> bool {
+    element_capabilities(project, element).is_some_and(predicate)
+}
+
+fn is_dual_body_member(capabilities: SemanticCapabilities) -> bool {
+    capabilities.dialogue || capabilities.parenthetical
 }
 
 /// Resolve a valid toggle target for a collapsed Body caret. TitlePage and ranged selections are ineligible.
@@ -810,7 +851,7 @@ pub fn resolve_toggle_target_for_validated_session(
     if let Some(group) = group_at_element_id(project, &element.id) {
         return Ok(Some(ToggleTarget::Disable(group.id.clone())));
     }
-    if element.transitional_role() != Role::Character {
+    if !has_capability(project, element, |capabilities| capabilities.character_cue) {
         return Ok(None);
     }
     Ok(recognize_candidate_unchecked(project, selection.focus.element)?.map(ToggleTarget::Enable))

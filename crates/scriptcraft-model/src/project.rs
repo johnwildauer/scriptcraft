@@ -7,6 +7,7 @@ use crate::{
     dual_dialogue::DualDialogueGroup,
     element::{body_owners_equal, BodyOwner},
     element_definitions::DocumentElementDefinitions,
+    element_semantics::{BehaviorTargetResolution, ElementSemantics, ParagraphBehaviorKey},
     formatting::{transitional_static_role_definitions, SourceParagraphOverrides},
     identity::{StableId, StableIdAllocator},
     preservation::PreservationState,
@@ -93,6 +94,34 @@ impl Project {
     /// Returns the project's ordered definition registry.
     pub fn element_definitions(&self) -> &DocumentElementDefinitions {
         &self.element_definitions
+    }
+
+    /// Returns the borrowed semantic view for an exact key in the current registry.
+    pub fn element_semantics(&self, key: &crate::ElementTypeKey) -> Option<ElementSemantics<'_>> {
+        self.element_definitions.get(key).map(ElementSemantics::new)
+    }
+
+    /// Resolves one owned Behavior target against this Project's current registry.
+    ///
+    /// An unknown source key returns `None`. For a known source, absent and
+    /// unresolved target values remain distinct; no fallback is manufactured.
+    pub fn resolve_paragraph_behavior_target(
+        &self,
+        source_key: &crate::ElementTypeKey,
+        behavior_key: ParagraphBehaviorKey,
+    ) -> Option<BehaviorTargetResolution> {
+        let definition = self.element_definitions.get(source_key)?;
+        let target = match behavior_key {
+            ParagraphBehaviorKey::Return => definition.behavior.return_key.as_ref(),
+            ParagraphBehaviorKey::Tab => definition.behavior.tab_key.as_ref(),
+        };
+        Some(match target {
+            None => BehaviorTargetResolution::Absent,
+            Some(target) if self.element_definitions.get(target).is_some() => {
+                BehaviorTargetResolution::Resolved(target.clone())
+            }
+            Some(target) => BehaviorTargetResolution::Unresolved(target.clone()),
+        })
     }
 
     /// Validates and atomically replaces the complete ordered registry.

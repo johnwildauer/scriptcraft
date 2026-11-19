@@ -3,7 +3,8 @@
 use scriptcraft_fdx::{read_v6, write_v6};
 use scriptcraft_model::dual_dialogue::active_dual_dialogue_projection;
 use scriptcraft_model::preservation::{PreservedElement, PreservedNode, SourceOwnership};
-use scriptcraft_model::{ElementTypeKey, Project};
+use scriptcraft_model::{BodyOwner, ElementTypeKey, Project, ScreenplayElement};
+use std::collections::BTreeSet;
 
 const SOURCE_FIXTURE: &[u8] = include_bytes!("fixtures/source_reconciliation.fdx");
 
@@ -247,6 +248,11 @@ fn source_reconciliation_fixture_roundtrips_managed_and_opaque_source() {
     assert_eq!(reopened_body.element_type(), body.element_type());
     assert_eq!(reopened_body.text, body.text);
     assert_eq!(reopened_body.runs, body.runs);
+    assert!(child(
+        source_by_id(&reopened, "reconcile-body-lyrics"),
+        "SceneProperties"
+    )
+    .is_some());
     assert!(reopened
         .direct_paragraph_overrides
         .contains_key(&reopened_body.id));
@@ -311,4 +317,159 @@ fn source_reconciliation_fixture_roundtrips_managed_and_opaque_source() {
     assert!(source_by_id(&reopened, "reconcile-dual-right-line")
         .anchor
         .is_some());
+}
+
+#[test]
+fn preservation_free_scene_metadata_uses_only_exact_capabilities() {
+    let mut project = valid(Project::new());
+    let mut definitions = project
+        .element_definitions()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut lyrics = definitions
+        .iter()
+        .find(|definition| definition.key.as_str() == "Action")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("base Action definition is present"));
+    lyrics.key = valid(ElementTypeKey::new("Lyrics"));
+    lyrics.behavior.paginate_as = Some("Character".to_owned());
+    definitions.push(lyrics);
+    valid(project.replace_element_definitions(definitions));
+
+    let element = |id: &str, element_type: &str, text: &str| {
+        BodyOwner::shared(valid(ScreenplayElement::new(
+            id,
+            valid(ElementTypeKey::new(element_type)),
+            text,
+        )))
+    };
+    project.elements = vec![
+        element("generated-scene-1", "Scene Heading", "INT. ROOM"),
+        element("misleading-scene", "Shot", "EXT. NOT A SCENE"),
+        element("misleading-cue", "Lyrics", "NOT A CHARACTER"),
+        element("generated-cue", "Character", "  Mira (V.O.)  "),
+        element("generated-scene-2", "Scene Heading", "INT. HALL"),
+    ];
+
+    let output = valid(write_v6(&project));
+    let reopened = valid(read_v6(&output)).project;
+    let first_heading = reopened
+        .elements
+        .iter()
+        .find(|element| {
+            element.element_type().as_str() == "Scene Heading" && element.text == "INT. ROOM"
+        })
+        .unwrap_or_else(|| unreachable!("first exact scene heading remains managed"));
+    let second_heading = reopened
+        .elements
+        .iter()
+        .find(|element| {
+            element.element_type().as_str() == "Scene Heading" && element.text == "INT. HALL"
+        })
+        .unwrap_or_else(|| unreachable!("second exact scene heading remains managed"));
+    let misleading = reopened
+        .elements
+        .iter()
+        .find(|element| {
+            element.element_type().as_str() == "Shot" && element.text == "EXT. NOT A SCENE"
+        })
+        .unwrap_or_else(|| unreachable!("arbitrary pagination type remains managed"));
+
+    assert_eq!(
+        scriptcraft_model::scene_metadata::scene_arc_names(&reopened, &first_heading.id),
+        Ok(vec!["MIRA".to_owned()])
+    );
+    assert_eq!(
+        scriptcraft_model::scene_metadata::scene_arc_names(&reopened, &second_heading.id),
+        Ok(Vec::new())
+    );
+    let preservation = reopened
+        .preservation
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("reread FDX has retained source"));
+    let misleading_source = preservation
+        .managed_element(&misleading.id)
+        .unwrap_or_else(|error| panic!("managed source lookup succeeds: {error:?}"))
+        .unwrap_or_else(|| unreachable!("Shot remains a managed owner"));
+    assert!(child(misleading_source, "SceneProperties").is_none());
+}
+
+#[test]
+fn scene_metadata_stays_opaque_while_scene_capability_is_removed() {
+    let mut project = valid(read_v6(SOURCE_FIXTURE)).project;
+    let heading_index = project
+        .elements
+        .iter()
+        .position(|element| {
+            element
+                .source_provenance
+                .as_ref()
+                .and_then(|source| source.foreign_id.as_deref())
+                == Some("reconcile-body-lyrics")
+        })
+        .unwrap_or_else(|| unreachable!("fixture has its Lyrics paragraph with opaque metadata"));
+    let heading_id = project.elements[heading_index].id.clone();
+    let original_key = project.elements[heading_index].element_type();
+    let scene_heading_key = valid(ElementTypeKey::new("Scene Heading"));
+    let lyrics_key = valid(ElementTypeKey::new("Lyrics"));
+    project
+        .preservation
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture has preservation state"))
+        .change_managed_element_type(&heading_id, &original_key, &scene_heading_key)
+        .unwrap_or_else(|error| panic!("exact source Type update is supported: {error:?}"));
+    BodyOwner::update(&mut project.elements[heading_index], |element| {
+        element.set_element_type(scene_heading_key.clone());
+    });
+    let original_heading_source = project
+        .preservation
+        .as_ref()
+        .and_then(|state| state.managed_element(&heading_id).ok().flatten())
+        .cloned()
+        .unwrap_or_else(|| unreachable!("fixture heading has retained source"));
+    let original_properties = child(&original_heading_source, "SceneProperties")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("fixture heading has scene metadata"));
+
+    project
+        .preservation
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture has preservation state"))
+        .change_managed_element_type(&heading_id, &scene_heading_key, &lyrics_key)
+        .unwrap_or_else(|error| panic!("exact source Type update is supported: {error:?}"));
+    BodyOwner::update(&mut project.elements[heading_index], |element| {
+        element.set_element_type(lyrics_key.clone());
+    });
+    assert!(scriptcraft_model::scene_metadata::scene_arc_names(&project, &heading_id).is_err());
+
+    let _ = scriptcraft_model::scene_metadata::reconcile_project_candidate_with_scope(
+        &mut project,
+        None,
+    )
+    .unwrap_or_else(|error| panic!("unrelated supported scenes reconcile safely: {error:?}"));
+    let still_opaque = project
+        .preservation
+        .as_ref()
+        .and_then(|state| state.managed_element(&heading_id).ok().flatten())
+        .and_then(|heading| child(heading, "SceneProperties"))
+        .unwrap_or_else(|| unreachable!("removed scene capability does not remove its attachment"));
+    assert_eq!(still_opaque, &original_properties);
+
+    project
+        .preservation
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture has preservation state"))
+        .change_managed_element_type(&heading_id, &lyrics_key, &scene_heading_key)
+        .unwrap_or_else(|error| panic!("restoring exact source Type is supported: {error:?}"));
+    BodyOwner::update(&mut project.elements[heading_index], |element| {
+        element.set_element_type(scene_heading_key);
+    });
+    let requested = BTreeSet::from([heading_id.as_str().to_owned()]);
+    let outcome = scriptcraft_model::scene_metadata::reconcile_project_candidate_with_scope(
+        &mut project,
+        Some(&requested),
+    )
+    .unwrap_or_else(|error| panic!("restored scene capability is eligible for refresh: {error:?}"));
+    assert_eq!(outcome.scene_candidates, 1);
 }

@@ -1,36 +1,22 @@
-//! Desktop-local natural text geometry. Nothing here is written back to core
-//! layout or used to alter the fixed-cell page painter in this work order.
+//! Desktop projection of canonical layout geometry and display boundaries.
 
-use super::style::AdvanceMode;
 use eframe::egui::{self, Color32, FontId};
 use egui::epaint::text::{Galley, LayoutJob};
 use scriptcraft_layout::{Caret, LayoutLine, PositionedStyledSpan};
-use scriptcraft_model::formatting::{FixedPoint, ParagraphAlignment};
+use scriptcraft_model::formatting::FixedPoint;
 use std::sync::Arc;
 
-/// An unmodified full-span galley and boundary x offsets derived from its own
-/// cursor map. Offsets are in the galley's logical-point coordinate space.
-#[derive(Clone, Debug)]
-pub(crate) struct NaturalGalleyGeometry {
-    pub galley: Arc<Galley>,
-    pub display_boundary_offsets: Arc<[f32]>,
-    pub natural_advance: f32,
-}
-
-/// One ephemeral span in the mixed-mode desktop line projection. `origin_x`,
+/// One ephemeral span in the canonical desktop line projection. `origin_x`,
 /// `advance`, and `display_boundary_offsets` are page-local screen points.
 #[derive(Clone, Debug)]
 pub(crate) struct PresentationSpan<'a> {
     pub core: &'a PositionedStyledSpan,
-    pub advance_mode: AdvanceMode,
     pub origin_x: f32,
     pub advance: f32,
     pub display_boundary_offsets: Arc<[f32]>,
-    pub natural: Option<Arc<NaturalGalleyGeometry>>,
 }
 
-/// A line projection exists only if the line contains an actually available
-/// proportional face. It owns no core layout state and is rebuilt per frame.
+/// A presentation-only projection of the canonical line and its source maps.
 #[derive(Clone, Debug)]
 pub(crate) struct PresentationLine<'a> {
     pub core: &'a LayoutLine,
@@ -44,114 +30,42 @@ pub(crate) struct PresentationLine<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PresentationProjectionError {
     InvalidScale,
-    SpanCountMismatch,
     DisplayTopologyMismatch,
-    MissingNaturalGeometry,
-    UnexpectedNaturalGeometry,
-    InvalidNaturalBoundaries,
-    AmbiguousJustificationExtra,
+    InvalidCanonicalBoundaries,
 }
 
-/// Projects a complete line from actual-face modes and the natural geometry
-/// already built for its proportional spans. Core fixed allocations are
-/// converted once; natural offsets are already in the paint font's point space.
+/// Projects one line without querying egui font advances. Every horizontal
+/// coordinate is a direct scaling of canonical layout geometry.
 pub(crate) fn project_line<'a>(
     line: &'a LayoutLine,
-    modes: &[AdvanceMode],
-    natural: &[Option<Arc<NaturalGalleyGeometry>>],
     scale: f32,
 ) -> Result<PresentationLine<'a>, PresentationProjectionError> {
     if !scale.is_finite() || scale <= 0.0 {
         return Err(PresentationProjectionError::InvalidScale);
     }
-    if modes.len() != line.spans.len() || natural.len() != line.spans.len() {
-        return Err(PresentationProjectionError::SpanCountMismatch);
-    }
-
     let line_chars = line.display_text.chars().collect::<Vec<_>>();
     let mut display_base = 0usize;
-    let mut advances = Vec::with_capacity(line.spans.len());
-    let mut boundaries = Vec::with_capacity(line.spans.len());
-    let mut extras = Vec::with_capacity(line.spans.len());
-
-    for (index, span) in line.spans.iter().enumerate() {
+    for span in line.spans.iter() {
         let count = span.display_text.chars().count();
         if line_chars.get(display_base..display_base.saturating_add(count))
             != Some(span.display_text.chars().collect::<Vec<_>>().as_slice())
         {
             return Err(PresentationProjectionError::DisplayTopologyMismatch);
         }
-        let fixed_width = span.geometry.width.to_points_f32() * scale;
-        let nominal_width = FixedPoint::from_raw(
-            span.char_width
-                .raw()
-                .saturating_mul(i64::try_from(count).unwrap_or(i64::MAX)),
-        );
-        let extra_raw = span
-            .geometry
-            .width
-            .raw()
-            .saturating_sub(nominal_width.raw())
-            .max(0);
-        let extra = FixedPoint::from_raw(extra_raw).to_points_f32() * scale;
-        if extra_raw > 0 {
-            let is_gap = count > 0
-                && line.alignment == ParagraphAlignment::Justified
-                && span.display_text.chars().all(char::is_whitespace)
-                && display_base > 0
-                && display_base + count < line_chars.len()
-                && !line_chars[display_base - 1].is_whitespace()
-                && !line_chars[display_base + count].is_whitespace();
-            if !is_gap {
-                return Err(PresentationProjectionError::AmbiguousJustificationExtra);
-            }
-        }
-        extras.push(extra);
-
-        match (modes[index], natural[index].as_ref()) {
-            (AdvanceMode::Proportional, Some(geometry)) => {
-                if geometry.display_boundary_offsets.len() != count + 1
-                    || !geometry.natural_advance.is_finite()
-                    || geometry.display_boundary_offsets.first().copied() != Some(0.0)
-                    || geometry.display_boundary_offsets.last().copied()
-                        != Some(geometry.natural_advance)
-                    || !geometry
-                        .display_boundary_offsets
-                        .windows(2)
-                        .all(|pair| pair[0].is_finite() && pair[0] <= pair[1])
-                {
-                    return Err(PresentationProjectionError::InvalidNaturalBoundaries);
-                }
-                let mut offsets = geometry.display_boundary_offsets.to_vec();
-                if let Some(final_boundary) = offsets.last_mut() {
-                    *final_boundary += extra;
-                }
-                advances.push(geometry.natural_advance + extra);
-                boundaries.push(Arc::<[f32]>::from(offsets));
-            }
-            (AdvanceMode::Proportional, None) => {
-                return Err(PresentationProjectionError::MissingNaturalGeometry);
-            }
-            (AdvanceMode::FixedCell, Some(_)) => {
-                return Err(PresentationProjectionError::UnexpectedNaturalGeometry);
-            }
-            (AdvanceMode::FixedCell, None) => {
-                let cell = if count > 0
-                    && fixed_width > span.char_width.to_points_f32() * count as f32 * scale
-                {
-                    fixed_width / count as f32
-                } else {
-                    span.char_width.to_points_f32() * scale
-                };
-                let mut offsets = (0..=count)
-                    .map(|boundary| boundary as f32 * cell)
-                    .collect::<Vec<_>>();
-                if let Some(final_boundary) = offsets.last_mut() {
-                    *final_boundary = fixed_width;
-                }
-                advances.push(fixed_width);
-                boundaries.push(Arc::<[f32]>::from(offsets));
-            }
+        let offsets = span
+            .display_boundary_offsets
+            .iter()
+            .map(|offset| offset.to_points_f32() * scale)
+            .collect::<Vec<_>>();
+        let width = span.geometry.width.to_points_f32() * scale;
+        if offsets.len() != count + 1
+            || offsets.first().copied() != Some(0.0)
+            || offsets.last().copied() != Some(width)
+            || !offsets
+                .windows(2)
+                .all(|pair| pair[0].is_finite() && pair[0] <= pair[1])
+        {
+            return Err(PresentationProjectionError::InvalidCanonicalBoundaries);
         }
         display_base = display_base.saturating_add(count);
     }
@@ -159,8 +73,8 @@ pub(crate) fn project_line<'a>(
         return Err(PresentationProjectionError::DisplayTopologyMismatch);
     }
 
-    let total_advance = advances.iter().sum::<f32>();
-    let line_left = line.unaligned_line_left.to_points_f32() * scale;
+    let total_advance = line.geometry.width.to_points_f32() * scale;
+    let line_origin_x = line.geometry.x.to_points_f32() * scale;
     let paragraph_left = line.paragraph_bounds.x.to_points_f32() * scale;
     let paragraph_right = FixedPoint::from_raw(
         line.paragraph_bounds
@@ -170,14 +84,6 @@ pub(crate) fn project_line<'a>(
     )
     .to_points_f32()
         * scale;
-    let line_origin_x = match line.alignment {
-        ParagraphAlignment::Left | ParagraphAlignment::Justified => line_left,
-        ParagraphAlignment::Right => paragraph_right - total_advance,
-        ParagraphAlignment::Center => {
-            let spare = (paragraph_right - line_left - total_advance).max(0.0);
-            line_left + spare / 2.0
-        }
-    };
     let paragraph_y = line.paragraph_bounds.y.to_points_f32() * scale;
     let paragraph_height = line.paragraph_bounds.height.to_points_f32() * scale;
     let clip_bounds = egui::Rect::from_min_size(
@@ -187,25 +93,21 @@ pub(crate) fn project_line<'a>(
             paragraph_height.max(0.0),
         ),
     );
-    let mut cursor_x = line_origin_x;
     let spans = line
         .spans
         .iter()
-        .enumerate()
-        .map(|(index, core)| {
-            let projected = PresentationSpan {
-                core,
-                advance_mode: modes[index],
-                origin_x: cursor_x,
-                advance: advances[index],
-                display_boundary_offsets: boundaries[index].clone(),
-                natural: natural[index].clone(),
-            };
-            cursor_x += advances[index];
-            projected
+        .map(|core| PresentationSpan {
+            core,
+            origin_x: core.geometry.x.to_points_f32() * scale,
+            advance: core.geometry.width.to_points_f32() * scale,
+            display_boundary_offsets: Arc::from(
+                core.display_boundary_offsets
+                    .iter()
+                    .map(|offset| offset.to_points_f32() * scale)
+                    .collect::<Vec<_>>(),
+            ),
         })
         .collect();
-    debug_assert_eq!(extras.len(), line.spans.len());
     Ok(PresentationLine {
         core: line,
         line_origin_x,
@@ -221,10 +123,20 @@ pub(crate) fn project_line<'a>(
 pub(super) fn line_display_boundaries(line: &PresentationLine<'_>) -> Vec<f32> {
     let mut boundaries = Vec::new();
     for span in &line.spans {
+        let span_origin = span.origin_x - line.line_origin_x;
         if boundaries.is_empty() {
-            boundaries.extend(span.display_boundary_offsets.iter().copied());
+            boundaries.extend(
+                span.display_boundary_offsets
+                    .iter()
+                    .map(|offset| span_origin + offset),
+            );
         } else {
-            boundaries.extend(span.display_boundary_offsets.iter().skip(1).copied());
+            boundaries.extend(
+                span.display_boundary_offsets
+                    .iter()
+                    .skip(1)
+                    .map(|offset| span_origin + offset),
+            );
         }
     }
     if boundaries.is_empty() {
@@ -238,6 +150,9 @@ pub(super) fn x_for_display_boundary(
     line: &PresentationLine<'_>,
     display_boundary: usize,
 ) -> Option<f32> {
+    if line.spans.is_empty() {
+        return (display_boundary == 0).then_some(line.line_origin_x);
+    }
     let (span_index, local_boundary) = span_for_display_boundary(line, display_boundary)?;
     let span = line.spans.get(span_index)?;
     span.display_boundary_offsets
@@ -365,13 +280,10 @@ pub(crate) fn projected_target_boundary(
         .then(|| display_boundary_for_x(projection, screen_x))
 }
 
-/// Makes a color-only galley variant for the clipped selected-foreground pass.
+/// Makes a color-only variant for the clipped selected-foreground pass.
 /// Glyph positions, advances, row sizes, and mesh positions remain identical.
-pub(crate) fn recolor_natural_galley(
-    geometry: &NaturalGalleyGeometry,
-    color: Color32,
-) -> Arc<Galley> {
-    let mut galley = (*geometry.galley).clone();
+pub(crate) fn recolor_galley(galley: &Arc<Galley>, color: Color32) -> Arc<Galley> {
+    let mut galley = (**galley).clone();
     for placed_row in &mut galley.rows {
         let row = Arc::make_mut(&mut placed_row.row);
         for vertex in &mut row.visuals.mesh.vertices {
@@ -382,70 +294,57 @@ pub(crate) fn recolor_natural_galley(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NaturalGalleyTopology {
+pub(crate) enum CanonicalGalleyError {
     Elided,
     RowCount,
     Newline,
     TextMismatch,
     GlyphCount,
     GlyphCharacter,
-    InvalidOriginOrAdvance,
-    InvalidGlyphGeometry,
-    CursorMismatch,
-    NonFiniteCursor,
-    NonMonotonicCursor,
+    InvalidBoundaries,
+    InvalidMeshTopology,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NaturalGalleyError {
-    NotProportional,
-    UnsupportedTopology(NaturalGalleyTopology),
-}
-
-/// Builds one natural single-line galley and its cursor-derived display
-/// boundaries. Selection is deliberately absent from both the signature and
-/// geometry. The UV-bearing result is scoped to the current egui pass; egui's
-/// own layout cache remains responsible for atlas-aware text layout reuse.
-pub(crate) fn natural_singleline_geometry(
+/// Builds a single-line galley and places each glyph origin at the matching
+/// canonical display boundary. Font shaping supplies glyph UVs only; it never
+/// supplies line advances or interaction coordinates.
+pub(crate) fn canonical_singleline_galley(
     painter: &egui::Painter,
     text: &str,
     font: &FontId,
-    advance_mode: AdvanceMode,
+    display_boundary_offsets: &[f32],
     ordinary_color: Color32,
-) -> Result<(Arc<NaturalGalleyGeometry>, bool), NaturalGalleyError> {
-    if advance_mode != AdvanceMode::Proportional {
-        return Err(NaturalGalleyError::NotProportional);
+) -> Result<Arc<Galley>, CanonicalGalleyError> {
+    let count = text.chars().count();
+    if display_boundary_offsets.len() != count.saturating_add(1)
+        || display_boundary_offsets.first().copied() != Some(0.0)
+        || !display_boundary_offsets
+            .windows(2)
+            .all(|pair| pair[0].is_finite() && pair[0] <= pair[1])
+    {
+        return Err(CanonicalGalleyError::InvalidBoundaries);
     }
 
     let job = LayoutJob::simple_singleline(text.to_owned(), font.clone(), ordinary_color);
-    let galley = painter.layout_job(job);
-    let geometry = Arc::new(geometry_from_galley(text, galley)?);
-    Ok((geometry, false))
-}
-
-fn geometry_from_galley(
-    display_text: &str,
-    galley: Arc<Galley>,
-) -> Result<NaturalGalleyGeometry, NaturalGalleyError> {
-    use NaturalGalleyTopology as Topology;
-    let fail = |reason| Err(NaturalGalleyError::UnsupportedTopology(reason));
+    let mut galley = painter.layout_job(job).as_ref().clone();
+    let fail = |reason| Err(reason);
     if galley.elided {
-        return fail(Topology::Elided);
+        return fail(CanonicalGalleyError::Elided);
     }
     if galley.rows.len() != 1 {
-        return fail(Topology::RowCount);
+        return fail(CanonicalGalleyError::RowCount);
     }
-    if galley.text() != display_text {
-        return fail(Topology::TextMismatch);
+    if galley.text() != text {
+        return fail(CanonicalGalleyError::TextMismatch);
     }
 
     let row = &galley.rows[0];
     if row.ends_with_newline {
-        return fail(Topology::Newline);
+        return fail(CanonicalGalleyError::Newline);
     }
-    let chars = display_text.chars().collect::<Vec<_>>();
+    let chars = text.chars().collect::<Vec<_>>();
     if row.glyphs.len() != chars.len() {
-        return fail(Topology::GlyphCount);
+        return fail(CanonicalGalleyError::GlyphCount);
     }
     if row
         .glyphs
@@ -453,57 +352,159 @@ fn geometry_from_galley(
         .zip(&chars)
         .any(|(glyph, expected)| glyph.chr != *expected)
     {
-        return fail(Topology::GlyphCharacter);
+        return fail(CanonicalGalleyError::GlyphCharacter);
+    }
+    let placed_row = &mut galley.rows[0];
+    let row = Arc::make_mut(&mut placed_row.row);
+    let expected_vertex_count = row
+        .glyphs
+        .iter()
+        .filter(|glyph| !glyph.uv_rect.is_nothing())
+        .count()
+        .saturating_mul(4);
+    if row.visuals.glyph_vertex_range.len() != expected_vertex_count {
+        return fail(CanonicalGalleyError::InvalidMeshTopology);
     }
 
-    let natural_advance = galley.rect.width();
-    if !natural_advance.is_finite()
-        || natural_advance < 0.0
-        || galley.rect.left() != 0.0
-        || galley.rect.right() != row.size.x
-        || row.pos.x != 0.0
-    {
-        return fail(Topology::InvalidOriginOrAdvance);
+    let pixels_per_point = galley.pixels_per_point;
+    let mut vertex_index = row.visuals.glyph_vertex_range.start;
+    let vertex_end = row.visuals.glyph_vertex_range.end;
+    for (index, glyph) in row.glyphs.iter_mut().enumerate() {
+        let left_boundary = display_boundary_offsets[index];
+        let right_boundary = display_boundary_offsets[index + 1];
+        let advance = right_boundary - left_boundary;
+        if !left_boundary.is_finite() || !advance.is_finite() || advance < 0.0 {
+            return fail(CanonicalGalleyError::InvalidBoundaries);
+        }
+        if !glyph.uv_rect.is_nothing() {
+            let Some(vertices) = row
+                .visuals
+                .mesh
+                .vertices
+                .get_mut(vertex_index..vertex_index.saturating_add(4))
+            else {
+                return fail(CanonicalGalleyError::InvalidMeshTopology);
+            };
+            let round_to_pixel = |value: f32| (value * pixels_per_point).round() / pixels_per_point;
+            let left = left_boundary + round_to_pixel(glyph.uv_rect.offset.x);
+            let right = left + glyph.uv_rect.size.x;
+            vertices[0].pos.x = left;
+            vertices[1].pos.x = right;
+            vertices[2].pos.x = left;
+            vertices[3].pos.x = right;
+            vertex_index = vertex_index.saturating_add(4);
+        }
+        glyph.pos.x = left_boundary;
+        glyph.advance_width = advance;
     }
-    if !row.size.x.is_finite()
-        || row.glyphs.iter().any(|glyph| {
-            !glyph.pos.x.is_finite()
-                || !glyph.advance_width.is_finite()
-                || glyph.advance_width < 0.0
-        })
-    {
-        return fail(Topology::InvalidGlyphGeometry);
+    if vertex_index != vertex_end {
+        return fail(CanonicalGalleyError::InvalidMeshTopology);
     }
 
-    let mut offsets = Vec::with_capacity(chars.len() + 1);
-    for boundary in 0..=chars.len() {
-        // CCursor indexes Unicode scalar boundaries, not UTF-8 bytes. epaint's
-        // cursor map and the glyph records are both read from this same galley.
-        let cursor_x = galley
-            .pos_from_cursor(egui::text::CCursor::new(boundary))
-            .left();
-        if !cursor_x.is_finite() {
-            return fail(Topology::NonFiniteCursor);
-        }
-        let expected_x = row
-            .glyphs
-            .get(boundary)
-            .map_or(natural_advance, |glyph| glyph.pos.x);
-        if cursor_x != expected_x {
-            return fail(Topology::CursorMismatch);
-        }
-        if offsets.last().is_some_and(|previous| cursor_x < *previous) {
-            return fail(Topology::NonMonotonicCursor);
-        }
-        offsets.push(cursor_x);
-    }
-    if offsets.first().copied() != Some(0.0) || offsets.last().copied() != Some(natural_advance) {
-        return fail(Topology::InvalidOriginOrAdvance);
+    let width = *display_boundary_offsets.last().unwrap_or(&0.0);
+    placed_row.pos.x = 0.0;
+    row.size.x = width;
+    row.visuals.mesh_bounds = row.visuals.mesh.calc_bounds();
+    galley.rect.min.x = 0.0;
+    galley.rect.max.x = width;
+    galley.mesh_bounds = galley.rows.iter().fold(egui::Rect::NOTHING, |bounds, row| {
+        bounds.union(row.visuals.mesh_bounds)
+    });
+    Ok(Arc::new(galley))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_galley_uses_supplied_offsets_for_every_glyph() {
+        let context = egui::Context::default();
+        context.run(egui::RawInput::default(), |context| {
+            let painter = context.layer_painter(egui::LayerId::new(
+                egui::Order::Background,
+                egui::Id::new("canonical-galley-test"),
+            ));
+            let offsets = [0.0, 4.25, 17.0];
+            let galley = canonical_singleline_galley(
+                &painter,
+                "Wi",
+                &FontId::monospace(12.0),
+                &offsets,
+                Color32::WHITE,
+            )
+            .expect("supported one-glyph-per-scalar topology");
+            let glyphs = &galley.rows[0].row.glyphs;
+            assert_eq!(glyphs.len(), 2);
+            assert_eq!(glyphs[0].pos.x, 0.0);
+            assert_eq!(glyphs[0].advance_width, 4.25);
+            assert_eq!(glyphs[1].pos.x, 4.25);
+            assert_eq!(glyphs[1].advance_width, 12.75);
+            assert_eq!(galley.rect.width(), 17.0);
+        });
     }
 
-    Ok(NaturalGalleyGeometry {
-        galley,
-        display_boundary_offsets: offsets.into(),
-        natural_advance,
-    })
+    #[test]
+    fn canonical_galley_rejects_boundary_topology_mismatch() {
+        let context = egui::Context::default();
+        let painter = context.layer_painter(egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("canonical-galley-invalid-test"),
+        ));
+        let error = canonical_singleline_galley(
+            &painter,
+            "two",
+            &FontId::monospace(12.0),
+            &[0.0, 5.0],
+            Color32::WHITE,
+        )
+        .expect_err("one display boundary is required per scalar plus final edge");
+        assert_eq!(error, CanonicalGalleyError::InvalidBoundaries);
+    }
+
+    #[test]
+    fn proportional_canonical_boundaries_drive_pointer_and_caret_projection() {
+        let mut project = scriptcraft_model::Project::new()
+            .unwrap_or_else(|_| unreachable!("default project is valid"));
+        project.elements = vec![scriptcraft_model::BodyOwner::shared(
+            scriptcraft_model::ScreenplayElement::new(
+                "desktop-proportional-boundary",
+                scriptcraft_model::Role::Action,
+                "Wi",
+            )
+            .unwrap_or_else(|_| unreachable!("bounded short element is valid")),
+        )];
+        let layout = scriptcraft_layout::ScreenplayLayout::build(&project)
+            .unwrap_or_else(|_| unreachable!("default layout inputs are valid"));
+        let source_line = layout
+            .pages
+            .iter()
+            .flat_map(|page| page.lines.iter())
+            .find(|line| line.element == 0)
+            .unwrap_or_else(|| unreachable!("project contains the test line"));
+        let mut line = source_line.clone();
+        let mut spans = line.spans.to_vec();
+        assert_eq!(spans.len(), 1);
+        spans[0].geometry.width = FixedPoint::from_raw(1_700);
+        spans[0].display_boundary_offsets = Arc::from(vec![
+            FixedPoint::default(),
+            FixedPoint::from_raw(425),
+            FixedPoint::from_raw(1_700),
+        ]);
+        line.spans = Arc::from(spans);
+        line.geometry.width = FixedPoint::from_raw(1_700);
+
+        let projected = project_line(&line, 2.0)
+            .unwrap_or_else(|_| unreachable!("synthetic proportional boundaries are valid"));
+        let second_boundary = projected.line_origin_x + 8.5;
+        assert_eq!(x_for_display_boundary(&projected, 1), Some(second_boundary));
+        assert_eq!(
+            projected_caret_for_x(&projected, second_boundary + 0.5).offset,
+            1
+        );
+        let caret = projected_caret_rect(&projected, 1, 2.0, 1.0)
+            .unwrap_or_else(|| unreachable!("source boundary resolves to a projected caret"));
+        assert_eq!(caret.rect.min.x, second_boundary);
+        assert_eq!(display_boundary_for_x(&projected, second_boundary + 0.5), 1);
+    }
 }

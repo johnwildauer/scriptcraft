@@ -193,7 +193,6 @@ fn session_activation_failure_code(
         EditError::EmptyHistory => "EDIT_EMPTY_HISTORY",
         EditError::TextTooLong => "EDIT_TEXT_LIMIT",
         EditError::TooManyElements => "EDIT_ELEMENT_LIMIT",
-        EditError::UnsupportedTransition { .. } => "EDIT_UNSUPPORTED_TRANSITION",
         EditError::InlineAltsRoleChange => "EDIT_INLINE_ALTS_ROLE_CHANGE",
         EditError::Preservation(_) => "EDIT_PRESERVATION_CONSTRAINT",
         EditError::InvalidDefinitionCandidate => "EDIT_INVALID_DEFINITION_CANDIDATE",

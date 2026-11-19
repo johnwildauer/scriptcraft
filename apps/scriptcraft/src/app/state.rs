@@ -79,7 +79,8 @@ impl Default for TitlePageViewState {
 pub(crate) struct ScriptCraftApp {
     pub(crate) session: EditingSession,
     pub(crate) root_close_lifecycle: RootCloseLifecycle,
-    pub(crate) document_font_availability: document_font::FontAvailability,
+    pub(crate) document_font_store: document_font::DocumentFontStore,
+    pub(crate) prepared_document_fonts: Option<document_font::PreparedDocumentFonts>,
     pub(crate) pending_commands: menu::PendingDesktopCommands,
     pub(crate) command_projection_cache: Option<CachedAppCommandProjection>,
     pub(crate) menu_policy: menu::RuntimeMenuPolicy,
@@ -197,7 +198,8 @@ impl ScriptCraftApp {
         Ok(Self {
             session,
             root_close_lifecycle: RootCloseLifecycle::default(),
-            document_font_availability: document_font::FontAvailability::default(),
+            document_font_store: document_font::DocumentFontStore::default(),
+            prepared_document_fonts: None,
             pending_commands: menu::PendingDesktopCommands::default(),
             command_projection_cache: None,
             menu_policy,

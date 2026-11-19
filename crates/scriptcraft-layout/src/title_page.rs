@@ -79,6 +79,8 @@ pub(super) fn compose_title_pages(
                         .saturating_add(6)
                         .div_euclid(12),
                 ),
+                starts_new_page: element.formatting.starts_new_page.unwrap_or(false),
+                pagination: super::inputs::PaginationPolicy::Ordinary,
             };
             let style = plain_title_style(inputs);
             // Phase 5 replaces this static-layout adapter; General remains the type-less fallback.
@@ -90,6 +92,7 @@ pub(super) fn compose_title_pages(
                 &element.text,
                 index,
                 role,
+                element.element_type.as_ref(),
                 paragraph,
                 style,
                 &element.runs,
@@ -108,6 +111,18 @@ pub(super) fn compose_title_pages(
             let placement_started = diagnostics.as_ref().map(|_| Instant::now());
             for line in lines {
                 let line_advance = line.paragraph.line_advance.raw();
+                let content_bottom = FixedPoint::from_points(i64::from(
+                    layout
+                        .inputs
+                        .paper_height
+                        .saturating_sub(layout.inputs.margin_bottom),
+                ));
+                if !page.lines.is_empty()
+                    && page.next_line_y.raw().saturating_add(line_advance) > content_bottom.raw()
+                {
+                    layout.pages.push(page);
+                    page = layout.new_page(true);
+                }
                 let laid_out = layout.make_line(page.number, line, true, page.next_line_y);
                 page.lines.push(laid_out);
                 page.occupied_lines = page.occupied_lines.saturating_add(1);

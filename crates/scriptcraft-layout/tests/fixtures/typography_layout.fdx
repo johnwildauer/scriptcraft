@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FinalDraft DocumentType="Script" Version="6">
+  <ElementSettings Type="Mono Layout">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="13" Style="Bold+Italic" Color="#87878F8FE0E0" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0.20" Leading="Regular" LeftIndent="0.00" RightIndent="0.00" SpaceBefore="2" Spacing="1" StartsNewPage="No" Type="Mono Layout" />
+    <Behavior ReturnKey="Sans Layout" TabKey="Serif Layout" PaginateAs="Character" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="Sans Layout">
+    <FontSpec AdornmentStyle="0" Font="Arial" RevisionID="0" Size="16" Style="Bold" />
+    <ParagraphSpec Alignment="Justified" FirstIndent="0.00" Leading="Regular" LeftIndent="1.00" RightIndent="1.00" SpaceBefore="4" Spacing="1" StartsNewPage="No" Type="Sans Layout" />
+    <Behavior ReturnKey="Mono Layout" TabKey="Mono Layout" PaginateAs="Ordinary" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="Serif Layout">
+    <FontSpec AdornmentStyle="0" Font="Times New Roman" RevisionID="0" Size="18" Style="Italic" />
+    <ParagraphSpec Alignment="Right" FirstIndent="0.00" Leading="Regular" LeftIndent="0.75" RightIndent="0.75" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Serif Layout" />
+    <Behavior ReturnKey="Action" TabKey="Action" PaginateAs="Parenthetical" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="Mystery Layout">
+    <FontSpec AdornmentStyle="0" Font="Uncatalogued Family" RevisionID="0" Size="11" Style="AllCaps+HiddenText" Color="not-a-supported-color" />
+    <ParagraphSpec Alignment="Center" FirstIndent="0.00" Leading="Regular" LeftIndent="1.25" RightIndent="1.25" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Mystery Layout" />
+    <Behavior ReturnKey="Action" TabKey="Action" PaginateAs="Not A Keep Class" />
+    <Outline CanHide="Yes" Level="2" />
+  </ElementSettings>
+  <ElementSettings Type="Misleading Scene">
+    <FontSpec AdornmentStyle="0" Font="Helvetica Neue" RevisionID="0" Size="12" Style="" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="0.00" RightIndent="0.00" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Misleading Scene" />
+    <Behavior PaginateAs="Scene Heading" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="Page Break Custom">
+    <FontSpec AdornmentStyle="0" Font="Times New Roman" RevisionID="0" Size="14" Style="Bold" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0.00" Leading="Regular" LeftIndent="0.00" RightIndent="0.00" SpaceBefore="0" Spacing="1" StartsNewPage="Yes" Type="Page Break Custom" />
+    <Behavior PaginateAs="Action" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+
+  <TitlePage>
+    <Content>
+      <Paragraph Type="Serif Layout" id="typography-title-serif" Alignment="Center">
+        <Text>Typography </Text><Text Font="Arial" Size="20" Style="Bold+Italic+Underline" Color="#123456789ABC">title café</Text>
+      </Paragraph>
+      <Paragraph id="typography-title-neutral"><Text>Type-less title baseline</Text></Paragraph>
+    </Content>
+  </TitlePage>
+  <Content>
+    <Paragraph Type="Mono Layout" id="typography-mono-long">
+      <Text>WWW iii proportional wrapping with repeated whitespace and unequal scalar widths. WWW iii proportional wrapping with repeated whitespace and unequal scalar widths.</Text>
+    </Paragraph>
+    <Paragraph Type="Sans Layout" id="typography-direct-overrides" Alignment="Center" FirstIndent="0.35" LeftIndent="1.20" RightIndent="1.20" SpaceBefore="6" StartsNewPage="Yes">
+      <Text>Definition style </Text><Text Font="Times New Roman" Size="21" Style="Bold+Italic+Underline" Color="#123456789ABC">direct run override café</Text>
+    </Paragraph>
+    <Paragraph Type="Mystery Layout" id="typography-unsupported-color"><Text>unsupported explicit color straße café</Text></Paragraph>
+    <Paragraph Type="Misleading Scene" id="typography-misleading-pagination"><Text>Pagination is not structural identity.</Text></Paragraph>
+    <Paragraph Type="Page Break Custom" id="typography-starts-new-page"><Text>Explicit page start.</Text></Paragraph>
+    <Paragraph Type="Action" id="typography-absent-color"><Text>Absent color follows presentation policy.</Text></Paragraph>
+    <Paragraph Type="Action" id="typography-case-source"><Text>Unicode all-caps source: straße café.</Text></Paragraph>
+
+    <Paragraph Type="General" id="typography-active-wrapper" LeftIndent="0.30" RightIndent="0.30">
+      <DualDialogue>
+        <SpellCheckIgnoreLists><IgnoredRanges /><IgnoredWords /></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="typography-active-left-cue"><Text>LEFT</Text></Paragraph>
+        <Paragraph Type="Dialogue" id="typography-active-left-line"><Text>Left side proportional words.</Text></Paragraph>
+        <Paragraph Type="Character" id="typography-active-right-cue"><Text>RIGHT</Text></Paragraph>
+        <Paragraph Type="Dialogue" id="typography-active-right-line"><Text>Right side proportional words.</Text></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+    <Paragraph Type="General" id="typography-inactive-wrapper">
+      <DualDialogue>
+        <SpellCheckIgnoreLists><IgnoredRanges /><IgnoredWords /></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="typography-inactive-left-cue"><Text>INACTIVE LEFT</Text></Paragraph>
+        <Paragraph Type="Action" id="typography-inactive-left-member"><Text>Ordinary sequential member.</Text></Paragraph>
+        <Paragraph Type="Character" id="typography-inactive-right-cue"><Text>INACTIVE RIGHT</Text></Paragraph>
+        <Paragraph Type="Dialogue" id="typography-inactive-right-line"><Text>Inactive groups remain sequential.</Text></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+  </Content>
+</FinalDraft>

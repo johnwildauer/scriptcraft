@@ -6,7 +6,7 @@ use crate::preservation::{
     ForeignIdDomain, ForeignIdentity, PreservationError, PreservationState, PreservedAttribute,
     PreservedElement, PreservedNode, SourceName, SourceOwnership,
 };
-use crate::{BodyOwner, ModelError, Project, Role, StableId};
+use crate::{BodyOwner, ModelError, Project, SemanticCapabilities, StableId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -43,7 +43,7 @@ pub fn reconcile_project_candidate_with_scope(
         // same projection is emitted directly from semantic content.
         return Ok(ReconcileOutcome::default());
     }
-    let scenes = scene_casts_with_scope(&project.elements, requested_scenes);
+    let scenes = scene_casts_with_scope(project, requested_scenes);
     let state = project
         .preservation
         .as_mut()
@@ -160,6 +160,15 @@ pub fn scene_arc_names(
     project: &Project,
     heading_id: &StableId,
 ) -> Result<Vec<String>, SceneMetadataError> {
+    let heading_is_scene = project
+        .elements
+        .iter()
+        .find(|element| &element.id == heading_id)
+        .and_then(|element| project.element_semantics(&element.element_type()))
+        .is_some_and(|semantics| semantics.capabilities().scene_boundary);
+    if !heading_is_scene {
+        return Err(SceneMetadataError::UnsupportedSceneMetadata);
+    }
     let state = project
         .preservation
         .as_ref()
@@ -337,13 +346,16 @@ fn generated_scene_properties_attributes(
     })
 }
 
-/// Projects canonical Character cues into normalized association keys and
-/// uppercase names for generated and imported scene metadata.
-pub fn derived_character_projection(elements: &[Arc<BodyOwner>]) -> Vec<(String, String)> {
+/// Projects exact-capability Character cues into normalized association keys
+/// and uppercase names for generated and imported scene metadata.
+pub fn derived_character_projection(
+    project: &Project,
+    elements: &[Arc<BodyOwner>],
+) -> Vec<(String, String)> {
     let mut seen = BTreeSet::new();
     let mut projection = Vec::new();
     for element in elements {
-        if element.transitional_role() != Role::Character {
+        if !has_capability(project, element, |capabilities| capabilities.character_cue) {
             continue;
         }
         let Some((key, name)) = projected_character_name(&element.text) else {
@@ -360,20 +372,20 @@ type SceneProjection = (StableId, Vec<(String, String)>);
 type ActiveSceneProjection = (StableId, Vec<(String, String)>, BTreeSet<String>);
 
 fn scene_casts_with_scope(
-    elements: &[Arc<BodyOwner>],
+    project: &Project,
     requested_scenes: Option<&BTreeSet<String>>,
 ) -> Vec<SceneProjection> {
     let mut scenes = Vec::new();
     let mut active: Option<ActiveSceneProjection> = None;
-    for element in elements {
-        if element.transitional_role() == Role::SceneHeading {
+    for element in &project.elements {
+        if has_capability(project, element, |capabilities| capabilities.scene_boundary) {
             if let Some((heading, projection, _)) = active.take() {
                 scenes.push((heading, projection));
             }
             if requested_scenes.is_none_or(|requested| requested.contains(element.id.as_str())) {
                 active = Some((element.id.clone(), Vec::new(), BTreeSet::new()));
             }
-        } else if element.transitional_role() == Role::Character {
+        } else if has_capability(project, element, |capabilities| capabilities.character_cue) {
             if let Some((_, projection, seen)) = active.as_mut() {
                 if let Some((key, name)) = projected_character_name(&element.text) {
                     if seen.insert(key.clone()) {
@@ -387,6 +399,18 @@ fn scene_casts_with_scope(
         scenes.push((heading, projection));
     }
     scenes
+}
+
+/// Returns a capability only through the current exact-key definition. An
+/// unregistered key has no inferred structural meaning.
+pub(crate) fn has_capability(
+    project: &Project,
+    element: &BodyOwner,
+    capability: impl FnOnce(SemanticCapabilities) -> bool,
+) -> bool {
+    project
+        .element_semantics(&element.element_type())
+        .is_some_and(|semantics| capability(semantics.capabilities()))
 }
 
 /// Constructs native metadata for a new document using the shared paragraph-ID allocator.
@@ -1051,5 +1075,120 @@ fn attribute(name: &str, value: &str) -> PreservedAttribute {
             qualified_name: Some(name.to_owned()),
         },
         value: value.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ElementTypeKey, Project, ScreenplayElement};
+
+    fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| panic!("test setup should be valid: {error:?}"))
+    }
+
+    fn project_with_misleading_pagination() -> Project {
+        let mut project = must(Project::new());
+        project.elements.clear();
+        let mut definitions = project
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for definition in &mut definitions {
+            if definition.key.as_str() == "Shot" {
+                definition.behavior.paginate_as = Some("Scene Heading".to_owned());
+            } else if definition.key.as_str() == "Lyrics" {
+                definition.behavior.paginate_as = Some("Character".to_owned());
+            }
+        }
+        let action = definitions
+            .iter()
+            .find(|definition| definition.key.as_str() == "Action")
+            .cloned()
+            .unwrap_or_else(|| panic!("Action definition is present"));
+        for (label, paginate_as) in [
+            ("Lyrics", Some("Character")),
+            ("scene heading", Some("Scene Heading")),
+            ("character", Some("Character")),
+            ("cast list", Some("Cast List")),
+        ] {
+            let mut definition = action.clone();
+            definition.key = must(ElementTypeKey::new(label));
+            definition.behavior.paginate_as = paginate_as.map(str::to_owned);
+            definitions.push(definition);
+        }
+        must(project.replace_element_definitions(definitions));
+        project
+    }
+
+    fn push_element(project: &mut Project, id: &str, element_type: &str, text: &str) {
+        let element = must(ScreenplayElement::new(
+            id,
+            must(ElementTypeKey::new(element_type)),
+            text,
+        ));
+        project.elements.push(BodyOwner::shared(element));
+    }
+
+    #[test]
+    fn scene_and_character_projections_use_only_exact_capabilities() {
+        let mut project = project_with_misleading_pagination();
+        push_element(&mut project, "scene-1", "Scene Heading", "INT. ROOM");
+        push_element(&mut project, "fake-scene", "Shot", "EXT. FALSE");
+        push_element(
+            &mut project,
+            "case-scene",
+            "scene heading",
+            "EXT. CASE VARIANT",
+        );
+        push_element(&mut project, "fake-cue", "Lyrics", "GHOST");
+        push_element(&mut project, "case-cue", "character", "CASE VARIANT");
+        push_element(&mut project, "cue-1", "Character", "  Élise (V.O.)  ");
+        push_element(&mut project, "cue-duplicate", "Character", "ÉLISE");
+        push_element(&mut project, "scene-2", "Scene Heading", "INT. HALL");
+        push_element(&mut project, "fake-cue-2", "Lyrics", "ANOTHER GHOST");
+
+        let projection = derived_character_projection(&project, &project.elements);
+        assert_eq!(projection, vec![("élise".to_owned(), "ÉLISE".to_owned())]);
+
+        let scenes = scene_casts_with_scope(&project, None);
+        assert_eq!(scenes.len(), 2);
+        assert_eq!(scenes[0].0.as_str(), "scene-1");
+        assert_eq!(scenes[0].1, projection);
+        assert_eq!(scenes[1].0.as_str(), "scene-2");
+        assert!(scenes[1].1.is_empty());
+    }
+
+    #[test]
+    fn cast_list_correction_ignores_arbitrary_labels_and_paginate_as() {
+        let mut project = project_with_misleading_pagination();
+        push_element(&mut project, "scene-1", "Scene Heading", "INT. ROOM");
+        push_element(&mut project, "false-list", "Lyrics", "(NOT A CAST LIST)");
+        push_element(
+            &mut project,
+            "case-list",
+            "cast list",
+            "(NOT A CAST LIST EITHER)",
+        );
+        push_element(&mut project, "false-scene", "Shot", "EXT. FALSE");
+        push_element(&mut project, "case-cue", "character", "NOT A CUE");
+        push_element(&mut project, "cue-1", "Character", "  Élodie (O.S.) ");
+        push_element(&mut project, "list-1", "Cast List", "(STALE)");
+        push_element(&mut project, "scene-2", "Scene Heading", "INT. HALL");
+        push_element(&mut project, "list-2", "Cast List", "(STALE)");
+
+        assert!(crate::cast_list::correct_cast_lists(&mut project).is_ok());
+        let text = |id: &str| {
+            project
+                .elements
+                .iter()
+                .find(|element| element.id.as_str() == id)
+                .map(|element| element.text.as_str())
+        };
+        assert_eq!(text("false-list"), Some("(NOT A CAST LIST)"));
+        assert_eq!(text("case-list"), Some("(NOT A CAST LIST EITHER)"));
+        assert_eq!(text("list-1"), Some("(ÉLODIE)"));
+        assert_eq!(text("list-2"), Some("()"));
     }
 }

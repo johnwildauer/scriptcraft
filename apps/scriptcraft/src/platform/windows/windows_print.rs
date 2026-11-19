@@ -114,6 +114,23 @@ impl PreparedPackages {
             include_title_page,
         }
     }
+
+    pub(crate) fn typography_report_summary(&self) -> Option<String> {
+        let include = self.include.typography_report().summary();
+        let omit = self.omit.typography_report().summary();
+        match (include, omit) {
+            (None, None) => None,
+            (Some(include), Some(omit)) => Some(format!(
+                "Prepared title-page variants — included: {include}; omitted: {omit}"
+            )),
+            (Some(include), None) => Some(format!(
+                "Prepared title-page variant included: {include}; omitted variant has no typography fallbacks"
+            )),
+            (None, Some(omit)) => Some(format!(
+                "Prepared title-page variant included has no typography fallbacks; omitted: {omit}"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +170,7 @@ impl PrintPreparation {
     pub(crate) fn start(
         project: scriptcraft_model::Project,
         inputs: scriptcraft_model::LayoutInputs,
+        layout_environment: scriptcraft_layout::LayoutEnvironment,
         request_revision: u64,
         job_title: String,
     ) -> Result<Self, StartFailure> {
@@ -163,11 +181,11 @@ impl PrintPreparation {
         std::thread::Builder::new()
             .name("scriptcraft-print-package".to_owned())
             .spawn(move || {
-                let include = document::build_package(&project, &inputs, true)
+                let include = document::build_package(&project, &inputs, &layout_environment, true)
                     .map_err(|_| StartFailure::PreparationFailed);
                 let prepared = match include {
                     Ok(include) if !worker_cancelled.load(Ordering::Acquire) => {
-                        document::build_package(&project, &inputs, false)
+                        document::build_package(&project, &inputs, &layout_environment, false)
                             .map(|omit| PreparedPackages {
                                 request_id,
                                 request_revision,
@@ -1081,14 +1099,8 @@ fn draw_vector_page(
     }
 
     let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }?;
-    let ink = D2D1_COLOR_F {
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-        a: 1.0,
-    };
-    let brush = unsafe { context.CreateSolidColorBrush(&ink, None) }?;
     let locale = HSTRING::from("en-us");
+    let mut drawn_scalars = 0usize;
 
     for (index, run) in page.runs().iter().enumerate() {
         if index.is_multiple_of(64) && callback_deadline_expired(started) {
@@ -1107,26 +1119,17 @@ fn draw_vector_page(
         {
             return Err(callback_error());
         }
-        let bold = matches!(
-            run.face(),
-            document::PrintFontFace::CourierNewBold | document::PrintFontFace::CourierNewBoldItalic
-        );
-        let italic = matches!(
-            run.face(),
-            document::PrintFontFace::CourierNewItalic
-                | document::PrintFontFace::CourierNewBoldItalic
-        );
-        let face = HSTRING::from(run.face().family_name());
+        let face = HSTRING::from(run.family_name());
         let format = unsafe {
             factory.CreateTextFormat(
                 windows::core::PCWSTR(face.as_ptr()),
                 None,
-                if bold {
+                if run.bold() {
                     DWRITE_FONT_WEIGHT_BOLD
                 } else {
                     DWRITE_FONT_WEIGHT_NORMAL
                 },
-                if italic {
+                if run.italic() {
                     DWRITE_FONT_STYLE_ITALIC
                 } else {
                     DWRITE_FONT_STYLE_NORMAL
@@ -1139,17 +1142,60 @@ fn draw_vector_page(
         // SAFETY: The format is a live DirectWrite object created on this
         // callback thread and the enum is a valid SDK word-wrapping value.
         unsafe { format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP) }?;
-        let text = run.text().encode_utf16().collect::<Vec<_>>();
-        unsafe {
-            context.DrawText(
-                &text,
-                &format,
-                &rect,
-                &brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
-            )
+        let [red, green, blue] = run.color_rgb();
+        let ink = D2D1_COLOR_F {
+            r: f32::from(red) / 255.0,
+            g: f32::from(green) / 255.0,
+            b: f32::from(blue) / 255.0,
+            a: 1.0,
         };
+        // Per-run brushes are intentionally not cached: native resources are
+        // bounded by the existing per-page run limit and released with a run.
+        let brush = unsafe { context.CreateSolidColorBrush(&ink, None) }?;
+        let offsets = run.display_boundary_offsets();
+        for (scalar_index, (scalar, pair)) in run.text().chars().zip(offsets.windows(2)).enumerate()
+        {
+            if scalar_index.is_multiple_of(256) && callback_deadline_expired(started) {
+                return Err(callback_error());
+            }
+            let left_offset = pair[0].to_points_f32() * (96.0 / 72.0) * transform.scale;
+            let right_offset = pair[1].to_points_f32() * (96.0 / 72.0) * transform.scale;
+            if !left_offset.is_finite() || !right_offset.is_finite() || right_offset <= left_offset
+            {
+                return Err(callback_error());
+            }
+            let scalar_rect = D2D_RECT_F {
+                left: rect.left + left_offset,
+                top: rect.top,
+                right: rect.left + right_offset,
+                bottom: rect.bottom,
+            };
+            if ![
+                scalar_rect.left,
+                scalar_rect.top,
+                scalar_rect.right,
+                scalar_rect.bottom,
+            ]
+            .into_iter()
+            .all(f32::is_finite)
+                || scalar_rect.right <= scalar_rect.left
+            {
+                return Err(callback_error());
+            }
+            let mut utf16 = [0u16; 2];
+            let scalar_text = scalar.encode_utf16(&mut utf16);
+            unsafe {
+                context.DrawText(
+                    scalar_text,
+                    &format,
+                    &scalar_rect,
+                    &brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                )
+            };
+            drawn_scalars = drawn_scalars.saturating_add(1);
+        }
 
         let (underline, strikethrough) = decoration_rects(rect, transform.scale);
         if run.underline() {
@@ -1161,7 +1207,10 @@ fn draw_vector_page(
             unsafe { context.FillRectangle(&line, &brush) };
         }
     }
-    if total_runs > MAX_RUNS_PER_CALLBACK_PAGE || text_bytes > MAX_TEXT_BYTES_PER_CALLBACK_PAGE {
+    if total_runs > MAX_RUNS_PER_CALLBACK_PAGE
+        || text_bytes > MAX_TEXT_BYTES_PER_CALLBACK_PAGE
+        || drawn_scalars > MAX_TEXT_BYTES_PER_CALLBACK_PAGE
+    {
         return Err(callback_error());
     }
     Ok(())
@@ -1211,4 +1260,16 @@ fn decoration_rects(rect: D2D_RECT_F, scale: f32) -> (D2D_RECT_F, D2D_RECT_F) {
             bottom: strike_top + height,
         },
     )
+}
+
+#[cfg(test)]
+mod windows_print_policy_tests {
+    #[test]
+    fn native_callback_resource_limits_remain_bounded() {
+        assert_eq!(super::MAX_RUNS_PER_CALLBACK_PAGE, 8_192);
+        assert_eq!(super::MAX_TEXT_BYTES_PER_CALLBACK_PAGE, 1_048_576);
+        assert_eq!(super::MAX_FINAL_PAGES_PER_CALLBACK, 512);
+        assert_eq!(super::MAX_FINAL_RUNS_PER_CALLBACK, 65_536);
+        assert_eq!(super::MAX_FINAL_TEXT_BYTES_PER_CALLBACK, 8_388_608);
+    }
 }

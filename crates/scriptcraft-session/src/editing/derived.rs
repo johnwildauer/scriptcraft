@@ -2,7 +2,7 @@
 
 use super::{EditError, EditingSession};
 use scriptcraft_model::cast_list::{self, CastListCorrection};
-use scriptcraft_model::{BodyOwner, Project, Role, ScreenplayElement};
+use scriptcraft_model::{BodyOwner, Project, ScreenplayElement, SemanticCapabilities};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -218,17 +218,31 @@ pub(super) fn can_skip_derived_invalidation(
     // candidates with a complete valid baseline and unchanged non-target state.
     // Character text and scene-heading text/topology are the derived inputs.
     scoped_valid
+        && before.element_definitions() == after.element_definitions()
         && before
             .elements
             .get(element_index)
             .zip(after.elements.get(element_index))
-            .is_some_and(|(before, after)| {
-                before.id == after.id
-                    && before.element_type() == after.element_type()
-                    && !matches!(
-                        before.transitional_role(),
-                        Role::Character | Role::SceneHeading
-                    )
+            .is_some_and(|(old_owner, new_owner)| {
+                if old_owner.id != new_owner.id
+                    || old_owner.element_type() != new_owner.element_type()
+                {
+                    return false;
+                }
+                let Some(before_capabilities) = before
+                    .element_semantics(&old_owner.element_type())
+                    .map(|semantics| semantics.capabilities())
+                else {
+                    return false;
+                };
+                let Some(after_capabilities) = after
+                    .element_semantics(&new_owner.element_type())
+                    .map(|semantics| semantics.capabilities())
+                else {
+                    return false;
+                };
+                !is_scene_or_character_relevant(before_capabilities)
+                    && !is_scene_or_character_relevant(after_capabilities)
             })
 }
 
@@ -245,17 +259,29 @@ pub(super) fn classify_derived_invalidation(
     let Some(after_by_id) = unique_elements_by_id(&after.elements) else {
         return PendingDerivedInvalidation::Complete;
     };
+    // Resolve each side against its own registry. A missing current definition
+    // makes the projection ambiguous, so keep the safe whole-document fallback.
+    let Some(before_capabilities) = capability_projection(before, &before.elements) else {
+        return PendingDerivedInvalidation::Complete;
+    };
+    let Some(after_capabilities) = capability_projection(after, &after.elements) else {
+        return PendingDerivedInvalidation::Complete;
+    };
 
     let before_heading_order = before
         .elements
         .iter()
-        .filter(|element| element.transitional_role() == Role::SceneHeading)
+        .zip(&before_capabilities)
+        .filter(|(_, capabilities)| capabilities.scene_boundary)
+        .map(|(element, _)| element)
         .map(|element| element.id.as_str())
         .collect::<Vec<_>>();
     let after_heading_order = after
         .elements
         .iter()
-        .filter(|element| element.transitional_role() == Role::SceneHeading)
+        .zip(&after_capabilities)
+        .filter(|(_, capabilities)| capabilities.scene_boundary)
+        .map(|(element, _)| element)
         .map(|element| element.id.as_str())
         .collect::<Vec<_>>();
     let before_heading_set = before_heading_order
@@ -285,10 +311,14 @@ pub(super) fn classify_derived_invalidation(
     // whose changes can affect a scene's generated cast and arc data. Building
     // it on both sides also catches cue insertion/deletion, role transitions,
     // cue reorder, and ownership transfer caused by heading topology edits.
-    let Some(before_character_inputs) = character_projection_inputs(&before.elements) else {
+    let Some(before_character_inputs) =
+        character_projection_inputs(&before.elements, &before_capabilities)
+    else {
         return PendingDerivedInvalidation::Complete;
     };
-    let Some(after_character_inputs) = character_projection_inputs(&after.elements) else {
+    let Some(after_character_inputs) =
+        character_projection_inputs(&after.elements, &after_capabilities)
+    else {
         return PendingDerivedInvalidation::Complete;
     };
 
@@ -314,8 +344,20 @@ pub(super) fn classify_derived_invalidation(
     // live scene owners.
     for (id, old) in &before_by_id {
         if let Some(new) = after_by_id.get(id) {
-            if old.transitional_role() == Role::SceneHeading
-                && new.transitional_role() == Role::SceneHeading
+            let Some(old_capabilities) = before
+                .element_semantics(&old.element_type())
+                .map(|semantics| semantics.capabilities())
+            else {
+                return PendingDerivedInvalidation::Complete;
+            };
+            let Some(new_capabilities) = after
+                .element_semantics(&new.element_type())
+                .map(|semantics| semantics.capabilities())
+            else {
+                return PendingDerivedInvalidation::Complete;
+            };
+            if old_capabilities.scene_boundary
+                && new_capabilities.scene_boundary
                 && old.text != new.text
             {
                 affected.insert(id.clone());
@@ -345,15 +387,34 @@ fn unique_elements_by_id(
     Some(by_id)
 }
 
+fn is_scene_or_character_relevant(capabilities: SemanticCapabilities) -> bool {
+    capabilities.scene_boundary || capabilities.character_cue
+}
+
+fn capability_projection(
+    project: &Project,
+    elements: &[Arc<BodyOwner>],
+) -> Option<Vec<SemanticCapabilities>> {
+    elements
+        .iter()
+        .map(|element| {
+            project
+                .element_semantics(&element.element_type())
+                .map(|semantics| semantics.capabilities())
+        })
+        .collect()
+}
+
 fn character_projection_inputs(
     elements: &[Arc<BodyOwner>],
+    capabilities: &[SemanticCapabilities],
 ) -> Option<BTreeMap<String, Vec<(String, String)>>> {
     let mut by_scene = BTreeMap::<String, Vec<(String, String)>>::new();
-    for (index, element) in elements.iter().enumerate() {
-        if element.transitional_role() != Role::Character {
+    for (index, (element, capability)) in elements.iter().zip(capabilities).enumerate() {
+        if !capability.character_cue {
             continue;
         }
-        let owner = owning_scene_id(elements, index)?;
+        let owner = owning_scene_id(elements, capabilities, index)?;
         by_scene
             .entry(owner)
             .or_default()
@@ -362,11 +423,40 @@ fn character_projection_inputs(
     Some(by_scene)
 }
 
-fn owning_scene_id(elements: &[Arc<BodyOwner>], element_index: usize) -> Option<String> {
+fn owning_scene_id(
+    elements: &[Arc<BodyOwner>],
+    capabilities: &[SemanticCapabilities],
+    element_index: usize,
+) -> Option<String> {
     elements
         .get(..=element_index)?
         .iter()
+        .zip(capabilities.get(..=element_index)?)
         .rev()
-        .find(|element| element.transitional_role() == Role::SceneHeading)
-        .map(|heading| heading.id.as_str().to_owned())
+        .find(|(_, capabilities)| capabilities.scene_boundary)
+        .map(|(heading, _)| heading.id.as_str().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_derived_invalidation, PendingDerivedInvalidation};
+    use scriptcraft_model::Project;
+
+    #[test]
+    fn ambiguous_stable_identity_uses_complete_derived_fallback() {
+        let Ok(mut project) = Project::new() else {
+            assert!(false, "default project is valid");
+            return;
+        };
+        let Some(owner) = project.elements.first().cloned() else {
+            assert!(false, "default project has a body owner");
+            return;
+        };
+        project.elements = vec![owner.clone(), owner];
+
+        assert_eq!(
+            classify_derived_invalidation(&project, &project),
+            PendingDerivedInvalidation::Complete
+        );
+    }
 }

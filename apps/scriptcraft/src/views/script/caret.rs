@@ -1,16 +1,11 @@
 //! Script View caret geometry, projection lookup, and blink presentation.
 
-use super::{
-    page_policy::{document_y_to_screen, page_local_screen_origin},
-    text::resolve_span_paint,
-    ScriptCraftApp,
-};
+use super::{page_policy::page_local_screen_origin, ScriptCraftApp};
 use crate::{
-    chrome::status_bar::PresentedPage,
-    presentation::{geometry as presentation_geometry, style::AdvanceMode},
+    chrome::status_bar::PresentedPage, presentation::geometry as presentation_geometry,
     views::script::RevealIntent,
 };
-use eframe::egui::{self, Vec2};
+use eframe::egui;
 use scriptcraft_commands::EditorSurface;
 use scriptcraft_layout::{Caret, InteractionQueryDiagnostics, ScreenplayLayout};
 use scriptcraft_session::editing::Selection;
@@ -21,7 +16,6 @@ const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy)]
 pub(super) enum CaretPresentation {
-    Fixed(scriptcraft_layout::FixedRect),
     Projected(presentation_geometry::ProjectedCaretRect),
 }
 
@@ -31,16 +25,6 @@ pub(super) fn viewport_caret_rect(
     scale: f32,
 ) -> (egui::Rect, Option<egui::Rect>) {
     match presentation {
-        CaretPresentation::Fixed(rect) => (
-            egui::Rect::from_min_size(
-                egui::pos2(
-                    page.rect.left() + rect.x.to_points_f32() * scale,
-                    document_y_to_screen(page, rect.y.to_points_f32(), scale),
-                ),
-                Vec2::new(CARET_WIDTH, rect.height.to_points_f32() * scale),
-            ),
-            None,
-        ),
         CaretPresentation::Projected(projected) => {
             let page_origin = page_local_screen_origin(page, scale);
             let viewport_rect = projected.rect.translate(page_origin.to_vec2());
@@ -214,31 +198,21 @@ impl ScriptCraftApp {
                         .and_then(|index| projections.get(index))
                         .and_then(Option::as_ref)
                 });
-            if let Some(projection) = projection {
-                presentation_geometry::projected_caret_rect(
-                    projection,
-                    caret.offset,
-                    scale,
-                    CARET_WIDTH,
-                )
+            let fallback_projection = projection
+                .is_none()
+                .then(|| presentation_geometry::project_line(located.line, scale).ok());
+            let projection =
+                projection.or_else(|| fallback_projection.as_ref().and_then(Option::as_ref));
+            projection
+                .and_then(|projection| {
+                    presentation_geometry::projected_caret_rect(
+                        projection,
+                        caret.offset,
+                        scale,
+                        CARET_WIDTH,
+                    )
+                })
                 .map(CaretPresentation::Projected)
-            } else if located.line.spans.iter().any(|span| {
-                resolve_span_paint(
-                    &span.text_style,
-                    span.text_style.size as f32 * scale,
-                    self.theme_palette.script_workspace.page,
-                    &self.document_font_availability,
-                )
-                .advance_mode
-                    == AdvanceMode::Proportional
-            }) {
-                None
-            } else {
-                located
-                    .fixed_caret_geometry(&caret)
-                    .ok()
-                    .map(CaretPresentation::Fixed)
-            }
         });
         self.performance.indexed_interaction_queries = self
             .performance

@@ -6,7 +6,7 @@ use super::selection::SelectionOrdering;
 use super::structure::{join_at, remove_body_owner, update_preserved_type};
 use super::text::{next_boundary, previous_boundary, replace_range, synchronize_body_typing_style};
 use super::{EditError, EditingSession, Position, Selection};
-use scriptcraft_model::{BodyOwner, Project, Role};
+use scriptcraft_model::{BodyOwner, ElementTypeKey, Project};
 use std::collections::BTreeSet;
 
 impl EditingSession {
@@ -74,7 +74,7 @@ impl EditingSession {
                 .filter(|(index, element)| {
                     *index > selection_start.element
                         && *index <= selection_end.element
-                        && element.transitional_role() == Role::SceneHeading
+                        && has_scene_heading_capability(&self.project, element)
                         && (*index < selection_end.element
                             || selection_end.offset == element.text.len())
                 })
@@ -88,7 +88,7 @@ impl EditingSession {
             )
             .into_iter()
             .filter_map(|index| self.project.elements.get(index))
-            .filter(|element| element.transitional_role() == Role::SceneHeading)
+            .filter(|element| has_scene_heading_capability(&self.project, element))
             .map(|element| element.id.clone())
             .collect()
         } else {
@@ -117,13 +117,21 @@ impl EditingSession {
                         DeleteDirection::Forward,
                     ));
                 }
-                if item.transitional_role() == Role::Parenthetical
+                let has_parenthetical_capability = project
+                    .element_semantics(&item.element_type())
+                    .is_some_and(|semantics| semantics.capabilities().parenthetical);
+                let after_closing_delimiter =
+                    item.text.ends_with(')') && start.offset == item.text.len();
+                if has_parenthetical_capability
                     && is_delimiter_only_parenthetical(item.text.as_str())
+                    && !after_closing_delimiter
                 {
                     let item_text_len = item.text.len();
                     let id = item.id.as_str().to_owned();
-                    generated.remove(&id);
                     if start.element == 0 || project.elements.len() == 1 {
+                        let Some(element_type) = unique_dialogue_capability_key(project) else {
+                            return Ok(Selection::caret(start));
+                        };
                         replace_range(
                             project,
                             Position {
@@ -136,12 +144,11 @@ impl EditingSession {
                             },
                             "",
                         )?;
-                        let element_type =
-                            scriptcraft_model::ElementTypeKey::from_role(Role::Dialogue);
                         update_preserved_type(project, 0, &element_type)?;
                         BodyOwner::update(&mut project.elements[0], |element| {
                             element.set_element_type(element_type);
                         });
+                        generated.remove(&id);
                         return Ok(Selection::caret(Position {
                             element: 0,
                             offset: 0,
@@ -149,6 +156,7 @@ impl EditingSession {
                     }
                     let previous = start.element.saturating_sub(1);
                     let offset = project.elements[previous].text.len();
+                    generated.remove(&id);
                     remove_body_owner(project, start.element);
                     return Ok(Selection::caret(Position {
                         element: previous,
@@ -189,7 +197,7 @@ impl EditingSession {
             deletion_candidate_empty_element(&self.project, start, DeleteDirection::Backward)
                 .into_iter()
                 .filter_map(|index| self.project.elements.get(index))
-                .filter(|element| element.transitional_role() == Role::SceneHeading)
+                .filter(|element| has_scene_heading_capability(&self.project, element))
                 .map(|element| element.id.clone())
                 .collect()
         } else {
@@ -250,6 +258,26 @@ impl EditingSession {
             },
         )
     }
+}
+
+fn has_scene_heading_capability(project: &Project, element: &BodyOwner) -> bool {
+    project
+        .element_semantics(&element.element_type())
+        .is_some_and(|semantics| semantics.capabilities().scene_boundary)
+}
+
+fn unique_dialogue_capability_key(project: &Project) -> Option<ElementTypeKey> {
+    let mut dialogue_keys = project
+        .element_definitions()
+        .iter()
+        .filter_map(|definition| {
+            project
+                .element_semantics(&definition.key)
+                .is_some_and(|semantics| semantics.capabilities().dialogue)
+                .then(|| definition.key.clone())
+        });
+    let key = dialogue_keys.next()?;
+    dialogue_keys.next().is_none().then_some(key)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

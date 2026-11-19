@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FinalDraft DocumentType="Script" Version="6" xmlns:vendor="urn:scriptcraft:dynamic-fixture">
+  <ElementSettings Type="Verse" vendor:kind="custom">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style="Bold" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0" Leading="Regular" LeftIndent="0" RightIndent="0" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Verse" />
+    <Behavior ReturnKey="Lyrics" TabKey="aside" PaginateAs="Character" Shortcut="" WinShortcut="Alt+V" />
+    <Outline CanHide="No" Level="1" />
+    <vendor:DefinitionPayload marker="keep">custom settings payload</vendor:DefinitionPayload>
+  </ElementSettings>
+  <ElementSettings Type="aside">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style="" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0" Leading="Regular" LeftIndent="0" RightIndent="0" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="aside" />
+    <Behavior ReturnKey="MissingTarget" PaginateAs="Scene Heading" Shortcut="" WinShortcut="" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="Lyrics">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style="Italic" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0" Leading="Regular" LeftIndent="0" RightIndent="0" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Lyrics" />
+    <Behavior ReturnKey="Verse" TabKey="MissingTab" Shortcut="" WinShortcut="" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="scene heading">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style="" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0" Leading="Regular" LeftIndent="0" RightIndent="0" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="scene heading" />
+    <Behavior PaginateAs="Scene Heading" Shortcut="" WinShortcut="" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="Character">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style="Bold" />
+    <ParagraphSpec Alignment="Center" FirstIndent="0" Leading="Regular" LeftIndent="2.2" RightIndent="2.2" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Character" />
+    <Behavior ReturnKey="Dialogue" TabKey="Parenthetical" Shortcut="" WinShortcut="" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="Dialogue">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style="" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0" Leading="Regular" LeftIndent="1.5" RightIndent="1" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Dialogue" />
+    <Behavior ReturnKey="Action" TabKey="Character" Shortcut="" WinShortcut="" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="Scene Heading">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style="Bold" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0" Leading="Regular" LeftIndent="0" RightIndent="0" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Scene Heading" />
+    <Behavior ReturnKey="Action" TabKey="Character" Shortcut="" WinShortcut="" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="Cast List">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style="" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0" Leading="Regular" LeftIndent="0" RightIndent="0" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Cast List" />
+    <Behavior ReturnKey="Action" TabKey="Action" Shortcut="" WinShortcut="" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="Parenthetical">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style="Italic" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0" Leading="Regular" LeftIndent="1" RightIndent="1" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Parenthetical" />
+    <Behavior ReturnKey="Dialogue" TabKey="aside" Shortcut="" WinShortcut="" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+  <ElementSettings Type="Action">
+    <FontSpec AdornmentStyle="0" Font="Courier Final Draft" RevisionID="0" Size="12" Style="" />
+    <ParagraphSpec Alignment="Left" FirstIndent="0" Leading="Regular" LeftIndent="0" RightIndent="0" SpaceBefore="0" Spacing="1" StartsNewPage="No" Type="Action" />
+    <Behavior ReturnKey="Action" TabKey="Action" Shortcut="" WinShortcut="" />
+    <Outline CanHide="No" Level="1" />
+  </ElementSettings>
+
+  <TitlePage>
+    <Content>
+      <Paragraph Type="Verse" id="dynamic-title-verse" Alignment="Right">
+        <Text Style="Bold">Title </Text><Text Style="Italic">café</Text>
+        <UserParagraphData><vendor:TitleAttachment marker="keep">title data</vendor:TitleAttachment></UserParagraphData>
+        <vendor:TitleOpaque marker="keep">opaque title child</vendor:TitleOpaque>
+      </Paragraph>
+      <Paragraph id="dynamic-title-typeless"><Text>Type-less credit</Text></Paragraph>
+    </Content>
+  </TitlePage>
+  <Content>
+    <Paragraph Type="Verse" id="dynamic-verse-enter" Alignment="Center" FirstIndent="0.25" vendor:paragraph="preserve">
+      <Text Style="Bold">Multi </Text><Text Style="Italic">run — café</Text>
+      <UserParagraphData><vendor:BodyAttachment marker="keep">body data</vendor:BodyAttachment></UserParagraphData>
+      <vendor:BodyOpaque marker="keep">opaque body child</vendor:BodyOpaque>
+    </Paragraph>
+    <Paragraph Type="Verse" id="dynamic-verse-tab"><Text>Tab target</Text></Paragraph>
+    <Paragraph Type="Verse" id="dynamic-generated-parenthetical"><Text /></Paragraph>
+    <Paragraph Type="scene heading" id="dynamic-false-heading"><Text>INT. NOT A SCENE - DAY</Text></Paragraph>
+    <Paragraph Type="Scene Heading" id="dynamic-scene-heading">
+      <Text>INT. REAL SCENE - DAY</Text>
+      <SceneProperties><SceneArcBeats /></SceneProperties>
+    </Paragraph>
+    <Paragraph Type="Character" id="dynamic-scene-cue"><Text>ALICE</Text></Paragraph>
+    <Paragraph Type="Dialogue" id="dynamic-scene-dialogue"><Text>Hello.</Text></Paragraph>
+    <Paragraph Type="Cast List" id="dynamic-cast-list"><Text>(OLD)</Text></Paragraph>
+    <Paragraph Type="General" id="dynamic-dual-wrapper" LeftIndent="0.25">
+      <UserParagraphData><vendor:WrapperAttachment marker="keep">wrapper data</vendor:WrapperAttachment></UserParagraphData>
+      <DualDialogue>
+        <SpellCheckIgnoreLists><IgnoredRanges /><IgnoredWords /></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="dynamic-dual-left-cue"><Text Style="Bold">LEFT</Text></Paragraph>
+        <Paragraph Type="Dialogue" id="dynamic-dual-left-line"><Text>Left </Text><Text Style="Italic">line</Text><UserParagraphData><vendor:MemberAttachment marker="keep">left member data</vendor:MemberAttachment></UserParagraphData></Paragraph>
+        <Paragraph Type="Character" id="dynamic-dual-right-cue"><Text>RIGHT</Text></Paragraph>
+        <Paragraph Type="Dialogue" id="dynamic-dual-right-line"><Text>Right line</Text></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+  </Content>
+</FinalDraft>

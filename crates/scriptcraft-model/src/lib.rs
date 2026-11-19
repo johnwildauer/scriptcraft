@@ -8,6 +8,7 @@ pub mod dual_dialogue;
 pub mod element;
 pub mod element_definition;
 pub mod element_definitions;
+pub mod element_semantics;
 pub mod element_type;
 pub mod error;
 pub mod formatted_text;
@@ -20,6 +21,7 @@ pub mod preservation;
 pub mod project;
 pub mod scene_metadata;
 pub mod title_page;
+pub mod typography;
 pub mod validation;
 
 pub use dual_dialogue::DualDialogueError;
@@ -32,13 +34,19 @@ pub use element_definition::{
     SemanticCapabilities, MAX_ELEMENT_DEFINITION_STRING_BYTES,
 };
 pub use element_definitions::{DocumentElementDefinitions, MAX_DOCUMENT_ELEMENT_DEFINITIONS};
+pub use element_semantics::{BehaviorTargetResolution, ElementSemantics, ParagraphBehaviorKey};
 pub use element_type::{ElementTypeKey, MAX_ELEMENT_TYPE_KEY_BYTES};
 pub use error::ModelError;
 pub use identity::{StableId, StableIdAllocator};
-pub use layout_inputs::LayoutInputs;
+pub use layout_inputs::{LayoutInputs, PageLayoutInputs};
 pub use position::{Position, Selection};
 pub use project::Project;
 pub use title_page::{TitlePageAlignment, TitlePageParagraph, TitlePageParagraphFormatting};
+pub use typography::{
+    DocumentFontEnvironment, EffectiveTextColor, EffectiveTextStyle, FaceStyle, FontResolutionKind,
+    RequestedFontResolution, ResolvedFaceMetrics, ResolvedFontFace, ResolvedFontId,
+    ResolvedFontSourceKind, ScalarAdvance,
+};
 pub use validation::{validate_layout_inputs, MAX_ELEMENTS};
 
 pub const MAX_TEXT_BYTES: usize = 262_144;

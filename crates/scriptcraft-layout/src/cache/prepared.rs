@@ -5,7 +5,10 @@ use crate::{
     wrap, LayoutBuildDiagnostics,
 };
 use scriptcraft_model::formatting::{EffectiveTextStyle, FixedPoint};
-use scriptcraft_model::{BodyOwner, RunAttribute, ScreenplayElement, StableId, TextRun};
+use scriptcraft_model::typography::EffectiveTextColor;
+use scriptcraft_model::{
+    BodyOwner, ElementTypeKey, RunAttribute, ScreenplayElement, StableId, TextRun,
+};
 use std::{
     collections::{BTreeSet, HashMap},
     hash::{Hash, Hasher},
@@ -17,8 +20,9 @@ const MAX_CACHED_PREPARED_BODY_PARAGRAPHS: usize = 4_096;
 const MAX_CACHED_PREPARED_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Every owner-local input consumed by wrapping, source/display preparation,
-/// positioned spans, and line metrics. Page composition is deliberately absent.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// positioned spans, and line metrics. The full environment is retained and
+/// compared, while its bounded content fingerprint is only a lookup candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedBodyEnvironment {
     pub(crate) purpose: LayoutPurpose,
     pub(crate) composition: LayoutComposition,
@@ -26,6 +30,26 @@ pub(crate) struct PreparedBodyEnvironment {
     pub(crate) paragraph: EffectiveParagraph,
     pub(crate) text_style: EffectiveTextStyle,
     pub(crate) char_width: FixedPoint,
+    pub(crate) element_key: Option<ElementTypeKey>,
+    pub(crate) layout_environment: Option<Arc<crate::inputs::LayoutEnvironment>>,
+    pub(crate) effective_color: EffectiveTextColor,
+}
+
+impl Hash for PreparedBodyEnvironment {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.purpose.hash(state);
+        self.composition.hash(state);
+        self.geometry_mode.hash(state);
+        self.paragraph.hash(state);
+        self.text_style.hash(state);
+        self.char_width.hash(state);
+        self.element_key.hash(state);
+        self.layout_environment
+            .as_deref()
+            .map(crate::inputs::LayoutEnvironment::cache_fingerprint)
+            .hash(state);
+        self.effective_color.hash(state);
+    }
 }
 
 /// Complete immutable owner-local Body output. Lines have owner-local element
@@ -232,6 +256,41 @@ fn text_style_heap_bytes(style: &EffectiveTextStyle) -> usize {
         .saturating_add(style.source_color.as_ref().map_or(0, String::len))
 }
 
+fn layout_environment_heap_bytes(environment: &crate::inputs::LayoutEnvironment) -> usize {
+    let fonts = &environment.fonts;
+    let requests = fonts
+        .requests()
+        .iter()
+        .fold(0usize, |total, (family, request)| {
+            total
+                .saturating_add(family.len())
+                .saturating_add(request.regular.as_str().len())
+                .saturating_add(request.bold.as_str().len())
+                .saturating_add(request.italic.as_str().len())
+                .saturating_add(request.bold_italic.as_str().len())
+        });
+    fonts.faces().values().fold(
+        std::mem::size_of::<crate::inputs::LayoutEnvironment>()
+            .saturating_add(requests)
+            .saturating_add(
+                environment
+                    .neutral_title_style
+                    .source_color
+                    .as_ref()
+                    .map_or(0, String::len),
+            ),
+        |total, face| {
+            total
+                .saturating_add(face.id.as_str().len())
+                .saturating_add(face.family_label.len())
+                .saturating_add(face.face_label.len())
+                .saturating_add(face.metrics.scalar_advances.len().saturating_mul(
+                    std::mem::size_of::<(char, scriptcraft_model::typography::ScalarAdvance)>(),
+                ))
+        },
+    )
+}
+
 fn prepared_body_entry_byte_cost(
     owner: &Arc<BodyOwner>,
     environment: &PreparedBodyEnvironment,
@@ -249,7 +308,19 @@ fn prepared_body_entry_byte_cost(
         )
         .saturating_add(element.id.as_str().len())
         .saturating_add(element.text.len())
-        .saturating_add(text_style_heap_bytes(&environment.text_style));
+        .saturating_add(text_style_heap_bytes(&environment.text_style))
+        .saturating_add(
+            environment
+                .element_key
+                .as_ref()
+                .map_or(0, |key| key.as_str().len()),
+        )
+        .saturating_add(
+            environment
+                .layout_environment
+                .as_deref()
+                .map_or(0, layout_environment_heap_bytes),
+        );
     for run in &element.runs {
         total = total
             .saturating_add(std::mem::size_of::<TextRun>())
@@ -356,6 +427,7 @@ pub(crate) fn prepare_body_for_layout(
             &element.text,
             0,
             role,
+            environment.element_key.as_ref(),
             paragraph,
             environment.text_style.clone(),
             &element.runs,
@@ -524,6 +596,7 @@ fn prepare_incremental_body_for_layout(
         reused_lines,
         0,
         new_role,
+        Some(&new.element_type()),
         environment.paragraph,
         environment.text_style.clone(),
         &new.runs,
@@ -542,4 +615,164 @@ fn prepare_incremental_body_for_layout(
         paragraph: environment.paragraph,
         lines: lines.into(),
     }))
+}
+
+#[cfg(test)]
+mod typography_cache_identity_tests {
+    use super::*;
+    use crate::inputs::EffectiveGeometryMode;
+    use scriptcraft_model::formatting::{FontFallback, ParagraphAlignment};
+    use scriptcraft_model::typography::parse_effective_text_color;
+    use scriptcraft_model::{BodyOwner, Project};
+
+    fn paragraph() -> EffectiveParagraph {
+        EffectiveParagraph {
+            left: FixedPoint::default(),
+            right: FixedPoint::from_points(100),
+            first_indent: FixedPoint::default(),
+            alignment: ParagraphAlignment::Left,
+            space_before: FixedPoint::default(),
+            line_advance: FixedPoint::from_points(12),
+            char_width: FixedPoint::from_points(7),
+            starts_new_page: false,
+            pagination: Default::default(),
+        }
+    }
+
+    fn environment(color: Option<&str>) -> PreparedBodyEnvironment {
+        PreparedBodyEnvironment {
+            purpose: LayoutPurpose::Editor,
+            composition: LayoutComposition::BodyEditor,
+            geometry_mode: EffectiveGeometryMode::Sequential,
+            paragraph: paragraph(),
+            text_style: EffectiveTextStyle {
+                declared_family: "Courier Prime".to_owned(),
+                family: FontFallback::CourierPrime,
+                size: 12,
+                bold: false,
+                italic: false,
+                underline: false,
+                all_caps: false,
+                hidden_text: false,
+                source_color: color.map(str::to_owned),
+            },
+            char_width: FixedPoint::from_points(7),
+            element_key: None,
+            layout_environment: None,
+            effective_color: parse_effective_text_color(color),
+        }
+    }
+
+    fn test_owner() -> Result<Arc<BodyOwner>, scriptcraft_model::ModelError> {
+        let project = Project::new()?;
+        project
+            .elements
+            .first()
+            .cloned()
+            .ok_or(scriptcraft_model::ModelError::InvalidNumber)
+    }
+
+    #[test]
+    fn prepared_lookup_rejects_unequal_identity_in_a_shared_candidate_bucket(
+    ) -> Result<(), scriptcraft_model::ModelError> {
+        let owner = test_owner()?;
+        let requested = environment(None);
+        let retained = environment(Some("unsupported-explicit-color"));
+        let fingerprint = PreparedBodyCache::fingerprint(&owner, &requested);
+        let prepared = Arc::new(PreparedBodyParagraph {
+            paragraph: requested.paragraph,
+            lines: Arc::from([]),
+        });
+        let mut cache = PreparedBodyCache::default();
+        cache.buckets.insert(
+            fingerprint,
+            vec![PreparedBodyEntry {
+                owner: Arc::clone(&owner),
+                owner_revision: owner.revision(),
+                environment: retained,
+                prepared,
+                last_used_generation: 0,
+                insertion_order: 1,
+                byte_cost: 1,
+            }],
+        );
+        cache.entry_count = 1;
+        assert!(cache.lookup(&owner, &requested).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_preparation_matches_a_fresh_owner_preparation(
+    ) -> Result<(), scriptcraft_model::ModelError> {
+        let project = Project::new()?;
+        let layout = ScreenplayLayout::build(&project)
+            .map_err(|_| scriptcraft_model::ModelError::InvalidNumber)?;
+        let mut old_owner = project
+            .elements
+            .first()
+            .cloned()
+            .ok_or(scriptcraft_model::ModelError::InvalidNumber)?;
+        BodyOwner::update(&mut old_owner, |element| {
+            element.text =
+                "A sufficiently long screenplay action line that wraps over several lines. "
+                    .repeat(4);
+        });
+        let mut new_owner = Arc::clone(&old_owner);
+        BodyOwner::update(&mut new_owner, |element| {
+            element
+                .text
+                .push_str("An appended sentence exercises suffix rewrapping.");
+        });
+        let mut prepared_environment = environment(None);
+        prepared_environment.element_key = Some(new_owner.element_type());
+        let previous = prepare_body_for_layout(
+            None,
+            None,
+            None,
+            &layout,
+            &old_owner,
+            prepared_environment.clone(),
+            None,
+        );
+        let incremental = prepare_incremental_body_for_layout(
+            None,
+            &layout,
+            &new_owner,
+            &old_owner,
+            &previous,
+            &prepared_environment,
+        )
+        .ok_or(scriptcraft_model::ModelError::InvalidNumber)?;
+        let fresh = prepare_body_for_layout(
+            None,
+            None,
+            None,
+            &layout,
+            &new_owner,
+            prepared_environment,
+            None,
+        );
+        assert_eq!(incremental.paragraph, fresh.paragraph);
+        assert_eq!(incremental.lines.as_ref(), fresh.lines.as_ref());
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_cache_eviction_preserves_entry_and_byte_bounds(
+    ) -> Result<(), scriptcraft_model::ModelError> {
+        let owner = test_owner()?;
+        let environment = environment(None);
+        let prepared = Arc::new(PreparedBodyParagraph {
+            paragraph: environment.paragraph,
+            lines: Arc::from([]),
+        });
+        let mut cache = PreparedBodyCache::default();
+        for _ in 0..=MAX_CACHED_PREPARED_BODY_PARAGRAPHS {
+            cache.insert(&owner, environment.clone(), Arc::clone(&prepared));
+        }
+        cache.evict_if_needed();
+        assert!(cache.entry_count <= MAX_CACHED_PREPARED_BODY_PARAGRAPHS);
+        assert!(cache.retained_bytes <= MAX_CACHED_PREPARED_BODY_BYTES);
+        Ok(())
+    }
 }

@@ -5,6 +5,7 @@
 
 use scriptcraft_commands::PdfExportOptions;
 use scriptcraft_export::{self as exports, ExportError};
+use scriptcraft_layout::LayoutEnvironment;
 use scriptcraft_model::{LayoutInputs, Project};
 use std::ffi::OsStr;
 use std::path::Path;
@@ -18,6 +19,7 @@ const UNTITLED_PRINT_JOB_TITLE: &str = "Untitled Screenplay";
 pub(crate) struct PrintRequest {
     pdf_data: Vec<u8>,
     job_title: String,
+    typography_report: exports::PdfTypographyReport,
 }
 
 /// Owned semantic/fixed-layout snapshot captured before the native panel opens.
@@ -27,6 +29,7 @@ pub(crate) struct PrintRequest {
 pub(crate) struct PrintCompositionSnapshot {
     project: Project,
     layout_inputs: LayoutInputs,
+    layout_environment: LayoutEnvironment,
     native_path: Option<std::path::PathBuf>,
 }
 
@@ -34,11 +37,13 @@ impl PrintCompositionSnapshot {
     pub(crate) fn capture(
         project: &Project,
         layout_inputs: &LayoutInputs,
+        layout_environment: &LayoutEnvironment,
         native_path: Option<&Path>,
     ) -> Self {
         Self {
             project: project.clone(),
             layout_inputs: layout_inputs.clone(),
+            layout_environment: layout_environment.clone(),
             native_path: native_path.map(Path::to_path_buf),
         }
     }
@@ -50,6 +55,7 @@ impl PrintCompositionSnapshot {
         build_print_request(
             &self.project,
             &self.layout_inputs,
+            &self.layout_environment,
             options,
             self.native_path.as_deref(),
         )
@@ -64,6 +70,10 @@ impl PrintRequest {
     pub(crate) fn job_title(&self) -> &str {
         &self.job_title
     }
+
+    pub(crate) fn fallback_summary(&self) -> String {
+        self.typography_report.summary()
+    }
 }
 
 /// Shared PDF builder used by both Save As PDF and native printing. The core
@@ -71,28 +81,34 @@ impl PrintRequest {
 pub(super) fn build_pdf_bytes(
     project: &Project,
     layout_inputs: &LayoutInputs,
+    layout_environment: &LayoutEnvironment,
     options: PdfExportOptions,
-) -> Result<Vec<u8>, ExportError> {
+) -> Result<exports::PdfExport, ExportError> {
     exports::export_pdf_with_layout_inputs_and_options(
         project,
         layout_inputs,
+        layout_environment,
         exports::PdfExportOptions {
             include_title_page: options.include_title_page,
         },
     )
 }
 
-/// Builds one complete request from borrowed semantic/fixed-layout inputs and
-/// returns only owned bytes and a bounded basename-derived job title.
+/// Builds one complete request from borrowed semantic/layout inputs and
+/// returns owned PDF bytes, a bounded job title, and the bounded typography
+/// fallback report needed by PDF-backed print feedback.
 pub(super) fn build_print_request(
     project: &Project,
     layout_inputs: &LayoutInputs,
+    layout_environment: &LayoutEnvironment,
     options: PdfExportOptions,
     native_path: Option<&Path>,
 ) -> Result<PrintRequest, ExportError> {
+    let export = build_pdf_bytes(project, layout_inputs, layout_environment, options)?;
     Ok(PrintRequest {
-        pdf_data: build_pdf_bytes(project, layout_inputs, options)?,
+        pdf_data: export.bytes,
         job_title: print_job_title(native_path),
+        typography_report: export.typography,
     })
 }
 

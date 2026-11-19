@@ -250,7 +250,10 @@ impl EditingSession {
             );
             generated.retain(|id| {
                 project.elements.iter().any(|element| {
-                    element.id.as_str() == id && element.element_type().as_str() == "Parenthetical"
+                    element.id.as_str() == id
+                        && project
+                            .element_semantics(&element.element_type())
+                            .is_some_and(|semantics| semantics.capabilities().parenthetical)
                 })
             });
             let scoped_preconditions = !structural
@@ -314,6 +317,7 @@ impl EditingSession {
                     if let Some(preservation) = project.preservation.as_mut() {
                         preservation
                             .reconcile_body_structure(
+                                &self.project,
                                 &self.project.elements,
                                 &mut project.elements,
                                 &generated_scene_heading_deletions,

@@ -5,11 +5,15 @@ use crate::{
     geometry::{LayoutError, LayoutErrorKind, ScreenplayLayout},
     inputs::{
         BodyEditorPresentation, EffectiveGeometryMode, EffectiveParagraph, LayoutComposition,
-        LayoutPurpose,
+        LayoutEnvironment, LayoutPurpose,
     },
 };
 use scriptcraft_model::formatting::{EffectiveTextStyle, FixedPoint, SourceLayoutSettings};
-use scriptcraft_model::{LayoutInputs, Project, Role, StableId, TextRun};
+use scriptcraft_model::{
+    dual_dialogue::DualDialogueGroup, element::body_owners_equal,
+    formatting::SourceParagraphOverrides, ElementDefinition, LayoutInputs, Project, Role, StableId,
+    TextRun, TitlePageParagraph,
+};
 use scriptcraft_session::editing::EditingSession;
 use std::{
     hash::{Hash, Hasher},
@@ -73,6 +77,10 @@ impl std::fmt::Debug for ElementWrapCache {
 }
 
 impl ElementWrapCache {
+    pub(super) fn set_layout_environment(&mut self, environment: Option<Arc<LayoutEnvironment>>) {
+        self.inner.set_layout_environment(environment);
+    }
+
     pub(super) fn start_generation(&mut self) {
         self.inner.start_generation();
     }
@@ -85,6 +93,7 @@ impl ElementWrapCache {
     pub(super) fn wrap(
         &mut self,
         element_id: &StableId,
+        element_key: Option<&scriptcraft_model::ElementTypeKey>,
         text: &str,
         element: usize,
         role: Role,
@@ -101,6 +110,7 @@ impl ElementWrapCache {
     ) -> Vec<crate::wrap::WrappedLine> {
         self.inner.wrap(
             element_id,
+            element_key,
             text,
             element,
             role,
@@ -148,21 +158,55 @@ pub(super) fn add_elapsed_nanos(total: &mut u128, started: Option<Instant>) {
 }
 
 /// Session-owned immutable layout cache shared by desktop adapters and
-/// headless measurements. The revision, effective geometry and source-derived
-/// layout settings are the cache key; viewport presentation state is excluded.
+/// headless measurements. Revision, semantic project state, effective layout
+/// settings, resolved typography, and composition are identity inputs;
+/// viewport presentation state is excluded.
 #[derive(Debug, Default)]
 pub struct LayoutCache {
     revision: Option<u64>,
     inputs: Option<LayoutInputs>,
     source_settings: Option<SourceLayoutSettings>,
+    layout_environment: Option<Arc<LayoutEnvironment>>,
     purpose: Option<LayoutPurpose>,
     composition: Option<LayoutComposition>,
     body_presentation: Option<BodyEditorPresentation>,
     project_layout_signature: Option<u64>,
+    semantic_project: Option<SemanticProjectLayoutSnapshot>,
+    definition_registry: Option<Vec<ElementDefinition>>,
     layout: Option<Arc<ScreenplayLayout>>,
     project_identity: Option<Arc<()>>,
     element_wraps: ElementWrapCache,
     prepared_body: PreparedBodyCache,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticProjectLayoutSnapshot {
+    elements: Vec<Arc<scriptcraft_model::BodyOwner>>,
+    title_page: Vec<TitlePageParagraph>,
+    direct_paragraph_overrides: std::collections::BTreeMap<StableId, SourceParagraphOverrides>,
+    dual_dialogue_groups: Vec<DualDialogueGroup>,
+    dual_dialogue_paragraph_overrides:
+        std::collections::BTreeMap<StableId, SourceParagraphOverrides>,
+}
+
+impl SemanticProjectLayoutSnapshot {
+    fn from_project(project: &Project) -> Self {
+        Self {
+            elements: project.elements.clone(),
+            title_page: project.title_page.clone(),
+            direct_paragraph_overrides: project.direct_paragraph_overrides.clone(),
+            dual_dialogue_groups: project.dual_dialogue_groups.clone(),
+            dual_dialogue_paragraph_overrides: project.dual_dialogue_paragraph_overrides.clone(),
+        }
+    }
+
+    fn matches(&self, project: &Project) -> bool {
+        body_owners_equal(&self.elements, &project.elements)
+            && self.title_page == project.title_page
+            && self.direct_paragraph_overrides == project.direct_paragraph_overrides
+            && self.dual_dialogue_groups == project.dual_dialogue_groups
+            && self.dual_dialogue_paragraph_overrides == project.dual_dialogue_paragraph_overrides
+    }
 }
 
 impl LayoutCache {
@@ -224,6 +268,53 @@ impl LayoutCache {
             None,
             false,
             BodyEditorPresentation::default(),
+        )
+    }
+
+    /// Builds any composition with a complete resolved-font environment in the
+    /// cache identity. Output adapters can select Print without a separate
+    /// typography-blind cache path.
+    pub fn get_or_build_with_composition_and_environment(
+        &mut self,
+        revision: u64,
+        project: &Project,
+        inputs: &LayoutInputs,
+        composition: LayoutComposition,
+        environment: &LayoutEnvironment,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        self.get_or_build_with_environment(
+            revision,
+            project,
+            inputs,
+            composition.purpose(),
+            composition,
+            None,
+            false,
+            BodyEditorPresentation::default(),
+            Some(environment),
+        )
+    }
+
+    pub fn get_or_build_with_composition_and_environment_and_diagnostics(
+        &mut self,
+        revision: u64,
+        project: &Project,
+        inputs: &LayoutInputs,
+        composition: LayoutComposition,
+        environment: &LayoutEnvironment,
+        diagnostics: &mut LayoutBuildDiagnostics,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        *diagnostics = LayoutBuildDiagnostics::default();
+        self.get_or_build_with_environment(
+            revision,
+            project,
+            inputs,
+            composition.purpose(),
+            composition,
+            Some(diagnostics),
+            false,
+            BodyEditorPresentation::default(),
+            Some(environment),
         )
     }
 
@@ -345,6 +436,86 @@ impl LayoutCache {
         )
     }
 
+    /// Typography-aware Body lookup. The complete transient environment is a
+    /// cache identity input even while legacy layout composition is migrating.
+    pub fn get_or_build_body_editor_for_session_with_environment(
+        &mut self,
+        session: &EditingSession,
+        presentation: &BodyEditorPresentation,
+        environment: &LayoutEnvironment,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        self.get_or_build_with_environment(
+            session.revision(),
+            session.project(),
+            session.layout_inputs(),
+            LayoutPurpose::Editor,
+            LayoutComposition::BodyEditor,
+            None,
+            true,
+            presentation.clone(),
+            Some(environment),
+        )
+    }
+
+    pub fn get_or_build_body_editor_for_session_with_environment_and_diagnostics(
+        &mut self,
+        session: &EditingSession,
+        presentation: &BodyEditorPresentation,
+        environment: &LayoutEnvironment,
+        diagnostics: &mut LayoutBuildDiagnostics,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        *diagnostics = LayoutBuildDiagnostics::default();
+        self.get_or_build_with_environment(
+            session.revision(),
+            session.project(),
+            session.layout_inputs(),
+            LayoutPurpose::Editor,
+            LayoutComposition::BodyEditor,
+            Some(diagnostics),
+            true,
+            presentation.clone(),
+            Some(environment),
+        )
+    }
+
+    pub fn get_or_build_title_page_editor_for_session_with_environment(
+        &mut self,
+        session: &EditingSession,
+        environment: &LayoutEnvironment,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        self.get_or_build_with_environment(
+            session.revision(),
+            session.project(),
+            session.layout_inputs(),
+            LayoutPurpose::Editor,
+            LayoutComposition::TitlePageEditor,
+            None,
+            true,
+            BodyEditorPresentation::default(),
+            Some(environment),
+        )
+    }
+
+    pub fn get_or_build_title_page_editor_for_session_with_environment_and_diagnostics(
+        &mut self,
+        session: &EditingSession,
+        environment: &LayoutEnvironment,
+        diagnostics: &mut LayoutBuildDiagnostics,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        *diagnostics = LayoutBuildDiagnostics::default();
+        self.get_or_build_with_environment(
+            session.revision(),
+            session.project(),
+            session.layout_inputs(),
+            LayoutPurpose::Editor,
+            LayoutComposition::TitlePageEditor,
+            Some(diagnostics),
+            true,
+            BodyEditorPresentation::default(),
+            Some(environment),
+        )
+    }
+
     /// Diagnostic counterpart to the ordinary cache lookup. A cache hit
     /// returns zero build measurements; a miss reports wrapping work separately
     /// from validation, pagination, and cache lookup.
@@ -408,9 +579,34 @@ impl LayoutCache {
         inputs: &LayoutInputs,
         purpose: LayoutPurpose,
         composition: LayoutComposition,
+        diagnostics: Option<&mut LayoutBuildDiagnostics>,
+        validated_session: bool,
+        body_presentation: BodyEditorPresentation,
+    ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
+        self.get_or_build_with_environment(
+            revision,
+            project,
+            inputs,
+            purpose,
+            composition,
+            diagnostics,
+            validated_session,
+            body_presentation,
+            None,
+        )
+    }
+
+    fn get_or_build_with_environment(
+        &mut self,
+        revision: u64,
+        project: &Project,
+        inputs: &LayoutInputs,
+        purpose: LayoutPurpose,
+        composition: LayoutComposition,
         mut diagnostics: Option<&mut LayoutBuildDiagnostics>,
         validated_session: bool,
         body_presentation: BodyEditorPresentation,
+        layout_environment: Option<&LayoutEnvironment>,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
         let whole_build_started = diagnostics.as_ref().map(|_| Instant::now());
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
@@ -435,14 +631,43 @@ impl LayoutCache {
             self.revision = None;
             self.inputs = None;
             self.source_settings = None;
+            self.layout_environment = None;
             self.purpose = None;
             self.composition = None;
             self.body_presentation = None;
             self.project_layout_signature = None;
+            self.semantic_project = None;
+            self.definition_registry = None;
             self.layout = None;
             self.element_wraps.clear();
             self.prepared_body.clear();
         }
+        let current_definitions = project
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let definition_registry_matches =
+            self.definition_registry.as_ref() == Some(&current_definitions);
+        if self
+            .definition_registry
+            .as_ref()
+            .is_some_and(|cached| cached != &current_definitions)
+        {
+            self.element_wraps.clear();
+            self.prepared_body.clear();
+        }
+        let environment_matches = self.layout_environment.as_deref() == layout_environment;
+        if !environment_matches {
+            self.prepared_body.clear();
+        }
+        let layout_environment = if environment_matches {
+            self.layout_environment.clone()
+        } else {
+            layout_environment.cloned().map(Arc::new)
+        };
+        self.element_wraps
+            .set_layout_environment(layout_environment.clone());
         let source_settings_match = self
             .source_settings
             .as_ref()
@@ -450,6 +675,8 @@ impl LayoutCache {
         let cache_keys_match = self.revision == Some(revision)
             && self.inputs.as_ref() == Some(inputs)
             && source_settings_match
+            && environment_matches
+            && definition_registry_matches
             && same_document
             && self.purpose == Some(purpose)
             && self.composition == Some(composition)
@@ -471,7 +698,12 @@ impl LayoutCache {
                     .saturating_add(1);
             }
             let signature = semantic_project_layout_signature(project);
-            if self.project_layout_signature == Some(signature) {
+            if self.project_layout_signature == Some(signature)
+                && self
+                    .semantic_project
+                    .as_ref()
+                    .is_some_and(|cached| cached.matches(project))
+            {
                 return self
                     .layout
                     .clone()
@@ -504,6 +736,7 @@ impl LayoutCache {
                 Some(&mut self.prepared_body),
                 true,
                 &body_presentation,
+                layout_environment.clone(),
             )?,
         );
         self.element_wraps.evict_if_needed();
@@ -511,10 +744,13 @@ impl LayoutCache {
         self.revision = Some(revision);
         self.inputs = Some(inputs.clone());
         self.source_settings = Some(source_settings);
+        self.layout_environment = layout_environment;
         self.purpose = Some(purpose);
         self.composition = Some(composition);
         self.body_presentation = Some(body_presentation);
         self.project_layout_signature = project_layout_signature;
+        self.semantic_project = Some(SemanticProjectLayoutSnapshot::from_project(project));
+        self.definition_registry = Some(current_definitions);
         self.layout = Some(layout.clone());
         self.project_identity = Some(project.layout_identity().clone());
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
@@ -527,13 +763,326 @@ impl LayoutCache {
 fn semantic_project_layout_signature(project: &Project) -> u64 {
     let mut signature_hasher = std::collections::hash_map::DefaultHasher::new();
     format!(
-        "{:?}{:?}{:?}{:?}{:?}",
+        "{:?}{:?}{:?}{:?}{:?}{:?}",
         project.elements,
         project.title_page,
         project.direct_paragraph_overrides,
         project.dual_dialogue_groups,
         project.dual_dialogue_paragraph_overrides,
+        project.element_definitions(),
     )
     .hash(&mut signature_hasher);
     signature_hasher.finish()
+}
+
+#[cfg(test)]
+mod typography_cache_identity_tests {
+    use super::*;
+    use scriptcraft_model::{
+        formatting::{ParagraphAlignment, SourceParagraphOverrides},
+        layout_inputs::PageLayoutInputs,
+        typography::{
+            DocumentFontEnvironment, FaceStyle, FontResolutionKind, RequestedFontResolution,
+            ResolvedFaceMetrics, ResolvedFontFace, ResolvedFontId, ResolvedFontSourceKind,
+            ScalarAdvance,
+        },
+        ModelError, TitlePageAlignment,
+    };
+    use std::collections::BTreeMap;
+
+    fn synthetic_environment(
+        ascender: i32,
+        fingerprint_seed: u64,
+    ) -> Result<LayoutEnvironment, ModelError> {
+        let mut faces = BTreeMap::new();
+        let mut ids = Vec::new();
+        for (index, style) in FaceStyle::ALL.into_iter().enumerate() {
+            let id = ResolvedFontId::new(format!("synthetic-{index}"))?;
+            let metrics = ResolvedFaceMetrics::new(
+                1_000,
+                ascender,
+                -200,
+                0,
+                BTreeMap::from([(
+                    'x',
+                    ScalarAdvance {
+                        advance_units: 500 + index as u32,
+                        missing_glyph: false,
+                    },
+                )]),
+            )?;
+            let face = ResolvedFontFace::new(
+                id.clone(),
+                "Synthetic",
+                format!("Synthetic {style:?}"),
+                style,
+                ResolvedFontSourceKind::Synthetic,
+                128,
+                fingerprint_seed + index as u64,
+                metrics,
+            )?;
+            ids.push(id.clone());
+            faces.insert(id, face);
+        }
+        let request = RequestedFontResolution {
+            kind: FontResolutionKind::CourierAlias,
+            regular: ids[0].clone(),
+            bold: ids[1].clone(),
+            italic: ids[2].clone(),
+            bold_italic: ids[3].clone(),
+        };
+        let fonts = DocumentFontEnvironment::new(
+            BTreeMap::from([("Courier Prime".to_owned(), request)]),
+            faces,
+        )?;
+        Ok(LayoutEnvironment::new(PageLayoutInputs::default(), fonts))
+    }
+
+    #[test]
+    fn complete_environment_equality_rejects_same_ids_with_new_bytes_or_metrics(
+    ) -> Result<(), ModelError> {
+        let original = synthetic_environment(800, 10)?;
+        let same = synthetic_environment(800, 10)?;
+        let different_bytes = synthetic_environment(800, 11)?;
+        let different_metrics = synthetic_environment(801, 10)?;
+        let mut different_page = original.clone();
+        different_page.page.paper_width = different_page.page.paper_width.saturating_add(1);
+        let different_neutral_title =
+            original
+                .clone()
+                .with_neutral_title_style(crate::inputs::NeutralTitleStyle {
+                    size: 14,
+                    ..crate::inputs::NeutralTitleStyle::default()
+                });
+        assert_eq!(original, same);
+        assert_ne!(original, different_bytes);
+        assert_ne!(original, different_metrics);
+        assert_ne!(original, different_page);
+        assert_ne!(original, different_neutral_title);
+        Ok(())
+    }
+
+    #[test]
+    fn generic_semantic_signature_covers_ordered_definitions_capabilities_and_direct_values(
+    ) -> Result<(), ModelError> {
+        let project = Project::new()?;
+        let signature = semantic_project_layout_signature(&project);
+
+        let mut changed_definition = project.clone();
+        let mut definitions = changed_definition
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(action) = definitions
+            .iter_mut()
+            .find(|definition| definition.key.as_str() == "Action")
+        {
+            action.font.size = action.font.size.saturating_add(1);
+            action.behavior.paginate_as = Some("Scene Heading".to_owned());
+        }
+        changed_definition.replace_element_definitions(definitions)?;
+        assert_ne!(
+            signature,
+            semantic_project_layout_signature(&changed_definition)
+        );
+
+        let mut paginate_as_only = project.clone();
+        let mut definitions = paginate_as_only
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(action) = definitions
+            .iter_mut()
+            .find(|definition| definition.key.as_str() == "Action")
+        {
+            action.behavior.paginate_as = Some("Character".to_owned());
+        }
+        paginate_as_only.replace_element_definitions(definitions)?;
+        assert_ne!(
+            signature,
+            semantic_project_layout_signature(&paginate_as_only)
+        );
+
+        let mut capability_key_change = project.clone();
+        let mut definitions = capability_key_change
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(action) = definitions
+            .iter_mut()
+            .find(|definition| definition.key.as_str() == "Action")
+        {
+            action.key = scriptcraft_model::ElementTypeKey::new("Custom Action")?;
+        }
+        capability_key_change.replace_element_definitions(definitions)?;
+        assert_ne!(
+            signature,
+            semantic_project_layout_signature(&capability_key_change)
+        );
+
+        let mut reordered = project.clone();
+        let reversed = reordered
+            .element_definitions()
+            .iter()
+            .cloned()
+            .rev()
+            .collect();
+        reordered.replace_element_definitions(reversed)?;
+        assert_ne!(signature, semantic_project_layout_signature(&reordered));
+
+        let mut direct_override = project;
+        let owner_id = direct_override.elements[0].id.clone();
+        let mut direct = SourceParagraphOverrides::default();
+        direct.paragraph.alignment = Some(ParagraphAlignment::Center);
+        direct_override
+            .direct_paragraph_overrides
+            .insert(owner_id, direct);
+        assert_ne!(
+            signature,
+            semantic_project_layout_signature(&direct_override)
+        );
+
+        let mut title_override = Project::new()?;
+        let title = title_override
+            .title_page
+            .first_mut()
+            .ok_or(ModelError::InvalidNumber)?;
+        title.formatting.alignment = Some(TitlePageAlignment::Center);
+        assert_ne!(
+            signature,
+            semantic_project_layout_signature(&title_override)
+        );
+
+        let mut wrapper_override = Project::new()?;
+        wrapper_override.dual_dialogue_paragraph_overrides.insert(
+            StableId::new("wrapper-cache-test")?,
+            SourceParagraphOverrides::default(),
+        );
+        assert_ne!(
+            signature,
+            semantic_project_layout_signature(&wrapper_override)
+        );
+
+        let mut dual_source = Project::new()?;
+        let member = dual_source
+            .elements
+            .first()
+            .map(|owner| owner.id.clone())
+            .ok_or(ModelError::InvalidNumber)?;
+        dual_source.dual_dialogue_groups.push(DualDialogueGroup {
+            id: StableId::new("dual-source-cache-test")?,
+            members: vec![member],
+            wrapper: Default::default(),
+        });
+        assert_ne!(signature, semantic_project_layout_signature(&dual_source));
+        Ok(())
+    }
+
+    #[test]
+    fn same_revision_definition_mutation_and_document_replacement_miss() -> Result<(), ModelError> {
+        let project = Project::new()?;
+        let inputs = project.session_layout_inputs();
+        let mut cache = LayoutCache::default();
+        let _ = cache
+            .get_or_build_with_inputs_for_purpose(71, &project, &inputs, LayoutPurpose::Editor)
+            .map_err(|_| ModelError::InvalidNumber)?;
+
+        let mut changed = project.clone();
+        let mut definitions = changed
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(action) = definitions
+            .iter_mut()
+            .find(|definition| definition.key.as_str() == "Action")
+        {
+            action.font.size = action.font.size.saturating_add(1);
+        }
+        changed.replace_element_definitions(definitions)?;
+        let (changed_layout, definition_hit) = cache
+            .get_or_build_with_inputs_for_purpose(71, &changed, &inputs, LayoutPurpose::Editor)
+            .map_err(|_| ModelError::InvalidNumber)?;
+        assert!(!definition_hit);
+        let fresh = ScreenplayLayout::build_with_inputs_for_purpose(
+            &changed,
+            &inputs,
+            LayoutPurpose::Editor,
+        )
+        .map_err(|_| ModelError::InvalidNumber)?;
+        assert_eq!(changed_layout.pages, fresh.pages);
+
+        let replacement = Project::new()?;
+        let (_, replacement_hit) = cache
+            .get_or_build_with_inputs_for_purpose(71, &replacement, &inputs, LayoutPurpose::Editor)
+            .map_err(|_| ModelError::InvalidNumber)?;
+        assert!(!replacement_hit);
+        Ok(())
+    }
+
+    #[test]
+    fn environment_change_forces_rebuild_and_matches_fresh_geometry() -> Result<(), ModelError> {
+        let project = Project::new()?;
+        let inputs = project.session_layout_inputs();
+        let mut cache = LayoutCache::default();
+        let original = synthetic_environment(800, 10)?;
+        let metric_change = synthetic_environment(801, 10)?;
+
+        let (first, first_hit) = cache
+            .get_or_build_with_environment(
+                0,
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+                LayoutComposition::BodyEditor,
+                None,
+                false,
+                BodyEditorPresentation::default(),
+                Some(&original),
+            )
+            .map_err(|_| ModelError::InvalidNumber)?;
+        assert!(!first_hit);
+
+        let (_, same_environment_hit) = cache
+            .get_or_build_with_environment(
+                0,
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+                LayoutComposition::BodyEditor,
+                None,
+                false,
+                BodyEditorPresentation::default(),
+                Some(&original),
+            )
+            .map_err(|_| ModelError::InvalidNumber)?;
+        assert!(same_environment_hit);
+
+        let (changed, changed_environment_hit) = cache
+            .get_or_build_with_environment(
+                0,
+                &project,
+                &inputs,
+                LayoutPurpose::Editor,
+                LayoutComposition::BodyEditor,
+                None,
+                false,
+                BodyEditorPresentation::default(),
+                Some(&metric_change),
+            )
+            .map_err(|_| ModelError::InvalidNumber)?;
+        assert!(!changed_environment_hit);
+        let fresh = ScreenplayLayout::build_with_inputs_for_purpose(
+            &project,
+            &inputs,
+            LayoutPurpose::Editor,
+        )
+        .map_err(|_| ModelError::InvalidNumber)?;
+        assert_eq!(changed.pages, fresh.pages);
+        assert_eq!(first.pages, changed.pages);
+        Ok(())
+    }
 }

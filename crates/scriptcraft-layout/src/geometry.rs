@@ -2,6 +2,7 @@ use super::{
     inputs::{EditorGroupBoundary, LayoutComposition, LayoutPurpose},
     interaction::{BodyLineIndexEntry, LineLocation},
 };
+use crate::inputs::LayoutEnvironment;
 use scriptcraft_model::{
     formatting::{EffectiveTextStyle, FixedPoint, ParagraphAlignment, SourceLayoutSettings},
     LayoutInputs, ModelError, Role, StableId,
@@ -80,6 +81,9 @@ pub struct PositionedStyledSpan {
     pub text_style: EffectiveTextStyle,
     pub char_width: FixedPoint,
     pub geometry: FixedRect,
+    /// Canonical x offsets for every display-character boundary in this span.
+    /// The vector starts at zero and ends at the span's laid-out width.
+    pub display_boundary_offsets: Arc<[FixedPoint]>,
     pub underline: bool,
     pub strikethrough: bool,
 }
@@ -116,6 +120,7 @@ pub struct LayoutPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenplayLayout {
     pub inputs: LayoutInputs,
+    pub(super) layout_environment: Option<Arc<LayoutEnvironment>>,
     pub source_settings: SourceLayoutSettings,
     pub font_family: String,
     pub char_width: u32,

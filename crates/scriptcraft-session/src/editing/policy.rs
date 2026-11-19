@@ -1,86 +1,105 @@
-//! Enter/Tab role decisions and generated-parenthetical policy.
+//! Enter/Tab Behavior decisions and generated-parenthetical policy.
 
 use super::selection::SelectionOrdering;
 use super::{EditError, EditPolicy, Position, Selection};
-use scriptcraft_model::{formatting, Project, Role};
+use scriptcraft_model::{BehaviorTargetResolution, ElementTypeKey, ParagraphBehaviorKey, Project};
 use std::collections::BTreeSet;
 
-/// Read-only outcome for a paragraph-key projection. A `Target` is the role
-/// resolved by editing policy, not a promise that later safety checks will
+/// Read-only outcome for a paragraph-key projection. A `Target` is the exact
+/// open key resolved by editing policy, not a promise that later safety checks will
 /// allow the candidate to publish. `NoOp` describes a consumed key with no
 /// semantic target; `Unavailable` describes a key that cannot resolve for the
 /// current selection (or whose editing resolver rejects the request).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParagraphKeyTarget {
-    Target(scriptcraft_model::Role),
+    Target(ElementTypeKey),
     NoOp,
     Unavailable,
 }
 
 /// Actual Enter and Tab target decisions for the session's current selection
 /// and editing policy. This value is a nonmutating hint, not a preview edit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParagraphKeyTargets {
     pub enter: ParagraphKeyTarget,
     pub tab: ParagraphKeyTarget,
 }
 
 fn strict_boundary_rejects(
-    project: &Project,
     policy: &EditPolicy,
-    element: usize,
-    role: Role,
+    capabilities: scriptcraft_model::SemanticCapabilities,
     text_len: usize,
     offset: usize,
 ) -> bool {
     policy.strict_transition_boundaries
-        && matches!(
-            role,
-            Role::SceneHeading | Role::Character | Role::Transition
-        )
-        && project.elements.get(element).is_some()
+        && (capabilities.scene_boundary || capabilities.character_cue || capabilities.transition)
         && offset != text_len
 }
 
-#[derive(Debug, Clone, Copy)]
+fn resolved_target(
+    project: &Project,
+    source: &ElementTypeKey,
+    behavior: ParagraphBehaviorKey,
+) -> Option<ElementTypeKey> {
+    match project.resolve_paragraph_behavior_target(source, behavior)? {
+        BehaviorTargetResolution::Resolved(target) => Some(target),
+        BehaviorTargetResolution::Absent | BehaviorTargetResolution::Unresolved(_) => None,
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct EnterDecision {
     pub(super) target: ParagraphKeyTarget,
     pub(super) action: EnterAction,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) enum EnterAction {
     NoOp,
-    InsertParentheticalBefore { element: usize, automatic: bool },
-    ClearGeneratedAndSplit { position: Position, role: Role },
-    RepairAndInsertDialogue { element: usize },
-    Split { position: Position, role: Role },
+    InsertParentheticalBefore {
+        element: usize,
+        automatic: bool,
+    },
+    ClearGeneratedAndSplit {
+        position: Position,
+        element_type: ElementTypeKey,
+    },
+    RepairAndInsert {
+        element: usize,
+        element_type: ElementTypeKey,
+    },
+    Split {
+        position: Position,
+        element_type: ElementTypeKey,
+    },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct TabDecision {
     pub(super) target: ParagraphKeyTarget,
     pub(super) action: TabAction,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) enum TabAction {
     NoOp,
-    DelimiterParentheticalToDialogue {
+    DelimiterParentheticalToType {
         element: usize,
+        element_type: ElementTypeKey,
     },
-    RepairAndInsertDialogue {
+    RepairAndInsert {
         element: usize,
+        element_type: ElementTypeKey,
     },
-    SetRole {
+    SetElementType {
         position: Position,
-        role: Role,
+        element_type: ElementTypeKey,
         clear_generated_parenthetical: bool,
     },
 }
 
-/// The shared Enter decision is intentionally value-only. Editing executes its
-/// action after this point; hint projection reads only `target`.
+/// The shared Enter decision is value-only. Execution applies this action and
+/// read-only guidance projects the exact same target.
 pub(super) fn resolve_enter(
     project: &Project,
     selection: Selection,
@@ -95,14 +114,15 @@ pub(super) fn resolve_enter(
         .elements
         .get(start.element)
         .ok_or(EditError::InvalidElement)?;
-    if strict_boundary_rejects(
-        project,
-        policy,
-        start.element,
-        item.transitional_role(),
-        item.text.len(),
-        start.offset,
-    ) {
+    let source_key = item.element_type();
+    let Some(semantics) = project.element_semantics(&source_key) else {
+        return Ok(EnterDecision {
+            target: ParagraphKeyTarget::NoOp,
+            action: EnterAction::NoOp,
+        });
+    };
+    let capabilities = semantics.capabilities();
+    if strict_boundary_rejects(policy, capabilities, item.text.len(), start.offset) {
         return Ok(EnterDecision {
             target: ParagraphKeyTarget::NoOp,
             action: EnterAction::NoOp,
@@ -110,33 +130,51 @@ pub(super) fn resolve_enter(
     }
 
     let mut position = start;
-    if item.transitional_role() == Role::Parenthetical {
+    if capabilities.parenthetical {
         if position.offset == 0 && item.text.starts_with('(') {
             return Ok(EnterDecision {
-                target: ParagraphKeyTarget::Target(Role::Parenthetical),
+                target: ParagraphKeyTarget::Target(source_key),
                 action: EnterAction::InsertParentheticalBefore {
                     element: position.element,
                     automatic: policy.auto_parenthetical,
                 },
             });
         }
-        if empty_parenthetical_at(item.text.as_str(), position.offset)
+        if policy.auto_parenthetical
+            && empty_parenthetical_at(item.text.as_str(), position.offset)
             && generated.contains(item.id.as_str())
         {
             position.offset = 0;
-            let current_role = item.transitional_role();
-            let role = enter_transition(current_role)
-                .ok_or(EditError::UnsupportedTransition { from: current_role })?;
+            let Some(element_type) =
+                resolved_target(project, &source_key, ParagraphBehaviorKey::Return)
+            else {
+                return Ok(EnterDecision {
+                    target: ParagraphKeyTarget::NoOp,
+                    action: EnterAction::NoOp,
+                });
+            };
             return Ok(EnterDecision {
-                target: ParagraphKeyTarget::Target(role),
-                action: EnterAction::ClearGeneratedAndSplit { position, role },
+                target: ParagraphKeyTarget::Target(element_type.clone()),
+                action: EnterAction::ClearGeneratedAndSplit {
+                    position,
+                    element_type,
+                },
             });
         }
         if parenthetical_repair_boundary(item.text.as_str(), position.offset).is_some() {
+            let Some(element_type) =
+                resolved_target(project, &source_key, ParagraphBehaviorKey::Return)
+            else {
+                return Ok(EnterDecision {
+                    target: ParagraphKeyTarget::NoOp,
+                    action: EnterAction::NoOp,
+                });
+            };
             return Ok(EnterDecision {
-                target: ParagraphKeyTarget::Target(Role::Dialogue),
-                action: EnterAction::RepairAndInsertDialogue {
+                target: ParagraphKeyTarget::Target(element_type.clone()),
+                action: EnterAction::RepairAndInsert {
                     element: position.element,
+                    element_type,
                 },
             });
         }
@@ -148,21 +186,29 @@ pub(super) fn resolve_enter(
         }
     }
 
-    let current_role = item.transitional_role();
-    let role = if current_role == Role::Dialogue && position.offset < item.text.len() {
-        Role::Dialogue
+    let element_type = if capabilities.dialogue && position.offset < item.text.len() {
+        source_key
     } else {
-        enter_transition(current_role)
-            .ok_or(EditError::UnsupportedTransition { from: current_role })?
+        let Some(target) = resolved_target(project, &source_key, ParagraphBehaviorKey::Return)
+        else {
+            return Ok(EnterDecision {
+                target: ParagraphKeyTarget::NoOp,
+                action: EnterAction::NoOp,
+            });
+        };
+        target
     };
     Ok(EnterDecision {
-        target: ParagraphKeyTarget::Target(role),
-        action: EnterAction::Split { position, role },
+        target: ParagraphKeyTarget::Target(element_type.clone()),
+        action: EnterAction::Split {
+            position,
+            element_type,
+        },
     })
 }
 
-/// The shared Tab decision preserves consumed no-ops and same-role displayable
-/// targets separately. Its action is also the sole source for real Tab edits.
+/// The shared Tab decision preserves consumed no-ops and resolved open-key
+/// targets separately. Its action is the sole source for real Tab edits.
 pub(super) fn resolve_tab(
     project: &Project,
     selection: Selection,
@@ -180,14 +226,15 @@ pub(super) fn resolve_tab(
         .elements
         .get(start.element)
         .ok_or(EditError::InvalidElement)?;
-    if strict_boundary_rejects(
-        project,
-        policy,
-        start.element,
-        item.transitional_role(),
-        item.text.len(),
-        start.offset,
-    ) {
+    let source_key = item.element_type();
+    let Some(semantics) = project.element_semantics(&source_key) else {
+        return Ok(TabDecision {
+            target: ParagraphKeyTarget::NoOp,
+            action: TabAction::NoOp,
+        });
+    };
+    let capabilities = semantics.capabilities();
+    if strict_boundary_rejects(policy, capabilities, item.text.len(), start.offset) {
         return Ok(TabDecision {
             target: ParagraphKeyTarget::NoOp,
             action: TabAction::NoOp,
@@ -196,12 +243,27 @@ pub(super) fn resolve_tab(
 
     let mut position = start;
     let mut clear_generated_parenthetical = false;
-    if policy.auto_parenthetical && item.transitional_role() == Role::Parenthetical {
+    if policy.auto_parenthetical && capabilities.parenthetical {
         if is_delimiter_only_parenthetical(item.text.as_str()) {
+            let Some(element_type) =
+                resolved_target(project, &source_key, ParagraphBehaviorKey::Tab)
+            else {
+                return Ok(TabDecision {
+                    target: ParagraphKeyTarget::NoOp,
+                    action: TabAction::NoOp,
+                });
+            };
+            if element_type == source_key {
+                return Ok(TabDecision {
+                    target: ParagraphKeyTarget::Target(element_type),
+                    action: TabAction::NoOp,
+                });
+            }
             return Ok(TabDecision {
-                target: ParagraphKeyTarget::Target(Role::Dialogue),
-                action: TabAction::DelimiterParentheticalToDialogue {
+                target: ParagraphKeyTarget::Target(element_type.clone()),
+                action: TabAction::DelimiterParentheticalToType {
                     element: position.element,
+                    element_type,
                 },
             });
         }
@@ -211,10 +273,19 @@ pub(super) fn resolve_tab(
             position.offset = 0;
             clear_generated_parenthetical = true;
         } else if parenthetical_repair_boundary(item.text.as_str(), position.offset).is_some() {
+            let Some(element_type) =
+                resolved_target(project, &source_key, ParagraphBehaviorKey::Tab)
+            else {
+                return Ok(TabDecision {
+                    target: ParagraphKeyTarget::NoOp,
+                    action: TabAction::NoOp,
+                });
+            };
             return Ok(TabDecision {
-                target: ParagraphKeyTarget::Target(Role::Dialogue),
-                action: TabAction::RepairAndInsertDialogue {
+                target: ParagraphKeyTarget::Target(element_type.clone()),
+                action: TabAction::RepairAndInsert {
                     element: position.element,
+                    element_type,
                 },
             });
         } else if !item.text.is_empty() {
@@ -225,19 +296,31 @@ pub(super) fn resolve_tab(
         }
     }
 
-    let role = tab_transition(item.transitional_role(), item.text.is_empty());
-    Ok(match role {
-        Some(role) => TabDecision {
-            target: ParagraphKeyTarget::Target(role),
-            action: TabAction::SetRole {
-                position,
-                role,
-                clear_generated_parenthetical,
-            },
-        },
-        None => TabDecision {
+    if capabilities.character_cue && !item.text.is_empty() {
+        return Ok(TabDecision {
             target: ParagraphKeyTarget::NoOp,
             action: TabAction::NoOp,
+        });
+    }
+    let Some(element_type) = resolved_target(project, &source_key, ParagraphBehaviorKey::Tab)
+    else {
+        return Ok(TabDecision {
+            target: ParagraphKeyTarget::NoOp,
+            action: TabAction::NoOp,
+        });
+    };
+    if element_type == source_key {
+        return Ok(TabDecision {
+            target: ParagraphKeyTarget::Target(element_type),
+            action: TabAction::NoOp,
+        });
+    }
+    Ok(TabDecision {
+        target: ParagraphKeyTarget::Target(element_type.clone()),
+        action: TabAction::SetElementType {
+            position,
+            element_type,
+            clear_generated_parenthetical,
         },
     })
 }
@@ -269,38 +352,4 @@ fn parenthetical_repair_boundary(text: &str, offset: usize) -> Option<usize> {
         (false, false) => text.len() + 1,
         (true, true) => text.len(),
     })
-}
-
-pub(super) fn repair_parenthetical(text: &str) -> String {
-    match (text.starts_with('('), text.ends_with(')')) {
-        (true, false) => format!("{text})"),
-        (false, true) => format!("({text}"),
-        (false, false) => format!("({text})"),
-        (true, true) => text.to_owned(),
-    }
-}
-
-/// Compatibility alias for the shared native ReturnKey application default.
-pub fn transition(role: Role) -> Option<Role> {
-    enter_transition(role)
-}
-
-pub fn enter_transition(role: Role) -> Option<Role> {
-    role_for_native_behavior_target(formatting::formatting_for_role(role).behavior.return_key)
-}
-
-/// Returns the shared native TabKey application default, with the established
-/// empty-Character condition retained as an application-specific boundary.
-pub fn tab_transition(role: Role, current_text_is_empty: bool) -> Option<Role> {
-    if role == Role::Character && !current_text_is_empty {
-        return None;
-    }
-    role_for_native_behavior_target(formatting::formatting_for_role(role).behavior.tab_key)
-}
-
-fn role_for_native_behavior_target(target: &str) -> Option<Role> {
-    formatting::formatting_in_native_order()
-        .iter()
-        .find(|formatting| formatting.fdx_label == target)
-        .map(|formatting| formatting.role)
 }

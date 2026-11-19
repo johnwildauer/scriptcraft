@@ -1,7 +1,18 @@
 #![forbid(unsafe_code)]
 
-use scriptcraft_export::{export_pdf, export_pdf_with_options, export_text, PdfExportOptions};
-use scriptcraft_model::{BodyOwner, Project, Role, ScreenplayElement, TitlePageParagraph};
+use scriptcraft_export::{
+    export_pdf, export_pdf_with_options, export_text, ExportError, PdfExportOptions,
+    PdfFallbackKind,
+};
+use scriptcraft_layout::LayoutEnvironment;
+use scriptcraft_model::{
+    typography::{
+        DocumentFontEnvironment, FaceStyle, FontResolutionKind, RequestedFontResolution,
+        ResolvedFaceMetrics, ResolvedFontFace, ResolvedFontId, ResolvedFontSourceKind,
+        ScalarAdvance,
+    },
+    BodyOwner, Project, Role, ScreenplayElement, TitlePageParagraph,
+};
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("export smoke scenario is valid"))
@@ -22,13 +33,89 @@ fn observed_pdf_text(bytes: &[u8]) -> String {
     output
 }
 
+fn synthetic_layout_environment(project: &Project) -> LayoutEnvironment {
+    let ids = FaceStyle::ALL.map(|style| {
+        let label = match style {
+            FaceStyle::Regular => "regular",
+            FaceStyle::Bold => "bold",
+            FaceStyle::Italic => "italic",
+            FaceStyle::BoldItalic => "bold-italic",
+        };
+        valid(ResolvedFontId::new(format!("synthetic-{label}")))
+    });
+    let advances = (32_u8..=126)
+        .map(|byte| {
+            (
+                char::from(byte),
+                ScalarAdvance {
+                    advance_units: 600,
+                    missing_glyph: false,
+                },
+            )
+        })
+        .chain([(
+            '\u{fffd}',
+            ScalarAdvance {
+                advance_units: 600,
+                missing_glyph: true,
+            },
+        )])
+        .collect();
+    let metrics = valid(ResolvedFaceMetrics::new(1_000, 800, -200, 0, advances));
+    let faces = FaceStyle::ALL
+        .into_iter()
+        .zip(ids.iter())
+        .map(|(style, id)| {
+            let face = valid(ResolvedFontFace::new(
+                id.clone(),
+                "Synthetic",
+                "Synthetic face",
+                style,
+                ResolvedFontSourceKind::Synthetic,
+                1,
+                1,
+                metrics.clone(),
+            ));
+            (id.clone(), face)
+        })
+        .collect();
+    let families = [
+        ("Courier Prime", FontResolutionKind::CourierAlias),
+        ("Courier Final Draft", FontResolutionKind::CourierAlias),
+        ("Courier", FontResolutionKind::CourierAlias),
+        ("Courier New", FontResolutionKind::CourierAlias),
+        ("Arial", FontResolutionKind::NearestSans),
+        ("Helvetica", FontResolutionKind::NearestSans),
+        ("Times New Roman", FontResolutionKind::NearestSerif),
+        ("Times", FontResolutionKind::NearestSerif),
+        ("Unknown family", FontResolutionKind::UnknownFallback),
+    ];
+    let requests = families
+        .into_iter()
+        .map(|(family, kind)| {
+            (
+                family.to_owned(),
+                RequestedFontResolution {
+                    kind,
+                    regular: ids[0].clone(),
+                    bold: ids[1].clone(),
+                    italic: ids[2].clone(),
+                    bold_italic: ids[3].clone(),
+                },
+            )
+        })
+        .collect();
+    let fonts = valid(DocumentFontEnvironment::new(requests, faces));
+    LayoutEnvironment::new(project.session_layout_inputs().page_only(), fonts)
+}
+
 #[test]
 fn export_public_api_smoke() {
     let mut project = valid(Project::new());
     project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
         "export-action",
         Role::Action,
-        "Export body smoke",
+        "Export body smoke café",
     )))];
     project.title_page = vec![valid(TitlePageParagraph::new(
         "export-title",
@@ -36,6 +123,7 @@ fn export_public_api_smoke() {
         Default::default(),
     ))];
     let original = project.clone();
+    let environment = synthetic_layout_environment(&project);
 
     let plain = valid(export_text(&project));
     assert!(plain.text.contains("Export body smoke"));
@@ -45,14 +133,15 @@ fn export_public_api_smoke() {
     }
     assert!(plain.loss.page_layout_lost);
 
-    let default_pdf = valid(export_pdf(&project));
+    let default_pdf = valid(export_pdf(&project, &environment));
     let body_only_pdf = valid(export_pdf_with_options(
         &project,
+        &environment,
         PdfExportOptions {
             include_title_page: false,
         },
     ));
-    for pdf in [&default_pdf, &body_only_pdf] {
+    for pdf in [&default_pdf.bytes, &body_only_pdf.bytes] {
         assert!(!pdf.is_empty());
         assert!(pdf.starts_with(b"%PDF-1.4\n"));
         let text = valid(std::str::from_utf8(pdf));
@@ -61,12 +150,38 @@ fn export_public_api_smoke() {
             .ends_with("%%EOF"));
     }
 
-    let default_observed = observed_pdf_text(&default_pdf);
-    let body_only_observed = observed_pdf_text(&body_only_pdf);
+    let default_observed = observed_pdf_text(&default_pdf.bytes);
+    let body_only_observed = observed_pdf_text(&body_only_pdf.bytes);
     assert!(default_observed.contains("Export Title Smoke"));
-    assert!(default_observed.contains("Export body smoke"));
-    assert!(body_only_observed.contains("Export body smoke"));
+    assert!(default_observed.contains("Export body smoke caf?"));
+    assert!(body_only_observed.contains("Export body smoke caf?"));
     assert!(!body_only_observed.contains("Export Title Smoke"));
-    assert_ne!(default_pdf, body_only_pdf);
+    assert_ne!(default_pdf.bytes, body_only_pdf.bytes);
+    assert!(default_pdf
+        .typography
+        .entries()
+        .iter()
+        .any(|entry| matches!(entry.kind, PdfFallbackKind::MetricGeometryUnverified)));
+    assert!(default_pdf
+        .typography
+        .summary()
+        .contains("canonical metric geometry unverified"));
+    assert!(default_pdf
+        .typography
+        .entries()
+        .iter()
+        .any(|entry| matches!(entry.kind, PdfFallbackKind::UnsupportedScalarSubstitution)));
+    assert!(default_pdf.typography.entries().len() <= 8);
+    assert!(!default_pdf
+        .typography
+        .summary()
+        .contains("Export body smoke"));
+    let mut mismatched_environment = environment.clone();
+    mismatched_environment.page.margin_top =
+        mismatched_environment.page.margin_top.saturating_add(1);
+    assert!(matches!(
+        export_pdf(&project, &mismatched_environment),
+        Err(ExportError::InvalidTypographyEnvironment)
+    ));
     assert_eq!(project, original);
 }

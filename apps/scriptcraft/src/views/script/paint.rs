@@ -7,20 +7,17 @@ use super::{
         normal_view_page_bottom_rule_visible, page_chrome_visible, page_local_screen_origin,
         NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH,
     },
-    text::{
-        paint_fixed_metric_text_with_selection, renderer_font, resolve_span_paint,
-        FixedMetricTextStyle,
-    },
+    text::{neutral_resolved_font, resolve_span_paint, resolved_font_for_family},
     zoom_scroll::PresentationMetrics,
     ScriptCraftApp,
 };
 use crate::{
     app::add_performance_counter,
     chrome::{status_bar::PresentedPage, theme},
-    presentation::{geometry as presentation_geometry, style::AdvanceMode},
+    presentation::geometry as presentation_geometry,
 };
 use eframe::egui::{self, Color32, Stroke, Vec2};
-use scriptcraft_commands::{EditorSurface, ScriptViewMode};
+use scriptcraft_commands::{Command, EditorSurface, ScriptViewMode};
 use scriptcraft_layout::{Caret, FixedRect, LayoutLine, PositionedStyledSpan, ScreenplayLayout};
 use scriptcraft_session::editing::{Position, Selection};
 use std::time::Instant;
@@ -28,6 +25,20 @@ use std::time::Instant;
 const PAGE_BORDER_WIDTH: f32 = 2.5;
 
 impl ScriptCraftApp {
+    fn post_typography_diagnostic_once(&mut self, prefix: &str, message: &str) {
+        let already_visible = self
+            .diagnostic_message
+            .as_ref()
+            .is_some_and(|current| current.as_str().starts_with(prefix));
+        let already_queued = self.pending_diagnostic_commands.iter().any(|command| {
+            matches!(command, Command::UiStatusSet { message: Some(message) }
+                if message.as_str().starts_with(prefix))
+        });
+        if !already_visible && !already_queued {
+            self.post_diagnostic(message);
+        }
+    }
+
     fn selection_range(
         &self,
         line_start: usize,
@@ -171,6 +182,13 @@ impl ScriptCraftApp {
         'paint_lines: for (line_index, line) in layout.pages[page_index].lines.iter().enumerate() {
             let selection =
                 self.selection_range(line.source.start, line.source.end, line.element, surface);
+            let Some(prepared_fonts) = self.prepared_document_fonts.clone() else {
+                self.post_typography_diagnostic_once(
+                    "TYPOGRAPHY_FACE_UNAVAILABLE:",
+                    "TYPOGRAPHY_FACE_UNAVAILABLE: prepared font environment missing",
+                );
+                continue 'paint_lines;
+            };
             let resolved_paints = line
                 .spans
                 .iter()
@@ -179,52 +197,57 @@ impl ScriptCraftApp {
                         &span.text_style,
                         span.text_style.size as f32 * scale,
                         palette,
-                        &self.document_font_availability,
+                        &prepared_fonts,
                     )
                 })
-                .collect::<Vec<_>>();
-            let has_proportional = resolved_paints
+                .collect::<Option<Vec<_>>>();
+            let Some(resolved_paints) = resolved_paints else {
+                self.post_typography_diagnostic_once(
+                    "TYPOGRAPHY_FACE_UNAVAILABLE:",
+                    "TYPOGRAPHY_FACE_UNAVAILABLE: prepared resolved face missing",
+                );
+                continue 'paint_lines;
+            };
+            if resolved_paints
                 .iter()
-                .any(|resolved| resolved.advance_mode == AdvanceMode::Proportional);
-
-            if has_proportional {
-                // Unsupported natural topology fails closed. The same projection
-                // object is also consumed by caret/reveal/IME and pointer dispatch.
-                let Some(projection) = projections.get(line_index).and_then(Option::as_ref) else {
-                    continue 'paint_lines;
-                };
-                debug_assert!(std::ptr::eq(projection.core, line));
-                debug_assert!(projection.total_advance.is_finite());
-                if let Some(first_span) = projection.spans.first() {
-                    debug_assert_eq!(first_span.origin_x, projection.line_origin_x);
-                }
-                let page_origin = page_local_screen_origin(presented_page, scale);
-                let line_clip = projection
-                    .clip_bounds
-                    .translate(page_origin.to_vec2())
-                    .intersect(page_rect);
-                let line_painter = painter.with_clip_rect(line_clip);
-                for (projected, resolved) in projection.spans.iter().zip(&resolved_paints) {
-                    let span = projected.core;
-                    let span_y = document_y_to_screen(
-                        presented_page,
-                        span.geometry.y.to_points_f32(),
-                        scale,
+                .any(|resolved| resolved.unsupported_color)
+            {
+                self.post_typography_diagnostic_once(
+                    "TYPOGRAPHY_COLOR_FALLBACK:",
+                    "TYPOGRAPHY_COLOR_FALLBACK: unsupported explicit color uses the theme text palette",
+                );
+            }
+            let Some(projection) = projections.get(line_index).and_then(Option::as_ref) else {
+                self.post_typography_diagnostic_once(
+                    "TYPOGRAPHY_PROJECTION_UNAVAILABLE:",
+                    "TYPOGRAPHY_PROJECTION_UNAVAILABLE: canonical line projection failed",
+                );
+                continue 'paint_lines;
+            };
+            debug_assert!(std::ptr::eq(projection.core, line));
+            let page_origin = page_local_screen_origin(presented_page, scale);
+            let line_clip = projection
+                .clip_bounds
+                .translate(page_origin.to_vec2())
+                .intersect(page_rect);
+            let line_painter = painter.with_clip_rect(line_clip);
+            for (projected, resolved) in projection.spans.iter().zip(&resolved_paints) {
+                let span = projected.core;
+                let span_y =
+                    document_y_to_screen(presented_page, span.geometry.y.to_points_f32(), scale);
+                let span_height = span.geometry.height.to_points_f32() * scale;
+                let span_origin = egui::pos2(page_rect.left() + projected.origin_x, span_y);
+                let selected_display = Self::selected_display_range(span, selection);
+                if let Some((from, to)) = selected_display {
+                    add_performance_counter(&mut self.performance.selection_spans_submitted, 1);
+                    let boundaries = &projected.display_boundary_offsets;
+                    let start = from.min(boundaries.len().saturating_sub(1));
+                    let end = to.min(boundaries.len().saturating_sub(1));
+                    let selected_rect = egui::Rect::from_min_max(
+                        egui::pos2(span_origin.x + boundaries[start], span_y),
+                        egui::pos2(span_origin.x + boundaries[end], span_y + span_height),
                     );
-                    let span_height = span.geometry.height.to_points_f32() * scale;
-                    let span_origin = egui::pos2(page_rect.left() + projected.origin_x, span_y);
-                    let selected_display = Self::selected_display_range(span, selection);
-                    if let Some((from, to)) = selected_display {
-                        add_performance_counter(&mut self.performance.selection_spans_submitted, 1);
-                        let boundaries = &projected.display_boundary_offsets;
-                        let start = from.min(boundaries.len().saturating_sub(1));
-                        let end = to.min(boundaries.len().saturating_sub(1));
-                        let selected_x = span_origin.x + boundaries[start];
-                        let selected_width = (boundaries[end] - boundaries[start]).max(0.0);
-                        let selected_rect = egui::Rect::from_min_size(
-                            egui::pos2(selected_x, span_y),
-                            Vec2::new(selected_width.max(1.0), span_height),
-                        );
+                    if selected_rect.width() > 0.0 {
                         line_painter.rect_filled(selected_rect, 0.0, palette.selection);
                         line_painter.rect_stroke(
                             selected_rect,
@@ -233,162 +256,68 @@ impl ScriptCraftApp {
                             egui::StrokeKind::Inside,
                         );
                     }
+                }
 
-                    if projected.advance_mode == AdvanceMode::Proportional {
-                        if let Some(geometry) = projected.natural.as_ref() {
-                            line_painter.galley(
-                                span_origin,
-                                geometry.galley.clone(),
-                                resolved.color,
-                            );
-                            if let Some((from, to)) = selected_display {
-                                let boundaries = &projected.display_boundary_offsets;
-                                let start = from.min(boundaries.len().saturating_sub(1));
-                                let end = to.min(boundaries.len().saturating_sub(1));
-                                let selected_rect = egui::Rect::from_min_max(
-                                    egui::pos2(span_origin.x + boundaries[start], span_y),
-                                    egui::pos2(
-                                        span_origin.x + boundaries[end],
-                                        span_y + span_height,
-                                    ),
-                                );
-                                let selected_clip = line_clip.intersect(selected_rect);
-                                if selected_rect.width() > 0.0
-                                    && selected_clip.width() > 0.0
-                                    && selected_clip.height() > 0.0
-                                {
-                                    let selected_galley =
-                                        presentation_geometry::recolor_natural_galley(
-                                            geometry,
-                                            palette.selection_text,
-                                        );
-                                    painter.with_clip_rect(selected_clip).galley(
-                                        span_origin,
-                                        selected_galley,
-                                        palette.selection_text,
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        let display_count = span.display_text.chars().count();
-                        let cell_width = if display_count == 0 {
-                            span.char_width.to_points_f32() * scale
-                        } else {
-                            projected.advance / display_count as f32
-                        };
-                        paint_fixed_metric_text_with_selection(
-                            &line_painter,
+                let galley = match presentation_geometry::canonical_singleline_galley(
+                    &line_painter,
+                    &span.display_text,
+                    &resolved.font,
+                    &projected.display_boundary_offsets,
+                    resolved.color,
+                ) {
+                    Ok(galley) => galley,
+                    Err(_) => {
+                        self.post_typography_diagnostic_once(
+                            "TYPOGRAPHY_GLYPH_TOPOLOGY_UNSUPPORTED:",
+                            "TYPOGRAPHY_GLYPH_TOPOLOGY_UNSUPPORTED: canonical span was not painted",
+                        );
+                        continue;
+                    }
+                };
+                self.performance.galleys_built = self.performance.galleys_built.saturating_add(1);
+                line_painter.galley(span_origin, galley.clone(), resolved.color);
+                if let Some((from, to)) = selected_display {
+                    let boundaries = &projected.display_boundary_offsets;
+                    let start = from.min(boundaries.len().saturating_sub(1));
+                    let end = to.min(boundaries.len().saturating_sub(1));
+                    let selected_rect = egui::Rect::from_min_max(
+                        egui::pos2(span_origin.x + boundaries[start], span_y),
+                        egui::pos2(span_origin.x + boundaries[end], span_y + span_height),
+                    );
+                    let selected_clip = line_clip.intersect(selected_rect);
+                    if selected_rect.width() > 0.0
+                        && selected_clip.width() > 0.0
+                        && selected_clip.height() > 0.0
+                    {
+                        let selected_galley =
+                            presentation_geometry::recolor_galley(&galley, palette.selection_text);
+                        painter.with_clip_rect(selected_clip).galley(
                             span_origin,
-                            &span.display_text,
-                            resolved.font.clone(),
-                            cell_width,
-                            FixedMetricTextStyle {
-                                color: resolved.color,
-                                selected_color: palette.selection_text,
-                                selection: selected_display,
-                            },
-                            &mut self.performance,
+                            selected_galley,
+                            palette.selection_text,
                         );
                     }
+                }
 
-                    if span.underline || span.strikethrough {
-                        if span.underline {
-                            let underline_y = span_y + span_height * 0.88;
-                            line_painter.line_segment(
-                                [
-                                    egui::pos2(span_origin.x, underline_y),
-                                    egui::pos2(span_origin.x + projected.advance, underline_y),
-                                ],
-                                Stroke::new(1.0_f32, resolved.color),
-                            );
-                        }
-                        if span.strikethrough {
-                            let strike_y = span_y + span_height * 0.52;
-                            line_painter.line_segment(
-                                [
-                                    egui::pos2(span_origin.x, strike_y),
-                                    egui::pos2(span_origin.x + projected.advance, strike_y),
-                                ],
-                                Stroke::new(1.0_f32, resolved.color),
-                            );
-                        }
-                    }
-                }
-                continue;
-            }
-
-            for (span, resolved_paint) in line.spans.iter().zip(&resolved_paints) {
-                let span_x = page_rect.left() + span.geometry.x.to_points_f32() * scale;
-                let span_y =
-                    document_y_to_screen(presented_page, span.geometry.y.to_points_f32(), scale);
-                let span_height = span.geometry.height.to_points_f32() * scale;
-                let span_width = span.geometry.width.to_points_f32() * scale;
-                let display_count = span.display_text.chars().count();
-                if display_count == 0 {
-                    continue;
-                }
-                let nominal_cell = span.char_width.to_points_f32() * scale;
-                let cell_width = if span_width > nominal_cell * display_count as f32 {
-                    span_width / display_count as f32
-                } else {
-                    nominal_cell
-                };
-                let selected_display = Self::selected_display_range(span, selection);
-                if let Some((from, to)) = selected_display {
-                    add_performance_counter(&mut self.performance.selection_spans_submitted, 1);
-                    let selected_x = span_x + from as f32 * cell_width;
-                    let selected_width = if display_count == 1 {
-                        span_width
-                    } else {
-                        to.saturating_sub(from) as f32 * cell_width
-                    };
-                    let selected_rect = egui::Rect::from_min_size(
-                        egui::pos2(selected_x, span_y),
-                        Vec2::new(selected_width.max(1.0), span_height),
-                    );
-                    painter.rect_filled(selected_rect, 0.0, palette.selection);
-                    painter.rect_stroke(
-                        selected_rect,
-                        0.0,
-                        Stroke::new(1.0, palette.selection_boundary),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-                let span_font = resolved_paint.font.clone();
-                let color = resolved_paint.color;
-                paint_fixed_metric_text_with_selection(
-                    &painter,
-                    egui::pos2(span_x, span_y),
-                    &span.display_text,
-                    span_font,
-                    cell_width,
-                    FixedMetricTextStyle {
-                        color,
-                        selected_color: palette.selection_text,
-                        selection: selected_display,
-                    },
-                    &mut self.performance,
-                );
                 if span.underline || span.strikethrough {
                     if span.underline {
                         let underline_y = span_y + span_height * 0.88;
-                        painter.line_segment(
+                        line_painter.line_segment(
                             [
-                                egui::pos2(span_x, underline_y),
-                                egui::pos2(span_x + span_width, underline_y),
+                                egui::pos2(span_origin.x, underline_y),
+                                egui::pos2(span_origin.x + projected.advance, underline_y),
                             ],
-                            Stroke::new(1.0_f32, color),
+                            Stroke::new(1.0_f32, resolved.color),
                         );
                     }
                     if span.strikethrough {
                         let strike_y = span_y + span_height * 0.52;
-                        painter.line_segment(
+                        line_painter.line_segment(
                             [
-                                egui::pos2(span_x, strike_y),
-                                egui::pos2(span_x + span_width, strike_y),
+                                egui::pos2(span_origin.x, strike_y),
+                                egui::pos2(span_origin.x + projected.advance, strike_y),
                             ],
-                            Stroke::new(1.0_f32, color),
+                            Stroke::new(1.0_f32, resolved.color),
                         );
                     }
                 }
@@ -441,27 +370,51 @@ impl ScriptCraftApp {
                     });
                     let caret_span =
                         caret_line.and_then(|line| Self::span_for_caret(line, caret.offset));
-                    let ime_font = caret_span.map_or_else(
-                        || renderer_font(&layout.inputs.font_family, metrics.font_size),
-                        |span| {
-                            resolve_span_paint(
-                                &span.text_style,
-                                span.text_style.size as f32 * scale,
-                                palette,
-                                &self.document_font_availability,
-                            )
-                            .font
-                        },
-                    );
-                    let ime_painter = caret_clip
-                        .map_or_else(|| painter.clone(), |clip| painter.with_clip_rect(clip));
-                    ime_painter.text(
-                        caret_rect.min,
-                        egui::Align2::LEFT_TOP,
-                        &self.ime_preedit,
-                        ime_font,
-                        palette.ime_text,
-                    );
+                    let prepared = self.prepared_document_fonts.as_ref();
+                    let ime_font = caret_span
+                        .and_then(|span| {
+                            prepared.and_then(|prepared| {
+                                resolve_span_paint(
+                                    &span.text_style,
+                                    span.text_style.size as f32 * scale,
+                                    palette,
+                                    prepared,
+                                )
+                            })
+                        })
+                        .map(|paint| paint.font)
+                        .or_else(|| {
+                            prepared.and_then(|prepared| {
+                                resolved_font_for_family(
+                                    &layout.inputs.font_family,
+                                    false,
+                                    false,
+                                    metrics.font_size * scale,
+                                    prepared,
+                                )
+                            })
+                        })
+                        .or_else(|| {
+                            prepared.and_then(|prepared| {
+                                neutral_resolved_font(metrics.font_size * scale, prepared)
+                            })
+                        });
+                    if let Some(ime_font) = ime_font {
+                        let ime_painter = caret_clip
+                            .map_or_else(|| painter.clone(), |clip| painter.with_clip_rect(clip));
+                        ime_painter.text(
+                            caret_rect.min,
+                            egui::Align2::LEFT_TOP,
+                            &self.ime_preedit,
+                            ime_font,
+                            palette.ime_text,
+                        );
+                    } else {
+                        self.post_typography_diagnostic_once(
+                            "TYPOGRAPHY_IME_FACE_UNAVAILABLE:",
+                            "TYPOGRAPHY_IME_FACE_UNAVAILABLE: prepared resolved face missing",
+                        );
+                    }
                 }
             }
         }

@@ -555,11 +555,20 @@ fn display_char_for_x(line: &LayoutLine, x: FixedPoint) -> usize {
     let mut display_offset = 0usize;
     for span in line.spans.iter() {
         let count = span.display_text.chars().count();
-        let cell = if count == 0 {
-            span.char_width.raw().max(1)
-        } else {
-            span.geometry.width.raw().div_euclid(count as i64).max(1)
-        };
+        let offsets = &span.display_boundary_offsets;
+        if x.raw() <= span.geometry.x.raw() {
+            return display_offset;
+        }
+        for index in 0..count {
+            let left = offsets.get(index).map_or(0, |offset| offset.raw());
+            let right = offsets
+                .get(index.saturating_add(1))
+                .map_or(span.geometry.width.raw(), |offset| offset.raw());
+            let midpoint = left.saturating_add(right.saturating_sub(left).div_euclid(2));
+            if x.raw() < span.geometry.x.raw().saturating_add(midpoint) {
+                return display_offset.saturating_add(index);
+            }
+        }
         if x.raw()
             <= span
                 .geometry
@@ -567,10 +576,7 @@ fn display_char_for_x(line: &LayoutLine, x: FixedPoint) -> usize {
                 .raw()
                 .saturating_add(span.geometry.width.raw())
         {
-            let units = x.raw().saturating_sub(span.geometry.x.raw()).max(0);
-            return display_offset
-                .saturating_add((units.saturating_add(cell / 2).div_euclid(cell)) as usize)
-                .min(display_offset.saturating_add(count));
+            return display_offset.saturating_add(count);
         }
         display_offset = display_offset.saturating_add(count);
     }
@@ -582,17 +588,12 @@ fn x_for_display_char(line: &LayoutLine, display_char: usize) -> i64 {
     for span in line.spans.iter() {
         let count = span.display_text.chars().count();
         if display_char <= display_offset.saturating_add(count) {
-            let local = display_char.saturating_sub(display_offset).min(count) as i64;
-            let cell = if count == 0 {
-                span.char_width.raw()
-            } else {
-                span.geometry.width.raw().div_euclid(count as i64)
-            };
-            return span
-                .geometry
-                .x
-                .raw()
-                .saturating_add(local.saturating_mul(cell));
+            let local = display_char.saturating_sub(display_offset).min(count);
+            let offset = span
+                .display_boundary_offsets
+                .get(local)
+                .map_or(span.geometry.width.raw(), |offset| offset.raw());
+            return span.geometry.x.raw().saturating_add(offset);
         }
         display_offset = display_offset.saturating_add(count);
     }

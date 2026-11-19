@@ -220,12 +220,10 @@ impl ScreenplayLayout {
         ));
         let page_top = FixedPoint::from_points(i64::from(self.inputs.margin_top));
         let content_height = content_bottom.raw().saturating_sub(page_top.raw());
-        let capacity = self.inputs.lines_per_page as usize;
         let block_height = left.height.raw().max(right.height.raw()).max(0);
-        let required_lines = left.line_count.max(right.line_count);
         // A saturated sum remains larger than any validated printable extent,
         // so overflow cannot be mistaken for a fitting block.
-        let fits_empty_page = block_height <= content_height && required_lines <= capacity;
+        let fits_empty_page = block_height <= content_height;
 
         let current_page = self.pages.len() - 1;
         let has_boundary = !self.pages[current_page].lines.is_empty();
@@ -241,9 +239,7 @@ impl ScreenplayLayout {
                 .saturating_add(applied_gap),
         );
         let vertical_end = block_top.raw().saturating_add(block_height);
-        let line_end =
-            (self.pages[current_page].occupied_lines as usize).saturating_add(required_lines);
-        let fits_remaining = line_end <= capacity && vertical_end <= content_bottom.raw();
+        let fits_remaining = vertical_end <= content_bottom.raw();
 
         if !fits_empty_page {
             // The exception is limited to a block that cannot fit on a fresh
@@ -280,7 +276,7 @@ impl ScreenplayLayout {
         self.pages[page_index].lines.extend(right_lines);
         self.pages[page_index].occupied_lines = self.pages[page_index]
             .occupied_lines
-            .saturating_add(required_lines.min(u32::MAX as usize) as u32);
+            .saturating_add(left.line_count.max(right.line_count).min(u32::MAX as usize) as u32);
         self.pages[page_index].next_line_y =
             FixedPoint::from_raw(block_top.raw().saturating_add(block_height));
     }
@@ -292,15 +288,14 @@ impl ScreenplayLayout {
         diagnostics: &mut Option<&mut LayoutBuildDiagnostics>,
     ) {
         let start_page = self.pages.len() - 1;
-        let capacity = self.inputs.lines_per_page as usize;
         let page_top = FixedPoint::from_points(i64::from(self.inputs.margin_top));
         let content_bottom = FixedPoint::from_points(i64::from(
             self.inputs
                 .paper_height
                 .saturating_sub(self.inputs.margin_bottom),
         ));
-        let left_placements = spill_side_lines(left, page_top, content_bottom, capacity);
-        let right_placements = spill_side_lines(right, page_top, content_bottom, capacity);
+        let left_placements = spill_side_lines(left, page_top, content_bottom);
+        let right_placements = spill_side_lines(right, page_top, content_bottom);
         let page_count = left_placements
             .page_count
             .max(right_placements.page_count)
@@ -377,7 +372,6 @@ fn spill_side_lines(
     side: &WrappedDualSide,
     page_top: FixedPoint,
     content_bottom: FixedPoint,
-    capacity: usize,
 ) -> SpilledDualSide {
     let mut result = SpilledDualSide {
         lines: Vec::with_capacity(side.line_count),
@@ -400,7 +394,7 @@ fn spill_side_lines(
             };
             let proposed_y = FixedPoint::from_raw(y.raw().saturating_add(gap));
             let proposed_end = proposed_y.raw().saturating_add(advance);
-            let fits_page = current_count < capacity && proposed_end <= content_bottom.raw();
+            let fits_page = proposed_end <= content_bottom.raw();
 
             if !fits_page && current_count > 0 {
                 page_offset = page_offset.saturating_add(1);
@@ -588,7 +582,10 @@ fn wrap_dual_side(
         paragraph.left = column.0;
         paragraph.right = column.1;
         paragraph.first_indent = FixedPoint::default();
-        if role == Role::Character {
+        if project
+            .element_semantics(&element.element_type())
+            .is_some_and(|semantics| semantics.capabilities().character_cue)
+        {
             paragraph.alignment = ParagraphAlignment::Center;
         }
         let environment = PreparedBodyEnvironment {
@@ -598,6 +595,11 @@ fn wrap_dual_side(
             paragraph,
             text_style,
             char_width: paragraph.char_width,
+            element_key: Some(element.element_type()),
+            layout_environment: layout.layout_environment.clone(),
+            effective_color: scriptcraft_model::typography::parse_effective_text_color(
+                source.text_style(role).source_color.as_deref(),
+            ),
         };
         let prepared = prepare_body_for_layout(
             prepared_cache.as_deref_mut(),

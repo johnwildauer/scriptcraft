@@ -107,6 +107,78 @@ fn editing_history_public_api_smoke() {
 }
 
 #[test]
+fn arbitrary_paginate_as_text_edit_keeps_scoped_derived_fast_path() {
+    let mut project = valid(Project::new());
+    let mut definitions = project
+        .element_definitions()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut lyrics = definitions
+        .iter()
+        .find(|definition| definition.key.as_str() == "Action")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("base Action definition is present"));
+    lyrics.key = valid(ElementTypeKey::new("Lyrics"));
+    lyrics.behavior.paginate_as = Some("Scene Heading".to_owned());
+    definitions.push(lyrics);
+    valid(project.replace_element_definitions(definitions));
+    project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
+        "lyrics-owner",
+        valid(ElementTypeKey::new("Lyrics")),
+        "ordinary text",
+    )))];
+
+    let mut session = valid(EditingSession::new(project));
+    valid(session.set_selection(Selection::caret(Position {
+        element: 0,
+        offset: 0,
+    })));
+    valid(session.insert("edited "));
+    assert!(!session.pending_derived_work_summary().pending);
+}
+
+#[test]
+fn current_behavior_guidance_and_enter_use_the_exact_document_key() {
+    let mut project = valid(Project::new());
+    let mut definitions = project
+        .element_definitions()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut verse = definitions
+        .iter()
+        .find(|definition| definition.key.as_str() == "Action")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("required Action definition exists"));
+    verse.key = valid(ElementTypeKey::new("Verse"));
+    verse.behavior.return_key = Some(valid(ElementTypeKey::new("lowercase action")));
+    let mut target = verse.clone();
+    target.key = valid(ElementTypeKey::new("lowercase action"));
+    definitions.push(verse);
+    definitions.push(target);
+    valid(project.replace_element_definitions(definitions));
+    project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
+        "behavior-body",
+        valid(ElementTypeKey::new("Verse")),
+        "verse body",
+    )))];
+
+    let mut session = valid(EditingSession::new(project));
+    valid(session.set_selection(Selection::caret(Position {
+        element: 0,
+        offset: 5,
+    })));
+    let expected = valid(ElementTypeKey::new("lowercase action"));
+    assert_eq!(
+        session.paragraph_key_targets().enter,
+        scriptcraft_session::editing::ParagraphKeyTarget::Target(expected.clone())
+    );
+    valid(session.enter());
+    assert_eq!(session.project().elements[1].element_type(), expected);
+}
+
+#[test]
 fn preservation_free_definition_replacement_is_one_undoable_registry_edit() {
     let project = valid(Project::new());
     let mut session = valid(EditingSession::new(project.clone()));

@@ -134,7 +134,6 @@ fn session_error_category(error: &EditError) -> &'static str {
         EditError::EmptyHistory => "empty edit history",
         EditError::TextTooLong => "text size limit",
         EditError::TooManyElements => "element count limit",
-        EditError::UnsupportedTransition { .. } => "unsupported role transition",
         EditError::InlineAltsRoleChange => "inline Alts role constraint",
         EditError::Preservation(_) => "source preservation constraint",
         EditError::InvalidDefinitionCandidate => "invalid definition replacement candidate",

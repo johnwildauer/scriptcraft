@@ -2,10 +2,10 @@
 
 use crate::preservation::PreservationError;
 use crate::scene_metadata::{
-    derived_character_projection, reconcile_project_candidate_with_scope, scene_arc_names,
-    SceneMetadataError,
+    derived_character_projection, has_capability, reconcile_project_candidate_with_scope,
+    scene_arc_names, SceneMetadataError,
 };
-use crate::{BodyOwner, ModelError, Project, Role, TextRun, MAX_TEXT_BYTES};
+use crate::{BodyOwner, ModelError, Project, TextRun, MAX_TEXT_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -115,7 +115,11 @@ fn correct_cast_lists_candidate(
     let all_scenes = candidate
         .elements
         .iter()
-        .filter(|element| element.transitional_role() == Role::SceneHeading)
+        .filter(|element| {
+            has_capability(candidate, element, |capabilities| {
+                capabilities.scene_boundary
+            })
+        })
         .map(|element| element.id.as_str().to_owned())
         .collect::<BTreeSet<_>>();
     let scope = requested_scenes
@@ -124,16 +128,17 @@ fn correct_cast_lists_candidate(
     let mut source_deferred_scenes = BTreeSet::new();
     let mut scene_start: Option<usize> = None;
     for index in 0..=candidate.elements.len() {
-        let is_heading = candidate
-            .elements
-            .get(index)
-            .is_some_and(|element| element.transitional_role() == Role::SceneHeading);
+        let is_heading = candidate.elements.get(index).is_some_and(|element| {
+            has_capability(candidate, element, |capabilities| {
+                capabilities.scene_boundary
+            })
+        });
         if is_heading || index == candidate.elements.len() {
             if let Some(start) = scene_start {
                 let scene = &candidate.elements[start + 1..index];
                 let heading_id = &candidate.elements[start].id;
                 if scope.contains(heading_id.as_str())
-                    && scene_needs_cast_list_update(scene)?
+                    && scene_needs_cast_list_update(candidate, scene)?
                     && !cast_list_source_is_replaceable(candidate, scene)?
                 {
                     source_deferred_scenes.insert(heading_id.as_str().to_owned());
@@ -159,10 +164,11 @@ fn correct_cast_lists_candidate(
     let mut attempted_scenes = BTreeSet::new();
 
     for index in 0..=candidate.elements.len() {
-        let is_heading = candidate
-            .elements
-            .get(index)
-            .is_some_and(|element| element.transitional_role() == Role::SceneHeading);
+        let is_heading = candidate.elements.get(index).is_some_and(|element| {
+            has_capability(candidate, element, |capabilities| {
+                capabilities.scene_boundary
+            })
+        });
         if is_heading || index == candidate.elements.len() {
             if let Some(start) = scene_start {
                 let scene = &candidate.elements[start + 1..index];
@@ -175,23 +181,26 @@ fn correct_cast_lists_candidate(
                     }
                 }
                 if scope.contains(heading_id.as_str())
-                    && scene
-                        .iter()
-                        .any(|element| element.transitional_role() == Role::CastList)
+                    && scene.iter().any(|element| {
+                        has_capability(candidate, element, |capabilities| capabilities.cast_list)
+                    })
                 {
                     let names = if candidate.preservation.is_some() {
                         scene_arc_names(candidate, heading_id)
                             .map_err(CastListError::SceneMetadata)?
                     } else {
-                        derived_character_projection(scene)
+                        derived_character_projection(candidate, scene)
                             .into_iter()
                             .map(|(_, name)| name)
                             .collect()
                     };
                     let cast = scene_cast_text(&names)?;
                     for element_index in start + 1..index {
-                        if candidate.elements[element_index].transitional_role() == Role::CastList
-                            && candidate.elements[element_index].text != cast
+                        if has_capability(
+                            candidate,
+                            &candidate.elements[element_index],
+                            |capabilities| capabilities.cast_list,
+                        ) && candidate.elements[element_index].text != cast
                         {
                             updates.push((
                                 heading_id.as_str().to_owned(),
@@ -245,20 +254,24 @@ fn correct_cast_lists_candidate(
     Ok((outcome, deferred_scenes, completed_scenes))
 }
 
-fn scene_needs_cast_list_update(scene: &[Arc<BodyOwner>]) -> Result<bool, CastListError> {
+fn scene_needs_cast_list_update(
+    project: &Project,
+    scene: &[Arc<BodyOwner>],
+) -> Result<bool, CastListError> {
     if !scene
         .iter()
-        .any(|element| element.transitional_role() == Role::CastList)
+        .any(|element| has_capability(project, element, |capabilities| capabilities.cast_list))
     {
         return Ok(false);
     }
-    let names = derived_character_projection(scene)
+    let names = derived_character_projection(project, scene)
         .into_iter()
         .map(|(_, name)| name)
         .collect::<Vec<_>>();
     let replacement = scene_cast_text(&names)?;
     Ok(scene.iter().any(|element| {
-        element.transitional_role() == Role::CastList && element.text != replacement
+        has_capability(project, element, |capabilities| capabilities.cast_list)
+            && element.text != replacement
     }))
 }
 
@@ -266,7 +279,7 @@ fn cast_list_source_is_replaceable(
     project: &Project,
     scene: &[Arc<BodyOwner>],
 ) -> Result<bool, CastListError> {
-    let names = derived_character_projection(scene)
+    let names = derived_character_projection(project, scene)
         .into_iter()
         .map(|(_, name)| name)
         .collect::<Vec<_>>();
@@ -274,7 +287,7 @@ fn cast_list_source_is_replaceable(
     let mut supported = true;
     for element in scene
         .iter()
-        .filter(|element| element.transitional_role() == Role::CastList)
+        .filter(|element| has_capability(project, element, |capabilities| capabilities.cast_list))
     {
         if element.text == replacement {
             continue;
