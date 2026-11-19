@@ -7,8 +7,10 @@ use crate::{
 };
 use eframe::egui::{self, Color32, FontFamily, FontId};
 use scriptcraft_layout::LayoutLine;
-use scriptcraft_model::formatting::EffectiveTextStyle;
-use scriptcraft_model::typography::{DocumentFontEnvironment, EffectiveTextColor, ResolvedFontId};
+use scriptcraft_model::formatting::EffectiveTextStyle as LegacyTextStyle;
+use scriptcraft_model::typography::{
+    DocumentFontEnvironment, EffectiveTextColor, EffectiveTextStyle, ResolvedFontId,
+};
 
 impl ScriptCraftApp {
     pub(crate) fn project_line_for_interaction<'a>(
@@ -69,6 +71,46 @@ pub(super) fn neutral_resolved_font(
 
 pub(super) fn resolve_span_paint(
     style: &EffectiveTextStyle,
+    font_size: f32,
+    palette: theme::PagePalette,
+    prepared: &document_font::PreparedDocumentFonts,
+) -> Option<ResolvedSpanPaint> {
+    let family_name = prepared.egui_family_names.get(&style.resolved_font_id)?;
+    let font = FontId::new(
+        font_size.max(1.0),
+        FontFamily::Name(family_name.clone().into()),
+    );
+    let color_resolution = style.color;
+    let (color, unsupported_color) = match color_resolution {
+        EffectiveTextColor::ThemeDefault => (
+            if style.hidden_text {
+                palette.subdued_text
+            } else {
+                palette.text
+            },
+            false,
+        ),
+        EffectiveTextColor::ExplicitRgb8 { red, green, blue } => {
+            (Color32::from_rgb(red, green, blue), false)
+        }
+        EffectiveTextColor::UnsupportedExplicit => (
+            if style.hidden_text {
+                palette.subdued_text
+            } else {
+                palette.text
+            },
+            true,
+        ),
+    };
+    Some(ResolvedSpanPaint {
+        font,
+        color,
+        unsupported_color,
+    })
+}
+
+pub(super) fn resolve_legacy_span_paint(
+    style: &LegacyTextStyle,
     font_size: f32,
     palette: theme::PagePalette,
     prepared: &document_font::PreparedDocumentFonts,

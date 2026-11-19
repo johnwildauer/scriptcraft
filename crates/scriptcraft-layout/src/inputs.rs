@@ -194,6 +194,22 @@ pub(super) fn validate_profile(inputs: &LayoutInputs) -> Result<(), LayoutError>
     Ok(())
 }
 
+pub(super) fn validate_page_profile(inputs: &LayoutInputs) -> Result<(), LayoutError> {
+    if inputs.name.len() > 262_144
+        || inputs.format_version == 0
+        || inputs.paper_width == 0
+        || inputs.paper_height == 0
+        || inputs.margin_left.saturating_add(inputs.margin_right) >= inputs.paper_width
+        || inputs.margin_top.saturating_add(inputs.margin_bottom) >= inputs.paper_height
+        || inputs.boundary_gap > 1_000
+    {
+        return Err(LayoutError {
+            kind: LayoutErrorKind::InvalidProfile,
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn effective_paragraph(
     inputs: &LayoutInputs,
     source: &SourceLayoutSettings,
@@ -368,11 +384,21 @@ pub fn resolve_effective_dual_wrapper_paragraph(
         .ok_or(LayoutError {
             kind: LayoutErrorKind::NoGeometry,
         })?;
-    let direct = project
+    let mut direct = project
         .dual_dialogue_paragraph_overrides
         .get(wrapper_id)
         .copied()
         .unwrap_or_default();
+    // The FDX wrapper's RightIndent is an inset from the paper's right edge,
+    // whereas the resolved dual constraint stores the right edge as a page-x
+    // coordinate. Convert only this wrapper-specific value at the boundary.
+    if let Some(right_inset) = direct.paragraph.right_indent {
+        direct.paragraph.right_indent = Some(FixedPoint::from_raw(
+            FixedPoint::from_points(i64::from(environment.page.paper_width))
+                .raw()
+                .saturating_sub(right_inset.raw()),
+        ));
+    }
     resolve_paragraph_values(definition, direct, &[], environment)
 }
 
@@ -844,7 +870,7 @@ mod dynamic_resolution_tests {
         let wrapper = StableId::new("dual-wrapper")?;
         let mut direct = SourceParagraphOverrides::default();
         direct.paragraph.left_indent = Some(FixedPoint::from_points(140));
-        direct.paragraph.right_indent = Some(FixedPoint::from_points(500));
+        direct.paragraph.right_indent = Some(FixedPoint::from_points(112));
         direct.starts_new_page = Some(true);
         project
             .dual_dialogue_paragraph_overrides

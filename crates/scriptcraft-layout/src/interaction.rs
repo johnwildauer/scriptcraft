@@ -49,8 +49,8 @@ impl InteractionQueryDiagnostics {
 }
 
 impl LocatedLayoutLine<'_> {
-    /// Applies the existing deterministic fixed-cell x-to-source mapping to
-    /// this already located line.
+    /// Applies the canonical span-boundary x-to-source mapping to this already
+    /// located line. Midpoint ties deterministically select the trailing side.
     pub fn fixed_caret_for_x(&self, x: FixedPoint) -> Caret {
         let display_char = display_char_for_x(self.line, x);
         Caret {
@@ -59,7 +59,7 @@ impl LocatedLayoutLine<'_> {
         }
     }
 
-    /// Applies the existing fixed-cell source-to-x mapping to a caret owned by
+    /// Applies the canonical span-boundary source-to-x mapping to a caret owned by
     /// this line. This does not perform another line-ownership query.
     pub fn fixed_caret_geometry(&self, caret: &Caret) -> Result<FixedRect, LayoutError> {
         if caret.element != self.line.element
@@ -328,8 +328,8 @@ impl ScreenplayLayout {
             .fixed_caret_geometry(&caret)
     }
 
-    /// Finds the core line that owns a canonical caret without computing its
-    /// fixed-cell x coordinate.
+    /// Finds the core line that owns a canonical caret without computing its x
+    /// coordinate.
     pub fn line_for_caret_with_diagnostics(
         &self,
         caret: &Caret,
@@ -548,9 +548,10 @@ impl ScreenplayLayout {
 
 fn display_char_for_x(line: &LayoutLine, x: FixedPoint) -> usize {
     if line.spans.is_empty() {
-        let cell = line.char_width.raw().max(1);
-        let units = x.raw().saturating_sub(line.geometry.x.raw()).max(0);
-        return (units.saturating_add(cell / 2) / cell) as usize;
+        // Empty lines have exactly one canonical/display boundary. There is no
+        // measured span from which to derive another x boundary.
+        let _ = x;
+        return 0;
     }
     let mut display_offset = 0usize;
     for span in line.spans.iter() {
@@ -584,6 +585,9 @@ fn display_char_for_x(line: &LayoutLine, x: FixedPoint) -> usize {
 }
 
 fn x_for_display_char(line: &LayoutLine, display_char: usize) -> i64 {
+    if line.spans.is_empty() {
+        return line.geometry.x.raw();
+    }
     let mut display_offset = 0usize;
     for span in line.spans.iter() {
         let count = span.display_text.chars().count();
@@ -608,4 +612,132 @@ fn is_boundary_in_line(line: &LayoutLine, offset: usize) -> bool {
         return true;
     }
     line.text.is_char_boundary(offset - line.source.start)
+}
+
+#[cfg(test)]
+mod canonical_boundary_tests {
+    use super::*;
+    use crate::geometry::{DisplaySourceSegment, PositionedStyledSpan};
+    use scriptcraft_model::formatting::{EffectiveTextStyle, FontFallback, ParagraphAlignment};
+    use std::sync::Arc;
+
+    fn legacy_style() -> EffectiveTextStyle {
+        EffectiveTextStyle {
+            declared_family: "Not authoritative".to_owned(),
+            family: FontFallback::CourierPrime,
+            size: 12,
+            bold: false,
+            italic: false,
+            underline: false,
+            all_caps: false,
+            hidden_text: false,
+            source_color: None,
+        }
+    }
+
+    fn line(empty: bool) -> LayoutLine {
+        let x = FixedPoint::from_raw(100);
+        let y = FixedPoint::from_raw(200);
+        let width = FixedPoint::from_raw(if empty { 0 } else { 400 });
+        let height = FixedPoint::from_points(12);
+        let rect = FixedRect {
+            x,
+            y,
+            width,
+            height,
+        };
+        let text: Arc<str> = if empty {
+            Arc::from("")
+        } else {
+            Arc::from("ab")
+        };
+        let display_text = Arc::clone(&text);
+        let source = SourceRange {
+            element: 0,
+            start: 10,
+            end: if empty { 10 } else { 12 },
+        };
+        let display_source_map: Arc<[DisplaySourceSegment]> = if empty {
+            Arc::from([])
+        } else {
+            Arc::from([
+                DisplaySourceSegment {
+                    display_start: 0,
+                    display_end: 1,
+                    source_start: 10,
+                    source_end: 11,
+                },
+                DisplaySourceSegment {
+                    display_start: 1,
+                    display_end: 2,
+                    source_start: 11,
+                    source_end: 12,
+                },
+            ])
+        };
+        let spans: Arc<[PositionedStyledSpan]> = if empty {
+            Arc::from([])
+        } else {
+            Arc::from([PositionedStyledSpan {
+                display_text: Arc::clone(&display_text),
+                source,
+                display_source_map: Arc::clone(&display_source_map),
+                text_style: legacy_style(),
+                resolved_text_style: None,
+                char_width: FixedPoint::from_points(7),
+                geometry: rect,
+                display_boundary_offsets: Arc::from([
+                    FixedPoint::default(),
+                    FixedPoint::from_raw(100),
+                    FixedPoint::from_raw(400),
+                ]),
+                underline: false,
+                strikethrough: false,
+            }])
+        };
+        LayoutLine {
+            page: 0,
+            role: scriptcraft_model::Role::Action,
+            element: 0,
+            source,
+            text,
+            display_text,
+            display_source_map,
+            spans,
+            text_style: legacy_style(),
+            resolved_text_style: None,
+            char_width: FixedPoint::from_points(7),
+            alignment: ParagraphAlignment::Left,
+            unaligned_line_left: x,
+            geometry: rect,
+            paragraph_bounds: rect,
+            rect: Rect {
+                x: 1,
+                y: 2,
+                width: 4,
+                height: 12,
+            },
+            keep_with_next: false,
+            oversized: false,
+        }
+    }
+
+    #[test]
+    fn caret_x_uses_unequal_canonical_boundaries_with_trailing_midpoint_ties() {
+        let line = line(false);
+        assert_eq!(display_char_for_x(&line, FixedPoint::from_raw(149)), 0);
+        assert_eq!(display_char_for_x(&line, FixedPoint::from_raw(150)), 1);
+        assert_eq!(display_char_for_x(&line, FixedPoint::from_raw(349)), 1);
+        assert_eq!(display_char_for_x(&line, FixedPoint::from_raw(350)), 2);
+        assert_eq!(x_for_display_char(&line, 1), 200);
+        assert_eq!(x_for_display_char(&line, 2), 500);
+    }
+
+    #[test]
+    fn empty_line_has_one_stable_boundary_without_global_cell_width() {
+        let line = line(true);
+        assert_eq!(display_char_for_x(&line, FixedPoint::from_raw(-10_000)), 0);
+        assert_eq!(display_char_for_x(&line, FixedPoint::from_raw(10_000)), 0);
+        assert_eq!(x_for_display_char(&line, 0), line.geometry.x.raw());
+    }
 }

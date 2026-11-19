@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Prepared WO-005.10 regression source. The ignored geometry acceptance below
-//! remains blocked on the active-builder/metric-routing work in WO-005.4/.5.
+//! Typography and canonical metric integration regressions.
 
 use scriptcraft_fdx::read_v6;
 use scriptcraft_layout::{
@@ -11,13 +10,14 @@ use scriptcraft_layout::{
 };
 use scriptcraft_model::dual_dialogue::active_dual_dialogue_projection;
 use scriptcraft_model::{
-    formatting::{FixedPoint, SourceLayoutSettings},
+    formatting::{FixedPoint, ParagraphAlignment, SourceLayoutSettings, SourceParagraphOverrides},
+    title_page::{TitlePageAlignment, TitlePageParagraphFormatting},
     typography::{
         DocumentFontEnvironment, FaceStyle, FontResolutionKind, RequestedFontResolution,
         ResolvedFaceMetrics, ResolvedFontFace, ResolvedFontId, ResolvedFontSourceKind,
         ScalarAdvance,
     },
-    BodyOwner, ElementTypeKey, Project,
+    BodyOwner, ElementTypeKey, Project, RunAttribute, TextRun, TitlePageParagraph,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -395,6 +395,15 @@ fn fixture_import_resolves_definition_direct_run_and_stable_owner_values() {
         wrapper.left,
         FixedPoint::parse_inches("0.30").unwrap_or_default()
     );
+    let wrapper_inset = FixedPoint::parse_inches("0.30").unwrap_or_default();
+    assert_eq!(
+        wrapper.right,
+        FixedPoint::from_raw(
+            FixedPoint::from_points(i64::from(environment.page.paper_width))
+                .raw()
+                .saturating_sub(wrapper_inset.raw()),
+        )
+    );
 }
 
 #[test]
@@ -464,7 +473,333 @@ fn environment_and_definition_mutations_invalidate_complete_layout_cache() {
 }
 
 #[test]
-#[ignore = "source-only acceptance pending complete WO-005.4/.5 active-builder metric routing"]
+fn active_dual_members_use_current_definitions_direct_overrides_and_metrics() {
+    let mut project = imported_project();
+    let left_id = foreign_body(&project, "typography-active-left-line")
+        .id
+        .clone();
+    let right_id = foreign_body(&project, "typography-active-right-line")
+        .id
+        .clone();
+    let left_index = project
+        .elements
+        .iter()
+        .position(|owner| owner.as_element().id == left_id)
+        .unwrap_or_else(|| unreachable!("left active member exists"));
+    let long_text = "Wide WWW and narrow iii. ".repeat(18);
+    BodyOwner::update(&mut project.elements[left_index], |element| {
+        element.text = long_text.clone();
+        element.runs = vec![TextRun {
+            text: long_text.clone(),
+            attributes: vec![
+                RunAttribute {
+                    name: "Font".to_owned(),
+                    value: "Arial".to_owned(),
+                },
+                RunAttribute {
+                    name: "Size".to_owned(),
+                    value: "22".to_owned(),
+                },
+                RunAttribute {
+                    name: "Style".to_owned(),
+                    value: "Bold".to_owned(),
+                },
+            ],
+        }];
+    });
+
+    let mut definitions = project
+        .element_definitions()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let dialogue = definitions
+        .iter_mut()
+        .find(|definition| definition.key.as_str() == "Dialogue")
+        .unwrap_or_else(|| unreachable!("current Dialogue definition exists"));
+    dialogue.font.family = "Times New Roman".to_owned();
+    dialogue.font.size = 18;
+    valid(project.replace_element_definitions(definitions));
+
+    let mut direct = SourceParagraphOverrides::default();
+    direct.paragraph.alignment = Some(ParagraphAlignment::Right);
+    project
+        .direct_paragraph_overrides
+        .insert(left_id.clone(), direct);
+
+    let inputs = project.session_layout_inputs();
+    let source = SourceLayoutSettings::default();
+    let narrow = synthetic_environment(&project, 1, 0);
+    let wide = synthetic_environment(&project, 2, 0);
+    let build = |environment: &LayoutEnvironment| {
+        valid(ScreenplayLayout::build_with_composition_and_environment(
+            &project,
+            &inputs,
+            &source,
+            LayoutComposition::BodyEditor,
+            environment,
+        ))
+    };
+    let narrow_layout = build(&narrow);
+    let wide_layout = build(&wide);
+    let lines_for = |layout: &ScreenplayLayout, index| {
+        layout
+            .pages
+            .iter()
+            .flat_map(|page| page.lines.iter())
+            .filter(|line| line.element == index)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let narrow_lines = lines_for(&narrow_layout, left_index);
+    let wide_lines = lines_for(&wide_layout, left_index);
+    let right_index = project
+        .elements
+        .iter()
+        .position(|owner| owner.as_element().id == right_id)
+        .unwrap_or_else(|| unreachable!("right active member exists"));
+    assert!(!narrow_lines.is_empty());
+    assert!(wide_lines.len() > narrow_lines.len());
+    assert!(narrow_lines.iter().all(|line| {
+        line.resolved_text_style
+            .as_ref()
+            .is_some_and(|style| style.declared_family == "Times New Roman" && style.size == 18)
+            && line.alignment == ParagraphAlignment::Right
+            && line.spans.iter().all(|span| {
+                span.resolved_text_style.as_ref().is_some_and(|style| {
+                    style.declared_family == "Arial" && style.size == 22 && style.bold
+                }) && span.display_boundary_offsets.len() == span.display_text.chars().count() + 1
+            })
+    }));
+    let right_lines = lines_for(&narrow_layout, right_index);
+    assert!(!right_lines.is_empty());
+    assert!(right_lines.iter().all(|line| {
+        line.resolved_text_style
+            .as_ref()
+            .is_some_and(|style| style.declared_family == "Times New Roman" && style.size == 18)
+    }));
+}
+
+#[test]
+fn title_composition_uses_resolved_styles_metrics_and_editable_formatting() {
+    let mut project = imported_project();
+    let neutral_index = project
+        .title_page
+        .iter()
+        .position(|title| {
+            title
+                .source_provenance
+                .as_ref()
+                .and_then(|source| source.foreign_id.as_deref())
+                == Some("typography-title-neutral")
+        })
+        .unwrap_or_else(|| unreachable!("fixture contains a type-less title"));
+
+    let long_text = "Wide WWW and narrow iii café ".repeat(70);
+    let mut editable = valid(TitlePageParagraph::new(
+        "typography-title-editable-resolved",
+        long_text.clone(),
+        TitlePageParagraphFormatting {
+            alignment: Some(TitlePageAlignment::Right),
+            first_indent: Some(FixedPoint::from_points(12)),
+            left_indent: Some(FixedPoint::from_points(80)),
+            right_indent: Some(FixedPoint::from_points(500)),
+            leading_regular: Some(false),
+            space_before: Some(FixedPoint::from_points(7)),
+            spacing_single: Some(true),
+            starts_new_page: Some(true),
+        },
+    ));
+    editable.runs = vec![TextRun {
+        text: long_text,
+        attributes: vec![
+            RunAttribute {
+                name: "Font".to_owned(),
+                value: "Arial".to_owned(),
+            },
+            RunAttribute {
+                name: "Size".to_owned(),
+                value: "20".to_owned(),
+            },
+            RunAttribute {
+                name: "Style".to_owned(),
+                value: "Bold+Italic+Underline".to_owned(),
+            },
+            RunAttribute {
+                name: "Color".to_owned(),
+                value: "#abcdef".to_owned(),
+            },
+        ],
+    }];
+    project.title_page.push(editable);
+
+    let mut hidden = valid(TitlePageParagraph::new(
+        "typography-title-hidden-print",
+        "hidden title text",
+        TitlePageParagraphFormatting::default(),
+    ));
+    hidden.set_element_type(Some(valid(ElementTypeKey::new("Mystery Layout"))));
+    project.title_page.push(hidden);
+
+    let inputs = project.session_layout_inputs();
+    let source = SourceLayoutSettings::default();
+    let narrow = synthetic_environment(&project, 1, 0);
+    let wide = synthetic_environment(&project, 2, 0);
+    let editable_element = project.title_page.len() - 2;
+    let (editable_paragraph, editable_style) = valid(resolve_effective_title(
+        &project,
+        &project.title_page[editable_element],
+        &narrow,
+    ));
+    assert_eq!(editable_style.declared_family, "Courier Prime");
+    assert_eq!(
+        editable_paragraph.alignment,
+        scriptcraft_model::formatting::ParagraphAlignment::Right
+    );
+    assert_eq!(editable_paragraph.left, FixedPoint::from_points(80));
+    assert_eq!(editable_paragraph.right, FixedPoint::from_points(500));
+    assert_eq!(editable_paragraph.first_indent, FixedPoint::from_points(12));
+    assert_eq!(editable_paragraph.space_before, FixedPoint::from_points(7));
+    assert!(editable_paragraph.starts_new_page);
+    let build = |environment: &LayoutEnvironment, composition| {
+        valid(ScreenplayLayout::build_with_composition_and_environment(
+            &project,
+            &inputs,
+            &source,
+            composition,
+            environment,
+        ))
+    };
+    let narrow_layout = build(&narrow, LayoutComposition::TitlePageEditor);
+    let wide_layout = build(&wide, LayoutComposition::TitlePageEditor);
+    let lines_for = |layout: &ScreenplayLayout, element| {
+        layout
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page, layout_page)| {
+                layout_page
+                    .lines
+                    .iter()
+                    .filter(move |line| line.element == element)
+                    .cloned()
+                    .map(move |line| (page, line))
+            })
+            .collect::<Vec<_>>()
+    };
+    let narrow_lines = lines_for(&narrow_layout, editable_element);
+    let wide_lines = lines_for(&wide_layout, editable_element);
+    assert!(wide_lines.len() > narrow_lines.len());
+    assert!(narrow_lines
+        .iter()
+        .all(|(_, line)| line.resolved_text_style.is_some()));
+    assert!(narrow_lines
+        .iter()
+        .all(|(_, line)| line.spans.iter().all(|span| {
+            span.resolved_text_style.as_ref().is_some_and(|style| {
+                style.declared_family == "Arial"
+                    && style.size == 20
+                    && style.bold
+                    && style.italic
+                    && style.underline
+                    && style.source_color.as_deref() == Some("#abcdef")
+            }) && span.display_boundary_offsets.len() == span.display_text.chars().count() + 1
+                && span.display_source_map.iter().all(|mapping| {
+                    mapping.source_start < mapping.source_end
+                        && mapping.source_end <= project.title_page[editable_element].text.len()
+                        && mapping.display_end.saturating_sub(mapping.display_start)
+                            == project.title_page[editable_element].text
+                                [mapping.source_start..mapping.source_end]
+                                .chars()
+                                .count()
+                })
+        })));
+    assert!(narrow_lines.iter().all(|(page, _)| *page > 0));
+    assert!(narrow_layout
+        .title_page_for_position(editable_element, 0)
+        .is_some());
+
+    let typed_index = project
+        .title_page
+        .iter()
+        .position(|title| {
+            title
+                .source_provenance
+                .as_ref()
+                .and_then(|source| source.foreign_id.as_deref())
+                == Some("typography-title-serif")
+        })
+        .unwrap_or_else(|| unreachable!("fixture contains a typed title"));
+    let typed_lines = lines_for(&narrow_layout, typed_index);
+    assert!(typed_lines
+        .iter()
+        .flat_map(|(_, line)| line.spans.iter())
+        .any(|span| {
+            span.resolved_text_style
+                .as_ref()
+                .is_some_and(|style| style.declared_family == "Times New Roman" && style.size == 18)
+        }));
+    assert!(typed_lines
+        .iter()
+        .flat_map(|(_, line)| line.spans.iter())
+        .any(|span| {
+            span.resolved_text_style.as_ref().is_some_and(|style| {
+                style.declared_family == "Arial"
+                    && style.size == 20
+                    && style.bold
+                    && style.italic
+                    && style.underline
+                    && style.source_color.as_deref() == Some("#123456789ABC")
+            })
+        }));
+
+    let neutral = lines_for(&narrow_layout, neutral_index);
+    assert!(neutral
+        .iter()
+        .flat_map(|(_, line)| line.spans.iter())
+        .any(|span| {
+            span.resolved_text_style
+                .as_ref()
+                .is_some_and(|style| style.declared_family == "Courier Prime")
+        }));
+
+    let mut title_only_project = valid(Project::new());
+    let mut definitions = title_only_project
+        .element_definitions()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let general = definitions
+        .iter_mut()
+        .find(|definition| definition.key.as_str() == "General")
+        .unwrap_or_else(|| unreachable!("new projects include the General definition"));
+    general.font.hidden_text = true;
+    valid(title_only_project.replace_element_definitions(definitions));
+    let mut hidden_print_title = valid(TitlePageParagraph::new(
+        "hidden-print-title",
+        "hidden title text",
+        TitlePageParagraphFormatting::default(),
+    ));
+    hidden_print_title.set_element_type(Some(valid(ElementTypeKey::new("General"))));
+    title_only_project.title_page.push(hidden_print_title);
+    let print_environment = synthetic_environment(&title_only_project, 1, 0);
+    let print_layout = valid(ScreenplayLayout::build_with_composition_and_environment(
+        &title_only_project,
+        &title_only_project.session_layout_inputs(),
+        &source,
+        LayoutComposition::Print {
+            include_title_page: true,
+        },
+        &print_environment,
+    ));
+    assert!(!print_layout
+        .pages
+        .iter()
+        .flat_map(|page| page.lines.iter())
+        .any(|line| { line.display_text.contains("hidden title text") }));
+}
+
+#[test]
 fn proportional_metrics_drive_wrapping_leading_and_vertical_page_fit() {
     let project = imported_project();
     let narrow = synthetic_environment(&project, 1, 0);
@@ -514,7 +849,7 @@ fn proportional_metrics_drive_wrapping_leading_and_vertical_page_fit() {
         .flat_map(|page| page.lines.iter())
         .map(|line| line.display_text.as_ref())
         .collect::<String>();
-    assert!(editor_text.contains("unsupported explicit color"));
+    assert!(editor_text.contains("UNSUPPORTED EXPLICIT COLOR"));
     assert!(editor_text.contains("STRASSE"));
     let print_layout = valid(ScreenplayLayout::build_with_composition_and_environment(
         &project,
@@ -531,5 +866,5 @@ fn proportional_metrics_drive_wrapping_leading_and_vertical_page_fit() {
         .flat_map(|page| page.lines.iter())
         .map(|line| line.display_text.as_ref())
         .collect::<String>();
-    assert!(!print_text.contains("unsupported explicit color"));
+    assert!(!print_text.contains("UNSUPPORTED EXPLICIT COLOR"));
 }

@@ -7,7 +7,10 @@ use super::{
         normal_view_page_bottom_rule_visible, page_chrome_visible, page_local_screen_origin,
         NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH,
     },
-    text::{neutral_resolved_font, resolve_span_paint, resolved_font_for_family},
+    text::{
+        neutral_resolved_font, resolve_legacy_span_paint, resolve_span_paint,
+        resolved_font_for_family,
+    },
     zoom_scroll::PresentationMetrics,
     ScriptCraftApp,
 };
@@ -193,11 +196,23 @@ impl ScriptCraftApp {
                 .spans
                 .iter()
                 .map(|span| {
-                    resolve_span_paint(
-                        &span.text_style,
-                        span.text_style.size as f32 * scale,
-                        palette,
-                        &prepared_fonts,
+                    span.resolved_text_style.as_ref().map_or_else(
+                        || {
+                            resolve_legacy_span_paint(
+                                &span.text_style,
+                                span.text_style.size as f32 * scale,
+                                palette,
+                                &prepared_fonts,
+                            )
+                        },
+                        |style| {
+                            resolve_span_paint(
+                                style,
+                                style.size as f32 * scale,
+                                palette,
+                                &prepared_fonts,
+                            )
+                        },
                     )
                 })
                 .collect::<Option<Vec<_>>>();
@@ -374,11 +389,23 @@ impl ScriptCraftApp {
                     let ime_font = caret_span
                         .and_then(|span| {
                             prepared.and_then(|prepared| {
-                                resolve_span_paint(
-                                    &span.text_style,
-                                    span.text_style.size as f32 * scale,
-                                    palette,
-                                    prepared,
+                                span.resolved_text_style.as_ref().map_or_else(
+                                    || {
+                                        resolve_legacy_span_paint(
+                                            &span.text_style,
+                                            span.text_style.size as f32 * scale,
+                                            palette,
+                                            prepared,
+                                        )
+                                    },
+                                    |style| {
+                                        resolve_span_paint(
+                                            style,
+                                            style.size as f32 * scale,
+                                            palette,
+                                            prepared,
+                                        )
+                                    },
                                 )
                             })
                         })

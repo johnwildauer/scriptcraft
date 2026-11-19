@@ -4,13 +4,16 @@ use super::{
         add_elapsed_nanos, prepare_body_for_layout, ElementWrapCache, PreparedBodyCache,
         PreparedBodyEnvironment, PreparedBodyParagraph,
     },
-    inputs::{effective_paragraph, EffectiveGeometryMode, EffectiveParagraph},
+    inputs::{
+        effective_paragraph, resolve_effective_dual_wrapper_paragraph, resolve_effective_paragraph,
+        resolve_effective_text_style, EffectiveGeometryMode,
+    },
 };
 use scriptcraft_model::dual_dialogue::{
     self as model_dual_dialogue, DualDialogueGroup, DualDialogueSide,
 };
 use scriptcraft_model::formatting::{
-    formatting_for_role, EffectiveTextStyle, FixedPoint, ParagraphAlignment, SourceLayoutSettings,
+    formatting_for_role, FixedPoint, ParagraphAlignment, SourceLayoutSettings,
     SourceParagraphOverrides,
 };
 use scriptcraft_model::{LayoutInputs, Project, Role, StableId};
@@ -67,8 +70,18 @@ impl ScreenplayLayout {
             return Ok(None);
         }
 
-        let (outer_left, outer_right) =
-            dual_outer_extent(&self.inputs, source_settings, project, group)?;
+        let resolved_wrapper = self
+            .layout_environment
+            .as_deref()
+            .map(|environment| {
+                resolve_effective_dual_wrapper_paragraph(project, &group.id, environment)
+            })
+            .transpose()?;
+        let (outer_left, outer_right) = if let Some(wrapper) = resolved_wrapper {
+            (wrapper.left, wrapper.right)
+        } else {
+            dual_outer_extent(&self.inputs, source_settings, project, group)?
+        };
         let gap = FixedPoint::from_points(geometry::DUAL_DIALOGUE_COLUMN_GAP_POINTS);
         let column_width = FixedPoint::from_raw(
             outer_right
@@ -108,7 +121,7 @@ impl ScreenplayLayout {
             prepared_body_cache,
             wrap_cache,
             diagnostics,
-        );
+        )?;
         let right = wrap_dual_side(
             project,
             &projection.right,
@@ -121,21 +134,29 @@ impl ScreenplayLayout {
             prepared_body_cache,
             wrap_cache,
             diagnostics,
-        );
+        )?;
 
         // Print-hidden members remain semantic group members but do not create
         // a visible block or apply wrapper-owned vertical fields.
         if left.line_count > 0 || right.line_count > 0 {
-            let wrapper = wrapper_overrides(project, source_settings, &group.id);
-            let starts_new_page = wrapper
-                .starts_new_page
-                .unwrap_or_else(|| source_settings.starts_new_page(Role::General));
-            let native_general = formatting_for_role(Role::General).paragraph;
-            let space_before = wrapper
-                .paragraph
-                .space_before
-                .or(source_settings.paragraph_spec(Role::General).space_before)
-                .unwrap_or_else(|| FixedPoint::from_points(i64::from(native_general.space_before)));
+            let (starts_new_page, space_before) = if let Some(wrapper) = resolved_wrapper {
+                (wrapper.starts_new_page, wrapper.space_before)
+            } else {
+                let wrapper = wrapper_overrides(project, source_settings, &group.id);
+                let native_general = formatting_for_role(Role::General).paragraph;
+                (
+                    wrapper
+                        .starts_new_page
+                        .unwrap_or_else(|| source_settings.starts_new_page(Role::General)),
+                    wrapper
+                        .paragraph
+                        .space_before
+                        .or(source_settings.paragraph_spec(Role::General).space_before)
+                        .unwrap_or_else(|| {
+                            FixedPoint::from_points(i64::from(native_general.space_before))
+                        }),
+                )
+            };
             let first_visible_space_before = |side: &WrappedDualSide| {
                 side.paragraphs
                     .iter()
@@ -558,7 +579,7 @@ fn wrap_dual_side(
     prepared_cache: &mut Option<&mut PreparedBodyCache>,
     cache: &mut Option<&mut ElementWrapCache>,
     diagnostics: &mut Option<&mut LayoutBuildDiagnostics>,
-) -> WrappedDualSide {
+) -> Result<WrappedDualSide, LayoutError> {
     let mut paragraphs = Vec::new();
     let mut height = 0i64;
     let mut line_count = 0usize;
@@ -571,14 +592,37 @@ fn wrap_dual_side(
         else {
             continue;
         };
-        // Phase 5 replaces this static-layout adapter with definition-driven layout.
         let role = element.transitional_role();
         let prepared_lookup_started = diagnostics.as_ref().map(|_| Instant::now());
-        let text_style = source.text_style(role);
+        let (text_style, resolved_text_style, mut paragraph, effective_color) =
+            if let Some(layout_environment) = layout.layout_environment.as_deref() {
+                let element_key = element.element_type();
+                let resolved_text_style =
+                    resolve_effective_text_style(project, &element_key, layout_environment)?;
+                let paragraph = resolve_effective_paragraph(
+                    project,
+                    &element_key,
+                    &element.id,
+                    &element.runs,
+                    layout_environment,
+                )?;
+                (
+                    spans::compatibility_style(&resolved_text_style),
+                    Some(resolved_text_style.clone()),
+                    paragraph,
+                    resolved_text_style.color,
+                )
+            } else {
+                let text_style = source.text_style(role);
+                let paragraph = effective_paragraph(inputs, source, role, &element.id, &text_style);
+                let effective_color = scriptcraft_model::typography::parse_effective_text_color(
+                    text_style.source_color.as_deref(),
+                );
+                (text_style, None, paragraph, effective_color)
+            };
         if purpose == LayoutPurpose::Print && text_style.hidden_text {
             continue;
         }
-        let mut paragraph = effective_paragraph(inputs, source, role, &element.id, &text_style);
         paragraph.left = column.0;
         paragraph.right = column.1;
         paragraph.first_indent = FixedPoint::default();
@@ -594,12 +638,11 @@ fn wrap_dual_side(
             geometry_mode: EffectiveGeometryMode::DualColumn,
             paragraph,
             text_style,
+            resolved_text_style,
             char_width: paragraph.char_width,
             element_key: Some(element.element_type()),
             layout_environment: layout.layout_environment.clone(),
-            effective_color: scriptcraft_model::typography::parse_effective_text_color(
-                source.text_style(role).source_color.as_deref(),
-            ),
+            effective_color,
         };
         let prepared = prepare_body_for_layout(
             prepared_cache.as_deref_mut(),
@@ -609,7 +652,7 @@ fn wrap_dual_side(
             element,
             environment,
             prepared_lookup_started,
-        );
+        )?;
         if !paragraphs.is_empty() {
             height = height.saturating_add(paragraph.space_before.raw().max(0));
         }
@@ -625,9 +668,9 @@ fn wrap_dual_side(
             prepared,
         });
     }
-    WrappedDualSide {
+    Ok(WrappedDualSide {
         paragraphs,
         height: FixedPoint::from_raw(height),
         line_count,
-    }
+    })
 }

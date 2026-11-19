@@ -4,7 +4,10 @@ use super::{
         add_elapsed_nanos, prepare_body_for_layout, ElementWrapCache, PreparedBodyCache,
         PreparedBodyEnvironment, PreparedBodyParagraph,
     },
-    inputs::{effective_paragraph, validate_profile, EffectiveGeometryMode, EffectiveParagraph},
+    inputs::{
+        effective_paragraph, validate_page_profile, validate_profile, EffectiveGeometryMode,
+        EffectiveParagraph,
+    },
     wrap::WrappedLine,
 };
 use scriptcraft_model::{
@@ -110,11 +113,6 @@ impl ScreenplayLayout {
         composition: LayoutComposition,
         environment: &crate::inputs::LayoutEnvironment,
     ) -> Result<Self, LayoutError> {
-        if environment.page != inputs.page_only() {
-            return Err(LayoutError {
-                kind: LayoutErrorKind::InvalidProfile,
-            });
-        }
         Self::build_with_effective_inputs_for_purpose_internal(
             project,
             inputs,
@@ -203,10 +201,19 @@ impl ScreenplayLayout {
         if !validated_session {
             project.validate()?;
         }
-        validate_layout_inputs(inputs).map_err(|_| LayoutError {
-            kind: LayoutErrorKind::InvalidProfile,
-        })?;
-        validate_profile(inputs)?;
+        if let Some(environment) = layout_environment.as_deref() {
+            validate_page_profile(inputs)?;
+            if environment.page != inputs.page_only() {
+                return Err(LayoutError {
+                    kind: LayoutErrorKind::InvalidProfile,
+                });
+            }
+        } else {
+            validate_layout_inputs(inputs).map_err(|_| LayoutError {
+                kind: LayoutErrorKind::InvalidProfile,
+            })?;
+            validate_profile(inputs)?;
+        }
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             diagnostics.layout_builds = diagnostics.layout_builds.saturating_add(1);
         }
@@ -264,7 +271,7 @@ impl ScreenplayLayout {
             include_body,
             &mut wrap_cache,
             &mut diagnostics,
-        );
+        )?;
 
         let mut index = 0;
         while include_body && index < project.elements.len() {
@@ -287,14 +294,45 @@ impl ScreenplayLayout {
             }
 
             let prepared_lookup_started = diagnostics.as_ref().map(|_| Instant::now());
-            let text_style = output.source_settings.text_style(role);
+            let (text_style, resolved_text_style, paragraph) =
+                if let Some(environment) = output.layout_environment.as_deref() {
+                    let element_key = element.element_type();
+                    let resolved_style = super::inputs::resolve_effective_text_style(
+                        project,
+                        &element_key,
+                        environment,
+                    )?;
+                    let paragraph = super::inputs::resolve_effective_paragraph(
+                        project,
+                        &element_key,
+                        &element.id,
+                        &element.runs,
+                        environment,
+                    )?;
+                    (
+                        spans::compatibility_style(&resolved_style),
+                        Some(resolved_style),
+                        paragraph,
+                    )
+                } else {
+                    let text_style = output.source_settings.text_style(role);
+                    let paragraph = effective_paragraph(
+                        &output.inputs,
+                        source_settings,
+                        role,
+                        &element.id,
+                        &text_style,
+                    );
+                    (text_style, None, paragraph)
+                };
             if purpose == LayoutPurpose::Print && text_style.hidden_text {
                 index = index.saturating_add(1);
                 continue;
             }
-            if output
-                .source_settings
-                .starts_new_page_for_element(role, &element.id)
+            if resolved_text_style.is_none()
+                && output
+                    .source_settings
+                    .starts_new_page_for_element(role, &element.id)
                 && output
                     .pages
                     .last()
@@ -302,28 +340,27 @@ impl ScreenplayLayout {
             {
                 output.pages.push(output.new_page(false));
             }
-            let paragraph = effective_paragraph(
-                &output.inputs,
-                source_settings,
-                role,
-                &element.id,
-                &text_style,
-            );
             let environment = PreparedBodyEnvironment {
                 purpose,
                 composition,
                 geometry_mode: EffectiveGeometryMode::Sequential,
                 paragraph,
                 text_style,
+                resolved_text_style: resolved_text_style.clone(),
                 char_width: paragraph.char_width,
                 element_key: Some(element.element_type()),
                 layout_environment: output.layout_environment.clone(),
-                effective_color: scriptcraft_model::typography::parse_effective_text_color(
-                    output
-                        .source_settings
-                        .text_style(role)
-                        .source_color
-                        .as_deref(),
+                effective_color: resolved_text_style.as_ref().map_or_else(
+                    || {
+                        scriptcraft_model::typography::parse_effective_text_color(
+                            output
+                                .source_settings
+                                .text_style(role)
+                                .source_color
+                                .as_deref(),
+                        )
+                    },
+                    |style| style.color,
                 ),
             };
             let prepared = prepare_body_for_layout(
@@ -334,7 +371,7 @@ impl ScreenplayLayout {
                 element,
                 environment,
                 prepared_lookup_started,
-            );
+            )?;
             let placement_started = diagnostics.as_ref().map(|_| Instant::now());
             output.place_element(prepared, index, paragraph, &mut diagnostics);
             if let Some(diagnostics) = diagnostics.as_deref_mut() {
@@ -401,15 +438,31 @@ impl ScreenplayLayout {
             FixedPoint::from_raw(line.paragraph.left.raw().saturating_add(indent.raw()));
         let line_width =
             FixedPoint::from_raw(line.paragraph.right.raw().saturating_sub(line_left.raw()));
-        let mut spans = spans::positioned_spans(
-            &line,
-            FixedRect {
-                x: line_left,
-                y,
-                width: FixedPoint::default(),
-                height: line.paragraph.line_advance,
-            },
-        );
+        let line_geometry = FixedRect {
+            x: line_left,
+            y,
+            width: FixedPoint::default(),
+            height: line.paragraph.line_advance,
+        };
+        let mut spans = if line.resolved_text_style.is_some() {
+            spans::resolved_positioned_spans(&line.resolved_scalars, line.element, line_geometry)
+                .into_iter()
+                .map(|span| PositionedStyledSpan {
+                    display_text: span.display_text,
+                    source: span.source,
+                    display_source_map: span.display_source_map,
+                    text_style: spans::compatibility_style(&span.text_style),
+                    resolved_text_style: Some(span.text_style),
+                    char_width: FixedPoint::default(),
+                    geometry: span.geometry,
+                    display_boundary_offsets: span.display_boundary_offsets,
+                    underline: span.underline,
+                    strikethrough: span.strikethrough,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            spans::positioned_spans(&line, line_geometry)
+        };
         let text_width = FixedPoint::from_raw(
             spans
                 .iter()
@@ -519,6 +572,7 @@ impl ScreenplayLayout {
             display_source_map: line.display_source_map,
             spans: spans.into(),
             text_style: line.text_style,
+            resolved_text_style: line.resolved_text_style,
             char_width: line.char_width,
             alignment: line.paragraph.alignment,
             unaligned_line_left: line_left,

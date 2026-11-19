@@ -242,9 +242,8 @@ pub(crate) fn projected_caret_rect(
     })
 }
 
-/// Stores the preferred vertical x in document fixed points. Fixed-only
-/// callers keep the historical fixed-column expression; projected callers
-/// convert the shared screen-space caret boundary exactly once.
+/// Stores the preferred vertical x in document fixed points by converting the
+/// shared canonical screen-space caret boundary exactly once.
 pub(crate) fn preferred_vertical_document_x(
     line: &LayoutLine,
     source_offset: usize,
@@ -254,14 +253,11 @@ pub(crate) fn preferred_vertical_document_x(
     if !scale.is_finite() || scale <= 0.0 {
         return None;
     }
-    if let Some(projection) = projection {
-        let display = line.display_char_for_source(source_offset, false);
-        return x_for_display_boundary(projection, display)
-            .and_then(|x| FixedPoint::from_points_f64(f64::from(x / scale)))
-            .map(FixedPoint::raw);
-    }
-    let columns = line.display_char_for_source(source_offset, false) as i64;
-    Some(line.geometry.x.raw() + columns.saturating_mul(line.char_width.raw()))
+    let projection = projection?;
+    let display = line.display_char_for_source(source_offset, false);
+    x_for_display_boundary(projection, display)
+        .and_then(|x| FixedPoint::from_points_f64(f64::from(x / scale)))
+        .map(FixedPoint::raw)
 }
 
 /// Converts the stored document-space preferred x to the projected screen

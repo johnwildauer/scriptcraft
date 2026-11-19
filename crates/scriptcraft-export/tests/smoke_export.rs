@@ -13,6 +13,7 @@ use scriptcraft_model::{
     },
     BodyOwner, Project, Role, ScreenplayElement, TitlePageParagraph,
 };
+use std::collections::BTreeSet;
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("export smoke scenario is valid"))
@@ -43,23 +44,40 @@ fn synthetic_layout_environment(project: &Project) -> LayoutEnvironment {
         };
         valid(ResolvedFontId::new(format!("synthetic-{label}")))
     });
-    let advances = (32_u8..=126)
-        .map(|byte| {
+    let mut scalars = (32_u8..=126).map(char::from).collect::<BTreeSet<_>>();
+    for owner in &project.elements {
+        let element = owner.as_element();
+        for character in element
+            .text
+            .chars()
+            .chain(element.runs.iter().flat_map(|run| run.text.chars()))
+        {
+            scalars.insert(character);
+            scalars.extend(character.to_uppercase());
+        }
+    }
+    for paragraph in &project.title_page {
+        for character in paragraph
+            .text
+            .chars()
+            .chain(paragraph.runs.iter().flat_map(|run| run.text.chars()))
+        {
+            scalars.insert(character);
+            scalars.extend(character.to_uppercase());
+        }
+    }
+    scalars.insert('\u{fffd}');
+    let advances = scalars
+        .into_iter()
+        .map(|character| {
             (
-                char::from(byte),
+                character,
                 ScalarAdvance {
                     advance_units: 600,
-                    missing_glyph: false,
+                    missing_glyph: character == '\u{fffd}',
                 },
             )
         })
-        .chain([(
-            '\u{fffd}',
-            ScalarAdvance {
-                advance_units: 600,
-                missing_glyph: true,
-            },
-        )])
         .collect();
     let metrics = valid(ResolvedFaceMetrics::new(1_000, 800, -200, 0, advances));
     let faces = FaceStyle::ALL
@@ -157,12 +175,7 @@ fn export_public_api_smoke() {
     assert!(body_only_observed.contains("Export body smoke caf?"));
     assert!(!body_only_observed.contains("Export Title Smoke"));
     assert_ne!(default_pdf.bytes, body_only_pdf.bytes);
-    assert!(default_pdf
-        .typography
-        .entries()
-        .iter()
-        .any(|entry| matches!(entry.kind, PdfFallbackKind::MetricGeometryUnverified)));
-    assert!(default_pdf
+    assert!(!default_pdf
         .typography
         .summary()
         .contains("canonical metric geometry unverified"));

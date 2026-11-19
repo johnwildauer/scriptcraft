@@ -9,6 +9,7 @@ use crate::{
     },
 };
 use scriptcraft_model::formatting::{EffectiveTextStyle, FixedPoint, SourceLayoutSettings};
+use scriptcraft_model::typography::EffectiveTextStyle as ResolvedTextStyle;
 use scriptcraft_model::{
     dual_dialogue::DualDialogueGroup, element::body_owners_equal,
     formatting::SourceParagraphOverrides, ElementDefinition, LayoutInputs, Project, Role, StableId,
@@ -120,6 +121,40 @@ impl ElementWrapCache {
             runs,
             atomic_ranges,
             atomic_boundaries,
+            purpose,
+            title_page,
+            geometry_mode,
+            diagnostics,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn wrap_resolved(
+        &mut self,
+        element_id: &StableId,
+        element_key: Option<&scriptcraft_model::ElementTypeKey>,
+        text: &str,
+        element: usize,
+        role: Role,
+        paragraph: EffectiveParagraph,
+        text_style: EffectiveTextStyle,
+        resolved_text_style: ResolvedTextStyle,
+        runs: &[TextRun],
+        purpose: LayoutPurpose,
+        title_page: bool,
+        geometry_mode: EffectiveGeometryMode,
+        diagnostics: Option<&mut LayoutBuildDiagnostics>,
+    ) -> Result<Vec<crate::wrap::WrappedLine>, LayoutError> {
+        self.inner.wrap_resolved(
+            element_id,
+            element_key,
+            text,
+            element,
+            role,
+            paragraph,
+            text_style,
+            resolved_text_style,
+            runs,
             purpose,
             title_page,
             geometry_mode,
@@ -788,53 +823,94 @@ mod typography_cache_identity_tests {
         },
         ModelError, TitlePageAlignment,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn synthetic_environment(
         ascender: i32,
         fingerprint_seed: u64,
     ) -> Result<LayoutEnvironment, ModelError> {
-        let mut faces = BTreeMap::new();
-        let mut ids = Vec::new();
-        for (index, style) in FaceStyle::ALL.into_iter().enumerate() {
-            let id = ResolvedFontId::new(format!("synthetic-{index}"))?;
-            let metrics = ResolvedFaceMetrics::new(
-                1_000,
-                ascender,
-                -200,
-                0,
-                BTreeMap::from([(
-                    'x',
-                    ScalarAdvance {
-                        advance_units: 500 + index as u32,
-                        missing_glyph: false,
-                    },
-                )]),
-            )?;
-            let face = ResolvedFontFace::new(
-                id.clone(),
-                "Synthetic",
-                format!("Synthetic {style:?}"),
-                style,
-                ResolvedFontSourceKind::Synthetic,
-                128,
-                fingerprint_seed + index as u64,
-                metrics,
-            )?;
-            ids.push(id.clone());
-            faces.insert(id, face);
+        let project = Project::new()?;
+        let mut families = project
+            .element_definitions()
+            .iter()
+            .map(|definition| definition.font.family.clone())
+            .collect::<BTreeSet<_>>();
+        for owner in &project.elements {
+            families.extend(owner.as_element().runs.iter().flat_map(|run| {
+                run.attributes.iter().filter_map(|attribute| {
+                    (attribute.name == "Font").then(|| attribute.value.clone())
+                })
+            }));
         }
-        let request = RequestedFontResolution {
-            kind: FontResolutionKind::CourierAlias,
-            regular: ids[0].clone(),
-            bold: ids[1].clone(),
-            italic: ids[2].clone(),
-            bold_italic: ids[3].clone(),
-        };
-        let fonts = DocumentFontEnvironment::new(
-            BTreeMap::from([("Courier Prime".to_owned(), request)]),
-            faces,
-        )?;
+        for title in &project.title_page {
+            if let Some(key) = title.element_type.as_ref() {
+                if let Some(definition) = project.element_definitions().get(key) {
+                    families.insert(definition.font.family.clone());
+                }
+            }
+        }
+        families.insert("Courier Prime".to_owned());
+        let mut scalars = project
+            .elements
+            .iter()
+            .flat_map(|owner| owner.as_element().text.chars())
+            .collect::<BTreeSet<_>>();
+        let uppercase = scalars
+            .iter()
+            .flat_map(|scalar| scalar.to_uppercase())
+            .collect::<Vec<_>>();
+        scalars.extend(uppercase);
+        scalars.insert('x');
+        let mut faces = BTreeMap::new();
+        let mut requests = BTreeMap::new();
+        for (family_index, family) in families.into_iter().enumerate() {
+            let mut ids = Vec::new();
+            for (index, style) in FaceStyle::ALL.into_iter().enumerate() {
+                let id = ResolvedFontId::new(format!("synthetic-{family_index}-{index}"))?;
+                let advances = scalars
+                    .iter()
+                    .enumerate()
+                    .map(|(scalar_index, scalar)| {
+                        (
+                            *scalar,
+                            ScalarAdvance {
+                                advance_units: 500 + scalar_index as u32,
+                                missing_glyph: false,
+                            },
+                        )
+                    })
+                    .collect();
+                let metrics = ResolvedFaceMetrics::new(1_000, ascender, -200, 0, advances)?;
+                let face = ResolvedFontFace::new(
+                    id.clone(),
+                    family.clone(),
+                    format!("{family} {style:?}"),
+                    style,
+                    ResolvedFontSourceKind::Synthetic,
+                    128,
+                    fingerprint_seed + family_index as u64 + index as u64,
+                    metrics,
+                )?;
+                ids.push(id.clone());
+                faces.insert(id, face);
+            }
+            let kind = if family == "Courier Prime" {
+                FontResolutionKind::CourierAlias
+            } else {
+                FontResolutionKind::UnknownFallback
+            };
+            requests.insert(
+                family,
+                RequestedFontResolution {
+                    kind,
+                    regular: ids[0].clone(),
+                    bold: ids[1].clone(),
+                    italic: ids[2].clone(),
+                    bold_italic: ids[3].clone(),
+                },
+            );
+        }
+        let fonts = DocumentFontEnvironment::new(requests, faces)?;
         Ok(LayoutEnvironment::new(PageLayoutInputs::default(), fonts))
     }
 
@@ -1075,14 +1151,20 @@ mod typography_cache_identity_tests {
             )
             .map_err(|_| ModelError::InvalidNumber)?;
         assert!(!changed_environment_hit);
-        let fresh = ScreenplayLayout::build_with_inputs_for_purpose(
+        let fresh = ScreenplayLayout::build_with_composition_and_environment(
             &project,
             &inputs,
-            LayoutPurpose::Editor,
+            &project
+                .preservation
+                .as_ref()
+                .map(|preservation| preservation.source_layout_settings().clone())
+                .unwrap_or_default(),
+            LayoutComposition::BodyEditor,
+            &metric_change,
         )
         .map_err(|_| ModelError::InvalidNumber)?;
         assert_eq!(changed.pages, fresh.pages);
-        assert_eq!(first.pages, changed.pages);
+        assert_ne!(first.pages, changed.pages);
         Ok(())
     }
 }

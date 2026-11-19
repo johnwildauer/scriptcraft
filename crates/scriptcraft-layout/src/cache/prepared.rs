@@ -6,6 +6,7 @@ use crate::{
 };
 use scriptcraft_model::formatting::{EffectiveTextStyle, FixedPoint};
 use scriptcraft_model::typography::EffectiveTextColor;
+use scriptcraft_model::typography::EffectiveTextStyle as ResolvedTextStyle;
 use scriptcraft_model::{
     BodyOwner, ElementTypeKey, RunAttribute, ScreenplayElement, StableId, TextRun,
 };
@@ -29,6 +30,7 @@ pub(crate) struct PreparedBodyEnvironment {
     pub(crate) geometry_mode: EffectiveGeometryMode,
     pub(crate) paragraph: EffectiveParagraph,
     pub(crate) text_style: EffectiveTextStyle,
+    pub(crate) resolved_text_style: Option<ResolvedTextStyle>,
     pub(crate) char_width: FixedPoint,
     pub(crate) element_key: Option<ElementTypeKey>,
     pub(crate) layout_environment: Option<Arc<crate::inputs::LayoutEnvironment>>,
@@ -42,6 +44,7 @@ impl Hash for PreparedBodyEnvironment {
         self.geometry_mode.hash(state);
         self.paragraph.hash(state);
         self.text_style.hash(state);
+        self.resolved_text_style.hash(state);
         self.char_width.hash(state);
         self.element_key.hash(state);
         self.layout_environment
@@ -256,6 +259,14 @@ fn text_style_heap_bytes(style: &EffectiveTextStyle) -> usize {
         .saturating_add(style.source_color.as_ref().map_or(0, String::len))
 }
 
+fn resolved_text_style_heap_bytes(style: &ResolvedTextStyle) -> usize {
+    style
+        .declared_family
+        .len()
+        .saturating_add(style.source_color.as_ref().map_or(0, String::len))
+        .saturating_add(style.resolved_font_id.as_str().len())
+}
+
 fn layout_environment_heap_bytes(environment: &crate::inputs::LayoutEnvironment) -> usize {
     let fonts = &environment.fonts;
     let requests = fonts
@@ -311,6 +322,12 @@ fn prepared_body_entry_byte_cost(
         .saturating_add(text_style_heap_bytes(&environment.text_style))
         .saturating_add(
             environment
+                .resolved_text_style
+                .as_ref()
+                .map_or(0, resolved_text_style_heap_bytes),
+        )
+        .saturating_add(
+            environment
                 .element_key
                 .as_ref()
                 .map_or(0, |key| key.as_str().len()),
@@ -352,6 +369,11 @@ fn prepared_body_entry_byte_cost(
                     .saturating_mul(std::mem::size_of::<PositionedStyledSpan>()),
             )
             .saturating_add(text_style_heap_bytes(&line.text_style));
+        total = total.saturating_add(
+            line.resolved_text_style
+                .as_ref()
+                .map_or(0, resolved_text_style_heap_bytes),
+        );
         for span in line.spans.iter() {
             total = total
                 .saturating_add(span.display_text.len())
@@ -361,6 +383,16 @@ fn prepared_body_entry_byte_cost(
                         .saturating_mul(std::mem::size_of::<DisplaySourceSegment>()),
                 )
                 .saturating_add(text_style_heap_bytes(&span.text_style));
+            total = total.saturating_add(
+                span.resolved_text_style
+                    .as_ref()
+                    .map_or(0, resolved_text_style_heap_bytes),
+            );
+            total = total.saturating_add(
+                span.display_boundary_offsets
+                    .len()
+                    .saturating_mul(std::mem::size_of::<FixedPoint>()),
+            );
         }
     }
     total
@@ -374,7 +406,7 @@ pub(crate) fn prepare_body_for_layout(
     owner: &Arc<BodyOwner>,
     environment: PreparedBodyEnvironment,
     environment_started: Option<Instant>,
-) -> Arc<PreparedBodyParagraph> {
+) -> Result<Arc<PreparedBodyParagraph>, crate::geometry::LayoutError> {
     let cache_attempted = prepared_cache.is_some();
     let cached = prepared_cache
         .as_deref_mut()
@@ -385,14 +417,21 @@ pub(crate) fn prepare_body_for_layout(
         }
     }
     if let Some(prepared) = cached {
-        return prepared;
+        return Ok(prepared);
     }
     let miss_started = (cache_attempted && diagnostics.is_some()).then(Instant::now);
 
-    let previous = prepared_cache
-        .as_deref_mut()
-        .and_then(|cache| cache.previous(owner, &environment));
+    let previous = if environment.resolved_text_style.is_some() {
+        None
+    } else {
+        prepared_cache
+            .as_deref_mut()
+            .and_then(|cache| cache.previous(owner, &environment))
+    };
     let incremental = previous.as_ref().and_then(|(previous_owner, previous)| {
+        if environment.resolved_text_style.is_some() {
+            return None;
+        }
         prepare_incremental_body_for_layout(
             diagnostics.as_deref_mut(),
             layout,
@@ -420,22 +459,66 @@ pub(crate) fn prepare_body_for_layout(
     let prepared = if let Some(prepared) = incremental {
         prepared
     } else {
-        let lines = wrap::wrap_for_layout(
-            wrap_cache,
-            diagnostics.as_deref_mut(),
-            &element.id,
-            &element.text,
-            0,
-            role,
-            environment.element_key.as_ref(),
-            paragraph,
-            environment.text_style.clone(),
-            &element.runs,
-            environment.char_width,
-            environment.purpose,
-            false,
-            environment.geometry_mode,
-        );
+        let lines = if let Some(resolved_style) = environment.resolved_text_style.clone() {
+            let key = environment
+                .element_key
+                .as_ref()
+                .ok_or(crate::geometry::LayoutError {
+                    kind: crate::geometry::LayoutErrorKind::NoGeometry,
+                })?;
+            if let Some(cache) = wrap_cache {
+                cache.wrap_resolved(
+                    &element.id,
+                    Some(key),
+                    &element.text,
+                    0,
+                    role,
+                    paragraph,
+                    environment.text_style.clone(),
+                    resolved_style,
+                    &element.runs,
+                    environment.purpose,
+                    false,
+                    environment.geometry_mode,
+                    diagnostics.as_deref_mut(),
+                )?
+            } else {
+                let layout_environment = environment.layout_environment.as_deref().ok_or(
+                    crate::geometry::LayoutError {
+                        kind: crate::geometry::LayoutErrorKind::InvalidProfile,
+                    },
+                )?;
+                wrap::wrap_resolved_for_layout(
+                    &element.text,
+                    0,
+                    role,
+                    paragraph,
+                    &resolved_style,
+                    &layout_environment.fonts,
+                    &element.runs,
+                    true,
+                    0,
+                    0,
+                )?
+            }
+        } else {
+            wrap::wrap_for_layout(
+                wrap_cache,
+                diagnostics.as_deref_mut(),
+                &element.id,
+                &element.text,
+                0,
+                role,
+                environment.element_key.as_ref(),
+                paragraph,
+                environment.text_style.clone(),
+                &element.runs,
+                environment.char_width,
+                environment.purpose,
+                false,
+                environment.geometry_mode,
+            )
+        };
         Arc::new(PreparedBodyParagraph {
             paragraph,
             lines: lines
@@ -451,7 +534,7 @@ pub(crate) fn prepare_body_for_layout(
     if let Some(diagnostics) = diagnostics.as_deref_mut() {
         add_elapsed_nanos(&mut diagnostics.prepared_miss_nanos, miss_started);
     }
-    prepared
+    Ok(prepared)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -656,6 +739,7 @@ mod typography_cache_identity_tests {
                 hidden_text: false,
                 source_color: color.map(str::to_owned),
             },
+            resolved_text_style: None,
             char_width: FixedPoint::from_points(7),
             element_key: None,
             layout_environment: None,
@@ -733,7 +817,8 @@ mod typography_cache_identity_tests {
             &old_owner,
             prepared_environment.clone(),
             None,
-        );
+        )
+        .map_err(|_| scriptcraft_model::ModelError::InvalidNumber)?;
         let incremental = prepare_incremental_body_for_layout(
             None,
             &layout,
@@ -751,7 +836,8 @@ mod typography_cache_identity_tests {
             &new_owner,
             prepared_environment,
             None,
-        );
+        )
+        .map_err(|_| scriptcraft_model::ModelError::InvalidNumber)?;
         assert_eq!(incremental.paragraph, fresh.paragraph);
         assert_eq!(incremental.lines.as_ref(), fresh.lines.as_ref());
         Ok(())

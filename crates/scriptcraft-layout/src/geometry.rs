@@ -5,6 +5,7 @@ use super::{
 use crate::inputs::LayoutEnvironment;
 use scriptcraft_model::{
     formatting::{EffectiveTextStyle, FixedPoint, ParagraphAlignment, SourceLayoutSettings},
+    typography::EffectiveTextStyle as ResolvedTextStyle,
     LayoutInputs, ModelError, Role, StableId,
 };
 use std::sync::Arc;
@@ -53,11 +54,12 @@ pub struct LayoutLine {
     /// Source-character to display-character spans, relative to this line's
     /// display text and absolute within the canonical element text.
     pub display_source_map: Arc<[DisplaySourceSegment]>,
-    /// Per-run display and fixed-cell geometry. `geometry` and `text_style` are
-    /// retained as line-level compatibility projections; mixed-style consumers
-    /// must use these positioned spans.
+    /// Per-run display and canonical geometry. The resolved style is authoritative
+    /// for metric-driven sequential Body lines; legacy style is compatibility
+    /// metadata for builders not yet migrated.
     pub spans: Arc<[PositionedStyledSpan]>,
     pub text_style: EffectiveTextStyle,
+    pub resolved_text_style: Option<ResolvedTextStyle>,
     pub char_width: FixedPoint,
     /// Effective paragraph alignment before fixed-width text alignment is applied.
     pub alignment: ParagraphAlignment,
@@ -79,6 +81,9 @@ pub struct PositionedStyledSpan {
     pub source: SourceRange,
     pub display_source_map: Arc<[DisplaySourceSegment]>,
     pub text_style: EffectiveTextStyle,
+    /// Authoritative resolved typography for metric-driven Body spans. `None`
+    /// is retained only for compatibility builders not owned by WO-005A.2.
+    pub resolved_text_style: Option<ResolvedTextStyle>,
     pub char_width: FixedPoint,
     pub geometry: FixedRect,
     /// Canonical x offsets for every display-character boundary in this span.

@@ -35,7 +35,6 @@ pub enum PdfFallbackKind {
     },
     UnsupportedScalarSubstitution,
     UnsupportedExplicitColor,
-    MetricGeometryUnverified,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +125,6 @@ impl PdfTypographyReport {
                 },
                 PdfFallbackKind::UnsupportedScalarSubstitution => "non-ASCII scalar substitution",
                 PdfFallbackKind::UnsupportedExplicitColor => "unsupported color fallback",
-                PdfFallbackKind::MetricGeometryUnverified => "canonical metric geometry unverified",
             };
             parts.push(format!("{label}: {}", entry.count));
         }
@@ -157,7 +155,7 @@ impl Default for PdfExportOptions {
 
 /// Produces a deterministic PDF from Print layout using an explicit resolved
 /// typography environment. The PDF remains noncanonical and reports its
-/// bounded Base-14 and metric-policy limitations.
+/// bounded Base-14 and character/color substitution limitations.
 pub fn export_pdf(
     project: &Project,
     environment: &LayoutEnvironment,
@@ -219,10 +217,6 @@ pub fn export_pdf_with_layout_inputs_and_options(
         environment,
     )?;
     let mut report = PdfTypographyReport::default();
-    // WO-005.4/5's current fixed-cell path is intentionally disclosed. The
-    // presence of resolved host metrics does not establish that those metrics
-    // produced the current canonical line/page geometry.
-    report.record(PdfFallbackKind::MetricGeometryUnverified);
 
     let mut used_fonts = BTreeMap::<(PdfBase14Family, bool, bool), String>::new();
     for page in &layout.pages {
@@ -530,7 +524,7 @@ mod tests {
                 });
             }
         }
-        report.record(PdfFallbackKind::MetricGeometryUnverified);
+        report.record(PdfFallbackKind::UnsupportedExplicitColor);
         assert_eq!(report.entries.len(), MAX_PDF_REPORT_ENTRIES);
         assert!(report.suppressed_count > 0);
         let summary = report.summary();

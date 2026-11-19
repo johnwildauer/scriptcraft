@@ -1,10 +1,11 @@
 #![forbid(unsafe_code)]
 
-//! Prepared WO-005.10 PDF policy source; bytes/report assertions are unexecuted.
+//! PDF typography policy and canonical-offset output regressions.
 
 use scriptcraft_export::{export_pdf, PdfBase14Family, PdfFallbackKind};
-use scriptcraft_layout::LayoutEnvironment;
+use scriptcraft_layout::{LayoutComposition, LayoutEnvironment, ScreenplayLayout};
 use scriptcraft_model::{
+    formatting::{FixedPoint, SourceLayoutSettings},
     typography::{
         DocumentFontEnvironment, FaceStyle, FontResolutionKind, RequestedFontResolution,
         ResolvedFaceMetrics, ResolvedFontFace, ResolvedFontId, ResolvedFontSourceKind,
@@ -35,28 +36,45 @@ fn synthetic_environment(project: &Project) -> LayoutEnvironment {
         "Times".to_owned(),
         "Unknown family".to_owned(),
     ]);
-    let advances = (32_u8..=126)
-        .map(|byte| {
+    let mut scalars = (32_u8..=126).map(char::from).collect::<BTreeSet<_>>();
+    for owner in &project.elements {
+        let element = owner.as_element();
+        for character in element
+            .text
+            .chars()
+            .chain(element.runs.iter().flat_map(|run| run.text.chars()))
+        {
+            scalars.insert(character);
+            scalars.extend(character.to_uppercase());
+        }
+    }
+    for paragraph in &project.title_page {
+        for character in paragraph
+            .text
+            .chars()
+            .chain(paragraph.runs.iter().flat_map(|run| run.text.chars()))
+        {
+            scalars.insert(character);
+            scalars.extend(character.to_uppercase());
+        }
+    }
+    scalars.insert('\u{fffd}');
+    let advances = scalars
+        .into_iter()
+        .map(|character| {
             (
-                char::from(byte),
+                character,
                 ScalarAdvance {
-                    advance_units: match char::from(byte) {
+                    advance_units: match character {
                         ' ' => 300,
                         'i' | 'l' => 250,
                         'W' | 'M' => 900,
                         _ => 560,
                     },
-                    missing_glyph: false,
+                    missing_glyph: character == '\u{fffd}',
                 },
             )
         })
-        .chain([(
-            '\u{fffd}',
-            ScalarAdvance {
-                advance_units: 560,
-                missing_glyph: true,
-            },
-        )])
         .collect();
     let metrics = valid(ResolvedFaceMetrics::new(1_000, 800, -200, 0, advances));
     let mut faces = BTreeMap::new();
@@ -114,7 +132,6 @@ fn synthetic_environment(project: &Project) -> LayoutEnvironment {
 }
 
 #[test]
-#[ignore = "source-only acceptance pending WO-005.4/.5 active-builder definition/style routing"]
 fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
     let mut project = valid(Project::new());
     let mut definitions = project
@@ -168,11 +185,72 @@ fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
     ];
     let original = project.clone();
     let environment = synthetic_environment(&project);
-    let pdf = valid(export_pdf(&project, &environment));
+    let pdf = export_pdf(&project, &environment)
+        .unwrap_or_else(|error| panic!("synthetic PDF policy input failed: {error:?}"));
+    let inputs = project.session_layout_inputs();
+    let layout = valid(ScreenplayLayout::build_with_composition_and_environment(
+        &project,
+        &inputs,
+        &SourceLayoutSettings::default(),
+        LayoutComposition::Print {
+            include_title_page: true,
+        },
+        &environment,
+    ));
 
     assert!(pdf.bytes.starts_with(b"%PDF-1.4\n"));
     let pdf_source = valid(std::str::from_utf8(&pdf.bytes));
     assert!(!pdf_source.contains("PRIVATE HIDDEN FIXTURE CONTENT"));
+    let action_line = layout
+        .pages
+        .iter()
+        .flat_map(|page| page.lines.iter())
+        .find(|line| line.element == 0 && line.display_text.contains('W'))
+        .unwrap_or_else(|| unreachable!("action fixture has a visible W"));
+    let display_index = action_line
+        .display_text
+        .chars()
+        .position(|character| character == 'W')
+        .unwrap_or_else(|| unreachable!("selected line contains W"));
+    let mut span_start = 0usize;
+    let (span, span_index) = action_line
+        .spans
+        .iter()
+        .find_map(|span| {
+            let count = span.display_text.chars().count();
+            let found = (display_index >= span_start
+                && display_index < span_start.saturating_add(count))
+            .then_some((span, display_index - span_start));
+            span_start = span_start.saturating_add(count);
+            found
+        })
+        .unwrap_or_else(|| unreachable!("W is represented by a canonical span"));
+    let glyph_x = FixedPoint::from_raw(
+        span.geometry
+            .x
+            .raw()
+            .saturating_add(span.display_boundary_offsets[span_index].raw()),
+    );
+    let glyph_y = FixedPoint::from_raw(
+        FixedPoint::from_points(i64::from(layout.inputs.paper_height))
+            .raw()
+            .saturating_sub(span.geometry.y.raw())
+            .saturating_sub(span.geometry.height.raw()),
+    );
+    let expected_glyph_command = format!(
+        "{} {} Tm (W) Tj ET",
+        glyph_x.decimal_string(),
+        glyph_y.decimal_string(),
+    );
+    assert!(
+        pdf_source.contains(&expected_glyph_command),
+        "expected canonical PDF glyph command {expected_glyph_command}; got {}",
+        pdf_source
+            .lines()
+            .filter(|line| line.contains("(W) Tj"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     assert!(pdf.typography.entries().len() <= 8);
     assert!(pdf.typography.entries().iter().any(|entry| matches!(
         entry.kind,
@@ -205,13 +283,8 @@ fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
         .entries()
         .iter()
         .any(|entry| matches!(entry.kind, PdfFallbackKind::UnsupportedExplicitColor)));
-    assert!(pdf
-        .typography
-        .entries()
-        .iter()
-        .any(|entry| matches!(entry.kind, PdfFallbackKind::MetricGeometryUnverified)));
     let summary = pdf.typography.summary();
-    assert!(summary.contains("canonical metric geometry unverified"));
+    assert!(!summary.contains("canonical metric geometry unverified"));
     assert!(!summary.contains("Output report"));
     assert!(!summary.contains("private-invalid-color-value"));
     assert_eq!(project, original);

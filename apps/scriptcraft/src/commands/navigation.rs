@@ -232,17 +232,15 @@ impl ScriptCraftApp {
             .unwrap_or(current_line.geometry.x.raw())
         });
         self.set_preferred_vertical_x_for(surface, Some(goal));
-        let display_boundary = if let Some(projection) = target_projection.as_ref() {
-            crate::presentation::geometry::projected_target_boundary(projection, goal, scale)
-                .ok_or(EditError::InvalidElement)?
-        } else {
-            let cell = target_line.char_width.raw().max(1);
-            (goal
-                .saturating_sub(target_line.geometry.x.raw())
-                .saturating_add(cell / 2)
-                / cell)
-                .max(0) as usize
-        };
+        let target_projection = target_projection
+            .as_ref()
+            .ok_or(EditError::InvalidElement)?;
+        let display_boundary = crate::presentation::geometry::projected_target_boundary(
+            target_projection,
+            goal,
+            scale,
+        )
+        .ok_or(EditError::InvalidElement)?;
         let next = Position {
             element: target_line.element,
             offset: target_line.source_for_display_char(display_boundary),
