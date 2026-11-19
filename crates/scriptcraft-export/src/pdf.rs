@@ -98,6 +98,15 @@ impl PdfTypographyReport {
                     (FontResolutionKind::UnknownFallback, PdfBase14Family::Courier) => {
                         "unknown-family fallback to Base-14 Courier"
                     }
+                    (FontResolutionKind::ExactHost, PdfBase14Family::Helvetica) => {
+                        "exact host family to Base-14 Helvetica generic resource (not embedded)"
+                    }
+                    (FontResolutionKind::ExactHost, PdfBase14Family::Courier) => {
+                        "exact host family to Base-14 Courier generic resource (not embedded)"
+                    }
+                    (FontResolutionKind::ExactHost, PdfBase14Family::Times) => {
+                        "exact host family to Base-14 Times generic resource (not embedded)"
+                    }
                     (FontResolutionKind::CourierAlias, PdfBase14Family::Helvetica) => {
                         "Courier request to Base-14 Helvetica"
                     }
@@ -233,7 +242,9 @@ pub fn export_pdf_with_layout_inputs_and_options(
                     FontResolutionKind::CourierAlias | FontResolutionKind::UnknownFallback => {
                         PdfBase14Family::Courier
                     }
-                    FontResolutionKind::NearestSans => PdfBase14Family::Helvetica,
+                    FontResolutionKind::NearestSans | FontResolutionKind::ExactHost => {
+                        PdfBase14Family::Helvetica
+                    }
                     FontResolutionKind::NearestSerif => PdfBase14Family::Times,
                 };
                 report.record(PdfFallbackKind::Base14FontSubstitution {
@@ -369,7 +380,9 @@ fn page_content(
                 FontResolutionKind::CourierAlias | FontResolutionKind::UnknownFallback => {
                     PdfBase14Family::Courier
                 }
-                FontResolutionKind::NearestSans => PdfBase14Family::Helvetica,
+                FontResolutionKind::NearestSans | FontResolutionKind::ExactHost => {
+                    PdfBase14Family::Helvetica
+                }
                 FontResolutionKind::NearestSerif => PdfBase14Family::Times,
             };
             let requested_font = fonts
@@ -509,6 +522,7 @@ mod tests {
         let mut report = PdfTypographyReport::default();
         for requested in [
             FontResolutionKind::CourierAlias,
+            FontResolutionKind::ExactHost,
             FontResolutionKind::NearestSans,
             FontResolutionKind::NearestSerif,
             FontResolutionKind::UnknownFallback,

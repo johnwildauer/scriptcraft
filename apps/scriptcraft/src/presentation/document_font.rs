@@ -6,19 +6,12 @@ use eframe::egui::{
     epaint::text::{FontInsert, FontPriority, InsertFontFamily},
     FontData, FontDefinitions, FontFamily,
 };
-use std::fs::File;
-use std::io::{self, Read};
-use std::path::{Path, PathBuf};
 
 pub(crate) const COURIER_PRIME_FAMILY: &str = "Courier Prime";
 const REGULAR_KEY: &str = "scriptcraft-courier-prime-regular";
 const BOLD_KEY: &str = "scriptcraft-courier-prime-bold";
 const ITALIC_KEY: &str = "scriptcraft-courier-prime-italic";
 const BOLD_ITALIC_KEY: &str = "scriptcraft-courier-prime-bold-italic";
-
-/// A host Arial face is accepted only up to this size. Reads are capped at one
-/// byte over this limit so oversized files are detected without unbounded I/O.
-pub(crate) const MAX_ARIAL_FACE_BYTES: usize = 16 * 1024 * 1024;
 
 const ARIAL_REGULAR_FAMILY: &str = "ScriptCraft Arial Regular";
 const ARIAL_BOLD_FAMILY: &str = "ScriptCraft Arial Bold";
@@ -109,7 +102,7 @@ pub(crate) struct ResolvedDocumentFace {
 }
 
 pub(crate) fn font_definitions() -> (FontDefinitions, FontAvailability) {
-    build_font_definitions(load_host_arial_faces())
+    build_font_definitions([None, None, None, None])
 }
 
 fn build_font_definitions(
@@ -226,39 +219,6 @@ pub(crate) fn install(context: &egui::Context) -> DocumentFontStore {
     DocumentFontStore::new(availability)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CandidatePlatform {
-    MacOs,
-    Windows,
-    Linux,
-    Unsupported,
-}
-
-fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
-    let file = File::open(path)?;
-    let mut limited = file.take((MAX_ARIAL_FACE_BYTES + 1) as u64);
-    let mut bytes = Vec::new();
-    limited.read_to_end(&mut bytes)?;
-    Ok(bytes)
-}
-
-fn load_host_arial_faces() -> [Option<Vec<u8>>; 4] {
-    std::array::from_fn(|index| {
-        let style = ResolvedFaceStyle::ALL[index];
-        let candidates = host_font_candidates(FamilySelection::Sans, style);
-        let sample = BTreeSet::from(['?']);
-        candidates.into_iter().find_map(|candidate| {
-            let path = candidate.path?;
-            let bytes = read_bounded(&path).ok()?;
-            if bytes.is_empty() || bytes.len() > MAX_ARIAL_FACE_BYTES {
-                return None;
-            }
-            metrics_for_bytes(&bytes, &sample).ok()?;
-            Some(bytes)
-        })
-    })
-}
-
 // WO-005.3 document resolver. The compatibility helpers above remain only for
 // the existing WO-005.7 paint migration; canonical layout preparation uses the
 // explicit model environment below and never exposes host paths.
@@ -277,7 +237,6 @@ use std::ops::Deref;
 const MAX_DOCUMENT_FONT_SCALARS: usize = MAX_SCALAR_ADVANCES;
 const MAX_DOCUMENT_FONT_REQUESTS: usize = MAX_FONT_REQUESTS;
 const MAX_PREPARATION_BYTES: usize = 64 * 1024 * 1024;
-const MAX_HOST_CANDIDATES: usize = 24;
 const MAX_PREPARED_ENVIRONMENTS: usize = 2;
 const MAX_REGISTERED_FONT_BYTES: usize = 256 * 1024 * 1024;
 const HOST_CATALOG_GENERATION: u64 = 1;
@@ -307,6 +266,7 @@ pub(crate) struct PreparedDocumentFonts {
     pub(crate) environment: Arc<DocumentFontEnvironment>,
     pub(crate) egui_family_names: BTreeMap<ResolvedFontId, String>,
     face_bytes: BTreeMap<ResolvedFontId, Arc<[u8]>>,
+    face_indices: BTreeMap<ResolvedFontId, u32>,
     pub(crate) fallback_faces: BTreeSet<(String, ResolvedFaceStyle)>,
     signature: PreparationSignature,
 }
@@ -327,9 +287,10 @@ impl PreparedDocumentFonts {
 #[derive(Debug)]
 pub(crate) struct DocumentFontStore {
     legacy_availability: FontAvailability,
-    host_catalog: HostFontCatalog,
+    native_font_catalog: super::host_font_catalog::NativeFontCatalog,
     prepared_cache: HashMap<PreparationSignature, PreparedDocumentFonts>,
     registered_bytes: BTreeMap<ResolvedFontId, Arc<[u8]>>,
+    registered_face_indices: BTreeMap<ResolvedFontId, u32>,
     registered_byte_count: usize,
     catalog_generation: u64,
 }
@@ -352,9 +313,10 @@ impl DocumentFontStore {
     fn new(legacy_availability: FontAvailability) -> Self {
         Self {
             legacy_availability,
-            host_catalog: HostFontCatalog::discover(),
+            native_font_catalog: super::host_font_catalog::NativeFontCatalog::default(),
             prepared_cache: HashMap::new(),
             registered_bytes: BTreeMap::new(),
+            registered_face_indices: BTreeMap::new(),
             registered_byte_count: 0,
             catalog_generation: HOST_CATALOG_GENERATION,
         }
@@ -367,13 +329,17 @@ impl DocumentFontStore {
         &mut self,
         project: &Project,
     ) -> Result<PreparedDocumentFonts, FontPreparationError> {
-        let signature = project_font_signature(project, self.catalog_generation)?;
+        let generation = self
+            .catalog_generation
+            .saturating_add(self.native_font_catalog.generation());
+        let signature = project_font_signature(project, generation)?;
         if let Some(cached) = self.prepared_cache.get(&signature) {
             return Ok(cached.clone());
         }
 
         let mut faces = BTreeMap::new();
         let mut face_bytes = BTreeMap::new();
+        let mut face_indices = BTreeMap::new();
         let mut family_names = BTreeMap::new();
         let mut fallback_faces = BTreeSet::new();
         let bundled = bundled_courier_prime_faces();
@@ -385,12 +351,14 @@ impl DocumentFontStore {
             let id = insert_resolved_face(
                 &mut faces,
                 &mut face_bytes,
+                &mut face_indices,
                 &mut family_names,
                 bytes,
                 "Courier Prime",
                 courier_style_name(style),
                 style,
                 ResolvedFontSourceKind::Bundled,
+                0,
                 metrics,
             )?;
             bundled_ids[index] = Some(id);
@@ -398,61 +366,112 @@ impl DocumentFontStore {
 
         let mut resolutions = BTreeMap::new();
         let mut bytes_read = 0usize;
-        let mut selected_host_faces: HashMap<
-            (FamilySelection, ResolvedFaceStyle),
-            Option<ParsedHostFace>,
-        > = HashMap::new();
         for family in &signature.families {
             let (kind, selection) = classify_requested_family(family);
-            let mut selected = Vec::with_capacity(4);
-            for style in ResolvedFaceStyle::ALL {
-                let chosen = match selection {
-                    FamilySelection::Courier => bundled_ids[resolved_style_index(style)]
-                        .clone()
-                        .ok_or_else(|| FontPreparationError::bounded("bundled-face-missing"))?,
-                    FamilySelection::Sans | FamilySelection::Serif => {
-                        let key = (selection, style);
-                        if !selected_host_faces.contains_key(&key) {
-                            let selected = resolve_host_style_with(
-                                self.host_catalog.candidates(selection, style).to_vec(),
-                                &signature.scalars,
-                                &mut bytes_read,
-                                read_bounded,
-                            )?;
-                            selected_host_faces.insert(key, selected);
-                        }
-                        match selected_host_faces.get(&key).cloned().flatten() {
-                            Some(candidate) => insert_resolved_face(
-                                &mut faces,
-                                &mut face_bytes,
-                                &mut family_names,
-                                &candidate.bytes,
-                                &candidate.family_label,
-                                &candidate.face_label,
-                                style,
-                                ResolvedFontSourceKind::Host,
-                                candidate.metrics,
-                            )?,
-                            None => {
-                                fallback_faces.insert((family.clone(), style));
-                                bundled_ids[resolved_style_index(style)]
-                                    .clone()
-                                    .ok_or_else(|| {
-                                        FontPreparationError::bounded("bundled-face-missing")
-                                    })?
+            let mut selected: [Option<ResolvedFontId>; 4] = std::array::from_fn(|_| None);
+            if kind == FamilyKind::CourierAlias {
+                for style in ResolvedFaceStyle::ALL {
+                    selected[resolved_style_index(style)] =
+                        bundled_ids[resolved_style_index(style)].clone();
+                }
+            } else {
+                // Resolve each exact family/style independently before generic
+                // matching-family faces. Missing styles are filled only after
+                // all available faces are known, using the documented family
+                // priority (Bold Italic, Bold, Italic, Regular).
+                for style in ResolvedFaceStyle::ALL {
+                    let index = resolved_style_index(style);
+                    let exact = resolve_native_style(
+                        &mut self.native_font_catalog,
+                        family,
+                        style,
+                        &signature.scalars,
+                        &mut bytes_read,
+                    )?;
+                    let (candidate, used_generic) = match exact {
+                        Some(face) => (Some(face), false),
+                        None => match selection {
+                            FamilySelection::Sans | FamilySelection::Serif => {
+                                let mut fallback = None;
+                                for generic_family in generic_family_candidates(selection) {
+                                    if generic_family.eq_ignore_ascii_case(family) {
+                                        continue;
+                                    }
+                                    if let Some(face) = resolve_native_style(
+                                        &mut self.native_font_catalog,
+                                        generic_family,
+                                        style,
+                                        &signature.scalars,
+                                        &mut bytes_read,
+                                    )? {
+                                        fallback = Some(face);
+                                        break;
+                                    }
+                                }
+                                (fallback, true)
                             }
+                            FamilySelection::Courier => (None, false),
+                        },
+                    };
+                    if let Some(candidate) = candidate {
+                        if used_generic {
+                            fallback_faces.insert((family.clone(), style));
                         }
+                        selected[index] = Some(insert_resolved_face(
+                            &mut faces,
+                            &mut face_bytes,
+                            &mut face_indices,
+                            &mut family_names,
+                            &candidate.bytes,
+                            &candidate.family_label,
+                            &candidate.face_label,
+                            style,
+                            ResolvedFontSourceKind::Host,
+                            candidate.face_index,
+                            candidate.metrics,
+                        )?);
                     }
-                };
-                selected.push(chosen);
+                }
+
+                let family_preference = [
+                    ResolvedFaceStyle::BoldItalic,
+                    ResolvedFaceStyle::Bold,
+                    ResolvedFaceStyle::Italic,
+                    ResolvedFaceStyle::Regular,
+                ];
+                let preferred_face = family_preference
+                    .into_iter()
+                    .find_map(|style| selected[resolved_style_index(style)].clone());
+                for style in ResolvedFaceStyle::ALL {
+                    let index = resolved_style_index(style);
+                    if selected[index].is_some() {
+                        continue;
+                    }
+                    fallback_faces.insert((family.clone(), style));
+                    selected[index] = Some(match &preferred_face {
+                        Some(face) => face.clone(),
+                        None => bundled_ids[index]
+                            .clone()
+                            .ok_or_else(|| FontPreparationError::bounded("bundled-face-missing"))?,
+                    });
+                }
             }
-            if selected.len() != 4 {
-                return Err(FontPreparationError::bounded("incomplete-face-selection"));
-            }
+            let selected = selected
+                .map(|face| {
+                    face.ok_or_else(|| FontPreparationError::bounded("incomplete-face-selection"))
+                })
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()?;
+            let has_exact_family_face = selected.iter().any(|id| {
+                faces
+                    .get(id)
+                    .is_some_and(|face| face.source_kind == ResolvedFontSourceKind::Host)
+            });
             let resolution_kind = match kind {
                 FamilyKind::CourierAlias => FontResolutionKind::CourierAlias,
                 FamilyKind::Sans => FontResolutionKind::NearestSans,
                 FamilyKind::Serif => FontResolutionKind::NearestSerif,
+                FamilyKind::Unknown if has_exact_family_face => FontResolutionKind::ExactHost,
                 FamilyKind::Unknown => FontResolutionKind::UnknownFallback,
             };
             resolutions.insert(
@@ -475,6 +494,7 @@ impl DocumentFontStore {
             environment: Arc::new(environment),
             egui_family_names: family_names,
             face_bytes,
+            face_indices,
             fallback_faces,
             signature: signature.clone(),
         };
@@ -498,9 +518,16 @@ impl DocumentFontStore {
         // a prefix of the document's resolved faces into the host context.
         let mut additional_bytes = 0usize;
         for (id, bytes) in &prepared.face_bytes {
+            let face_index = prepared
+                .face_indices
+                .get(id)
+                .ok_or_else(|| FontPreparationError::bounded("registered-face-index-missing"))?;
             if let Some(existing) = self.registered_bytes.get(id) {
                 if existing.as_ref() != bytes.as_ref() {
                     return Err(FontPreparationError::bounded("resolved-id-byte-collision"));
+                }
+                if self.registered_face_indices.get(id) != Some(face_index) {
+                    return Err(FontPreparationError::bounded("resolved-id-index-collision"));
                 }
             } else {
                 additional_bytes = additional_bytes.saturating_add(bytes.len());
@@ -520,16 +547,23 @@ impl DocumentFontStore {
                 .egui_family_names
                 .get(id)
                 .ok_or_else(|| FontPreparationError::bounded("registered-family-missing"))?;
+            let face_index = *prepared
+                .face_indices
+                .get(id)
+                .ok_or_else(|| FontPreparationError::bounded("registered-face-index-missing"))?;
             let data_key = format!("scriptcraft-resolved-{}", id.as_str());
+            let mut font_data = FontData::from_owned(bytes.as_ref().to_vec());
+            font_data.index = face_index;
             context.add_font(FontInsert::new(
                 data_key.as_str(),
-                FontData::from_owned(bytes.as_ref().to_vec()),
+                font_data,
                 vec![InsertFontFamily {
                     family: FontFamily::Name(family_name.clone().into()),
                     priority: FontPriority::Highest,
                 }],
             ));
             self.registered_bytes.insert(id.clone(), bytes.clone());
+            self.registered_face_indices.insert(id.clone(), face_index);
             self.registered_byte_count = self.registered_byte_count.saturating_add(bytes.len());
         }
 
@@ -539,9 +573,15 @@ impl DocumentFontStore {
                 let Some(family_name) = prepared.egui_family_names.get(id) else {
                     return false;
                 };
+                let Some(face_index) = prepared.face_indices.get(id) else {
+                    return false;
+                };
                 let data_key = format!("scriptcraft-resolved-{}", id.as_str());
                 let family = FontFamily::Name(family_name.clone().into());
-                definitions.font_data.contains_key(&data_key)
+                definitions
+                    .font_data
+                    .get(&data_key)
+                    .is_some_and(|data| data.index == *face_index)
                     && definitions
                         .families
                         .get(&family)
@@ -553,7 +593,7 @@ impl DocumentFontStore {
 
     pub(crate) fn invalidate_catalog(&mut self) {
         self.catalog_generation = self.catalog_generation.saturating_add(1);
-        self.host_catalog = HostFontCatalog::discover();
+        self.native_font_catalog.invalidate();
         self.prepared_cache.clear();
     }
 }
@@ -719,60 +759,88 @@ fn collect_uppercase_scalars(
 #[derive(Debug, Clone)]
 struct ParsedHostFace {
     bytes: Vec<u8>,
+    face_index: u32,
     metrics: ResolvedFaceMetrics,
     family_label: String,
     face_label: String,
 }
 
-fn resolve_host_style_with(
-    candidates: Vec<FontCandidate>,
+fn generic_family_candidates(selection: FamilySelection) -> &'static [&'static str] {
+    match selection {
+        FamilySelection::Sans => &["sans-serif", "Arial", "Helvetica", "Liberation Sans"],
+        FamilySelection::Serif => &["serif", "Times New Roman", "Times", "Liberation Serif"],
+        FamilySelection::Courier => &[],
+    }
+}
+
+fn native_style(style: ResolvedFaceStyle) -> super::host_font_catalog::FaceStyle {
+    use super::host_font_catalog::FaceStyle as NativeStyle;
+    match style {
+        ResolvedFaceStyle::Regular => NativeStyle::Regular,
+        ResolvedFaceStyle::Bold => NativeStyle::Bold,
+        ResolvedFaceStyle::Italic => NativeStyle::Italic,
+        ResolvedFaceStyle::BoldItalic => NativeStyle::BoldItalic,
+    }
+}
+
+fn resolve_native_style(
+    catalog: &mut super::host_font_catalog::NativeFontCatalog,
+    family: &str,
+    style: ResolvedFaceStyle,
     scalars: &BTreeSet<char>,
     bytes_read: &mut usize,
-    mut read: impl FnMut(&Path) -> io::Result<Vec<u8>>,
 ) -> Result<Option<ParsedHostFace>, FontPreparationError> {
-    if candidates.len() > MAX_HOST_CANDIDATES {
-        return Err(FontPreparationError::bounded("host-candidate-limit"));
+    let Some(native) = catalog.query_exact(family, native_style(style)) else {
+        return Ok(None);
+    };
+    *bytes_read = bytes_read.saturating_add(native.bytes.len());
+    if *bytes_read > MAX_PREPARATION_BYTES {
+        return Err(FontPreparationError::bounded("font-byte-budget"));
     }
-    for candidate in candidates {
-        let Some(path) = candidate.path.as_deref() else {
-            continue;
-        };
-        let bytes = match read(path) {
-            Ok(bytes) => bytes,
-            Err(_) => continue,
-        };
-        *bytes_read = bytes_read.saturating_add(bytes.len());
-        if *bytes_read > MAX_PREPARATION_BYTES
-            || bytes.is_empty()
-            || bytes.len() > MAX_ARIAL_FACE_BYTES
-        {
-            if *bytes_read > MAX_PREPARATION_BYTES {
-                return Err(FontPreparationError::bounded("font-byte-budget"));
-            }
-            continue;
-        }
-        if let Ok(metrics) = metrics_for_bytes(&bytes, scalars) {
-            return Ok(Some(ParsedHostFace {
-                bytes,
-                metrics,
-                family_label: candidate.family_label,
-                face_label: candidate.face_label,
-            }));
-        }
-    }
-    Ok(None)
+    let metrics = match metrics_for_bytes_and_index(&native.bytes, native.collection_index, scalars)
+    {
+        Ok(metrics) => metrics,
+        Err(_) => return Ok(None),
+    };
+    let face_label = native
+        .full_name
+        .or(native.postscript_name)
+        .unwrap_or_else(|| format!("{} {:?}", native.family_label, style));
+    Ok(Some(ParsedHostFace {
+        bytes: native.bytes.as_ref().to_vec(),
+        face_index: native.collection_index,
+        metrics,
+        family_label: native.family_label,
+        face_label,
+    }))
 }
 
 fn metrics_for_bytes(
     bytes: &[u8],
     scalars: &BTreeSet<char>,
 ) -> Result<ResolvedFaceMetrics, FontPreparationError> {
-    // Collections have a face index and are deliberately rejected rather than
-    // silently measuring whichever member a parser happens to choose.
-    if bytes.starts_with(b"ttcf") || bytes.starts_with(b"wOFF") || bytes.starts_with(b"wOF2") {
+    // This compatibility entry point has no selection context, so a collection
+    // is ambiguous. Exact host descriptors use the indexed entry point below.
+    if bytes.starts_with(b"ttcf") {
         return Err(FontPreparationError::bounded("unsupported-font-container"));
     }
-    let font = FontRef::try_from_slice(bytes)
+    metrics_for_bytes_and_index(bytes, 0, scalars)
+}
+
+fn metrics_for_bytes_and_index(
+    bytes: &[u8],
+    face_index: u32,
+    scalars: &BTreeSet<char>,
+) -> Result<ResolvedFaceMetrics, FontPreparationError> {
+    if bytes.starts_with(b"wOFF") || bytes.starts_with(b"wOF2") {
+        return Err(FontPreparationError::bounded("unsupported-font-container"));
+    }
+    if bytes.starts_with(b"ttcf") && !has_collection_face(bytes, face_index) {
+        return Err(FontPreparationError::bounded(
+            "invalid-collection-face-index",
+        ));
+    }
+    let font = FontRef::try_from_slice_and_index(bytes, face_index)
         .map_err(|_| FontPreparationError::bounded("malformed-font"))?;
     let upem = font
         .units_per_em()
@@ -805,6 +873,14 @@ fn metrics_for_bytes(
     .map_err(|_| FontPreparationError::bounded("invalid-font-metrics"))
 }
 
+fn has_collection_face(bytes: &[u8], face_index: u32) -> bool {
+    if bytes.len() < 12 || !bytes.starts_with(b"ttcf") {
+        return false;
+    }
+    let face_count = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    face_index < face_count
+}
+
 fn finite_metric(value: f32) -> Result<i32, FontPreparationError> {
     if !value.is_finite() || value.abs() > 1_000_000.0 {
         return Err(FontPreparationError::bounded("invalid-font-metrics"));
@@ -822,16 +898,29 @@ fn finite_advance(value: f32) -> Result<u32, FontPreparationError> {
 fn insert_resolved_face(
     faces: &mut BTreeMap<ResolvedFontId, ResolvedFontFace>,
     bytes_by_id: &mut BTreeMap<ResolvedFontId, Arc<[u8]>>,
+    indices_by_id: &mut BTreeMap<ResolvedFontId, u32>,
     family_names: &mut BTreeMap<ResolvedFontId, String>,
     bytes: &[u8],
     family_label: &str,
     face_label: &str,
     style: ResolvedFaceStyle,
     source_kind: ResolvedFontSourceKind,
+    face_index: u32,
     metrics: ResolvedFaceMetrics,
 ) -> Result<ResolvedFontId, FontPreparationError> {
-    let fingerprint = content_fingerprint(bytes);
-    let id = allocate_resolved_font_id(bytes, style, fingerprint, bytes_by_id)?;
+    let fingerprint =
+        resolved_identity_fingerprint(bytes, face_index, style, source_kind, &metrics);
+    let id = allocate_resolved_font_id(
+        bytes,
+        face_index,
+        style,
+        source_kind,
+        &metrics,
+        fingerprint,
+        bytes_by_id,
+        indices_by_id,
+        faces,
+    )?;
     if !faces.contains_key(&id) {
         let face = ResolvedFontFace::from_bytes(
             id.clone(),
@@ -845,17 +934,62 @@ fn insert_resolved_face(
         .map_err(|_| FontPreparationError::bounded("resolved-face-invalid"))?;
         faces.insert(id.clone(), face);
         bytes_by_id.insert(id.clone(), Arc::from(bytes));
+        indices_by_id.insert(id.clone(), face_index);
         let egui_name = format!("ScriptCraft Resolved {}", id.as_str());
         family_names.insert(id.clone(), egui_name);
     }
     Ok(id)
 }
 
+fn resolved_identity_fingerprint(
+    bytes: &[u8],
+    face_index: u32,
+    style: ResolvedFaceStyle,
+    source_kind: ResolvedFontSourceKind,
+    metrics: &ResolvedFaceMetrics,
+) -> u64 {
+    let mut hash = content_fingerprint(bytes);
+    let mut mix = |byte: u8| {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for byte in face_index.to_le_bytes() {
+        mix(byte);
+    }
+    mix(style as u8);
+    mix(source_kind as u8);
+    for value in [
+        metrics.units_per_em as i64,
+        i64::from(metrics.ascender),
+        i64::from(metrics.descender),
+        i64::from(metrics.line_gap),
+    ] {
+        for byte in value.to_le_bytes() {
+            mix(byte);
+        }
+    }
+    for (scalar, advance) in &metrics.scalar_advances {
+        for byte in (*scalar as u32).to_le_bytes() {
+            mix(byte);
+        }
+        for byte in advance.advance_units.to_le_bytes() {
+            mix(byte);
+        }
+        mix(u8::from(advance.missing_glyph));
+    }
+    hash
+}
+
 fn allocate_resolved_font_id(
     bytes: &[u8],
+    face_index: u32,
     style: ResolvedFaceStyle,
+    source_kind: ResolvedFontSourceKind,
+    metrics: &ResolvedFaceMetrics,
     fingerprint: u64,
     existing: &BTreeMap<ResolvedFontId, Arc<[u8]>>,
+    existing_indices: &BTreeMap<ResolvedFontId, u32>,
+    existing_faces: &BTreeMap<ResolvedFontId, ResolvedFontFace>,
 ) -> Result<ResolvedFontId, FontPreparationError> {
     let style_suffix = match style {
         ResolvedFaceStyle::Regular => "r",
@@ -865,14 +999,24 @@ fn allocate_resolved_font_id(
     };
     for collision_index in 0..=16u32 {
         let spelling = if collision_index == 0 {
-            format!("font-{fingerprint:016x}-{style_suffix}")
+            format!("font-{fingerprint:016x}-f{face_index}-{style_suffix}")
         } else {
-            format!("font-{fingerprint:016x}-{style_suffix}-c{collision_index}")
+            format!("font-{fingerprint:016x}-f{face_index}-{style_suffix}-c{collision_index}")
         };
         let id = ResolvedFontId::new(spelling)
             .map_err(|_| FontPreparationError::bounded("resolved-id-bound"))?;
         match existing.get(&id) {
-            Some(existing_bytes) if existing_bytes.as_ref() == bytes => return Ok(id),
+            Some(existing_bytes)
+                if existing_bytes.as_ref() == bytes
+                    && existing_indices.get(&id) == Some(&face_index)
+                    && existing_faces.get(&id).is_some_and(|face| {
+                        face.style == style
+                            && face.source_kind == source_kind
+                            && face.metrics == *metrics
+                    }) =>
+            {
+                return Ok(id)
+            }
             Some(_) => continue,
             None => return Ok(id),
         }
@@ -907,266 +1051,10 @@ fn bundled_courier_prime_faces() -> [&'static [u8]; 4] {
     ]
 }
 
-#[derive(Debug, Clone)]
-struct FontCandidate {
-    path: Option<PathBuf>,
-    family_label: String,
-    face_label: String,
-}
-
-#[derive(Debug)]
-struct HostFontCatalog {
-    sans: [Vec<FontCandidate>; 4],
-    serif: [Vec<FontCandidate>; 4],
-}
-
-impl HostFontCatalog {
-    fn discover() -> Self {
-        Self {
-            sans: std::array::from_fn(|index| {
-                font_candidates_for_platform(
-                    current_candidate_platform(),
-                    current_windows_directory().as_deref(),
-                    FamilySelection::Sans,
-                    ResolvedFaceStyle::ALL[index],
-                )
-            }),
-            serif: std::array::from_fn(|index| {
-                font_candidates_for_platform(
-                    current_candidate_platform(),
-                    current_windows_directory().as_deref(),
-                    FamilySelection::Serif,
-                    ResolvedFaceStyle::ALL[index],
-                )
-            }),
-        }
-    }
-
-    fn candidates(&self, selection: FamilySelection, style: ResolvedFaceStyle) -> &[FontCandidate] {
-        let index = resolved_style_index(style);
-        match selection {
-            FamilySelection::Sans => &self.sans[index],
-            FamilySelection::Serif => &self.serif[index],
-            FamilySelection::Courier => &[],
-        }
-    }
-}
-
-fn current_candidate_platform() -> CandidatePlatform {
-    #[cfg(target_os = "windows")]
-    {
-        CandidatePlatform::Windows
-    }
-    #[cfg(target_os = "macos")]
-    {
-        CandidatePlatform::MacOs
-    }
-    #[cfg(target_os = "linux")]
-    {
-        CandidatePlatform::Linux
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    {
-        CandidatePlatform::Unsupported
-    }
-}
-
-fn current_windows_directory() -> Option<PathBuf> {
-    std::env::var_os("WINDIR")
-        .or_else(|| std::env::var_os("SystemRoot"))
-        .map(PathBuf::from)
-}
-
-fn host_font_candidates(
-    selection: FamilySelection,
-    style: ResolvedFaceStyle,
-) -> Vec<FontCandidate> {
-    font_candidates_for_platform(
-        current_candidate_platform(),
-        current_windows_directory().as_deref(),
-        selection,
-        style,
-    )
-}
-
-fn font_candidates_for_platform(
-    platform: CandidatePlatform,
-    windows_directory: Option<&Path>,
-    selection: FamilySelection,
-    style: ResolvedFaceStyle,
-) -> Vec<FontCandidate> {
-    let file_names: &[(&str, &str)] = match (selection, style) {
-        (FamilySelection::Sans, ResolvedFaceStyle::Regular) => &[
-            ("Arial", "arial.ttf"),
-            ("Helvetica", "Helvetica.ttf"),
-            ("Liberation Sans", "LiberationSans-Regular.ttf"),
-            ("Segoe UI", "segoeui.ttf"),
-        ],
-        (FamilySelection::Sans, ResolvedFaceStyle::Bold) => &[
-            ("Arial", "arialbd.ttf"),
-            ("Helvetica", "Helvetica Bold.ttf"),
-            ("Liberation Sans", "LiberationSans-Bold.ttf"),
-            ("Segoe UI", "segoeuib.ttf"),
-        ],
-        (FamilySelection::Sans, ResolvedFaceStyle::Italic) => &[
-            ("Arial", "ariali.ttf"),
-            ("Helvetica", "Helvetica Oblique.ttf"),
-            ("Liberation Sans", "LiberationSans-Italic.ttf"),
-            ("Segoe UI", "segoeuii.ttf"),
-        ],
-        (FamilySelection::Sans, ResolvedFaceStyle::BoldItalic) => &[
-            ("Arial", "arialbi.ttf"),
-            ("Helvetica", "Helvetica Bold Oblique.ttf"),
-            ("Liberation Sans", "LiberationSans-BoldItalic.ttf"),
-            ("Segoe UI", "segoeuiz.ttf"),
-        ],
-        (FamilySelection::Serif, ResolvedFaceStyle::Regular) => &[
-            ("Times New Roman", "times.ttf"),
-            ("Times", "Times.ttf"),
-            ("Liberation Serif", "LiberationSerif-Regular.ttf"),
-            ("Georgia", "georgia.ttf"),
-        ],
-        (FamilySelection::Serif, ResolvedFaceStyle::Bold) => &[
-            ("Times New Roman", "timesbd.ttf"),
-            ("Times", "Times Bold.ttf"),
-            ("Liberation Serif", "LiberationSerif-Bold.ttf"),
-            ("Georgia", "georgiab.ttf"),
-        ],
-        (FamilySelection::Serif, ResolvedFaceStyle::Italic) => &[
-            ("Times New Roman", "timesi.ttf"),
-            ("Times", "Times Italic.ttf"),
-            ("Liberation Serif", "LiberationSerif-Italic.ttf"),
-            ("Georgia", "georgiai.ttf"),
-        ],
-        (FamilySelection::Serif, ResolvedFaceStyle::BoldItalic) => &[
-            ("Times New Roman", "timesbi.ttf"),
-            ("Times", "Times Bold Italic.ttf"),
-            ("Liberation Serif", "LiberationSerif-BoldItalic.ttf"),
-            ("Georgia", "georgiaz.ttf"),
-        ],
-        (FamilySelection::Courier, _) => &[],
-    };
-    let mut candidates = Vec::new();
-    for (family_label, file_name) in file_names {
-        let paths = candidate_paths(platform, windows_directory, family_label, file_name);
-        if paths.is_empty() {
-            candidates.push(FontCandidate {
-                path: None,
-                family_label: (*family_label).to_owned(),
-                face_label: format!("{family_label} {style:?}"),
-            });
-        } else {
-            candidates.extend(paths.into_iter().map(|path| FontCandidate {
-                path: Some(path),
-                family_label: (*family_label).to_owned(),
-                face_label: format!("{family_label} {style:?}"),
-            }));
-        }
-    }
-    candidates.truncate(MAX_HOST_CANDIDATES);
-    candidates
-}
-
-fn candidate_paths(
-    platform: CandidatePlatform,
-    windows_directory: Option<&Path>,
-    family: &str,
-    file_name: &str,
-) -> Vec<PathBuf> {
-    match platform {
-        CandidatePlatform::Windows => windows_directory
-            .map(|root| vec![root.join("Fonts").join(file_name)])
-            .unwrap_or_default(),
-        CandidatePlatform::MacOs => {
-            let directory =
-                if family == "Arial" || family == "Times New Roman" || family == "Georgia" {
-                    "/System/Library/Fonts/Supplemental"
-                } else {
-                    "/Library/Fonts"
-                };
-            let mac_name = match file_name {
-                "arial.ttf" => "Arial.ttf",
-                "arialbd.ttf" => "Arial Bold.ttf",
-                "ariali.ttf" => "Arial Italic.ttf",
-                "arialbi.ttf" => "Arial Bold Italic.ttf",
-                "times.ttf" => "Times New Roman.ttf",
-                "timesbd.ttf" => "Times New Roman Bold.ttf",
-                "timesi.ttf" => "Times New Roman Italic.ttf",
-                "timesbi.ttf" => "Times New Roman Bold Italic.ttf",
-                "georgia.ttf" => "Georgia.ttf",
-                "georgiab.ttf" => "Georgia Bold.ttf",
-                "georgiai.ttf" => "Georgia Italic.ttf",
-                "georgiaz.ttf" => "Georgia Bold Italic.ttf",
-                other => other,
-            };
-            vec![PathBuf::from(directory).join(mac_name)]
-        }
-        CandidatePlatform::Linux => {
-            let mut paths = Vec::new();
-            let linux_name = match (family, file_name) {
-                ("Arial", "arial.ttf") => "Arial.ttf",
-                ("Arial", "arialbd.ttf") => "Arial_Bold.ttf",
-                ("Arial", "ariali.ttf") => "Arial_Italic.ttf",
-                ("Arial", "arialbi.ttf") => "Arial_Bold_Italic.ttf",
-                ("Times New Roman", "times.ttf") => "Times_New_Roman.ttf",
-                ("Times New Roman", "timesbd.ttf") => "Times_New_Roman_Bold.ttf",
-                ("Times New Roman", "timesi.ttf") => "Times_New_Roman_Italic.ttf",
-                ("Times New Roman", "timesbi.ttf") => "Times_New_Roman_Bold_Italic.ttf",
-                ("Georgia", "georgia.ttf") => "Georgia.ttf",
-                ("Georgia", "georgiab.ttf") => "Georgia_Bold.ttf",
-                ("Georgia", "georgiai.ttf") => "Georgia_Italic.ttf",
-                ("Georgia", "georgiaz.ttf") => "Georgia_Bold_Italic.ttf",
-                (_, other) => other,
-            };
-            let roots = [
-                "/usr/share/fonts/truetype/msttcorefonts",
-                "/usr/share/fonts/truetype/liberation",
-                "/usr/share/fonts/truetype/liberation2",
-                "/usr/local/share/fonts",
-            ];
-            for root in roots {
-                paths.push(PathBuf::from(root).join(linux_name));
-            }
-            paths
-        }
-        CandidatePlatform::Unsupported => Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod resolved_font_tests {
     use super::*;
     use eframe::egui::{Color32, FontId};
-    use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static TEMP_FONT_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
-
-    struct TestFontDirectory(PathBuf);
-
-    impl TestFontDirectory {
-        fn new() -> Self {
-            let id = TEMP_FONT_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "scriptcraft-font-readiness-{}-{id}",
-                std::process::id()
-            ));
-            assert!(fs::create_dir_all(&path).is_ok());
-            Self(path)
-        }
-
-        fn write(&self, name: &str, bytes: &[u8]) -> PathBuf {
-            let path = self.0.join(name);
-            assert!(fs::write(&path, bytes).is_ok());
-            path
-        }
-    }
-
-    impl Drop for TestFontDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn project_with_family(family: &str) -> Option<Project> {
         let Ok(mut project) = Project::new() else {
@@ -1201,6 +1089,10 @@ mod resolved_font_tests {
                 let data_key = format!("scriptcraft-resolved-{}", id.as_str());
                 let family = FontFamily::Name(name.clone().into());
                 assert!(definitions.font_data.contains_key(&data_key));
+                assert_eq!(
+                    definitions.font_data.get(&data_key).map(|data| data.index),
+                    prepared.face_indices.get(id).copied()
+                );
                 assert!(definitions
                     .families
                     .get(&family)
@@ -1217,11 +1109,135 @@ mod resolved_font_tests {
         });
     }
 
-    fn empty_host_catalog() -> HostFontCatalog {
-        HostFontCatalog {
-            sans: std::array::from_fn(|_| Vec::new()),
-            serif: std::array::from_fn(|_| Vec::new()),
+    fn is_prepared_environment_ready(
+        context: &egui::Context,
+        prepared: &PreparedDocumentFonts,
+    ) -> bool {
+        context.fonts(|fonts| {
+            let definitions = fonts.definitions();
+            prepared.face_bytes.keys().all(|id| {
+                let (Some(name), Some(index)) = (
+                    prepared.egui_family_names.get(id),
+                    prepared.face_indices.get(id),
+                ) else {
+                    return false;
+                };
+                let data_key = format!("scriptcraft-resolved-{}", id.as_str());
+                definitions
+                    .font_data
+                    .get(&data_key)
+                    .is_some_and(|data| data.index == *index)
+                    && definitions
+                        .families
+                        .get(&FontFamily::Name(name.clone().into()))
+                        .is_some_and(|keys| keys.iter().any(|key| key == &data_key))
+            })
+        })
+    }
+
+    fn deterministic_two_face_collection() -> Vec<u8> {
+        let source_faces = [
+            bundled_courier_prime_faces()[0],
+            bundled_courier_prime_faces()[1],
+        ];
+        let header_len = 12 + source_faces.len() * 4;
+        let align_four = |value: usize| (value + 3) & !3;
+        let mut offsets = Vec::with_capacity(source_faces.len());
+        let mut total_len = align_four(header_len);
+        for face in source_faces {
+            offsets.push(total_len);
+            total_len = align_four(total_len + face.len());
         }
+        let mut collection = vec![0; total_len];
+        collection[..4].copy_from_slice(b"ttcf");
+        collection[4..8].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        collection[8..12].copy_from_slice(&(source_faces.len() as u32).to_be_bytes());
+
+        for (face_index, (face, base_offset)) in source_faces.into_iter().zip(offsets).enumerate() {
+            let offset_slot = 12 + face_index * 4;
+            collection[offset_slot..offset_slot + 4]
+                .copy_from_slice(&(base_offset as u32).to_be_bytes());
+            collection[base_offset..base_offset + face.len()].copy_from_slice(face);
+
+            let table_count = u16::from_be_bytes([face[4], face[5]]) as usize;
+            for table_index in 0..table_count {
+                let record_offset = base_offset + 12 + table_index * 16;
+                let old_offset = u32::from_be_bytes([
+                    collection[record_offset + 8],
+                    collection[record_offset + 9],
+                    collection[record_offset + 10],
+                    collection[record_offset + 11],
+                ]);
+                collection[record_offset + 8..record_offset + 12]
+                    .copy_from_slice(&(old_offset + base_offset as u32).to_be_bytes());
+            }
+        }
+        collection
+    }
+
+    fn injected_native_face(
+        family: &str,
+        style: ResolvedFaceStyle,
+        bytes: &[u8],
+        collection_index: u32,
+    ) -> super::super::host_font_catalog::NativeFontFace {
+        use super::super::host_font_catalog::{FaceStyle as NativeStyle, FontSourceLocation};
+        let style = match style {
+            ResolvedFaceStyle::Regular => NativeStyle::Regular,
+            ResolvedFaceStyle::Bold => NativeStyle::Bold,
+            ResolvedFaceStyle::Italic => NativeStyle::Italic,
+            ResolvedFaceStyle::BoldItalic => NativeStyle::BoldItalic,
+        };
+        super::super::host_font_catalog::NativeFontFace {
+            requested_family: family.to_owned(),
+            family_label: family.to_owned(),
+            full_name: Some(format!("{family} {style:?}")),
+            postscript_name: None,
+            style,
+            source: FontSourceLocation::Memory,
+            bytes: Arc::from(bytes),
+            collection_index,
+        }
+    }
+
+    fn inject_native_faces(
+        store: &mut DocumentFontStore,
+        faces: Vec<super::super::host_font_catalog::NativeFontFace>,
+    ) {
+        store.native_font_catalog =
+            super::super::host_font_catalog::NativeFontCatalog::with_test_faces(faces);
+    }
+
+    fn inject_native_faces_with_query_log(
+        store: &mut DocumentFontStore,
+        faces: Vec<super::super::host_font_catalog::NativeFontFace>,
+    ) -> Arc<std::sync::Mutex<Vec<(String, super::super::host_font_catalog::FaceStyle)>>> {
+        let (catalog, calls) =
+            super::super::host_font_catalog::NativeFontCatalog::with_test_faces_and_query_log(
+                faces,
+            );
+        store.native_font_catalog = catalog;
+        calls
+    }
+
+    fn native_style_faces(family: &str) -> Vec<super::super::host_font_catalog::NativeFontFace> {
+        ResolvedFaceStyle::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, style)| {
+                let bytes = bundled_courier_prime_faces()[index];
+                injected_native_face(family, style, &bytes, 0)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn document_store_owns_and_invalidates_native_catalog() {
+        let mut store = DocumentFontStore::default();
+        let initial_generation = store.native_font_catalog.generation();
+        assert!(initial_generation > 0);
+        store.invalidate_catalog();
+        assert!(store.native_font_catalog.generation() > initial_generation);
     }
 
     #[test]
@@ -1258,49 +1274,268 @@ mod resolved_font_tests {
     }
 
     #[test]
-    fn candidate_order_is_family_then_style_specific_and_unknown_is_courier() {
-        let candidates = font_candidates_for_platform(
-            CandidatePlatform::Linux,
-            None,
-            FamilySelection::Sans,
-            ResolvedFaceStyle::BoldItalic,
+    fn futura_like_declared_family_resolves_exact_host_faces_independently() {
+        let Some(project) = project_with_family("Futura") else {
+            assert!(false, "Futura project should be constructible");
+            return;
+        };
+        let mut store = DocumentFontStore::default();
+        inject_native_faces(&mut store, native_style_faces("Futura"));
+        let Ok(prepared) = store.prepare_document(&project) else {
+            assert!(false, "injected exact Futura faces should prepare");
+            return;
+        };
+        let Some(request) = prepared.environment.resolution_for("Futura") else {
+            assert!(false, "declared custom family must be retained");
+            return;
+        };
+        assert_eq!(request.kind, FontResolutionKind::ExactHost);
+        for style in ResolvedFaceStyle::ALL {
+            let Some(face) = prepared.environment.face(request.face_for_style(style)) else {
+                assert!(false, "resolved exact style must have a face record");
+                return;
+            };
+            assert_eq!(face.source_kind, ResolvedFontSourceKind::Host);
+            assert_eq!(face.family_label, "Futura");
+            assert!(face.metrics.scalar_advances.contains_key(&'A'));
+        }
+        assert!(ResolvedFaceStyle::ALL.into_iter().all(|style| !prepared
+            .fallback_faces
+            .contains(&("Futura".to_owned(), style))));
+    }
+
+    #[test]
+    fn courier_aliases_short_circuit_native_lookup_and_select_bundled_styles() {
+        let Some(project) = project_with_family("Courier Final Draft") else {
+            assert!(false, "Courier project should be constructible");
+            return;
+        };
+        let mut store = DocumentFontStore::default();
+        let calls = inject_native_faces_with_query_log(
+            &mut store,
+            native_style_faces("Courier Final Draft"),
         );
-        assert!(candidates
-            .first()
-            .is_some_and(|candidate| candidate.family_label == "Arial"));
-        assert!(candidates
+        let Ok(prepared) = store.prepare_document(&project) else {
+            assert!(false, "Courier alias should prepare from bundled faces");
+            return;
+        };
+        let Some(request) = prepared.environment.resolution_for("Courier Final Draft") else {
+            assert!(
+                false,
+                "declared Courier alias must remain in the environment"
+            );
+            return;
+        };
+        assert_eq!(request.kind, FontResolutionKind::CourierAlias);
+        assert!(calls.lock().is_ok_and(|calls| calls
             .iter()
-            .any(|candidate| candidate.family_label == "Liberation Sans"));
-        assert!(candidates
-            .iter()
-            .any(|candidate| candidate.face_label.contains("BoldItalic")));
-        assert!(font_candidates_for_platform(
-            CandidatePlatform::Linux,
-            None,
-            FamilySelection::Courier,
-            ResolvedFaceStyle::Regular,
-        )
-        .is_empty());
-        let serif = font_candidates_for_platform(
-            CandidatePlatform::Linux,
-            None,
-            FamilySelection::Serif,
-            ResolvedFaceStyle::Regular,
-        );
+            .all(|(family, _)| !family.eq_ignore_ascii_case("Courier Final Draft"))));
+        for style in ResolvedFaceStyle::ALL {
+            let Some(face) = prepared.environment.face(request.face_for_style(style)) else {
+                assert!(false, "Courier style must resolve");
+                return;
+            };
+            assert_eq!(face.source_kind, ResolvedFontSourceKind::Bundled);
+        }
+    }
+
+    #[test]
+    fn known_sans_and_serif_exact_host_faces_keep_their_base14_classes() {
+        for (family, expected_kind) in [
+            ("Arial", FontResolutionKind::NearestSans),
+            ("Times New Roman", FontResolutionKind::NearestSerif),
+        ] {
+            let Some(project) = project_with_family(family) else {
+                assert!(false, "known-family project should be constructible");
+                return;
+            };
+            let mut store = DocumentFontStore::default();
+            inject_native_faces(&mut store, native_style_faces(family));
+            let Ok(prepared) = store.prepare_document(&project) else {
+                assert!(false, "injected known-family faces should prepare");
+                return;
+            };
+            let Some(request) = prepared.environment.resolution_for(family) else {
+                assert!(false, "known family should remain the declared request");
+                return;
+            };
+            assert_eq!(request.kind, expected_kind);
+            let Some(face) = prepared.environment.face(&request.regular) else {
+                assert!(false, "regular known-family face should exist");
+                return;
+            };
+            assert_eq!(face.source_kind, ResolvedFontSourceKind::Host);
+            assert_eq!(face.family_label, family);
+        }
+    }
+
+    #[test]
+    fn generic_face_is_used_only_after_exact_known_family_misses() {
+        let Some(project) = project_with_family("Arial") else {
+            assert!(false, "Arial project should be constructible");
+            return;
+        };
+        let mut store = DocumentFontStore::default();
+        let calls = inject_native_faces_with_query_log(&mut store, native_style_faces("Helvetica"));
+        let Ok(prepared) = store.prepare_document(&project) else {
+            assert!(false, "generic host face should prepare after exact miss");
+            return;
+        };
+        let Some(request) = prepared.environment.resolution_for("Arial") else {
+            assert!(false, "declared Arial family must be retained");
+            return;
+        };
+        assert_eq!(request.kind, FontResolutionKind::NearestSans);
+        assert!(prepared
+            .fallback_faces
+            .contains(&("Arial".to_owned(), ResolvedFaceStyle::Regular)));
         assert_eq!(
-            serif
-                .first()
-                .map(|candidate| candidate.family_label.as_str()),
-            Some("Times New Roman")
+            prepared
+                .environment
+                .face(&request.regular)
+                .map(|face| face.family_label.as_str()),
+            Some("Helvetica")
         );
-        assert!(serif
-            .iter()
-            .any(|candidate| candidate.family_label == "Liberation Serif"));
+        let calls = calls.lock().ok();
+        let Some(calls) = calls else {
+            assert!(
+                false,
+                "injected native source should record its query order"
+            );
+            return;
+        };
+        let exact_attempt = calls.iter().position(|(family, style)| {
+            family == "Arial" && *style == native_style(ResolvedFaceStyle::Regular)
+        });
+        let generic_attempt = calls.iter().position(|(family, style)| {
+            family == "Helvetica" && *style == native_style(ResolvedFaceStyle::Regular)
+        });
+        assert!(exact_attempt.is_some() && generic_attempt.is_some());
+        assert!(
+            exact_attempt < generic_attempt,
+            "exact family is queried before generic fallback"
+        );
+    }
+
+    #[test]
+    fn unknown_family_uses_matching_bundled_courier_fallback() {
+        let Some(project) = project_with_family("Uninstalled Custom Family") else {
+            assert!(false, "unknown-family project should be constructible");
+            return;
+        };
+        let mut store = DocumentFontStore::default();
+        inject_native_faces(&mut store, Vec::new());
+        let Ok(prepared) = store.prepare_document(&project) else {
+            assert!(false, "unknown-family fallback should prepare");
+            return;
+        };
+        let Some(request) = prepared
+            .environment
+            .resolution_for("Uninstalled Custom Family")
+        else {
+            assert!(false, "unknown declared family must be retained");
+            return;
+        };
+        assert_eq!(request.kind, FontResolutionKind::UnknownFallback);
+        for style in ResolvedFaceStyle::ALL {
+            assert!(prepared
+                .fallback_faces
+                .contains(&("Uninstalled Custom Family".to_owned(), style)));
+            assert_eq!(
+                prepared
+                    .environment
+                    .face(request.face_for_style(style))
+                    .map(|face| face.source_kind),
+                Some(ResolvedFontSourceKind::Bundled)
+            );
+        }
+    }
+
+    #[test]
+    fn missing_custom_style_stays_in_family_using_global_style_priority() {
+        let Some(project) = project_with_family("Futura") else {
+            assert!(false, "Futura project should be constructible");
+            return;
+        };
+        let faces = ResolvedFaceStyle::ALL
+            .into_iter()
+            .take(3)
+            .enumerate()
+            .map(|(index, style)| {
+                injected_native_face(
+                    "Futura",
+                    style,
+                    bundled_courier_prime_faces()[(index + 1) % 4],
+                    0,
+                )
+            })
+            .collect();
+        let mut store = DocumentFontStore::default();
+        inject_native_faces(&mut store, faces);
+        let Ok(prepared) = store.prepare_document(&project) else {
+            assert!(false, "partially available exact family should prepare");
+            return;
+        };
+        let Some(request) = prepared.environment.resolution_for("Futura") else {
+            assert!(false, "Futura request must be preserved");
+            return;
+        };
+        assert_eq!(request.kind, FontResolutionKind::ExactHost);
+        for style in ResolvedFaceStyle::ALL {
+            if style == ResolvedFaceStyle::BoldItalic {
+                assert!(prepared
+                    .fallback_faces
+                    .contains(&("Futura".to_owned(), style)));
+                assert_eq!(request.bold_italic, request.bold);
+            }
+            assert_eq!(
+                prepared
+                    .environment
+                    .face(request.face_for_style(style))
+                    .map(|face| face.source_kind),
+                Some(ResolvedFontSourceKind::Host)
+            );
+        }
+        assert_ne!(request.regular, request.bold);
+        assert_ne!(request.italic, request.bold);
+    }
+
+    #[test]
+    fn direct_inline_font_run_family_is_prepared_exactly() {
+        let Ok(mut project) = Project::new() else {
+            assert!(false, "default project should be constructible");
+            return;
+        };
+        let run = scriptcraft_model::TextRun {
+            text: "inline".to_owned(),
+            attributes: vec![scriptcraft_model::RunAttribute {
+                name: "Font".to_owned(),
+                value: "Run Futura".to_owned(),
+            }],
+        };
+        let Ok(paragraph) = scriptcraft_model::TitlePageParagraph::with_runs(
+            "font-test-title",
+            None,
+            vec![run],
+            None,
+            Default::default(),
+        ) else {
+            assert!(false, "inline title run should be constructible");
+            return;
+        };
+        project.title_page.push(paragraph);
+        let mut store = DocumentFontStore::default();
+        inject_native_faces(&mut store, native_style_faces("Run Futura"));
+        let Ok(prepared) = store.prepare_document(&project) else {
+            assert!(false, "inline Font family should prepare");
+            return;
+        };
         assert_eq!(
-            serif
-                .last()
-                .map(|candidate| candidate.family_label.as_str()),
-            Some("Georgia")
+            prepared
+                .environment
+                .resolution_for("Run Futura")
+                .map(|request| request.kind),
+            Some(FontResolutionKind::ExactHost)
         );
     }
 
@@ -1313,17 +1548,29 @@ mod resolved_font_tests {
             .zip(bundled_courier_prime_faces())
             .enumerate()
         {
-            let metrics = metrics_for_bytes(bytes, &scalars);
-            assert!(metrics.is_ok());
-            if let Ok(metrics) = metrics {
-                assert_eq!(metrics.scalar_advances.len(), 4);
-                assert!(metrics.units_per_em > 0);
-                assert!(metrics.scalar_advances.contains_key(&'�'));
-            }
+            let Ok(metrics) = metrics_for_bytes(bytes, &scalars) else {
+                assert!(false, "bundled style metrics should parse");
+                return;
+            };
+            assert_eq!(metrics.scalar_advances.len(), 4);
+            assert!(metrics.units_per_em > 0);
+            assert!(metrics.scalar_advances.contains_key(&'�'));
+            let fingerprint = resolved_identity_fingerprint(
+                bytes,
+                0,
+                style,
+                ResolvedFontSourceKind::Bundled,
+                &metrics,
+            );
             let id = allocate_resolved_font_id(
                 bytes,
+                0,
                 style,
-                content_fingerprint(bytes),
+                ResolvedFontSourceKind::Bundled,
+                &metrics,
+                fingerprint,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
                 &BTreeMap::new(),
             );
             assert!(id.is_ok());
@@ -1336,37 +1583,261 @@ mod resolved_font_tests {
     }
 
     #[test]
-    fn injected_candidates_skip_missing_malformed_and_oversized_faces() {
-        let candidates = ["missing", "malformed", "oversized", "valid"]
-            .into_iter()
-            .map(|name| FontCandidate {
-                path: Some(PathBuf::from(name)),
-                family_label: name.to_owned(),
-                face_label: format!("{name} Regular"),
-            })
-            .collect();
-        let mut bytes_read = 0;
-        let repertoire = BTreeSet::from(['?', 'A']);
-        let bundled = bundled_courier_prime_faces()[0];
-        let result =
-            resolve_host_style_with(candidates, &repertoire, &mut bytes_read, |path| match path
-                .to_string_lossy()
-                .as_ref()
-            {
-                "missing" => Err(io::Error::new(io::ErrorKind::NotFound, "injected missing")),
-                "malformed" => Ok(vec![0, 1, 2, 3]),
-                "oversized" => Ok(vec![0; MAX_ARIAL_FACE_BYTES + 1]),
-                "valid" => Ok(bundled.to_vec()),
-                _ => Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "unknown injected candidate",
-                )),
-            });
-        assert!(result.is_ok());
+    fn indexed_collection_metrics_and_resolved_identity_preserve_face_index() {
+        let collection = deterministic_two_face_collection();
+        let scalars = BTreeSet::from(['A', 'W', 'i']);
         assert_eq!(
-            result.ok().flatten().map(|face| face.family_label),
-            Some("valid".to_owned())
+            metrics_for_bytes(&collection, &scalars),
+            Err(FontPreparationError::bounded("unsupported-font-container"))
         );
+        let (Ok(face_zero), Ok(face_one)) = (
+            metrics_for_bytes_and_index(&collection, 0, &scalars),
+            metrics_for_bytes_and_index(&collection, 1, &scalars),
+        ) else {
+            assert!(false, "the deterministic collection faces must parse");
+            return;
+        };
+        assert!(face_zero.units_per_em > 0 && face_one.units_per_em > 0);
+        assert_eq!(face_zero.scalar_advances.len(), scalars.len());
+        assert_eq!(face_one.scalar_advances.len(), scalars.len());
+        assert!(metrics_for_bytes_and_index(&collection, 2, &scalars).is_err());
+        assert!(metrics_for_bytes_and_index(b"wOFFbroken", 0, &scalars).is_err());
+        assert!(metrics_for_bytes_and_index(b"wOF2broken", 0, &scalars).is_err());
+
+        let mut faces = BTreeMap::new();
+        let mut bytes_by_id = BTreeMap::new();
+        let mut indices_by_id = BTreeMap::new();
+        let mut family_names = BTreeMap::new();
+        let style = ResolvedFaceStyle::Regular;
+        let insert = |index,
+                      metrics: ResolvedFaceMetrics,
+                      faces: &mut BTreeMap<ResolvedFontId, ResolvedFontFace>,
+                      bytes_by_id: &mut BTreeMap<ResolvedFontId, Arc<[u8]>>,
+                      indices_by_id: &mut BTreeMap<ResolvedFontId, u32>,
+                      family_names: &mut BTreeMap<ResolvedFontId, String>| {
+            insert_resolved_face(
+                faces,
+                bytes_by_id,
+                indices_by_id,
+                family_names,
+                &collection,
+                "Injected Collection",
+                "Regular",
+                style,
+                ResolvedFontSourceKind::Host,
+                index,
+                metrics,
+            )
+        };
+        let Ok(zero_id) = insert(
+            0,
+            face_zero.clone(),
+            &mut faces,
+            &mut bytes_by_id,
+            &mut indices_by_id,
+            &mut family_names,
+        ) else {
+            assert!(false, "face index zero should insert");
+            return;
+        };
+        let Ok(zero_reuse) = insert(
+            0,
+            face_zero,
+            &mut faces,
+            &mut bytes_by_id,
+            &mut indices_by_id,
+            &mut family_names,
+        ) else {
+            assert!(false, "identical indexed face should be reusable");
+            return;
+        };
+        let Ok(one_id) = insert(
+            1,
+            face_one,
+            &mut faces,
+            &mut bytes_by_id,
+            &mut indices_by_id,
+            &mut family_names,
+        ) else {
+            assert!(false, "face index one should insert independently");
+            return;
+        };
+        assert_eq!(zero_id, zero_reuse);
+        assert_ne!(zero_id, one_id);
+        assert_eq!(faces.len(), 2);
+        assert_eq!(bytes_by_id.len(), 2);
+        assert_eq!(indices_by_id.len(), 2);
+    }
+
+    #[test]
+    fn same_bytes_and_index_with_different_metrics_get_distinct_resolved_ids() {
+        let bytes = bundled_courier_prime_faces()[0];
+        let scalars = BTreeSet::from(['A']);
+        let Ok(metrics) = metrics_for_bytes(bytes, &scalars) else {
+            assert!(false, "bundled metrics should parse");
+            return;
+        };
+        let mut changed_advances = metrics.scalar_advances.clone();
+        if let Some(advance) = changed_advances.get_mut(&'A') {
+            advance.advance_units = advance.advance_units.saturating_add(1);
+        }
+        let Ok(changed_metrics) = ResolvedFaceMetrics::new(
+            metrics.units_per_em,
+            metrics.ascender,
+            metrics.descender,
+            metrics.line_gap,
+            changed_advances,
+        ) else {
+            assert!(false, "modified test metrics should remain valid");
+            return;
+        };
+        let mut faces = BTreeMap::new();
+        let mut bytes_by_id = BTreeMap::new();
+        let mut indices_by_id = BTreeMap::new();
+        let mut family_names = BTreeMap::new();
+        let first = insert_resolved_face(
+            &mut faces,
+            &mut bytes_by_id,
+            &mut indices_by_id,
+            &mut family_names,
+            bytes,
+            "Metric identity fixture",
+            "Regular",
+            ResolvedFaceStyle::Regular,
+            ResolvedFontSourceKind::Host,
+            0,
+            metrics,
+        );
+        let second = insert_resolved_face(
+            &mut faces,
+            &mut bytes_by_id,
+            &mut indices_by_id,
+            &mut family_names,
+            bytes,
+            "Metric identity fixture",
+            "Regular",
+            ResolvedFaceStyle::Regular,
+            ResolvedFontSourceKind::Host,
+            0,
+            changed_metrics,
+        );
+        assert!(first.is_ok() && second.is_ok());
+        assert_ne!(first.ok(), second.ok());
+    }
+
+    #[test]
+    fn indexed_host_cache_fingerprint_and_egui_registration_include_face_index() {
+        let Some(project) = project_with_family("Arial") else {
+            assert!(false, "Arial test project should be constructible");
+            return;
+        };
+        let collection = deterministic_two_face_collection();
+        let mut store = DocumentFontStore::default();
+        inject_native_faces(
+            &mut store,
+            ResolvedFaceStyle::ALL
+                .into_iter()
+                .map(|style| injected_native_face("Arial", style, &collection, 0))
+                .collect(),
+        );
+        let Ok(index_zero) = store.prepare_document(&project) else {
+            assert!(false, "index-zero collection face should prepare");
+            return;
+        };
+        let Some(zero_resolution) = index_zero.environment.resolution_for("Arial") else {
+            assert!(false, "prepared environment must retain the Arial request");
+            return;
+        };
+        let zero_regular = zero_resolution.regular.clone();
+        let zero_fingerprint = index_zero.environment.content_fingerprint();
+        let Ok(index_zero_cached) = store.prepare_document(&project) else {
+            assert!(
+                false,
+                "a matching preparation request should reuse its cache entry"
+            );
+            return;
+        };
+        assert!(index_zero.signature_matches(&index_zero_cached));
+
+        store.catalog_generation = store.catalog_generation.saturating_add(1);
+        store.prepared_cache.clear();
+        inject_native_faces(
+            &mut store,
+            ResolvedFaceStyle::ALL
+                .into_iter()
+                .map(|style| injected_native_face("Arial", style, &collection, 1))
+                .collect(),
+        );
+        let Ok(index_one) = store.prepare_document(&project) else {
+            assert!(false, "index-one collection face should prepare");
+            return;
+        };
+        let Some(one_resolution) = index_one.environment.resolution_for("Arial") else {
+            assert!(false, "prepared environment must retain the Arial request");
+            return;
+        };
+        assert_ne!(zero_regular, one_resolution.regular);
+        assert_ne!(
+            zero_fingerprint,
+            index_one.environment.content_fingerprint()
+        );
+        assert!(!index_zero.signature_matches(&index_one));
+
+        let expected_registered_bytes = index_one
+            .face_bytes
+            .values()
+            .map(|bytes| bytes.len())
+            .sum::<usize>();
+        let context = egui::Context::default();
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            assert_eq!(store.register_prepared_fonts(ctx, &index_one), Ok(false));
+            assert!(!is_prepared_environment_ready(ctx, &index_one));
+        });
+        let _ = context.run(egui::RawInput::default(), |ctx| {
+            assert_eq!(store.register_prepared_fonts(ctx, &index_one), Ok(true));
+            assert!(is_prepared_environment_ready(ctx, &index_one));
+            for (id, expected_index) in &index_one.face_indices {
+                let data_key = format!("scriptcraft-resolved-{}", id.as_str());
+                assert_eq!(
+                    ctx.fonts(|fonts| fonts
+                        .definitions()
+                        .font_data
+                        .get(&data_key)
+                        .map(|data| data.index)),
+                    Some(*expected_index)
+                );
+            }
+            assert_prepared_faces_paintable(ctx, &index_one);
+        });
+        assert_eq!(store.registered_byte_count, expected_registered_bytes);
+        let collection_face_registrations = index_one
+            .face_bytes
+            .iter()
+            .filter(|(_, bytes)| bytes.as_ref() == collection.as_slice())
+            .count();
+        assert!(collection_face_registrations > 1);
+        assert_eq!(
+            index_one
+                .face_bytes
+                .iter()
+                .filter(|(_, bytes)| bytes.as_ref() == collection.as_slice())
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>(),
+            collection.len() * collection_face_registrations
+        );
+
+        let mut bounded_store = DocumentFontStore::default();
+        bounded_store.registered_byte_count = MAX_REGISTERED_FONT_BYTES
+            .saturating_sub(expected_registered_bytes)
+            .saturating_add(1);
+        let bounded_context = egui::Context::default();
+        let _ = bounded_context.run(egui::RawInput::default(), |ctx| {
+            assert_eq!(
+                bounded_store.register_prepared_fonts(ctx, &index_one),
+                Err(FontPreparationError::bounded("registered-font-byte-limit"))
+            );
+        });
+        assert!(bounded_store.registered_bytes.is_empty());
     }
 
     #[test]
@@ -1376,7 +1847,6 @@ mod resolved_font_tests {
             return;
         };
         let mut store = DocumentFontStore::default();
-        store.host_catalog = empty_host_catalog();
         let Ok(prepared) = store.prepare_document(&project) else {
             assert!(false, "default Project font preparation should succeed");
             return;
@@ -1412,23 +1882,9 @@ mod resolved_font_tests {
             assert!(false, "test replacement project should be constructible");
             return;
         };
-        let directory = TestFontDirectory::new();
         let bundled = bundled_courier_prime_faces();
-        let rotated = [bundled[1], bundled[2], bundled[3], bundled[0]];
-        let paths: [PathBuf; 4] = std::array::from_fn(|index| {
-            directory.write(&format!("host-face-{index}.ttf"), rotated[index])
-        });
         let mut store = DocumentFontStore::default();
-        store.host_catalog = HostFontCatalog {
-            sans: std::array::from_fn(|index| {
-                vec![FontCandidate {
-                    path: Some(paths[index].clone()),
-                    family_label: "Injected Sans".to_owned(),
-                    face_label: format!("Injected Sans {:?}", ResolvedFaceStyle::ALL[index]),
-                }]
-            }),
-            serif: std::array::from_fn(|_| Vec::new()),
-        };
+        inject_native_faces(&mut store, native_style_faces("Arial"));
         let Ok(initial) = store.prepare_document(&default_project) else {
             assert!(false, "initial default font environment should prepare");
             return;
@@ -1476,27 +1932,8 @@ mod resolved_font_tests {
             assert!(false, "Arial test project should be constructible");
             return;
         };
-        let directory = TestFontDirectory::new();
-        let malformed_path = directory.write("malformed.ttf", &[0, 1, 2, 3]);
         let mut store = DocumentFontStore::default();
-        store.host_catalog = HostFontCatalog {
-            sans: std::array::from_fn(|index| {
-                let path = if index % 2 == 0 {
-                    Some(directory.0.join(format!("absent-{index}.ttf")))
-                } else {
-                    Some(malformed_path.clone())
-                };
-                vec![FontCandidate {
-                    path,
-                    family_label: "Injected Invalid Sans".to_owned(),
-                    face_label: format!(
-                        "Injected Invalid Sans {:?}",
-                        ResolvedFaceStyle::ALL[index]
-                    ),
-                }]
-            }),
-            serif: std::array::from_fn(|_| Vec::new()),
-        };
+        inject_native_faces(&mut store, Vec::new());
         let Ok(prepared) = store.prepare_document(&project) else {
             assert!(
                 false,
@@ -1554,15 +1991,65 @@ mod resolved_font_tests {
             Err(FontPreparationError::bounded("scalar-repertoire-limit"))
         );
 
+        let metrics = metrics_for_bytes(bundled_courier_prime_faces()[0], &BTreeSet::from(['A']));
+        let Ok(metrics) = metrics else {
+            assert!(false, "bundled test metrics should parse");
+            return;
+        };
         let mut existing = BTreeMap::new();
-        let base = allocate_resolved_font_id(b"first", ResolvedFaceStyle::Regular, 7, &existing);
+        let mut existing_indices = BTreeMap::new();
+        let mut existing_faces = BTreeMap::new();
+        let source_kind = ResolvedFontSourceKind::Synthetic;
+        let fingerprint = 7;
+        let base = allocate_resolved_font_id(
+            b"first",
+            0,
+            ResolvedFaceStyle::Regular,
+            source_kind,
+            &metrics,
+            fingerprint,
+            &existing,
+            &existing_indices,
+            &existing_faces,
+        );
         assert!(base.is_ok());
         if let Ok(base) = base {
             existing.insert(base.clone(), Arc::from(&b"first"[..]));
-            let same =
-                allocate_resolved_font_id(b"first", ResolvedFaceStyle::Regular, 7, &existing);
-            let collision =
-                allocate_resolved_font_id(b"second", ResolvedFaceStyle::Regular, 7, &existing);
+            existing_indices.insert(base.clone(), 0);
+            if let Ok(face) = ResolvedFontFace::new(
+                base.clone(),
+                "test",
+                "test regular",
+                ResolvedFaceStyle::Regular,
+                source_kind,
+                5,
+                content_fingerprint(b"first"),
+                metrics.clone(),
+            ) {
+                existing_faces.insert(base.clone(), face);
+            }
+            let same = allocate_resolved_font_id(
+                b"first",
+                0,
+                ResolvedFaceStyle::Regular,
+                source_kind,
+                &metrics,
+                fingerprint,
+                &existing,
+                &existing_indices,
+                &existing_faces,
+            );
+            let collision = allocate_resolved_font_id(
+                b"second",
+                0,
+                ResolvedFaceStyle::Regular,
+                source_kind,
+                &metrics,
+                fingerprint,
+                &existing,
+                &existing_indices,
+                &existing_faces,
+            );
             assert_eq!(same, Ok(base.clone()));
             assert!(collision.is_ok_and(|id| id != base && id.as_str().ends_with("-c1")));
         }

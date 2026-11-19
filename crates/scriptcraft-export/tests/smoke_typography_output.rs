@@ -34,6 +34,7 @@ fn synthetic_environment(project: &Project) -> LayoutEnvironment {
         "Helvetica".to_owned(),
         "Times New Roman".to_owned(),
         "Times".to_owned(),
+        "Futura Exact".to_owned(),
         "Unknown family".to_owned(),
     ]);
     let mut scalars = (32_u8..=126).map(char::from).collect::<BTreeSet<_>>();
@@ -110,6 +111,8 @@ fn synthetic_environment(project: &Project) -> LayoutEnvironment {
             FontResolutionKind::CourierAlias
         } else if matches!(family.as_str(), "Times" | "Times New Roman") {
             FontResolutionKind::NearestSerif
+        } else if family == "Futura Exact" {
+            FontResolutionKind::ExactHost
         } else if matches!(family.as_str(), "Arial" | "Helvetica") {
             FontResolutionKind::NearestSans
         } else {
@@ -160,6 +163,11 @@ fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
     scene_heading.font.family = "Uncatalogued Output Family".to_owned();
     scene_heading.font.bold = true;
     scene_heading.font.italic = true;
+    let transition = definitions
+        .iter_mut()
+        .find(|definition| definition.key.as_str() == "Transition")
+        .unwrap_or_else(|| unreachable!("required Transition definition exists"));
+    transition.font.family = "Futura Exact".to_owned();
     valid(project.replace_element_definitions(definitions));
     project.elements = vec![
         BodyOwner::shared(valid(ScreenplayElement::new(
@@ -176,6 +184,11 @@ fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
             "typography-output-scene",
             Role::SceneHeading,
             "Unknown-family output substitution.",
+        ))),
+        BodyOwner::shared(valid(ScreenplayElement::new(
+            "typography-output-exact-host",
+            Role::Transition,
+            "Exact host family uses a generic PDF resource.",
         ))),
         BodyOwner::shared(valid(ScreenplayElement::new(
             "typography-output-hidden",
@@ -273,6 +286,13 @@ fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
             resource: PdfBase14Family::Courier,
         }
     )));
+    assert!(pdf.typography.entries().iter().any(|entry| matches!(
+        entry.kind,
+        PdfFallbackKind::Base14FontSubstitution {
+            requested: FontResolutionKind::ExactHost,
+            resource: PdfBase14Family::Helvetica,
+        }
+    )));
     assert!(pdf
         .typography
         .entries()
@@ -285,6 +305,7 @@ fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
         .any(|entry| matches!(entry.kind, PdfFallbackKind::UnsupportedExplicitColor)));
     let summary = pdf.typography.summary();
     assert!(!summary.contains("canonical metric geometry unverified"));
+    assert!(summary.contains("generic resource (not embedded)"));
     assert!(!summary.contains("Output report"));
     assert!(!summary.contains("private-invalid-color-value"));
     assert_eq!(project, original);

@@ -490,9 +490,9 @@ fn effective_definition_style(
     fonts: &DocumentFontEnvironment,
 ) -> Result<ResolvedTextStyle, LayoutError> {
     let font = &definition.font;
-    let request = fonts.require_resolution_for(&font.family)?;
-    let id = request
-        .face_for_style(FaceStyle::from_flags(font.bold, font.italic))
+    let requested_style = FaceStyle::from_flags(font.bold, font.italic);
+    let id = fonts
+        .resolve_face_id(&font.family, requested_style, None)?
         .clone();
     Ok(ResolvedTextStyle::new(
         font.family.clone(),
@@ -512,6 +512,7 @@ fn resolve_one_run_style(
     run: &TextRun,
     fonts: &DocumentFontEnvironment,
 ) -> Result<ResolvedTextStyle, LayoutError> {
+    let element_style = FaceStyle::from_flags(base.bold, base.italic);
     let mut family = base.declared_family.clone();
     let mut size = base.size;
     let mut bold = base.bold;
@@ -548,8 +549,11 @@ fn resolve_one_run_style(
             _ => {}
         }
     }
-    let request = fonts.require_resolution_for(&family)?;
-    let id = request.face_for_flags(bold, italic).clone();
+    let requested_style = FaceStyle::from_flags(bold, italic);
+    let preferred_style = (requested_style != element_style).then_some(element_style);
+    let id = fonts
+        .resolve_face_id(&family, requested_style, preferred_style)?
+        .clone();
     base = ResolvedTextStyle::new(
         family, color, id, size, bold, italic, underline, all_caps, hidden,
     )?;
@@ -813,6 +817,75 @@ mod dynamic_resolution_tests {
         Ok(LayoutEnvironment::new(PageLayoutInputs::default(), fonts))
     }
 
+    fn environment_with_partial_futura() -> Result<LayoutEnvironment, ModelError> {
+        let mut faces = BTreeMap::new();
+        let mut ids = Vec::new();
+        for style in FaceStyle::ALL {
+            let id = ResolvedFontId::new(format!("futura-{style:?}"))?;
+            ids.push(id.clone());
+            if style == FaceStyle::BoldItalic {
+                continue;
+            }
+            faces.insert(
+                id.clone(),
+                ResolvedFontFace::new(
+                    id,
+                    "Futura",
+                    format!("Futura {style:?}"),
+                    style,
+                    ResolvedFontSourceKind::Host,
+                    100,
+                    style as u64 + 1,
+                    ResolvedFaceMetrics::new(1_000, 800, -200, 0, BTreeMap::new())?,
+                )?,
+            );
+        }
+        let courier_ids = FaceStyle::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, style)| {
+                let id = ResolvedFontId::new(format!("courier-{style:?}"))?;
+                faces.insert(
+                    id.clone(),
+                    ResolvedFontFace::new(
+                        id.clone(),
+                        "Courier Prime",
+                        format!("Courier Prime {style:?}"),
+                        style,
+                        ResolvedFontSourceKind::Bundled,
+                        100,
+                        index as u64 + 20,
+                        ResolvedFaceMetrics::new(1_000, 800, -200, 0, BTreeMap::new())?,
+                    )?,
+                );
+                Ok::<_, ModelError>(id)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let courier = RequestedFontResolution {
+            kind: FontResolutionKind::CourierAlias,
+            regular: courier_ids[0].clone(),
+            bold: courier_ids[1].clone(),
+            italic: courier_ids[2].clone(),
+            bold_italic: courier_ids[3].clone(),
+        };
+        let futura = RequestedFontResolution {
+            kind: FontResolutionKind::ExactHost,
+            regular: ids[0].clone(),
+            bold: ids[1].clone(),
+            italic: ids[2].clone(),
+            // The document resolver uses Bold Italic → Bold → Italic → Regular.
+            bold_italic: ids[1].clone(),
+        };
+        let fonts = DocumentFontEnvironment::new(
+            BTreeMap::from([
+                ("Courier Prime".to_owned(), courier),
+                ("Futura".to_owned(), futura),
+            ]),
+            faces,
+        )?;
+        Ok(LayoutEnvironment::new(PageLayoutInputs::default(), fonts))
+    }
+
     #[test]
     fn resolves_exact_definition_and_matching_direct_overrides_only() -> Result<(), ModelError> {
         let mut project = Project::new()?;
@@ -991,6 +1064,55 @@ mod dynamic_resolution_tests {
             scriptcraft_model::typography::EffectiveTextColor::UnsupportedExplicit
         );
         assert_eq!(run_style.source_color.as_deref(), Some("not-a-color"));
+        Ok(())
+    }
+
+    #[test]
+    fn unavailable_inline_style_prefers_the_element_face_before_family_cascade(
+    ) -> Result<(), ModelError> {
+        let mut project = Project::new()?;
+        let mut definitions = project
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let action = definitions
+            .iter_mut()
+            .find(|definition| definition.key.as_str() == "Action")
+            .ok_or(ModelError::InvalidNumber)?;
+        action.font.family = "Futura".to_owned();
+        action.font.bold = false;
+        action.font.italic = true;
+        project.replace_element_definitions(definitions)?;
+
+        let environment = environment_with_partial_futura()?;
+        let action_key = ElementTypeKey::new("Action")?;
+        let element_style = resolve_effective_text_style(&project, &action_key, &environment)
+            .map_err(|_| ModelError::InvalidNumber)?;
+        assert_eq!(element_style.resolved_font_id.as_str(), "futura-Italic");
+
+        let bold_italic_override = TextRun {
+            text: "To tell your story".to_owned(),
+            attributes: vec![scriptcraft_model::RunAttribute {
+                name: "Style".to_owned(),
+                value: "Bold+Italic".to_owned(),
+            }],
+        };
+        let effective = resolve_effective_run_text_style(
+            &project,
+            &action_key,
+            &bold_italic_override,
+            &environment,
+        )
+        .map_err(|_| ModelError::InvalidNumber)?;
+        assert!(effective.bold && effective.italic);
+        assert_eq!(effective.resolved_font_id, element_style.resolved_font_id);
+
+        let family_cascade =
+            environment
+                .fonts
+                .resolve_face_id("Futura", FaceStyle::BoldItalic, None)?;
+        assert_eq!(family_cascade.as_str(), "futura-Bold");
         Ok(())
     }
 

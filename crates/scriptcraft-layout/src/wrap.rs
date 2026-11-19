@@ -113,6 +113,8 @@ fn resolve_display_run_style(
     let flags = parse_style_attribute(&run.attributes)
         .map_err(|_| scriptcraft_model::ModelError::InvalidRunProjection)?
         .flags;
+    let element_style =
+        scriptcraft_model::typography::FaceStyle::from_flags(base.bold, base.italic);
     let mut family = base.declared_family.clone();
     let mut size = base.size;
     let mut color = base.source_color.clone();
@@ -134,11 +136,15 @@ fn resolve_display_run_style(
     }
     let bold = base.bold || flags.bold;
     let italic = base.italic || flags.italics;
-    let request = fonts.require_resolution_for(&family)?;
+    let requested_style = scriptcraft_model::typography::FaceStyle::from_flags(bold, italic);
+    let preferred_style = (requested_style != element_style).then_some(element_style);
+    let face_id = fonts
+        .resolve_face_id(&family, requested_style, preferred_style)?
+        .clone();
     let style = ResolvedTextStyle::new(
         family,
         color,
-        request.face_for_flags(bold, italic).clone(),
+        face_id,
         size,
         bold,
         italic,
@@ -1084,7 +1090,7 @@ mod metric_wrap_tests {
     fn synthetic_environment() -> DocumentFontEnvironment {
         let mut requests = BTreeMap::new();
         let mut faces = BTreeMap::new();
-        for family in ["Alpha", "Beta", "Courier Prime"] {
+        for family in ["Alpha", "Beta", "Courier Prime", "Futura"] {
             let ids: Vec<_> = FaceStyle::ALL
                 .into_iter()
                 .map(|style| ResolvedFontId::new(format!("{family}-{style:?}")).unwrap())
@@ -1100,10 +1106,17 @@ mod metric_wrap_tests {
                     regular: ids[0].clone(),
                     bold: ids[1].clone(),
                     italic: ids[2].clone(),
-                    bold_italic: ids[3].clone(),
+                    bold_italic: if family == "Futura" {
+                        ids[1].clone()
+                    } else {
+                        ids[3].clone()
+                    },
                 },
             );
             for (style, id) in FaceStyle::ALL.into_iter().zip(ids) {
+                if family == "Futura" && style == FaceStyle::BoldItalic {
+                    continue;
+                }
                 let scalar_advances = [
                     ('A', 500),
                     ('S', 700),
@@ -1220,6 +1233,32 @@ mod metric_wrap_tests {
         assert_eq!(scalars[3].text_style.declared_family, "Alpha");
         assert!(!scalars[3].text_style.bold);
         assert_eq!(scalars[3].advance, FixedPoint::from_raw(360));
+    }
+
+    #[test]
+    fn display_style_override_falls_back_to_the_elements_face_before_family_priority() {
+        let environment = synthetic_environment();
+        let base = ResolvedTextStyle::new(
+            "Futura",
+            None,
+            ResolvedFontId::new("Futura-Italic").unwrap(),
+            18,
+            false,
+            true,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        let run = run("sample", &[("Style", "Bold+Italic")]);
+        let resolved = resolve_display_run_style(&base, &run, &environment).unwrap();
+        assert!(resolved.0.bold && resolved.0.italic);
+        assert_eq!(resolved.0.resolved_font_id.as_str(), "Futura-Italic");
+
+        let family_fallback = environment
+            .resolve_face_id("Futura", FaceStyle::BoldItalic, None)
+            .unwrap();
+        assert_eq!(family_fallback.as_str(), "Futura-Bold");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! App-private shared presentation and resource adapters.
 
 pub(crate) mod document_font;
+pub(crate) mod host_font_catalog;
 pub(crate) mod material_font;
 // Shared app presentation geometry; Script View modules consume these primitives
 // for painting and interaction.

@@ -11,6 +11,7 @@ ab_glyph = "=0.2.32"
 arboard = "3.7.0"
 eframe = "0.34"
 egui_material_icons = { version = "0.6.0", features = ["outline"] }
+font-kit = { version = "=0.14.3", default-features = false, features = ["source"] }
 rfd = "0.15"
 scriptcraft-commands = { path = "../../crates/scriptcraft-commands" }
 scriptcraft-export = { path = "../../crates/scriptcraft-export" }

@@ -95,7 +95,12 @@ fn directwrite_family(
     source_kind: ResolvedFontSourceKind,
     family_label: &str,
 ) -> (String, bool) {
-    if kind == FontResolutionKind::UnknownFallback || source_kind == ResolvedFontSourceKind::Bundled
+    if matches!(
+        kind,
+        FontResolutionKind::CourierAlias
+            | FontResolutionKind::UnknownFallback
+            | FontResolutionKind::ExactHost
+    ) && source_kind == ResolvedFontSourceKind::Bundled
     {
         ("Courier New".to_owned(), true)
     } else {
@@ -372,7 +377,9 @@ fn package_from_layout(
                 );
                 let nearest_family_substitution = matches!(
                     request.kind,
-                    FontResolutionKind::NearestSans | FontResolutionKind::NearestSerif
+                    FontResolutionKind::NearestSans
+                        | FontResolutionKind::NearestSerif
+                        | FontResolutionKind::ExactHost
                 ) && !resolved_face
                     .family_label
                     .eq_ignore_ascii_case(&span.text_style.declared_family);
@@ -442,6 +449,14 @@ mod tests {
             ),
             ("Courier New".to_owned(), true),
         );
+        assert_eq!(
+            directwrite_family(
+                FontResolutionKind::ExactHost,
+                ResolvedFontSourceKind::Bundled,
+                "Courier Prime",
+            ),
+            ("Courier New".to_owned(), true),
+        );
     }
 
     #[test]
@@ -461,6 +476,14 @@ mod tests {
                 "Georgia",
             ),
             ("Georgia".to_owned(), false),
+        );
+        assert_eq!(
+            directwrite_family(
+                FontResolutionKind::ExactHost,
+                ResolvedFontSourceKind::Host,
+                "Futura",
+            ),
+            ("Futura".to_owned(), false),
         );
     }
 

@@ -279,6 +279,8 @@ pub fn content_fingerprint(bytes: &[u8]) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontResolutionKind {
     CourierAlias,
+    /// A non-generic declared family resolved to its exact host family.
+    ExactHost,
     NearestSans,
     NearestSerif,
     UnknownFallback,
@@ -343,9 +345,13 @@ impl DocumentFontEnvironment {
             if !valid_label(family) {
                 return Err(ModelError::TypographyValueTooLong);
             }
-            for (style, id) in FaceStyle::ALL.into_iter().zip(request.face_ids()) {
+            for id in request.face_ids() {
                 let face = faces.get(id).ok_or(ModelError::MissingResolvedFontFace)?;
-                if face.id != *id || face.style != style {
+                // A requested style may deliberately point at another actual
+                // face when the family lacks that style. The ID must still
+                // resolve to the exact face record; style fallback is explicit
+                // in the resolved face metadata rather than synthesized.
+                if face.id != *id {
                     return Err(ModelError::MissingResolvedFontFace);
                 }
             }
@@ -388,6 +394,38 @@ impl DocumentFontEnvironment {
 
     pub fn face(&self, id: &ResolvedFontId) -> Option<&ResolvedFontFace> {
         self.faces.get(id)
+    }
+
+    /// Resolve a requested style, preferring the element's unoverridden style
+    /// when the requested style has no exact face. The request's style slot is
+    /// already mapped to the family-wide fallback priority by the desktop
+    /// resolver, so it is the final fallback if `preferred_style` is missing.
+    pub fn resolve_face_id(
+        &self,
+        declared_family: &str,
+        requested_style: FaceStyle,
+        preferred_style: Option<FaceStyle>,
+    ) -> Result<&ResolvedFontId, ModelError> {
+        let request = self
+            .resolution_for(declared_family)
+            .ok_or(ModelError::MissingResolvedFontRequest)?;
+        let requested_id = request.face_for_style(requested_style);
+        let requested_face = self
+            .face(requested_id)
+            .ok_or(ModelError::MissingResolvedFontFace)?;
+        if requested_face.style == requested_style {
+            return Ok(requested_id);
+        }
+        if let Some(preferred_style) = preferred_style.filter(|style| *style != requested_style) {
+            let preferred_id = request.face_for_style(preferred_style);
+            let preferred_face = self
+                .face(preferred_id)
+                .ok_or(ModelError::MissingResolvedFontFace)?;
+            if preferred_face.style == preferred_style {
+                return Ok(preferred_id);
+            }
+        }
+        Ok(requested_id)
     }
 
     pub fn require_face(&self, id: &ResolvedFontId) -> Result<&ResolvedFontFace, ModelError> {
