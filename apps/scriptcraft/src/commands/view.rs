@@ -64,9 +64,9 @@ impl ScriptCraftApp {
                 }
                 DesktopCommandOutcome::EffectDispatched
             }
-            other => DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(
-                other.id(),
-            )),
+            other => {
+                DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id()))
+            }
         }
     }
 

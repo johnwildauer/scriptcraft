@@ -90,48 +90,110 @@ pub(crate) fn map_selection_to_project(
         }
         let old_element = old.elements.get(position.element);
         let old_source = old_element.and_then(|element| element.source_provenance.as_ref());
-        let source_id = old_source.and_then(|provenance| provenance.foreign_id.as_deref());
-        let index = if let Some(source_id) = source_id {
-            if old.elements.iter().filter(|element| {
-                element.source_provenance.as_ref()
-                    .and_then(|provenance| provenance.foreign_id.as_deref()) == Some(source_id)
-            }).count() != 1 {
-                return None;
-            }
-            let matches = new.elements.iter().enumerate().filter(|(_, element)| {
-                element.source_provenance.as_ref().is_some_and(|provenance| {
-                    provenance.foreign_id.as_deref() == Some(source_id)
-                        && old_source.is_some_and(|old| {
-                            provenance.format == old.format
-                                && provenance.section == old.section
-                                && provenance.foreign_role == old.foreign_role
-                        })
-                })
-            }).map(|(index, _)| index).collect::<Vec<_>>();
-            let [index] = matches.as_slice() else { return None };
+        let stable_matches = old_element
+            .filter(|element| {
+                old.elements
+                    .iter()
+                    .filter(|candidate| candidate.id == element.id)
+                    .count()
+                    == 1
+            })
+            .map(|element| {
+                new.elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, candidate)| {
+                        candidate.id == element.id
+                            && match (
+                                element.source_provenance.as_ref(),
+                                candidate.source_provenance.as_ref(),
+                            ) {
+                                (Some(old), Some(new)) => {
+                                    old.format == new.format
+                                        && old.section == new.section
+                                        && old.foreign_id == new.foreign_id
+                                }
+                                (Some(_), None) => false,
+                                _ => true,
+                            }
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let index = if let [index] = stable_matches.as_slice() {
             *index
         } else {
-            let old_element = old_element?;
-            let stable_matches = if old_source.is_none() {
-                new.elements.iter().enumerate().filter(|(_, element)| {
-                    element.id == old_element.id
-                }).map(|(index, _)| index).collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            if let [index] = stable_matches.as_slice() {
+            let source_id = old_source.and_then(|provenance| provenance.foreign_id.as_deref());
+            if let Some(source_id) = source_id {
+                if old
+                    .elements
+                    .iter()
+                    .filter(|element| {
+                        element
+                            .source_provenance
+                            .as_ref()
+                            .and_then(|provenance| provenance.foreign_id.as_deref())
+                            == Some(source_id)
+                    })
+                    .count()
+                    != 1
+                {
+                    return None;
+                }
+                let matches = new
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, element)| {
+                        element
+                            .source_provenance
+                            .as_ref()
+                            .is_some_and(|provenance| {
+                                provenance.foreign_id.as_deref() == Some(source_id)
+                                    && old_source.is_some_and(|old| {
+                                        provenance.format == old.format
+                                            && provenance.section == old.section
+                                    })
+                            })
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                let [index] = matches.as_slice() else {
+                    return None;
+                };
                 *index
             } else {
+                let old_element = old_element?;
+                if old_source.is_some() {
+                    return None;
+                }
                 // Source-less projects acquire FDX identities during Save As.
-                // Map them by a unique ordered semantic occurrence, never by a
-                // bare paragraph index that could now refer to unrelated text.
-                let old_occurrences = old.elements.iter().enumerate().filter(|(_, element)| {
-                    element.role == old_element.role && element.text == old_element.text
-                }).map(|(index, _)| index).collect::<Vec<_>>();
-                let occurrence = old_occurrences.iter().position(|index| *index == position.element)?;
-                let new_occurrences = new.elements.iter().enumerate().filter(|(_, element)| {
-                    element.role == old_element.role && element.text == old_element.text
-                }).map(|(index, _)| index).collect::<Vec<_>>();
+                // Keep the existing exact-key/text occurrence fallback only when
+                // stable identity is unavailable.
+                let old_occurrences = old
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, element)| {
+                        element.element_type() == old_element.element_type()
+                            && element.text == old_element.text
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                let occurrence = old_occurrences
+                    .iter()
+                    .position(|index| *index == position.element)?;
+                let new_occurrences = new
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, element)| {
+                        element.element_type() == old_element.element_type()
+                            && element.text == old_element.text
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
                 if old_occurrences.len() != new_occurrences.len() {
                     return None;
                 }
@@ -143,7 +205,10 @@ pub(crate) fn map_selection_to_project(
         while !element.text.is_char_boundary(offset) {
             offset = offset.saturating_sub(1);
         }
-        Some(Position { element: index, offset })
+        Some(Position {
+            element: index,
+            offset,
+        })
     }
     Some(Selection {
         anchor: map_position(selection.anchor, old_project, new_project)?,
@@ -158,27 +223,87 @@ pub(crate) fn map_title_selection_to_project(
 ) -> Selection {
     fn map_position(position: Position, old: &Project, new: &Project) -> Position {
         if new.title_page.is_empty() {
-            return Position { element: 0, offset: 0 };
+            return Position {
+                element: 0,
+                offset: 0,
+            };
         }
         let old_paragraph = old.title_page.get(position.element);
-        let source_id = old_paragraph
-            .and_then(|paragraph| paragraph.source_provenance.as_ref())
-            .and_then(|provenance| provenance.foreign_id.as_deref());
-        let unique_source_id = source_id.filter(|source_id| {
-            old.title_page.iter().filter(|paragraph| {
-                paragraph.source_provenance.as_ref()
-                    .and_then(|provenance| provenance.foreign_id.as_deref()) == Some(*source_id)
-            }).count() == 1
-                && new.title_page.iter().filter(|paragraph| {
-                    paragraph.source_provenance.as_ref()
-                        .and_then(|provenance| provenance.foreign_id.as_deref()) == Some(*source_id)
-                }).count() == 1
+        let stable_index = old_paragraph.and_then(|old_paragraph| {
+            let old_id_count = old
+                .title_page
+                .iter()
+                .filter(|paragraph| paragraph.id == old_paragraph.id)
+                .count();
+            if old_id_count != 1 {
+                return None;
+            }
+            let matches = new
+                .title_page
+                .iter()
+                .enumerate()
+                .filter(|(_, paragraph)| {
+                    paragraph.id == old_paragraph.id
+                        && match (
+                            old_paragraph.source_provenance.as_ref(),
+                            paragraph.source_provenance.as_ref(),
+                        ) {
+                            (Some(old), Some(new)) => {
+                                old.format == new.format
+                                    && old.section == new.section
+                                    && old.foreign_id == new.foreign_id
+                            }
+                            (Some(_), None) => false,
+                            _ => true,
+                        }
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if let [index] = matches.as_slice() {
+                Some(*index)
+            } else {
+                None
+            }
         });
-        let index = unique_source_id
-            .and_then(|source_id| new.title_page.iter().position(|paragraph| {
-                paragraph.source_provenance.as_ref()
-                    .and_then(|provenance| provenance.foreign_id.as_deref()) == Some(source_id)
-            }))
+        let source_index = old_paragraph.and_then(|old_paragraph| {
+            let source = old_paragraph.source_provenance.as_ref()?;
+            let foreign_id = source.foreign_id.as_deref()?;
+            let old_count = old
+                .title_page
+                .iter()
+                .filter(|paragraph| {
+                    paragraph
+                        .source_provenance
+                        .as_ref()
+                        .and_then(|provenance| provenance.foreign_id.as_deref())
+                        == Some(foreign_id)
+                })
+                .count();
+            let matches = new
+                .title_page
+                .iter()
+                .enumerate()
+                .filter(|(_, paragraph)| {
+                    paragraph
+                        .source_provenance
+                        .as_ref()
+                        .is_some_and(|provenance| {
+                            provenance.foreign_id.as_deref() == Some(foreign_id)
+                                && provenance.format == source.format
+                                && provenance.section == source.section
+                        })
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if old_count == 1 {
+                if let [index] = matches.as_slice() {
+                    return Some(*index);
+                }
+            }
+            None
+        });
+        let index = stable_index
+            .or(source_index)
             .or_else(|| {
                 let old_paragraph = old_paragraph?;
                 if old_paragraph.source_provenance.is_some() {
@@ -186,7 +311,9 @@ pub(crate) fn map_title_selection_to_project(
                 }
                 new.title_page.iter().position(|paragraph| {
                     paragraph.id == old_paragraph.id
-                        && paragraph.source_provenance.as_ref()
+                        && paragraph
+                            .source_provenance
+                            .as_ref()
                             .is_none_or(|provenance| provenance.foreign_id.is_none())
                 })
             })
@@ -196,7 +323,10 @@ pub(crate) fn map_title_selection_to_project(
         while !paragraph.text.is_char_boundary(offset) {
             offset = offset.saturating_sub(1);
         }
-        Position { element: index, offset }
+        Position {
+            element: index,
+            offset,
+        }
     }
     Selection {
         anchor: map_position(selection.anchor, old_project, new_project),
@@ -225,7 +355,13 @@ pub(super) fn validate_title_position(
     project: &Project,
     position: Position,
 ) -> Result<(), EditError> {
-    if project.title_page.is_empty() && position == (Position { element: 0, offset: 0 }) {
+    if project.title_page.is_empty()
+        && position
+            == (Position {
+                element: 0,
+                offset: 0,
+            })
+    {
         return Ok(());
     }
     let paragraph = project

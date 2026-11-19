@@ -1,8 +1,10 @@
 use crate::chrome::focus_mode::FocusModeView;
-use crate::chrome::theme::{AppearanceMode, StatusPalette};
-use crate::chrome::toolbar::{
-    toolbar_cursor_icon, toolbar_icon_hover_rect,
+use crate::chrome::shortcuts::{
+    element_hint_bindings, element_hint_chord, modifiers_are_none, ElementHintChord,
+    ShortcutPlatform,
 };
+use crate::chrome::theme::{AppearanceMode, StatusPalette};
+use crate::chrome::toolbar::{toolbar_cursor_icon, toolbar_icon_hover_rect};
 use eframe::egui::{
     self, Align, Color32, Direction, FontSelection, Pos2, Rect, Sense, Vec2, WidgetInfo,
     WidgetText, WidgetType,
@@ -12,14 +14,13 @@ use egui_material_icons::{
     MaterialIcon,
 };
 use scriptcraft_commands::{Appearance, Command, ZoomPercent};
-use scriptcraft_session::editing::{EditingSession, ParagraphKeyTarget};
 use scriptcraft_model::formatting::formatting_for_role;
-use crate::chrome::shortcuts::{
-    element_hint_bindings, element_hint_chord, modifiers_are_none, ElementHintChord,
-    ShortcutPlatform,
-};
+use scriptcraft_session::editing::{EditingSession, ParagraphKeyTarget};
 
-pub(crate) fn status_modifiers_changed(previous: egui::Modifiers, current: egui::Modifiers) -> bool {
+pub(crate) fn status_modifiers_changed(
+    previous: egui::Modifiers,
+    current: egui::Modifiers,
+) -> bool {
     previous != current
 }
 
@@ -89,8 +90,7 @@ mod presentation {
     }
 
     pub(super) fn hovered_foreground(ui: &egui::Ui) -> Color32 {
-        HOVERED_FOREGROUND_OVERRIDE
-            .unwrap_or_else(|| ui.visuals().widgets.hovered.text_color())
+        HOVERED_FOREGROUND_OVERRIDE.unwrap_or_else(|| ui.visuals().widgets.hovered.text_color())
     }
 }
 
@@ -104,11 +104,7 @@ pub(crate) fn status_panel_frame(ctx: &egui::Context, palette: StatusPalette) ->
         .stroke(egui::Stroke::NONE)
 }
 
-pub(crate) fn paint_panel_top_border(
-    ui: &egui::Ui,
-    panel_rect: Rect,
-    palette: StatusPalette,
-) {
+pub(crate) fn paint_panel_top_border(ui: &egui::Ui, panel_rect: Rect, palette: StatusPalette) {
     let width = presentation::STATUS_PANEL_TOP_BORDER_WIDTH;
     let y = panel_rect.top() + width * 0.5;
     ui.painter_at(panel_rect).line_segment(
@@ -167,9 +163,8 @@ fn with_center_text_style<R>(
         if let Some(font) = ui.style_mut().text_styles.get_mut(&egui::TextStyle::Body) {
             font.size = text_size;
         }
-        ui.visuals_mut().override_text_color = Some(
-            presentation::CENTER_FOREGROUND_OVERRIDE.unwrap_or(center_foreground),
-        );
+        ui.visuals_mut().override_text_color =
+            Some(presentation::CENTER_FOREGROUND_OVERRIDE.unwrap_or(center_foreground));
         contents(ui)
     })
     .inner
@@ -214,10 +209,8 @@ fn plan_status_row(
     let slider_max = nonnegative(slider_max).max(slider_min);
     let page_label_width = nonnegative(page_label_width);
 
-    let fixed_right_width = icons.iter().sum::<f32>()
-        + percentage_width
-        + slider_min
-        + spacing * 4.0;
+    let fixed_right_width =
+        icons.iter().sum::<f32>() + percentage_width + slider_min + spacing * 4.0;
     let compression = if width < fixed_right_width && fixed_right_width > 0.0 {
         width / fixed_right_width
     } else {
@@ -242,14 +235,14 @@ fn plan_status_row(
         slider_width += available_for_growth.min(slider_max - slider_min);
     }
 
-    let right_width = icons.iter().sum::<f32>()
-        + percentage_width
-        + slider_width
-        + spacing * 4.0;
+    let right_width = icons.iter().sum::<f32>() + percentage_width + slider_width + spacing * 4.0;
     let row_min = available.min;
     let row_right = row_min.x + width;
     let make_rect = |left: f32, width: f32| {
-        Rect::from_min_size(egui::pos2(left, row_min.y), Vec2::new(width.max(0.0), height))
+        Rect::from_min_size(
+            egui::pos2(left, row_min.y),
+            Vec2::new(width.max(0.0), height),
+        )
     };
 
     let mut right_edge = row_right;
@@ -366,11 +359,7 @@ fn zoom_slider(
         }
     }
     response.widget_info(|| {
-        WidgetInfo::slider(
-            response.enabled(),
-            f64::from(*zoom_percent),
-            "Page zoom",
-        )
+        WidgetInfo::slider(response.enabled(), f64::from(*zoom_percent), "Page zoom")
     });
     ui.ctx().accesskit_node_builder(response.id, |node| {
         node.set_label("Page zoom");
@@ -404,7 +393,7 @@ fn paint_zoom_slider_knob(
     let position_range = response.rect.x_range().shrink(handle_radius);
     let normalized = (f32::from(zoom_percent - MIN_ZOOM_PERCENT)
         / f32::from(MAX_ZOOM_PERCENT - MIN_ZOOM_PERCENT))
-        .clamp(0.0, 1.0);
+    .clamp(0.0, 1.0);
     let center = egui::pos2(
         egui::emath::lerp(position_range, normalized),
         response.rect.center().y,
@@ -430,7 +419,9 @@ fn paint_status_hover_control(
     response: egui::Response,
     hover_rect: Rect,
 ) -> (egui::Response, Color32) {
-    let hover_rect = hover_rect.intersect(ui.max_rect()).intersect(ui.clip_rect());
+    let hover_rect = hover_rect
+        .intersect(ui.max_rect())
+        .intersect(ui.clip_rect());
     let response = response.on_hover_cursor(toolbar_cursor_icon());
     if response.hovered() {
         let fill = ui.style().visuals.widgets.hovered.bg_fill;
@@ -450,13 +441,12 @@ fn zoom_presets_button(
 ) -> egui::Response {
     let rect = ui.max_rect();
     let hover_rect = rect.intersect(ui.max_rect()).intersect(ui.clip_rect());
-    let response = ui
-        .interact(
-            hover_rect,
-            ui.make_persistent_id("status-page-zoom-presets"),
-            Sense::click(),
-        );
-        // .on_hover_text(format!("Page Zoom"));
+    let response = ui.interact(
+        hover_rect,
+        ui.make_persistent_id("status-page-zoom-presets"),
+        Sense::click(),
+    );
+    // .on_hover_text(format!("Page Zoom"));
     let accessible_name = format!("Page zoom presets, currently {percentage_label}");
     let (response, text_color) = paint_status_hover_control(ui, response, hover_rect);
     let button_response = interactive_response(ui, response, &accessible_name);
@@ -468,8 +458,10 @@ fn zoom_presets_button(
             egui::TextStyle::Button,
         )
     });
-    let text_left = (rect.center().x - galley.size().x / 2.0)
-        .clamp(rect.left(), (rect.right() - galley.size().x).max(rect.left()));
+    let text_left = (rect.center().x - galley.size().x / 2.0).clamp(
+        rect.left(),
+        (rect.right() - galley.size().x).max(rect.left()),
+    );
     let text_position = egui::pos2(text_left, rect.center().y - galley.size().y / 2.0);
     let painter_clip = rect.intersect(ui.clip_rect());
     ui.painter()
@@ -605,8 +597,8 @@ fn status_icon_control(
                 icon_control_rect,
                 crate::chrome::toolbar::ToolbarIconHoverPadding::uniform(padding),
             )
-                .intersect(ui.max_rect())
-                .intersect(ui.clip_rect());
+            .intersect(ui.max_rect())
+            .intersect(ui.clip_rect());
             let response = ui.interact(hover_rect, id.with("status-icon"), Sense::click());
             let (response, text_color) = paint_status_hover_control(ui, response, hover_rect);
 
@@ -614,12 +606,7 @@ fn status_icon_control(
                 crate::presentation::material_font::rich_text(icon, None)
                     .size(presentation::ICON_GLYPH_SIZE),
             )
-            .into_galley(
-                ui,
-                None,
-                icon_control_rect.width(),
-                egui::TextStyle::Button,
-            );
+            .into_galley(ui, None, icon_control_rect.width(), egui::TextStyle::Button);
             let text_position = icon_control_rect.center() - galley.size() / 2.0;
             ui.painter().galley(text_position, galley, text_color);
 
@@ -786,10 +773,7 @@ fn valid_rect(rect: Rect) -> bool {
 /// Select the rendered sheet with the greatest vertical overlap against the
 /// actual editor clip. Empty overlap selects the nearest sheet interval.
 pub(super) fn select_visible_page(pages: &[PresentedPage], clip: Rect) -> VisiblePage {
-    if pages.is_empty()
-        || !valid_rect(clip)
-        || pages.iter().any(|page| !valid_rect(page.rect))
-    {
+    if pages.is_empty() || !valid_rect(clip) || pages.iter().any(|page| !valid_rect(page.rect)) {
         return VisiblePage::Unavailable;
     }
 
@@ -1001,10 +985,7 @@ impl ViewportPageTracker {
         clip: Rect,
         scroll_offset: Vec2,
     ) -> bool {
-        if pages
-            .iter()
-            .any(|page| !page.document_y_offset.is_finite())
-        {
+        if pages.iter().any(|page| !page.document_y_offset.is_finite()) {
             self.published = None;
             self.repaint_after_publish = true;
             return true;
@@ -1075,7 +1056,6 @@ fn distance_squared_to_rect(point: Pos2, rect: Rect) -> f32 {
     dx * dx + dy * dy
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CenterProjection {
     pub(super) text: String,
@@ -1094,12 +1074,7 @@ fn modifier_list_text(chord: ElementHintChord) -> Option<String> {
     let rows = element_hint_bindings(extended);
     (!rows.is_empty()).then(|| {
         rows.into_iter()
-            .map(|(digit, role)| {
-                format!(
-                    "[{digit}] {}",
-                    formatting_for_role(role).fdx_label
-                )
-            })
+            .map(|(digit, role)| format!("[{digit}] {}", formatting_for_role(role).fdx_label))
             .collect::<Vec<_>>()
             .join(", ")
     })
@@ -1255,7 +1230,10 @@ fn paint_clipped_single_line(
     let galley = ui.painter().layout_job(layout_job);
     let centered_left = rect.center().x - galley.size().x * 0.5;
     let pos = egui::pos2(
-        centered_left.clamp(rect.left(), (rect.right() - galley.size().x).max(rect.left())),
+        centered_left.clamp(
+            rect.left(),
+            (rect.right() - galley.size().x).max(rect.left()),
+        ),
         rect.center().y - galley.size().y * 0.5,
     );
     if ui.is_rect_visible(rect) {
@@ -1276,11 +1254,18 @@ fn paint_clipped_single_line(
 
 fn page_counter_content_rect(rect: Rect) -> Rect {
     let inset = presentation::PAGE_COUNTER_HORIZONTAL_INSET;
-    let inset = if inset.is_finite() { inset.max(0.0) } else { 0.0 };
+    let inset = if inset.is_finite() {
+        inset.max(0.0)
+    } else {
+        0.0
+    };
     let center_x = rect.center().x;
     let left = (rect.left() + inset).min(center_x);
     let right = (rect.right() - inset).max(center_x);
-    Rect::from_min_max(egui::pos2(left, rect.top()), egui::pos2(right, rect.bottom()))
+    Rect::from_min_max(
+        egui::pos2(left, rect.top()),
+        egui::pos2(right, rect.bottom()),
+    )
 }
 
 fn paint_page_counter(ui: &egui::Ui, text: &str, rect: Rect, color: Color32) {
@@ -1295,7 +1280,9 @@ fn paint_page_counter(ui: &egui::Ui, text: &str, rect: Rect, color: Color32) {
     let galley = ui.painter().layout_job(layout_job);
     let position = egui::pos2(rect.left(), rect.center().y - galley.size().y * 0.5);
     if ui.is_rect_visible(rect) {
-        ui.painter().with_clip_rect(rect).galley(position, galley, color);
+        ui.painter()
+            .with_clip_rect(rect)
+            .galley(position, galley, color);
     }
     let accessibility_id = ui.make_persistent_id(("status-label", "visible-page"));
     ui.ctx().accesskit_node_builder(accessibility_id, |node| {
@@ -1391,7 +1378,7 @@ pub(crate) fn show_with_focus_mode(
     zoom_percent: u16,
     appearance: AppearanceMode,
     focus_view: &FocusModeView,
- ) -> StatusCommandIntents {
+) -> StatusCommandIntents {
     show_impl_with_appearance(
         ui,
         palette,
@@ -1472,8 +1459,8 @@ fn measured_percentage_slot_width(ui: &egui::Ui) -> f32 {
             status_font_id(ui, egui::TextStyle::Button),
             presentation::default_foreground(ui),
         )
-    .size()
-    .x;
+        .size()
+        .x;
     text_width + presentation::PERCENTAGE_SIDE_RESERVATION * 2.0
 }
 
@@ -1486,23 +1473,20 @@ fn appearance_menu(ui: &mut egui::Ui, appearance: &mut AppearanceMode) -> bool {
         true,
         "Appearance mode",
     );
-    control
-        .response
-        .clone()
-        .on_hover_text("Appearance");
+    control.response.clone().on_hover_text("Appearance");
     egui::Popup::menu(&control.response)
         .open_memory(control.activated.then_some(egui::SetOpenCommand::Toggle))
         .show(|ui| {
-        ui.set_min_width(156.0);
-        for choice in [
-            AppearanceMode::System,
-            AppearanceMode::Day,
-            AppearanceMode::Night,
-            AppearanceMode::Midnight,
-        ] {
-            ui.selectable_value(appearance, choice, choice.label());
-        }
-    });
+            ui.set_min_width(156.0);
+            for choice in [
+                AppearanceMode::System,
+                AppearanceMode::Day,
+                AppearanceMode::Night,
+                AppearanceMode::Midnight,
+            ] {
+                ui.selectable_value(appearance, choice, choice.label());
+            }
+        });
     *appearance != previous
 }
 
@@ -1519,7 +1503,7 @@ fn show_impl_with_appearance(
     diagnostics_open: Option<bool>,
     focus_view: Option<&FocusModeView>,
     options: StatusSurfaceOptions,
- ) -> StatusCommandIntents {
+) -> StatusCommandIntents {
     let mut zoom_percent = zoom_value;
     let mut appearance = appearance_value;
     let mut commands = Vec::new();
@@ -1531,7 +1515,10 @@ fn show_impl_with_appearance(
     let available = ui.available_rect_before_wrap().intersect(ui.clip_rect());
     let row_rect = Rect::from_min_size(
         available.min,
-        Vec2::new(available.width().max(0.0), row_height.min(available.height().max(0.0))),
+        Vec2::new(
+            available.width().max(0.0),
+            row_height.min(available.height().max(0.0)),
+        ),
     );
     let page_label = page.label();
     let page_label_text_width = ui
@@ -1580,22 +1567,18 @@ fn show_impl_with_appearance(
             right_ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
                 |right_ui| {
-                    one_line_region_at(
-                        right_ui,
-                        planned_zoom,
-                        |zoom_ui| {
-                            let (changed, slider_response) = zoom_controls(
-                                zoom_ui,
-                                palette,
-                                &mut zoom_percent,
-                                layout.slider,
-                                layout.percentage,
-                                &percentage_label,
-                            );
-                            zoom_changed |= changed;
-                            zoom_slider_response = slider_response;
-                        },
-                    );
+                    one_line_region_at(right_ui, planned_zoom, |zoom_ui| {
+                        let (changed, slider_response) = zoom_controls(
+                            zoom_ui,
+                            palette,
+                            &mut zoom_percent,
+                            layout.slider,
+                            layout.percentage,
+                            &percentage_label,
+                        );
+                        zoom_changed |= changed;
+                        zoom_slider_response = slider_response;
+                    });
                     one_line_region(
                         right_ui,
                         Vec2::new(layout.icons[2].width(), row_height),
@@ -1610,21 +1593,18 @@ fn show_impl_with_appearance(
                         |icon_ui| {
                             if options.show_focus_mode {
                                 if let Some(view) = focus_view {
-                                let accessible_name = view.accessible_name();
-                                let rendered = status_icon_control(
-                                    icon_ui,
-                                    ICON_LOCATION_SEARCHING.outlined(),
-                                    "focus-mode-status-item",
-                                    view.enabled(),
-                                    &accessible_name,
-                                );
-                                rendered
-                                    .response
-                                    .clone()
-                                    .on_hover_text("Focus Mode");
-                                if rendered.activated {
-                                    commands.push(Command::ViewFocusModeToggle);
-                                }
+                                    let accessible_name = view.accessible_name();
+                                    let rendered = status_icon_control(
+                                        icon_ui,
+                                        ICON_LOCATION_SEARCHING.outlined(),
+                                        "focus-mode-status-item",
+                                        view.enabled(),
+                                        &accessible_name,
+                                    );
+                                    rendered.response.clone().on_hover_text("Focus Mode");
+                                    if rendered.activated {
+                                        commands.push(Command::ViewFocusModeToggle);
+                                    }
                                 }
                             }
                         },
@@ -1700,9 +1680,10 @@ fn show_impl_with_appearance(
             });
         });
     });
-    if let (true, Some(diagnostics)) =
-        (diagnostics_disclosure_enabled(development_mode, options), diagnostics)
-    {
+    if let (true, Some(diagnostics)) = (
+        diagnostics_disclosure_enabled(development_mode, options),
+        diagnostics,
+    ) {
         with_status_text_style(ui, |ui| {
             let default_foreground = presentation::default_foreground(ui);
             ui.visuals_mut().override_text_color = Some(default_foreground);
@@ -1734,18 +1715,14 @@ fn show_impl_with_appearance(
                             );
                         },
                     );
-                    one_line_region(
-                        ui,
-                        egui::vec2(summary_width, summary_height),
-                        |phase_ui| {
-                            paint_noninteractive_text(
-                                phase_ui,
-                                "status-diagnostics-phases",
-                                &phase_summary,
-                                presentation::default_foreground(phase_ui),
-                            );
-                        },
-                    );
+                    one_line_region(ui, egui::vec2(summary_width, summary_height), |phase_ui| {
+                        paint_noninteractive_text(
+                            phase_ui,
+                            "status-diagnostics-phases",
+                            &phase_summary,
+                            presentation::default_foreground(phase_ui),
+                        );
+                    });
                     for (summary, id_source) in command_detail_summaries.iter().zip([
                         "status-diagnostics-command-core",
                         "status-diagnostics-command-checks",
@@ -1781,30 +1758,22 @@ fn show_impl_with_appearance(
                             },
                         );
                     }
-                    one_line_region(
-                        ui,
-                        egui::vec2(summary_width, summary_height),
-                        |detail_ui| {
-                            paint_noninteractive_text(
-                                detail_ui,
-                                "status-diagnostics-edit-update-other-detail",
-                                &aligned_edit_update_other_detail_summary,
-                                presentation::default_foreground(detail_ui),
-                            );
-                        },
-                    );
-                    one_line_region(
-                        ui,
-                        egui::vec2(summary_width, summary_height),
-                        |detail_ui| {
-                            paint_noninteractive_text(
-                                detail_ui,
-                                "status-diagnostics-layout-build-detail",
-                                &layout_build_detail_summary,
-                                presentation::default_foreground(detail_ui),
-                            );
-                        },
-                    );
+                    one_line_region(ui, egui::vec2(summary_width, summary_height), |detail_ui| {
+                        paint_noninteractive_text(
+                            detail_ui,
+                            "status-diagnostics-edit-update-other-detail",
+                            &aligned_edit_update_other_detail_summary,
+                            presentation::default_foreground(detail_ui),
+                        );
+                    });
+                    one_line_region(ui, egui::vec2(summary_width, summary_height), |detail_ui| {
+                        paint_noninteractive_text(
+                            detail_ui,
+                            "status-diagnostics-layout-build-detail",
+                            &layout_build_detail_summary,
+                            presentation::default_foreground(detail_ui),
+                        );
+                    });
                     if let Some(message) = diagnostics.diagnostic_message {
                         one_line_region(
                             ui,

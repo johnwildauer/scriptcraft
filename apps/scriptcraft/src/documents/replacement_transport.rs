@@ -75,7 +75,10 @@ pub(crate) fn acknowledged_child_arguments(
 ) -> Result<Vec<OsString>, ReplacementOpenTransportError> {
     let mut arguments = child_arguments(development, menu_platform, Some(document_path))
         .map_err(|_| ReplacementOpenTransportError::InvalidDocumentPath)?;
-    arguments.push(OsString::from(format!("--open-handoff={}", handoff_id.get())));
+    arguments.push(OsString::from(format!(
+        "--open-handoff={}",
+        handoff_id.get()
+    )));
     Ok(arguments)
 }
 
@@ -92,12 +95,8 @@ pub(crate) fn spawn_acknowledged_replacement(
     events: &ReplacementOpenEventSender,
     repaint_context: &egui::Context,
 ) -> Result<ReplacementOpenTransport, ReplacementOpenTransportError> {
-    let arguments = acknowledged_child_arguments(
-        development,
-        menu_platform,
-        document_path,
-        handoff_id,
-    )?;
+    let arguments =
+        acknowledged_child_arguments(development, menu_platform, document_path, handoff_id)?;
     let mut child = Command::new(executable)
         .args(arguments)
         .stdout(Stdio::piped())

@@ -27,9 +27,9 @@ pub use tree::{
     MAX_TOTAL_IMAGE_BYTES,
 };
 
-pub use state::PreservationState;
 use indexes::SourceIdentityUseIndex;
 use state::ManagedParagraphLocation;
+pub use state::PreservationState;
 
 /// Attach a stable call-site category to managed-text mismatch errors.
 pub(super) fn categorize_managed_text_mismatch(

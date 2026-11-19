@@ -17,7 +17,11 @@ pub enum AvailabilityPolicy {
     RecheckAtExecution,
 }
 
-const fn descriptor(id: CommandId, family: &'static str, parameters: &'static str) -> CommandDescriptor {
+const fn descriptor(
+    id: CommandId,
+    family: &'static str,
+    parameters: &'static str,
+) -> CommandDescriptor {
     CommandDescriptor {
         id,
         family,
@@ -40,8 +44,16 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 52] = [
         "path: document_path, overwrite: bool (default false)",
     ),
     descriptor(CommandId::FileSaveAsPdf, "file", "none"),
-    descriptor(CommandId::FilePrint, "file", "none; native print host effect (macOS panel or Windows print session)"),
-    descriptor(CommandId::FileImportResolve, "file", "resolution: import_resolution"),
+    descriptor(
+        CommandId::FilePrint,
+        "file",
+        "none; native print host effect (macOS panel or Windows print session)",
+    ),
+    descriptor(
+        CommandId::FileImportResolve,
+        "file",
+        "resolution: import_resolution",
+    ),
     descriptor(CommandId::EditUndo, "edit", "none"),
     descriptor(CommandId::EditRedo, "edit", "none"),
     descriptor(CommandId::EditCut, "edit", "none"),
@@ -49,41 +61,141 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 52] = [
     descriptor(CommandId::EditPaste, "edit", "none"),
     descriptor(CommandId::EditDelete, "edit", "none"),
     descriptor(CommandId::EditSelectAll, "edit", "none"),
-    descriptor(CommandId::EditorTextInsert, "editor", "text: string, surface: editor_surface (default body)"),
-    descriptor(CommandId::EditorTextPaste, "editor", "text: string, surface: editor_surface (default body)"),
-    descriptor(CommandId::EditorDeleteBackward, "editor", "none; host active surface"),
-    descriptor(CommandId::EditorParagraphEnter, "editor", "none; host active surface"),
-    descriptor(CommandId::EditorParagraphTab, "editor", "none; host active surface"),
-    descriptor(CommandId::EditorElementChange, "editor", "role: screenplay_role, surface: editor_surface (default body)"),
-    descriptor(CommandId::EditorSelectionSet, "editor", "selection: utf8_byte_positions, surface: editor_surface (default body)"),
-    descriptor(CommandId::EditorSelectionPointer, "editor", "position, phase, surface: editor_surface (default body)"),
-    descriptor(CommandId::EditorNavigationHorizontal, "editor", "direction, extend, surface: editor_surface (default body)"),
-    descriptor(CommandId::EditorNavigationVertical, "editor", "direction, extend, surface: editor_surface (default body)"),
-    descriptor(CommandId::EditorNavigationLineEdge, "editor", "edge, extend, surface: editor_surface (default body)"),
+    descriptor(
+        CommandId::EditorTextInsert,
+        "editor",
+        "text: string, surface: editor_surface (default body)",
+    ),
+    descriptor(
+        CommandId::EditorTextPaste,
+        "editor",
+        "text: string, surface: editor_surface (default body)",
+    ),
+    descriptor(
+        CommandId::EditorDeleteBackward,
+        "editor",
+        "none; host active surface",
+    ),
+    descriptor(
+        CommandId::EditorParagraphEnter,
+        "editor",
+        "none; host active surface",
+    ),
+    descriptor(
+        CommandId::EditorParagraphTab,
+        "editor",
+        "none; host active surface",
+    ),
+    descriptor(
+        CommandId::EditorElementChange,
+        "editor",
+        "role: screenplay_role, surface: editor_surface (default body)",
+    ),
+    descriptor(
+        CommandId::EditorSelectionSet,
+        "editor",
+        "selection: utf8_byte_positions, surface: editor_surface (default body)",
+    ),
+    descriptor(
+        CommandId::EditorSelectionPointer,
+        "editor",
+        "position, phase, surface: editor_surface (default body)",
+    ),
+    descriptor(
+        CommandId::EditorNavigationHorizontal,
+        "editor",
+        "direction, extend, surface: editor_surface (default body)",
+    ),
+    descriptor(
+        CommandId::EditorNavigationVertical,
+        "editor",
+        "direction, extend, surface: editor_surface (default body)",
+    ),
+    descriptor(
+        CommandId::EditorNavigationLineEdge,
+        "editor",
+        "edge, extend, surface: editor_surface (default body)",
+    ),
     descriptor(CommandId::EditorFocus, "editor", "none"),
-    descriptor(CommandId::WindowTitlePageOpen, "window", "none; host viewport effect"),
-    descriptor(CommandId::WindowTitlePageClose, "window", "none; host viewport effect"),
-    descriptor(CommandId::EditorStyleToggle, "editor", "surface, style: bounded_text_style"),
-    descriptor(CommandId::EditorAlignmentSet, "editor", "surface, alignment: bounded_alignment"),
-    descriptor(CommandId::PdfIncludeTitlePageResolve, "pdf", "options: pdf_export_options; host dialog effect"),
+    descriptor(
+        CommandId::WindowTitlePageOpen,
+        "window",
+        "none; host viewport effect",
+    ),
+    descriptor(
+        CommandId::WindowTitlePageClose,
+        "window",
+        "none; host viewport effect",
+    ),
+    descriptor(
+        CommandId::EditorStyleToggle,
+        "editor",
+        "surface, style: bounded_text_style",
+    ),
+    descriptor(
+        CommandId::EditorAlignmentSet,
+        "editor",
+        "surface, alignment: bounded_alignment",
+    ),
+    descriptor(
+        CommandId::PdfIncludeTitlePageResolve,
+        "pdf",
+        "options: pdf_export_options; host dialog effect",
+    ),
     descriptor(CommandId::ViewZoomSet, "view", "percent: 75..=300"),
-    descriptor(CommandId::ViewZoomPinch, "view", "factor: finite_positive_f32"),
-    descriptor(CommandId::ViewAppearanceSet, "view", "appearance: appearance"),
+    descriptor(
+        CommandId::ViewZoomPinch,
+        "view",
+        "factor: finite_positive_f32",
+    ),
+    descriptor(
+        CommandId::ViewAppearanceSet,
+        "view",
+        "appearance: appearance",
+    ),
     descriptor(CommandId::ViewFocusModeToggle, "view", "none"),
     descriptor(CommandId::ToolsSprintTimerTogglePopup, "tools", "none"),
     descriptor(CommandId::ToolsSprintTimerClosePopup, "tools", "none"),
-    descriptor(CommandId::ToolsSprintTimerSetMode, "tools", "mode: sprint_timer_mode"),
-    descriptor(CommandId::ToolsSprintTimerSetMinutes, "tools", "text: string"),
+    descriptor(
+        CommandId::ToolsSprintTimerSetMode,
+        "tools",
+        "mode: sprint_timer_mode",
+    ),
+    descriptor(
+        CommandId::ToolsSprintTimerSetMinutes,
+        "tools",
+        "text: string",
+    ),
     descriptor(CommandId::ToolsSprintTimerStart, "tools", "none"),
     descriptor(CommandId::ToolsSprintTimerPause, "tools", "none"),
     descriptor(CommandId::ToolsSprintTimerResume, "tools", "none"),
     descriptor(CommandId::ToolsSprintTimerReset, "tools", "none"),
     descriptor(CommandId::ToolsSprintTimerEnd, "tools", "none"),
-    descriptor(CommandId::UiStatusSet, "ui", "message: optional diagnostic_message (<=512 UTF-8 bytes, single-line)"),
-    descriptor(CommandId::EditorDualDialogueToggle, "editor", "none; Body only; host active surface"),
-    descriptor(CommandId::EditorStyleClear, "editor", "surface: editor_surface; clear supported run styles"),
-    descriptor(CommandId::ApplicationQuit, "application", "none; requests guarded root Close"),
-    descriptor(CommandId::ViewScriptViewSet, "view", "mode: script_view_mode (normal, page, speed)"),
+    descriptor(
+        CommandId::UiStatusSet,
+        "ui",
+        "message: optional diagnostic_message (<=512 UTF-8 bytes, single-line)",
+    ),
+    descriptor(
+        CommandId::EditorDualDialogueToggle,
+        "editor",
+        "none; Body only; host active surface",
+    ),
+    descriptor(
+        CommandId::EditorStyleClear,
+        "editor",
+        "surface: editor_surface; clear supported run styles",
+    ),
+    descriptor(
+        CommandId::ApplicationQuit,
+        "application",
+        "none; requests guarded root Close",
+    ),
+    descriptor(
+        CommandId::ViewScriptViewSet,
+        "view",
+        "mode: script_view_mode (normal, page, speed)",
+    ),
 ];
 
 pub fn descriptor_for(id: CommandId) -> Option<&'static CommandDescriptor> {
@@ -125,7 +237,10 @@ pub fn validate_descriptor_catalog() -> Result<(), CatalogError> {
         }
     }
     for id in CommandId::ALL {
-        if !COMMAND_DESCRIPTORS.iter().any(|descriptor| descriptor.id == id) {
+        if !COMMAND_DESCRIPTORS
+            .iter()
+            .any(|descriptor| descriptor.id == id)
+        {
             return Err(CatalogError::MissingDescriptor(id));
         }
     }

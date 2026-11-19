@@ -66,7 +66,7 @@ impl PreservationState {
         }
     }
 
-pub fn source_layout_settings(&self) -> &SourceLayoutSettings {
+    pub fn source_layout_settings(&self) -> &SourceLayoutSettings {
         &self.source_layout_settings
     }
 }

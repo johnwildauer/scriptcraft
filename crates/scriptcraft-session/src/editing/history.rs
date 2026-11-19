@@ -1,7 +1,7 @@
 //! Snapshot ownership, bounded history, and undo/redo restoration.
 
-use super::selection::{validate_selection, validate_title_selection};
 use super::derived::PendingDerivedInvalidation;
+use super::selection::{validate_selection, validate_title_selection};
 use super::{validate_full_candidate, EditError, EditingSession, Selection};
 use scriptcraft_model::{cast_list, formatted_text::RunStyleFlags, Project};
 use std::collections::BTreeSet;

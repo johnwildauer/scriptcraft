@@ -81,15 +81,6 @@ pub(super) fn validate_profile(inputs: &LayoutInputs) -> Result<(), LayoutError>
         || inputs.lines_per_page == 0
         || inputs.chars_per_line == 0
         || inputs.line_advance == 0
-        || inputs
-            .role_boxes
-            .iter()
-            .any(|box_| box_.width == 0 || box_.x.saturating_add(box_.width) > inputs.paper_width)
-        || inputs
-            .additional_role_boxes
-            .iter()
-            .flatten()
-            .any(|box_| box_.width == 0 || box_.x.saturating_add(box_.width) > inputs.paper_width)
     {
         return Err(LayoutError {
             kind: LayoutErrorKind::InvalidProfile,
@@ -103,7 +94,6 @@ pub(super) fn effective_paragraph(
     source: &SourceLayoutSettings,
     role: Role,
     element_id: &StableId,
-    legacy_json_profile: bool,
     text_style: &EffectiveTextStyle,
 ) -> EffectiveParagraph {
     let native = formatting_for_role(role).paragraph;
@@ -118,18 +108,8 @@ pub(super) fn effective_paragraph(
     let mut left = projected.left_indent.unwrap_or(default_left);
     let mut right = projected.right_indent.unwrap_or(default_right);
 
-    // Legacy JSON's explicit role boxes remain a transient compatibility input.
-    // The reference-derived defaults, rather than those historical boxes, drive
-    // all FDX sessions and ordinary new documents.
-    let legacy_defaults = LayoutInputs::default();
-    let role_box = inputs.role_box(role);
-    let legacy_box = role_box
-        .filter(|box_| legacy_json_profile || (legacy_defaults.role_box(role) != Some(*box_)));
-    if let Some(box_) = legacy_box {
-        left = FixedPoint::from_points(i64::from(box_.x));
-        right = FixedPoint::from_points(i64::from(box_.x.saturating_add(box_.width)));
-    }
-
+    // Until Phase 5 replaces static role formatting, imported role settings
+    // override its paragraph defaults; per-element direct overrides remain topmost.
     let page_right = FixedPoint::from_points(i64::from(inputs.paper_width));
     if left.raw() < 0 || right <= left || right > page_right {
         left = default_left;
@@ -170,8 +150,8 @@ pub(super) fn effective_paragraph(
         .filter(|indent| indent_fits(*indent))
         .unwrap_or(role_indent);
 
-    let default_alignment = ParagraphAlignment::from_fdx(native.alignment)
-        .unwrap_or(ParagraphAlignment::Left);
+    let default_alignment =
+        ParagraphAlignment::from_fdx(native.alignment).unwrap_or(ParagraphAlignment::Left);
     let alignment = direct
         .alignment
         .or(projected.alignment)

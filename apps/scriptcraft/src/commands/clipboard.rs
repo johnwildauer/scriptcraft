@@ -1,8 +1,8 @@
 use crate::app::ScriptCraftApp;
-use scriptcraft_model::Project;
-use scriptcraft_session::editing::Selection;
 use eframe::egui;
 use scriptcraft_commands::{Command, CommandOutcome, CommandRejection, EditorSurface};
+use scriptcraft_model::Project;
+use scriptcraft_session::editing::Selection;
 
 use super::DesktopCommandOutcome;
 
@@ -15,14 +15,17 @@ impl ScriptCraftApp {
         match command {
             Command::EditCopy => {
                 let selection = self.active_selection();
-                match canonical_selection_text(self.session.project(), selection, self.active_editor_surface()) {
+                match canonical_selection_text(
+                    self.session.project(),
+                    selection,
+                    self.active_editor_surface(),
+                ) {
                     Some(text) => match DesktopClipboard::write_text(&text) {
                         Ok(()) => {
                             self.clear_error();
                         }
-                        Err(ClipboardAccessError::Unavailable) => self.set_clipboard_notice(
-                            "Clipboard write failed; screenplay unchanged",
-                        ),
+                        Err(ClipboardAccessError::Unavailable) => self
+                            .set_clipboard_notice("Clipboard write failed; screenplay unchanged"),
                     },
                     None => self.set_clipboard_notice(
                         "Copy unavailable: selection could not be read; screenplay unchanged",
@@ -33,7 +36,11 @@ impl ScriptCraftApp {
             }
             Command::EditCut => {
                 let selection = self.active_selection();
-                match canonical_selection_text(self.session.project(), selection, self.active_editor_surface()) {
+                match canonical_selection_text(
+                    self.session.project(),
+                    selection,
+                    self.active_editor_surface(),
+                ) {
                     Some(text) => match DesktopClipboard::write_text(&text) {
                         Ok(()) => {
                             let outcome = self.dispatch_internal_command(Command::EditDelete, ctx);
@@ -74,7 +81,10 @@ impl ScriptCraftApp {
                 }
                 Ok(text) => {
                     let outcome = self.dispatch_internal_command(
-                        Command::EditorTextPaste { text, surface: self.active_editor_surface() },
+                        Command::EditorTextPaste {
+                            text,
+                            surface: self.active_editor_surface(),
+                        },
                         ctx,
                     );
                     if matches!(
@@ -95,9 +105,9 @@ impl ScriptCraftApp {
                     DesktopCommandOutcome::EffectDispatched
                 }
             },
-            other => DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(
-                other.id(),
-            )),
+            other => {
+                DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id()))
+            }
         }
     }
 
@@ -116,16 +126,16 @@ struct DesktopClipboard;
 
 impl DesktopClipboard {
     fn write_text(text: &str) -> Result<(), ClipboardAccessError> {
-        let mut clipboard = arboard::Clipboard::new()
-            .map_err(|_| ClipboardAccessError::Unavailable)?;
+        let mut clipboard =
+            arboard::Clipboard::new().map_err(|_| ClipboardAccessError::Unavailable)?;
         clipboard
             .set_text(text.to_owned())
             .map_err(|_| ClipboardAccessError::Unavailable)
     }
 
     fn read_text() -> Result<String, ClipboardAccessError> {
-        let mut clipboard = arboard::Clipboard::new()
-            .map_err(|_| ClipboardAccessError::Unavailable)?;
+        let mut clipboard =
+            arboard::Clipboard::new().map_err(|_| ClipboardAccessError::Unavailable)?;
         clipboard
             .get_text()
             .map_err(|_| ClipboardAccessError::Unavailable)
@@ -152,8 +162,14 @@ fn canonical_selection_text(
     }
 
     let paragraph_text = |index: usize| match surface {
-        EditorSurface::Body => project.elements.get(index).map(|element| element.text.as_str()),
-        EditorSurface::TitlePage => project.title_page.get(index).map(|paragraph| paragraph.text.as_str()),
+        EditorSurface::Body => project
+            .elements
+            .get(index)
+            .map(|element| element.text.as_str()),
+        EditorSurface::TitlePage => project
+            .title_page
+            .get(index)
+            .map(|paragraph| paragraph.text.as_str()),
     };
     let start_text = paragraph_text(start.element)?;
     if start.element == end.element {

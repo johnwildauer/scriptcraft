@@ -2,9 +2,9 @@
 
 use super::{zoom_scroll::has_nonzero_mouse_wheel, ScriptCraftApp};
 use crate::app::add_performance_counter;
-use crate::views::script::RevealIntent;
 use crate::chrome::shortcuts::{editor_command_for_key_event, ShortcutPlatform};
 use crate::commands::CommandInvocation;
+use crate::views::script::RevealIntent;
 use eframe::egui::{self, Key};
 use scriptcraft_commands::{
     Command, CommandId, CommandOrigin, EditorSurface, HorizontalDirection, LineEdge,
@@ -21,7 +21,9 @@ impl ScriptCraftApp {
         surface: EditorSurface,
     ) {
         let started = Instant::now();
-        let ime_event_in_frame = events.iter().any(|event| matches!(event, egui::Event::Ime(_)));
+        let ime_event_in_frame = events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Ime(_)));
         self.performance.events = self.performance.events.saturating_add(events.len() as u64);
         for (index, event) in events.iter().enumerate() {
             self.record_native_event(match event {
@@ -170,10 +172,7 @@ impl ScriptCraftApp {
                 continue;
             }
             if let Some(result) = result {
-                self.mutate(
-                    result,
-                    RevealIntent::Conditional,
-                );
+                self.mutate(result, RevealIntent::Conditional);
             }
         }
         self.performance.event_nanos = self
@@ -223,11 +222,7 @@ impl ScriptCraftApp {
         }
     }
 
-    pub(crate) fn handle_surface_input(
-        &mut self,
-        ctx: &egui::Context,
-        surface: EditorSurface,
-    ) {
+    pub(crate) fn handle_surface_input(&mut self, ctx: &egui::Context, surface: EditorSurface) {
         if self.replacement_open_pending() {
             // Do not consume Body or Title Page semantic input while a selected
             // replacement is pending; the frame's events are intentionally not

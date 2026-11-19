@@ -1,8 +1,8 @@
 //! Reversible ScriptCraft mapping for disposable FDX TextState offsets.
 
+use crate::constants::FDX_ROOT;
 use crate::reader::{RawElement, RawNode};
 use crate::tree::new_lineage_element;
-use crate::constants::FDX_ROOT;
 use crate::FdxError;
 use scriptcraft_model::{
     position::{Position, Selection},
@@ -43,7 +43,10 @@ pub fn flat_offset_to_position(project: &Project, offset: usize) -> Option<Posit
     let mut base = 0usize;
     for (element_index, element) in project.elements.iter().enumerate() {
         if offset == base {
-            return Some(Position { element: element_index, offset: 0 });
+            return Some(Position {
+                element: element_index,
+                offset: 0,
+            });
         }
         for (byte, character) in element.text.char_indices() {
             let next = base.checked_add(character.len_utf16())?;
@@ -64,7 +67,10 @@ pub fn flat_offset_to_position(project: &Project, offset: usize) -> Option<Posit
     }
     (offset == base).then(|| Position {
         element: project.elements.len() - 1,
-        offset: project.elements.last().map_or(0, |element| element.text.len()),
+        offset: project
+            .elements
+            .last()
+            .map_or(0, |element| element.text.len()),
     })
 }
 
@@ -180,8 +186,8 @@ pub(crate) fn text_state_element(
     project: &Project,
     state: TextState,
 ) -> Result<scriptcraft_model::preservation::PreservedElement, FdxError> {
-    let (start, end) = selection_to_flat_offsets(project, state.selection)
-        .ok_or(FdxError::InvalidValue)?;
+    let (start, end) =
+        selection_to_flat_offsets(project, state.selection).ok_or(FdxError::InvalidValue)?;
     Ok(new_lineage_element(
         parent,
         "TextState",

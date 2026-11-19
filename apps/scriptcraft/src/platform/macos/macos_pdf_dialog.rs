@@ -57,10 +57,7 @@ pub(crate) fn show_pdf_save_panel(default_filename: &str) -> PdfExportPickerResu
         PanelResult::Failed
     };
 
-    picker_result_from_panel_result(
-        result,
-        checkbox.state() == NSControlStateValueOn,
-    )
+    picker_result_from_panel_result(result, checkbox.state() == NSControlStateValueOn)
 }
 
 /// The sole unsafe AppKit construction: nil target/action means the standard
@@ -71,9 +68,8 @@ fn include_title_page_checkbox(main_thread: MainThreadMarker) -> objc2::rc::Reta
     // SAFETY: The control has no target and no action, so AppKit cannot message
     // an incorrectly typed target or invoke an invalid selector. MainThreadMarker
     // proves the AppKit object is created on the UI thread.
-    let checkbox = unsafe {
-        NSButton::checkboxWithTitle_target_action(&label, None, None, main_thread)
-    };
+    let checkbox =
+        unsafe { NSButton::checkboxWithTitle_target_action(&label, None, None, main_thread) };
     let default_include_title_page = PdfExportOptions::default().include_title_page;
     checkbox.setState(if default_include_title_page {
         NSControlStateValueOn
@@ -100,13 +96,9 @@ fn picker_result_from_panel_result(
         PanelResult::Failed => PdfExportPickerResult::Error(PdfExportPickerFailure::Failed),
         PanelResult::Accepted(Some(destination)) => PdfExportPickerResult::Accept {
             destination,
-            options: PdfExportOptions {
-                include_title_page,
-            },
+            options: PdfExportOptions { include_title_page },
         },
-        PanelResult::Accepted(None) => {
-            PdfExportPickerResult::Error(PdfExportPickerFailure::Failed)
-        }
+        PanelResult::Accepted(None) => PdfExportPickerResult::Error(PdfExportPickerFailure::Failed),
     }
 }
 

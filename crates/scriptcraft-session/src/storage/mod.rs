@@ -21,12 +21,12 @@
 mod candidate;
 mod error;
 mod filesystem;
+mod native_session;
 mod open;
 mod platform;
 mod publication;
 mod save;
 mod target;
-mod native_session;
 
 pub use candidate::PreparedFdx;
 pub use error::{

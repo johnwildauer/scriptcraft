@@ -124,7 +124,9 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
     egui::Panel::top("title-page-toolbar")
         .frame(egui::Frame::NONE.fill(palette.toolbar.background))
         .show_separator_line(false)
-        .exact_size(crate::chrome::toolbar::toolbar_content_height(&ctx.global_style()))
+        .exact_size(crate::chrome::toolbar::toolbar_content_height(
+            &ctx.global_style(),
+        ))
         .show_inside(ui, |ui| {
             ui.scope(|ui| {
                 app.toolbar_for_surface(ui, EditorSurface::TitlePage, true);
@@ -132,8 +134,14 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
             if palette.toolbar.border != egui::Color32::TRANSPARENT {
                 let rect = ui.max_rect().intersect(ui.clip_rect());
                 ui.painter().line_segment(
-                    [egui::pos2(rect.left(), rect.bottom() - 0.5), egui::pos2(rect.right(), rect.bottom() - 0.5)],
-                    egui::Stroke::new(crate::chrome::toolbar::TOOLBAR_BOTTOM_BORDER_WIDTH, palette.toolbar.border),
+                    [
+                        egui::pos2(rect.left(), rect.bottom() - 0.5),
+                        egui::pos2(rect.right(), rect.bottom() - 0.5),
+                    ],
+                    egui::Stroke::new(
+                        crate::chrome::toolbar::TOOLBAR_BOTTOM_BORDER_WIDTH,
+                        palette.toolbar.border,
+                    ),
                 );
             }
         });
@@ -165,12 +173,10 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
             for command in intents.commands {
                 let opening_timer = matches!(command, Command::ToolsSprintTimerTogglePopup)
                     && !app.sprint_timer.popup_open;
-                app.dispatch_command(
-                    CommandInvocation::new(command, CommandOrigin::Pointer),
-                    ctx,
-                );
+                app.dispatch_command(CommandInvocation::new(command, CommandOrigin::Pointer), ctx);
                 if opening_timer {
-                    app.sprint_timer.popup_anchor = timer_button_rect.unwrap_or(egui::Rect::NOTHING);
+                    app.sprint_timer.popup_anchor =
+                        timer_button_rect.unwrap_or(egui::Rect::NOTHING);
                     app.timer_popup_surface = EditorSurface::TitlePage;
                     app.capture_sprint_timer_host_geometry(EditorSurface::TitlePage, ctx);
                 }
@@ -184,7 +190,9 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
             scriptcraft_commands::ScriptViewMode::Page,
             palette.script_workspace,
         ))
-        .show_inside(ui, |ui| app.live_document_surface(ui, EditorSurface::TitlePage));
+        .show_inside(ui, |ui| {
+            app.live_document_surface(ui, EditorSurface::TitlePage)
+        });
     if app.timer_popup_surface == EditorSurface::TitlePage {
         let host_geometry = app.sprint_timer_host_geometry(EditorSurface::TitlePage);
         for command in crate::widgets::sprint_timer::show_popup_with_host_geometry(
@@ -193,10 +201,7 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
             now,
             host_geometry,
         ) {
-            app.dispatch_command(
-                CommandInvocation::new(command, CommandOrigin::Pointer),
-                ctx,
-            );
+            app.dispatch_command(CommandInvocation::new(command, CommandOrigin::Pointer), ctx);
         }
         if app.sprint_timer.take_popup_close_completion() {
             app.finalize_sprint_timer_popup(ctx);

@@ -45,10 +45,8 @@ impl ScriptCraftApp {
         }
         let position = selection.focus;
         let project = self.session.project();
-        let origin_group = scriptcraft_model::dual_dialogue::group_at_element_index(
-            project,
-            position.element,
-        );
+        let origin_group =
+            scriptcraft_model::dual_dialogue::group_at_element_index(project, position.element);
         let item = &project.elements[position.element];
         let next = if direction == HorizontalDirection::Right {
             if position.offset < item.text.len() {
@@ -84,19 +82,13 @@ impl ScriptCraftApp {
         } else {
             position
         };
-        let target_group = scriptcraft_model::dual_dialogue::group_at_element_index(
-            project,
-            next.element,
-        );
-        let next = if let Some(group) = target_group.filter(|group| {
-            origin_group.map_or(true, |origin| origin.id != group.id)
-        }) {
-            dual_group_navigation_edge(
-                project,
-                group,
-                direction == HorizontalDirection::Right,
-            )
-            .unwrap_or(next)
+        let target_group =
+            scriptcraft_model::dual_dialogue::group_at_element_index(project, next.element);
+        let next = if let Some(group) =
+            target_group.filter(|group| origin_group.map_or(true, |origin| origin.id != group.id))
+        {
+            dual_group_navigation_edge(project, group, direction == HorizontalDirection::Right)
+                .unwrap_or(next)
         } else {
             next
         };
@@ -185,14 +177,10 @@ impl ScriptCraftApp {
             return Ok(selection);
         };
         let project = self.session.project();
-        let origin_group = scriptcraft_model::dual_dialogue::group_at_element_index(
-            project,
-            current.element,
-        );
-        let target_group = scriptcraft_model::dual_dialogue::group_at_element_index(
-            project,
-            target_line.element,
-        );
+        let origin_group =
+            scriptcraft_model::dual_dialogue::group_at_element_index(project, current.element);
+        let target_group =
+            scriptcraft_model::dual_dialogue::group_at_element_index(project, target_line.element);
         let mode_transition = match (origin_group, target_group) {
             (Some(origin), Some(target)) => origin.id != target.id,
             (None, Some(_)) | (Some(_), None) => true,
@@ -200,15 +188,12 @@ impl ScriptCraftApp {
         };
         if let Some(group) = target_group.filter(|_| mode_transition) {
             self.preferred_vertical_x = None;
-            let next = dual_group_navigation_edge(
-                project,
-                group,
-                direction == VerticalDirection::Down,
-            )
-            .unwrap_or(Position {
-                element: target_line.element,
-                offset: target_line.source.start,
-            });
+            let next =
+                dual_group_navigation_edge(project, group, direction == VerticalDirection::Down)
+                    .unwrap_or(Position {
+                        element: target_line.element,
+                        offset: target_line.source.start,
+                    });
             return Ok(if extend {
                 Selection {
                     anchor: selection.anchor,

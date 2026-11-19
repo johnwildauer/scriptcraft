@@ -4,11 +4,11 @@ use std::sync::Arc;
 use crate::{
     dual_dialogue::{self, DualDialogueError},
     element::{
-        ScreenplayElement, MAX_PROVENANCE_STRING_BYTES, MAX_RUNS_PER_ELEMENT,
-        MAX_RUN_ATTRIBUTES, MAX_RUN_ATTRIBUTE_BYTES,
+        ScreenplayElement, MAX_PROVENANCE_STRING_BYTES, MAX_RUNS_PER_ELEMENT, MAX_RUN_ATTRIBUTES,
+        MAX_RUN_ATTRIBUTE_BYTES,
     },
     identity::StableId,
-    project::{LegacyJsonMetadata, Project},
+    project::Project,
     ModelError, MAX_TEXT_BYTES,
 };
 
@@ -60,23 +60,10 @@ pub(crate) fn validate_element(element: &ScreenplayElement) -> Result<(), ModelE
     Ok(())
 }
 
-fn validate_legacy_json_metadata(metadata: &LegacyJsonMetadata) -> Result<(), ModelError> {
-    for value in [
-        &metadata.title,
-        &metadata.author,
-        &metadata.contact,
-        &metadata.created_at,
-        &metadata.updated_at,
-    ] {
-        if value.len() > crate::legacy_json::MAX_STRING_BYTES {
-            return Err(ModelError::StringTooLong);
-        }
-    }
-    Ok(())
-}
-
-pub fn validate_layout_inputs(inputs: &crate::layout_inputs::LayoutInputs) -> Result<(), ModelError> {
-    if inputs.name.len() > crate::legacy_json::MAX_STRING_BYTES
+pub fn validate_layout_inputs(
+    inputs: &crate::layout_inputs::LayoutInputs,
+) -> Result<(), ModelError> {
+    if inputs.name.len() > crate::layout_inputs::MAX_LAYOUT_NAME_BYTES
         || inputs.format_version == 0
         || inputs.paper_width == 0
         || inputs.paper_height == 0
@@ -93,15 +80,6 @@ pub fn validate_layout_inputs(inputs: &crate::layout_inputs::LayoutInputs) -> Re
         || inputs.font_size > 72
         || inputs.char_width == 0
         || inputs.char_width > 100
-        || inputs
-            .role_boxes
-            .iter()
-            .any(|box_| box_.width == 0 || box_.width > 1_000 || box_.x > 10_000)
-        || inputs
-            .additional_role_boxes
-            .iter()
-            .flatten()
-            .any(|box_| box_.width == 0 || box_.width > 1_000 || box_.x > 10_000)
     {
         return Err(ModelError::InvalidNumber);
     }
@@ -110,21 +88,19 @@ pub fn validate_layout_inputs(inputs: &crate::layout_inputs::LayoutInputs) -> Re
 
 impl Project {
     pub fn validate(&self) -> Result<(), ModelError> {
-        if let Some(legacy) = &self.legacy_json_state {
-            StableId::new(legacy.project_id.as_str())?;
-            if legacy.project_schema_version != crate::legacy_json::CURRENT_SCHEMA_VERSION {
-                return Err(ModelError::InvalidSchemaVersion);
-            }
-            validate_legacy_json_metadata(&legacy.metadata)?;
-            validate_layout_inputs(&legacy.layout_inputs)?;
-        }
         if self.elements.len() > MAX_ELEMENTS || self.title_page.len() > MAX_ELEMENTS {
             return Err(ModelError::TooManyElements);
         }
+        self.element_definitions().validate()?;
         let mut ids = BTreeSet::new();
         let mut element_ids = BTreeSet::new();
         for item in &self.title_page {
             item.validate()?;
+            if let Some(key) = item.element_type() {
+                if self.element_definitions().get(&key).is_none() {
+                    return Err(ModelError::MissingElementDefinition(key));
+                }
+            }
             if !ids.insert(&item.id) {
                 return Err(ModelError::DuplicateId);
             }
@@ -132,6 +108,10 @@ impl Project {
         }
         for item in &self.elements {
             validate_element(item)?;
+            let key = item.element_type();
+            if self.element_definitions().get(&key).is_none() {
+                return Err(ModelError::MissingElementDefinition(key));
+            }
             if !ids.insert(&item.id) {
                 return Err(ModelError::DuplicateId);
             }
@@ -150,11 +130,18 @@ impl Project {
             .iter()
             .map(|group| group.id.clone())
             .collect::<BTreeSet<_>>();
-        dual_dialogue::validate_wrapper_overrides(self)
-            .map_err(ModelError::InvalidDualDialogue)?;
+        dual_dialogue::validate_wrapper_overrides(self).map_err(ModelError::InvalidDualDialogue)?;
         if let Some(preservation) = &self.preservation {
             preservation
                 .validate_project_elements(&element_ids, &group_ids)
+                .map_err(ModelError::InvalidPreservationState)?;
+            let definition_keys = self
+                .element_definitions()
+                .iter()
+                .map(|definition| definition.key.clone())
+                .collect::<BTreeSet<_>>();
+            preservation
+                .validate_element_definition_anchors(&definition_keys)
                 .map_err(ModelError::InvalidPreservationState)?;
             for group in &self.dual_dialogue_groups {
                 let wrapper_anchor = preservation.dual_dialogue_wrapper_anchor(&group.id);
@@ -189,7 +176,7 @@ impl Project {
             || self.dual_dialogue_groups != baseline.dual_dialogue_groups
             || self.dual_dialogue_paragraph_overrides != baseline.dual_dialogue_paragraph_overrides
             || self.direct_paragraph_overrides != baseline.direct_paragraph_overrides
-            || self.legacy_json_state != baseline.legacy_json_state
+            || self.element_definitions() != baseline.element_definitions()
             || !Arc::ptr_eq(&self.layout_identity, &baseline.layout_identity)
         {
             return Ok(false);
@@ -241,5 +228,30 @@ impl Project {
             }
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_registry_change_falls_back_from_scoped_validation() {
+        let Ok(baseline) = Project::new() else {
+            assert!(false, "static bootstrap should produce valid definitions");
+            return;
+        };
+        let mut candidate = baseline.clone();
+        let reordered = candidate
+            .element_definitions()
+            .iter()
+            .cloned()
+            .rev()
+            .collect::<Vec<_>>();
+        assert!(candidate.replace_element_definitions(reordered).is_ok());
+        assert_eq!(
+            candidate.validate_scoped_single_element_edit(&baseline, 0),
+            Ok(false)
+        );
     }
 }

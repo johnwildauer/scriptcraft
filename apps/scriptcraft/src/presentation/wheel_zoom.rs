@@ -69,11 +69,9 @@ impl WheelZoomAdapter {
                     // Any matched nonzero vertical component is consumed. A
                     // bad page height, factor overflow, or underflow therefore
                     // cannot leak invalid data into egui's scroll processing.
-                    let Some(points) = normalized_vertical_points(
-                        *unit,
-                        delta.y,
-                        viewport_height_points,
-                    ) else {
+                    let Some(points) =
+                        normalized_vertical_points(*unit, delta.y, viewport_height_points)
+                    else {
                         continue;
                     };
                     let factor = (points / POINTS_PER_ZOOM_E_FOLD).exp();

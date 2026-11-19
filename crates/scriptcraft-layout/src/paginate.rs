@@ -64,7 +64,9 @@ impl ScreenplayLayout {
             source_settings,
             purpose,
             match purpose {
-                LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true },
+                LayoutPurpose::Print => LayoutComposition::Print {
+                    include_title_page: true,
+                },
                 LayoutPurpose::Editor => LayoutComposition::BodyEditor,
             },
             None,
@@ -137,7 +139,9 @@ impl ScreenplayLayout {
             source_settings,
             purpose,
             match purpose {
-                LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true },
+                LayoutPurpose::Print => LayoutComposition::Print {
+                    include_title_page: true,
+                },
                 LayoutPurpose::Editor => LayoutComposition::BodyEditor,
             },
             Some(diagnostics),
@@ -175,7 +179,15 @@ impl ScreenplayLayout {
                 .active_group_id
                 .as_ref()
                 .filter(|_| body_presentation.is_for_project(project))
-                .filter(|requested| project.dual_dialogue_groups.iter().any(|group| &group.id == *requested))
+                .filter(|requested| {
+                    project.dual_dialogue_groups.iter().any(|group| {
+                        &group.id == *requested
+                            && scriptcraft_model::dual_dialogue::active_dual_dialogue_projection(
+                                project, group,
+                            )
+                            .is_some()
+                    })
+                })
                 .cloned()
         } else {
             None
@@ -220,6 +232,8 @@ impl ScreenplayLayout {
         let mut index = 0;
         while include_body && index < project.elements.len() {
             let element = &project.elements[index];
+            // Phase 5 replaces this static-layout adapter with definition-driven layout.
+            let role = element.transitional_role();
             if let Some(next_index) = dual_dialogue::prepare_group(
                 &mut output,
                 project,
@@ -235,16 +249,15 @@ impl ScreenplayLayout {
                 continue;
             }
 
-
             let prepared_lookup_started = diagnostics.as_ref().map(|_| Instant::now());
-            let text_style = output.source_settings.text_style(element.role);
+            let text_style = output.source_settings.text_style(role);
             if purpose == LayoutPurpose::Print && text_style.hidden_text {
                 index = index.saturating_add(1);
                 continue;
             }
             if output
                 .source_settings
-                .starts_new_page_for_element(element.role, &element.id)
+                .starts_new_page_for_element(role, &element.id)
                 && output
                     .pages
                     .last()
@@ -255,9 +268,8 @@ impl ScreenplayLayout {
             let paragraph = effective_paragraph(
                 &output.inputs,
                 source_settings,
-                element.role,
+                role,
                 &element.id,
-                project.uses_legacy_layout_defaults(),
                 &text_style,
             );
             let environment = PreparedBodyEnvironment {
@@ -278,18 +290,25 @@ impl ScreenplayLayout {
                 prepared_lookup_started,
             );
             let placement_started = diagnostics.as_ref().map(|_| Instant::now());
-            output.place_element(prepared, index, element.role, paragraph, &mut diagnostics);
+            output.place_element(prepared, index, role, paragraph, &mut diagnostics);
             if let Some(diagnostics) = diagnostics.as_deref_mut() {
                 add_elapsed_nanos(&mut diagnostics.placement_nanos, placement_started);
             }
             index = index.saturating_add(1);
         }
         if output.pages.is_empty() {
-            output.pages.push(output.new_page(composition == LayoutComposition::TitlePageEditor));
+            output
+                .pages
+                .push(output.new_page(composition == LayoutComposition::TitlePageEditor));
         }
         if let Some(active_group_id) = output.active_group_id.clone() {
-            if let Some(group) = project.dual_dialogue_groups.iter().find(|group| group.id == active_group_id) {
-                output.editor_group_boundaries = dual_dialogue::active_group_boundaries(&output, project, group);
+            if let Some(group) = project
+                .dual_dialogue_groups
+                .iter()
+                .find(|group| group.id == active_group_id)
+            {
+                output.editor_group_boundaries =
+                    dual_dialogue::active_group_boundaries(&output, project, group);
             }
         }
         output.rebuild_interaction_indexes(diagnostics.as_deref_mut());
@@ -336,14 +355,20 @@ impl ScreenplayLayout {
             FixedPoint::from_raw(line.paragraph.left.raw().saturating_add(indent.raw()));
         let line_width =
             FixedPoint::from_raw(line.paragraph.right.raw().saturating_sub(line_left.raw()));
-        let mut spans = spans::positioned_spans(&line, FixedRect {
-            x: line_left,
-            y,
-            width: FixedPoint::default(),
-            height: line.paragraph.line_advance,
-        });
+        let mut spans = spans::positioned_spans(
+            &line,
+            FixedRect {
+                x: line_left,
+                y,
+                width: FixedPoint::default(),
+                height: line.paragraph.line_advance,
+            },
+        );
         let text_width = FixedPoint::from_raw(
-            spans.iter().map(|span| span.geometry.width.raw()).sum::<i64>(),
+            spans
+                .iter()
+                .map(|span| span.geometry.width.raw())
+                .sum::<i64>(),
         );
         let spare = line_width.raw().saturating_sub(text_width.raw()).max(0);
         let display_chars = line.display_text.chars().collect::<Vec<_>>();
@@ -362,8 +387,16 @@ impl ScreenplayLayout {
         };
         let distribute = !justified_gaps.is_empty();
         let distributed_width = if distribute { spare } else { 0 };
-        let gap_width = if distribute { spare.div_euclid(justified_gaps.len() as i64) } else { 0 };
-        let gap_remainder = if distribute { spare.rem_euclid(justified_gaps.len() as i64) as usize } else { 0 };
+        let gap_width = if distribute {
+            spare.div_euclid(justified_gaps.len() as i64)
+        } else {
+            0
+        };
+        let gap_remainder = if distribute {
+            spare.rem_euclid(justified_gaps.len() as i64) as usize
+        } else {
+            0
+        };
         let text_x = match line.paragraph.alignment {
             ParagraphAlignment::Left => line_left,
             ParagraphAlignment::Right => {
@@ -376,7 +409,8 @@ impl ScreenplayLayout {
         };
         let alignment_shift = text_x.raw().saturating_sub(line_left.raw());
         for span in &mut spans {
-            span.geometry.x = FixedPoint::from_raw(span.geometry.x.raw().saturating_add(alignment_shift));
+            span.geometry.x =
+                FixedPoint::from_raw(span.geometry.x.raw().saturating_add(alignment_shift));
         }
         let height = line.paragraph.line_advance;
         let paragraph_bounds = FixedRect {
@@ -398,18 +432,22 @@ impl ScreenplayLayout {
         };
         if distribute {
             let gap_adjustment = |index: usize| {
-                justified_gaps.iter().position(|gap| *gap == index).map(|rank| {
-                    gap_width.saturating_add(if rank < gap_remainder { 1 } else { 0 })
-                }).unwrap_or(0)
+                justified_gaps
+                    .iter()
+                    .position(|gap| *gap == index)
+                    .map(|rank| gap_width.saturating_add(if rank < gap_remainder { 1 } else { 0 }))
+                    .unwrap_or(0)
             };
             let mut display_index = 0usize;
             let mut shift = 0i64;
             for span in &mut spans {
                 let count = span.display_text.chars().count();
                 let internal = (display_index..display_index.saturating_add(count))
-                    .map(gap_adjustment).sum::<i64>();
+                    .map(gap_adjustment)
+                    .sum::<i64>();
                 span.geometry.x = FixedPoint::from_raw(span.geometry.x.raw().saturating_add(shift));
-                span.geometry.width = FixedPoint::from_raw(span.geometry.width.raw().saturating_add(internal));
+                span.geometry.width =
+                    FixedPoint::from_raw(span.geometry.width.raw().saturating_add(internal));
                 shift = shift.saturating_add(internal);
                 display_index = display_index.saturating_add(count);
             }
@@ -559,12 +597,14 @@ pub(super) fn rebase_prepared_line(
     line.page = page;
     line.element = element;
     line.source.element = element;
-    line.geometry.y = FixedPoint::from_raw(prepared.geometry.y.raw().saturating_add(vertical_delta));
+    line.geometry.y =
+        FixedPoint::from_raw(prepared.geometry.y.raw().saturating_add(vertical_delta));
     line.paragraph_bounds.y = y;
     line.rect = compat_rect(line.paragraph_bounds);
     for span in Arc::make_mut(&mut line.spans) {
         span.source.element = element;
-        span.geometry.y = FixedPoint::from_raw(span.geometry.y.raw().saturating_add(vertical_delta));
+        span.geometry.y =
+            FixedPoint::from_raw(span.geometry.y.raw().saturating_add(vertical_delta));
     }
     if let Some(diagnostics) = diagnostics {
         add_elapsed_nanos(&mut diagnostics.rebase_nanos, started);

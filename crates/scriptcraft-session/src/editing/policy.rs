@@ -1,7 +1,7 @@
 //! Enter/Tab role decisions and generated-parenthetical policy.
 
-use super::{EditError, EditPolicy, Position, Selection};
 use super::selection::SelectionOrdering;
+use super::{EditError, EditPolicy, Position, Selection};
 use scriptcraft_model::{formatting, Project, Role};
 use std::collections::BTreeSet;
 
@@ -66,8 +66,12 @@ pub(super) struct TabDecision {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum TabAction {
     NoOp,
-    DelimiterParentheticalToDialogue { element: usize },
-    RepairAndInsertDialogue { element: usize },
+    DelimiterParentheticalToDialogue {
+        element: usize,
+    },
+    RepairAndInsertDialogue {
+        element: usize,
+    },
     SetRole {
         position: Position,
         role: Role,
@@ -95,7 +99,7 @@ pub(super) fn resolve_enter(
         project,
         policy,
         start.element,
-        item.role,
+        item.transitional_role(),
         item.text.len(),
         start.offset,
     ) {
@@ -106,7 +110,7 @@ pub(super) fn resolve_enter(
     }
 
     let mut position = start;
-    if item.role == Role::Parenthetical {
+    if item.transitional_role() == Role::Parenthetical {
         if position.offset == 0 && item.text.starts_with('(') {
             return Ok(EnterDecision {
                 target: ParagraphKeyTarget::Target(Role::Parenthetical),
@@ -120,8 +124,9 @@ pub(super) fn resolve_enter(
             && generated.contains(item.id.as_str())
         {
             position.offset = 0;
-            let role = enter_transition(item.role)
-                .ok_or(EditError::UnsupportedTransition { from: item.role })?;
+            let current_role = item.transitional_role();
+            let role = enter_transition(current_role)
+                .ok_or(EditError::UnsupportedTransition { from: current_role })?;
             return Ok(EnterDecision {
                 target: ParagraphKeyTarget::Target(role),
                 action: EnterAction::ClearGeneratedAndSplit { position, role },
@@ -143,11 +148,12 @@ pub(super) fn resolve_enter(
         }
     }
 
-    let role = if item.role == Role::Dialogue && position.offset < item.text.len() {
+    let current_role = item.transitional_role();
+    let role = if current_role == Role::Dialogue && position.offset < item.text.len() {
         Role::Dialogue
     } else {
-        enter_transition(item.role)
-            .ok_or(EditError::UnsupportedTransition { from: item.role })?
+        enter_transition(current_role)
+            .ok_or(EditError::UnsupportedTransition { from: current_role })?
     };
     Ok(EnterDecision {
         target: ParagraphKeyTarget::Target(role),
@@ -178,7 +184,7 @@ pub(super) fn resolve_tab(
         project,
         policy,
         start.element,
-        item.role,
+        item.transitional_role(),
         item.text.len(),
         start.offset,
     ) {
@@ -190,7 +196,7 @@ pub(super) fn resolve_tab(
 
     let mut position = start;
     let mut clear_generated_parenthetical = false;
-    if policy.auto_parenthetical && item.role == Role::Parenthetical {
+    if policy.auto_parenthetical && item.transitional_role() == Role::Parenthetical {
         if is_delimiter_only_parenthetical(item.text.as_str()) {
             return Ok(TabDecision {
                 target: ParagraphKeyTarget::Target(Role::Dialogue),
@@ -219,7 +225,7 @@ pub(super) fn resolve_tab(
         }
     }
 
-    let role = tab_transition(item.role, item.text.is_empty());
+    let role = tab_transition(item.transitional_role(), item.text.is_empty());
     Ok(match role {
         Some(role) => TabDecision {
             target: ParagraphKeyTarget::Target(role),
@@ -280,11 +286,7 @@ pub fn transition(role: Role) -> Option<Role> {
 }
 
 pub fn enter_transition(role: Role) -> Option<Role> {
-    role_for_native_behavior_target(
-        formatting::formatting_for_role(role)
-            .behavior
-            .return_key,
-    )
+    role_for_native_behavior_target(formatting::formatting_for_role(role).behavior.return_key)
 }
 
 /// Returns the shared native TabKey application default, with the established
@@ -293,11 +295,7 @@ pub fn tab_transition(role: Role, current_text_is_empty: bool) -> Option<Role> {
     if role == Role::Character && !current_text_is_empty {
         return None;
     }
-    role_for_native_behavior_target(
-        formatting::formatting_for_role(role)
-            .behavior
-            .tab_key,
-    )
+    role_for_native_behavior_target(formatting::formatting_for_role(role).behavior.tab_key)
 }
 
 fn role_for_native_behavior_target(target: &str) -> Option<Role> {

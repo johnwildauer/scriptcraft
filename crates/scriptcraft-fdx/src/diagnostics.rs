@@ -1,7 +1,5 @@
 use scriptcraft_model::{
-    error::ModelError,
-    paragraph_id::ParagraphIdAllocationError,
-    preservation::PreservationError,
+    error::ModelError, paragraph_id::ParagraphIdAllocationError, preservation::PreservationError,
 };
 use std::fmt;
 

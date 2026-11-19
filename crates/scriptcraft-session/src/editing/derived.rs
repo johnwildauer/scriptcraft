@@ -155,9 +155,7 @@ impl EditingSession {
 
     /// Refreshes derived data and reports safe-stop deferrals without exposing
     /// document-owned identities or content to the caller.
-    pub fn refresh_cast_lists_with_outcome(
-        &mut self,
-    ) -> Result<CastListCorrection, EditError> {
+    pub fn refresh_cast_lists_with_outcome(&mut self) -> Result<CastListCorrection, EditError> {
         let (scope, complete_refresh) = match &self.pending_derived_invalidation {
             PendingDerivedInvalidation::None => {
                 return Ok(CastListCorrection::default());
@@ -226,8 +224,11 @@ pub(super) fn can_skip_derived_invalidation(
             .zip(after.elements.get(element_index))
             .is_some_and(|(before, after)| {
                 before.id == after.id
-                    && before.role == after.role
-                    && !matches!(before.role, Role::Character | Role::SceneHeading)
+                    && before.element_type() == after.element_type()
+                    && !matches!(
+                        before.transitional_role(),
+                        Role::Character | Role::SceneHeading
+                    )
             })
 }
 
@@ -248,13 +249,13 @@ pub(super) fn classify_derived_invalidation(
     let before_heading_order = before
         .elements
         .iter()
-        .filter(|element| element.role == Role::SceneHeading)
+        .filter(|element| element.transitional_role() == Role::SceneHeading)
         .map(|element| element.id.as_str())
         .collect::<Vec<_>>();
     let after_heading_order = after
         .elements
         .iter()
-        .filter(|element| element.role == Role::SceneHeading)
+        .filter(|element| element.transitional_role() == Role::SceneHeading)
         .map(|element| element.id.as_str())
         .collect::<Vec<_>>();
     let before_heading_set = before_heading_order
@@ -313,8 +314,8 @@ pub(super) fn classify_derived_invalidation(
     // live scene owners.
     for (id, old) in &before_by_id {
         if let Some(new) = after_by_id.get(id) {
-            if old.role == Role::SceneHeading
-                && new.role == Role::SceneHeading
+            if old.transitional_role() == Role::SceneHeading
+                && new.transitional_role() == Role::SceneHeading
                 && old.text != new.text
             {
                 affected.insert(id.clone());
@@ -349,7 +350,7 @@ fn character_projection_inputs(
 ) -> Option<BTreeMap<String, Vec<(String, String)>>> {
     let mut by_scene = BTreeMap::<String, Vec<(String, String)>>::new();
     for (index, element) in elements.iter().enumerate() {
-        if element.role != Role::Character {
+        if element.transitional_role() != Role::Character {
             continue;
         }
         let owner = owning_scene_id(elements, index)?;
@@ -366,6 +367,6 @@ fn owning_scene_id(elements: &[Arc<BodyOwner>], element_index: usize) -> Option<
         .get(..=element_index)?
         .iter()
         .rev()
-        .find(|element| element.role == Role::SceneHeading)
+        .find(|element| element.transitional_role() == Role::SceneHeading)
         .map(|heading| heading.id.as_str().to_owned())
 }

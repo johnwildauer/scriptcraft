@@ -199,9 +199,7 @@ impl PendingReplacementMetadata {
         Self {
             handoff_id,
             // An unrepresentable deadline safely becomes immediately due.
-            deadline: now
-                .checked_add(PENDING_REPLACEMENT_TIMEOUT)
-                .unwrap_or(now),
+            deadline: now.checked_add(PENDING_REPLACEMENT_TIMEOUT).unwrap_or(now),
         }
     }
 }
@@ -258,9 +256,9 @@ pub(crate) fn decide_pending_replacement(
             ReplacementOpenEvent::Result(message) => {
                 let decision = match message.result {
                     ReplacementOpenResult::Opened => PendingReplacementDecision::AuthorizeClose,
-                    ReplacementOpenResult::Failed => PendingReplacementDecision::Resume(
-                        ReplacementOpenResumeReason::ChildFailed,
-                    ),
+                    ReplacementOpenResult::Failed => {
+                        PendingReplacementDecision::Resume(ReplacementOpenResumeReason::ChildFailed)
+                    }
                     ReplacementOpenResult::Cancelled => PendingReplacementDecision::Resume(
                         ReplacementOpenResumeReason::ChildCancelled,
                     ),
@@ -269,9 +267,9 @@ pub(crate) fn decide_pending_replacement(
             }
             ReplacementOpenEvent::ChannelFailed { handoff_id, reason } => (
                 handoff_id,
-                PendingReplacementDecision::Resume(
-                    ReplacementOpenResumeReason::ChannelFailed(reason),
-                ),
+                PendingReplacementDecision::Resume(ReplacementOpenResumeReason::ChannelFailed(
+                    reason,
+                )),
             ),
         };
         if handoff_id == pending.handoff_id {
@@ -287,9 +285,7 @@ pub(crate) fn decide_pending_replacement(
             return PendingReplacementDecision::Resume(ReplacementOpenResumeReason::ChildExited);
         }
         ReplacementOpenChildObservation::PollFailed => {
-            return PendingReplacementDecision::Resume(
-                ReplacementOpenResumeReason::ExitPollFailed,
-            );
+            return PendingReplacementDecision::Resume(ReplacementOpenResumeReason::ExitPollFailed);
         }
         ReplacementOpenChildObservation::Running => {}
     }
@@ -353,8 +349,8 @@ pub(crate) fn decode_handoff_result(
     if marker != HANDOFF_MARKER || fields.next().is_some() {
         return Err(HandoffCodecError::InvalidLine);
     }
-    let handoff_id = HandoffId::parse_decimal(identity)
-        .map_err(|_| HandoffCodecError::InvalidIdentity)?;
+    let handoff_id =
+        HandoffId::parse_decimal(identity).map_err(|_| HandoffCodecError::InvalidIdentity)?;
     let result = match result {
         "opened" => ReplacementOpenResult::Opened,
         "failed" => ReplacementOpenResult::Failed,
@@ -362,8 +358,5 @@ pub(crate) fn decode_handoff_result(
         _ => return Err(HandoffCodecError::InvalidLine),
     };
 
-    Ok(ReplacementOpenMessage {
-        handoff_id,
-        result,
-    })
+    Ok(ReplacementOpenMessage { handoff_id, result })
 }

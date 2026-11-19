@@ -7,10 +7,7 @@
 use crate::documents::lifecycle::UnsavedChangesChoice;
 
 /// Dispatches a native Save / Don't Save / Cancel prompt, failing safe to Cancel.
-pub(crate) fn prompt_unsaved_changes(
-    title: &str,
-    frame: &eframe::Frame,
-) -> UnsavedChangesChoice {
+pub(crate) fn prompt_unsaved_changes(title: &str, frame: &eframe::Frame) -> UnsavedChangesChoice {
     #[cfg(target_os = "macos")]
     {
         let _ = frame;
@@ -19,7 +16,9 @@ pub(crate) fn prompt_unsaved_changes(
 
     #[cfg(target_os = "windows")]
     {
-        crate::platform::windows::windows_unsaved_changes_prompt::prompt_unsaved_changes(title, frame)
+        crate::platform::windows::windows_unsaved_changes_prompt::prompt_unsaved_changes(
+            title, frame,
+        )
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]

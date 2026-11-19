@@ -6,6 +6,6 @@ pub(crate) mod material_font;
 // for painting and interaction.
 #[allow(dead_code)]
 pub(crate) mod geometry;
-pub(crate) mod style;
 pub(crate) mod runtime_icon;
+pub(crate) mod style;
 pub(crate) mod wheel_zoom;

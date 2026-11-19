@@ -1,13 +1,12 @@
 //! Parent-side coordination for acknowledged replacement opens.
 
 use crate::app::ScriptCraftApp;
+use crate::chrome::menu;
 use crate::documents::{
     lifecycle::{self, show_native_lifecycle_error},
-    replacement_protocol as replacement_open,
-    replacement_transport as replacement_open_transport,
+    replacement_protocol as replacement_open, replacement_transport as replacement_open_transport,
     unsaved_changes,
 };
-use crate::chrome::menu;
 use eframe::egui;
 use scriptcraft_commands::EditorSurface;
 use scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL;
@@ -54,7 +53,11 @@ fn launch_child_for_app(
     document_path: Option<&Path>,
     spawn: impl FnOnce(&Path, &[OsString]) -> std::io::Result<()>,
 ) -> Result<(), ChildLaunchError> {
-    let arguments = child_arguments(app.development_mode, app.menu_platform_choice, document_path)?;
+    let arguments = child_arguments(
+        app.development_mode,
+        app.menu_platform_choice,
+        document_path,
+    )?;
     launch_child_with(executable, &arguments, spawn)
 }
 
@@ -157,9 +160,8 @@ impl ScriptCraftApp {
         }
 
         let is_dirty = self.session.dirty();
-        let choice = is_dirty.then(|| {
-            unsaved_changes::prompt_unsaved_changes(&self.native_title, frame)
-        });
+        let choice =
+            is_dirty.then(|| unsaved_changes::prompt_unsaved_changes(&self.native_title, frame));
         let save_outcome = if choice == Some(lifecycle::UnsavedChangesChoice::Save) {
             Some(self.save_for_lifecycle(ctx))
         } else {
@@ -224,10 +226,7 @@ impl ScriptCraftApp {
         // This is transient Body presentation state, not session selection or
         // semantic content; stop reconciling it while both editor inputs lock.
         self.set_active_body_group(None);
-        let metadata = replacement_open::PendingReplacementMetadata::new(
-            transport.handoff_id,
-            now,
-        );
+        let metadata = replacement_open::PendingReplacementMetadata::new(transport.handoff_id, now);
         self.pending_replacement = Some(PendingReplacement {
             metadata,
             transport,
@@ -245,11 +244,7 @@ impl ScriptCraftApp {
     /// Drains all queued events before the nonblocking child poll, then applies
     /// one terminal decision. Matching Opened arms and requests the next
     /// WO-001 one-shot root Close; every other result resumes with feedback.
-    pub(crate) fn poll_pending_replacement(
-        &mut self,
-        ctx: &egui::Context,
-        now: Instant,
-    ) -> bool {
+    pub(crate) fn poll_pending_replacement(&mut self, ctx: &egui::Context, now: Instant) -> bool {
         let events: Vec<_> = self.replacement_open_events.try_iter().collect();
         let child_observation = match self.pending_replacement.as_mut() {
             Some(pending) => match pending.transport.try_wait() {
@@ -300,15 +295,12 @@ impl ScriptCraftApp {
                 self.pending_replacement = None;
                 let (title, message) = replacement_resume_feedback(reason);
                 show_native_lifecycle_error(title, message);
-                self.next_cast_list_refresh = now
-                    .checked_add(CAST_LIST_REFRESH_INTERVAL)
-                    .unwrap_or(now);
+                self.next_cast_list_refresh =
+                    now.checked_add(CAST_LIST_REFRESH_INTERVAL).unwrap_or(now);
                 let availability = self.app_command_availability();
                 let prior_surface = self.replacement_resume_surface.take();
-                let resume_surface = replacement_resume_surface(
-                    prior_surface,
-                    self.title_page_window_open,
-                );
+                let resume_surface =
+                    replacement_resume_surface(prior_surface, self.title_page_window_open);
                 if let Some(surface) = resume_surface {
                     self.set_active_editor_surface(surface);
                     self.reconcile_body_active_group();

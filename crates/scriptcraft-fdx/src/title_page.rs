@@ -1,23 +1,19 @@
 //! FDX title-page semantic paragraph and direct-formatting mapping.
 //! The FDX package owns this mapping between source title-page data and model values.
 
-use crate::diagnostics::{
-    map_model_error, map_paragraph_id_error, FdxError, SaveDiagnosticCode,
-};
+use crate::diagnostics::{map_model_error, map_paragraph_id_error, FdxError, SaveDiagnosticCode};
 use crate::identity::raw_identity_attribute as identity_attribute;
 use crate::reader::{attribute, validate_xml_chars, RawElement};
-use crate::settings::role_from_fdx;
 use crate::tree::{preserved_element, preserved_element_owned};
 use crate::writer::validate_qname;
-use crate::content::role_to_fdx;
-use scriptcraft_model::paragraph_id::ParagraphIdAllocator;
 use scriptcraft_model::formatting::FixedPoint;
+use scriptcraft_model::paragraph_id::ParagraphIdAllocator;
 use scriptcraft_model::preservation::{
     PreservedAttribute, PreservedElement, PreservedNode, SourceName,
 };
 use scriptcraft_model::{
-    SourceFormat, SourceProvenance, SourceSection, TextRun, TitlePageAlignment,
-    TitlePageParagraph, TitlePageParagraphFormatting,
+    SourceFormat, SourceProvenance, SourceSection, TextRun, TitlePageAlignment, TitlePageParagraph,
+    TitlePageParagraphFormatting,
 };
 
 pub(crate) fn new_title_page_header_and_footer(
@@ -84,21 +80,23 @@ pub(crate) fn new_title_page_header_and_footer(
 
     let mut footer = preserved_element("Footer", Vec::new());
     let footer_id = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
-    footer.children.push(PreservedNode::Element(preserved_element(
-        "Paragraph",
-        vec![
-            ("Alignment", "Right"),
-            ("FirstIndent", "0.00"),
-            ("Leading", "Regular"),
-            ("LeftIndent", "1.25"),
-            ("OutlineLevel", "1"),
-            ("RightIndent", "-1.25"),
-            ("SpaceBefore", "0"),
-            ("Spacing", "1"),
-            ("StartsNewPage", "No"),
-            ("id", &footer_id),
-        ],
-    )));
+    footer
+        .children
+        .push(PreservedNode::Element(preserved_element(
+            "Paragraph",
+            vec![
+                ("Alignment", "Right"),
+                ("FirstIndent", "0.00"),
+                ("Leading", "Regular"),
+                ("LeftIndent", "1.25"),
+                ("OutlineLevel", "1"),
+                ("RightIndent", "-1.25"),
+                ("SpaceBefore", "0"),
+                ("Spacing", "1"),
+                ("StartsNewPage", "No"),
+                ("id", &footer_id),
+            ],
+        )));
     header_and_footer
         .children
         .push(PreservedNode::Element(header));
@@ -146,13 +144,10 @@ pub(crate) fn new_title_page_paragraph(
         attributes.push(("Spacing", "1".to_owned()));
     }
     if let Some(value) = formatting.starts_new_page {
-        attributes.push((
-            "StartsNewPage",
-            if value { "Yes" } else { "No" }.to_owned(),
-        ));
+        attributes.push(("StartsNewPage", if value { "Yes" } else { "No" }.to_owned()));
     }
-    if let Some(role) = semantic.role {
-        attributes.push(("Type", role_to_fdx(role).to_owned()));
+    if let Some(element_type) = semantic.element_type() {
+        attributes.push(("Type", element_type.into_string()));
     }
     validate_xml_chars(&semantic.text)?;
     let paragraph_id = paragraph_ids.allocate().map_err(map_paragraph_id_error)?;
@@ -234,10 +229,10 @@ pub(crate) fn make_title_page_paragraph(
         foreign_id: identity_attribute(element).map(str::to_owned),
         foreign_role: attribute(element, "Type").map(str::to_owned),
     };
-    let role = attribute(element, "Type").and_then(role_from_fdx);
+    let element_type = crate::content::paragraph_type_key(element)?;
     TitlePageParagraph::with_runs(
         id,
-        role,
+        element_type,
         crate::content::semantic_text_runs(element, false, false)?,
         Some(source_provenance),
         direct_title_page_formatting(element),
@@ -270,5 +265,44 @@ fn direct_title_page_formatting(element: &RawElement) -> TitlePageParagraphForma
             "No" => Some(false),
             _ => None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod element_type_output_tests {
+    use super::*;
+    use scriptcraft_model::{ElementTypeKey, TitlePageParagraphFormatting};
+
+    fn rendered_type(paragraph: &PreservedElement) -> Option<&str> {
+        paragraph
+            .attributes
+            .iter()
+            .find(|attribute| {
+                attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type"
+            })
+            .map(|attribute| attribute.value.as_str())
+    }
+
+    #[test]
+    fn preservation_free_title_output_keeps_arbitrary_case_and_optional_absence() {
+        let mut ids = ParagraphIdAllocator::new(Vec::<String>::new());
+        for label in [Some("Lyrics"), Some("lyrics"), None] {
+            let key =
+                label.map(|label| ElementTypeKey::new(label).unwrap_or_else(|_| unreachable!()));
+            let paragraph = TitlePageParagraph::with_runs(
+                format!("title-{}", label.unwrap_or("typeless")),
+                key,
+                Vec::new(),
+                None,
+                TitlePageParagraphFormatting::default(),
+            )
+            .unwrap_or_else(|_| unreachable!());
+            let PreservedNode::Element(source) =
+                new_title_page_paragraph(&paragraph, &mut ids).unwrap_or_else(|_| unreachable!())
+            else {
+                unreachable!("title paragraph construction returns an element")
+            };
+            assert_eq!(rendered_type(&source), label);
+        }
     }
 }

@@ -183,9 +183,9 @@ impl ElementWrapCache {
         };
         let fingerprint = self.fingerprint(&identity, text);
         if let Some(entry) = self.buckets.get_mut(&fingerprint).and_then(|bucket| {
-            bucket
-                .iter_mut()
-                .find(|entry| entry.context.matches(identity) && entry.canonical_text.as_ref() == text)
+            bucket.iter_mut().find(|entry| {
+                entry.context.matches(identity) && entry.canonical_text.as_ref() == text
+            })
         }) {
             self.usage_order.remove(&(
                 entry.last_used_generation,
@@ -288,10 +288,7 @@ impl ElementWrapCache {
                         .position(|entry| entry.insertion_order == insertion_order)
                         .map(|index| bucket.remove(index));
                     let remove_bucket = bucket.is_empty();
-                    (
-                        removed.map_or(0, |entry| entry.byte_cost),
-                        remove_bucket,
-                    )
+                    (removed.map_or(0, |entry| entry.byte_cost), remove_bucket)
                 } else {
                     (0, false)
                 };

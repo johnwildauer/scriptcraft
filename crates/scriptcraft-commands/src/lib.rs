@@ -17,8 +17,8 @@ pub use values::{
 mod conversions;
 pub use conversions::{
     pointer_selection, DiagnosticMessage, DocumentPath, InvalidDiagnosticMessage,
-    InvalidDocumentPath, InvalidZoomFactor, InvalidZoomPercent, Position, PositionError,
-    Selection, SelectionError, ZoomFactor, ZoomPercent, MAX_DIAGNOSTIC_MESSAGE_BYTES,
+    InvalidDocumentPath, InvalidZoomFactor, InvalidZoomPercent, Position, PositionError, Selection,
+    SelectionError, ZoomFactor, ZoomPercent, MAX_DIAGNOSTIC_MESSAGE_BYTES,
 };
 
 mod command;

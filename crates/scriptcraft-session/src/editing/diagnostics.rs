@@ -44,4 +44,3 @@ pub(super) fn add_optional_diagnostic_duration(target: &mut Option<u64>, started
         *target = Some(target.unwrap_or(0).saturating_add(elapsed));
     }
 }
-

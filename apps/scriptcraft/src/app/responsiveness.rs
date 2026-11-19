@@ -5,8 +5,8 @@
 //! latency. Histories and pending state have fixed bounds.
 
 use scriptcraft_commands::{CommandId, EditorSurface};
-use scriptcraft_session::editing::EditMutationDiagnostics;
 use scriptcraft_layout::LayoutBuildDiagnostics;
+use scriptcraft_session::editing::EditMutationDiagnostics;
 use std::time::{Duration, Instant};
 
 const HISTORY_CAPACITY: usize = 120;
@@ -117,11 +117,17 @@ impl CommandDetailCountWindow {
         let mut totals = CommandDetailCounts::default();
         for offset in 0..self.len {
             let counts = self.values[(first + offset) % HISTORY_CAPACITY];
-            totals.structural_retries = totals.structural_retries.saturating_add(counts.structural_retries);
-            totals.scoped_attempts = totals.scoped_attempts.saturating_add(counts.scoped_attempts);
+            totals.structural_retries = totals
+                .structural_retries
+                .saturating_add(counts.structural_retries);
+            totals.scoped_attempts = totals
+                .scoped_attempts
+                .saturating_add(counts.scoped_attempts);
             totals.scoped_accepts = totals.scoped_accepts.saturating_add(counts.scoped_accepts);
             totals.full_fallbacks = totals.full_fallbacks.saturating_add(counts.full_fallbacks);
-            totals.full_validations = totals.full_validations.saturating_add(counts.full_validations);
+            totals.full_validations = totals
+                .full_validations
+                .saturating_add(counts.full_validations);
             totals.no_ops = totals.no_ops.saturating_add(counts.no_ops);
         }
         totals
@@ -148,17 +154,42 @@ struct CommandDetailDiagnostics {
 impl CommandDetailDiagnostics {
     fn record(&mut self, executor_duration: Duration, observation: EditMutationDiagnostics) {
         self.executor_durations.push(executor_duration);
-        self.core_durations.push_nanos(u128::from(observation.total_nanos));
-        self.candidate_setup_durations.push_nanos(u128::from(observation.candidate_setup_nanos));
-        self.edit_operation_durations.push_nanos(u128::from(observation.edit_operation_nanos));
-        self.preservation_durations.push_nanos(u128::from(observation.preservation_nanos));
-        push_optional_nanos(&mut self.structural_retry_durations, observation.structural_retry_nanos);
-        push_optional_nanos(&mut self.scoped_validation_durations, observation.scoped_validation_nanos);
-        push_optional_nanos(&mut self.full_validation_durations, observation.full_validation_nanos);
-        push_optional_nanos(&mut self.no_op_equality_durations, observation.no_op_equality_nanos);
-        push_optional_nanos(&mut self.derived_classification_durations, observation.derived_classification_nanos);
-        push_optional_nanos(&mut self.dirty_comparison_durations, observation.dirty_comparison_nanos);
-        push_optional_nanos(&mut self.history_publication_durations, observation.history_publication_nanos);
+        self.core_durations
+            .push_nanos(u128::from(observation.total_nanos));
+        self.candidate_setup_durations
+            .push_nanos(u128::from(observation.candidate_setup_nanos));
+        self.edit_operation_durations
+            .push_nanos(u128::from(observation.edit_operation_nanos));
+        self.preservation_durations
+            .push_nanos(u128::from(observation.preservation_nanos));
+        push_optional_nanos(
+            &mut self.structural_retry_durations,
+            observation.structural_retry_nanos,
+        );
+        push_optional_nanos(
+            &mut self.scoped_validation_durations,
+            observation.scoped_validation_nanos,
+        );
+        push_optional_nanos(
+            &mut self.full_validation_durations,
+            observation.full_validation_nanos,
+        );
+        push_optional_nanos(
+            &mut self.no_op_equality_durations,
+            observation.no_op_equality_nanos,
+        );
+        push_optional_nanos(
+            &mut self.derived_classification_durations,
+            observation.derived_classification_nanos,
+        );
+        push_optional_nanos(
+            &mut self.dirty_comparison_durations,
+            observation.dirty_comparison_nanos,
+        );
+        push_optional_nanos(
+            &mut self.history_publication_durations,
+            observation.history_publication_nanos,
+        );
         self.counts.push(&observation);
     }
 
@@ -526,9 +557,13 @@ fn finalize_aligned_edit_update(
             other_surface_builds = other_surface_builds.saturating_add(surface.layout_builds);
         }
     }
-    let surface_nanos = update.surfaces.iter().flatten().fold(0_u128, |total, surface| {
-        total.saturating_add(surface.duration_nanos)
-    });
+    let surface_nanos = update
+        .surfaces
+        .iter()
+        .flatten()
+        .fold(0_u128, |total, surface| {
+            total.saturating_add(surface.duration_nanos)
+        });
     // Exact residual ownership: document surfaces are sequential root-update
     // work, while only outermost Commands outside every surface are additional
     // nonoverlapping work. Nested Layout/Page/inside-Commands are never subtracted.
@@ -581,8 +616,8 @@ impl ResponsivenessDiagnostics {
         if self.active_other_bucket == Some(bucket) {
             if let Some(update) = self.current_update.as_mut() {
                 let index = bucket.index();
-                update.other_buckets.elapsed_nanos[index] = update.other_buckets.elapsed_nanos[index]
-                    .saturating_add(duration.as_nanos());
+                update.other_buckets.elapsed_nanos[index] =
+                    update.other_buckets.elapsed_nanos[index].saturating_add(duration.as_nanos());
             }
         }
         self.active_other_bucket = None;
@@ -621,13 +656,11 @@ impl ResponsivenessDiagnostics {
         if let Some(update) = self.current_update.as_mut() {
             update.command_nanos = update.command_nanos.saturating_add(nanos);
             if inside_surface {
-                update.command_inside_surface_nanos = update
-                    .command_inside_surface_nanos
-                    .saturating_add(nanos);
+                update.command_inside_surface_nanos =
+                    update.command_inside_surface_nanos.saturating_add(nanos);
             } else {
-                update.command_outside_surface_nanos = update
-                    .command_outside_surface_nanos
-                    .saturating_add(nanos);
+                update.command_outside_surface_nanos =
+                    update.command_outside_surface_nanos.saturating_add(nanos);
                 // Nested internal commands remain in the raw aggregate but are
                 // not subtracted again from the root Update or its active bucket.
                 if outermost {
@@ -636,9 +669,8 @@ impl ResponsivenessDiagnostics {
                         .saturating_add(nanos);
                     if let Some(bucket) = active_other_bucket {
                         let index = bucket.index();
-                        update.other_buckets.command_nanos[index] = update.other_buckets
-                            .command_nanos[index]
-                            .saturating_add(nanos);
+                        update.other_buckets.command_nanos[index] =
+                            update.other_buckets.command_nanos[index].saturating_add(nanos);
                     }
                 }
             }
@@ -660,9 +692,7 @@ impl ResponsivenessDiagnostics {
             self.layout_build_durations.push(duration);
         }
         let nanos = duration.as_nanos();
-        if let (Some(update), Some(surface)) =
-            (self.current_update.as_mut(), self.active_surface)
-        {
+        if let (Some(update), Some(surface)) = (self.current_update.as_mut(), self.active_surface) {
             let observation = update.surfaces[aligned_surface_index(surface)]
                 .get_or_insert_with(AlignedSurfaceObservation::default);
             observation.layout_nanos = observation.layout_nanos.saturating_add(nanos);
@@ -700,20 +730,16 @@ impl ResponsivenessDiagnostics {
             (self.current_update.as_mut(), self.active_other_bucket)
         {
             let index = bucket.index();
-            update.other_buckets.surface_nanos[index] = update.other_buckets.surface_nanos[index]
-                .saturating_add(duration.as_nanos());
+            update.other_buckets.surface_nanos[index] =
+                update.other_buckets.surface_nanos[index].saturating_add(duration.as_nanos());
         }
-        if let (Some(update), Some(surface)) =
-            (self.current_update.as_mut(), self.active_surface)
-        {
+        if let (Some(update), Some(surface)) = (self.current_update.as_mut(), self.active_surface) {
             let observation = update.surfaces[aligned_surface_index(surface)]
                 .get_or_insert_with(AlignedSurfaceObservation::default);
             observation.duration_nanos = observation
                 .duration_nanos
                 .saturating_add(duration.as_nanos());
-            observation.page_paint_nanos = observation
-                .page_paint_nanos
-                .saturating_add(paint_nanos);
+            observation.page_paint_nanos = observation.page_paint_nanos.saturating_add(paint_nanos);
         }
         self.active_surface = None;
     }
@@ -782,7 +808,8 @@ impl ResponsivenessDiagnostics {
         let update = format_optional_summary(samples.summary(|sample| Some(sample.update_nanos)));
         let command = format_optional_summary(samples.summary(|sample| Some(sample.command_nanos)));
         let surface = format_optional_summary(samples.summary(|sample| Some(sample.surface_nanos)));
-        let residual = format_optional_summary(samples.summary(|sample| Some(sample.residual_nanos)));
+        let residual =
+            format_optional_summary(samples.summary(|sample| Some(sample.residual_nanos)));
         let build_surface = format_optional_summary(
             samples.summary(|sample| sample.build_surface.map(|surface| surface.surface_nanos)),
         );
@@ -812,18 +839,16 @@ impl ResponsivenessDiagnostics {
 
     pub(crate) fn aligned_edit_update_other_detail_summary(&self) -> String {
         let samples = &self.aligned_edit_updates;
-        let input = format_optional_summary(
-            samples.summary(|sample| Some(sample.input_dispatch_nanos)),
-        );
+        let input =
+            format_optional_summary(samples.summary(|sample| Some(sample.input_dispatch_nanos)));
         let derived = format_optional_summary(samples.summary(|sample| Some(sample.derived_nanos)));
         let chrome = format_optional_summary(samples.summary(|sample| Some(sample.chrome_nanos)));
         let diagnostics = format_optional_summary(
             samples.summary(|sample| Some(sample.diagnostics_calculation_nanos)),
         );
         let host = format_optional_summary(samples.summary(|sample| Some(sample.host_nanos)));
-        let remainder = format_optional_summary(
-            samples.summary(|sample| Some(sample.other_remainder_nanos)),
-        );
+        let remainder =
+            format_optional_summary(samples.summary(|sample| Some(sample.other_remainder_nanos)));
         format!(
             "Edit update Other detail ms avg/p95/max | Input/dispatch {input} | Derived {derived} | Chrome {chrome} | Diagnostics nested {diagnostics} | Host {host} | Remainder {remainder}"
         )
@@ -831,16 +856,16 @@ impl ResponsivenessDiagnostics {
 
     pub(crate) fn layout_build_detail_summary(&self) -> String {
         let samples = &self.layout_build_stages;
-        let lookup = format_optional_summary(
-            samples.summary(|sample| Some(sample.prepared_lookup_nanos)),
-        );
+        let lookup =
+            format_optional_summary(samples.summary(|sample| Some(sample.prepared_lookup_nanos)));
         let miss = format_optional_summary(samples.summary(|sample| sample.prepared_miss_nanos));
-        let placement = format_optional_summary(samples.summary(|sample| Some(sample.placement_nanos)));
+        let placement =
+            format_optional_summary(samples.summary(|sample| Some(sample.placement_nanos)));
         let rebase = format_optional_summary(samples.summary(|sample| Some(sample.rebase_nanos)));
-        let indexes = format_optional_summary(
-            samples.summary(|sample| Some(sample.interaction_index_nanos)),
-        );
-        let sort = format_optional_summary(samples.summary(|sample| Some(sample.body_y_sort_nanos)));
+        let indexes =
+            format_optional_summary(samples.summary(|sample| Some(sample.interaction_index_nanos)));
+        let sort =
+            format_optional_summary(samples.summary(|sample| Some(sample.body_y_sort_nanos)));
         let other = format_optional_summary(samples.summary(|sample| Some(sample.other_nanos)));
         let hits = samples.total(|sample| sample.prepared_hits);
         let misses = samples.total(|sample| sample.prepared_misses);
@@ -905,10 +930,9 @@ fn format_optional_summary(summary: Option<DurationSummary>) -> String {
 }
 
 fn format_optional_duration_summary(history: &DurationHistory) -> String {
-    history.summary().map_or_else(
-        || "collecting".to_owned(),
-        format_duration_summary,
-    )
+    history
+        .summary()
+        .map_or_else(|| "collecting".to_owned(), format_duration_summary)
 }
 
 fn format_duration_summary(summary: DurationSummary) -> String {

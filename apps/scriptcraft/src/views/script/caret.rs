@@ -6,9 +6,9 @@ use super::{
     ScriptCraftApp,
 };
 use crate::{
-    views::script::RevealIntent,
     chrome::status_bar::PresentedPage,
     presentation::{geometry as presentation_geometry, style::AdvanceMode},
+    views::script::RevealIntent,
 };
 use eframe::egui::{self, Vec2};
 use scriptcraft_commands::EditorSurface;
@@ -101,11 +101,7 @@ fn caret_blink_repaint_delay(time: f64) -> Duration {
 }
 
 impl ScriptCraftApp {
-    pub(super) fn update_caret_blink_focus(
-        &mut self,
-        ctx: &egui::Context,
-        surface_focused: bool,
-    ) {
+    pub(super) fn update_caret_blink_focus(&mut self, ctx: &egui::Context, surface_focused: bool) {
         self.caret_blink_focus_generation = self.caret_blink_focus_generation.wrapping_add(1);
         if surface_focused {
             self.caret_blink_reset_time = ctx.input(|input| input.time.max(0.0));
@@ -129,10 +125,9 @@ impl ScriptCraftApp {
                     None,
                     &mut query_diagnostics,
                 ),
-                EditorSurface::TitlePage => layout.title_page_for_position(
-                    selection.focus.element,
-                    selection.focus.offset,
-                ),
+                EditorSurface::TitlePage => {
+                    layout.title_page_for_position(selection.focus.element, selection.focus.offset)
+                }
             };
             self.performance.indexed_interaction_queries = self
                 .performance

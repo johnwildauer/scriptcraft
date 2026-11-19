@@ -10,6 +10,11 @@ use crate::lineage::reconcile_document_lineage;
 use crate::reader::{read_v6, validate_xml_chars};
 use crate::reconcile::reconcile_project_elements;
 use crate::text_state::reconcile_root_text_state;
+use crate::verification::{
+    first_identity_set_difference, first_source_tree_difference, identity_set, normalize_sections,
+    same_non_paragraph_identities, validate_project_output_budgets,
+    verify_writer_semantic_projection, IdentitySetDifference, SourceTreeDifference,
+};
 use crate::version::set_preserved_root_version;
 use crate::whitespace::{
     collect_inserted_managed_paragraph_ids, format_generated_structure,
@@ -17,19 +22,17 @@ use crate::whitespace::{
 };
 use crate::window_state::reconcile_root_window_state;
 use crate::{MAX_SOURCE_BYTES, MAX_SOURCE_DEPTH, MAX_SOURCE_NAME_OR_VALUE_BYTES};
-use crate::verification::{
-    first_identity_set_difference, first_source_tree_difference, identity_set,
-    normalize_sections, same_dual_dialogue_projection, same_non_paragraph_identities,
-    same_semantic_elements, same_semantic_title_paragraphs, validate_project_output_budgets,
-    IdentitySetDifference, SourceTreeDifference,
-};
 use scriptcraft_model::preservation::{
     ForeignIdDomain, PreservedElement, PreservedNode, SourceEncoding,
 };
 use scriptcraft_model::{Project, SourceFormat};
 use std::collections::BTreeSet;
 
-pub(crate) fn write_node(node: &PreservedNode, output: &mut String, depth: usize) -> Result<(), FdxError> {
+pub(crate) fn write_node(
+    node: &PreservedNode,
+    output: &mut String,
+    depth: usize,
+) -> Result<(), FdxError> {
     if depth > MAX_SOURCE_DEPTH || output.len() > MAX_SOURCE_BYTES {
         return Err(FdxError::ResourceLimit);
     }
@@ -228,7 +231,6 @@ fn is_xml_name_char(character: char) -> bool {
         || matches!(character, '-' | '.' | '0'..='9' | '\u{B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriterStage {
     ProjectValidation,
@@ -316,7 +318,17 @@ fn write_v6_inner(
     structural_difference: &mut Option<SourceTreeDifference>,
     identity_difference: &mut Option<IdentitySetDifference>,
 ) -> Result<Vec<u8>, FdxError> {
-    project.validate().map_err(map_model_error)?;
+    // Project validation requires every retained definition anchor to resolve
+    // against the current registry. Reconcile a detached validation copy first
+    // so removing a definition (including its inert duplicate family) can be
+    // verified instead of being rejected before the writer gets to project it.
+    // The actual output path below still starts from the caller's unchanged
+    // preservation snapshot and performs the same projection for comparison.
+    let mut validation_project = project.clone();
+    if validation_project.preservation.is_some() {
+        crate::element_settings::reconcile_project_element_settings(&mut validation_project)?;
+    }
+    validation_project.validate().map_err(map_model_error)?;
     if !valid_document_ref_datetime(context.timestamp()) {
         return Err(FdxError::InvalidValue);
     }
@@ -375,6 +387,13 @@ fn write_v6_inner(
             reconcile_root_text_state(&mut sections, project, context.text_state())?;
         }
         *stage = WriterStage::ManagedSourceReconciliation;
+        let mut definition_projection = state.clone();
+        definition_projection.sections = sections;
+        crate::element_settings::reconcile_retained_project_element_settings(
+            &mut definition_projection,
+            project.element_definitions(),
+        )?;
+        let mut sections = definition_projection.sections;
         reconcile_project_elements(&mut sections, project)?;
         let original_paragraph_ids = original_state
             .identities
@@ -423,12 +442,7 @@ fn write_v6_inner(
         save_diagnostic_at(error, SaveDiagnosticCode::WriteOutputRereadPropagation)
     })?;
     *stage = WriterStage::SemanticComparison;
-    if !same_semantic_title_paragraphs(&project.title_page, &written.project.title_page)
-        || !same_semantic_elements(&project.elements, &written.project.elements)
-        || !same_dual_dialogue_projection(project, &written.project)
-    {
-        return Err(SaveDiagnosticCode::WriteSemanticRereadMismatch.error());
-    }
+    verify_writer_semantic_projection(project, &written.project)?;
     if let Some((expected_sections, expected_identities)) = expected_preserved_sections {
         *stage = WriterStage::IdentityComparison;
         let actual_state = written

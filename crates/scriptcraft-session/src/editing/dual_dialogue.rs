@@ -27,9 +27,9 @@ impl EditingSession {
     /// Atomically enables a valid ungrouped dual sequence or disables the group
     /// containing the collapsed Body caret. An ineligible selection is a no-op.
     pub fn toggle_dual_dialogue(&mut self) -> Result<(), EditError> {
-        let Some(target) = self.dual_dialogue_toggle_target(
-            dual_dialogue::SelectionSurface::Body,
-        )? else {
+        let Some(target) =
+            self.dual_dialogue_toggle_target(dual_dialogue::SelectionSurface::Body)?
+        else {
             return Ok(());
         };
         let mut project = self.project.clone();
@@ -37,7 +37,9 @@ impl EditingSession {
             dual_dialogue::ToggleTarget::Enable(pattern) => {
                 let candidate_start = pattern.flat_range.start;
                 let group_id = project.allocate_element_id()?;
-                let member_ids = pattern.left.member_ids()
+                let member_ids = pattern
+                    .left
+                    .member_ids()
                     .chain(pattern.right.member_ids())
                     .cloned()
                     .collect::<Vec<_>>();
@@ -58,14 +60,17 @@ impl EditingSession {
                 }
                 let group = dual_dialogue::DualDialogueGroup {
                     id: group_id,
-                    left: pattern.left,
-                    right: pattern.right,
+                    members: member_ids,
                     wrapper,
                 };
-                let insertion = project.dual_dialogue_groups.iter().position(|existing| {
-                    dual_dialogue::first_member(&project, existing)
-                        .is_some_and(|index| index > candidate_start)
-                }).unwrap_or(project.dual_dialogue_groups.len());
+                let insertion = project
+                    .dual_dialogue_groups
+                    .iter()
+                    .position(|existing| {
+                        dual_dialogue::first_member(&project, existing)
+                            .is_some_and(|index| index > candidate_start)
+                    })
+                    .unwrap_or(project.dual_dialogue_groups.len());
                 project.dual_dialogue_groups.insert(insertion, group);
             }
             dual_dialogue::ToggleTarget::Disable(group_id) => {
@@ -95,8 +100,7 @@ impl EditingSession {
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
         self.validated_baseline = true;
-        self.pending_derived_invalidation =
-            super::derived::PendingDerivedInvalidation::Complete;
+        self.pending_derived_invalidation = super::derived::PendingDerivedInvalidation::Complete;
         self.deferred_derived_scenes.clear();
         self.failed_derived_complete = false;
         self.failed_derived_scenes.clear();

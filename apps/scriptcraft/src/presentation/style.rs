@@ -24,9 +24,7 @@ pub(crate) struct ResolvedTextPresentation {
 
 /// Resolves only an explicitly declared Arial family to Arial. All other
 /// families, including hidden styles, retain the established Courier fallback.
-pub(crate) fn resolve_effective_text_style(
-    style: &EffectiveTextStyle,
-) -> ResolvedTextPresentation {
+pub(crate) fn resolve_effective_text_style(style: &EffectiveTextStyle) -> ResolvedTextPresentation {
     ResolvedTextPresentation {
         family: if style.declared_family.eq_ignore_ascii_case("Arial") {
             RendererFamilyChoice::Arial

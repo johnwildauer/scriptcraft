@@ -6,7 +6,9 @@ use super::{
     },
     inputs::{effective_paragraph, EffectiveGeometryMode, EffectiveParagraph},
 };
-use scriptcraft_model::dual_dialogue::{self as model_dual_dialogue, DualDialogueGroup, DualDialogueSide};
+use scriptcraft_model::dual_dialogue::{
+    self as model_dual_dialogue, DualDialogueGroup, DualDialogueSide,
+};
 use scriptcraft_model::formatting::{
     formatting_for_role, EffectiveTextStyle, FixedPoint, ParagraphAlignment, SourceLayoutSettings,
     SourceParagraphOverrides,
@@ -56,17 +58,17 @@ impl ScreenplayLayout {
         else {
             return Ok(None);
         };
+        let Some(projection) = model_dual_dialogue::active_dual_dialogue_projection(project, group)
+        else {
+            return Ok(None);
+        };
         // The transient active Body group follows the ordinary sequential path.
         if self.active_group_id.as_ref() == Some(&group.id) {
             return Ok(None);
         }
 
-        let (outer_left, outer_right) = dual_outer_extent(
-            &self.inputs,
-            source_settings,
-            project,
-            group,
-        )?;
+        let (outer_left, outer_right) =
+            dual_outer_extent(&self.inputs, source_settings, project, group)?;
         let gap = FixedPoint::from_points(geometry::DUAL_DIALOGUE_COLUMN_GAP_POINTS);
         let column_width = FixedPoint::from_raw(
             outer_right
@@ -96,11 +98,10 @@ impl ScreenplayLayout {
         );
         let left = wrap_dual_side(
             project,
-            &group.left,
+            &projection.left,
             left_box,
             &self.inputs,
             source_settings,
-            project.uses_legacy_layout_defaults(),
             purpose,
             composition,
             self,
@@ -110,11 +111,10 @@ impl ScreenplayLayout {
         );
         let right = wrap_dual_side(
             project,
-            &group.right,
+            &projection.right,
             right_box,
             &self.inputs,
             source_settings,
-            project.uses_legacy_layout_defaults(),
             purpose,
             composition,
             self,
@@ -155,13 +155,7 @@ impl ScreenplayLayout {
                     .max(first_visible_space_before(&right)),
             );
             let placement_started = diagnostics.as_ref().map(|_| Instant::now());
-            self.place_dual_block(
-                &left,
-                &right,
-                starts_new_page,
-                space_before,
-                diagnostics,
-            );
+            self.place_dual_block(&left, &right, starts_new_page, space_before, diagnostics);
             if let Some(diagnostics) = diagnostics.as_deref_mut() {
                 add_elapsed_nanos(&mut diagnostics.placement_nanos, placement_started);
             }
@@ -215,9 +209,7 @@ impl ScreenplayLayout {
         if self.pages.is_empty() || self.pages.last().is_some_and(|page| page.title_page) {
             self.pages.push(self.new_page(false));
         }
-        if starts_new_page
-            && self.pages.last().is_some_and(|page| !page.lines.is_empty())
-        {
+        if starts_new_page && self.pages.last().is_some_and(|page| !page.lines.is_empty()) {
             self.pages.push(self.new_page(false));
         }
 
@@ -233,8 +225,7 @@ impl ScreenplayLayout {
         let required_lines = left.line_count.max(right.line_count);
         // A saturated sum remains larger than any validated printable extent,
         // so overflow cannot be mistaken for a fitting block.
-        let fits_empty_page = block_height <= content_height
-            && required_lines <= capacity;
+        let fits_empty_page = block_height <= content_height && required_lines <= capacity;
 
         let current_page = self.pages.len() - 1;
         let has_boundary = !self.pages[current_page].lines.is_empty();
@@ -250,8 +241,8 @@ impl ScreenplayLayout {
                 .saturating_add(applied_gap),
         );
         let vertical_end = block_top.raw().saturating_add(block_height);
-        let line_end = (self.pages[current_page].occupied_lines as usize)
-            .saturating_add(required_lines);
+        let line_end =
+            (self.pages[current_page].occupied_lines as usize).saturating_add(required_lines);
         let fits_remaining = line_end <= capacity && vertical_end <= content_bottom.raw();
 
         if !fits_empty_page {
@@ -290,9 +281,8 @@ impl ScreenplayLayout {
         self.pages[page_index].occupied_lines = self.pages[page_index]
             .occupied_lines
             .saturating_add(required_lines.min(u32::MAX as usize) as u32);
-        self.pages[page_index].next_line_y = FixedPoint::from_raw(
-            block_top.raw().saturating_add(block_height),
-        );
+        self.pages[page_index].next_line_y =
+            FixedPoint::from_raw(block_top.raw().saturating_add(block_height));
     }
 
     fn spill_oversized_dual_block(
@@ -356,8 +346,6 @@ impl ScreenplayLayout {
             page.next_line_y = FixedPoint::from_raw(bottoms[page_offset]);
         }
     }
-
-
 }
 
 struct PreparedDualParagraph {
@@ -473,12 +461,28 @@ pub(super) fn active_group_boundaries(
     let Some(last_element) = model_dual_dialogue::last_member(project, group) else {
         return Vec::new();
     };
-    let first = layout.pages.iter().enumerate().find_map(|(page_index, page)| {
-        page.lines.iter().find(|line| line.element == first_element).map(|line| (page_index, line))
-    });
-    let last = layout.pages.iter().enumerate().rev().find_map(|(page_index, page)| {
-        page.lines.iter().rev().find(|line| line.element == last_element).map(|line| (page_index, line))
-    });
+    let first = layout
+        .pages
+        .iter()
+        .enumerate()
+        .find_map(|(page_index, page)| {
+            page.lines
+                .iter()
+                .find(|line| line.element == first_element)
+                .map(|line| (page_index, line))
+        });
+    let last = layout
+        .pages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(page_index, page)| {
+            page.lines
+                .iter()
+                .rev()
+                .find(|line| line.element == last_element)
+                .map(|line| (page_index, line))
+        });
     let (Some((upper_page, first_line)), Some((lower_page, last_line))) = (first, last) else {
         return Vec::new();
     };
@@ -494,7 +498,11 @@ pub(super) fn active_group_boundaries(
     let lower = FixedRect {
         x,
         y: FixedPoint::from_raw(
-            last_line.paragraph_bounds.y.raw().saturating_add(last_line.paragraph_bounds.height.raw()),
+            last_line
+                .paragraph_bounds
+                .y
+                .raw()
+                .saturating_add(last_line.paragraph_bounds.height.raw()),
         ),
         width,
         height: FixedPoint::default(),
@@ -550,7 +558,6 @@ fn wrap_dual_side(
     column: (FixedPoint, FixedPoint),
     inputs: &LayoutInputs,
     source: &SourceLayoutSettings,
-    legacy_json_profile: bool,
     purpose: LayoutPurpose,
     composition: LayoutComposition,
     layout: &ScreenplayLayout,
@@ -570,23 +577,18 @@ fn wrap_dual_side(
         else {
             continue;
         };
+        // Phase 5 replaces this static-layout adapter with definition-driven layout.
+        let role = element.transitional_role();
         let prepared_lookup_started = diagnostics.as_ref().map(|_| Instant::now());
-        let text_style = source.text_style(element.role);
+        let text_style = source.text_style(role);
         if purpose == LayoutPurpose::Print && text_style.hidden_text {
             continue;
         }
-        let mut paragraph = effective_paragraph(
-            inputs,
-            source,
-            element.role,
-            &element.id,
-            legacy_json_profile,
-            &text_style,
-        );
+        let mut paragraph = effective_paragraph(inputs, source, role, &element.id, &text_style);
         paragraph.left = column.0;
         paragraph.right = column.1;
         paragraph.first_indent = FixedPoint::default();
-        if element.role == Role::Character {
+        if role == Role::Character {
             paragraph.alignment = ParagraphAlignment::Center;
         }
         let environment = PreparedBodyEnvironment {

@@ -4,21 +4,21 @@
 //! The custom Command-Q item enters the same FIFO as catalog activations and
 //! requests guarded root Close through the typed application command.
 
-use crate::commands::AppCommandAvailability;
 use crate::chrome::menu_items::{
     command_for_action, menu_item_is_checked, MenuAction, MenuEntrySpec, MenuItemBehavior,
     MenuItemSpec, PlaceholderKind, MENU_CATALOG,
 };
 use crate::chrome::shortcuts::{LogicalShortcut, ShortcutKey};
-use std::collections::{HashMap, VecDeque};
-use std::marker::PhantomData;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
-use scriptcraft_commands::{Command, CommandId, CommandOrigin, EditorSurface, ScriptViewMode};
+use crate::commands::AppCommandAvailability;
 use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{
     AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
+use scriptcraft_commands::{Command, CommandId, CommandOrigin, EditorSurface, ScriptViewMode};
+use std::collections::{HashMap, VecDeque};
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 type NativeEventInbox = Arc<Mutex<VecDeque<MenuId>>>;
 const APPLICATION_MENU_TITLE: &str = "ScriptCraft";
@@ -113,7 +113,7 @@ impl NativeMenuController {
             PredefinedMenuItem::about(
                 Some("About ScriptCraft"),
                 Some(AboutMetadata {
-                name: Some(APPLICATION_MENU_TITLE.to_owned()),
+                    name: Some(APPLICATION_MENU_TITLE.to_owned()),
                     version: Some(env!("CARGO_PKG_VERSION").to_owned()),
                     ..AboutMetadata::default()
                 }),
@@ -361,8 +361,7 @@ fn append_catalog_item(
             command_items.insert(
                 MenuId::new(spec.id),
                 (
-                    crate::commands::command_for_id(command)
-                        .expect("catalog command is mapped"),
+                    crate::commands::command_for_id(command).expect("catalog command is mapped"),
                     RetainedNativeCommandItem::Plain(item),
                 ),
             );
@@ -398,20 +397,24 @@ fn append_catalog_item(
         MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Disclosure) => {
             let child_menu = Submenu::with_id(spec.id, spec.label, false);
             submenu.append(&child_menu).map_err(|error| {
-                format!("could not append native disclosure placeholder {}: {error}", spec.id)
+                format!(
+                    "could not append native disclosure placeholder {}: {error}",
+                    spec.id
+                )
             })?;
             retained_submenus.push(child_menu);
         }
         MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Checked) => {
             let item = CheckMenuItem::with_id(spec.id, spec.label, false, true, accelerator);
             submenu.append(&item).map_err(|error| {
-                format!("could not append native checked placeholder {}: {error}", spec.id)
+                format!(
+                    "could not append native checked placeholder {}: {error}",
+                    spec.id
+                )
             })?;
             checked_placeholder_items.push(item);
         }
-        MenuItemBehavior::DisabledPlaceholder(
-            PlaceholderKind::Item | PlaceholderKind::Search,
-        ) => {
+        MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Item | PlaceholderKind::Search) => {
             let item = MenuItem::with_id(spec.id, spec.label, false, accelerator);
             submenu.append(&item).map_err(|error| {
                 format!("could not append native placeholder {}: {error}", spec.id)
@@ -443,7 +446,8 @@ fn synchronize_entries(
             MenuEntrySpec::Item(spec) => {
                 let id = MenuId::new(spec.id);
                 if let Some((command, item)) = command_items.get(&id) {
-                    let label = if command.id() == CommandId::EditorDualDialogueToggle && say_undual {
+                    let label = if command.id() == CommandId::EditorDualDialogueToggle && say_undual
+                    {
                         "Undual Dialogue"
                     } else {
                         spec.label

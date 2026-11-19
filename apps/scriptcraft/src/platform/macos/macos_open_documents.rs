@@ -20,12 +20,12 @@ use super::macos_document_open::{
     MacOsDocumentOpenError, MacOsDocumentOpenEvent, MacOsDocumentOpenInbox,
     MacOsDocumentOpenRequest,
 };
-use objc2_app_kit::NSApplicationWillFinishLaunchingNotification;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::NSApplicationWillFinishLaunchingNotification;
 use objc2_core_services::{
-    kAEOpenDocuments, keyDirectObject, kCoreEventClass, typeAEList, typeFileURL,
+    kAEOpenDocuments, kCoreEventClass, keyDirectObject, typeAEList, typeFileURL,
 };
 use objc2_foundation::{
     NSAppleEventDescriptor, NSAppleEventManager, NSNotification, NSNotificationCenter, NSObject,
@@ -69,10 +69,7 @@ fn descriptor_route(
 fn file_url_request(
     descriptor: &NSAppleEventDescriptor,
 ) -> Result<MacOsDocumentOpenRequest, MacOsDocumentOpenError> {
-    file_url_request_with(
-        || descriptor.fileURLValue(),
-        |url| request_from_url(url),
-    )
+    file_url_request_with(|| descriptor.fileURLValue(), |url| request_from_url(url))
 }
 
 fn file_url_request_with<T>(
@@ -109,12 +106,10 @@ fn event_from_apple_event(event: &NSAppleEventDescriptor) -> MacOsDocumentOpenEv
         let direct_object = event
             .paramDescriptorForKeyword(keyDirectObject)
             .ok_or(MacOsDocumentOpenError::EmptyOrMalformedEvent)?;
-        let list_item_count = (direct_object.descriptorType() == typeAEList)
-            .then(|| direct_object.numberOfItems());
+        let list_item_count =
+            (direct_object.descriptorType() == typeAEList).then(|| direct_object.numberOfItems());
         match descriptor_route(direct_object.descriptorType(), list_item_count)? {
-            DescriptorRoute::BareFileUrl => {
-                file_url_request(&direct_object)
-            }
+            DescriptorRoute::BareFileUrl => file_url_request(&direct_object),
             DescriptorRoute::SingleItemList => {
                 let item = direct_object
                     .descriptorAtIndex(1)
@@ -162,10 +157,7 @@ define_class!(
 );
 
 impl NativeOpenDocumentsHandler {
-    fn new(
-        inbox: MacOsDocumentOpenInbox,
-        main_thread: MainThreadMarker,
-    ) -> Retained<Self> {
+    fn new(inbox: MacOsDocumentOpenInbox, main_thread: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(main_thread).set_ivars(NativeOpenDocumentsHandlerIvars { inbox });
         // SAFETY: NSObject's initializer is invoked on a valid allocated
         // subclass instance during main-thread-only adapter installation.
@@ -229,14 +221,14 @@ fn register_open_documents_handler(
     // SAFETY: The retained main-thread target implements this exact typed
     // selector, and only the core-class Open Documents event is registered.
     #[allow(unsafe_code)]
-        unsafe {
-            event_manager.setEventHandler_andSelector_forEventClass_andEventID(
-                handler,
-                sel!(handleOpenDocuments:withReplyEvent:),
-                kCoreEventClass,
-                kAEOpenDocuments,
-            );
-        }
+    unsafe {
+        event_manager.setEventHandler_andSelector_forEventClass_andEventID(
+            handler,
+            sel!(handleOpenDocuments:withReplyEvent:),
+            kCoreEventClass,
+            kAEOpenDocuments,
+        );
+    }
 }
 
 /// Retains the shared manager, native target, launch observer, and bounded inbox
@@ -254,20 +246,15 @@ pub(crate) struct NativeOpenDocumentsController {
 impl NativeOpenDocumentsController {
     /// Installs the sole Open Documents registration without touching winit's
     /// application delegate or the separate core Quit event registration.
-    pub(crate) fn install(
-        inbox: MacOsDocumentOpenInbox,
-    ) -> Result<Self, &'static str> {
+    pub(crate) fn install(inbox: MacOsDocumentOpenInbox) -> Result<Self, &'static str> {
         let Some(main_thread) = MainThreadMarker::new() else {
             return Err(INSTALLATION_ERROR);
         };
         let handler = NativeOpenDocumentsHandler::new(inbox.clone(), main_thread);
         let event_manager = NSAppleEventManager::sharedAppleEventManager();
         let notification_center = NSNotificationCenter::defaultCenter();
-        let launch_observer = OpenDocumentsLaunchObserver::new(
-            event_manager.clone(),
-            handler.clone(),
-            main_thread,
-        );
+        let launch_observer =
+            OpenDocumentsLaunchObserver::new(event_manager.clone(), handler.clone(), main_thread);
 
         let controller = Self {
             event_manager: event_manager.clone(),
@@ -284,12 +271,14 @@ impl NativeOpenDocumentsController {
         // launch document event.
         #[allow(unsafe_code)]
         unsafe {
-            controller.notification_center.addObserver_selector_name_object(
-                controller._launch_observer.as_ref() as &AnyObject,
-                sel!(applicationWillFinishLaunching:),
-                Some(NSApplicationWillFinishLaunchingNotification),
-                None,
-            );
+            controller
+                .notification_center
+                .addObserver_selector_name_object(
+                    controller._launch_observer.as_ref() as &AnyObject,
+                    sel!(applicationWillFinishLaunching:),
+                    Some(NSApplicationWillFinishLaunchingNotification),
+                    None,
+                );
         }
         Ok(controller)
     }
@@ -305,10 +294,7 @@ impl NativeOpenDocumentsController {
 
     /// Removes the first cold request only when no command-line path owns startup.
     /// The selected path is ordinary independent startup work, never a handoff.
-    pub(crate) fn take_cold_startup_path(
-        &self,
-        startup_argument_exists: bool,
-    ) -> Option<PathBuf> {
+    pub(crate) fn take_cold_startup_path(&self, startup_argument_exists: bool) -> Option<PathBuf> {
         self.inbox
             .take_cold_startup_request(startup_argument_exists)
             .map(|request| request.into_path())

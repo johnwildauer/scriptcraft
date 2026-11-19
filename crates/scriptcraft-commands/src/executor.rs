@@ -6,9 +6,7 @@
 use scriptcraft_model::{Position as CorePosition, Selection as CoreSelection};
 use scriptcraft_session::editing::{EditError, EditingSession};
 
-use crate::{
-    Command, CommandId, EditorSurface, PointerPhase, PositionError, SelectionError,
-};
+use crate::{Command, CommandId, EditorSurface, PointerPhase, PositionError, SelectionError};
 
 /// Result of applying a semantic editor command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,10 +34,7 @@ pub enum CommandRejection {
 }
 
 /// Executes with the legacy Body target for generic surface-less commands.
-pub fn execute_editor_command(
-    session: &mut EditingSession,
-    command: &Command,
-) -> CommandOutcome {
+pub fn execute_editor_command(session: &mut EditingSession, command: &Command) -> CommandOutcome {
     execute_editor_command_on_surface(session, command, EditorSurface::Body)
 }
 
@@ -94,17 +89,28 @@ pub fn execute_editor_command_on_surface(
             }
             match selection.to_core() {
                 Ok(selection) => set_selection(session, *surface, selection),
-                Err(error) => return CommandOutcome::Rejected(CommandRejection::PositionOutOfRange(error)),
+                Err(error) => {
+                    return CommandOutcome::Rejected(CommandRejection::PositionOutOfRange(error))
+                }
             }
         }
-        Command::EditorSelectionPointer { position, surface, phase } => {
-            let selection = crate::Selection { anchor: *position, focus: *position };
+        Command::EditorSelectionPointer {
+            position,
+            surface,
+            phase,
+        } => {
+            let selection = crate::Selection {
+                anchor: *position,
+                focus: *position,
+            };
             if let Err(error) = selection.validate_for_surface(session.project(), *surface) {
                 return CommandOutcome::Rejected(CommandRejection::InvalidSelection(error));
             }
             let core_position = match position.to_core() {
                 Ok(position) => position,
-                Err(error) => return CommandOutcome::Rejected(CommandRejection::PositionOutOfRange(error)),
+                Err(error) => {
+                    return CommandOutcome::Rejected(CommandRejection::PositionOutOfRange(error))
+                }
             };
             let current = match surface {
                 EditorSurface::Body => session.selection(),
@@ -156,7 +162,12 @@ fn rejected(command: &Command) -> CommandOutcome {
     CommandOutcome::Rejected(CommandRejection::UnsupportedCommand(command.id()))
 }
 
-fn insert(session: &mut EditingSession, surface: EditorSurface, text: &str, paste: bool) -> Result<(), EditError> {
+fn insert(
+    session: &mut EditingSession,
+    surface: EditorSurface,
+    text: &str,
+    paste: bool,
+) -> Result<(), EditError> {
     match (surface, paste) {
         (EditorSurface::Body, false) => session.insert(text),
         (EditorSurface::Body, true) => session.insert_paste(text),
@@ -211,7 +222,10 @@ fn select_all(session: &mut EditingSession, surface: EditorSurface) -> Result<()
                 return Err(EditError::InvalidSelection);
             };
             session.set_selection(CoreSelection {
-                anchor: CorePosition { element: 0, offset: 0 },
+                anchor: CorePosition {
+                    element: 0,
+                    offset: 0,
+                },
                 focus: CorePosition {
                     element: session.project().elements.len() - 1,
                     offset: last.text.len(),
@@ -223,7 +237,10 @@ fn select_all(session: &mut EditingSession, surface: EditorSurface) -> Result<()
                 return Err(EditError::InvalidSelection);
             };
             session.set_title_selection(CoreSelection {
-                anchor: CorePosition { element: 0, offset: 0 },
+                anchor: CorePosition {
+                    element: 0,
+                    offset: 0,
+                },
                 focus: CorePosition {
                     element: session.project().title_page.len() - 1,
                     offset: last.text.len(),

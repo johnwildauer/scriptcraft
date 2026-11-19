@@ -8,6 +8,8 @@ use scriptcraft_model::Project;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FdxDocument {
     pub project: Project,
+    /// Bounded, value-free diagnostics produced while interpreting the source.
+    pub import_diagnostics: FdxImportDiagnostics,
     /// Valid root DocumentRef DateTime observed during deserialization. This is
     /// source metadata, not the ephemeral session-open timestamp used for XRefs.
     /// Malformed or ambiguous values remain source-preserved but are not typed.
@@ -18,6 +20,23 @@ pub struct FdxDocument {
     /// Direct-root disposable zoom and body-editor selection, with safe defaults.
     pub text_state: TextState,
 }
+
+/// A privacy-safe import diagnostic. Settings ordinals identify source position
+/// only; source labels and setting values are deliberately excluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdxImportDiagnostic {
+    DuplicateElementSettings { settings_ordinal: usize },
+}
+
+/// Bounded diagnostics retained on every successful Version 6 reader result.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FdxImportDiagnostics {
+    pub entries: Vec<FdxImportDiagnostic>,
+    /// Number of additional duplicate entries suppressed after the cap.
+    pub suppressed_duplicate_count: u32,
+}
+
+pub const MAX_FDX_IMPORT_DIAGNOSTICS: usize = 32;
 
 /// Supported native-window geometry in OS logical coordinates. FDX V6 currently
 /// emits only Normal mode; unknown imported modes safely project as Normal.
@@ -78,8 +97,14 @@ pub enum FdxMigrationConsent {
 /// is not a claim of native save/reopen safety or Final Draft compatibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FdxMigrationKind {
-    OlderLossy { declared: String },
-    NewerBestEffort { declared: String },
+    /// Older-version import may lose unsupported root sections/settings, but
+    /// paragraph Type spelling and presence are not among those migration losses.
+    OlderLossy {
+        declared: String,
+    },
+    NewerBestEffort {
+        declared: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

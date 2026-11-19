@@ -137,6 +137,7 @@ fn session_error_category(error: &EditError) -> &'static str {
         EditError::UnsupportedTransition { .. } => "unsupported role transition",
         EditError::InlineAltsRoleChange => "inline Alts role constraint",
         EditError::Preservation(_) => "source preservation constraint",
+        EditError::InvalidDefinitionCandidate => "invalid definition replacement candidate",
         EditError::CastList(_) => "cast-list reconciliation constraint",
         EditError::FormattedText(_) => "formatted-text constraint",
         EditError::Model(_) => "model validation constraint",

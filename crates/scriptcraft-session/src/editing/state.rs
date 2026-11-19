@@ -1,10 +1,10 @@
 //! Editing-session value state, construction, and basic accessors.
 
+use super::derived::PendingDerivedInvalidation;
+use super::selection::{validate_selection, validate_title_selection};
 use super::{
     validate_full_candidate, EditError, EditMutationDiagnostics, EditPolicy, Position, Selection,
 };
-use super::derived::PendingDerivedInvalidation;
-use super::selection::{validate_selection, validate_title_selection};
 use scriptcraft_model::formatted_text::{
     project_style_at_caret, RunBoundaryAffinity, RunStyleFlags,
 };
@@ -91,32 +91,34 @@ impl EditingSession {
             offset: 0,
         });
         validate_selection(&project, selection)?;
-        let body_typing_style = project.elements.first().map_or(
-            Ok(RunStyleFlags::default()),
-            |element| {
-                project_style_at_caret(
-                    &element.text,
-                    &element.runs,
-                    0,
-                    RunBoundaryAffinity::Right,
-                    RunStyleFlags::default(),
-                )
-                .map_err(EditError::FormattedText)
-            },
-        )?;
-        let title_typing_style = project.title_page.first().map_or(
-            Ok(RunStyleFlags::default()),
-            |paragraph| {
-                project_style_at_caret(
-                    &paragraph.text,
-                    &paragraph.runs,
-                    0,
-                    RunBoundaryAffinity::Right,
-                    RunStyleFlags::default(),
-                )
-                .map_err(EditError::FormattedText)
-            },
-        )?;
+        let body_typing_style =
+            project
+                .elements
+                .first()
+                .map_or(Ok(RunStyleFlags::default()), |element| {
+                    project_style_at_caret(
+                        &element.text,
+                        &element.runs,
+                        0,
+                        RunBoundaryAffinity::Right,
+                        RunStyleFlags::default(),
+                    )
+                    .map_err(EditError::FormattedText)
+                })?;
+        let title_typing_style =
+            project
+                .title_page
+                .first()
+                .map_or(Ok(RunStyleFlags::default()), |paragraph| {
+                    project_style_at_caret(
+                        &paragraph.text,
+                        &paragraph.runs,
+                        0,
+                        RunBoundaryAffinity::Right,
+                        RunStyleFlags::default(),
+                    )
+                    .map_err(EditError::FormattedText)
+                })?;
         Ok(Self {
             clean_project: project.clone(),
             project,
@@ -125,7 +127,10 @@ impl EditingSession {
             policy,
             layout_inputs,
             selection,
-            title_selection: Selection::caret(Position { element: 0, offset: 0 }),
+            title_selection: Selection::caret(Position {
+                element: 0,
+                offset: 0,
+            }),
             title_typing_style,
             body_typing_style,
             dirty: false,

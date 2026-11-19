@@ -1,13 +1,11 @@
 //! Menu presentation policy and the shared ordered desktop-command handoff.
 
-use crate::commands::{
-    command_for_id, AppCommandAvailability, CommandInvocation,
-};
 use super::menu_items::{
-    command_for_action, LogicalShortcut, MenuAction, MenuEntrySpec, MenuItemBehavior,
-    MenuItemSpec, PlaceholderKind, SemanticIcon, ShortcutKey, MENU_CATALOG,
+    command_for_action, LogicalShortcut, MenuAction, MenuEntrySpec, MenuItemBehavior, MenuItemSpec,
+    PlaceholderKind, SemanticIcon, ShortcutKey, MENU_CATALOG,
 };
 use super::shortcuts::{shortcut_matches, ShortcutPlatform};
+use crate::commands::{command_for_id, AppCommandAvailability, CommandInvocation};
 use eframe::egui;
 use scriptcraft_commands::{Command, CommandId, CommandOrigin, ScriptViewMode};
 use std::collections::VecDeque;
@@ -140,7 +138,9 @@ impl RuntimeMenuPolicy {
         };
         match Self::resolve(host, MenuPlatformChoice::Auto) {
             Ok(policy) => policy,
-            Err(_) => Self { backend: MenuBackend::None },
+            Err(_) => Self {
+                backend: MenuBackend::None,
+            },
         }
     }
 
@@ -164,7 +164,6 @@ impl RuntimeMenuPolicy {
         }
     }
 }
-
 
 /// Resolves catalog shortcuts and the Windows-only Redo alias from the logical
 /// key and modifiers carried by the pressed key event.
@@ -226,10 +225,13 @@ fn command_for_shortcut_event_on_platform(
                         continue;
                     }
                     return match item.behavior {
-                        MenuItemBehavior::Command(command) => crate::commands::command_for_id(command),
-                        MenuItemBehavior::MenuCommand(action) => {
-                            Some(command_for_action(action, scriptcraft_commands::EditorSurface::Body))
+                        MenuItemBehavior::Command(command) => {
+                            crate::commands::command_for_id(command)
                         }
+                        MenuItemBehavior::MenuCommand(action) => Some(command_for_action(
+                            action,
+                            scriptcraft_commands::EditorSurface::Body,
+                        )),
                         MenuItemBehavior::DisabledPlaceholder(_) => None,
                     };
                 }
@@ -297,23 +299,21 @@ pub(crate) fn show_menu_bar(
 ) {
     let metrics = MENU_PRESENTATION;
     let viewport_height = ui.ctx().content_rect().height();
-    let popup_padding_y = metrics.popup_padding_y.min((viewport_height / 2.0).max(0.0));
+    let popup_padding_y = metrics
+        .popup_padding_y
+        .min((viewport_height / 2.0).max(0.0));
     let popup_max_height = (viewport_height - 2.0 * popup_padding_y - 2.0).max(0.0);
     let popup_style = move |style: &mut egui::Style| {
         let separator_color = style.visuals.widgets.noninteractive.bg_stroke.color;
         egui::containers::menu::menu_style(style);
-        style.spacing.menu_margin = egui::Margin::symmetric(
-            metrics.popup_padding_x as i8,
-            popup_padding_y as i8,
-        );
+        style.spacing.menu_margin =
+            egui::Margin::symmetric(metrics.popup_padding_x as i8, popup_padding_y as i8);
         style.spacing.button_padding =
             egui::vec2(metrics.row_button_padding_x, metrics.row_button_padding_y);
         style.spacing.item_spacing = egui::vec2(metrics.row_item_gap_x, metrics.row_item_gap_y);
         style.visuals.menu_corner_radius = egui::CornerRadius::same(metrics.popup_corner_radius);
-        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(
-            metrics.separator_stroke_width,
-            separator_color,
-        );
+        style.visuals.widgets.noninteractive.bg_stroke =
+            egui::Stroke::new(metrics.separator_stroke_width, separator_color);
         style.visuals.widgets.inactive.corner_radius =
             egui::CornerRadius::same(metrics.row_corner_radius);
         style.visuals.widgets.hovered.corner_radius =
@@ -332,8 +332,7 @@ pub(crate) fn show_menu_bar(
         .style(move |style: &mut egui::Style| {
             egui::containers::menu::menu_style(style);
             style.spacing.interact_size.y = metrics.bar_height;
-            style.spacing.item_spacing =
-                egui::vec2(metrics.bar_item_gap_x, metrics.bar_item_gap_y);
+            style.spacing.item_spacing = egui::vec2(metrics.bar_item_gap_x, metrics.bar_item_gap_y);
             style.spacing.button_padding =
                 egui::vec2(metrics.bar_button_padding_x, metrics.bar_button_padding_y);
             style.visuals.widgets.inactive.corner_radius =
@@ -347,49 +346,57 @@ pub(crate) fn show_menu_bar(
         })
         .config(egui::containers::menu::MenuConfig::new().style(popup_style))
         .ui(ui, |ui| {
-        for menu in MENU_CATALOG {
-            let menu_button = ui.menu_button(
-                egui::RichText::new(menu.label).size(metrics.bar_text_size),
-                |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(popup_max_height)
-                        .min_scrolled_height(0.0)
-                        .auto_shrink([true, true])
-                        .show(ui, |ui| {
-                            render_menu_entries(ui, menu.entries, availability, script_view_mode, say_undual, pending, metrics);
-                        });
-                },
-            );
-            menu_button.response.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    true,
-                    menu.accessibility_name.to_owned(),
-                )
-            });
-            let popup_id = egui::Popup::default_response_id(&menu_button.response);
-            if menu_button.response.hovered()
-                && active_top_level_popup_id.is_some_and(|active_popup_id| {
-                    active_popup_id != popup_id
-                        && egui::Popup::is_id_open(ui.ctx(), active_popup_id)
-                })
-            {
-                // MenuBar/MenuButton only open on click in egui 0.34.3. Switch
-                // only when another catalog popup is already open; Popup
-                // memory closes that popup and preserves normal menu handling.
-                egui::Popup::open_id(ui.ctx(), popup_id);
-                active_top_level_popup_id = Some(popup_id);
-                ui.ctx().request_repaint();
+            for menu in MENU_CATALOG {
+                let menu_button = ui.menu_button(
+                    egui::RichText::new(menu.label).size(metrics.bar_text_size),
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(popup_max_height)
+                            .min_scrolled_height(0.0)
+                            .auto_shrink([true, true])
+                            .show(ui, |ui| {
+                                render_menu_entries(
+                                    ui,
+                                    menu.entries,
+                                    availability,
+                                    script_view_mode,
+                                    say_undual,
+                                    pending,
+                                    metrics,
+                                );
+                            });
+                    },
+                );
+                menu_button.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        menu.accessibility_name.to_owned(),
+                    )
+                });
+                let popup_id = egui::Popup::default_response_id(&menu_button.response);
+                if menu_button.response.hovered()
+                    && active_top_level_popup_id.is_some_and(|active_popup_id| {
+                        active_popup_id != popup_id
+                            && egui::Popup::is_id_open(ui.ctx(), active_popup_id)
+                    })
+                {
+                    // MenuBar/MenuButton only open on click in egui 0.34.3. Switch
+                    // only when another catalog popup is already open; Popup
+                    // memory closes that popup and preserves normal menu handling.
+                    egui::Popup::open_id(ui.ctx(), popup_id);
+                    active_top_level_popup_id = Some(popup_id);
+                    ui.ctx().request_repaint();
+                }
+                if egui::Popup::is_id_open(ui.ctx(), popup_id) {
+                    active_top_level_popup_id = Some(popup_id);
+                }
             }
-            if egui::Popup::is_id_open(ui.ctx(), popup_id) {
-                active_top_level_popup_id = Some(popup_id);
+            if let Some(popup_id) = active_top_level_popup_id {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(active_top_level_popup_key, popup_id));
             }
-        }
-        if let Some(popup_id) = active_top_level_popup_id {
-            ui.ctx()
-                .data_mut(|data| data.insert_temp(active_top_level_popup_key, popup_id));
-        }
-    });
+        });
 }
 
 fn render_menu_entries(
@@ -404,26 +411,42 @@ fn render_menu_entries(
     for entry in entries {
         match entry {
             MenuEntrySpec::Separator => {
-                ui.add(egui::Separator::default().spacing(metrics.separator_spacing).horizontal());
+                ui.add(
+                    egui::Separator::default()
+                        .spacing(metrics.separator_spacing)
+                        .horizontal(),
+                );
             }
             MenuEntrySpec::Submenu(menu) => {
-                ui.menu_button(egui::RichText::new(menu.label).size(metrics.item_text_size), |ui| {
-                    render_menu_entries(ui, menu.entries, availability, script_view_mode, say_undual, pending, metrics);
-                });
+                ui.menu_button(
+                    egui::RichText::new(menu.label).size(metrics.item_text_size),
+                    |ui| {
+                        render_menu_entries(
+                            ui,
+                            menu.entries,
+                            availability,
+                            script_view_mode,
+                            say_undual,
+                            pending,
+                            metrics,
+                        );
+                    },
+                );
             }
             MenuEntrySpec::Item(item) => {
                 let command = menu_item_command(item);
                 let enabled = match item.behavior {
                     MenuItemBehavior::Command(command) => command_enabled(command, availability),
-                    MenuItemBehavior::MenuCommand(_) => command.as_ref().is_some_and(|command| {
-                        command_enabled(command.id(), availability)
-                    }),
+                    MenuItemBehavior::MenuCommand(_) => command
+                        .as_ref()
+                        .is_some_and(|command| command_enabled(command.id(), availability)),
                     MenuItemBehavior::DisabledPlaceholder(_) => false,
                 };
                 let label = menu_item_label(item, say_undual);
                 let shortcut = menu_shortcut_label(item);
                 let icon_atom = menu_icon_atom(item, script_view_mode, metrics);
-                let mut label_atom = egui::Atom::from(egui::RichText::new(label).size(metrics.item_text_size));
+                let mut label_atom =
+                    egui::Atom::from(egui::RichText::new(label).size(metrics.item_text_size));
                 label_atom.grow = true;
                 label_atom.align = egui::Align2::LEFT_CENTER;
                 let button = egui::Button::new((icon_atom, label_atom))
@@ -432,11 +455,7 @@ fn render_menu_entries(
                     .corner_radius(egui::CornerRadius::same(metrics.row_corner_radius));
                 let response = ui.add_enabled(enabled, button);
                 response.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Button,
-                        enabled,
-                        label.to_owned(),
-                    )
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label.to_owned())
                 });
                 if response.has_focus() {
                     ui.painter().rect_stroke(
@@ -470,7 +489,8 @@ fn menu_item_command(item: &MenuItemSpec) -> Option<Command> {
 }
 
 fn menu_item_label<'a>(item: &'a MenuItemSpec, say_undual: bool) -> &'a str {
-    if item.behavior == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle) && say_undual {
+    if item.behavior == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle) && say_undual
+    {
         "Undual Dialogue"
     } else {
         item.label
@@ -484,9 +504,7 @@ fn menu_icon_atom(
 ) -> egui::Atom<'static> {
     let slot_size = egui::vec2(metrics.icon_slot_width, metrics.row_height);
     if super::menu_items::menu_item_is_checked(item, script_view_mode) {
-        let mut atom = egui::Atom::from(
-            egui::RichText::new("✓").size(metrics.icon_size),
-        );
+        let mut atom = egui::Atom::from(egui::RichText::new("✓").size(metrics.icon_size));
         atom.size = Some(slot_size);
         return atom;
     }

@@ -65,7 +65,8 @@ fn popup_opening_presentation(
     let animated_scale = POPUP_OPENING_START_SCALE
         + (POPUP_OPENING_END_SCALE - POPUP_OPENING_START_SCALE) * progress;
     let deadline = started_at + POPUP_OPENING_DURATION.as_secs_f64();
-    let active = started_at.is_finite() && now.is_finite() && deadline.is_finite() && now < deadline;
+    let active =
+        started_at.is_finite() && now.is_finite() && deadline.is_finite() && now < deadline;
     let scale = if active {
         animated_scale
     } else {
@@ -166,10 +167,7 @@ fn popup_closing_presentation(
 }
 
 fn sprint_timer_popup_layer_id() -> egui::LayerId {
-    egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("sprint-timer-popup"),
-    )
+    egui::LayerId::new(egui::Order::Foreground, egui::Id::new("sprint-timer-popup"))
 }
 
 impl SprintTimer {
@@ -207,11 +205,8 @@ impl SprintTimer {
         } else {
             egui::Rect::from_center_size(rest.body.center(), egui::Vec2::ZERO)
         };
-        let opening = popup_opening_presentation(
-            self.opening_started_at,
-            egui_time,
-            icon_anchor.center(),
-        );
+        let opening =
+            popup_opening_presentation(self.opening_started_at, egui_time, icon_anchor.center());
         self.closing = Some(PopupClosingTransition {
             started_at: egui_time,
             start_scale: opening.scale,
@@ -266,14 +261,21 @@ pub(super) fn show_closing_popup(
             ui.add_enabled_ui(false, |ui| {
                 let frame = egui::Frame::popup(ui.style())
                     .inner_margin(egui::Margin::ZERO)
-                    .show(ui, |ui| show_popup_contents(ui, timer, now, &mut popup_commands));
+                    .show(ui, |ui| {
+                        show_popup_contents(ui, timer, now, &mut popup_commands)
+                    });
                 let mut snapshot = frame.inner;
                 snapshot.geometry.frame_outer = frame.response.rect;
                 snapshot
             })
             .inner
         });
-    paint_popup_notch(ctx, output.response.layer_id, closing.rest, presentation.opacity);
+    paint_popup_notch(
+        ctx,
+        output.response.layer_id,
+        closing.rest,
+        presentation.opacity,
+    );
     timer.popup_rect = (presentation.transform * closing.rest.popup).intersect(viewport);
     let mut snapshot = output.inner;
     snapshot.geometry.area_response = output.response.rect;
@@ -298,7 +300,10 @@ pub(super) fn show_opening_popup(
 ) -> (Vec<Command>, Option<SprintTimerPopupRenderSnapshot>) {
     let mut commands = Vec::new();
     let placement = sprint_timer_popup_placement(
-        timer.popup_anchor.is_positive().then_some(timer.popup_anchor),
+        timer
+            .popup_anchor
+            .is_positive()
+            .then_some(timer.popup_anchor),
         viewport,
     );
     let icon_center = if timer.popup_anchor.is_positive() {
@@ -322,20 +327,20 @@ pub(super) fn show_opening_popup(
         ctx.request_repaint_after(delay);
     }
     let mut popup_commands = Vec::new();
-    let output = area
-        .fixed_pos(placement.body.min)
-        .show(ctx, |ui| {
-            ui.set_opacity(opening.opacity);
-            ui.add_enabled_ui(!opening.active, |ui| {
-                let frame = egui::Frame::popup(ui.style())
-                    .inner_margin(egui::Margin::ZERO)
-                    .show(ui, |ui| show_popup_contents(ui, timer, now, &mut popup_commands));
-                let mut snapshot = frame.inner;
-                snapshot.geometry.frame_outer = frame.response.rect;
-                snapshot
-            })
-            .inner
-        });
+    let output = area.fixed_pos(placement.body.min).show(ctx, |ui| {
+        ui.set_opacity(opening.opacity);
+        ui.add_enabled_ui(!opening.active, |ui| {
+            let frame = egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::ZERO)
+                .show(ui, |ui| {
+                    show_popup_contents(ui, timer, now, &mut popup_commands)
+                });
+            let mut snapshot = frame.inner;
+            snapshot.geometry.frame_outer = frame.response.rect;
+            snapshot
+        })
+        .inner
+    });
     if !opening.active {
         commands.extend(popup_commands);
     }

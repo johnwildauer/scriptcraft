@@ -6,20 +6,21 @@ use crate::{preflight_version, read_v6, write_v6, FdxError};
 
 /// Import Version 6 directly, or attempt a typed migration after the caller has
 /// shown the required warning and supplied explicit consent. Older files retain
-/// only TitlePage and Content, with unrecognized paragraph types converted to
-/// General. Newer files use the Version 6 importer best-effort and retain source
-/// sections where representable. Neither path mutates the source or a session.
+/// only TitlePage and Content; paragraph Type values and missing Type attributes
+/// are not rewritten during preparation. Newer files use the Version 6 importer
+/// best-effort and retain source sections where representable. Neither path
+/// mutates the source or a session.
 pub fn import_fdx(
     input: &[u8],
     consent: FdxMigrationConsent,
 ) -> Result<FdxImportOutcome, FdxError> {
     match preflight_version(input)? {
-        FdxVersionStatus::Version6 => Ok(FdxImportOutcome::Candidate(Box::new(
-            FdxImportCandidate {
+        FdxVersionStatus::Version6 => {
+            Ok(FdxImportOutcome::Candidate(Box::new(FdxImportCandidate {
                 document: read_v6(input)?,
                 migration: None,
-            },
-        ))),
+            })))
+        }
         FdxVersionStatus::ExplicitNon6 {
             declared,
             direction,

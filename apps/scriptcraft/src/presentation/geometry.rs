@@ -4,8 +4,8 @@
 use super::style::AdvanceMode;
 use eframe::egui::{self, Color32, FontId};
 use egui::epaint::text::{Galley, LayoutJob};
-use scriptcraft_model::formatting::{FixedPoint, ParagraphAlignment};
 use scriptcraft_layout::{Caret, LayoutLine, PositionedStyledSpan};
+use scriptcraft_model::formatting::{FixedPoint, ParagraphAlignment};
 use std::sync::Arc;
 
 /// An unmodified full-span galley and boundary x offsets derived from its own
@@ -136,7 +136,9 @@ pub(crate) fn project_line<'a>(
                 return Err(PresentationProjectionError::UnexpectedNaturalGeometry);
             }
             (AdvanceMode::FixedCell, None) => {
-                let cell = if count > 0 && fixed_width > span.char_width.to_points_f32() * count as f32 * scale {
+                let cell = if count > 0
+                    && fixed_width > span.char_width.to_points_f32() * count as f32 * scale
+                {
                     fixed_width / count as f32
                 } else {
                     span.char_width.to_points_f32() * scale
@@ -287,10 +289,15 @@ pub(super) fn span_for_display_boundary(
         }
         base = base.saturating_add(count);
     }
-    line.spans
-        .len()
-        .checked_sub(1)
-        .map(|span_index| (span_index, line.spans[span_index].display_boundary_offsets.len().saturating_sub(1)))
+    line.spans.len().checked_sub(1).map(|span_index| {
+        (
+            span_index,
+            line.spans[span_index]
+                .display_boundary_offsets
+                .len()
+                .saturating_sub(1),
+        )
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -315,10 +322,7 @@ pub(crate) fn projected_caret_rect(
     let y = line.core.geometry.y.to_points_f32() * scale;
     let height = line.core.geometry.height.to_points_f32() * scale;
     Some(ProjectedCaretRect {
-        rect: egui::Rect::from_min_size(
-            egui::pos2(x, y),
-            egui::vec2(caret_width, height.max(0.0)),
-        ),
+        rect: egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(caret_width, height.max(0.0))),
         clip_bounds: line.clip_bounds,
     })
 }
@@ -356,7 +360,9 @@ pub(crate) fn projected_target_boundary(
         return None;
     }
     let screen_x = FixedPoint::from_raw(document_x_raw).to_points_f32() * scale;
-    screen_x.is_finite().then(|| display_boundary_for_x(projection, screen_x))
+    screen_x
+        .is_finite()
+        .then(|| display_boundary_for_x(projection, screen_x))
 }
 
 /// Makes a color-only galley variant for the clipped selected-foreground pass.
@@ -491,9 +497,7 @@ fn geometry_from_galley(
         }
         offsets.push(cursor_x);
     }
-    if offsets.first().copied() != Some(0.0)
-        || offsets.last().copied() != Some(natural_advance)
-    {
+    if offsets.first().copied() != Some(0.0) || offsets.last().copied() != Some(natural_advance) {
         return fail(Topology::InvalidOriginOrAdvance);
     }
 

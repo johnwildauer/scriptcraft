@@ -30,26 +30,18 @@ impl ScriptCraftApp {
                 RevealIntent::Conditional,
                 ctx,
             ),
-            Command::EditorDualDialogueToggle => self.execute_editor(
-                &Command::EditorDualDialogueToggle,
-                RevealIntent::None,
-                ctx,
-            ),
-            Command::EditUndo => self.execute_editor(
-                &Command::EditUndo,
-                RevealIntent::Conditional,
-                ctx,
-            ),
-            Command::EditRedo => self.execute_editor(
-                &Command::EditRedo,
-                RevealIntent::Conditional,
-                ctx,
-            ),
-            Command::EditDelete => self.execute_editor(
-                &Command::EditDelete,
-                RevealIntent::Conditional,
-                ctx,
-            ),
+            Command::EditorDualDialogueToggle => {
+                self.execute_editor(&Command::EditorDualDialogueToggle, RevealIntent::None, ctx)
+            }
+            Command::EditUndo => {
+                self.execute_editor(&Command::EditUndo, RevealIntent::Conditional, ctx)
+            }
+            Command::EditRedo => {
+                self.execute_editor(&Command::EditRedo, RevealIntent::Conditional, ctx)
+            }
+            Command::EditDelete => {
+                self.execute_editor(&Command::EditDelete, RevealIntent::Conditional, ctx)
+            }
             Command::EditorTextInsert { text, surface } => self.execute_editor(
                 &Command::EditorTextInsert { text, surface },
                 RevealIntent::Conditional,
@@ -70,16 +62,12 @@ impl ScriptCraftApp {
                 RevealIntent::Conditional,
                 ctx,
             ),
-            Command::EditorParagraphTab => self.execute_editor(
-                &Command::EditorParagraphTab,
-                RevealIntent::Conditional,
-                ctx,
-            ),
-            Command::EditSelectAll => self.execute_editor(
-                &Command::EditSelectAll,
-                RevealIntent::Conditional,
-                ctx,
-            ),
+            Command::EditorParagraphTab => {
+                self.execute_editor(&Command::EditorParagraphTab, RevealIntent::Conditional, ctx)
+            }
+            Command::EditSelectAll => {
+                self.execute_editor(&Command::EditSelectAll, RevealIntent::Conditional, ctx)
+            }
             Command::EditorElementChange { role, surface } => self.execute_editor(
                 &Command::EditorElementChange { role, surface },
                 RevealIntent::None,
@@ -90,9 +78,9 @@ impl ScriptCraftApp {
                 RevealIntent::Conditional,
                 ctx,
             ),
-            other => DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(
-                other.id(),
-            )),
+            other => {
+                DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id()))
+            }
         }
     }
 
@@ -132,11 +120,7 @@ impl ScriptCraftApp {
             self.session.begin_mutation_diagnostics();
         }
         let executor_started = self.development_mode.then(std::time::Instant::now);
-        let outcome = execute_editor_command_on_surface(
-            &mut self.session,
-            command,
-            active_surface,
-        );
+        let outcome = execute_editor_command_on_surface(&mut self.session, command, active_surface);
         let executor_duration = executor_started.map(|started| started.elapsed());
         let mutation_diagnostics = if self.development_mode {
             self.session.take_mutation_diagnostics()
@@ -164,11 +148,9 @@ impl ScriptCraftApp {
             CommandOutcome::Unavailable(_) | CommandOutcome::Rejected(_) => {}
             CommandOutcome::Failed(error) => self.show_edit_error(error.clone()),
         }
-        if matches!(
-            &outcome,
-            CommandOutcome::Changed | CommandOutcome::NoOp
-        ) && !(command.id() == CommandId::EditorDualDialogueToggle
-            && matches!(&outcome, CommandOutcome::NoOp))
+        if matches!(&outcome, CommandOutcome::Changed | CommandOutcome::NoOp)
+            && !(command.id() == CommandId::EditorDualDialogueToggle
+                && matches!(&outcome, CommandOutcome::NoOp))
         {
             self.reconcile_body_active_group();
         }

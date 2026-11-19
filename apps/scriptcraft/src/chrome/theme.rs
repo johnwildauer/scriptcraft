@@ -178,10 +178,7 @@ pub(crate) struct ApplicationPalette {
 }
 
 impl ApplicationPalette {
-    pub(crate) fn from_visuals(
-        appearance: ResolvedAppearance,
-        visuals: &egui::Visuals,
-    ) -> Self {
+    pub(crate) fn from_visuals(appearance: ResolvedAppearance, visuals: &egui::Visuals) -> Self {
         let widgets = &visuals.widgets;
         let page = match appearance {
             ResolvedAppearance::Day => PagePalette {
@@ -507,12 +504,8 @@ pub(crate) fn configure_appearance(
     let system_theme = ctx
         .system_theme()
         .unwrap_or_else(|| ctx.options(|options| options.fallback_theme));
-    let (resolved_theme, applied, palette, _) = configure_appearance_for_theme(
-        ctx,
-        mode,
-        currently_applied,
-        system_theme,
-    );
+    let (resolved_theme, applied, palette, _) =
+        configure_appearance_for_theme(ctx, mode, currently_applied, system_theme);
     (resolved_theme, applied, palette)
 }
 
@@ -556,4 +549,3 @@ fn configure_appearance_for_theme(
 
     (resolved_theme, applied, palette, installed)
 }
-

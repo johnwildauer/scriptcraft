@@ -76,8 +76,14 @@ fn validate_position(
 ) -> Result<(), SelectionError> {
     let index = usize::try_from(position.element).map_err(|_| SelectionError::ElementOutOfRange)?;
     let text = match surface {
-        EditorSurface::Body => project.elements.get(index).map(|element| element.text.as_str()),
-        EditorSurface::TitlePage => project.title_page.get(index).map(|paragraph| paragraph.text.as_str()),
+        EditorSurface::Body => project
+            .elements
+            .get(index)
+            .map(|element| element.text.as_str()),
+        EditorSurface::TitlePage => project
+            .title_page
+            .get(index)
+            .map(|paragraph| paragraph.text.as_str()),
     }
     .ok_or(SelectionError::ElementOutOfRange)?;
     let offset = usize::try_from(position.offset).map_err(|_| SelectionError::OffsetOutOfRange)?;
@@ -102,7 +108,9 @@ impl fmt::Display for SelectionError {
         match self {
             Self::ElementOutOfRange => formatter.write_str("selection element is out of range"),
             Self::OffsetOutOfRange => formatter.write_str("selection byte offset is out of range"),
-            Self::InvalidUtf8Boundary => formatter.write_str("selection is not on a UTF-8 boundary"),
+            Self::InvalidUtf8Boundary => {
+                formatter.write_str("selection is not on a UTF-8 boundary")
+            }
         }
     }
 }
@@ -268,7 +276,12 @@ pub struct InvalidZoomPercent;
 
 impl fmt::Display for InvalidZoomPercent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "zoom percentage must be in {}..={}", ZoomPercent::MIN, ZoomPercent::MAX)
+        write!(
+            formatter,
+            "zoom percentage must be in {}..={}",
+            ZoomPercent::MIN,
+            ZoomPercent::MAX
+        )
     }
 }
 
@@ -337,19 +350,32 @@ pub fn pointer_selection(
 
     Some(match phase {
         PointerPhase::Press | PointerPhase::Release => CoreSelection::caret(position),
-        PointerPhase::Drag => CoreSelection { anchor: current.anchor, focus: position },
-        PointerPhase::DoubleClick => {
-            match word_range_at(text, position.offset) {
-                Some((start, end)) => CoreSelection {
-                    anchor: CorePosition { element: position.element, offset: start },
-                    focus: CorePosition { element: position.element, offset: end },
+        PointerPhase::Drag => CoreSelection {
+            anchor: current.anchor,
+            focus: position,
+        },
+        PointerPhase::DoubleClick => match word_range_at(text, position.offset) {
+            Some((start, end)) => CoreSelection {
+                anchor: CorePosition {
+                    element: position.element,
+                    offset: start,
                 },
-                None => CoreSelection::caret(position),
-            }
-        }
+                focus: CorePosition {
+                    element: position.element,
+                    offset: end,
+                },
+            },
+            None => CoreSelection::caret(position),
+        },
         PointerPhase::TripleClick => CoreSelection {
-            anchor: CorePosition { element: position.element, offset: 0 },
-            focus: CorePosition { element: position.element, offset: text.len() },
+            anchor: CorePosition {
+                element: position.element,
+                offset: 0,
+            },
+            focus: CorePosition {
+                element: position.element,
+                offset: text.len(),
+            },
         },
     })
 }

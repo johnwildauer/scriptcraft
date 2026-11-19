@@ -22,14 +22,16 @@ mod diagnostics;
 pub use diagnostics::EditMutationDiagnostics;
 mod derived;
 pub use derived::DerivedWorkSummary;
-mod history;
-mod text;
+mod definitions;
+pub use definitions::{ElementDefinitionCandidate, ElementTypeRemapping};
 mod body;
+mod dual_dialogue;
+mod formatting;
+mod history;
 mod policy;
 mod structure;
+mod text;
 mod title;
-mod formatting;
-mod dual_dialogue;
 pub use policy::{
     enter_transition, tab_transition, transition, ParagraphKeyTarget, ParagraphKeyTargets,
 };
@@ -59,11 +61,15 @@ pub enum EditError {
     EmptyHistory,
     TextTooLong,
     TooManyElements,
-    UnsupportedTransition { from: scriptcraft_model::Role },
+    UnsupportedTransition {
+        from: scriptcraft_model::Role,
+    },
     /// Inline Alts is valid only while its exact source owner remains Dialogue.
     /// This failure is intentionally not eligible for automatic dual unwrap.
     InlineAltsRoleChange,
     Preservation(PreservationError),
+    /// A definition/remapping request or retained settings projection was invalid.
+    InvalidDefinitionCandidate,
     CastList(CastListError),
     FormattedText(FormattedTextError),
     Model(ModelError),

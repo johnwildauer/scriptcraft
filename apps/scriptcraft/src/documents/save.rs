@@ -19,7 +19,10 @@ pub(crate) const UNTITLED_DOCUMENT_TITLE: &str = "Untitled Screenplay";
 
 /// Converts an optional Save As picker result into its typed save result.
 /// Picker cancellation is not a dispatched save and is never reported as Saved.
-fn save_picker_outcome<T>(selection: Option<T>, save: impl FnOnce(T) -> SaveOutcome) -> SaveOutcome {
+fn save_picker_outcome<T>(
+    selection: Option<T>,
+    save: impl FnOnce(T) -> SaveOutcome,
+) -> SaveOutcome {
     match selection {
         Some(selection) => save(selection),
         None => SaveOutcome::Cancelled,
@@ -72,9 +75,15 @@ impl ScriptCraftApp {
         self.save_fdx_mode_at(path, mode)
     }
 
-    pub(crate) fn save_fdx_as_at(&mut self, path: &std::path::Path, overwrite: bool) -> SaveOutcome {
+    pub(crate) fn save_fdx_as_at(
+        &mut self,
+        path: &std::path::Path,
+        overwrite: bool,
+    ) -> SaveOutcome {
         if !has_extension(path, "fdx") {
-            self.show_error("SAVE_AS_EXTENSION_REJECTED: .fdx required; destination and document unchanged");
+            self.show_error(
+                "SAVE_AS_EXTENSION_REJECTED: .fdx required; destination and document unchanged",
+            );
             return SaveOutcome::Failed;
         }
         let mode = if overwrite {
@@ -93,7 +102,9 @@ impl ScriptCraftApp {
             FdxSaveMode::SaveAs(_) | FdxSaveMode::SaveAsOverwrite(_)
         ) && !has_extension(path, "fdx")
         {
-            self.show_error("SAVE_AS_EXTENSION_REJECTED: .fdx required; destination and document unchanged");
+            self.show_error(
+                "SAVE_AS_EXTENSION_REJECTED: .fdx required; destination and document unchanged",
+            );
             return SaveOutcome::Failed;
         }
         if self.fdx_baseline.is_none()
@@ -207,7 +218,9 @@ impl ScriptCraftApp {
             .add_filter("Final Draft document", &["fdx"])
             .set_file_name("Untitled Screenplay.fdx")
             .save_file();
-        save_picker_outcome(picker_result, |path| self.dispatch_save_as_path(&path, true, ctx))
+        save_picker_outcome(picker_result, |path| {
+            self.dispatch_save_as_path(&path, true, ctx)
+        })
     }
 
     /// Save As has a typed follow-up boundary so accepted picker destinations
@@ -218,10 +231,7 @@ impl ScriptCraftApp {
         overwrite: bool,
         ctx: &egui::Context,
     ) -> SaveOutcome {
-        let Some(path) = path
-            .to_str()
-            .and_then(|path| DocumentPath::new(path).ok())
-        else {
+        let Some(path) = path.to_str().and_then(|path| DocumentPath::new(path).ok()) else {
             self.show_error("DOCUMENT_PATH_REJECTED: selected path is not valid UTF-8; active document unchanged");
             return SaveOutcome::Failed;
         };
@@ -241,10 +251,9 @@ impl ScriptCraftApp {
     }
 
     pub(crate) fn sync_native_title(&mut self, ctx: &egui::Context) {
-        if let Some(title) = changed_native_document_title(
-            &self.native_title,
-            self.native_path.as_deref(),
-        ) {
+        if let Some(title) =
+            changed_native_document_title(&self.native_title, self.native_path.as_deref())
+        {
             commands::DesktopViewportEffects::title(ctx, title.clone());
             ctx.send_viewport_cmd_to(
                 title_page::viewport_id(),

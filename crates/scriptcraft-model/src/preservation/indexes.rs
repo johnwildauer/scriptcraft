@@ -355,7 +355,7 @@ fn collect_managed_paragraph_locations(
 }
 
 impl PreservationState {
-/// Reconstructs all transient preservation indexes after direct edits to
+    /// Reconstructs all transient preservation indexes after direct edits to
     /// the publicly exposed source tree or identity/reference collections.
     /// Managed editing APIs maintain paragraph locations transactionally and
     /// rebuild identity uses only when an identity-sensitive consumer needs them.
@@ -363,7 +363,7 @@ impl PreservationState {
         self.rebuild_source_identity_use_index();
     }
 
-/// Rebuilds only the transient source-tree location map from the
+    /// Rebuilds only the transient source-tree location map from the
     /// authoritative ordered preservation tree. Source text and attributes are
     /// not scanned for identity uses, and the prior byte total remains the
     /// baseline for scoped single-paragraph delta validation. Any such explicit
@@ -386,7 +386,7 @@ impl PreservationState {
         self.invalidate_source_identity_use_index();
     }
 
-/// Rebuilds both transient indexes for an identity-sensitive consumer. The
+    /// Rebuilds both transient indexes for an identity-sensitive consumer. The
     /// complete source walk retains the established managed-location behavior,
     /// raw-ID reservation, lexical-use detection, and source byte accounting.
     fn rebuild_source_identity_use_index(&mut self) {
@@ -406,7 +406,7 @@ impl PreservationState {
         self.source_identity_use_index = Some(source_index);
     }
 
-pub(super) fn invalidate_source_identity_use_index(&mut self) {
+    pub(super) fn invalidate_source_identity_use_index(&mut self) {
         self.source_identity_use_index = None;
     }
 
@@ -416,7 +416,7 @@ pub(super) fn invalidate_source_identity_use_index(&mut self) {
         }
     }
 
-/// Answers a removal-safety query only from a current complete source-use
+    /// Answers a removal-safety query only from a current complete source-use
     /// index. Mutable managed-source access invalidates that index, so this
     /// method never interprets absence as permission to remove an identity.
     pub fn paragraph_identity_safely_removable(&mut self, id: &str) -> bool {
@@ -427,7 +427,7 @@ pub(super) fn invalidate_source_identity_use_index(&mut self) {
             .paragraph_is_safely_removable(id)
     }
 
-/// Returns raw source IDs only after refreshing collision-reservation state.
+    /// Returns raw source IDs only after refreshing collision-reservation state.
     /// An absent index is never equivalent to an empty reservation set.
     pub fn indexed_source_id_values(&mut self) -> BTreeSet<String> {
         self.ensure_source_identity_use_index();

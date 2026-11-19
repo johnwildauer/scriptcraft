@@ -1,7 +1,7 @@
 //! DocumentRef/XRef source projection and transactional lineage reconciliation.
 
-use crate::context::{valid_document_ref_datetime, SaveContext, SaveOperation};
 use crate::constants::FDX_ROOT;
+use crate::context::{valid_document_ref_datetime, SaveContext, SaveOperation};
 use crate::diagnostics::{map_preservation_error, FdxError, SaveDiagnosticCode};
 use crate::identity::identity_domain;
 use crate::reader::{RawElement, RawNode};
@@ -88,11 +88,8 @@ pub(crate) fn reconcile_document_lineage(
     } else {
         let document_ref_id = context.allocate_lineage_id(&mut reserved)?;
         additions.push(
-            ForeignIdentity::new(
-                identity_domain("DocumentRef"),
-                document_ref_id.clone(),
-            )
-            .map_err(map_preservation_error)?,
+            ForeignIdentity::new(identity_domain("DocumentRef"), document_ref_id.clone())
+                .map_err(map_preservation_error)?,
         );
         let document_ref = new_lineage_element(
             &root.name,
@@ -233,7 +230,9 @@ fn append_lineage_xref(
         return append_xref_without_formatting(document_ref, xref);
     }
     let format_safe = document_ref.children.iter().all(|node| match node {
-        PreservedNode::Element(element) => element.name.namespace_uri == document_ref.name.namespace_uri,
+        PreservedNode::Element(element) => {
+            element.name.namespace_uri == document_ref.name.namespace_uri
+        }
         PreservedNode::Text(text) => text.chars().all(char::is_whitespace),
         _ => false,
     });
@@ -248,7 +247,9 @@ fn append_xref_without_formatting(
     xref: PreservedElement,
 ) -> Result<(), FdxError> {
     let index = lineage_xref_insert_index(document_ref)?;
-    document_ref.children.insert(index, PreservedNode::Element(xref));
+    document_ref
+        .children
+        .insert(index, PreservedNode::Element(xref));
     Ok(())
 }
 
@@ -262,12 +263,20 @@ fn append_xref_with_formatting(
         document_ref.children.get(index),
         Some(PreservedNode::Text(text)) if text.chars().all(char::is_whitespace)
     );
-    document_ref.children.insert(index, PreservedNode::Text("\n    ".into()));
-    document_ref.children.insert(index + 1, PreservedNode::Element(xref));
+    document_ref
+        .children
+        .insert(index, PreservedNode::Text("\n    ".into()));
+    document_ref
+        .children
+        .insert(index + 1, PreservedNode::Element(xref));
     if has_following_node && !following_is_whitespace {
-        document_ref.children.insert(index + 2, PreservedNode::Text("\n    ".into()));
+        document_ref
+            .children
+            .insert(index + 2, PreservedNode::Text("\n    ".into()));
     } else if !has_following_node {
-        document_ref.children.push(PreservedNode::Text("\n  ".into()));
+        document_ref
+            .children
+            .push(PreservedNode::Text("\n  ".into()));
     }
     Ok(())
 }

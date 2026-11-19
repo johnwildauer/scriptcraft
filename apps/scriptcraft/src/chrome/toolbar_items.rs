@@ -1,18 +1,15 @@
+use crate::presentation::material_font::{MaterialIconAxes, MaterialIconAxisOverrides};
 use eframe::egui::Color32;
-use scriptcraft_commands::CommandId;
-use crate::presentation::material_font::{
-    MaterialIconAxes, MaterialIconAxisOverrides,
-};
 use egui_material_icons::{
     icons::{
-        ICON_DRAFT, ICON_DOUBLE_ARROW, ICON_UPLOAD_FILE, ICON_FILE_OPEN,
-        ICON_KEYBOARD_ARROW_DOWN, ICON_PICTURE_AS_PDF, ICON_SAVE, ICON_SAVE_AS,
-        ICON_VISIBILITY, ICON_BOOK_5, ICON_CANCEL, ICON_FORMAT_ALIGN_LEFT,
-        ICON_FORMAT_BOLD, ICON_FORMAT_ITALIC, ICON_FORMAT_UNDERLINED,
-        ICON_TEXT_FIELDS, ICON_FORMAT_STRIKETHROUGH,
+        ICON_BOOK_5, ICON_CANCEL, ICON_DOUBLE_ARROW, ICON_DRAFT, ICON_FILE_OPEN,
+        ICON_FORMAT_ALIGN_LEFT, ICON_FORMAT_BOLD, ICON_FORMAT_ITALIC, ICON_FORMAT_STRIKETHROUGH,
+        ICON_FORMAT_UNDERLINED, ICON_KEYBOARD_ARROW_DOWN, ICON_PICTURE_AS_PDF, ICON_SAVE,
+        ICON_SAVE_AS, ICON_TEXT_FIELDS, ICON_UPLOAD_FILE, ICON_VISIBILITY,
     },
     MaterialIcon,
 };
+use scriptcraft_commands::CommandId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolbarIconVariant {
@@ -53,10 +50,7 @@ impl IconSpec {
     }
 
     #[allow(dead_code)] // Catalog capability for declaring per-icon native font axes.
-    pub(super) const fn with_material_axes(
-        mut self,
-        axes: MaterialIconAxisOverrides,
-    ) -> Self {
+    pub(super) const fn with_material_axes(mut self, axes: MaterialIconAxisOverrides) -> Self {
         self.material_axes = Some(axes);
         self
     }
@@ -108,7 +102,8 @@ pub(super) enum ToolbarGraphic {
     None,
     Icon(IconSpec),
     /// Icons are independently configurable and laid out left-to-right.
-    #[allow(dead_code)] // Supported catalog capability for independently configured icon groups.
+    #[allow(dead_code)]
+    // Supported catalog capability for independently configured icon groups.
     Icons(&'static [IconSpec]),
     /// The disclosure icon has its own size and foreground overrides.
     #[allow(dead_code)] // Supported so primary and disclosure icons can vary independently.
@@ -276,7 +271,12 @@ pub(super) const TEMPORARY_TOOLBAR_ITEMS: [ToolbarItemSpec; 14] = [
     action("new", "New", ICON_DRAFT, CommandId::FileNew),
     action("open", "Open", ICON_FILE_OPEN, CommandId::FileOpenRequest),
     action("save", "Save", ICON_SAVE, CommandId::FileSave),
-    action("save-as", "Save As", ICON_SAVE_AS, CommandId::FileSaveAsRequest),
+    action(
+        "save-as",
+        "Save As",
+        ICON_SAVE_AS,
+        CommandId::FileSaveAsRequest,
+    ),
     ToolbarItemSpec {
         id: "flexible-space-pre-elements",
         label: "Flexible Space",
@@ -371,7 +371,6 @@ pub(super) const SPACE_ITEM_SPEC: ToolbarItemSpec = ToolbarItemSpec {
     layout: ToolbarLayoutPolicy::FixedSpace(72.0),
     presentation: ItemPresentationOverrides::NONE,
 };
-
 
 pub(super) const OVERFLOW_ITEM_SPEC: ToolbarItemSpec = ToolbarItemSpec {
     id: "overflow",

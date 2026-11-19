@@ -212,11 +212,19 @@ impl ScreenplayLayout {
                 return None;
             }
             let page_height = i64::from(self.inputs.paper_height).saturating_mul(FixedPoint::SCALE);
-            let pointer_y = i64::try_from(page).ok()?.saturating_mul(page_height).saturating_add(y.raw());
-            let entry = self.title_line_index.iter().enumerate().min_by_key(|(_, entry)| {
-                diagnostics.examined();
-                pointer_y.saturating_sub(entry.absolute_y).saturating_abs()
-            })?.1;
+            let pointer_y = i64::try_from(page)
+                .ok()?
+                .saturating_mul(page_height)
+                .saturating_add(y.raw());
+            let entry = self
+                .title_line_index
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| {
+                    diagnostics.examined();
+                    pointer_y.saturating_sub(entry.absolute_y).saturating_abs()
+                })?
+                .1;
             let line = &self.pages[entry.location.page].lines[entry.location.line];
             return Some(LocatedLayoutLine {
                 page_index: entry.location.page,
@@ -232,7 +240,10 @@ impl ScreenplayLayout {
             diagnostics.examined();
             self.body_line_index[*index].absolute_y < pointer_y
         });
-        let neighbor_coordinates = [insertion.checked_sub(1), (insertion < self.body_line_y_order.len()).then_some(insertion)];
+        let neighbor_coordinates = [
+            insertion.checked_sub(1),
+            (insertion < self.body_line_y_order.len()).then_some(insertion),
+        ];
         let mut nearest_y_distance = i64::MAX;
         let mut candidate_ys = [None, None];
         let mut candidate_y_count = 0usize;
@@ -255,9 +266,13 @@ impl ScreenplayLayout {
         let horizontal_distance = |line: &LayoutLine| {
             let left = line.paragraph_bounds.x.raw();
             let right = left.saturating_add(line.paragraph_bounds.width.raw());
-            if x.raw() < left { left.saturating_sub(x.raw()) }
-            else if x.raw() > right { x.raw().saturating_sub(right) }
-            else { 0 }
+            if x.raw() < left {
+                left.saturating_sub(x.raw())
+            } else if x.raw() > right {
+                x.raw().saturating_sub(right)
+            } else {
+                0
+            }
         };
         let mut best: Option<(i64, usize)> = None;
         for y in candidate_ys[..candidate_y_count].iter().flatten().copied() {
@@ -416,30 +431,44 @@ impl ScreenplayLayout {
         if self.composition != LayoutComposition::TitlePageEditor {
             return None;
         }
-        self.title_lines_by_element.get(element)?.iter().copied().find(|index| {
-            let entry = self.title_line_index[*index];
-            offset >= entry.source.start && offset <= entry.source.end
-        })
+        self.title_lines_by_element
+            .get(element)?
+            .iter()
+            .copied()
+            .find(|index| {
+                let entry = self.title_line_index[*index];
+                offset >= entry.source.start && offset <= entry.source.end
+            })
     }
 
     pub fn title_line(&self, index: usize) -> Option<&LayoutLine> {
-        if self.composition != LayoutComposition::TitlePageEditor { return None; }
+        if self.composition != LayoutComposition::TitlePageEditor {
+            return None;
+        }
         let entry = self.title_line_index.get(index)?;
-        self.pages.get(entry.location.page)?.lines.get(entry.location.line)
+        self.pages
+            .get(entry.location.page)?
+            .lines
+            .get(entry.location.line)
     }
 
     pub fn title_page_for_position(&self, element: usize, offset: usize) -> Option<usize> {
-        if self.composition != LayoutComposition::TitlePageEditor { return None; }
+        if self.composition != LayoutComposition::TitlePageEditor {
+            return None;
+        }
         self.page_for_position_with_diagnostics(
             element,
             offset,
             &mut InteractionQueryDiagnostics::default(),
-        ).filter(|page| self.pages.get(*page).is_some_and(|page| page.title_page))
+        )
+        .filter(|page| self.pages.get(*page).is_some_and(|page| page.title_page))
     }
 
     pub fn title_caret_geometry(&self, caret: Caret) -> Result<FixedRect, LayoutError> {
         if self.composition != LayoutComposition::TitlePageEditor {
-            return Err(LayoutError { kind: LayoutErrorKind::InvalidPosition });
+            return Err(LayoutError {
+                kind: LayoutErrorKind::InvalidPosition,
+            });
         }
         self.caret_geometry(caret)
     }
@@ -526,11 +555,22 @@ fn display_char_for_x(line: &LayoutLine, x: FixedPoint) -> usize {
     let mut display_offset = 0usize;
     for span in line.spans.iter() {
         let count = span.display_text.chars().count();
-        let cell = if count == 0 { span.char_width.raw().max(1) }
-            else { span.geometry.width.raw().div_euclid(count as i64).max(1) };
-        if x.raw() <= span.geometry.x.raw().saturating_add(span.geometry.width.raw()) {
+        let cell = if count == 0 {
+            span.char_width.raw().max(1)
+        } else {
+            span.geometry.width.raw().div_euclid(count as i64).max(1)
+        };
+        if x.raw()
+            <= span
+                .geometry
+                .x
+                .raw()
+                .saturating_add(span.geometry.width.raw())
+        {
             let units = x.raw().saturating_sub(span.geometry.x.raw()).max(0);
-            return display_offset.saturating_add((units.saturating_add(cell / 2).div_euclid(cell)) as usize).min(display_offset.saturating_add(count));
+            return display_offset
+                .saturating_add((units.saturating_add(cell / 2).div_euclid(cell)) as usize)
+                .min(display_offset.saturating_add(count));
         }
         display_offset = display_offset.saturating_add(count);
     }
@@ -543,13 +583,23 @@ fn x_for_display_char(line: &LayoutLine, display_char: usize) -> i64 {
         let count = span.display_text.chars().count();
         if display_char <= display_offset.saturating_add(count) {
             let local = display_char.saturating_sub(display_offset).min(count) as i64;
-            let cell = if count == 0 { span.char_width.raw() }
-                else { span.geometry.width.raw().div_euclid(count as i64) };
-            return span.geometry.x.raw().saturating_add(local.saturating_mul(cell));
+            let cell = if count == 0 {
+                span.char_width.raw()
+            } else {
+                span.geometry.width.raw().div_euclid(count as i64)
+            };
+            return span
+                .geometry
+                .x
+                .raw()
+                .saturating_add(local.saturating_mul(cell));
         }
         display_offset = display_offset.saturating_add(count);
     }
-    line.geometry.x.raw().saturating_add(line.geometry.width.raw())
+    line.geometry
+        .x
+        .raw()
+        .saturating_add(line.geometry.width.raw())
 }
 
 fn is_boundary_in_line(line: &LayoutLine, offset: usize) -> bool {

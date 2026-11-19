@@ -1,11 +1,22 @@
-//! Shared, typed screenplay element formatting defaults.
+//! Shared formatting values and transitional static screenplay defaults.
 //!
 //! The ordered defaults in this module are evidenced by the blank and populated
 //! Final Draft references. They are used for native emission and only for the
 //! runtime fields currently interpreted by ScriptCraft; retaining these values
-//! does not imply that the renderer applies every formatting category.
+//! does not imply that the renderer applies every formatting category. The
+//! static role table is only a constructor bootstrap until Phase 2 sources FDX
+//! definitions and Phase 7 constructs new projects from the packaged template.
 
-use crate::{element::Role, identity::StableId};
+use crate::{
+    element::Role,
+    element_definition::{
+        ElementBehavior, ElementDefinition, ElementFontSpec, ElementOutline, ElementParagraphSpec,
+    },
+    element_definitions::DocumentElementDefinitions,
+    element_type::ElementTypeKey,
+    identity::StableId,
+    ModelError,
+};
 use std::collections::BTreeMap;
 
 pub const ROLE_FORMATTING_COUNT: usize = 17;
@@ -493,6 +504,67 @@ pub fn formatting_for_role(role: Role) -> &'static RoleFormatting {
 
 pub fn formatting_in_native_order() -> &'static [RoleFormatting; ROLE_FORMATTING_COUNT] {
     &ROLE_FORMATTING_DEFAULTS
+}
+
+/// Transitional constructor bootstrap only. Phase 2 replaces import seeding
+/// with source-ordered FDX definitions; Phase 7 replaces new-project seeding
+/// with the packaged Screenplay template. No registry read or replacement may
+/// consult the static role table after construction.
+pub(crate) fn transitional_static_role_definitions(
+) -> Result<DocumentElementDefinitions, ModelError> {
+    let definitions = formatting_in_native_order()
+        .iter()
+        .map(|formatting| {
+            let paragraph = &formatting.paragraph;
+            let alignment = match paragraph.alignment {
+                "Left" => ParagraphAlignment::Left,
+                "Right" => ParagraphAlignment::Right,
+                "Center" => ParagraphAlignment::Center,
+                "Justified" => ParagraphAlignment::Justified,
+                _ => return Err(ModelError::InvalidNumber),
+            };
+            let fixed_inches =
+                |value: &str| FixedPoint::parse_inches(value).ok_or(ModelError::InvalidNumber);
+            let behavior = &formatting.behavior;
+            ElementDefinition::new(
+                ElementTypeKey::new(formatting.fdx_label)?,
+                ElementFontSpec {
+                    family: formatting.font.family.to_owned(),
+                    size: formatting.font.size,
+                    bold: formatting.font.style_tokens.contains(&"Bold"),
+                    italic: formatting.font.style_tokens.contains(&"Italic"),
+                    underline: formatting.font.style_tokens.contains(&"Underline"),
+                    all_caps: formatting.font.style_tokens.contains(&"AllCaps"),
+                    hidden_text: formatting.font.style_tokens.contains(&"HiddenText"),
+                    color: formatting.font.color.map(str::to_owned),
+                    adornment_style: formatting.font.adornment_style,
+                    revision_id: formatting.font.revision_id,
+                },
+                ElementParagraphSpec {
+                    alignment,
+                    first_indent: fixed_inches(paragraph.first_indent)?,
+                    left_indent: fixed_inches(paragraph.left_indent)?,
+                    right_indent: fixed_inches(paragraph.right_indent)?,
+                    leading: paragraph.leading.to_owned(),
+                    space_before: FixedPoint::from_points(i64::from(paragraph.space_before)),
+                    spacing: paragraph.spacing,
+                    starts_new_page: paragraph.starts_new_page,
+                },
+                ElementBehavior {
+                    paginate_as: Some(behavior.paginate_as.to_owned()),
+                    return_key: Some(ElementTypeKey::new(behavior.return_key)?),
+                    shortcut: Some(behavior.shortcut.to_owned()),
+                    tab_key: Some(ElementTypeKey::new(behavior.tab_key)?),
+                    win_shortcut: Some(behavior.win_shortcut.to_owned()),
+                },
+                ElementOutline {
+                    can_hide: formatting.outline.can_hide,
+                    level: formatting.outline.level,
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, ModelError>>()?;
+    DocumentElementDefinitions::new(definitions)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

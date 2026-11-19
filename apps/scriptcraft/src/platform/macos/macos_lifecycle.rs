@@ -93,19 +93,13 @@ pub(crate) struct NativeLifecycleController {
 
 impl NativeLifecycleController {
     /// Installs the core-class Quit handler without replacing winit's delegate.
-    pub(crate) fn install(
-        repaint_context: eframe::egui::Context,
-    ) -> Result<Self, &'static str> {
+    pub(crate) fn install(repaint_context: eframe::egui::Context) -> Result<Self, &'static str> {
         let Some(main_thread) = MainThreadMarker::new() else {
             return Err(INSTALLATION_ERROR);
         };
 
         let inbox = Arc::new(QuitRequestInbox::default());
-        let handler = NativeQuitEventHandler::new(
-            Arc::clone(&inbox),
-            repaint_context,
-            main_thread,
-        );
+        let handler = NativeQuitEventHandler::new(Arc::clone(&inbox), repaint_context, main_thread);
         let event_manager = NSAppleEventManager::sharedAppleEventManager();
 
         // SAFETY: The retained main-thread target implements this exact

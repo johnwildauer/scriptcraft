@@ -1,9 +1,9 @@
 //! Detached Body candidate validation and atomic publication.
 
-use super::diagnostics::{add_diagnostic_duration, add_optional_diagnostic_duration};
 use super::derived::{
     can_skip_derived_invalidation, classify_derived_invalidation, PendingDerivedInvalidation,
 };
+use super::diagnostics::{add_diagnostic_duration, add_optional_diagnostic_duration};
 use super::history::Snapshot;
 use super::selection::SelectionOrdering;
 use super::structure::{
@@ -13,7 +13,7 @@ use super::{
     invalidate_changed_generated_parentheticals, validate_full_candidate, validate_selection,
     EditError, EditMutationDiagnostics, EditPolicy, EditingSession, Selection,
 };
-use scriptcraft_model::{dual_dialogue, Project, Role, StableId};
+use scriptcraft_model::{dual_dialogue, Project, StableId};
 use std::collections::BTreeSet;
 use std::time::Instant;
 
@@ -37,12 +37,7 @@ impl EditingSession {
             &EditPolicy,
         ) -> Result<Selection, EditError>,
     {
-        self.mutate_with_scene_heading_deletions(
-            requested_scope,
-            BTreeSet::new(),
-            false,
-            operation,
-        )
+        self.mutate_with_scene_heading_deletions(requested_scope, BTreeSet::new(), false, operation)
     }
 
     pub(super) fn mutate_structural<F>(
@@ -58,12 +53,7 @@ impl EditingSession {
             &EditPolicy,
         ) -> Result<Selection, EditError>,
     {
-        self.mutate_with_scene_heading_deletions(
-            requested_scope,
-            BTreeSet::new(),
-            true,
-            operation,
-        )
+        self.mutate_with_scene_heading_deletions(requested_scope, BTreeSet::new(), true, operation)
     }
 
     pub(super) fn mutate_structural_with_scene_heading_deletions<F>(
@@ -144,41 +134,56 @@ impl EditingSession {
                     } else {
                         Vec::new()
                     };
-                    let unwrap_ids = plan.into_iter().filter_map(|classification| {
-                        matches!(
-                            classification.outcome,
-                            dual_dialogue::StructuralGroupOutcome::Removed
-                                | dual_dialogue::StructuralGroupOutcome::InvalidRequiresUnwrap
-                        ).then_some(classification.group_id)
-                    }).collect::<Vec<_>>();
+                    let unwrap_ids = plan
+                        .into_iter()
+                        .filter_map(|classification| {
+                            matches!(
+                                classification.outcome,
+                                dual_dialogue::StructuralGroupOutcome::Removed
+                                    | dual_dialogue::StructuralGroupOutcome::InvalidRequiresUnwrap
+                            )
+                            .then_some(classification.group_id)
+                        })
+                        .collect::<Vec<_>>();
                     if unwrap_ids.is_empty() {
                         (first_project, first_generated, selection)
                     } else {
-                        diagnostics.structural_retries = diagnostics.structural_retries.saturating_add(1);
+                        diagnostics.structural_retries =
+                            diagnostics.structural_retries.saturating_add(1);
                         let retry_started = capture_diagnostics.then(Instant::now);
-                        let retry_result = (|| -> Result<(Project, BTreeSet<String>, Selection), EditError> {
-                            let setup_started = capture_diagnostics.then(Instant::now);
-                            let mut retry_project = baseline.clone();
-                            unwrap_dual_dialogue_groups(&mut retry_project, &unwrap_ids)?;
-                            let retry_selection = remap_selection_by_identity(
-                                &baseline,
-                                &retry_project,
-                                self.selection,
-                            )?;
-                            let mut retry_generated = baseline_generated.clone();
-                            add_diagnostic_duration(&mut diagnostics.candidate_setup_nanos, setup_started);
-                            let edit_started = capture_diagnostics.then(Instant::now);
-                            let selection_result = operation(
-                                &mut retry_project,
-                                &retry_selection,
-                                &mut retry_generated,
-                                &self.policy,
-                            );
-                            add_diagnostic_duration(&mut diagnostics.edit_operation_nanos, edit_started);
-                            let selection = selection_result?;
-                            Ok((retry_project, retry_generated, selection))
-                        })();
-                        add_optional_diagnostic_duration(&mut diagnostics.structural_retry_nanos, retry_started);
+                        let retry_result =
+                            (|| -> Result<(Project, BTreeSet<String>, Selection), EditError> {
+                                let setup_started = capture_diagnostics.then(Instant::now);
+                                let mut retry_project = baseline.clone();
+                                unwrap_dual_dialogue_groups(&mut retry_project, &unwrap_ids)?;
+                                let retry_selection = remap_selection_by_identity(
+                                    &baseline,
+                                    &retry_project,
+                                    self.selection,
+                                )?;
+                                let mut retry_generated = baseline_generated.clone();
+                                add_diagnostic_duration(
+                                    &mut diagnostics.candidate_setup_nanos,
+                                    setup_started,
+                                );
+                                let edit_started = capture_diagnostics.then(Instant::now);
+                                let selection_result = operation(
+                                    &mut retry_project,
+                                    &retry_selection,
+                                    &mut retry_generated,
+                                    &self.policy,
+                                );
+                                add_diagnostic_duration(
+                                    &mut diagnostics.edit_operation_nanos,
+                                    edit_started,
+                                );
+                                let selection = selection_result?;
+                                Ok((retry_project, retry_generated, selection))
+                            })();
+                        add_optional_diagnostic_duration(
+                            &mut diagnostics.structural_retry_nanos,
+                            retry_started,
+                        );
                         let (retry_project, retry_generated, selection) = retry_result?;
                         (retry_project, retry_generated, selection)
                     }
@@ -189,31 +194,42 @@ impl EditingSession {
                     if unwrap_ids.is_empty() {
                         return Err(first_error);
                     }
-                    diagnostics.structural_retries = diagnostics.structural_retries.saturating_add(1);
+                    diagnostics.structural_retries =
+                        diagnostics.structural_retries.saturating_add(1);
                     let retry_started = capture_diagnostics.then(Instant::now);
-                    let retry_result = (|| -> Result<(Project, BTreeSet<String>, Selection), EditError> {
-                        let setup_started = capture_diagnostics.then(Instant::now);
-                        let mut retry_project = baseline.clone();
-                        unwrap_dual_dialogue_groups(&mut retry_project, &unwrap_ids)?;
-                        let retry_selection = remap_selection_by_identity(
-                            &baseline,
-                            &retry_project,
-                            self.selection,
-                        )?;
-                        let mut retry_generated = baseline_generated.clone();
-                        add_diagnostic_duration(&mut diagnostics.candidate_setup_nanos, setup_started);
-                        let edit_started = capture_diagnostics.then(Instant::now);
-                        let selection_result = operation(
-                            &mut retry_project,
-                            &retry_selection,
-                            &mut retry_generated,
-                            &self.policy,
-                        );
-                        add_diagnostic_duration(&mut diagnostics.edit_operation_nanos, edit_started);
-                        let selection = selection_result?;
-                        Ok((retry_project, retry_generated, selection))
-                    })();
-                    add_optional_diagnostic_duration(&mut diagnostics.structural_retry_nanos, retry_started);
+                    let retry_result =
+                        (|| -> Result<(Project, BTreeSet<String>, Selection), EditError> {
+                            let setup_started = capture_diagnostics.then(Instant::now);
+                            let mut retry_project = baseline.clone();
+                            unwrap_dual_dialogue_groups(&mut retry_project, &unwrap_ids)?;
+                            let retry_selection = remap_selection_by_identity(
+                                &baseline,
+                                &retry_project,
+                                self.selection,
+                            )?;
+                            let mut retry_generated = baseline_generated.clone();
+                            add_diagnostic_duration(
+                                &mut diagnostics.candidate_setup_nanos,
+                                setup_started,
+                            );
+                            let edit_started = capture_diagnostics.then(Instant::now);
+                            let selection_result = operation(
+                                &mut retry_project,
+                                &retry_selection,
+                                &mut retry_generated,
+                                &self.policy,
+                            );
+                            add_diagnostic_duration(
+                                &mut diagnostics.edit_operation_nanos,
+                                edit_started,
+                            );
+                            let selection = selection_result?;
+                            Ok((retry_project, retry_generated, selection))
+                        })();
+                    add_optional_diagnostic_duration(
+                        &mut diagnostics.structural_retry_nanos,
+                        retry_started,
+                    );
                     let (retry_project, retry_generated, selection) = retry_result?;
                     (retry_project, retry_generated, selection)
                 }
@@ -233,10 +249,9 @@ impl EditingSession {
                 &mut generated,
             );
             generated.retain(|id| {
-                project
-                    .elements
-                    .iter()
-                    .any(|element| element.id.as_str() == id && element.role == Role::Parenthetical)
+                project.elements.iter().any(|element| {
+                    element.id.as_str() == id && element.element_type().as_str() == "Parenthetical"
+                })
             });
             let scoped_preconditions = !structural
                 && self.validated_baseline
@@ -248,32 +263,51 @@ impl EditingSession {
                             .is_some_and(|element| &element.id == id)
                         && selection.anchor.element == scope_start.element
                         && selection.focus.element == scope_start.element
+                        // Scoped validation currently assumes that a single
+                        // paragraph retains its exact type. Type changes must
+                        // validate complete group invariants so an invalidated
+                        // dual container cannot slip through while WO-003.7 is
+                        // still pending.
+                        && self
+                            .project
+                            .elements
+                            .get(scope_start.element)
+                            .zip(project.elements.get(scope_start.element))
+                            .is_some_and(|(before, after)| {
+                                before.element_type() == after.element_type()
+                            })
                         && project
                             .preservation
                             .as_ref()
                             .is_none_or(|state| state.has_managed_paragraph_index())
                 });
             let scoped_valid = if scoped_preconditions {
-                diagnostics.scoped_candidate_attempts = diagnostics.scoped_candidate_attempts.saturating_add(1);
+                diagnostics.scoped_candidate_attempts =
+                    diagnostics.scoped_candidate_attempts.saturating_add(1);
                 let scoped_started = capture_diagnostics.then(Instant::now);
-                let scoped_result = (|| {
-                    match project.validate_scoped_single_element_edit(&self.project, scope_start.element) {
-                        Ok(true) if validate_selection(&project, selection).is_ok() => {
-                            diagnostics.scoped_candidate_accepts = diagnostics.scoped_candidate_accepts.saturating_add(1);
-                            Ok(true)
-                        }
-                        Ok(_) => Ok(false),
-                        Err(error) => Err(EditError::Model(error)),
+                let scoped_result = (|| match project
+                    .validate_scoped_single_element_edit(&self.project, scope_start.element)
+                {
+                    Ok(true) if validate_selection(&project, selection).is_ok() => {
+                        diagnostics.scoped_candidate_accepts =
+                            diagnostics.scoped_candidate_accepts.saturating_add(1);
+                        Ok(true)
                     }
+                    Ok(_) => Ok(false),
+                    Err(error) => Err(EditError::Model(error)),
                 })();
-                add_optional_diagnostic_duration(&mut diagnostics.scoped_validation_nanos, scoped_started);
+                add_optional_diagnostic_duration(
+                    &mut diagnostics.scoped_validation_nanos,
+                    scoped_started,
+                );
                 scoped_result?
             } else {
                 false
             };
             if !scoped_valid {
                 if requested_scope == MutationValidationScope::SingleParagraph {
-                    diagnostics.full_validation_fallbacks = diagnostics.full_validation_fallbacks.saturating_add(1);
+                    diagnostics.full_validation_fallbacks =
+                        diagnostics.full_validation_fallbacks.saturating_add(1);
                 }
                 let preservation_started = capture_diagnostics.then(Instant::now);
                 let preservation_result = (|| -> Result<(), EditError> {
@@ -292,10 +326,14 @@ impl EditingSession {
                 add_diagnostic_duration(&mut diagnostics.preservation_nanos, preservation_started);
                 preservation_result?;
 
-                diagnostics.full_candidate_validations = diagnostics.full_candidate_validations.saturating_add(1);
+                diagnostics.full_candidate_validations =
+                    diagnostics.full_candidate_validations.saturating_add(1);
                 let full_started = capture_diagnostics.then(Instant::now);
                 let full_result = validate_full_candidate(&project);
-                add_optional_diagnostic_duration(&mut diagnostics.full_validation_nanos, full_started);
+                add_optional_diagnostic_duration(
+                    &mut diagnostics.full_validation_nanos,
+                    full_started,
+                );
                 full_result?;
 
                 let preservation_started = capture_diagnostics.then(Instant::now);
@@ -305,7 +343,10 @@ impl EditingSession {
                 add_diagnostic_duration(&mut diagnostics.preservation_nanos, preservation_started);
                 let selection_started = capture_diagnostics.then(Instant::now);
                 let selection_result = validate_selection(&project, selection);
-                add_optional_diagnostic_duration(&mut diagnostics.full_validation_nanos, selection_started);
+                add_optional_diagnostic_duration(
+                    &mut diagnostics.full_validation_nanos,
+                    selection_started,
+                );
                 selection_result?;
             }
             let no_op_started = capture_diagnostics.then(Instant::now);
@@ -326,7 +367,10 @@ impl EditingSession {
             } else {
                 classify_derived_invalidation(&self.project, &project)
             };
-            add_optional_diagnostic_duration(&mut diagnostics.derived_classification_nanos, derived_started);
+            add_optional_diagnostic_duration(
+                &mut diagnostics.derived_classification_nanos,
+                derived_started,
+            );
             match &derived_invalidation {
                 PendingDerivedInvalidation::Scenes(scenes) => {
                     self.deferred_derived_scenes
@@ -358,16 +402,25 @@ impl EditingSession {
             self.generated_parentheticals = generated;
             self.redo.clear();
             self.revision = self.revision.saturating_add(1);
-            add_optional_diagnostic_duration(&mut diagnostics.history_publication_nanos, publication_started);
+            add_optional_diagnostic_duration(
+                &mut diagnostics.history_publication_nanos,
+                publication_started,
+            );
             let dirty_started = capture_diagnostics.then(Instant::now);
             self.dirty = self.project != self.clean_project;
-            add_optional_diagnostic_duration(&mut diagnostics.dirty_comparison_nanos, dirty_started);
+            add_optional_diagnostic_duration(
+                &mut diagnostics.dirty_comparison_nanos,
+                dirty_started,
+            );
             let publication_started = capture_diagnostics.then(Instant::now);
             self.validated_baseline = true;
             self.pending_derived_invalidation
                 .merge(derived_invalidation);
             self.mark_mutated();
-            add_optional_diagnostic_duration(&mut diagnostics.history_publication_nanos, publication_started);
+            add_optional_diagnostic_duration(
+                &mut diagnostics.history_publication_nanos,
+                publication_started,
+            );
             Ok(())
         })();
         if capture_diagnostics {
@@ -376,5 +429,4 @@ impl EditingSession {
         }
         result
     }
-
 }

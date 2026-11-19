@@ -1,16 +1,19 @@
 #![deny(unsafe_code)]
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 use std::io::Write as _;
 
 mod app;
+mod chrome;
 mod commands;
 mod documents;
-mod chrome;
+mod platform;
 mod presentation;
 mod views;
-mod platform;
 mod widgets;
 use documents::lifecycle::show_native_lifecycle_error;
 

@@ -3,10 +3,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Appearance, DiagnosticMessage, DocumentPath, EditorSurface, HorizontalDirection, ImportResolution,
-    LineEdge, ParagraphAlignmentValue, PdfExportOptions, PointerPhase, Position, RoleValue,
-    ScriptViewMode, Selection, SprintTimerMode, TitleTextStyle, VerticalDirection, ZoomFactor,
-    ZoomPercent,
+    Appearance, DiagnosticMessage, DocumentPath, EditorSurface, HorizontalDirection,
+    ImportResolution, LineEdge, ParagraphAlignmentValue, PdfExportOptions, PointerPhase, Position,
+    RoleValue, ScriptViewMode, Selection, SprintTimerMode, TitleTextStyle, VerticalDirection,
+    ZoomFactor, ZoomPercent,
 };
 
 /// Stable identifier for a command. Identifiers are intentionally independent
@@ -269,9 +269,17 @@ pub enum Command {
     #[serde(rename = "edit.select-all")]
     EditSelectAll,
     #[serde(rename = "editor.text.insert")]
-    EditorTextInsert { text: String, #[serde(default)] surface: EditorSurface },
+    EditorTextInsert {
+        text: String,
+        #[serde(default)]
+        surface: EditorSurface,
+    },
     #[serde(rename = "editor.text.paste")]
-    EditorTextPaste { text: String, #[serde(default)] surface: EditorSurface },
+    EditorTextPaste {
+        text: String,
+        #[serde(default)]
+        surface: EditorSurface,
+    },
     #[serde(rename = "editor.delete.backward")]
     EditorDeleteBackward,
     #[serde(rename = "editor.paragraph.enter")]
@@ -279,17 +287,45 @@ pub enum Command {
     #[serde(rename = "editor.paragraph.tab")]
     EditorParagraphTab,
     #[serde(rename = "editor.element.change")]
-    EditorElementChange { role: RoleValue, #[serde(default)] surface: EditorSurface },
+    EditorElementChange {
+        role: RoleValue,
+        #[serde(default)]
+        surface: EditorSurface,
+    },
     #[serde(rename = "editor.selection.set")]
-    EditorSelectionSet { selection: Selection, #[serde(default)] surface: EditorSurface },
+    EditorSelectionSet {
+        selection: Selection,
+        #[serde(default)]
+        surface: EditorSurface,
+    },
     #[serde(rename = "editor.selection.pointer")]
-    EditorSelectionPointer { position: Position, phase: PointerPhase, #[serde(default)] surface: EditorSurface },
+    EditorSelectionPointer {
+        position: Position,
+        phase: PointerPhase,
+        #[serde(default)]
+        surface: EditorSurface,
+    },
     #[serde(rename = "editor.navigation.horizontal")]
-    EditorNavigationHorizontal { direction: HorizontalDirection, extend: bool, #[serde(default)] surface: EditorSurface },
+    EditorNavigationHorizontal {
+        direction: HorizontalDirection,
+        extend: bool,
+        #[serde(default)]
+        surface: EditorSurface,
+    },
     #[serde(rename = "editor.navigation.vertical")]
-    EditorNavigationVertical { direction: VerticalDirection, extend: bool, #[serde(default)] surface: EditorSurface },
+    EditorNavigationVertical {
+        direction: VerticalDirection,
+        extend: bool,
+        #[serde(default)]
+        surface: EditorSurface,
+    },
     #[serde(rename = "editor.navigation.line-edge")]
-    EditorNavigationLineEdge { edge: LineEdge, extend: bool, #[serde(default)] surface: EditorSurface },
+    EditorNavigationLineEdge {
+        edge: LineEdge,
+        extend: bool,
+        #[serde(default)]
+        surface: EditorSurface,
+    },
     #[serde(rename = "editor.focus")]
     EditorFocus,
     #[serde(rename = "window.title-page.open")]
@@ -297,9 +333,15 @@ pub enum Command {
     #[serde(rename = "window.title-page.close")]
     WindowTitlePageClose,
     #[serde(rename = "editor.style.toggle")]
-    EditorStyleToggle { surface: EditorSurface, style: TitleTextStyle },
+    EditorStyleToggle {
+        surface: EditorSurface,
+        style: TitleTextStyle,
+    },
     #[serde(rename = "editor.alignment.set")]
-    EditorAlignmentSet { surface: EditorSurface, alignment: ParagraphAlignmentValue },
+    EditorAlignmentSet {
+        surface: EditorSurface,
+        alignment: ParagraphAlignmentValue,
+    },
     #[serde(rename = "pdf.include-title-page.resolve")]
     PdfIncludeTitlePageResolve { options: PdfExportOptions },
     #[serde(rename = "view.zoom.set")]
@@ -413,4 +455,3 @@ impl Command {
         }
     }
 }
-

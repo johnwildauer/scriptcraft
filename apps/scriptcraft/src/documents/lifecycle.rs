@@ -161,10 +161,8 @@ impl ScriptCraftApp {
                     return false;
                 }
 
-                let choice = super::unsaved_changes::prompt_unsaved_changes(
-                    &self.native_title,
-                    frame,
-                );
+                let choice =
+                    super::unsaved_changes::prompt_unsaved_changes(&self.native_title, frame);
                 let save_outcome = if matches!(choice, UnsavedChangesChoice::Save) {
                     Some(self.save_for_lifecycle(ctx))
                 } else {

@@ -34,8 +34,7 @@ impl RunStyle {
     }
 
     fn matches_token(self, token: &str) -> bool {
-        token == self.canonical_token()
-            || (self == Self::Strikethrough && token == "StrikeThrough")
+        token == self.canonical_token() || (self == Self::Strikethrough && token == "StrikeThrough")
     }
 }
 
@@ -126,7 +125,9 @@ pub struct RunStyleRange<'a> {
 pub fn parse_style_attribute(
     attributes: &[RunAttribute],
 ) -> Result<RunStyleProjection, FormattedTextError> {
-    let mut style_values = attributes.iter().filter(|attribute| attribute.name == "Style");
+    let mut style_values = attributes
+        .iter()
+        .filter(|attribute| attribute.name == "Style");
     let Some(style_attribute) = style_values.next() else {
         return Ok(RunStyleProjection {
             flags: RunStyleFlags::default(),
@@ -213,7 +214,10 @@ fn update_run_style(
     Ok(result)
 }
 
-pub(super) fn effective_runs(text: &str, runs: &[TextRun]) -> Result<Vec<TextRun>, FormattedTextError> {
+pub(super) fn effective_runs(
+    text: &str,
+    runs: &[TextRun],
+) -> Result<Vec<TextRun>, FormattedTextError> {
     if runs.is_empty() {
         return Ok(if text.is_empty() {
             Vec::new()
@@ -270,7 +274,9 @@ fn any_or_all_selected_style(
         let start = cursor.max(range.start);
         let end = run_end.min(range.end);
         if start < end {
-            let has_style = parse_style_attribute(&run.attributes)?.flags.contains(style);
+            let has_style = parse_style_attribute(&run.attributes)?
+                .flags
+                .contains(style);
             any |= has_style;
             all &= has_style;
         }
@@ -347,12 +353,10 @@ fn transform_style_range(
         if local_start == local_end {
             push_run_coalescing(&mut transformed, &run.text, &run.attributes);
         } else {
-            push_run_coalescing(
-                &mut transformed,
-                &run.text[..local_start],
-                &run.attributes,
-            );
-            let current_has_style = parse_style_attribute(&run.attributes)?.flags.contains(style);
+            push_run_coalescing(&mut transformed, &run.text[..local_start], &run.attributes);
+            let current_has_style = parse_style_attribute(&run.attributes)?
+                .flags
+                .contains(style);
             let updated = if current_has_style == enabled {
                 run.attributes.clone()
             } else {
@@ -363,11 +367,7 @@ fn transform_style_range(
                 &run.text[local_start..local_end],
                 &updated,
             );
-            push_run_coalescing(
-                &mut transformed,
-                &run.text[local_end..],
-                &run.attributes,
-            );
+            push_run_coalescing(&mut transformed, &run.text[local_end..], &run.attributes);
         }
         global_start = global_end;
     }

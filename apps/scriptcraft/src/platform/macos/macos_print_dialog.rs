@@ -8,9 +8,9 @@ use objc2::rc::Retained;
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSButton, NSControlStateValueOff, NSControlStateValueOn, NSPrintInfo, NSPrintOperation,
-    NSPrintPanel, NSPrintPanelAccessorizing, NSPrintPanelAccessorySummaryKey,
-    NSPrintPanelAccessorySummaryItemDescriptionKey, NSPrintPanelAccessorySummaryItemNameKey,
-    NSPrintPanelOptions, NSPrintPanelResult, NSView, NSViewController,
+    NSPrintPanel, NSPrintPanelAccessorizing, NSPrintPanelAccessorySummaryItemDescriptionKey,
+    NSPrintPanelAccessorySummaryItemNameKey, NSPrintPanelAccessorySummaryKey, NSPrintPanelOptions,
+    NSPrintPanelResult, NSView, NSViewController,
 };
 use objc2_foundation::{
     NSArray, NSData, NSDictionary, NSObjectProtocol, NSPoint, NSSet, NSSize, NSString,
@@ -247,13 +247,15 @@ pub(crate) fn show_print_panel(snapshot: PrintCompositionSnapshot) -> PrintPanel
     ) {
         PanelMapping::Cancelled => PrintPanelResult::Cancelled,
         PanelMapping::Failed => PrintPanelResult::Failed,
-        PanelMapping::Accepted { print_info, options, snapshot } => {
-            PrintPanelResult::Accepted(AcceptedPrintSettings {
-                print_info,
-                options,
-                snapshot,
-            })
-        }
+        PanelMapping::Accepted {
+            print_info,
+            options,
+            snapshot,
+        } => PrintPanelResult::Accepted(AcceptedPrintSettings {
+            print_info,
+            options,
+            snapshot,
+        }),
     }
 }
 
@@ -279,9 +281,7 @@ fn map_panel_response<T>(
         PanelResponse::Accepted => match print_info {
             Some(print_info) => PanelMapping::Accepted {
                 print_info,
-                options: PdfExportOptions {
-                    include_title_page,
-                },
+                options: PdfExportOptions { include_title_page },
                 snapshot,
             },
             None => PanelMapping::Failed,
@@ -294,7 +294,8 @@ fn include_title_page_checkbox(main_thread: MainThreadMarker) -> Retained<NSButt
     // SAFETY: nil target/action leaves a standard self-tracking checkbox without
     // a callback crossing this adapter boundary; construction is main-thread-only.
     #[allow(unsafe_code)]
-    let checkbox = unsafe { NSButton::checkboxWithTitle_target_action(&label, None, None, main_thread) };
+    let checkbox =
+        unsafe { NSButton::checkboxWithTitle_target_action(&label, None, None, main_thread) };
     checkbox.setState(if fresh_title_page_default() {
         NSControlStateValueOn
     } else {

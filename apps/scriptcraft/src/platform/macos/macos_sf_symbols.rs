@@ -1,5 +1,6 @@
 //! Main-thread-only AppKit SF Symbols images for selected native menu items.
 
+use muda::{ContextMenu, Menu};
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSImage, NSMenu, NSMenuItem};
@@ -7,7 +8,6 @@ use objc2_foundation::{NSSize, NSString};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use muda::{ContextMenu, Menu};
 
 use crate::chrome::menu_items::{MenuEntrySpec, MENU_CATALOG};
 

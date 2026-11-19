@@ -188,14 +188,18 @@ impl ScriptCraftApp {
                 self.session.layout_inputs(),
                 self.native_path.as_deref(),
             );
-            let panel_result = crate::platform::macos::macos_print_dialog::show_print_panel(snapshot);
-            let delivery = crate::platform::macos::macos_print_dialog::dispatch_panel_result(panel_result, |settings| {
-                self.accepted_print_settings = Some(settings);
-                match self.accepted_print_settings.take() {
+            let panel_result =
+                crate::platform::macos::macos_print_dialog::show_print_panel(snapshot);
+            let delivery = crate::platform::macos::macos_print_dialog::dispatch_panel_result(
+                panel_result,
+                |settings| {
+                    self.accepted_print_settings = Some(settings);
+                    match self.accepted_print_settings.take() {
                     Some(settings) => crate::platform::macos::macos_print_dialog::deliver_print(settings),
                     None => crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PrintOperationUnavailable,
                 }
-            });
+                },
+            );
             match delivery {
                 crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Cancelled => self.clear_error(),
                     crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Accepted(
@@ -322,7 +326,9 @@ impl ScriptCraftApp {
         if let Some(prepared) = prepared {
             self.windows_print_preparation = None;
             match prepared {
-                Ok(packages) => match crate::platform::windows::windows_print::PrintSession::start(frame, packages) {
+                Ok(packages) => match crate::platform::windows::windows_print::PrintSession::start(
+                    frame, packages,
+                ) {
                     Ok(session) => {
                         self.windows_print_session = Some(session);
                         self.show_error("WINDOWS_PRINT_PREVIEW_REQUESTED: modern Windows print UI opened for the immutable request-time snapshot; later edits require a new request");
@@ -353,7 +359,10 @@ impl ScriptCraftApp {
         self.restore_editor_focus(ctx);
     }
 
-    fn report_windows_print_start_failure(&mut self, failure: crate::platform::windows::windows_print::StartFailure) {
+    fn report_windows_print_start_failure(
+        &mut self,
+        failure: crate::platform::windows::windows_print::StartFailure,
+    ) {
         let message = match failure {
             crate::platform::windows::windows_print::StartFailure::UnsupportedWindow => {
                 "WINDOWS_PRINT_UNSUPPORTED: eframe did not expose a Win32 owner window"

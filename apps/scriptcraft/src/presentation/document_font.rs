@@ -104,7 +104,6 @@ pub(crate) struct ResolvedDocumentFace {
     pub advance_mode: AdvanceMode,
 }
 
-
 pub(crate) fn font_definitions() -> (FontDefinitions, FontAvailability) {
     build_font_definitions(load_host_arial_faces())
 }
@@ -236,9 +235,15 @@ fn candidates_for_platform(
 ) -> [Option<PathBuf>; 4] {
     match platform {
         CandidatePlatform::MacOs => [
-            Some(PathBuf::from("/System/Library/Fonts/Supplemental/Arial.ttf")),
-            Some(PathBuf::from("/System/Library/Fonts/Supplemental/Arial Bold.ttf")),
-            Some(PathBuf::from("/System/Library/Fonts/Supplemental/Arial Italic.ttf")),
+            Some(PathBuf::from(
+                "/System/Library/Fonts/Supplemental/Arial.ttf",
+            )),
+            Some(PathBuf::from(
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            )),
+            Some(PathBuf::from(
+                "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
+            )),
             Some(PathBuf::from(
                 "/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf",
             )),

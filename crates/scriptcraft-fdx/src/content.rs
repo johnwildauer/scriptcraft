@@ -4,25 +4,24 @@
 use crate::diagnostics::{map_model_error, map_paragraph_id_error, FdxError, SaveDiagnosticCode};
 use crate::identity::raw_identity_attribute as identity_attribute;
 use crate::reader::{attribute, validate_xml_chars, RawElement, RawNode};
-use crate::settings::{bounded_inches, role_from_fdx};
+use crate::settings::bounded_inches;
 use crate::tree::{preserve_misc_node, preserve_opaque_element, preserved_element};
 use crate::writer::validate_qname;
-use scriptcraft_model::dual_dialogue::{
-    DualDialogueGroup, DualDialogueSide, DualDialogueWrapperProvenance,
-};
+use scriptcraft_model::dual_dialogue::{DualDialogueGroup, DualDialogueWrapperProvenance};
+use scriptcraft_model::element_definition::SemanticCapabilities;
+use scriptcraft_model::element_type::ElementTypeKey;
 use scriptcraft_model::formatting::{
-    formatting_for_role, FixedPoint, ParagraphAlignment, SourceLayoutSettings,
-    SourceParagraphOverrides,
-};
-use scriptcraft_model::preservation::{
-    is_user_paragraph_data_name, AnchorRelation,
-    AnchorTarget, DependencyConfidence, PreservedAttribute, PreservedElement, PreservedNode,
-    SectionKind, SourceAnchor, SourceAnchorId, SourceName, SourceOwnership,
+    FixedPoint, ParagraphAlignment, SourceLayoutSettings, SourceParagraphOverrides,
 };
 use scriptcraft_model::paragraph_id::ParagraphIdAllocator;
+use scriptcraft_model::preservation::{
+    is_user_paragraph_data_name, AnchorRelation, AnchorTarget, DependencyConfidence,
+    PreservedAttribute, PreservedElement, PreservedNode, SectionKind, SourceAnchor, SourceAnchorId,
+    SourceName, SourceOwnership,
+};
 use scriptcraft_model::{
-    BodyOwner, Project, Role, RunAttribute, ScreenplayElement, SourceFormat,
-    SourceProvenance, SourceSection, StableId, TextRun, TitlePageParagraph,
+    BodyOwner, Project, RunAttribute, ScreenplayElement, SourceFormat, SourceProvenance,
+    SourceSection, StableId, TextRun, TitlePageParagraph,
 };
 
 fn is_fdx_element(element: &RawElement, name: &str, root_ns: Option<&str>) -> bool {
@@ -31,10 +30,41 @@ fn is_fdx_element(element: &RawElement, name: &str, root_ns: Option<&str>) -> bo
 
 pub(crate) use crate::reader::{classify_preserved_element, SourceClass};
 
+/// Returns a direct, unqualified, unique, nonempty paragraph Type as its exact
+/// open key. Oversized labels fail through the bounded import error mapping.
+pub(crate) fn paragraph_type_key(element: &RawElement) -> Result<Option<ElementTypeKey>, FdxError> {
+    let Some(label) = attribute(element, "Type").filter(|label| !label.is_empty()) else {
+        return Ok(None);
+    };
+    if label.len() > scriptcraft_model::element_type::MAX_ELEMENT_TYPE_KEY_BYTES {
+        return Err(FdxError::ResourceLimit);
+    }
+    ElementTypeKey::new(label.to_owned())
+        .map(Some)
+        .map_err(|_| FdxError::InvalidValue)
+}
+
+/// Whether a direct body Paragraph is a managed owner under the supported
+/// dual-dialogue source topology.
+pub(crate) fn is_managed_direct_body_paragraph(
+    element: &RawElement,
+    root_ns: Option<&str>,
+) -> Result<bool, FdxError> {
+    if paragraph_type_key(element)?.is_none() {
+        return Ok(false);
+    }
+    let has_dual_name = element.children.iter().any(
+        |child| matches!(child, RawNode::Element(child) if child.name.local_name == "DualDialogue"),
+    );
+    if !has_dual_name {
+        return Ok(true);
+    }
+    Ok(attribute(element, "Type") == Some("General")
+        && is_supported_dual_dialogue_source(element, root_ns))
+}
+
 pub(crate) fn is_supported_dual_dialogue_source(outer: &RawElement, root_ns: Option<&str>) -> bool {
-    if !is_fdx_element(outer, "Paragraph", root_ns)
-        || attribute(outer, "Type") != Some("General")
-    {
+    if !is_fdx_element(outer, "Paragraph", root_ns) || attribute(outer, "Type") != Some("General") {
         return false;
     }
     let duals = outer
@@ -66,7 +96,7 @@ pub(crate) fn is_supported_dual_dialogue_source(outer: &RawElement, root_ns: Opt
     }
 
     let mut spell_blocks = 0usize;
-    let mut roles = Vec::new();
+    let mut members = 0usize;
     for child in &dual.children {
         match child {
             RawNode::Text(value) if value.chars().all(char::is_whitespace) => {}
@@ -74,7 +104,7 @@ pub(crate) fn is_supported_dual_dialogue_source(outer: &RawElement, root_ns: Opt
                 if is_fdx_element(element, "SpellCheckIgnoreLists", root_ns) =>
             {
                 if spell_blocks != 0
-                    || !roles.is_empty()
+                    || members != 0
                     || validate_nested_spell_check(element, root_ns).is_err()
                 {
                     return false;
@@ -82,36 +112,18 @@ pub(crate) fn is_supported_dual_dialogue_source(outer: &RawElement, root_ns: Opt
                 spell_blocks += 1;
             }
             RawNode::Element(element) if is_fdx_element(element, "Paragraph", root_ns) => {
-                let Some(role) = attribute(element, "Type").and_then(role_from_fdx) else {
+                let Ok(Some(element_type)) = paragraph_type_key(element) else {
                     return false;
                 };
-                if !matches!(role, Role::Character | Role::Dialogue | Role::Parenthetical)
-                    || validate_nested_member_topology(element, root_ns, role).is_err()
-                {
+                if validate_nested_member_topology(element, root_ns, &element_type).is_err() {
                     return false;
                 }
-                roles.push(role);
+                members += 1;
             }
             _ => return false,
         }
     }
-    if spell_blocks != 1 || roles.len() < 2 || roles.first() != Some(&Role::Character) {
-        return false;
-    }
-    let Some(right_cue) = roles
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find_map(|(index, role)| (*role == Role::Character).then_some(index))
-    else {
-        return false;
-    };
-    !roles[1..right_cue]
-        .iter()
-        .any(|role| !matches!(role, Role::Dialogue | Role::Parenthetical))
-        && !roles[right_cue + 1..]
-            .iter()
-            .any(|role| !matches!(role, Role::Dialogue | Role::Parenthetical))
+    spell_blocks == 1 && members >= 2
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -125,7 +137,6 @@ pub(crate) fn preserve_dual_dialogue_wrapper(
     next_anchor: &mut usize,
 ) -> Result<PreservedElement, FdxError> {
     let wrapper_ordinal = next_id.checked_sub(1).ok_or(FdxError::ResourceLimit)?;
-    let member_start = project.elements.len();
     let mut staged_members = Vec::new();
     let mut staged_anchors = Vec::new();
     let mut staged_member_overrides = Vec::new();
@@ -167,7 +178,7 @@ pub(crate) fn preserve_dual_dialogue_wrapper(
 
     let mut spell_blocks = 0usize;
     let mut seen_member = false;
-    let mut roles = Vec::new();
+    let mut member_count = 0usize;
     let mut dual_children = Vec::with_capacity(dual.children.len());
     for child in &dual.children {
         match child {
@@ -187,22 +198,11 @@ pub(crate) fn preserve_dual_dialogue_wrapper(
                 if !is_fdx_element(element, "Paragraph", root_ns) {
                     return Err(FdxError::UnsupportedConstruct);
                 }
-                let role = attribute(element, "Type")
-                    .and_then(role_from_fdx)
-                    .ok_or(FdxError::UnsupportedConstruct)?;
-                if !matches!(
-                    role,
-                    Role::Character | Role::Dialogue | Role::Parenthetical
-                ) {
-                    return Err(FdxError::UnsupportedConstruct);
-                }
-                validate_nested_member_topology(element, root_ns, role)?;
-                let semantic = make_semantic_element(
-                    element,
-                    role,
-                    SectionKind::Content,
-                    next_id,
-                )?;
+                let element_type =
+                    paragraph_type_key(element)?.ok_or(FdxError::UnsupportedConstruct)?;
+                validate_nested_member_topology(element, root_ns, &element_type)?;
+                let semantic =
+                    make_semantic_element(element, element_type, SectionKind::Content, next_id)?;
                 let member_id = semantic.id.clone();
                 let anchor_id = next_source_anchor(next_anchor)?;
                 let member_overrides = direct_paragraph_overrides(element);
@@ -211,68 +211,38 @@ pub(crate) fn preserve_dual_dialogue_wrapper(
                 }
                 staged_anchors.push(SourceAnchor {
                     id: anchor_id.clone(),
-                    target: AnchorTarget::ProjectElement(
-                        member_id.clone(),
-                    ),
+                    target: AnchorTarget::ProjectElement(member_id.clone()),
                     relation: AnchorRelation::Represents,
                 });
-                roles.push(role);
+                member_count = member_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
                 staged_members.push(semantic);
-                dual_children.push(PreservedNode::Element(
-                    preserved_managed_nested_paragraph(element, member_id, anchor_id)?,
-                ));
+                dual_children.push(PreservedNode::Element(preserved_managed_nested_paragraph(
+                    element, member_id, anchor_id,
+                )?));
             }
             _ => return Err(FdxError::UnsupportedConstruct),
         }
     }
-    if spell_blocks != 1 {
-        return Err(FdxError::UnsupportedConstruct);
-    }
-    let right_cue = roles
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find_map(|(index, role)| (*role == Role::Character).then_some(index))
-        .ok_or(FdxError::UnsupportedConstruct)?;
-    if roles.first() != Some(&Role::Character)
-        || roles[1..right_cue]
-            .iter()
-            .any(|role| !matches!(role, Role::Dialogue | Role::Parenthetical))
-        || roles[right_cue + 1..]
-            .iter()
-            .any(|role| !matches!(role, Role::Dialogue | Role::Parenthetical))
-        || roles[right_cue + 1..]
-            .iter()
-            .any(|role| *role == Role::Character)
-    {
+    if spell_blocks != 1 || member_count < 2 {
         return Err(FdxError::UnsupportedConstruct);
     }
 
     // The semantic members were appended in source order. Their IDs are also
     // the group membership authority; the outer General remains invisible.
-    if staged_members.len() != roles.len() {
+    if staged_members.len() != member_count {
         return Err(FdxError::UnsupportedConstruct);
     }
     let members = staged_members.as_slice();
     let group_id = StableId::new(format!(
         "fdx-dual-group-{}",
-        project.dual_dialogue_groups.len().checked_add(1).ok_or(FdxError::ResourceLimit)?
+        project
+            .dual_dialogue_groups
+            .len()
+            .checked_add(1)
+            .ok_or(FdxError::ResourceLimit)?
     ))
     .map_err(map_model_error)?;
-    let left = DualDialogueSide {
-        character: members[0].id.clone(),
-        paragraphs: members[1..right_cue]
-            .iter()
-            .map(|member| member.id.clone())
-            .collect(),
-    };
-    let right = DualDialogueSide {
-        character: members[right_cue].id.clone(),
-        paragraphs: members[right_cue + 1..]
-            .iter()
-            .map(|member| member.id.clone())
-            .collect(),
-    };
+    let member_ids = members.iter().map(|member| member.id.clone()).collect();
 
     let wrapper_anchor = next_source_anchor(next_anchor)?;
     let outer_id = Some(
@@ -298,8 +268,7 @@ pub(crate) fn preserve_dual_dialogue_wrapper(
     });
     let group = DualDialogueGroup {
         id: group_id.clone(),
-        left,
-        right,
+        members: member_ids,
         wrapper: DualDialogueWrapperProvenance {
             outer_foreign_id: outer_id,
             source: Some(source),
@@ -343,7 +312,9 @@ pub(crate) fn preserve_dual_dialogue_wrapper(
         anchor: Some(wrapper_anchor),
         children: wrapper_children.into(),
     };
-    project.elements.extend(staged_members.into_iter().map(BodyOwner::shared));
+    project
+        .elements
+        .extend(staged_members.into_iter().map(BodyOwner::shared));
     project.dual_dialogue_groups.push(group);
     for (id, overrides) in staged_member_overrides {
         source_layout_settings
@@ -394,7 +365,10 @@ fn preserved_managed_nested_paragraph(
     })
 }
 
-fn validate_nested_spell_check(element: &RawElement, root_ns: Option<&str>) -> Result<(), FdxError> {
+fn validate_nested_spell_check(
+    element: &RawElement,
+    root_ns: Option<&str>,
+) -> Result<(), FdxError> {
     if !is_fdx_element(element, "SpellCheckIgnoreLists", root_ns) {
         return Err(FdxError::UnsupportedConstruct);
     }
@@ -434,8 +408,9 @@ fn reject_nested_dual_dialogue(element: &RawElement) -> Result<(), FdxError> {
 fn validate_nested_member_topology(
     element: &RawElement,
     root_ns: Option<&str>,
-    role: Role,
+    element_type: &ElementTypeKey,
 ) -> Result<(), FdxError> {
+    let capabilities = SemanticCapabilities::for_key(element_type);
     let mut saw_alts = false;
     let mut saw_attachment = false;
     for child in &element.children {
@@ -443,24 +418,29 @@ fn validate_nested_member_topology(
             RawNode::Text(value) if value.chars().all(char::is_whitespace) => {}
             RawNode::Element(child)
                 if is_fdx_element(child, "Text", root_ns)
-                    && child.children.iter().all(|inline| {
-                        matches!(inline, RawNode::Text(_) | RawNode::CData(_))
-                    }) => {}
+                    && child
+                        .children
+                        .iter()
+                        .all(|inline| matches!(inline, RawNode::Text(_) | RawNode::CData(_))) => {}
             RawNode::Element(child)
-                if role == Role::SceneHeading && is_fdx_element(child, "SceneProperties", root_ns) => {}
+                if capabilities.scene_boundary
+                    && is_fdx_element(child, "SceneProperties", root_ns) => {}
             RawNode::Element(child)
-                if role == Role::Dialogue && is_fdx_element(child, "Alts", root_ns) =>
+                if capabilities.dialogue && is_fdx_element(child, "Alts", root_ns) =>
             {
                 if saw_alts {
                     return Err(FdxError::UnsupportedConstruct);
                 }
                 saw_alts = true;
             }
-            RawNode::Element(child)
-                if is_user_paragraph_data_name(&child.name, &element.name) && !saw_attachment =>
-            {
+            RawNode::Element(child) if is_user_paragraph_data_name(&child.name, &element.name) => {
+                if saw_attachment {
+                    return Err(FdxError::UnsupportedConstruct);
+                }
                 saw_attachment = true;
             }
+            RawNode::Element(child) => reject_nested_dual_dialogue(child)?,
+            RawNode::Comment(_) | RawNode::ProcessingInstruction { .. } | RawNode::CData(_) => {}
             _ => return Err(FdxError::UnsupportedConstruct),
         }
     }
@@ -509,7 +489,8 @@ pub(crate) fn new_paragraph(
     direct_overrides: Option<SourceParagraphOverrides>,
     paragraph_ids: &mut ParagraphIdAllocator,
 ) -> Result<PreservedNode, FdxError> {
-    let mut paragraph = preserved_element("Paragraph", vec![("Type", role_to_fdx(semantic.role))]);
+    let element_type = semantic.element_type();
+    let mut paragraph = preserved_element("Paragraph", vec![("Type", element_type.as_str())]);
     if let Some(overrides) = direct_overrides {
         add_member_direct_attributes(&mut paragraph, overrides)?;
     }
@@ -595,11 +576,7 @@ pub(crate) fn add_member_direct_attributes(
         push_unqualified_attribute(paragraph, "Spacing", "1");
     }
     if let Some(value) = overrides.starts_new_page {
-        push_unqualified_attribute(
-            paragraph,
-            "StartsNewPage",
-            if value { "Yes" } else { "No" },
-        );
+        push_unqualified_attribute(paragraph, "StartsNewPage", if value { "Yes" } else { "No" });
     }
     Ok(())
 }
@@ -618,11 +595,7 @@ pub(crate) fn add_wrapper_direct_attributes(
         push_unqualified_attribute(paragraph, "SpaceBefore", &value.decimal_string());
     }
     if let Some(value) = overrides.starts_new_page {
-        push_unqualified_attribute(
-            paragraph,
-            "StartsNewPage",
-            if value { "Yes" } else { "No" },
-        );
+        push_unqualified_attribute(paragraph, "StartsNewPage", if value { "Yes" } else { "No" });
     }
     Ok(())
 }
@@ -660,20 +633,22 @@ fn fixed_inches_string(value: FixedPoint) -> String {
     let raw = value.raw();
     const PER_INCH: u64 = 7_200;
     let magnitude = raw.unsigned_abs();
-    let whole = magnitude / PER_INCH;
+    let mut whole = magnitude / PER_INCH;
     let remainder = magnitude % PER_INCH;
-    if remainder == 0 {
-        return format!("{}{whole}", if raw < 0 { "-" } else { "" });
+    let mut fractional_millionths = (remainder * 1_000_000 + PER_INCH / 2) / PER_INCH;
+    if fractional_millionths == 1_000_000 {
+        whole += 1;
+        fractional_millionths = 0;
     }
-    let mut fraction = format!("{remainder:06}");
+    let sign = if raw < 0 { "-" } else { "" };
+    if fractional_millionths == 0 {
+        return format!("{sign}{whole}");
+    }
+    let mut fraction = format!("{fractional_millionths:06}");
     while fraction.ends_with('0') {
         fraction.pop();
     }
-    format!("{}{whole}.{fraction}", if raw < 0 { "-" } else { "" })
-}
-
-pub(crate) fn role_to_fdx(role: Role) -> &'static str {
-    formatting_for_role(role).fdx_label
+    format!("{sign}{whole}.{fraction}")
 }
 
 impl ImportedSemanticParagraph {
@@ -685,13 +660,10 @@ impl ImportedSemanticParagraph {
     }
 }
 
-pub(crate) fn direct_paragraph_overrides(
-    element: &RawElement,
-) -> Option<SourceParagraphOverrides> {
+pub(crate) fn direct_paragraph_overrides(element: &RawElement) -> Option<SourceParagraphOverrides> {
     let mut overrides = SourceParagraphOverrides::default();
     let paragraph = &mut overrides.paragraph;
-    paragraph.alignment = attribute(element, "Alignment")
-        .and_then(ParagraphAlignment::from_fdx);
+    paragraph.alignment = attribute(element, "Alignment").and_then(ParagraphAlignment::from_fdx);
     paragraph.first_indent =
         attribute(element, "FirstIndent").and_then(|value| bounded_inches(value, true));
     paragraph.left_indent =
@@ -722,7 +694,7 @@ pub(crate) fn direct_paragraph_overrides(
 
 pub(crate) fn make_semantic_element(
     element: &RawElement,
-    role: Role,
+    element_type: ElementTypeKey,
     section: SectionKind,
     next_id: &mut usize,
 ) -> Result<ScreenplayElement, FdxError> {
@@ -739,12 +711,14 @@ pub(crate) fn make_semantic_element(
         foreign_id: identity_attribute(element).map(str::to_owned),
         foreign_role: attribute(element, "Type").map(str::to_owned),
     };
+    let capabilities = SemanticCapabilities::for_key(&element_type);
     let runs = semantic_text_runs(
         element,
-        section == SectionKind::Content && role == Role::SceneHeading,
-        section == SectionKind::Content && role == Role::Dialogue,
+        section == SectionKind::Content && capabilities.scene_boundary,
+        section == SectionKind::Content && capabilities.dialogue,
     )?;
-    ScreenplayElement::with_runs(id, role, runs, Some(source_provenance)).map_err(map_model_error)
+    ScreenplayElement::with_runs(id, element_type, runs, Some(source_provenance))
+        .map_err(map_model_error)
 }
 
 fn classify_paragraph_child(
@@ -806,7 +780,9 @@ pub(crate) fn semantic_text_runs(
                 RawNode::Text(value) | RawNode::CData(value) => text.push_str(value),
                 // Inline elements and miscellaneous nodes remain in the raw
                 // source tree. Their text is intentionally not flattened.
-                RawNode::Element(_) | RawNode::Comment(_) | RawNode::ProcessingInstruction { .. } => {}
+                RawNode::Element(_)
+                | RawNode::Comment(_)
+                | RawNode::ProcessingInstruction { .. } => {}
             }
         }
         if text.is_empty() {
@@ -827,4 +803,214 @@ pub(crate) fn semantic_text_runs(
         runs.push(TextRun { text, attributes });
     }
     Ok(runs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scriptcraft_model::preservation::{PreservedElement, PreservedNode, SourceOwnership};
+
+    fn valid<T, E>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|_| unreachable!("focused arbitrary-body FDX source is valid"))
+    }
+
+    fn attribute<'a>(element: &'a PreservedElement, name: &str) -> Option<&'a str> {
+        element
+            .attributes
+            .iter()
+            .find(|attribute| {
+                attribute.name.namespace_uri.is_none() && attribute.name.local_name == name
+            })
+            .map(|attribute| attribute.value.as_str())
+    }
+
+    fn child<'a>(element: &'a PreservedElement, name: &str) -> Option<&'a PreservedElement> {
+        element.children.iter().find_map(|node| match node {
+            PreservedNode::Element(child)
+                if child.name.local_name == name
+                    && child.name.namespace_uri == element.name.namespace_uri =>
+            {
+                Some(child)
+            }
+            _ => None,
+        })
+    }
+
+    fn body_source(project: &scriptcraft_model::Project) -> Option<&PreservedElement> {
+        let root = project
+            .preservation
+            .as_ref()?
+            .sections
+            .iter()
+            .flat_map(|section| section.children.iter())
+            .find_map(|node| match node {
+                PreservedNode::Element(root) if root.name.local_name == "FinalDraft" => Some(root),
+                _ => None,
+            })?;
+        child(root, "Content")
+    }
+
+    #[test]
+    fn arbitrary_direct_body_types_are_managed_without_guessed_semantics() {
+        let source = br#"<FinalDraft DocumentType="Script" Version="6" xmlns:x="urn:foreign">
+  <Content>
+    <Paragraph Type="Lyrics" id="lyrics-foreign" LeftIndent="0.25">
+      <Text Style="Bold">Some </Text><Text>lyrics</Text>
+      <VendorPayload marker="retained">not canonical text</VendorPayload>
+      <SceneProperties id="opaque-scene"><SceneArcBeats><SceneArcBeat id="opaque-beat"/></SceneArcBeats></SceneProperties>
+      <Alts><AltCollection><Alt><Paragraph Type="Dialogue"><Text>alternate</Text></Paragraph></Alt></AltCollection></Alts>
+    </Paragraph>
+    <Paragraph Type="lyrics" id="lowercase-foreign"><Text>lowercase</Text></Paragraph>
+    <Paragraph id="missing-type"><Text>missing</Text></Paragraph>
+    <Paragraph Type="" id="empty-type"><Text>empty</Text></Paragraph>
+    <Paragraph x:Type="Foreign" id="namespaced-type"><Text>foreign</Text></Paragraph>
+  </Content>
+</FinalDraft>"#;
+        let imported = valid(crate::reader::read_v6(source));
+        let project = imported.project;
+
+        assert_eq!(project.elements.len(), 2);
+        let lyrics = project.elements[0].as_element();
+        let lowercase = project.elements[1].as_element();
+        assert_eq!(lyrics.id.as_str(), "fdx-element-1");
+        assert_eq!(lowercase.id.as_str(), "fdx-element-2");
+        assert_eq!(lyrics.element_type().as_str(), "Lyrics");
+        assert_eq!(lowercase.element_type().as_str(), "lyrics");
+        assert_eq!(lyrics.text, "Some lyrics");
+        assert_eq!(lyrics.runs.len(), 2);
+        assert_eq!(lyrics.runs[0].text, "Some ");
+        assert_eq!(lyrics.runs[0].attributes[0].name, "Style");
+        assert_eq!(lyrics.runs[0].attributes[0].value, "Bold");
+        assert_eq!(lyrics.runs[1].text, "lyrics");
+        assert!(project.direct_paragraph_overrides.contains_key(&lyrics.id));
+        assert_eq!(
+            lyrics
+                .source_provenance
+                .as_ref()
+                .and_then(|source| source.foreign_id.as_deref()),
+            Some("lyrics-foreign")
+        );
+        assert_eq!(
+            project
+                .element_definitions()
+                .get_by_label("Lyrics")
+                .map(|definition| definition.capabilities()),
+            Some(SemanticCapabilities::default())
+        );
+        assert_eq!(
+            project
+                .element_definitions()
+                .get_by_label("lyrics")
+                .map(|definition| definition.capabilities()),
+            Some(SemanticCapabilities::default())
+        );
+
+        let content = body_source(&project)
+            .unwrap_or_else(|| unreachable!("the source Content section is retained"));
+        let lyrics_source = content
+            .children
+            .iter()
+            .find_map(|node| match node {
+                PreservedNode::Element(paragraph)
+                    if paragraph.name.local_name == "Paragraph"
+                        && attribute(paragraph, "id") == Some("lyrics-foreign") =>
+                {
+                    Some(paragraph)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| unreachable!("the arbitrary body paragraph remains retained"));
+        assert_eq!(
+            lyrics_source.ownership,
+            SourceOwnership::Managed(lyrics.id.clone())
+        );
+        assert!(lyrics_source.anchor.is_some());
+        assert_eq!(lyrics_source.source_type.as_deref(), Some("Lyrics"));
+        let payload = child(lyrics_source, "VendorPayload")
+            .unwrap_or_else(|| unreachable!("unknown direct children remain in their owner"));
+        assert_eq!(payload.ownership, SourceOwnership::Opaque);
+        assert_eq!(attribute(payload, "marker"), Some("retained"));
+        assert_eq!(
+            payload
+                .children
+                .iter()
+                .filter_map(|node| match node {
+                    PreservedNode::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>(),
+            "not canonical text"
+        );
+        assert_eq!(
+            child(lyrics_source, "SceneProperties").map(|node| node.ownership.clone()),
+            Some(SourceOwnership::Opaque)
+        );
+        assert_eq!(
+            child(lyrics_source, "Alts").map(|node| node.ownership.clone()),
+            Some(SourceOwnership::Opaque)
+        );
+
+        for id in ["missing-type", "empty-type", "namespaced-type"] {
+            let opaque = content.children.iter().find_map(|node| match node {
+                PreservedNode::Element(paragraph)
+                    if paragraph.name.local_name == "Paragraph"
+                        && attribute(paragraph, "id") == Some(id) =>
+                {
+                    Some(paragraph)
+                }
+                _ => None,
+            });
+            assert!(opaque.is_some_and(|paragraph| {
+                paragraph.ownership == SourceOwnership::Opaque && paragraph.anchor.is_none()
+            }));
+        }
+    }
+
+    #[test]
+    fn preservation_free_body_construction_emits_exact_case_sensitive_type_keys() {
+        for label in ["Lyrics", "lyrics"] {
+            let key = ElementTypeKey::new(label).unwrap_or_else(|_| unreachable!());
+            let semantic = ScreenplayElement::with_runs(
+                format!("new-{label}"),
+                key,
+                vec![TextRun {
+                    text: "sung words".to_owned(),
+                    attributes: vec![RunAttribute {
+                        name: "Style".to_owned(),
+                        value: "Italic".to_owned(),
+                    }],
+                }],
+                None,
+            )
+            .unwrap_or_else(|_| unreachable!());
+            let mut paragraph_ids = ParagraphIdAllocator::new(Vec::<String>::new());
+            let PreservedNode::Element(paragraph) = new_paragraph(
+                &semantic,
+                Some(SourceParagraphOverrides::default()),
+                &mut paragraph_ids,
+            )
+            .unwrap_or_else(|_| unreachable!()) else {
+                unreachable!("new paragraph construction returns an element")
+            };
+
+            assert_eq!(attribute(&paragraph, "Type"), Some(label));
+            assert!(paragraph
+                .attributes
+                .iter()
+                .any(|attribute| attribute.name.local_name == "id" && !attribute.value.is_empty()));
+            let text = child(&paragraph, "Text")
+                .unwrap_or_else(|| unreachable!("canonical runs construct Text children"));
+            assert_eq!(
+                text.children
+                    .iter()
+                    .filter_map(|node| match node {
+                        PreservedNode::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+                "sung words"
+            );
+            assert_eq!(attribute(text, "Style"), Some("Italic"));
+        }
+    }
 }

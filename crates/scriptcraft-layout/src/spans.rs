@@ -96,15 +96,21 @@ pub(super) fn positioned_spans(
                 && span.underline == style.underline
                 && span.strikethrough == strikethrough
                 && !character.is_whitespace()
-                && !span.display_text.chars().last().is_some_and(char::is_whitespace)
+                && !span
+                    .display_text
+                    .chars()
+                    .last()
+                    .is_some_and(char::is_whitespace)
                 && (span.source.end == source_start
                     || (span.source.start == source_start && span.source.end == source_end))
         });
         if same {
-            output
-                .last_mut()
-                .expect("checked span exists")
-                .push(character, source_start, source_end, cell);
+            output.last_mut().expect("checked span exists").push(
+                character,
+                source_start,
+                source_end,
+                cell,
+            );
         } else {
             output.push(PositionedSpanBuilder {
                 display_text: character.to_string(),
@@ -133,7 +139,10 @@ pub(super) fn positioned_spans(
         }
         x = x.saturating_add(cell.raw());
     }
-    output.into_iter().map(PositionedSpanBuilder::finish).collect()
+    output
+        .into_iter()
+        .map(PositionedSpanBuilder::finish)
+        .collect()
 }
 
 struct PositionedSpanBuilder {
@@ -148,22 +157,15 @@ struct PositionedSpanBuilder {
 }
 
 impl PositionedSpanBuilder {
-    fn push(
-        &mut self,
-        character: char,
-        source_start: usize,
-        source_end: usize,
-        cell: FixedPoint,
-    ) {
+    fn push(&mut self, character: char, source_start: usize, source_end: usize, cell: FixedPoint) {
         let display_start = self
             .display_source_map
             .last()
             .map_or(0, |segment| segment.display_end);
         self.display_text.push(character);
         self.source.end = source_end;
-        self.geometry.width = FixedPoint::from_raw(
-            self.geometry.width.raw().saturating_add(cell.raw()),
-        );
+        self.geometry.width =
+            FixedPoint::from_raw(self.geometry.width.raw().saturating_add(cell.raw()));
         self.char_width = cell;
         self.display_source_map.push(DisplaySourceSegment {
             display_start,
@@ -186,4 +188,3 @@ impl PositionedSpanBuilder {
         }
     }
 }
-

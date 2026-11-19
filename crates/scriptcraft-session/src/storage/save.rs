@@ -1,9 +1,7 @@
 //! Transactional native save preparation, verification, publication, and rebase.
 
 use super::candidate::PreparedFdx;
-use super::error::{
-    FdxStorageErrorKind, TransactionalSaveError, TransactionalSaveOutcome,
-};
+use super::error::{FdxStorageErrorKind, TransactionalSaveError, TransactionalSaveOutcome};
 use super::filesystem::FdxStorageFileSystem;
 use super::publication::{replace, save_as, save_as_overwrite};
 use super::target::{FdxSaveMode, FdxSaveTarget};
@@ -11,7 +9,9 @@ use crate::editing::{
     map_selection_to_project, map_title_selection_to_project, EditError, EditingSession,
 };
 use scriptcraft_fdx::{self as fdx, same_dual_dialogue_projection, write_v6_for_save, FdxError};
-use scriptcraft_model::{cast_list, BodyOwner, Project, TitlePageParagraph};
+use scriptcraft_model::{
+    cast_list, BodyOwner, ElementTypeKey, Project, Role, StableId, TitlePageParagraph,
+};
 
 /// Save against the session's opened/saved target, or create a new target using
 /// the mode's Save As policy. Session and target state change only after publish.
@@ -193,7 +193,7 @@ fn same_save_projection(expected: &Project, actual: &Project) -> bool {
     ) -> bool {
         expected.len() == actual.len()
             && expected.iter().zip(actual).all(|(expected, actual)| {
-                expected.role == actual.role
+                expected.element_type() == actual.element_type()
                     && expected.text == actual.text
                     && if expected.runs.is_empty() {
                         actual.runs.iter().all(|run| run.attributes.is_empty())
@@ -203,18 +203,17 @@ fn same_save_projection(expected: &Project, actual: &Project) -> bool {
             })
     }
 
-    same_title_paragraphs(&expected.title_page, &actual.title_page)
+    expected.element_definitions() == actual.element_definitions()
+        && expected.direct_paragraph_overrides == actual.direct_paragraph_overrides
+        && same_title_paragraphs(&expected.title_page, &actual.title_page)
         && same_elements(&expected.elements, &actual.elements)
         && same_dual_dialogue_projection(expected, actual)
 }
 
-fn same_title_paragraphs(
-    expected: &[TitlePageParagraph],
-    actual: &[TitlePageParagraph],
-) -> bool {
+fn same_title_paragraphs(expected: &[TitlePageParagraph], actual: &[TitlePageParagraph]) -> bool {
     expected.len() == actual.len()
         && expected.iter().zip(actual).all(|(expected, actual)| {
-            expected.role == actual.role
+            expected.element_type() == actual.element_type()
                 && expected.text == actual.text
                 && expected.formatting == actual.formatting
                 && if expected.runs.is_empty() {
@@ -223,6 +222,106 @@ fn same_title_paragraphs(
                     expected.runs == actual.runs
                 }
         })
+}
+
+fn map_body_owner_identity<'a>(
+    old_project: &Project,
+    old_id: &StableId,
+    new_project: &'a Project,
+) -> Option<&'a BodyOwner> {
+    let old = old_project
+        .elements
+        .iter()
+        .find(|owner| &owner.id == old_id)?;
+    if old_project
+        .elements
+        .iter()
+        .filter(|owner| owner.id == *old_id)
+        .count()
+        != 1
+    {
+        return None;
+    }
+
+    let stable_matches = new_project
+        .elements
+        .iter()
+        .filter(|owner| {
+            owner.id == *old_id
+                && match (
+                    old.source_provenance.as_ref(),
+                    owner.source_provenance.as_ref(),
+                ) {
+                    (Some(old), Some(new)) => {
+                        old.format == new.format
+                            && old.section == new.section
+                            && old.foreign_id == new.foreign_id
+                    }
+                    (Some(_), None) => false,
+                    _ => true,
+                }
+        })
+        .collect::<Vec<_>>();
+    if let [owner] = stable_matches.as_slice() {
+        return Some(owner);
+    }
+
+    if let Some(old_source) = old.source_provenance.as_ref() {
+        if let Some(foreign_id) = old_source.foreign_id.as_deref() {
+            let old_matches = old_project
+                .elements
+                .iter()
+                .filter(|owner| {
+                    owner.source_provenance.as_ref().is_some_and(|source| {
+                        source.foreign_id.as_deref() == Some(foreign_id)
+                            && source.format == old_source.format
+                            && source.section == old_source.section
+                    })
+                })
+                .count();
+            let new_matches = new_project
+                .elements
+                .iter()
+                .filter(|owner| {
+                    owner.source_provenance.as_ref().is_some_and(|source| {
+                        source.foreign_id.as_deref() == Some(foreign_id)
+                            && source.format == old_source.format
+                            && source.section == old_source.section
+                    })
+                })
+                .collect::<Vec<_>>();
+            if old_matches == 1 {
+                if let [owner] = new_matches.as_slice() {
+                    return Some(owner);
+                }
+            }
+        }
+        return None;
+    }
+
+    let old_matches = old_project
+        .elements
+        .iter()
+        .filter(|owner| owner.element_type() == old.element_type() && owner.text == old.text)
+        .collect::<Vec<_>>();
+    let occurrence = old_matches.iter().position(|owner| owner.id == old.id)?;
+    let new_matches = new_project
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|owner| {
+            let owner = owner.1;
+            owner.element_type() == old.element_type() && owner.text == old.text
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if old_matches.len() != new_matches.len() {
+        return None;
+    }
+    new_matches
+        .get(occurrence)
+        .and_then(|index| new_project.elements.get(*index))
+        .map(|owner| owner.as_ref())
 }
 
 impl EditingSession {
@@ -241,17 +340,23 @@ impl EditingSession {
             .ok_or(EditError::InvalidSelection)?;
         let title_selection =
             map_title_selection_to_project(self.title_selection, self.project(), &project);
+        let parenthetical_key = ElementTypeKey::from_role(Role::Parenthetical);
         let generated_parentheticals = self
-            .project()
-            .elements
+            .generated_parentheticals
             .iter()
-            .zip(&project.elements)
-            .filter(|(old, new)| {
-                old.role == scriptcraft_model::Role::Parenthetical
-                    && new.role == scriptcraft_model::Role::Parenthetical
-                    && self.generated_parentheticals.contains(old.id.as_str())
+            .filter_map(|old_id| {
+                let old = self
+                    .project()
+                    .elements
+                    .iter()
+                    .find(|owner| owner.id.as_str() == old_id)?;
+                if old.element_type() != parenthetical_key || old.text != "()" {
+                    return None;
+                }
+                let new = map_body_owner_identity(self.project(), &old.id, &project)?;
+                (new.element_type() == parenthetical_key && new.text == "()")
+                    .then(|| new.id.as_str().to_owned())
             })
-            .map(|(_, new)| new.id.as_str().to_owned())
             .collect();
 
         rebased.project = project.clone();
@@ -266,5 +371,83 @@ impl EditingSession {
         rebased.revision = rebased.revision.saturating_add(1);
         rebased.validate()?;
         Ok(rebased)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scriptcraft_model::{ElementDefinition, ElementTypeKey};
+
+    fn project_with_changed_action(change: impl FnOnce(&mut ElementDefinition)) -> Project {
+        let mut project = Project::new().expect("the default project should be valid");
+        let mut definitions = project
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let action = definitions
+            .iter_mut()
+            .find(|definition| definition.key.as_str() == "Action")
+            .expect("the default project should define Action");
+        change(action);
+        project
+            .replace_element_definitions(definitions)
+            .expect("the changed definitions should remain valid");
+        project
+    }
+
+    #[test]
+    fn save_projection_compares_ordered_complete_definitions() {
+        let original = Project::new().expect("the default project should be valid");
+        assert!(same_save_projection(&original, &original.clone()));
+
+        let mut reordered = original.clone();
+        reordered
+            .replace_element_definitions(
+                reordered
+                    .element_definitions()
+                    .iter()
+                    .cloned()
+                    .rev()
+                    .collect(),
+            )
+            .expect("reordered unique definitions should remain valid");
+        assert_eq!(original.elements, reordered.elements);
+        assert_eq!(original.title_page, reordered.title_page);
+        assert!(!same_save_projection(&original, &reordered));
+
+        let changed_behavior = project_with_changed_action(|definition| {
+            definition.behavior.paginate_as = Some("Dialogue".to_owned());
+        });
+        let changed_outline = project_with_changed_action(|definition| {
+            definition.outline.can_hide = !definition.outline.can_hide;
+        });
+        let changed_color = project_with_changed_action(|definition| {
+            definition.font.color = Some("#87878F8FE0E0".to_owned());
+        });
+        for changed in [changed_behavior, changed_outline, changed_color] {
+            assert_eq!(original.elements, changed.elements);
+            assert_eq!(original.title_page, changed.title_page);
+            assert!(!same_save_projection(&original, &changed));
+        }
+
+        let mut changed_direct_override = original.clone();
+        changed_direct_override.direct_paragraph_overrides.insert(
+            changed_direct_override.elements[0].id.clone(),
+            scriptcraft_model::formatting::SourceParagraphOverrides {
+                starts_new_page: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(!same_save_projection(&original, &changed_direct_override));
+
+        let changed_case = project_with_changed_action(|definition| {
+            definition.key =
+                ElementTypeKey::new("action").expect("a case-distinct key should be valid");
+        });
+        assert_eq!(original.elements, changed_case.elements);
+        assert_eq!(original.title_page, changed_case.title_page);
+        assert!(!same_save_projection(&original, &changed_case));
     }
 }

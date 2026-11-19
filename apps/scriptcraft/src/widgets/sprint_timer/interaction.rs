@@ -2,6 +2,8 @@ use eframe::egui::{self, Key, WidgetInfo, WidgetType};
 use scriptcraft_commands::{Command, SprintTimerMode as CommandTimerMode};
 use std::time::Duration;
 
+use super::animation;
+use super::animation::POPUP_OPENING_END_SCALE;
 use super::geometry::{
     mode_focus_rect, mode_selector_geometry, sprint_timer_popup_layout, ModeSelectorGeometry,
     PopupGeometryCheckpoint, PopupGeometryLedger, SprintTimerHostGeometry,
@@ -15,8 +17,6 @@ use super::paint::{
     POPUP_MODE_FOCUS_CORNER_RADIUS, POPUP_MODE_LABEL_FONT_SIZE,
 };
 use super::state::TimerMode;
-use super::animation;
-use super::animation::POPUP_OPENING_END_SCALE;
 use super::SprintTimer;
 
 pub(crate) fn show_popup(
@@ -182,7 +182,11 @@ fn show_mode_selector(
     );
 
     paint_mode_switch(ui, &switch, enabled, mode == TimerMode::Stopwatch);
-    rendered.focused = [countdown.has_focus(), switch.has_focus(), stopwatch.has_focus()];
+    rendered.focused = [
+        countdown.has_focus(),
+        switch.has_focus(),
+        stopwatch.has_focus(),
+    ];
 
     let key_activation = |response: &egui::Response| {
         response.has_focus()
@@ -227,12 +231,7 @@ fn mode_label_response(
             egui::CursorIcon::Default
         });
     response.widget_info(|| {
-        WidgetInfo::selected(
-            WidgetType::RadioButton,
-            enabled,
-            selected,
-            label.to_owned(),
-        )
+        WidgetInfo::selected(WidgetType::RadioButton, enabled, selected, label.to_owned())
     });
 
     let visuals = ui.visuals();
@@ -308,10 +307,7 @@ pub(super) fn show_popup_contents(
         TimerMode::Countdown if timer.is_idle() => {
             let edit_rect = egui::Rect::from_center_size(
                 egui::pos2(display.center().x, display.top() + 20.0),
-                egui::vec2(
-                    POPUP_COUNTDOWN_EDITOR_WIDTH,
-                    POPUP_COUNTDOWN_EDITOR_HEIGHT,
-                ),
+                egui::vec2(POPUP_COUNTDOWN_EDITOR_WIDTH, POPUP_COUNTDOWN_EDITOR_HEIGHT),
             );
             let editor_background = popup_display_background(ui.visuals());
             let editor_text = popup_display_text(ui.visuals());
@@ -330,9 +326,7 @@ pub(super) fn show_popup_contents(
                 egui::TextEdit::singleline(&mut minutes_input)
                     .id(egui::Id::new("sprint-timer-minutes"))
                     .desired_width(edit_rect.width())
-                    .font(egui::FontId::proportional(
-                        POPUP_COUNTDOWN_EDITOR_FONT_SIZE,
-                    ))
+                    .font(egui::FontId::proportional(POPUP_COUNTDOWN_EDITOR_FONT_SIZE))
                     .background_color(editor_background)
                     .text_color(editor_text)
                     .horizontal_align(egui::Align::Center)
@@ -418,17 +412,15 @@ pub(super) fn show_popup_contents(
         egui::UiBuilder::new()
             .id(egui::Id::new("sprint-timer-primary-action"))
             .max_rect(primary_action)
-            .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)),
+            .layout(egui::Layout::centered_and_justified(
+                egui::Direction::LeftToRight,
+            )),
     );
-    let primary = primary_ui.add(
-        egui::Button::new(primary_label).min_size(primary_action.size()),
-    );
+    let primary = primary_ui.add(egui::Button::new(primary_label).min_size(primary_action.size()));
     geometry.primary_child_min = primary_ui.min_rect();
     geometry.primary_response = primary.rect;
     geometry.primary_parent_after = PopupGeometryCheckpoint::capture(ui);
-    primary.widget_info(|| {
-        WidgetInfo::labeled(WidgetType::Button, true, primary_label.to_owned())
-    });
+    primary.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, primary_label.to_owned()));
     if primary.clicked() {
         commands.push(timer.primary_command());
     }
@@ -439,7 +431,9 @@ pub(super) fn show_popup_contents(
     let mut end_builder = egui::UiBuilder::new()
         .id(egui::Id::new("sprint-timer-end-action"))
         .max_rect(end_action)
-        .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight));
+        .layout(egui::Layout::centered_and_justified(
+            egui::Direction::LeftToRight,
+        ));
     if !end_enabled {
         end_builder = end_builder.disabled();
     }
@@ -449,11 +443,7 @@ pub(super) fn show_popup_contents(
     geometry.end_response = end.rect;
     geometry.end_parent_after = PopupGeometryCheckpoint::capture(ui);
     end.widget_info(|| {
-        WidgetInfo::labeled(
-            WidgetType::Button,
-            end_enabled,
-            "End Sprint".to_owned(),
-        )
+        WidgetInfo::labeled(WidgetType::Button, end_enabled, "End Sprint".to_owned())
     });
     if end.clicked() && end_enabled {
         commands.push(Command::ToolsSprintTimerEnd);
@@ -504,8 +494,7 @@ pub(super) fn host_geometry_changed(
     captured_host_geometry: Option<SprintTimerHostGeometry>,
     current_host_geometry: SprintTimerHostGeometry,
 ) -> bool {
-    captured_host_geometry
-        .is_some_and(|captured| current_host_geometry.changed_from(captured))
+    captured_host_geometry.is_some_and(|captured| current_host_geometry.changed_from(captured))
 }
 
 pub(super) fn dismissal_requested(ctx: &egui::Context, timer: &mut SprintTimer) -> bool {

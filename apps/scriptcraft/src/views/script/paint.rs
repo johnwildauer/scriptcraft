@@ -7,8 +7,12 @@ use super::{
         normal_view_page_bottom_rule_visible, page_chrome_visible, page_local_screen_origin,
         NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH,
     },
-    text::{paint_fixed_metric_text_with_selection, renderer_font, resolve_span_paint, FixedMetricTextStyle},
-    zoom_scroll::PresentationMetrics, ScriptCraftApp,
+    text::{
+        paint_fixed_metric_text_with_selection, renderer_font, resolve_span_paint,
+        FixedMetricTextStyle,
+    },
+    zoom_scroll::PresentationMetrics,
+    ScriptCraftApp,
 };
 use crate::{
     app::add_performance_counter,
@@ -17,9 +21,7 @@ use crate::{
 };
 use eframe::egui::{self, Color32, Stroke, Vec2};
 use scriptcraft_commands::{EditorSurface, ScriptViewMode};
-use scriptcraft_layout::{
-    Caret, FixedRect, LayoutLine, PositionedStyledSpan, ScreenplayLayout,
-};
+use scriptcraft_layout::{Caret, FixedRect, LayoutLine, PositionedStyledSpan, ScreenplayLayout};
 use scriptcraft_session::editing::{Position, Selection};
 use std::time::Instant;
 
@@ -63,9 +65,11 @@ impl ScriptCraftApp {
         let mut selected_end = None;
         for segment in span.display_source_map.iter() {
             if selection_start < segment.source_end && selection_end > segment.source_start {
-                selected_start = Some(selected_start.map_or(segment.display_start, |current: usize| {
-                    current.min(segment.display_start)
-                }));
+                selected_start = Some(
+                    selected_start.map_or(segment.display_start, |current: usize| {
+                        current.min(segment.display_start)
+                    }),
+                );
                 selected_end = Some(selected_end.map_or(segment.display_end, |current: usize| {
                     current.max(segment.display_end)
                 }));
@@ -125,11 +129,7 @@ impl ScriptCraftApp {
                 egui::StrokeKind::Middle,
             );
         }
-        if normal_view_page_bottom_rule_visible(
-            presentation_mode,
-            page_index,
-            layout.pages.len(),
-        ) {
+        if normal_view_page_bottom_rule_visible(presentation_mode, page_index, layout.pages.len()) {
             let rule_painter = ui.painter().with_clip_rect(ui.clip_rect());
             rule_painter.line_segment(
                 normal_view_page_bottom_rule_geometry(page_rect),
@@ -169,12 +169,8 @@ impl ScriptCraftApp {
         }
 
         'paint_lines: for (line_index, line) in layout.pages[page_index].lines.iter().enumerate() {
-            let selection = self.selection_range(
-                line.source.start,
-                line.source.end,
-                line.element,
-                surface,
-            );
+            let selection =
+                self.selection_range(line.source.start, line.source.end, line.element, surface);
             let resolved_paints = line
                 .spans
                 .iter()
@@ -216,10 +212,7 @@ impl ScriptCraftApp {
                         scale,
                     );
                     let span_height = span.geometry.height.to_points_f32() * scale;
-                    let span_origin = egui::pos2(
-                        page_rect.left() + projected.origin_x,
-                        span_y,
-                    );
+                    let span_origin = egui::pos2(page_rect.left() + projected.origin_x, span_y);
                     let selected_display = Self::selected_display_range(span, selection);
                     if let Some((from, to)) = selected_display {
                         add_performance_counter(&mut self.performance.selection_spans_submitted, 1);
@@ -269,9 +262,11 @@ impl ScriptCraftApp {
                                             geometry,
                                             palette.selection_text,
                                         );
-                                    painter
-                                        .with_clip_rect(selected_clip)
-                                        .galley(span_origin, selected_galley, palette.selection_text);
+                                    painter.with_clip_rect(selected_clip).galley(
+                                        span_origin,
+                                        selected_galley,
+                                        palette.selection_text,
+                                    );
                                 }
                             }
                         }
@@ -325,11 +320,8 @@ impl ScriptCraftApp {
 
             for (span, resolved_paint) in line.spans.iter().zip(&resolved_paints) {
                 let span_x = page_rect.left() + span.geometry.x.to_points_f32() * scale;
-                let span_y = document_y_to_screen(
-                    presented_page,
-                    span.geometry.y.to_points_f32(),
-                    scale,
-                );
+                let span_y =
+                    document_y_to_screen(presented_page, span.geometry.y.to_points_f32(), scale);
                 let span_height = span.geometry.height.to_points_f32() * scale;
                 let span_width = span.geometry.width.to_points_f32() * scale;
                 let display_count = span.display_text.chars().count();
@@ -407,9 +399,7 @@ impl ScriptCraftApp {
             EditorSurface::Body => self.session.selection(),
             EditorSurface::TitlePage => self.session.title_selection(),
         };
-        if caret_page_index == Some(page_index)
-            && selection.anchor == selection.focus
-        {
+        if caret_page_index == Some(page_index) && selection.anchor == selection.focus {
             if let Some(caret_geometry) = caret_geometry {
                 let (caret_rect, caret_clip) =
                     viewport_caret_rect(caret_geometry, presented_page, scale);
@@ -432,7 +422,9 @@ impl ScriptCraftApp {
                     self.caret_blink_reset_time,
                 ) {
                     if let Some(clip) = caret_clip {
-                        painter.with_clip_rect(clip).rect_filled(caret_rect, 0.0, palette.caret);
+                        painter
+                            .with_clip_rect(clip)
+                            .rect_filled(caret_rect, 0.0, palette.caret);
                     } else {
                         painter.rect_filled(caret_rect, 0.0, palette.caret);
                     }
@@ -447,20 +439,22 @@ impl ScriptCraftApp {
                             && caret.offset >= line.source.start
                             && caret.offset <= line.source.end
                     });
-                    let caret_span = caret_line.and_then(|line| Self::span_for_caret(line, caret.offset));
+                    let caret_span =
+                        caret_line.and_then(|line| Self::span_for_caret(line, caret.offset));
                     let ime_font = caret_span.map_or_else(
                         || renderer_font(&layout.inputs.font_family, metrics.font_size),
-                        |span| resolve_span_paint(
-                            &span.text_style,
-                            span.text_style.size as f32 * scale,
-                            palette,
-                            &self.document_font_availability,
-                        ).font,
+                        |span| {
+                            resolve_span_paint(
+                                &span.text_style,
+                                span.text_style.size as f32 * scale,
+                                palette,
+                                &self.document_font_availability,
+                            )
+                            .font
+                        },
                     );
-                    let ime_painter = caret_clip.map_or_else(
-                        || painter.clone(),
-                        |clip| painter.with_clip_rect(clip),
-                    );
+                    let ime_painter = caret_clip
+                        .map_or_else(|| painter.clone(), |clip| painter.with_clip_rect(clip));
                     ime_painter.text(
                         caret_rect.min,
                         egui::Align2::LEFT_TOP,
@@ -489,10 +483,7 @@ fn paint_dotted_boundary(
 ) {
     let physical_pixel = boundary_stroke_width(pixels_per_point);
     for [start, end] in dotted_boundary_segments(start_x, end_x, y, pixels_per_point) {
-        painter.line_segment(
-            [start, end],
-            Stroke::new(physical_pixel, color),
-        );
+        painter.line_segment([start, end], Stroke::new(physical_pixel, color));
     }
 }
 

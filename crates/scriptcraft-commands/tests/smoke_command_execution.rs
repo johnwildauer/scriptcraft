@@ -2,15 +2,47 @@
 
 use scriptcraft_commands::{
     execute_editor_command, Command, CommandOutcome, CommandRejection, EditorSurface, Position,
-    Selection, SelectionError,
+    RoleValue, Selection, SelectionError,
 };
+use scriptcraft_model::{element::Role, element_type::ElementTypeKey, Project};
 use scriptcraft_session::editing::{
     EditingSession, Position as CorePosition, Selection as CoreSelection,
 };
-use scriptcraft_model::Project;
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("command smoke uses valid bounded input"))
+}
+
+#[test]
+fn version_1_role_spellings_map_to_exact_element_type_labels() {
+    const EXACT_ELEMENT_LABELS: [&str; 17] = [
+        "Scene Heading",
+        "Action",
+        "Character",
+        "Dialogue",
+        "Parenthetical",
+        "Transition",
+        "Note",
+        "New Act",
+        "End of Act",
+        "Cast List",
+        "General",
+        "Shot",
+        "Sequence",
+        "Outline 1",
+        "Outline 2",
+        "Outline 3",
+        "Summary",
+    ];
+
+    for (role, exact_label) in Role::ALL.into_iter().zip(EXACT_ELEMENT_LABELS) {
+        let wire_value = RoleValue::new(role);
+        let element_type = ElementTypeKey::from_role(role);
+
+        assert_eq!(wire_value.as_str(), role.as_str());
+        assert_eq!(element_type.as_str(), exact_label);
+        assert_eq!(element_type.to_role(), Some(wire_value.as_core()));
+    }
 }
 
 #[test]
@@ -40,9 +72,7 @@ fn command_execution_public_api_smoke() {
 
     let before_rejection = session.clone();
     // The final é occupies two bytes; this points at its continuation byte.
-    let invalid_offset = valid(u32::try_from(
-        INSERTED_TEXT.len() - "é".len() + 1,
-    ));
+    let invalid_offset = valid(u32::try_from(INSERTED_TEXT.len() - "é".len() + 1));
     let invalid_position = Position {
         element: 0,
         offset: invalid_offset,

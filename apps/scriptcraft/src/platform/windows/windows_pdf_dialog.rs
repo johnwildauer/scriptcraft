@@ -9,16 +9,15 @@ use scriptcraft_commands::PdfExportOptions;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
-use windows::core::{Interface, PCWSTR, PWSTR, HRESULT};
+use windows::core::{Interface, HRESULT, PCWSTR, PWSTR};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
     COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
-    FileSaveDialog, IFileDialogCustomize, IFileSaveDialog, SIGDN_FILESYSPATH,
-    FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST,
-    FOS_STRICTFILETYPES,
+    FileSaveDialog, IFileDialogCustomize, IFileSaveDialog, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR,
+    FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST, FOS_STRICTFILETYPES, SIGDN_FILESYSPATH,
 };
 
 use crate::documents::pdf::{PdfExportPickerFailure, PdfExportPickerResult};
@@ -65,10 +64,9 @@ pub(crate) fn show_pdf_save_dialog(default_filename: &str) -> PdfExportPickerRes
         // SAFETY: FileSaveDialog is the system COM class, created in-process
         // inside the initialized STA. The returned interface is owned by its
         // generated COM smart pointer and is dropped before the apartment.
-        let dialog: IFileSaveDialog = unsafe {
-            CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)
-        }
-        .map_err(|_| DialogResult::Failed)?;
+        let dialog: IFileSaveDialog =
+            unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER) }
+                .map_err(|_| DialogResult::Failed)?;
 
         // SAFETY: Every call targets a live COM interface on its owning STA;
         // all PCWSTR arguments point to NUL-terminated buffers retained through
@@ -116,10 +114,7 @@ pub(crate) fn show_pdf_save_dialog(default_filename: &str) -> PdfExportPickerRes
                 )
                 .map_err(|_| DialogResult::Failed)?;
             customize
-                .SetCheckButtonState(
-                    INCLUDE_TITLE_PAGE_CONTROL_ID,
-                    default_include_title_page,
-                )
+                .SetCheckButtonState(INCLUDE_TITLE_PAGE_CONTROL_ID, default_include_title_page)
                 .map_err(|_| DialogResult::Failed)?;
         }
 
@@ -153,9 +148,7 @@ pub(crate) fn show_pdf_save_dialog(default_filename: &str) -> PdfExportPickerRes
 
     match result {
         Ok(result) => picker_result_from_dialog_result(result),
-        Err(DialogResult::Failed) => {
-            PdfExportPickerResult::Error(PdfExportPickerFailure::Failed)
-        }
+        Err(DialogResult::Failed) => PdfExportPickerResult::Error(PdfExportPickerFailure::Failed),
         Err(DialogResult::Cancelled) => PdfExportPickerResult::Cancel,
         Err(DialogResult::Accepted { .. }) => {
             PdfExportPickerResult::Error(PdfExportPickerFailure::Failed)
@@ -194,7 +187,7 @@ impl Drop for CoTaskMemWide {
     fn drop(&mut self) {
         // SAFETY: GetDisplayName allocated this pointer with COM task memory;
         // the wrapper owns it uniquely and frees it exactly once.
-        unsafe { CoTaskMemFree(Some(self.0.0.cast())) };
+        unsafe { CoTaskMemFree(Some(self.0 .0.cast())) };
     }
 }
 
@@ -204,7 +197,7 @@ fn path_buf_from_shell_item(item: &windows::Win32::UI::Shell::IShellItem) -> Opt
     // requested filesystem name is a NUL-terminated CoTaskMem allocation.
     let display_name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.ok()?;
     let allocation = CoTaskMemWide(display_name);
-    if allocation.0.0.is_null() {
+    if allocation.0 .0.is_null() {
         return None;
     }
 
@@ -212,10 +205,10 @@ fn path_buf_from_shell_item(item: &windows::Win32::UI::Shell::IShellItem) -> Opt
     // string. The allocation guard keeps it alive through the bounded copy.
     let wide = unsafe {
         let mut length = 0usize;
-        while *allocation.0.0.add(length) != 0 {
+        while *allocation.0 .0.add(length) != 0 {
             length += 1;
         }
-        std::slice::from_raw_parts(allocation.0.0, length)
+        std::slice::from_raw_parts(allocation.0 .0, length)
     };
     path_buf_from_wide_path(wide)
 }
@@ -229,9 +222,7 @@ fn picker_result_from_dialog_result(result: DialogResult) -> PdfExportPickerResu
             include_title_page,
         } => PdfExportPickerResult::Accept {
             destination,
-            options: PdfExportOptions {
-                include_title_page,
-            },
+            options: PdfExportOptions { include_title_page },
         },
         DialogResult::Accepted {
             destination: None, ..

@@ -14,10 +14,8 @@ pub trait FdxStorageFileSystem {
         &self,
         path: &Path,
     ) -> Result<Option<Self::Permissions>, FdxStorageError>;
-    fn create_temp(
-        &self,
-        destination: &Path,
-    ) -> Result<(PathBuf, Self::TempFile), FdxStorageError>;
+    fn create_temp(&self, destination: &Path)
+        -> Result<(PathBuf, Self::TempFile), FdxStorageError>;
     fn set_temp_permissions(
         &self,
         temp: &mut Self::TempFile,

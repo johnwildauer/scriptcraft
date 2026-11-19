@@ -80,7 +80,10 @@ pub(super) fn sprint_timer_popup_layout() -> SprintTimerPopupLayout {
             egui::vec2(POPUP_ACTION_WIDTH, POPUP_ACTION_HEIGHT),
         ),
         end_action: egui::Rect::from_min_size(
-            egui::pos2(pair_left + POPUP_ACTION_WIDTH + POPUP_ACTION_GAP, POPUP_ACTION_TOP),
+            egui::pos2(
+                pair_left + POPUP_ACTION_WIDTH + POPUP_ACTION_GAP,
+                POPUP_ACTION_TOP,
+            ),
             egui::vec2(POPUP_ACTION_WIDTH, POPUP_ACTION_HEIGHT),
         ),
     }
@@ -250,9 +253,8 @@ impl Default for ModeSelectorGeometry {
 }
 
 pub(super) fn mode_selector_geometry(toggle: egui::Rect) -> ModeSelectorGeometry {
-    let group_width = POPUP_MODE_LABEL_WIDTH * 2.0
-        + POPUP_MODE_SWITCH_TRACK_WIDTH
-        + MODE_SELECTOR_GAP * 2.0;
+    let group_width =
+        POPUP_MODE_LABEL_WIDTH * 2.0 + POPUP_MODE_SWITCH_TRACK_WIDTH + MODE_SELECTOR_GAP * 2.0;
     let group_left = toggle.center().x - group_width / 2.0;
     let label_top = toggle.center().y - POPUP_MODE_LABEL_HEIGHT / 2.0;
     let switch_left = group_left + POPUP_MODE_LABEL_WIDTH + MODE_SELECTOR_GAP;
@@ -265,7 +267,10 @@ pub(super) fn mode_selector_geometry(toggle: egui::Rect) -> ModeSelectorGeometry
         ),
         switch: egui::Rect::from_min_size(
             egui::pos2(switch_left, label_top),
-            egui::vec2(POPUP_MODE_SWITCH_TRACK_WIDTH, POPUP_MODE_SWITCH_TRACK_HEIGHT),
+            egui::vec2(
+                POPUP_MODE_SWITCH_TRACK_WIDTH,
+                POPUP_MODE_SWITCH_TRACK_HEIGHT,
+            ),
         ),
         stopwatch: egui::Rect::from_min_size(
             egui::pos2(
@@ -394,4 +399,3 @@ pub(super) fn centered_active_display_panel_rect(stage: egui::Rect) -> egui::Rec
         egui::vec2(POPUP_ACTIVE_DISPLAY_WIDTH, POPUP_ACTIVE_DISPLAY_HEIGHT),
     )
 }
-

@@ -12,8 +12,7 @@ pub(super) fn is_reparse_point(metadata: &Metadata) -> bool {
 }
 
 pub(super) fn is_device(metadata: &Metadata) -> bool {
-    metadata.file_attributes() & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DEVICE
-        != 0
+    metadata.file_attributes() & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DEVICE != 0
 }
 
 pub(super) fn refuses_readonly_replacement(permissions: &Permissions) -> bool {

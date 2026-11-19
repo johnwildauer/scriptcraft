@@ -1,34 +1,18 @@
+//! Semantic project state shared by editing, native FDX preservation, and layout.
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::{
     dual_dialogue::DualDialogueGroup,
     element::{body_owners_equal, BodyOwner},
-    formatting::SourceParagraphOverrides,
+    element_definitions::DocumentElementDefinitions,
+    formatting::{transitional_static_role_definitions, SourceParagraphOverrides},
     identity::{StableId, StableIdAllocator},
     preservation::PreservationState,
     title_page::{reference_boilerplate, TitlePageParagraph},
     ModelError, ScreenplayElement,
 };
-
-/// Legacy fields kept only while an unchanged JSON-origin document uses the
-/// transitional JSON adapter. These are not part of the FDX semantic model.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct LegacyJsonMetadata {
-    pub(crate) title: String,
-    pub(crate) author: String,
-    pub(crate) contact: String,
-    pub(crate) created_at: String,
-    pub(crate) updated_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LegacyJsonState {
-    pub(crate) project_id: StableId,
-    pub(crate) project_schema_version: u32,
-    pub(crate) metadata: LegacyJsonMetadata,
-    pub(crate) layout_inputs: crate::layout_inputs::LayoutInputs,
-}
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -41,11 +25,11 @@ pub struct Project {
     pub direct_paragraph_overrides: BTreeMap<StableId, SourceParagraphOverrides>,
     /// Outer-wrapper direct fields, keyed only by semantic wrapper identities.
     pub dual_dialogue_paragraph_overrides: BTreeMap<StableId, SourceParagraphOverrides>,
-    /// Source-owned state is separate from the semantic projection and is not
-    /// representable in transitional JSON.
+    /// Source-owned FDX state is separate from the semantic projection.
     pub preservation: Option<PreservationState>,
-    /// Transitional JSON-only source state; never consumed by the FDX codec.
-    pub(crate) legacy_json_state: Option<LegacyJsonState>,
+    /// Ordered document-owned element settings. The backing registry is private
+    /// and changes only through validated whole-registry replacement.
+    element_definitions: DocumentElementDefinitions,
     /// Clone-stable identity for cache invalidation across document replacement.
     /// It is intentionally excluded from semantic equality and serialization.
     pub(crate) layout_identity: Arc<()>,
@@ -59,7 +43,7 @@ impl PartialEq for Project {
             && self.direct_paragraph_overrides == other.direct_paragraph_overrides
             && self.dual_dialogue_paragraph_overrides == other.dual_dialogue_paragraph_overrides
             && self.preservation == other.preservation
-            && self.legacy_json_state == other.legacy_json_state
+            && self.element_definitions == other.element_definitions
     }
 }
 
@@ -69,6 +53,9 @@ impl Project {
     pub fn new() -> Result<Self, ModelError> {
         let mut ids = StableIdAllocator::new();
         let title_page = reference_boilerplate(&mut ids)?;
+        // Transitional static-role bootstrap. Phase 7 replaces this with the
+        // packaged Screenplay template; FDX import has its own Phase 2 handoff.
+        let element_definitions = transitional_static_role_definitions()?;
         let start = ScreenplayElement::new(
             ids.allocate("element")?.as_str().to_owned(),
             crate::Role::SceneHeading,
@@ -81,24 +68,41 @@ impl Project {
             direct_paragraph_overrides: BTreeMap::new(),
             dual_dialogue_paragraph_overrides: BTreeMap::new(),
             preservation: None,
-            legacy_json_state: None,
+            element_definitions,
             layout_identity: Arc::new(()),
         })
     }
 
     /// Creates the empty semantic projection required while importing FDX.
-    /// It carries no title, body, group, override, preservation, or legacy state.
-    pub fn empty_projection() -> Self {
-        Self {
+    /// It carries no title, body, group, override, or preservation state, but
+    /// uses the transitional static bootstrap until the common FDX reader
+    /// replaces it with WO-002.3's completed document-owned definitions.
+    pub fn empty_projection() -> Result<Self, ModelError> {
+        Ok(Self {
             title_page: Vec::new(),
             elements: Vec::new(),
             dual_dialogue_groups: Vec::new(),
             direct_paragraph_overrides: BTreeMap::new(),
             dual_dialogue_paragraph_overrides: BTreeMap::new(),
             preservation: None,
-            legacy_json_state: None,
+            element_definitions: transitional_static_role_definitions()?,
             layout_identity: Arc::new(()),
-        }
+        })
+    }
+
+    /// Returns the project's ordered definition registry.
+    pub fn element_definitions(&self) -> &DocumentElementDefinitions {
+        &self.element_definitions
+    }
+
+    /// Validates and atomically replaces the complete ordered registry.
+    pub fn replace_element_definitions(
+        &mut self,
+        definitions: Vec<crate::ElementDefinition>,
+    ) -> Result<(), ModelError> {
+        let replacement = DocumentElementDefinitions::new(definitions)?;
+        self.element_definitions = replacement;
+        Ok(())
     }
 
     /// Allocates an application element ID distinct from title-page and body IDs.
@@ -134,19 +138,9 @@ impl Project {
         }
     }
 
-    /// Runtime layout inputs use preserved legacy geometry when available and
-    /// deterministic application defaults otherwise.
+    /// Runtime layout inputs use deterministic application defaults.
     pub fn session_layout_inputs(&self) -> crate::layout_inputs::LayoutInputs {
-        self.legacy_json_state
-            .as_ref()
-            .map(|legacy| legacy.layout_inputs.clone())
-            .unwrap_or_default()
-    }
-
-    /// Reports whether legacy JSON geometry fallback rules apply to this
-    /// project, without exposing the adapter's private metadata.
-    pub fn uses_legacy_layout_defaults(&self) -> bool {
-        self.legacy_json_state.is_some()
+        crate::layout_inputs::LayoutInputs::default()
     }
 
     /// Clone-stable identity for cache invalidation across document replacement.
@@ -155,33 +149,45 @@ impl Project {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeProjectEnvelope {
-    pub schema_version: u32,
-    pub project: Project,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ModelError;
 
-impl NativeProjectEnvelope {
-    pub fn new(project: Project) -> Result<Self, ModelError> {
-        project.validate()?;
-        Ok(Self {
-            schema_version: crate::legacy_json::CURRENT_SCHEMA_VERSION,
-            project,
-        })
+    #[test]
+    fn definition_order_participates_in_project_equality() {
+        let Ok(project) = Project::new() else {
+            assert!(false, "static bootstrap should produce valid definitions");
+            return;
+        };
+        let mut reordered = project.clone();
+        let definitions = reordered
+            .element_definitions()
+            .iter()
+            .cloned()
+            .rev()
+            .collect::<Vec<_>>();
+        assert!(reordered.replace_element_definitions(definitions).is_ok());
+        assert_ne!(project, reordered);
     }
 
-    pub fn to_json(&self) -> Result<String, ModelError> {
-        if self.schema_version != crate::legacy_json::CURRENT_SCHEMA_VERSION {
-            return Err(ModelError::InvalidSchemaVersion);
-        }
-        self.project.to_json()
-    }
+    #[test]
+    fn failed_definition_replacement_is_atomic() {
+        let Ok(mut project) = Project::new() else {
+            assert!(false, "static bootstrap should produce valid definitions");
+            return;
+        };
+        let original = project.clone();
+        let duplicate = project.element_definitions().iter().next().cloned();
+        let Some(duplicate) = duplicate else {
+            assert!(false, "bootstrap registry should be nonempty");
+            return;
+        };
 
-    pub fn from_json(input: &str) -> Result<Self, ModelError> {
-        let project = Project::from_json(input)?;
-        Ok(Self {
-            schema_version: crate::legacy_json::CURRENT_SCHEMA_VERSION,
-            project,
-        })
+        assert_eq!(
+            project.replace_element_definitions(vec![duplicate.clone(), duplicate]),
+            Err(ModelError::DuplicateElementDefinitionKey)
+        );
+        assert_eq!(project, original);
     }
 }

@@ -1,6 +1,6 @@
+use super::text::{is_managed_paragraph_attribute, is_paragraph_id_attribute, is_text_element};
 use super::*;
 use crate::StableId;
-use super::text::{is_managed_paragraph_attribute, is_paragraph_id_attribute, is_text_element};
 
 pub(super) fn find_managed_element_counted<'a>(
     sections: &'a [PreservedSection],
@@ -24,7 +24,10 @@ pub(super) fn find_managed_element_counted<'a>(
         .find_map(|section| find(&section.children, id))
 }
 
-pub(super) fn element_at_path<'a>(nodes: &'a [PreservedNode], path: &[usize]) -> Option<&'a PreservedElement> {
+pub(super) fn element_at_path<'a>(
+    nodes: &'a [PreservedNode],
+    path: &[usize],
+) -> Option<&'a PreservedElement> {
     let (index, rest) = path.split_first()?;
     let PreservedNode::Element(element) = nodes.get(*index)? else {
         return None;
@@ -112,6 +115,54 @@ pub(super) fn element_at_path_mut<'a>(
         Some(element)
     } else {
         element_at_path_mut(&mut element.children, rest)
+    }
+}
+
+impl PreservationState {
+    /// Returns the source anchor for the winning retained settings node of an
+    /// exact document element key, if one is currently present.
+    pub fn element_definition_anchor(
+        &self,
+        key: &crate::element_type::ElementTypeKey,
+    ) -> Option<&SourceAnchorId> {
+        self.anchors.iter().find_map(|anchor| {
+            matches!(&anchor.target, AnchorTarget::ElementDefinition(target) if target == key)
+                .then_some(&anchor.id)
+        })
+    }
+
+    /// Resolves an exact definition key through its winning anchor to the
+    /// direct-root retained ElementSettings node. Inert duplicate settings are
+    /// intentionally not considered by this derived lookup.
+    pub fn element_definition_settings(
+        &self,
+        key: &crate::element_type::ElementTypeKey,
+    ) -> Option<&PreservedElement> {
+        let anchor = self.element_definition_anchor(key)?;
+        fn find_direct_root<'a>(
+            sections: &'a [PreservedSection],
+            anchor: &SourceAnchorId,
+        ) -> Option<&'a PreservedElement> {
+            for section in sections {
+                for node in &section.children {
+                    let PreservedNode::Element(root) = node else {
+                        continue;
+                    };
+                    for child in &root.children {
+                        let PreservedNode::Element(setting) = child else {
+                            continue;
+                        };
+                        if setting.name.local_name == "ElementSettings"
+                            && setting.anchor.as_ref() == Some(anchor)
+                        {
+                            return Some(setting);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        find_direct_root(&self.sections, anchor)
     }
 }
 
@@ -219,11 +270,26 @@ pub(super) fn same_managed_paragraph_shell(
     before: &PreservedElement,
     after: &PreservedElement,
 ) -> bool {
-    let opaque_attributes = |element: &PreservedElement| element.attributes.iter().filter(|attribute| {
-        !is_paragraph_id_attribute(attribute) && !is_managed_paragraph_attribute(attribute)
-    }).cloned().collect::<Vec<_>>();
-    let id_attributes = |element: &PreservedElement| element.attributes.iter()
-        .filter(|attribute| is_paragraph_id_attribute(attribute)).cloned().collect::<Vec<_>>();
+    let opaque_attributes = |element: &PreservedElement| {
+        element
+            .attributes
+            .iter()
+            .filter(|attribute| {
+                !is_paragraph_id_attribute(attribute)
+                    && !(attribute.name.namespace_uri.is_none()
+                        && attribute.name.local_name == "Type")
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let id_attributes = |element: &PreservedElement| {
+        element
+            .attributes
+            .iter()
+            .filter(|attribute| is_paragraph_id_attribute(attribute))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     before.name == after.name
         && before.namespace_bindings == after.namespace_bindings
         && before.ownership == after.ownership
@@ -232,6 +298,55 @@ pub(super) fn same_managed_paragraph_shell(
         && (before.source_type == after.source_type || before.name.local_name == "Paragraph")
         && opaque_attributes(before) == opaque_attributes(after)
         && id_attributes(before) == id_attributes(after)
+}
+
+#[cfg(test)]
+mod managed_shell_tests {
+    use super::*;
+
+    fn attribute(name: &str, value: &str) -> PreservedAttribute {
+        PreservedAttribute {
+            name: SourceName {
+                namespace_uri: None,
+                local_name: name.to_owned(),
+                qualified_name: Some(name.to_owned()),
+            },
+            value: value.to_owned(),
+        }
+    }
+
+    fn paragraph(attributes: Vec<PreservedAttribute>, source_type: &str) -> PreservedElement {
+        PreservedElement {
+            name: SourceName {
+                namespace_uri: None,
+                local_name: "Paragraph".to_owned(),
+                qualified_name: Some("Paragraph".to_owned()),
+            },
+            attributes,
+            namespace_bindings: Vec::new(),
+            source_type: Some(source_type.to_owned()),
+            ownership: SourceOwnership::Opaque,
+            dependency_confidence: DependencyConfidence::Unknown,
+            anchor: None,
+            children: Default::default(),
+        }
+    }
+
+    #[test]
+    fn managed_shell_comparison_allows_only_the_unqualified_type_projection() {
+        let before = paragraph(
+            vec![attribute("Type", "Lyrics"), attribute("LeftIndent", "0.25")],
+            "Lyrics",
+        );
+        let mut type_changed = before.clone();
+        type_changed.attributes[0].value = "lyrics".to_owned();
+        type_changed.source_type = Some("lyrics".to_owned());
+        assert!(same_managed_paragraph_shell(&before, &type_changed));
+
+        let mut formatting_changed = type_changed.clone();
+        formatting_changed.attributes[1].value = "0.50".to_owned();
+        assert!(!same_managed_paragraph_shell(&before, &formatting_changed));
+    }
 }
 
 pub(super) fn source_text_bytes_in_element(element: &PreservedElement) -> usize {
@@ -268,7 +383,7 @@ pub(super) fn contains_managed_element_counted(nodes: &[PreservedNode], id: &Sta
 }
 
 impl PreservationState {
-/// Looks up a managed element through the preservation-owned location index.
+    /// Looks up a managed element through the preservation-owned location index.
     /// A missing index retains the counted complete-search fallback for callers
     /// operating on externally constructed preservation states.
     pub fn managed_element(
@@ -293,7 +408,7 @@ impl PreservationState {
         }
     }
 
-/// Gets the indexed source location's document depth and inherited
+    /// Gets the indexed source location's document depth and inherited
     /// `xml:space` state without walking unrelated source branches.
     pub fn managed_element_context(
         &self,
@@ -321,7 +436,7 @@ impl PreservationState {
             .ok_or(PreservationError::ManagedAnchorMissing)
     }
 
-/// Mutable indexed access for a detached candidate. The source-use index is
+    /// Mutable indexed access for a detached candidate. The source-use index is
     /// invalidated before mutation; identity-sensitive consumers refresh it on
     /// demand while paragraph locations remain available for scoped validation.
     pub fn managed_element_mut_indexed(
@@ -346,7 +461,7 @@ impl PreservationState {
         Ok(element)
     }
 
-pub(super) fn indexed_location(
+    pub(super) fn indexed_location(
         &self,
         id: &StableId,
     ) -> Result<Option<&ManagedParagraphLocation>, PreservationError> {
@@ -361,14 +476,17 @@ pub(super) fn indexed_location(
         }
     }
 
-pub(super) fn managed_element_at(&self, location: &ManagedParagraphLocation) -> Option<&PreservedElement> {
+    pub(super) fn managed_element_at(
+        &self,
+        location: &ManagedParagraphLocation,
+    ) -> Option<&PreservedElement> {
         element_at_path(
             self.sections.get(location.section_index)?.children.as_ref(),
             &location.node_path,
         )
     }
 
-pub(super) fn is_supported_managed_body_location(
+    pub(super) fn is_supported_managed_body_location(
         &self,
         location: &ManagedParagraphLocation,
         id: &StableId,
@@ -438,7 +556,10 @@ pub(super) fn is_supported_managed_body_location(
                     .enumerate()
                     .filter_map(|(index, node)| match node {
                         PreservedNode::Element(element)
-                            if element.name.local_name == "SpellCheckIgnoreLists" => Some(index),
+                            if element.name.local_name == "SpellCheckIgnoreLists" =>
+                        {
+                            Some(index)
+                        }
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -448,15 +569,20 @@ pub(super) fn is_supported_managed_body_location(
         }
     }
 
-pub fn has_managed_paragraph_index(&self) -> bool {
+    pub fn has_managed_paragraph_index(&self) -> bool {
         self.managed_paragraph_index.is_some()
     }
 
-pub fn dual_dialogue_wrapper_anchor(&self, id: &StableId) -> Option<SourceAnchorId> {
-        let mut stack = self.sections.iter().flat_map(|section| section.children.iter()).collect::<Vec<_>>();
+    pub fn dual_dialogue_wrapper_anchor(&self, id: &StableId) -> Option<SourceAnchorId> {
+        let mut stack = self
+            .sections
+            .iter()
+            .flat_map(|section| section.children.iter())
+            .collect::<Vec<_>>();
         while let Some(node) = stack.pop() {
             if let PreservedNode::Element(element) = node {
-                if matches!(&element.ownership, SourceOwnership::DualDialogueWrapper(owner) if owner == id) {
+                if matches!(&element.ownership, SourceOwnership::DualDialogueWrapper(owner) if owner == id)
+                {
                     return element.anchor.clone();
                 }
                 stack.extend(element.children.iter());
@@ -465,7 +591,7 @@ pub fn dual_dialogue_wrapper_anchor(&self, id: &StableId) -> Option<SourceAnchor
         None
     }
 
-pub fn has_managed_element(&self, id: &StableId) -> bool {
+    pub fn has_managed_element(&self, id: &StableId) -> bool {
         if let Some(index) = &self.managed_paragraph_index {
             let locations = index.get(id).map(Vec::as_slice).unwrap_or_default();
             return !locations.is_empty();
@@ -475,7 +601,7 @@ pub fn has_managed_element(&self, id: &StableId) -> bool {
             .any(|section| contains_managed_element_counted(&section.children, id))
     }
 
-/// Returns whether the exact managed Paragraph owns a direct inline Alts
+    /// Returns whether the exact managed Paragraph owns a direct inline Alts
     /// child. The codec has already validated its role, namespace, and
     /// multiplicity; callers use this only to guard role transitions.
     pub fn has_inline_alts(&self, id: &StableId) -> bool {
@@ -487,15 +613,17 @@ pub fn has_managed_element(&self, id: &StableId) -> bool {
             _ => None,
         };
         paragraph.is_some_and(|paragraph| {
-            paragraph.children.iter().any(|node| matches!(node,
-                PreservedNode::Element(element)
-                    if element.name.local_name == "Alts"
-                        && element.name.namespace_uri == paragraph.name.namespace_uri
-            ))
+            paragraph.children.iter().any(|node| {
+                matches!(node,
+                    PreservedNode::Element(element)
+                        if element.name.local_name == "Alts"
+                            && element.name.namespace_uri == paragraph.name.namespace_uri
+                )
+            })
         })
     }
 
-pub(super) fn has_owner_opaque_data(&self, id: &StableId) -> bool {
+    pub(super) fn has_owner_opaque_data(&self, id: &StableId) -> bool {
         let paragraph = match self.indexed_location(id) {
             Ok(Some(location)) => self.managed_element_at(location),
             Ok(None) if self.managed_paragraph_index.is_none() => {
@@ -507,16 +635,19 @@ pub(super) fn has_owner_opaque_data(&self, id: &StableId) -> bool {
             paragraph.attributes.iter().any(|attribute| {
                 !is_paragraph_id_attribute(attribute) && !is_managed_paragraph_attribute(attribute)
             }) || paragraph.children.iter().any(|node| match node {
-                PreservedNode::Element(element) => !is_text_element(element, paragraph)
-                    || element.children.iter().any(|child| !matches!(child,
-                        PreservedNode::Text(_) | PreservedNode::CData(_))),
+                PreservedNode::Element(element) => {
+                    !is_text_element(element, paragraph)
+                        || element.children.iter().any(|child| {
+                            !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_))
+                        })
+                }
                 PreservedNode::Text(text) | PreservedNode::CData(text) => !text.trim().is_empty(),
                 PreservedNode::Comment(_) | PreservedNode::ProcessingInstruction { .. } => true,
             })
         })
     }
 
-pub(super) fn managed_element_mut(
+    pub(super) fn managed_element_mut(
         &mut self,
         id: &StableId,
     ) -> Result<&mut PreservedElement, PreservationError> {

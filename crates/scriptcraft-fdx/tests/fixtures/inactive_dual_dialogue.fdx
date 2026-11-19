@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FinalDraft DocumentType="Script" Version="6">
+  <Content>
+    <Paragraph Type="General" id="inactive-dual-wrapper" RightIndent="0.5">
+      <UserParagraphData><VendorWrapperPayload marker="wrapper-opaque">inactive wrapper payload</VendorWrapperPayload></UserParagraphData>
+      <DualDialogue>
+        <SpellCheckIgnoreLists><IgnoredRanges /><IgnoredWords /></SpellCheckIgnoreLists>
+        <Paragraph Type="Voice" id="inactive-member-one" Alignment="Right"><Text Style="Bold">First arbitrary member</Text><VendorMemberPayload marker="opaque-one">first opaque payload</VendorMemberPayload></Paragraph>
+        <Paragraph Type="voice" id="inactive-member-two"><Text>Case-distinct arbitrary member</Text></Paragraph>
+        <Paragraph Type="Response" id="inactive-member-three"><Text>Third arbitrary member</Text><UserParagraphData><VendorAttachment marker="member-attachment">member attachment</VendorAttachment></UserParagraphData></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+  </Content>
+</FinalDraft>

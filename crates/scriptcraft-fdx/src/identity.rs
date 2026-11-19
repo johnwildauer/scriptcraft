@@ -8,7 +8,6 @@ use scriptcraft_model::preservation::{
     is_user_paragraph_data_lookalike, BoardEntity, BoardEntityKind, BoardGraph, ForeignIdDomain,
     ForeignIdentity, ForeignReference, ReferencePolicy, SectionKind,
 };
-use crate::settings::role_from_fdx;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Map a raw FDX element name to its established foreign identity domain.
@@ -105,16 +104,11 @@ pub(crate) fn validate_user_paragraph_data_locations(
         let body_owner = current_section == SectionKind::Content
             && depth == 2
             && is_paragraph
-            && (attribute(element, "Type").and_then(role_from_fdx).is_some()
-                || (attribute(element, "Type") == Some("General")
-                    && element.children.iter().any(|child| {
-                        matches!(child, RawNode::Element(child)
-                            if is_fdx_element(child, "DualDialogue", root_namespace))
-                    })));
+            && content::is_managed_direct_body_paragraph(element, root_namespace)?;
         let title_owner = current_section == SectionKind::TitlePage
             && is_paragraph
-            && ((title_content && depth == 3)
-                || (depth == 2 && attribute(element, "Type").and_then(role_from_fdx).is_some()));
+            && title_content
+            && depth == 3;
         let dual_member_owner = current_section == SectionKind::Content
             && depth == 4
             && is_paragraph
@@ -127,12 +121,10 @@ pub(crate) fn validate_user_paragraph_data_locations(
                             if is_fdx_element(child, "DualDialogue", root_namespace))
                     })
             })
-            && matches!(
-                attribute(element, "Type").and_then(role_from_fdx),
-                Some(scriptcraft_model::Role::Character
-                    | scriptcraft_model::Role::Dialogue
-                    | scriptcraft_model::Role::Parenthetical)
-            );
+            && matches!(content::paragraph_type_key(element), Ok(Some(_)))
+            && grandparent.is_some_and(|wrapper| {
+                content::is_supported_dual_dialogue_source(wrapper, root_namespace)
+            });
         let accepts_attachment = body_owner || title_owner || dual_member_owner;
 
         for child in &element.children {
@@ -167,73 +159,78 @@ pub(crate) fn validate_user_paragraph_data_locations(
 
 /// Collect supported typed definitions and board references in source order.
 /// FDX import uses these results to analyze source identities and board references.
-pub(crate) fn collect_identities(root: &RawElement) -> Result<(Vec<ForeignIdentity>, BoardGraph), FdxError> {
+pub(crate) fn collect_identities(
+    root: &RawElement,
+) -> Result<(Vec<ForeignIdentity>, BoardGraph), FdxError> {
     let mut identities = Vec::new();
     let mut board_graph = BoardGraph::default();
     let mut seen = BTreeSet::new();
     let mut scoped_title_page_paragraphs = BTreeMap::new();
     let mut definitions = Vec::new();
-    walk_elements(
-        root,
-        &mut |element, nearest_board, in_title_page, in_title_content, depth, is_alternate_copy| {
-            if raw_identity_attribute_count(element) > 1 {
-                return Err(FdxError::AmbiguousIdentity);
-            }
-            if matches!(element.name.local_name.as_str(), "ListItem" | "DisplayBoard" | "Image")
-                && raw_identity_attribute(element).is_none()
-            {
-                return Err(FdxError::AmbiguousIdentity);
-            }
-            if nearest_board.is_some()
-                && matches!(element.name.local_name.as_str(), "Item" | "Picture")
-                && raw_identity_attribute(element).is_none()
-            {
-                return Err(FdxError::DanglingReference);
-            }
-            let Some(value) = raw_identity_attribute(element) else {
-                return Ok(());
-            };
-            if nearest_board.is_some()
-                && matches!(element.name.local_name.as_str(), "Item" | "Picture")
-            {
-                return Ok(());
-            }
-            if is_alternate_copy {
-                // Exact AltCollection copies remain opaque and never compete
-                // with global Paragraph definitions.
-                return Ok(());
-            }
-            let domain = identity_domain(&element.name.local_name);
-            let identity = ForeignIdentity::new(domain, value.to_owned())
-                .map_err(map_preservation_error)?;
-            let scoped_title_page_paragraph = in_title_page
-                && in_title_content
-                && element.name.local_name == "Paragraph"
-                && depth == 3;
-            if scoped_title_page_paragraph {
-                *scoped_title_page_paragraphs
-                    .entry(identity.clone())
-                    .or_insert(0usize) += 1;
-                definitions.push((
-                    element.name.local_name.clone(),
-                    identity,
-                    element.attributes.clone(),
-                    true,
-                ));
-                return Ok(());
-            }
-            if !seen.insert(identity.clone()) {
-                return Err(FdxError::AmbiguousIdentity);
-            }
+    walk_elements(root, &mut |element,
+                              nearest_board,
+                              in_title_page,
+                              in_title_content,
+                              depth,
+                              is_alternate_copy| {
+        if raw_identity_attribute_count(element) > 1 {
+            return Err(FdxError::AmbiguousIdentity);
+        }
+        if matches!(
+            element.name.local_name.as_str(),
+            "ListItem" | "DisplayBoard" | "Image"
+        ) && raw_identity_attribute(element).is_none()
+        {
+            return Err(FdxError::AmbiguousIdentity);
+        }
+        if nearest_board.is_some()
+            && matches!(element.name.local_name.as_str(), "Item" | "Picture")
+            && raw_identity_attribute(element).is_none()
+        {
+            return Err(FdxError::DanglingReference);
+        }
+        let Some(value) = raw_identity_attribute(element) else {
+            return Ok(());
+        };
+        if nearest_board.is_some() && matches!(element.name.local_name.as_str(), "Item" | "Picture")
+        {
+            return Ok(());
+        }
+        if is_alternate_copy {
+            // Exact AltCollection copies remain opaque and never compete
+            // with global Paragraph definitions.
+            return Ok(());
+        }
+        let domain = identity_domain(&element.name.local_name);
+        let identity =
+            ForeignIdentity::new(domain, value.to_owned()).map_err(map_preservation_error)?;
+        let scoped_title_page_paragraph = in_title_page
+            && in_title_content
+            && element.name.local_name == "Paragraph"
+            && depth == 3;
+        if scoped_title_page_paragraph {
+            *scoped_title_page_paragraphs
+                .entry(identity.clone())
+                .or_insert(0usize) += 1;
             definitions.push((
                 element.name.local_name.clone(),
                 identity,
                 element.attributes.clone(),
-                false,
+                true,
             ));
-            Ok(())
-        },
-    )?;
+            return Ok(());
+        }
+        if !seen.insert(identity.clone()) {
+            return Err(FdxError::AmbiguousIdentity);
+        }
+        definitions.push((
+            element.name.local_name.clone(),
+            identity,
+            element.attributes.clone(),
+            false,
+        ));
+        Ok(())
+    })?;
 
     // A single scoped title identity enters source-use accounting without
     // shadowing global definitions; repeated scoped occurrences coalesce.
@@ -341,7 +338,14 @@ pub(crate) fn collect_identities(root: &RawElement) -> Result<(Vec<ForeignIdenti
 
 fn walk_elements<F>(element: &RawElement, visitor: &mut F) -> Result<(), FdxError>
 where
-    F: FnMut(&RawElement, Option<&ForeignIdentity>, bool, bool, usize, bool) -> Result<(), FdxError>,
+    F: FnMut(
+        &RawElement,
+        Option<&ForeignIdentity>,
+        bool,
+        bool,
+        usize,
+        bool,
+    ) -> Result<(), FdxError>,
 {
     fn classify(
         element: &RawElement,
@@ -379,9 +383,11 @@ where
 
         let body_parent = depth == 3
             && is_fdx_element(parent, "Paragraph", root_namespace)
-            && attribute(parent, "Type").and_then(role_from_fdx)
-                == Some(scriptcraft_model::Role::SceneHeading)
-            && grandparent.is_some_and(|content| is_fdx_element(content, "Content", root_namespace));
+            && matches!(content::paragraph_type_key(parent), Ok(Some(key)) if
+                scriptcraft_model::element_definition::SemanticCapabilities::for_key(&key)
+                    .scene_boundary)
+            && grandparent
+                .is_some_and(|content| is_fdx_element(content, "Content", root_namespace));
         if body_parent && is_fdx_element(element, "SceneProperties", root_namespace) {
             return content::SourceClass::KnownIdentity;
         }
@@ -390,21 +396,33 @@ where
         // recognized only at these exact root/board paths.
         let root_child = depth == 1 && is_fdx_element(parent, FDX_ROOT, root_namespace);
         let board_container = root_child
-            && matches!(element.name.local_name.as_str(), "DisplayBoards" | "ListItems" | "Images");
+            && matches!(
+                element.name.local_name.as_str(),
+                "DisplayBoards" | "ListItems" | "Images"
+            );
         if board_container {
             return content::SourceClass::Structural;
         }
         if root_child
-            && matches!(element.name.local_name.as_str(), "DisplayBoard" | "ListItem" | "Image")
+            && matches!(
+                element.name.local_name.as_str(),
+                "DisplayBoard" | "ListItem" | "Image"
+            )
             && element.name.namespace_uri.as_deref() == root_namespace
         {
             return content::SourceClass::KnownIdentity;
         }
         let under_board_container = depth == 2
             && parent.name.namespace_uri.as_deref() == root_namespace
-            && matches!(parent.name.local_name.as_str(), "DisplayBoards" | "ListItems" | "Images");
+            && matches!(
+                parent.name.local_name.as_str(),
+                "DisplayBoards" | "ListItems" | "Images"
+            );
         let board_entity = under_board_container
-            && matches!(element.name.local_name.as_str(), "DisplayBoard" | "ListItem" | "Image")
+            && matches!(
+                element.name.local_name.as_str(),
+                "DisplayBoard" | "ListItem" | "Image"
+            )
             && element.name.namespace_uri.as_deref() == root_namespace;
         if board_entity {
             return content::SourceClass::KnownIdentity;
@@ -435,7 +453,8 @@ where
 
         let inside_scene_properties = is_fdx_element(parent, "SceneProperties", root_namespace);
         let inside_scene_arcs = is_fdx_element(parent, "SceneArcBeats", root_namespace)
-            && grandparent.is_some_and(|scene| is_fdx_element(scene, "SceneProperties", root_namespace));
+            && grandparent
+                .is_some_and(|scene| is_fdx_element(scene, "SceneProperties", root_namespace));
         if inside_scene_properties && is_fdx_element(element, "SceneArcBeats", root_namespace) {
             return content::SourceClass::Structural;
         }
@@ -450,7 +469,8 @@ where
         }
         if depth == 5
             && is_fdx_element(parent, "SceneArcBeats", root_namespace)
-            && grandparent.is_some_and(|scene| is_fdx_element(scene, "SceneProperties", root_namespace))
+            && grandparent
+                .is_some_and(|scene| is_fdx_element(scene, "SceneProperties", root_namespace))
             && is_fdx_element(element, "CharacterArcBeat", root_namespace)
         {
             return content::SourceClass::Structural;
@@ -477,14 +497,7 @@ where
                     && attribute(outer, "Type") == Some("General")
                     && content::is_supported_dual_dialogue_source(outer, root_namespace)
             })
-            && matches!(
-                attribute(element, "Type").and_then(role_from_fdx),
-                Some(
-                    scriptcraft_model::Role::Character
-                        | scriptcraft_model::Role::Dialogue
-                        | scriptcraft_model::Role::Parenthetical
-                )
-            );
+            && matches!(content::paragraph_type_key(element), Ok(Some(_)));
         if dual_member {
             return content::SourceClass::Managed;
         }
@@ -507,7 +520,14 @@ where
         visitor: &mut F,
     ) -> Result<(), FdxError>
     where
-        F: FnMut(&RawElement, Option<&ForeignIdentity>, bool, bool, usize, bool) -> Result<(), FdxError>,
+        F: FnMut(
+            &RawElement,
+            Option<&ForeignIdentity>,
+            bool,
+            bool,
+            usize,
+            bool,
+        ) -> Result<(), FdxError>,
     {
         let class = classify(
             element,
@@ -538,7 +558,8 @@ where
         let exact_alternate_copy = element.name.local_name == "Paragraph"
             && element.name.namespace_uri.as_deref() == root_namespace
             && parent.is_some_and(|parent| {
-                parent.name.local_name == "Alt" && parent.name.namespace_uri.as_deref() == root_namespace
+                parent.name.local_name == "Alt"
+                    && parent.name.namespace_uri.as_deref() == root_namespace
             })
             && grandparent.is_some_and(|grandparent| {
                 grandparent.name.local_name == "AltCollection"
@@ -616,10 +637,14 @@ pub(crate) fn validate_image_payload_budgets(
         for child in &element.children {
             match child {
                 RawNode::Text(value) | RawNode::CData(value) => {
-                    size = size.checked_add(value.len()).ok_or(FdxError::ResourceLimit)?;
+                    size = size
+                        .checked_add(value.len())
+                        .ok_or(FdxError::ResourceLimit)?;
                 }
                 RawNode::Element(element) => {
-                    size = size.checked_add(text_size(element)?).ok_or(FdxError::ResourceLimit)?;
+                    size = size
+                        .checked_add(text_size(element)?)
+                        .ok_or(FdxError::ResourceLimit)?;
                 }
                 RawNode::Comment(_) | RawNode::ProcessingInstruction { .. } => {}
             }
@@ -638,7 +663,9 @@ pub(crate) fn validate_image_payload_budgets(
             .and_then(|value| value.checked_add(2))
             .map(|value| value / 3)
             .ok_or(FdxError::ResourceLimit)?;
-        total_image_text = total_image_text.checked_add(encoded).ok_or(FdxError::ResourceLimit)?;
+        total_image_text = total_image_text
+            .checked_add(encoded)
+            .ok_or(FdxError::ResourceLimit)?;
         let total_encoded_limit = MAX_TOTAL_IMAGE_BYTES
             .checked_mul(4)
             .and_then(|value| value.checked_add(2))

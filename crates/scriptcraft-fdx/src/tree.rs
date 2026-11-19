@@ -2,11 +2,11 @@
 
 use crate::diagnostics::FdxError;
 use crate::reader::{attribute, RawElement, RawNode};
+use scriptcraft_model::preservation::SharedVec;
 use scriptcraft_model::preservation::{
     DependencyConfidence, PreservedAttribute, PreservedElement, PreservedNode, SourceName,
     SourceOwnership,
 };
-use scriptcraft_model::preservation::SharedVec;
 
 pub(crate) fn new_lineage_element(
     parent: &SourceName,
@@ -51,7 +51,10 @@ pub(crate) fn plain_source_name(local_name: &str) -> SourceName {
     }
 }
 
-pub(crate) fn preserved_element_owned(name: &str, attributes: Vec<(String, String)>) -> PreservedElement {
+pub(crate) fn preserved_element_owned(
+    name: &str,
+    attributes: Vec<(String, String)>,
+) -> PreservedElement {
     let mut element = preserved_element(name, Vec::new());
     element.attributes = attributes
         .into_iter()

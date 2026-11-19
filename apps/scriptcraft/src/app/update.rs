@@ -2,21 +2,22 @@
 
 use crate::app;
 use crate::app::{measure_root_other_bucket, responsiveness, ScriptCraftApp};
+use crate::chrome::status_bar::status_modifiers_changed;
+use crate::chrome::status_bar::DiagnosticProjection;
+use crate::chrome::toolbar::toolbar_content_height;
 use crate::commands::CommandInvocation;
 use crate::{
+    chrome::{menu, shortcuts, status_bar, theme},
     documents::open::{show_fdx_migration_dialog, show_startup_open_failure, StagedOpenOutcome},
-    chrome::{menu, shortcuts, status_bar, theme}, widgets::sprint_timer,
     views::{
         script::{self as script_view, zoom_scroll::page_geometry_input_invalidated, RevealIntent},
         title_page,
     },
+    widgets::sprint_timer,
 };
-use crate::chrome::status_bar::status_modifiers_changed;
-use crate::chrome::toolbar::toolbar_content_height;
 use eframe::egui;
 use scriptcraft_commands::{Command, CommandOrigin, EditorSurface, ZoomFactor};
 use std::time::Instant;
-use crate::chrome::status_bar::DiagnosticProjection;
 
 fn chrome_frame(palette: theme::ToolbarPalette) -> egui::Frame {
     // The semantic divider is painted along the toolbar's lower edge; keep the
@@ -84,7 +85,10 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     let (modifiers, ime_event_in_frame) = ctx.input(|input| {
         (
             input.modifiers,
-            input.events.iter().any(|event| matches!(event, egui::Event::Ime(_))),
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Ime(_))),
         )
     });
     let center = status_bar::project_center(
@@ -108,9 +112,10 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     let aligned_edit_update_summaries = app
         .development_mode
         .then(|| app.responsiveness.aligned_edit_update_summaries());
-    let aligned_edit_update_other_detail_summary = app
-        .development_mode
-        .then(|| app.responsiveness.aligned_edit_update_other_detail_summary());
+    let aligned_edit_update_other_detail_summary = app.development_mode.then(|| {
+        app.responsiveness
+            .aligned_edit_update_other_detail_summary()
+    });
     let layout_build_detail_summary = app
         .development_mode
         .then(|| app.responsiveness.layout_build_detail_summary());
@@ -159,13 +164,16 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         _ => None,
     };
     let status_panel = egui::Panel::bottom("status")
-        .frame(status_bar::status_panel_frame(&ctx, app.theme_palette.status))
+        .frame(status_bar::status_panel_frame(
+            &ctx,
+            app.theme_palette.status,
+        ))
         .default_size(status_bar::default_panel_height())
         .show_separator_line(false)
         .show_inside(ui, |ui| {
-        status_bar::apply_status_palette(ui, app.theme_palette.status);
-        let focus_view = app.focus_mode.view();
-        let status_intents = status_bar::show_with_focus_mode(
+            status_bar::apply_status_palette(ui, app.theme_palette.status);
+            let focus_view = app.focus_mode.view();
+            let status_intents = status_bar::show_with_focus_mode(
                 ui,
                 app.theme_palette.status,
                 page_number,
@@ -176,41 +184,33 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                 app.appearance_mode,
                 &focus_view,
             );
-        let timer_button_rect = status_intents.timer_button_rect;
-        for command in status_intents.commands {
-            let opening_timer = matches!(&command, Command::ToolsSprintTimerTogglePopup)
-                && !app.sprint_timer.popup_open;
-            app.dispatch_command(
-                CommandInvocation::new(command, CommandOrigin::Pointer),
-                &ctx,
-            );
-            if opening_timer {
-                app.sprint_timer.popup_anchor = timer_button_rect.unwrap_or(egui::Rect::NOTHING);
-                app.timer_popup_surface = EditorSurface::Body;
-                app.capture_sprint_timer_host_geometry(EditorSurface::Body, &ctx);
+            let timer_button_rect = status_intents.timer_button_rect;
+            for command in status_intents.commands {
+                let opening_timer = matches!(&command, Command::ToolsSprintTimerTogglePopup)
+                    && !app.sprint_timer.popup_open;
+                app.dispatch_command(
+                    CommandInvocation::new(command, CommandOrigin::Pointer),
+                    &ctx,
+                );
+                if opening_timer {
+                    app.sprint_timer.popup_anchor =
+                        timer_button_rect.unwrap_or(egui::Rect::NOTHING);
+                    app.timer_popup_surface = EditorSurface::Body;
+                    app.capture_sprint_timer_host_geometry(EditorSurface::Body, &ctx);
+                }
             }
-        }
         });
-    status_bar::paint_panel_top_border(
-        ui,
-        status_panel.response.rect,
-        app.theme_palette.status,
-    );
-        let central = egui::CentralPanel::default()
-            .frame(script_view::central_panel_frame(
-                &ctx,
-                app.script_view_mode,
-                app.theme_palette.script_workspace,
-            ))
+    status_bar::paint_panel_top_border(ui, status_panel.response.rect, app.theme_palette.status);
+    let central = egui::CentralPanel::default()
+        .frame(script_view::central_panel_frame(
+            &ctx,
+            app.script_view_mode,
+            app.theme_palette.script_workspace,
+        ))
         .show_inside(ui, |ui| app.live_document_surface(ui, EditorSurface::Body));
     let timer_commands = if app.timer_popup_surface == EditorSurface::Body {
         let host_geometry = app.sprint_timer_host_geometry(EditorSurface::Body);
-        sprint_timer::show_popup_with_host_geometry(
-            &ctx,
-            &mut app.sprint_timer,
-            now,
-            host_geometry,
-        )
+        sprint_timer::show_popup_with_host_geometry(&ctx, &mut app.sprint_timer, now, host_geometry)
     } else {
         Vec::new()
     };
@@ -230,10 +230,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
 
 impl eframe::App for ScriptCraftApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        script_view::chrome_clear_color(
-            self.script_view_mode,
-            self.theme_palette.script_workspace,
-        )
+        script_view::chrome_clear_color(self.script_view_mode, self.theme_palette.script_workspace)
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -355,7 +352,6 @@ impl eframe::App for ScriptCraftApp {
     }
 }
 
-
 impl ScriptCraftApp {
     fn update(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         self.finalize_initial_document_slot();
@@ -365,32 +361,24 @@ impl ScriptCraftApp {
             self.responsiveness.begin_update();
         }
         self.performance.frames = self.performance.frames.saturating_add(1);
-        let root_close_allowed = measure_root_other_bucket(
-            self,
-            app::responsiveness::RootOtherBucket::Host,
-            |app| app.begin_root_close_update(&ctx, frame),
-        );
+        let root_close_allowed =
+            measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+                app.begin_root_close_update(&ctx, frame)
+            });
         // Acknowledgements and process exit are settled before availability or
         // input projection. Matching Opened uses the same WO-001 root Close path.
-        let replacement_close_continuation = measure_root_other_bucket(
-            self,
-            app::responsiveness::RootOtherBucket::Host,
-            |app| app.poll_pending_replacement(&ctx, Instant::now()),
-        );
-        measure_root_other_bucket(
-            self,
-            app::responsiveness::RootOtherBucket::Host,
-            |app| {
-                app.update_native_window_state(&ctx);
-                if ctx.input(|input| input.viewport().focused) == Some(true) {
-                    app.set_active_editor_surface(EditorSurface::Body);
-                }
-            },
-        );
-        let startup_outcome = measure_root_other_bucket(
-            self,
-            app::responsiveness::RootOtherBucket::Host,
-            |app| {
+        let replacement_close_continuation =
+            measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+                app.poll_pending_replacement(&ctx, Instant::now())
+            });
+        measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+            app.update_native_window_state(&ctx);
+            if ctx.input(|input| input.viewport().focused) == Some(true) {
+                app.set_active_editor_surface(EditorSurface::Body);
+            }
+        });
+        let startup_outcome =
+            measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
                 let outcome = app.consume_startup_document_handoff();
                 if let Some(outcome) = outcome {
                     app.emit_startup_handoff_result(outcome);
@@ -401,19 +389,15 @@ impl ScriptCraftApp {
                     show_startup_open_failure(StagedOpenOutcome::Failed);
                 }
                 outcome
-            },
-        );
+            });
         #[cfg(target_os = "macos")]
-        measure_root_other_bucket(
-            self,
-            app::responsiveness::RootOtherBucket::Host,
-            |app| {
-                if !replacement_close_continuation && app.menu_policy.installs_native_macos() {
-                    if let Some(native_menu) = &app.native_menu {
-                        native_menu.drain_events(&mut app.pending_commands);
-                    }
+        measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+            if !replacement_close_continuation && app.menu_policy.installs_native_macos() {
+                if let Some(native_menu) = &app.native_menu {
+                    native_menu.drain_events(&mut app.pending_commands);
                 }
-                if !replacement_close_continuation
+            }
+            if !replacement_close_continuation
                     && app
                         .native_lifecycle
                         .as_ref()
@@ -426,8 +410,7 @@ impl ScriptCraftApp {
                         CommandOrigin::NativeOs,
                     ));
                 }
-            },
-        );
+        });
         // Menu activations rendered in the previous pass are dispatched once
         // before ordinary editor input, with command availability rechecked.
         if !replacement_close_continuation {
@@ -437,11 +420,9 @@ impl ScriptCraftApp {
                 |app| app.dispatch_pending_commands(&ctx),
             );
         }
-        measure_root_other_bucket(
-            self,
-            app::responsiveness::RootOtherBucket::Host,
-            |app| app.process_staged_replacement_open(&ctx, frame),
-        );
+        measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+            app.process_staged_replacement_open(&ctx, frame)
+        });
         self.notification_sink.set_repaint_context(&ctx);
         let replacement_pending = self.replacement_open_pending();
         let migration_pending = self.pending_fdx_open.is_some() && !replacement_pending;
@@ -455,11 +436,9 @@ impl ScriptCraftApp {
             );
             // Scheduled derived work sees every accepted same-frame edit and
             // never delays already-queued editor input on its deadline frame.
-            measure_root_other_bucket(
-                self,
-                app::responsiveness::RootOtherBucket::Derived,
-                |app| app.refresh_cast_lists_on_schedule(&ctx, Instant::now()),
-            );
+            measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Derived, |app| {
+                app.refresh_cast_lists_on_schedule(&ctx, Instant::now())
+            });
         }
         let timer_now = self.timer_now();
         self.reconcile_sprint_timer(timer_now);
@@ -471,7 +450,10 @@ impl ScriptCraftApp {
             });
         } else if migration_pending {
             let status_panel = egui::Panel::bottom("status")
-                .frame(status_bar::status_panel_frame(&ctx, self.theme_palette.status))
+                .frame(status_bar::status_panel_frame(
+                    &ctx,
+                    self.theme_palette.status,
+                ))
                 .default_size(status_bar::default_panel_height())
                 .show_separator_line(false)
                 .show_inside(ui, |ui| {
@@ -487,36 +469,26 @@ impl ScriptCraftApp {
             });
             show_fdx_migration_dialog(self, &ctx);
         } else {
-            measure_root_other_bucket(
-                self,
-                app::responsiveness::RootOtherBucket::Chrome,
-                |app| show_application_panels(app, ui),
-            );
+            measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Chrome, |app| {
+                show_application_panels(app, ui)
+            });
         }
         if root_close_allowed {
-            measure_root_other_bucket(
-                self,
-                app::responsiveness::RootOtherBucket::Host,
-                |app| {
-                    app.close_title_page_window(&ctx);
-                    if app.timer_popup_surface == EditorSurface::Body {
-                        app.finalize_sprint_timer_popup(&ctx);
-                    }
-                },
-            );
+            measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+                app.close_title_page_window(&ctx);
+                if app.timer_popup_surface == EditorSurface::Body {
+                    app.finalize_sprint_timer_popup(&ctx);
+                }
+            });
         } else if !replacement_close_continuation {
-            measure_root_other_bucket(
-                self,
-                app::responsiveness::RootOtherBucket::Host,
-                |app| title_page::show_if_open(app, &ctx),
-            );
+            measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+                title_page::show_if_open(app, &ctx)
+            });
         }
         if replacement_pending {
-            measure_root_other_bucket(
-                self,
-                app::responsiveness::RootOtherBucket::Host,
-                |_| show_pending_replacement_indicator(&ctx),
-            );
+            measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |_| {
+                show_pending_replacement_indicator(&ctx)
+            });
         }
         measure_root_other_bucket(
             self,
@@ -526,29 +498,24 @@ impl ScriptCraftApp {
         self.schedule_sprint_timer_repaint(&ctx, self.timer_now());
         self.schedule_focus_mode_repaint(&ctx, self.timer_now());
         #[cfg(target_os = "macos")]
-        measure_root_other_bucket(
-            self,
-            app::responsiveness::RootOtherBucket::Host,
-            |app| {
-                if app.menu_policy.installs_native_macos() {
-                    let projection = app.app_command_projection();
-                    if let Some(native_menu) = &mut app.native_menu {
-                        native_menu.synchronize(
-                            projection.availability,
-                            app.script_view_mode,
-                            projection.say_undual,
-                        );
-                    }
+        measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+            if app.menu_policy.installs_native_macos() {
+                let projection = app.app_command_projection();
+                if let Some(native_menu) = &mut app.native_menu {
+                    native_menu.synchronize(
+                        projection.availability,
+                        app.script_view_mode,
+                        projection.say_undual,
+                    );
                 }
-            },
-        );
-        measure_root_other_bucket(
-            self,
-            app::responsiveness::RootOtherBucket::Host,
-            |app| app.sync_native_title(&ctx),
-        );
+            }
+        });
+        measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+            app.sync_native_title(&ctx)
+        });
         if self.development_mode {
-            self.responsiveness.record_update(frame_started, Instant::now());
+            self.responsiveness
+                .record_update(frame_started, Instant::now());
         }
         self.performance.frame_nanos = self
             .performance
@@ -569,9 +536,13 @@ fn show_pending_replacement_indicator(ctx: &egui::Context) {
                 .inner_margin(egui::Margin::same(16))
                 .show(ui, |ui| {
                     ui.set_max_width(360.0);
-                    ui.label(egui::RichText::new("Opening selected document in a new instance").strong());
+                    ui.label(
+                        egui::RichText::new("Opening selected document in a new instance").strong(),
+                    );
                     ui.add_space(6.0);
-                    ui.label("The current document is temporarily locked while the new instance opens.");
+                    ui.label(
+                        "The current document is temporarily locked while the new instance opens.",
+                    );
                 });
         });
 }

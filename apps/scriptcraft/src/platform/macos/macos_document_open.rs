@@ -155,7 +155,9 @@ impl MacOsDocumentOpenInbox {
 }
 
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// One bounded drain result. Overflow is aggregated numerically rather than

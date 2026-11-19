@@ -5,9 +5,7 @@ use super::runs::{
     FormattedTextError, RunStyle, RunStyleEdit, RunStyleFlags, RunStyleRange,
 };
 use crate::{
-    element::BodyOwner,
-    formatting::ParagraphAlignment,
-    preservation::PreservationError,
+    element::BodyOwner, formatting::ParagraphAlignment, preservation::PreservationError,
     project::Project,
 };
 use std::ops::Range;
@@ -76,7 +74,7 @@ pub fn set_paragraph_alignments(
                         Some(alignment.fdx_value()),
                     )?;
                 }
-                    paragraph.formatting.alignment = Some(alignment.into());
+                paragraph.formatting.alignment = Some(alignment.into());
             }
         }
     }
@@ -91,7 +89,10 @@ pub fn project_paragraph_alignment(
 ) -> ParagraphAlignmentProjection {
     let first = alignments.first().copied().flatten();
     let uniform = first.filter(|first| {
-        alignments.len() > 0 && alignments.iter().all(|alignment| *alignment == Some(*first))
+        alignments.len() > 0
+            && alignments
+                .iter()
+                .all(|alignment| *alignment == Some(*first))
     });
     ParagraphAlignmentProjection { alignment: uniform }
 }
@@ -112,14 +113,22 @@ pub fn toggle_paragraph_run_style(
                 .elements
                 .get(index)
                 .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-            (element.id.clone(), element.text.clone(), element.runs.clone())
+            (
+                element.id.clone(),
+                element.text.clone(),
+                element.runs.clone(),
+            )
         }
         ParagraphTarget::TitlePage(index) => {
             let paragraph = candidate
                 .title_page
                 .get(index)
                 .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-            (paragraph.id.clone(), paragraph.text.clone(), paragraph.runs.clone())
+            (
+                paragraph.id.clone(),
+                paragraph.text.clone(),
+                paragraph.runs.clone(),
+            )
         }
     };
     if !range.is_empty() {
@@ -191,14 +200,22 @@ pub fn toggle_paragraph_run_styles(
                     .elements
                     .get(index)
                     .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-                (element.id.clone(), element.text.clone(), element.runs.clone())
+                (
+                    element.id.clone(),
+                    element.text.clone(),
+                    element.runs.clone(),
+                )
             }
             ParagraphTarget::TitlePage(index) => {
                 let paragraph = candidate
                     .title_page
                     .get(index)
                     .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-                (paragraph.id.clone(), paragraph.text.clone(), paragraph.runs.clone())
+                (
+                    paragraph.id.clone(),
+                    paragraph.text.clone(),
+                    paragraph.runs.clone(),
+                )
             }
         };
         if !range.is_empty() {
@@ -284,14 +301,22 @@ pub fn clear_paragraph_run_styles(
                     .elements
                     .get(index)
                     .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-                (element.id.clone(), element.text.clone(), element.runs.clone())
+                (
+                    element.id.clone(),
+                    element.text.clone(),
+                    element.runs.clone(),
+                )
             }
             ParagraphTarget::TitlePage(index) => {
                 let paragraph = candidate
                     .title_page
                     .get(index)
                     .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-                (paragraph.id.clone(), paragraph.text.clone(), paragraph.runs.clone())
+                (
+                    paragraph.id.clone(),
+                    paragraph.text.clone(),
+                    paragraph.runs.clone(),
+                )
             }
         };
         if !range.is_empty() {

@@ -64,22 +64,37 @@ impl ScriptCraftApp {
     }
 
     pub(crate) fn swap_title_view_state(&mut self) {
-        std::mem::swap(&mut self.surface_focused, &mut self.title_view.surface_focused);
+        std::mem::swap(
+            &mut self.surface_focused,
+            &mut self.title_view.surface_focused,
+        );
         std::mem::swap(&mut self.drag_anchor, &mut self.title_view.drag_anchor);
         std::mem::swap(&mut self.ime_preedit, &mut self.title_view.ime_preedit);
         std::mem::swap(&mut self.ime_active, &mut self.title_view.ime_active);
-        std::mem::swap(&mut self.rendered_revision, &mut self.title_view.rendered_revision);
+        std::mem::swap(
+            &mut self.rendered_revision,
+            &mut self.title_view.rendered_revision,
+        );
         std::mem::swap(&mut self.reveal_intent, &mut self.title_view.reveal_intent);
-        std::mem::swap(&mut self.preferred_vertical_x, &mut self.title_view.preferred_vertical_x);
+        std::mem::swap(
+            &mut self.preferred_vertical_x,
+            &mut self.title_view.preferred_vertical_x,
+        );
         std::mem::swap(&mut self.page_geometry, &mut self.title_view.page_geometry);
-        std::mem::swap(&mut self.pending_zoom_anchor, &mut self.title_view.pending_zoom_anchor);
+        std::mem::swap(
+            &mut self.pending_zoom_anchor,
+            &mut self.title_view.pending_zoom_anchor,
+        );
         std::mem::swap(&mut self.page_scale, &mut self.title_view.page_scale);
         std::mem::swap(
             &mut self.effective_pixels_per_point,
             &mut self.title_view.effective_pixels_per_point,
         );
         std::mem::swap(&mut self.zoom_percent, &mut self.title_view.zoom_percent);
-        std::mem::swap(&mut self.pinch_zoom_percent, &mut self.title_view.pinch_zoom_percent);
+        std::mem::swap(
+            &mut self.pinch_zoom_percent,
+            &mut self.title_view.pinch_zoom_percent,
+        );
         std::mem::swap(
             &mut self.caret_blink_focus_generation,
             &mut self.title_view.caret_blink_focus_generation,
@@ -128,7 +143,12 @@ impl ScriptCraftApp {
         }
     }
 
-    pub(crate) fn set_zoom_for_surface(&mut self, surface: EditorSurface, zoom: u16, ctx: &egui::Context) {
+    pub(crate) fn set_zoom_for_surface(
+        &mut self,
+        surface: EditorSurface,
+        zoom: u16,
+        ctx: &egui::Context,
+    ) {
         if self.zoom_for_surface(surface) == zoom {
             return;
         }
@@ -159,12 +179,13 @@ impl ScriptCraftApp {
             }
             EditorSurface::TitlePage => {
                 if self.title_view.pending_zoom_anchor.is_none() {
-                    self.title_view.pending_zoom_anchor = self.title_view.page_geometry.capture_center_anchor(
-                        self.performance.frames,
-                        self.session.revision(),
-                        ctx.content_rect(),
-                        self.title_view.page_scale.unwrap_or(f32::NAN),
-                    );
+                    self.title_view.pending_zoom_anchor =
+                        self.title_view.page_geometry.capture_center_anchor(
+                            self.performance.frames,
+                            self.session.revision(),
+                            ctx.content_rect(),
+                            self.title_view.page_scale.unwrap_or(f32::NAN),
+                        );
                 }
             }
         }
@@ -183,14 +204,16 @@ impl ScriptCraftApp {
     pub(crate) fn preferred_vertical_x_for(&self, surface: EditorSurface) -> Option<i64> {
         match surface {
             EditorSurface::Body => self.preferred_vertical_x,
-            EditorSurface::TitlePage if self.title_view_state_swapped => {
-                self.preferred_vertical_x
-            }
+            EditorSurface::TitlePage if self.title_view_state_swapped => self.preferred_vertical_x,
             EditorSurface::TitlePage => self.title_view.preferred_vertical_x,
         }
     }
 
-    pub(crate) fn set_preferred_vertical_x_for(&mut self, surface: EditorSurface, value: Option<i64>) {
+    pub(crate) fn set_preferred_vertical_x_for(
+        &mut self,
+        surface: EditorSurface,
+        value: Option<i64>,
+    ) {
         match surface {
             EditorSurface::Body => self.preferred_vertical_x = value,
             EditorSurface::TitlePage if self.title_view_state_swapped => {

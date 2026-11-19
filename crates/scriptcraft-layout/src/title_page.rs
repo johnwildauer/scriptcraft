@@ -3,7 +3,9 @@ use super::{
     cache::{add_elapsed_nanos, ElementWrapCache},
     inputs::{EffectiveGeometryMode, EffectiveParagraph},
 };
-use scriptcraft_model::formatting::{EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment};
+use scriptcraft_model::formatting::{
+    EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment,
+};
 use scriptcraft_model::{LayoutInputs, Project, Role};
 use std::time::Instant;
 
@@ -27,7 +29,10 @@ pub(super) fn compose_title_pages(
             }
             let default_left = FixedPoint::from_points(i64::from(layout.inputs.margin_left));
             let default_right = FixedPoint::from_points(i64::from(
-                layout.inputs.paper_width.saturating_sub(layout.inputs.margin_right),
+                layout
+                    .inputs
+                    .paper_width
+                    .saturating_sub(layout.inputs.margin_right),
             ));
             let requested_left = element.formatting.left_indent.unwrap_or(default_left);
             let requested_right = element.formatting.right_indent.unwrap_or(default_right);
@@ -76,13 +81,15 @@ pub(super) fn compose_title_pages(
                 ),
             };
             let style = plain_title_style(inputs);
+            // Phase 5 replaces this static-layout adapter; General remains the type-less fallback.
+            let role = element.transitional_role().unwrap_or(Role::General);
             let lines = wrap::wrap_for_layout(
                 wrap_cache.as_deref_mut(),
                 diagnostics.as_deref_mut(),
                 &element.id,
                 &element.text,
                 index,
-                element.role.unwrap_or(Role::General),
+                role,
                 paragraph,
                 style,
                 &element.runs,
@@ -113,9 +120,7 @@ pub(super) fn compose_title_pages(
         }
         layout.pages.push(page);
     }
-    if include_title_page
-        && include_body
-        && layout.pages.last().is_some_and(|page| page.title_page)
+    if include_title_page && include_body && layout.pages.last().is_some_and(|page| page.title_page)
     {
         layout.pages.push(layout.new_page(false));
     }

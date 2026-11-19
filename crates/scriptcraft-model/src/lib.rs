@@ -3,35 +3,42 @@
 
 //! Canonical screenplay values shared by document and codec packages.
 
-pub mod dual_dialogue;
 pub mod cast_list;
-pub mod layout_inputs;
+pub mod dual_dialogue;
 pub mod element;
-pub mod formatting;
-pub mod formatted_text;
+pub mod element_definition;
+pub mod element_definitions;
+pub mod element_type;
 pub mod error;
+pub mod formatted_text;
+pub mod formatting;
 pub mod identity;
-pub mod position;
+pub mod layout_inputs;
 pub mod paragraph_id;
-pub mod project;
+pub mod position;
 pub mod preservation;
+pub mod project;
 pub mod scene_metadata;
 pub mod title_page;
 pub mod validation;
-mod legacy_json;
 
 pub use dual_dialogue::DualDialogueError;
-pub use layout_inputs::{LayoutInputs, RoleBox};
 pub use element::{
     BodyOwner, Role, RunAttribute, ScreenplayElement, SourceFormat, SourceProvenance,
     SourceSection, TextRun,
 };
+pub use element_definition::{
+    ElementBehavior, ElementDefinition, ElementFontSpec, ElementOutline, ElementParagraphSpec,
+    SemanticCapabilities, MAX_ELEMENT_DEFINITION_STRING_BYTES,
+};
+pub use element_definitions::{DocumentElementDefinitions, MAX_DOCUMENT_ELEMENT_DEFINITIONS};
+pub use element_type::{ElementTypeKey, MAX_ELEMENT_TYPE_KEY_BYTES};
 pub use error::ModelError;
-pub use project::{NativeProjectEnvelope, Project};
-pub use validation::{validate_layout_inputs, MAX_ELEMENTS};
-pub use legacy_json::{CURRENT_SCHEMA_VERSION, MAX_JSON_BYTES, MAX_STRING_BYTES, POINTS_PER_INCH};
 pub use identity::{StableId, StableIdAllocator};
+pub use layout_inputs::LayoutInputs;
 pub use position::{Position, Selection};
+pub use project::Project;
 pub use title_page::{TitlePageAlignment, TitlePageParagraph, TitlePageParagraphFormatting};
+pub use validation::{validate_layout_inputs, MAX_ELEMENTS};
 
 pub const MAX_TEXT_BYTES: usize = 262_144;

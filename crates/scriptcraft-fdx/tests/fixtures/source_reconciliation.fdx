@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FinalDraft DocumentType="Script" Version="6" xmlns:vendor="urn:scriptcraft:fixture">
+  <ElementSettings Type="Lyrics" vendor:class="winner" VendorSetting="keep">
+    <FontSpec AdornmentStyle="2" Color="#123456789ABC" Font="Avenir Next" RevisionID="7" Size="14" Style="Bold+Italic" vendor:font="retain" />
+    <ParagraphSpec Alignment="Full" FirstIndent="-0.25" Leading="1.3" LeftIndent="1.25" RightIndent="0.5" SpaceBefore="4.5" Spacing="2" StartsNewPage="Yes" Type="Lyrics" />
+    <Behavior PaginateAs="Action" ReturnKey="action" TabKey="ACTION" Shortcut="" WinShortcut="Alt+L" />
+    <Outline CanHide="Yes" Level="4" />
+    <vendor:UnknownDefinition marker="retained">settings extension</vendor:UnknownDefinition>
+  </ElementSettings>
+  <ElementSettings Type="action"><FontSpec Font="Georgia" Size="11" Style="Italic" /></ElementSettings>
+  <ElementSettings Type="Action"><FontSpec Font="Courier Final Draft" Size="12" Style="Bold" /></ElementSettings>
+  <ElementSettings Type="Lyrics" VendorSetting="inert duplicate">
+    <FontSpec Font="Must Not Win" Size="8" />
+    <vendor:DuplicatePayload marker="inert">duplicate source remains</vendor:DuplicatePayload>
+  </ElementSettings>
+
+  <TitlePage>
+    <Paragraph Type="DirectOnlyTitle" Alignment="Center" id="reconcile-title-direct">
+      <Text>Direct title is opaque</Text>
+      <vendor:TitlePayload marker="preserve">direct title payload</vendor:TitlePayload>
+    </Paragraph>
+    <Content>
+      <Paragraph Type="titlefirst" id="reconcile-title-content" Alignment="Right" vendor:paragraph="title">
+        <Text Style="Bold">A </Text><Text Style="Italic">content title</Text>
+        <UserParagraphData><vendor:TitleAttachment marker="title-attachment">title attachment</vendor:TitleAttachment></UserParagraphData>
+        <vendor:TitleOpaque marker="keep">title opaque child</vendor:TitleOpaque>
+      </Paragraph>
+      <Paragraph id="reconcile-title-typeless"><Text>Type-less content title</Text></Paragraph>
+      <Wrapper><Paragraph Type="WrappedTitle" id="reconcile-title-wrapped"><Text>Wrapped title is opaque</Text></Paragraph></Wrapper>
+    </Content>
+  </TitlePage>
+  <HeaderAndFooter>
+    <Header><Paragraph Type="HeaderTitle" id="reconcile-header-title"><Text>Header source</Text><vendor:HeaderPayload marker="keep" /></Paragraph></Header>
+    <Footer><Paragraph Type="FooterTitle" id="reconcile-footer-title"><Text>Footer source</Text><vendor:FooterPayload marker="keep" /></Paragraph></Footer>
+  </HeaderAndFooter>
+
+  <Content>
+    <Paragraph Type="Lyrics" id="reconcile-body-lyrics" Alignment="Center" FirstIndent="0.25" vendor:paragraph="body">
+      <Text Style="Bold">First </Text><Text Style="Italic">line</Text>
+      <UserParagraphData><vendor:BodyAttachment marker="body-attachment">body attachment</vendor:BodyAttachment></UserParagraphData>
+      <SceneProperties><SceneNumber>opaque arbitrary-type data</SceneNumber></SceneProperties>
+      <vendor:BodyOpaque marker="keep">body opaque child</vendor:BodyOpaque>
+    </Paragraph>
+    <Paragraph Type="NoSettingsBody" id="reconcile-body-synthesis"><Text>Type requiring a settings winner</Text></Paragraph>
+    <Paragraph Type="General" id="reconcile-dual-wrapper" LeftIndent="0.25">
+      <UserParagraphData><vendor:WrapperAttachment marker="wrapper-attachment">wrapper attachment</vendor:WrapperAttachment></UserParagraphData>
+      <DualDialogue>
+        <SpellCheckIgnoreLists><IgnoredRanges /><IgnoredWords /></SpellCheckIgnoreLists>
+        <Paragraph Type="Character" id="reconcile-dual-left-cue" Alignment="Center"><Text Style="Bold">ALICE</Text><vendor:MemberPayload marker="cue">cue payload</vendor:MemberPayload></Paragraph>
+        <Paragraph Type="Dialogue" id="reconcile-dual-left-line"><Text>Left </Text><Text Style="Italic">line</Text><UserParagraphData><vendor:MemberAttachment marker="left-line">left line attachment</vendor:MemberAttachment></UserParagraphData></Paragraph>
+        <Paragraph Type="Character" id="reconcile-dual-right-cue"><Text>BOB</Text></Paragraph>
+        <Paragraph Type="Dialogue" id="reconcile-dual-right-line"><Text>Right line</Text></Paragraph>
+      </DualDialogue>
+    </Paragraph>
+  </Content>
+</FinalDraft>

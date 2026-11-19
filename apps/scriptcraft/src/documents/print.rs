@@ -3,9 +3,9 @@
 //! This module builds only PDF-backed Print composition. Native panels and
 //! printer APIs are intentionally owned by later macOS/Windows adapters.
 
+use scriptcraft_commands::PdfExportOptions;
 use scriptcraft_export::{self as exports, ExportError};
 use scriptcraft_model::{LayoutInputs, Project};
-use scriptcraft_commands::PdfExportOptions;
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -107,7 +107,11 @@ pub(super) fn print_job_title(native_path: Option<&Path>) -> String {
 
     let mut bounded = String::new();
     for character in stem.chars() {
-        let character = if character.is_control() { ' ' } else { character };
+        let character = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
         if bounded.len() + character.len_utf8() > MAX_PRINT_JOB_TITLE_BYTES {
             break;
         }

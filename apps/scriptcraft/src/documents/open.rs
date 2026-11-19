@@ -2,12 +2,12 @@
 
 use crate::app::startup::{StartupDocumentInput, StartupDocumentSource};
 use crate::app::ScriptCraftApp;
-use crate::views::script::RevealIntent;
 use crate::commands::CommandInvocation;
 use crate::documents::lifecycle::show_native_lifecycle_error;
-use crate::documents::unsaved_changes;
 use crate::documents::replacement_protocol as replacement_open;
 use crate::documents::save::UNTITLED_DOCUMENT_TITLE;
+use crate::documents::unsaved_changes;
+use crate::views::script::RevealIntent;
 use eframe::egui::{self, Vec2};
 use scriptcraft_commands::{Command, CommandOrigin, DocumentPath, EditorSurface, ImportResolution};
 use scriptcraft_fdx::{self as fdx, FdxImportOutcome, FdxMigrationConsent, FdxVersionStatus};
@@ -76,8 +76,7 @@ fn finalize_startup_document_slot(
 
     let startup_document_exists = startup_document.is_some();
     let cold_path = take_cold_path(startup_document_exists);
-    *startup_document =
-        startup_document_with_cold_request(startup_document.take(), cold_path);
+    *startup_document = startup_document_with_cold_request(startup_document.take(), cold_path);
     *finalized = true;
 }
 
@@ -132,9 +131,7 @@ fn child_startup_open_failure_copy() -> (&'static str, &'static str) {
     )
 }
 
-fn startup_open_failure_copy(
-    outcome: StagedOpenOutcome,
-) -> Option<(&'static str, &'static str)> {
+fn startup_open_failure_copy(outcome: StagedOpenOutcome) -> Option<(&'static str, &'static str)> {
     (outcome == StagedOpenOutcome::Failed).then_some(child_startup_open_failure_copy())
 }
 
@@ -164,15 +161,6 @@ fn macos_document_open_error_copy(
     ("Unable to Open Document", message)
 }
 
-fn looks_like_legacy_json(bytes: &[u8]) -> bool {
-    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
-    bytes
-        .iter()
-        .copied()
-        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
-        == Some(b'{')
-}
-
 fn pending_resolution_outcome(
     pending: Option<()>,
     consent: FdxMigrationConsent,
@@ -187,16 +175,16 @@ fn pending_resolution_outcome(
     }
 }
 
-fn staged_open_activation_outcome(
-    activation: Result<(), StagedOpenOutcome>,
-) -> StagedOpenOutcome {
+fn staged_open_activation_outcome(activation: Result<(), StagedOpenOutcome>) -> StagedOpenOutcome {
     match activation {
         Ok(()) => StagedOpenOutcome::Activated,
         Err(outcome) => outcome,
     }
 }
 
-fn session_activation_failure_code(error: &scriptcraft_session::editing::EditError) -> &'static str {
+fn session_activation_failure_code(
+    error: &scriptcraft_session::editing::EditError,
+) -> &'static str {
     use scriptcraft_session::editing::EditError;
     match error {
         EditError::InvalidElement => "EDIT_INVALID_ELEMENT",
@@ -208,6 +196,7 @@ fn session_activation_failure_code(error: &scriptcraft_session::editing::EditErr
         EditError::UnsupportedTransition { .. } => "EDIT_UNSUPPORTED_TRANSITION",
         EditError::InlineAltsRoleChange => "EDIT_INLINE_ALTS_ROLE_CHANGE",
         EditError::Preservation(_) => "EDIT_PRESERVATION_CONSTRAINT",
+        EditError::InvalidDefinitionCandidate => "EDIT_INVALID_DEFINITION_CANDIDATE",
         EditError::CastList(_) => "EDIT_CAST_LIST_CONSTRAINT",
         EditError::FormattedText(_) => "EDIT_FORMATTING_CONSTRAINT",
         EditError::Model(_) => "EDIT_MODEL_VALIDATION",
@@ -222,9 +211,7 @@ fn open_import_failure_message(error: &fdx::FdxError) -> String {
     format!("FDX_IMPORT_FAILED: {error}; active document unchanged")
 }
 
-fn session_activation_failure_message(
-    error: &scriptcraft_session::editing::EditError,
-) -> String {
+fn session_activation_failure_message(error: &scriptcraft_session::editing::EditError) -> String {
     format!(
         "FDX_SESSION_ACTIVATION_FAILED: {}; active document unchanged",
         session_activation_failure_code(error)
@@ -328,10 +315,7 @@ impl ScriptCraftApp {
     }
 
     fn dispatch_document_path_command(&mut self, path: &Path, ctx: &egui::Context) {
-        let Some(path) = path
-            .to_str()
-            .and_then(|path| DocumentPath::new(path).ok())
-        else {
+        let Some(path) = path.to_str().and_then(|path| DocumentPath::new(path).ok()) else {
             self.show_error("DOCUMENT_PATH_REJECTED: selected path is not valid UTF-8; active document unchanged");
             return;
         };
@@ -367,7 +351,9 @@ impl ScriptCraftApp {
 
     fn open_staged_native_at(&mut self, path: &Path) -> StagedOpenOutcome {
         if self.pending_fdx_open.is_some() {
-            self.show_error("OPEN_BLOCKED_BY_MIGRATION: resolve pending FDX import; active document unchanged");
+            self.show_error(
+                "OPEN_BLOCKED_BY_MIGRATION: resolve pending FDX import; active document unchanged",
+            );
             return StagedOpenOutcome::Failed;
         }
         if self.session.dirty() {
@@ -382,13 +368,8 @@ impl ScriptCraftApp {
                 return StagedOpenOutcome::Failed;
             }
         };
-        if looks_like_legacy_json(source.bytes()) {
-            self.show_error(
-                "LEGACY_JSON_OPEN_REJECTED: format unsupported; active document unchanged",
-            );
-            return StagedOpenOutcome::Failed;
-        }
-
+        // Selected bytes go through the bounded native FDX preflight/import path;
+        // this boundary does not sniff or dispatch alternate document formats.
         match fdx::preflight_version(source.bytes()) {
             Ok(FdxVersionStatus::Version6) => {
                 self.finish_fdx_import(path.to_owned(), source, FdxMigrationConsent::Continue)
@@ -485,7 +466,10 @@ impl ScriptCraftApp {
         };
         let restored_selection = scriptcraft_commands::Selection::from_core(text_state.selection)
             .ok()
-            .map(|selection| Command::EditorSelectionSet { selection, surface: EditorSurface::Body })
+            .map(|selection| Command::EditorSelectionSet {
+                selection,
+                surface: EditorSurface::Body,
+            })
             .is_some_and(|command| {
                 matches!(
                     scriptcraft_commands::execute_editor_command(&mut replacement, &command),
@@ -494,15 +478,18 @@ impl ScriptCraftApp {
                 )
             });
         if !restored_selection {
-            if let Ok(selection) = scriptcraft_commands::Selection::from_core(Selection::caret(
-                Position {
+            if let Ok(selection) =
+                scriptcraft_commands::Selection::from_core(Selection::caret(Position {
                     element: 0,
                     offset: 0,
-                },
-            )) {
+                }))
+            {
                 let _ = scriptcraft_commands::execute_editor_command(
                     &mut replacement,
-                    &Command::EditorSelectionSet { selection, surface: EditorSurface::Body },
+                    &Command::EditorSelectionSet {
+                        selection,
+                        surface: EditorSurface::Body,
+                    },
                 );
             }
         }
@@ -521,7 +508,9 @@ impl ScriptCraftApp {
         self.pending_fdx_open = None;
         self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
         self.page_geometry.reset_for_document_replacement();
-        self.title_view.page_geometry.reset_for_document_replacement();
+        self.title_view
+            .page_geometry
+            .reset_for_document_replacement();
         self.responsiveness.clear_pending_edit();
         self.layout_cache = LayoutCache::default();
         self.title_layout_cache = LayoutCache::default();

@@ -118,11 +118,14 @@ impl ScriptCraftApp {
     /// Dispatch always observes current gates. Most commands do not consume the
     /// dual-dialogue target, so their fresh availability check need not perform
     /// that target resolution and candidate scan.
-    pub(super) fn command_dispatch_availability(&mut self, command: CommandId) -> AppCommandAvailability {
+    pub(super) fn command_dispatch_availability(
+        &mut self,
+        command: CommandId,
+    ) -> AppCommandAvailability {
         let mut availability = self.app_command_availability_without_dual_dialogue();
         if command == CommandId::EditorDualDialogueToggle {
-            availability.dual_dialogue_toggle = !availability.replacement_pending
-                && self.dual_dialogue_toggle_target().is_some();
+            availability.dual_dialogue_toggle =
+                !availability.replacement_pending && self.dual_dialogue_toggle_target().is_some();
         }
         availability
     }
@@ -131,18 +134,38 @@ impl ScriptCraftApp {
         let migration_pending = self.pending_fdx_open.is_some();
         let replacement_pending = self.replacement_open_pending();
         let native_output_active = self.native_output_active();
-        let (selection, text_len, role_is_empty_parenthetical, element_count) = match self.active_editor_surface {
-            EditorSurface::Body => {
-                let selection = self.session.selection();
-                let element = self.session.project().elements.get(selection.focus.element);
-                (selection, element.map(|e| e.text.len()).unwrap_or(0), element.is_some_and(|e| e.role == scriptcraft_model::Role::Parenthetical && matches!(e.text.as_str(), "(" | "()" | ")")), self.session.project().elements.len())
-            }
-            EditorSurface::TitlePage => {
-                let selection = self.session.title_selection();
-                let text_len = self.session.project().title_page.get(selection.focus.element).map(|p| p.text.len()).unwrap_or(0);
-                (selection, text_len, false, self.session.project().title_page.len())
-            }
-        };
+        let (selection, text_len, role_is_empty_parenthetical, element_count) =
+            match self.active_editor_surface {
+                EditorSurface::Body => {
+                    let selection = self.session.selection();
+                    let element = self.session.project().elements.get(selection.focus.element);
+                    (
+                        selection,
+                        element.map(|e| e.text.len()).unwrap_or(0),
+                        element.is_some_and(|e| {
+                            e.transitional_role() == scriptcraft_model::Role::Parenthetical
+                                && matches!(e.text.as_str(), "(" | "()" | ")")
+                        }),
+                        self.session.project().elements.len(),
+                    )
+                }
+                EditorSurface::TitlePage => {
+                    let selection = self.session.title_selection();
+                    let text_len = self
+                        .session
+                        .project()
+                        .title_page
+                        .get(selection.focus.element)
+                        .map(|p| p.text.len())
+                        .unwrap_or(0);
+                    (
+                        selection,
+                        text_len,
+                        false,
+                        self.session.project().title_page.len(),
+                    )
+                }
+            };
         let delete_target_exists = if selection.anchor != selection.focus {
             true
         } else {
@@ -168,7 +191,9 @@ impl ScriptCraftApp {
             dual_dialogue_toggle: false,
             // In-app Open is a selected-path replacement request and is blocked
             // while the current document is resolving another lifecycle gate.
-            title_open: !migration_pending && !replacement_pending && !self.title_viewport_unsupported,
+            title_open: !migration_pending
+                && !replacement_pending
+                && !self.title_viewport_unsupported,
             // Closing the presentation-only child viewport does not destroy
             // the root document and remains available during replacement.
             title_close: !migration_pending && self.title_page_window_open,
@@ -181,9 +206,10 @@ impl ScriptCraftApp {
         if self.active_editor_surface != EditorSurface::Body {
             return None;
         }
-        self.session.dual_dialogue_toggle_target(
-            scriptcraft_model::dual_dialogue::SelectionSurface::Body,
-        ).ok().flatten()
+        self.session
+            .dual_dialogue_toggle_target(scriptcraft_model::dual_dialogue::SelectionSurface::Body)
+            .ok()
+            .flatten()
     }
 }
 

@@ -1,3 +1,4 @@
+use super::{add_elapsed_nanos, ElementWrapCache};
 use crate::{
     geometry::{DisplaySourceSegment, LayoutLine, PositionedStyledSpan, ScreenplayLayout},
     inputs::{EffectiveGeometryMode, EffectiveParagraph, LayoutComposition, LayoutPurpose},
@@ -5,7 +6,6 @@ use crate::{
 };
 use scriptcraft_model::formatting::{EffectiveTextStyle, FixedPoint};
 use scriptcraft_model::{BodyOwner, RunAttribute, ScreenplayElement, StableId, TextRun};
-use super::{add_elapsed_nanos, ElementWrapCache};
 use std::{
     collections::{BTreeSet, HashMap},
     hash::{Hash, Hasher},
@@ -95,10 +95,7 @@ impl PreparedBodyCache {
         hasher.finish()
     }
 
-    fn identity_fingerprint(
-        owner: &Arc<BodyOwner>,
-        environment: &PreparedBodyEnvironment,
-    ) -> u64 {
+    fn identity_fingerprint(owner: &Arc<BodyOwner>, environment: &PreparedBodyEnvironment) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         owner.id.hash(&mut hasher);
         environment.hash(&mut hasher);
@@ -197,7 +194,8 @@ impl PreparedBodyCache {
             };
             self.usage_order.remove(&oldest);
             let (_, insertion_order, fingerprint) = oldest;
-            let (removed, remove_bucket) = if let Some(bucket) = self.buckets.get_mut(&fingerprint) {
+            let (removed, remove_bucket) = if let Some(bucket) = self.buckets.get_mut(&fingerprint)
+            {
                 let removed = bucket
                     .iter()
                     .position(|entry| entry.insertion_order == insertion_order)
@@ -297,7 +295,6 @@ fn prepared_body_entry_byte_cost(
     total
 }
 
-
 pub(crate) fn prepare_body_for_layout(
     mut prepared_cache: Option<&mut PreparedBodyCache>,
     wrap_cache: Option<&mut ElementWrapCache>,
@@ -347,6 +344,8 @@ pub(crate) fn prepare_body_for_layout(
     }
     let element = owner.as_element();
     let paragraph = environment.paragraph;
+    // Phase 5 replaces this static-layout adapter with definition-driven layout.
+    let role = element.transitional_role();
     let prepared = if let Some(prepared) = incremental {
         prepared
     } else {
@@ -356,7 +355,7 @@ pub(crate) fn prepare_body_for_layout(
             &element.id,
             &element.text,
             0,
-            element.role,
+            role,
             paragraph,
             environment.text_style.clone(),
             &element.runs,
@@ -482,8 +481,10 @@ fn prepare_incremental_body_for_layout(
 ) -> Option<Arc<PreparedBodyParagraph>> {
     let old = previous_owner.as_element();
     let new = owner.as_element();
+    // Phase 5 replaces this static-role projection with definition-driven layout.
+    let new_role = new.transitional_role();
     if old.id != new.id
-        || old.role != new.role
+        || old.element_type() != new.element_type()
         || old.source_provenance != new.source_provenance
         || previous.paragraph != environment.paragraph
     {
@@ -522,7 +523,7 @@ fn prepare_incremental_body_for_layout(
         false,
         reused_lines,
         0,
-        new.role,
+        new_role,
         environment.paragraph,
         environment.text_style.clone(),
         &new.runs,

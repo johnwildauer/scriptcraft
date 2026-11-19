@@ -1,12 +1,12 @@
+use super::identity::{validate_field, validate_identity, validate_ownership};
+use super::navigation::{
+    same_managed_paragraph_shell, same_sections_except_managed_location,
+    source_text_bytes_in_element,
+};
+use super::text::{is_plain_managed_paragraph, is_text_element, same_direct_owner_opaque_children};
 use super::*;
 use crate::{ScreenplayElement, StableId};
 use std::collections::{BTreeMap, BTreeSet};
-use super::identity::{validate_field, validate_identity, validate_ownership};
-use super::navigation::{same_managed_paragraph_shell, same_sections_except_managed_location, source_text_bytes_in_element};
-use super::text::{
-    fdx_role_name, is_plain_managed_paragraph, is_text_element,
-    same_direct_owner_opaque_children,
-};
 
 fn validate_name(name: &SourceName) -> Result<(), PreservationError> {
     if name.local_name.is_empty() {
@@ -30,7 +30,7 @@ fn is_board_domain(domain: &ForeignIdDomain) -> bool {
 }
 
 impl PreservationState {
-pub fn scoped_global_invariants_match(&self, baseline: &PreservationState) -> bool {
+    pub fn scoped_global_invariants_match(&self, baseline: &PreservationState) -> bool {
         self.source == baseline.source
             && self.source_layout_settings == baseline.source_layout_settings
             && self.anchors == baseline.anchors
@@ -39,11 +39,11 @@ pub fn scoped_global_invariants_match(&self, baseline: &PreservationState) -> bo
             && self.board_graph == baseline.board_graph
     }
 
-pub fn set_validated_source_text_bytes(&mut self, byte_count: usize) {
+    pub fn set_validated_source_text_bytes(&mut self, byte_count: usize) {
         self.source_text_bytes = byte_count;
     }
 
-/// Validates only a single managed paragraph against a complete valid
+    /// Validates only a single managed paragraph against a complete valid
     /// baseline. It refuses any topology or identity change, leaving those
     /// cases for complete source-tree validation.
     pub fn validate_scoped_managed_edit(
@@ -87,7 +87,14 @@ pub fn set_validated_source_text_bytes(&mut self, byte_count: usize) {
         {
             return Err(PreservationError::UnsupportedTextMapping);
         }
-        let role_name = fdx_role_name(semantic.role);
+        let type_label = semantic.element_type();
+        let namespace_qualified_type_count = after
+            .attributes
+            .iter()
+            .filter(|attribute| {
+                attribute.name.namespace_uri.is_some() && attribute.name.local_name == "Type"
+            })
+            .count();
         let role_attribute_count = after
             .attributes
             .iter()
@@ -95,12 +102,13 @@ pub fn set_validated_source_text_bytes(&mut self, byte_count: usize) {
                 attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type"
             })
             .count();
-        if after.source_type.as_deref() != Some(role_name)
+        if after.source_type.as_deref() != Some(type_label.as_str())
             || role_attribute_count != 1
+            || namespace_qualified_type_count != 0
             || !after.attributes.iter().any(|attribute| {
                 attribute.name.namespace_uri.is_none()
                     && attribute.name.local_name == "Type"
-                    && attribute.value == role_name
+                    && attribute.value == type_label.as_str()
             })
         {
             return Err(PreservationError::UnsupportedRoleMapping);
@@ -135,7 +143,8 @@ pub fn set_validated_source_text_bytes(&mut self, byte_count: usize) {
                         }
                     }
                 }
-                PreservedNode::Element(_) | PreservedNode::Comment(_)
+                PreservedNode::Element(_)
+                | PreservedNode::Comment(_)
                 | PreservedNode::ProcessingInstruction { .. } => {}
                 PreservedNode::Text(_) | PreservedNode::CData(_) => {
                     return Err(PreservationError::UnsupportedTextMapping)
@@ -159,7 +168,7 @@ pub fn set_validated_source_text_bytes(&mut self, byte_count: usize) {
         Ok(new_total)
     }
 
-pub fn validate(&self) -> Result<(), PreservationError> {
+    pub fn validate(&self) -> Result<(), PreservationError> {
         if self.source.original_bytes.len() > MAX_SOURCE_BYTES {
             return Err(PreservationError::SourceTooLarge);
         }
@@ -405,7 +414,7 @@ pub fn validate(&self) -> Result<(), PreservationError> {
         Ok(())
     }
 
-pub fn validate_project_elements(
+    pub fn validate_project_elements(
         &self,
         project_element_ids: &BTreeSet<StableId>,
         dual_dialogue_group_ids: &BTreeSet<StableId>,
@@ -441,6 +450,92 @@ pub fn validate_project_elements(
                 }
                 stack.extend(element.children.iter());
             }
+        }
+        Ok(())
+    }
+
+    /// Validates the binding and uniqueness rules for retained direct-root
+    /// ElementSettings winners. Definitions without a source node may exist in
+    /// non-FDX projects; every present definition anchor must resolve exactly.
+    pub fn validate_element_definition_anchors(
+        &self,
+        definition_keys: &BTreeSet<crate::element_type::ElementTypeKey>,
+    ) -> Result<(), PreservationError> {
+        let mut winners = BTreeMap::<crate::element_type::ElementTypeKey, SourceAnchorId>::new();
+        for anchor in &self.anchors {
+            let AnchorTarget::ElementDefinition(key) = &anchor.target else {
+                continue;
+            };
+            if anchor.relation != AnchorRelation::Represents {
+                return Err(PreservationError::InvalidAnchor);
+            }
+            if !definition_keys.contains(key) {
+                return Err(PreservationError::AnchorTargetMissing);
+            }
+            if winners.insert(key.clone(), anchor.id.clone()).is_some() {
+                return Err(PreservationError::DuplicateAnchor);
+            }
+        }
+
+        let mut found = BTreeSet::new();
+        for section in &self.sections {
+            for node in &section.children {
+                let PreservedNode::Element(root) = node else {
+                    continue;
+                };
+                for child in &root.children {
+                    let PreservedNode::Element(setting) = child else {
+                        continue;
+                    };
+                    if setting.name.local_name != "ElementSettings"
+                        || setting.name.namespace_uri != root.name.namespace_uri
+                    {
+                        continue;
+                    }
+                    let type_attributes = setting
+                        .attributes
+                        .iter()
+                        .filter(|attribute| {
+                            attribute.name.namespace_uri.is_none()
+                                && attribute.name.local_name == "Type"
+                        })
+                        .collect::<Vec<_>>();
+                    if type_attributes.len() != 1 {
+                        if setting.anchor.as_ref().is_some_and(|anchor| {
+                            self.anchors.iter().any(|candidate| {
+                                candidate.id == *anchor
+                                    && matches!(
+                                        &candidate.target,
+                                        AnchorTarget::ElementDefinition(_)
+                                    )
+                            })
+                        }) {
+                            return Err(PreservationError::InvalidAnchor);
+                        }
+                        continue;
+                    }
+                    let Some((key, winner_anchor)) = winners
+                        .iter()
+                        .find(|(key, _)| key.as_str() == type_attributes[0].value)
+                    else {
+                        continue;
+                    };
+                    let is_winner = setting.anchor.as_ref() == Some(winner_anchor);
+                    if !is_winner && setting.anchor.is_some() {
+                        return Err(PreservationError::InvalidAnchor);
+                    }
+                    if is_winner {
+                        if setting.source_type.as_deref() != Some(key.as_str())
+                            || !found.insert(key.clone())
+                        {
+                            return Err(PreservationError::InvalidAnchor);
+                        }
+                    }
+                }
+            }
+        }
+        if found.len() != winners.len() {
+            return Err(PreservationError::UnboundAnchor);
         }
         Ok(())
     }

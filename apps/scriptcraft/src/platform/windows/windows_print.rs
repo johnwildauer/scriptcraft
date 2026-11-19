@@ -8,9 +8,9 @@
 #[path = "windows_print_document.rs"]
 mod document;
 
+use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
@@ -18,33 +18,31 @@ use std::time::{Duration, Instant};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::core as windows_core;
 use windows::core::{
-    implement, Error as WindowsError, HSTRING, HRESULT, IUnknownImpl, Interface, Ref,
-    Result as WinResult,
+    implement, Error as WindowsError, IUnknownImpl, Interface, Ref, Result as WinResult, HRESULT,
+    HSTRING,
 };
 use windows::Foundation::TypedEventHandler;
-use windows::Graphics::Printing::{
-    IPrintDocumentSource, IPrintDocumentSource_Impl, IPrintTaskOptionsCore, PrintManager,
-    PrintPageDescription, PrintTask, PrintTaskCompletion, PrintTaskCompletedEventArgs,
-    PrintTaskOptions, PrintTaskRequestedEventArgs, PrintTaskSourceRequestedHandler,
-    StandardPrintTaskOptions,
-};
+use windows::Foundation::{IPropertyValue, PropertyValue};
 use windows::Graphics::Printing::OptionDetails::{
     PrintTaskOptionChangedEventArgs, PrintTaskOptionDetails,
 };
-use windows::Foundation::{IPropertyValue, PropertyValue};
+use windows::Graphics::Printing::{
+    IPrintDocumentSource, IPrintDocumentSource_Impl, IPrintTaskOptionsCore, PrintManager,
+    PrintPageDescription, PrintTask, PrintTaskCompletedEventArgs, PrintTaskCompletion,
+    PrintTaskOptions, PrintTaskRequestedEventArgs, PrintTaskSourceRequestedHandler,
+    StandardPrintTaskOptions,
+};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F,
-    D2D_SIZE_U,
+    D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1CreateDevice,
-    ID2D1Device, ID2D1DeviceContext,
+    D2D1CreateDevice, ID2D1Device, ID2D1DeviceContext, D2D1_BITMAP_OPTIONS_TARGET,
+    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, ID3D11Device,
+    D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
@@ -53,9 +51,7 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory, IWICImagingFactory};
-use windows::Win32::Graphics::Printing::{
-    FinalPageCount, IPrintPreviewDxgiPackageTarget,
-};
+use windows::Win32::Graphics::Printing::{FinalPageCount, IPrintPreviewDxgiPackageTarget};
 use windows::Win32::Storage::Xps::Printing::IPrintDocumentPackageTarget;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::WinRT::Printing::{
@@ -105,7 +101,11 @@ pub(crate) struct PreparedPackages {
 
 impl PreparedPackages {
     fn package(&self, include_title_page: bool) -> &Arc<document::WindowsPrintPackage> {
-        if include_title_page { &self.include } else { &self.omit }
+        if include_title_page {
+            &self.include
+        } else {
+            &self.omit
+        }
     }
 
     fn cache_key(&self, include_title_page: bool) -> PackageCacheKey {
@@ -268,34 +268,34 @@ impl PrintSession {
         // eframe's live borrowed Win32 handle and is used before leaving this
         // callback; the session is polled and dropped on that same UI thread.
         let interop: IPrintManagerInterop = unsafe {
-            windows::Win32::System::WinRT::RoGetActivationFactory(
-                &HSTRING::from("Windows.Graphics.Printing.PrintManager"),
-            )
+            windows::Win32::System::WinRT::RoGetActivationFactory(&HSTRING::from(
+                "Windows.Graphics.Printing.PrintManager",
+            ))
         }
         .map_err(|_| StartFailure::ManagerUnavailable)?;
         // SAFETY: The HWND is the actual active eframe viewport owner, not an
         // unrelated foreground window. WinRT calls remain on its UI thread.
-        let manager: PrintManager = unsafe { interop.GetForWindow(hwnd) }
-            .map_err(|_| StartFailure::ManagerUnavailable)?;
+        let manager: PrintManager =
+            unsafe { interop.GetForWindow(hwnd) }.map_err(|_| StartFailure::ManagerUnavailable)?;
 
         let (sender, events) = mpsc::channel();
         let task_sender = sender.clone();
         let task_packages = packages.clone();
-        let requested = TypedEventHandler::<PrintManager, PrintTaskRequestedEventArgs>::new(
-            move |_, args| {
+        let requested =
+            TypedEventHandler::<PrintManager, PrintTaskRequestedEventArgs>::new(move |_, args| {
                 let Some(args) = args.as_ref() else {
                     let _ = task_sender.send(SessionEvent::Failed);
                     return Ok(());
                 };
-                match create_screenplay_print_task(args, task_sender.clone(), task_packages.clone()) {
+                match create_screenplay_print_task(args, task_sender.clone(), task_packages.clone())
+                {
                     Ok(()) => Ok(()),
                     Err(_) => {
                         let _ = task_sender.send(SessionEvent::Failed);
                         Err(callback_error())
                     }
                 }
-            },
-        );
+            });
         let requested_token = manager
             .PrintTaskRequested(&requested)
             .map_err(|_| StartFailure::RegistrationFailed)?;
@@ -303,15 +303,14 @@ impl PrintSession {
         // SAFETY: The owner HWND remains owned by eframe while this session is
         // active. ShowPrintUIForWindowAsync is observed by a callback; the app
         // event loop is not blocked and no synchronous modal wait is used.
-        let operation = match unsafe {
-            interop.ShowPrintUIForWindowAsync::<IAsyncOperation<bool>>(hwnd)
-        } {
-            Ok(operation) => operation,
-            Err(_) => {
-                let _ = manager.RemovePrintTaskRequested(requested_token);
-                return Err(StartFailure::UiUnavailable);
-            }
-        };
+        let operation =
+            match unsafe { interop.ShowPrintUIForWindowAsync::<IAsyncOperation<bool>>(hwnd) } {
+                Ok(operation) => operation,
+                Err(_) => {
+                    let _ = manager.RemovePrintTaskRequested(requested_token);
+                    return Err(StartFailure::UiUnavailable);
+                }
+            };
         let completion_sender = sender.clone();
         let completed = AsyncOperationCompletedHandler::<bool>::new(move |operation, _status| {
             let shown = operation
@@ -456,7 +455,8 @@ fn create_screenplay_print_task(
     let option_state = Arc::clone(&source_state);
     let source_requested = PrintTaskSourceRequestedHandler::new(move |args| {
         let args = args.as_ref().ok_or_else(callback_error)?;
-        let source_interface: IPrintDocumentSource = PrintSource::new(Arc::clone(&source_state)).into();
+        let source_interface: IPrintDocumentSource =
+            PrintSource::new(Arc::clone(&source_state)).into();
         args.SetSource(&source_interface)
     });
     let task = request.CreatePrintTask(&HSTRING::from(job_title.as_str()), &source_requested)?;
@@ -498,17 +498,23 @@ fn create_screenplay_print_task(
 
     let changed_state = Arc::clone(&option_state);
     let changed_option = title_option.clone();
-    let option_changed = TypedEventHandler::<PrintTaskOptionDetails, PrintTaskOptionChangedEventArgs>::new(move |_, args| {
-        let args = args.as_ref().ok_or_else(callback_error)?;
-        let changed_id = args.OptionId()?.cast::<IPropertyValue>()?.GetString()?;
-        if changed_id == HSTRING::from(TITLE_PAGE_OPTION_ID) {
-            let selected = changed_option.Value()?.cast::<IPropertyValue>()?.GetString()?;
-            let selected_text = selected.to_string_lossy();
-            let include = title_page_choice(&selected_text).ok_or_else(callback_error)?;
-            changed_state.change_title_page_option(include)?;
-        }
-        Ok(())
-    });
+    let option_changed =
+        TypedEventHandler::<PrintTaskOptionDetails, PrintTaskOptionChangedEventArgs>::new(
+            move |_, args| {
+                let args = args.as_ref().ok_or_else(callback_error)?;
+                let changed_id = args.OptionId()?.cast::<IPropertyValue>()?.GetString()?;
+                if changed_id == HSTRING::from(TITLE_PAGE_OPTION_ID) {
+                    let selected = changed_option
+                        .Value()?
+                        .cast::<IPropertyValue>()?
+                        .GetString()?;
+                    let selected_text = selected.to_string_lossy();
+                    let include = title_page_choice(&selected_text).ok_or_else(callback_error)?;
+                    changed_state.change_title_page_option(include)?;
+                }
+                Ok(())
+            },
+        );
     let option_token = option_details.OptionChanged(&option_changed)?;
 
     let submitted_sender = sender.clone();
@@ -521,8 +527,8 @@ fn create_screenplay_print_task(
         return Err(callback_error());
     }
     let completed_details = option_details.clone();
-    let completed = TypedEventHandler::<PrintTask, PrintTaskCompletedEventArgs>::new(
-        move |_, args| {
+    let completed =
+        TypedEventHandler::<PrintTask, PrintTaskCompletedEventArgs>::new(move |_, args| {
             let _ = completed_details.RemoveOptionChanged(option_token);
             let result = args
                 .ok()
@@ -531,8 +537,7 @@ fn create_screenplay_print_task(
                 .unwrap_or(PrintResult::Failed);
             let _ = sender.send(SessionEvent::TaskCompleted(result));
             Ok(())
-        },
-    );
+        });
     if task.Completed(&completed).is_err() {
         let _ = option_details.RemoveOptionChanged(option_token);
         return Err(callback_error());
@@ -558,10 +563,7 @@ fn callback_deadline_expired(started: Instant) -> bool {
     started.elapsed() >= CALLBACK_TIMEOUT
 }
 
-fn take_terminal_result(
-    reported: &mut bool,
-    result: Option<PrintResult>,
-) -> Option<PrintResult> {
+fn take_terminal_result(reported: &mut bool, result: Option<PrintResult>) -> Option<PrintResult> {
     if *reported {
         return None;
     }
@@ -626,7 +628,11 @@ impl SourceState {
 mod custom_source {
     use super::*;
 
-    #[implement(IPrintDocumentSource, IPrintDocumentPageSource, IPrintPreviewPageCollection)]
+    #[implement(
+        IPrintDocumentSource,
+        IPrintDocumentPageSource,
+        IPrintPreviewPageCollection
+    )]
     pub(super) struct PrintSource {
         state: Arc<SourceState>,
         preview_target: Mutex<Option<IPrintPreviewDxgiPackageTarget>>,
@@ -657,9 +663,7 @@ mod custom_source {
                     &IPrintPreviewDxgiPackageTarget::IID,
                 )
             }?;
-            *self.preview_target
-                .lock()
-                .map_err(|_| callback_error())? = Some(preview);
+            *self.preview_target.lock().map_err(|_| callback_error())? = Some(preview);
             Ok(self.to_interface())
         }
 
@@ -668,9 +672,7 @@ mod custom_source {
             options: Ref<windows::core::IInspectable>,
             target: Ref<IPrintDocumentPackageTarget>,
         ) -> WinResult<()> {
-            let options_inspectable = options
-                .as_ref()
-                .ok_or_else(callback_error)?;
+            let options_inspectable = options.as_ref().ok_or_else(callback_error)?;
             let options_core = options_inspectable.cast::<IPrintTaskOptionsCore>()?;
             let options_ranges = options_inspectable.cast::<PrintTaskOptions>()?;
             let target = target.as_ref().ok_or_else(callback_error)?;
@@ -813,11 +815,15 @@ fn write_final_pages(
             return Err(callback_error());
         }
         let page = package.pages().get(page_index).ok_or_else(callback_error)?;
-        total_runs = total_runs.checked_add(page.runs().len()).ok_or_else(callback_error)?;
+        total_runs = total_runs
+            .checked_add(page.runs().len())
+            .ok_or_else(callback_error)?;
         total_text_bytes = page
             .runs()
             .iter()
-            .try_fold(total_text_bytes, |total, run| total.checked_add(run.text().len()))
+            .try_fold(total_text_bytes, |total, run| {
+                total.checked_add(run.text().len())
+            })
             .ok_or_else(callback_error)?;
         if total_runs > MAX_FINAL_RUNS_PER_CALLBACK
             || total_text_bytes > MAX_FINAL_TEXT_BYTES_PER_CALLBACK
@@ -827,9 +833,8 @@ fn write_final_pages(
     }
     let device = create_d2d_device()?;
     let context = unsafe { device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE) }?;
-    let wic: IWICImagingFactory = unsafe {
-        CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
-    }?;
+    let wic: IWICImagingFactory =
+        unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }?;
     // SAFETY: The print control is created with this callback's live package
     // target and its owned D2D device. The WIC factory and command list outlive
     // page addition and Close; no package stream or printer is opened directly.
@@ -840,7 +845,8 @@ fn write_final_pages(
         }
         let page = package.pages().get(page_index).ok_or_else(callback_error)?;
         let job_page_number = u32::try_from(job_index + 1).map_err(|_| callback_error())?;
-        let description: PrintPageDescription = unsafe { options.GetPageDescription(job_page_number) }?;
+        let description: PrintPageDescription =
+            unsafe { options.GetPageDescription(job_page_number) }?;
         let page_size = D2D_SIZE_F {
             width: description.PageSize.Width,
             height: description.PageSize.Height,
@@ -856,7 +862,14 @@ fn write_final_pages(
         let command_list = unsafe { context.CreateCommandList() }?;
         unsafe { context.SetTarget(&command_list) };
         unsafe { context.BeginDraw() };
-        unsafe { context.Clear(Some(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })) };
+        unsafe {
+            context.Clear(Some(&D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }))
+        };
         draw_vector_page(&context, page, transform)?;
         if callback_deadline_expired(started) {
             return Err(callback_error());
@@ -886,8 +899,8 @@ fn draw_preview_page(
     height: f32,
 ) -> WinResult<()> {
     let started = Instant::now();
-    let (pixel_width, pixel_height) = preview_bitmap_dimensions(width, height)
-        .ok_or_else(callback_error)?;
+    let (pixel_width, pixel_height) =
+        preview_bitmap_dimensions(width, height).ok_or_else(callback_error)?;
     let device = create_d2d_device()?;
     let context = unsafe { device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE) }?;
     let properties = D2D1_BITMAP_PROPERTIES1 {
@@ -916,7 +929,14 @@ fn draw_preview_page(
     }
     unsafe { context.SetTarget(&bitmap) };
     unsafe { context.BeginDraw() };
-    unsafe { context.Clear(Some(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })) };
+    unsafe {
+        context.Clear(Some(&D2D1_COLOR_F {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        }))
+    };
     let transform = page_transform(page, width, height, None).ok_or_else(callback_error)?;
     draw_vector_page(&context, page, transform)?;
     unsafe { context.EndDraw(None, None) }?;
@@ -1089,8 +1109,7 @@ fn draw_vector_page(
         }
         let bold = matches!(
             run.face(),
-            document::PrintFontFace::CourierNewBold
-                | document::PrintFontFace::CourierNewBoldItalic
+            document::PrintFontFace::CourierNewBold | document::PrintFontFace::CourierNewBoldItalic
         );
         let italic = matches!(
             run.face(),
@@ -1102,8 +1121,16 @@ fn draw_vector_page(
             factory.CreateTextFormat(
                 windows::core::PCWSTR(face.as_ptr()),
                 None,
-                if bold { DWRITE_FONT_WEIGHT_BOLD } else { DWRITE_FONT_WEIGHT_NORMAL },
-                if italic { DWRITE_FONT_STYLE_ITALIC } else { DWRITE_FONT_STYLE_NORMAL },
+                if bold {
+                    DWRITE_FONT_WEIGHT_BOLD
+                } else {
+                    DWRITE_FONT_WEIGHT_NORMAL
+                },
+                if italic {
+                    DWRITE_FONT_STYLE_ITALIC
+                } else {
+                    DWRITE_FONT_STYLE_NORMAL
+                },
                 DWRITE_FONT_STRETCH_NORMAL,
                 f32::from(run.font_size_pt()) * (96.0 / 72.0) * transform.scale,
                 windows::core::PCWSTR(locale.as_ptr()),
@@ -1140,7 +1167,10 @@ fn draw_vector_page(
     Ok(())
 }
 
-fn scaled_run_rect(geometry: scriptcraft_layout::FixedRect, transform: PageTransform) -> Option<D2D_RECT_F> {
+fn scaled_run_rect(
+    geometry: scriptcraft_layout::FixedRect,
+    transform: PageTransform,
+) -> Option<D2D_RECT_F> {
     let point_to_dip = 96.0 / 72.0;
     let rect = D2D_RECT_F {
         left: transform.offset_x + geometry.x.to_points_f32() * point_to_dip * transform.scale,

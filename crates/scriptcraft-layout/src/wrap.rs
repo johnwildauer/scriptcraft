@@ -99,7 +99,9 @@ pub(super) fn wrap_for_layout_range(
         source_cursor = end;
     }
     let base_size = i64::from(text_style.size.max(1));
-    let maximum_run_size = runs.iter().flat_map(|run| run.attributes.iter())
+    let maximum_run_size = runs
+        .iter()
+        .flat_map(|run| run.attributes.iter())
         .filter(|attribute| attribute.name == "Size")
         .filter_map(|attribute| attribute.value.parse::<u8>().ok())
         .filter(|size| (1..=72).contains(size))
@@ -110,7 +112,11 @@ pub(super) fn wrap_for_layout_range(
     // Wrapping uses a conservative largest direct run metric; span placement
     // below restores each run's own fixed-cell width without host font advances.
     let wrapping_char_width = FixedPoint::from_raw(
-        char_width.raw().saturating_mul(maximum_run_size).div_euclid(base_size).max(1),
+        char_width
+            .raw()
+            .saturating_mul(maximum_run_size)
+            .div_euclid(base_size)
+            .max(1),
     );
     let mut run_index = 0usize;
     for (local_start, scalar) in text[source_range.clone()].char_indices() {
@@ -159,7 +165,9 @@ pub(super) fn wrap_for_layout_range(
             },
             wrapping_char_width,
             runs,
-            atomic_ranges.as_deref().expect("cached wrapping retains complete ranges"),
+            atomic_ranges
+                .as_deref()
+                .expect("cached wrapping retains complete ranges"),
             &atomic_boundaries,
             purpose,
             title_page,
@@ -192,18 +200,12 @@ pub(super) fn wrap_for_layout_range(
     for line in &mut lines {
         let projected_start = line.start;
         let projected_end = line.end;
-        let mapped_start = source_start_for_display_offset(
-            &source_map,
-            &mut line_map_index,
-            projected_start,
-        )
-        .unwrap_or(text.len());
-        let mapped_end = source_end_for_display_offset(
-            &source_map,
-            &mut line_map_index,
-            projected_end,
-        )
-        .unwrap_or(mapped_start);
+        let mapped_start =
+            source_start_for_display_offset(&source_map, &mut line_map_index, projected_start)
+                .unwrap_or(text.len());
+        let mapped_end =
+            source_end_for_display_offset(&source_map, &mut line_map_index, projected_end)
+                .unwrap_or(mapped_start);
         line.start = mapped_start;
         line.end = mapped_end;
         line.text = Arc::from(&text[mapped_start..mapped_end]);
@@ -352,10 +354,10 @@ pub(super) fn wrap_element(
         first_limit,
         rest_limit,
         paragraph,
-            &text_style,
-            char_width,
-            atomic_boundaries,
-            &mut first_visual_line,
+        &text_style,
+        char_width,
+        atomic_boundaries,
+        &mut first_visual_line,
         line_offset,
         &mut output,
     );
@@ -365,12 +367,12 @@ pub(super) fn wrap_element(
             role,
             start: 0,
             end: 0,
-        text: Arc::from(""),
-        display_text: Arc::from(""),
-        display_source_map: Arc::from([]),
-        text_style,
-        runs: Arc::from([]),
-        char_width,
+            text: Arc::from(""),
+            display_text: Arc::from(""),
+            display_source_map: Arc::from([]),
+            text_style,
+            runs: Arc::from([]),
+            char_width,
             first_visual_line,
             final_visual_line: true,
             paragraph,

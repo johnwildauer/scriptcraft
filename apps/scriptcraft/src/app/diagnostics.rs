@@ -1,18 +1,16 @@
 //! App-owned performance/native diagnostics and status/error bookkeeping.
 
 use super::{responsiveness, ScriptCraftApp};
-use scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL;
 use crate::views::script::RevealIntent;
 use eframe::egui;
 use scriptcraft_commands::{Command, EditorSurface};
 use scriptcraft_fdx as fdx;
+use scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL;
 use scriptcraft_session::editing::EditError;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
 
-pub(crate) fn safe_layout_error_category(
-    error: &scriptcraft_layout::LayoutError,
-) -> &'static str {
+pub(crate) fn safe_layout_error_category(error: &scriptcraft_layout::LayoutError) -> &'static str {
     use scriptcraft_layout::LayoutErrorKind;
     match &error.kind {
         LayoutErrorKind::Model(_) => "model validation",
@@ -503,6 +501,7 @@ impl ScriptCraftApp {
                 EditError::UnsupportedTransition { .. } => "EDIT_UNSUPPORTED_TRANSITION",
                 EditError::InlineAltsRoleChange => "EDIT_INLINE_ALTS_ROLE_CHANGE",
                 EditError::Preservation(_) => "EDIT_PRESERVATION_CONSTRAINT",
+                EditError::InvalidDefinitionCandidate => "EDIT_INVALID_DEFINITION_CANDIDATE",
                 EditError::CastList(_) => "EDIT_CAST_LIST_CONSTRAINT",
                 EditError::FormattedText(_) => "EDIT_FORMATTING_CONSTRAINT",
                 EditError::Model(_) => "EDIT_MODEL_VALIDATION",
@@ -529,11 +528,7 @@ impl ScriptCraftApp {
             .push_back(Command::UiStatusSet { message: None });
     }
 
-    pub(crate) fn mutate(
-        &mut self,
-        result: Result<(), EditError>,
-        reveal_intent: RevealIntent,
-    ) {
+    pub(crate) fn mutate(&mut self, result: Result<(), EditError>, reveal_intent: RevealIntent) {
         match result {
             Ok(()) => {
                 let surface = self.active_editor_surface();

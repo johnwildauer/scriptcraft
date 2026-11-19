@@ -2,9 +2,10 @@
 
 use super::{ScriptCraftApp, TitlePageViewState};
 use crate::{
-    commands::CommandInvocation, documents::replacement::replacement_resume_focus_allowed,
-    views::{script::zoom_scroll, title_page},
     chrome::theme,
+    commands::CommandInvocation,
+    documents::replacement::replacement_resume_focus_allowed,
+    views::{script::zoom_scroll, title_page},
 };
 use eframe::egui::{self, Vec2};
 use scriptcraft_commands::{Command, CommandOrigin, EditorSurface, ZoomFactor};
@@ -25,9 +26,7 @@ impl ScriptCraftApp {
                 .adapt_events(&mut input.events, viewport_height_points);
             let consumed_event = input.events.len() < previous_event_count;
             input.raw.events.clone_from(&input.events);
-            if consumed_event
-                && !zoom_scroll::has_nonzero_mouse_wheel(&input.raw.events)
-            {
+            if consumed_event && !zoom_scroll::has_nonzero_mouse_wheel(&input.raw.events) {
                 // At this fallback point egui has already accumulated wheel
                 // deltas. Clear those only when no ordinary wheel event remains.
                 input.smooth_scroll_delta = Vec2::ZERO;
@@ -79,7 +78,8 @@ impl ScriptCraftApp {
         surface: EditorSurface,
         ctx: &egui::Context,
     ) {
-        let geometry = crate::widgets::sprint_timer::geometry::SprintTimerHostGeometry::from_context(ctx);
+        let geometry =
+            crate::widgets::sprint_timer::geometry::SprintTimerHostGeometry::from_context(ctx);
         match surface {
             EditorSurface::Body => {
                 self.timer_body_host_geometry = Some(geometry);

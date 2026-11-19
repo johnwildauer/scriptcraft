@@ -46,16 +46,12 @@ impl ScriptCraftApp {
                 DesktopViewportEffects::close_root(ctx);
                 DesktopCommandOutcome::EffectDispatched
             }
-            Command::FileSave => {
-                DesktopCommandOutcome::SaveCompleted(self.save_native(ctx))
-            }
+            Command::FileSave => DesktopCommandOutcome::SaveCompleted(self.save_native(ctx)),
             Command::FileSaveAsRequest => {
                 DesktopCommandOutcome::SaveCompleted(self.save_as_native(ctx))
             }
             Command::FileSaveAs { path, overwrite } => {
-                DesktopCommandOutcome::SaveCompleted(
-                    self.save_fdx_as_at(path.as_path(), overwrite),
-                )
+                DesktopCommandOutcome::SaveCompleted(self.save_fdx_as_at(path.as_path(), overwrite))
             }
             Command::FileImportResolve { resolution } => {
                 let _outcome = self.resolve_pending_fdx_import(match resolution {
@@ -86,9 +82,9 @@ impl ScriptCraftApp {
                 self.with_native_output_modal(|app| resolve_pdf_options(app, options));
                 DesktopCommandOutcome::EffectDispatched
             }
-            other => DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(
-                other.id(),
-            )),
+            other => {
+                DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id()))
+            }
         }
     }
 

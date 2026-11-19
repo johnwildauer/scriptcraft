@@ -1,11 +1,8 @@
-use scriptcraft_model::{
-    element::Role,
-    formatted_text::RunStyle,
-    formatting::ParagraphAlignment,
-};
+use scriptcraft_model::{element::Role, formatted_text::RunStyle, formatting::ParagraphAlignment};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
-/// Screenplay element role serialized using the stable core role spelling.
+/// Phase 1 compatibility payload for command ID 22, serialized with the exact
+/// stable role spelling. Phase 6 owns transition to open element-type commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoleValue(Role);
 
@@ -62,7 +59,9 @@ impl<'de> Deserialize<'de> for EditorSurface {
         match String::deserialize(deserializer)?.as_str() {
             "body" => Ok(Self::Body),
             "title_page" => Ok(Self::TitlePage),
-            value => Err(de::Error::custom(format!("unknown editor surface: {value}"))),
+            value => Err(de::Error::custom(format!(
+                "unknown editor surface: {value}"
+            ))),
         }
     }
 }
@@ -98,7 +97,9 @@ impl<'de> Deserialize<'de> for TitleTextStyle {
             "underline" => Ok(Self::Underline),
             "all_caps" => Ok(Self::AllCaps),
             "strikethrough" => Ok(Self::Strikethrough),
-            value => Err(de::Error::custom(format!("unknown title text style: {value}"))),
+            value => Err(de::Error::custom(format!(
+                "unknown title text style: {value}"
+            ))),
         }
     }
 }
@@ -135,7 +136,9 @@ impl<'de> Deserialize<'de> for ParagraphAlignmentValue {
             "right" => Ok(Self::Right),
             "center" => Ok(Self::Center),
             "justified" => Ok(Self::Justified),
-            value => Err(de::Error::custom(format!("unknown paragraph alignment: {value}"))),
+            value => Err(de::Error::custom(format!(
+                "unknown paragraph alignment: {value}"
+            ))),
         }
     }
 }
@@ -160,7 +163,9 @@ pub struct PdfExportOptions {
 
 impl Default for PdfExportOptions {
     fn default() -> Self {
-        Self { include_title_page: true }
+        Self {
+            include_title_page: true,
+        }
     }
 }
 

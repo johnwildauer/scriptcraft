@@ -2,7 +2,9 @@
 //! The FDX writer owns formatting generated structure while preserving source whitespace.
 
 use crate::constants::FDX_ROOT;
-use scriptcraft_model::preservation::{PreservedElement, PreservedNode, PreservedSection, SourceOwnership};
+use scriptcraft_model::preservation::{
+    PreservedElement, PreservedNode, PreservedSection, SourceOwnership,
+};
 use std::collections::BTreeSet;
 
 pub(crate) fn format_generated_structure(nodes: &mut [PreservedNode]) {

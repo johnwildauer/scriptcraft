@@ -60,7 +60,9 @@ impl CommandEnvelope {
             Command::EditorSelectionSet { selection, surface } => selection
                 .validate_for_surface(project, *surface)
                 .map_err(EnvelopeError::InvalidSelection),
-            Command::EditorSelectionPointer { position, surface, .. } => Selection {
+            Command::EditorSelectionPointer {
+                position, surface, ..
+            } => Selection {
                 anchor: *position,
                 focus: *position,
             }
@@ -85,7 +87,9 @@ impl fmt::Display for EnvelopeError {
                 write!(formatter, "unsupported command wire version: {version}")
             }
             Self::InvalidCatalog(error) => write!(formatter, "invalid command catalog: {error}"),
-            Self::InvalidSelection(error) => write!(formatter, "invalid command selection: {error}"),
+            Self::InvalidSelection(error) => {
+                write!(formatter, "invalid command selection: {error}")
+            }
         }
     }
 }

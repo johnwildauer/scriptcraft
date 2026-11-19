@@ -3,22 +3,23 @@
 use super::diagnostics::{NativeInputDiagnostics, PerformanceDiagnostics};
 use super::responsiveness;
 use super::startup::StartupDocumentInput;
+use crate::chrome::status_bar::{ViewportCenterAnchor, ViewportPageTracker};
+use crate::documents::save::UNTITLED_DOCUMENT_TITLE;
+#[cfg(target_os = "macos")]
+use crate::platform::macos::{
+    macos_lifecycle, macos_menu, macos_open_documents, macos_print_dialog,
+};
+use crate::views::script::RevealIntent;
 use crate::{
+    chrome::{focus_mode, menu, theme},
     commands::CachedAppCommandProjection,
     documents::{
         lifecycle::RootCloseLifecycle, open::PendingFdxOpen, replacement, replacement_protocol,
         replacement_transport,
     },
     presentation::{document_font, wheel_zoom},
-    chrome::{focus_mode, menu, theme}, widgets::sprint_timer,
+    widgets::sprint_timer,
 };
-use crate::documents::save::UNTITLED_DOCUMENT_TITLE;
-#[cfg(target_os = "macos")]
-use crate::platform::macos::{
-    macos_lifecycle, macos_menu, macos_open_documents, macos_print_dialog,
-};
-use crate::chrome::status_bar::{ViewportCenterAnchor, ViewportPageTracker};
-use crate::views::script::RevealIntent;
 use eframe::egui;
 use scriptcraft_commands::{Command, DiagnosticMessage, EditorSurface, ScriptViewMode};
 use scriptcraft_layout::{LayoutCache, ScreenplayLayout};
@@ -98,7 +99,8 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) timer_clock_origin: Instant,
     pub(crate) next_cast_list_refresh: Instant,
     pub(crate) notification_sink: sprint_timer::notifications::NativeNotificationSink,
-    pub(crate) notification_results: Receiver<(u64, sprint_timer::notifications::NotificationResult)>,
+    pub(crate) notification_results:
+        Receiver<(u64, sprint_timer::notifications::NotificationResult)>,
     // The bounded event channel is paired with the optional single pending
     // record; a monotonic ID sequence scopes each acknowledged child.
     pub(crate) replacement_open_event_sender: replacement_transport::ReplacementOpenEventSender,
@@ -132,7 +134,8 @@ pub(crate) struct ScriptCraftApp {
     #[cfg(target_os = "windows")]
     pub(crate) windows_print_session: Option<crate::platform::windows::windows_print::PrintSession>,
     #[cfg(target_os = "windows")]
-    pub(crate) windows_print_preparation: Option<crate::platform::windows::windows_print::PrintPreparation>,
+    pub(crate) windows_print_preparation:
+        Option<crate::platform::windows::windows_print::PrintPreparation>,
     pub(crate) native_output_modal_active: bool,
     pub(crate) fdx_baseline: Option<FdxBaseline>,
     pub(crate) pending_window_restore: Option<scriptcraft_fdx::WindowState>,
@@ -212,7 +215,8 @@ impl ScriptCraftApp {
             timer_body_host_geometry: None,
             timer_title_host_geometry: None,
             timer_clock_origin: Instant::now(),
-            next_cast_list_refresh: Instant::now() + scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL,
+            next_cast_list_refresh: Instant::now()
+                + scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL,
             notification_sink,
             notification_results,
             replacement_open_event_sender,

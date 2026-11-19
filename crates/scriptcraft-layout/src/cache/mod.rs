@@ -192,9 +192,19 @@ impl LayoutCache {
         purpose: LayoutPurpose,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
         self.get_or_build_with_optional_diagnostics(
-            revision, project, inputs, purpose,
-            match purpose { LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true }, LayoutPurpose::Editor => LayoutComposition::BodyEditor },
-            None, false, BodyEditorPresentation::default(),
+            revision,
+            project,
+            inputs,
+            purpose,
+            match purpose {
+                LayoutPurpose::Print => LayoutComposition::Print {
+                    include_title_page: true,
+                },
+                LayoutPurpose::Editor => LayoutComposition::BodyEditor,
+            },
+            None,
+            false,
+            BodyEditorPresentation::default(),
         )
     }
 
@@ -206,7 +216,13 @@ impl LayoutCache {
         composition: LayoutComposition,
     ) -> Result<(Arc<ScreenplayLayout>, bool), LayoutError> {
         self.get_or_build_with_optional_diagnostics(
-            revision, project, inputs, composition.purpose(), composition, None, false,
+            revision,
+            project,
+            inputs,
+            composition.purpose(),
+            composition,
+            None,
+            false,
             BodyEditorPresentation::default(),
         )
     }
@@ -346,7 +362,12 @@ impl LayoutCache {
             project,
             inputs,
             purpose,
-            match purpose { LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true }, LayoutPurpose::Editor => LayoutComposition::BodyEditor },
+            match purpose {
+                LayoutPurpose::Print => LayoutComposition::Print {
+                    include_title_page: true,
+                },
+                LayoutPurpose::Editor => LayoutComposition::BodyEditor,
+            },
             Some(diagnostics),
             false,
             BodyEditorPresentation::default(),
@@ -368,7 +389,12 @@ impl LayoutCache {
             session.project(),
             session.layout_inputs(),
             purpose,
-            match purpose { LayoutPurpose::Print => LayoutComposition::Print { include_title_page: true }, LayoutPurpose::Editor => LayoutComposition::BodyEditor },
+            match purpose {
+                LayoutPurpose::Print => LayoutComposition::Print {
+                    include_title_page: true,
+                },
+                LayoutPurpose::Editor => LayoutComposition::BodyEditor,
+            },
             Some(diagnostics),
             true,
             BodyEditorPresentation::default(),

@@ -1,20 +1,16 @@
 //! Preservation-free construction of a new FDX document source tree.
 
 use crate::constants::FDX_VERSION;
-use crate::content::{
-    add_wrapper_direct_attributes, new_paragraph, set_unqualified_attribute,
-};
+use crate::content::{add_wrapper_direct_attributes, new_paragraph, set_unqualified_attribute};
 use crate::context::{SaveContext, SaveOperation};
 use crate::diagnostics::{map_paragraph_id_error, FdxError, SaveDiagnosticCode};
-use crate::settings::new_element_settings;
 use crate::text_state::text_state_element;
 use crate::title_page::{new_title_page_header_and_footer, new_title_page_paragraph};
 use crate::tree::preserved_element;
 use crate::window_state::window_state_element;
-use scriptcraft_model::formatting::formatting_in_native_order;
 use scriptcraft_model::paragraph_id::ParagraphIdAllocator;
 use scriptcraft_model::preservation::{ForeignIdDomain, PreservedNode};
-use scriptcraft_model::{Project, Role};
+use scriptcraft_model::Project;
 use std::collections::BTreeSet;
 
 /// Construct a complete new-document tree without source-preservation input.
@@ -30,17 +26,17 @@ pub(crate) fn make_new_document_nodes(
     );
     let mut lineage_ids = BTreeSet::new();
     let document_ref_id = context.allocate_lineage_id(&mut lineage_ids)?;
-    let xref_id = if matches!(context.operation(), SaveOperation::Save | SaveOperation::SaveAs) {
+    let xref_id = if matches!(
+        context.operation(),
+        SaveOperation::Save | SaveOperation::SaveAs
+    ) {
         Some(context.allocate_lineage_id(&mut lineage_ids)?)
     } else {
         None
     };
     let mut document_ref = preserved_element(
         "DocumentRef",
-        vec![
-            ("DateTime", context.timestamp()),
-            ("id", &document_ref_id),
-        ],
+        vec![("DateTime", context.timestamp()), ("id", &document_ref_id)],
     );
     if let Some(xref_id) = xref_id {
         let xref_datetime = match context.operation() {
@@ -77,14 +73,18 @@ pub(crate) fn make_new_document_nodes(
             }
             let mut dual = preserved_element("DualDialogue", Vec::new());
             let mut spell = preserved_element("SpellCheckIgnoreLists", Vec::new());
-            spell.children.push(PreservedNode::Element(preserved_element(
-                "IgnoredRanges",
-                Vec::new(),
-            )));
-            spell.children.push(PreservedNode::Element(preserved_element(
-                "IgnoredWords",
-                Vec::new(),
-            )));
+            spell
+                .children
+                .push(PreservedNode::Element(preserved_element(
+                    "IgnoredRanges",
+                    Vec::new(),
+                )));
+            spell
+                .children
+                .push(PreservedNode::Element(preserved_element(
+                    "IgnoredWords",
+                    Vec::new(),
+                )));
             dual.children.push(PreservedNode::Element(spell));
             let members = group.member_ids().cloned().collect::<Vec<_>>();
             if members.is_empty() {
@@ -110,10 +110,10 @@ pub(crate) fn make_new_document_nodes(
 
         let direct_overrides = project.direct_paragraph_overrides.get(&element.id).copied();
         let mut paragraph = new_paragraph(element, direct_overrides, &mut paragraph_ids)?;
-        if element.role == Role::SceneHeading {
+        if element.element_type().as_str() == "Scene Heading" {
             let scene_end = project.elements[index + 1..]
                 .iter()
-                .position(|candidate| candidate.role == Role::SceneHeading)
+                .position(|candidate| candidate.element_type().as_str() == "Scene Heading")
                 .map_or(project.elements.len(), |offset| index + 1 + offset);
             let names = scriptcraft_model::scene_metadata::derived_character_projection(
                 &project.elements[index + 1..scene_end],
@@ -161,15 +161,17 @@ pub(crate) fn make_new_document_nodes(
             project,
             context.text_state(),
         )?));
-    for formatting in formatting_in_native_order() {
-        root.children
-            .push(PreservedNode::Element(new_element_settings(formatting.role)));
+    for definition in project.element_definitions().iter() {
+        let settings = crate::settings::new_element_settings(definition, &root)?;
+        root.children.push(PreservedNode::Element(settings));
     }
 
     let mut title_page = preserved_element("TitlePage", Vec::new());
-    title_page.children.push(PreservedNode::Element(
-        new_title_page_header_and_footer(&mut paragraph_ids)?,
-    ));
+    title_page
+        .children
+        .push(PreservedNode::Element(new_title_page_header_and_footer(
+            &mut paragraph_ids,
+        )?));
     let mut title_content = preserved_element("Content", Vec::new());
     for element in &project.title_page {
         title_content
@@ -179,10 +181,16 @@ pub(crate) fn make_new_document_nodes(
     title_page
         .children
         .push(PreservedNode::Element(title_content));
-    title_page.children.push(PreservedNode::Element(preserved_element(
-        "TextState",
-        vec![("Scaling", "100"), ("Selection", "0,0"), ("ShowInvisibles", "No")],
-    )));
+    title_page
+        .children
+        .push(PreservedNode::Element(preserved_element(
+            "TextState",
+            vec![
+                ("Scaling", "100"),
+                ("Selection", "0,0"),
+                ("ShowInvisibles", "No"),
+            ],
+        )));
     root.children.push(PreservedNode::Element(title_page));
     Ok(vec![PreservedNode::Element(root)])
 }

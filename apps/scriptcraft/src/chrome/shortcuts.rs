@@ -287,24 +287,95 @@ struct ElementBinding {
     extended: bool,
 }
 
+// Fixed RoleValue shortcut bindings remain a Phase 1 desktop compatibility
+// adapter. Phase 6 owns generating shortcuts from the current definitions and
+// Behavior; these bindings do not affect the project's element registry.
 const EDITOR_ELEMENT_BINDINGS: [ElementBinding; 17] = [
-    ElementBinding { digit: ShortcutKey::Digit0, role: Role::General, extended: false },
-    ElementBinding { digit: ShortcutKey::Digit1, role: Role::SceneHeading, extended: false },
-    ElementBinding { digit: ShortcutKey::Digit2, role: Role::Action, extended: false },
-    ElementBinding { digit: ShortcutKey::Digit3, role: Role::Character, extended: false },
-    ElementBinding { digit: ShortcutKey::Digit4, role: Role::Parenthetical, extended: false },
-    ElementBinding { digit: ShortcutKey::Digit5, role: Role::Dialogue, extended: false },
-    ElementBinding { digit: ShortcutKey::Digit6, role: Role::Transition, extended: false },
-    ElementBinding { digit: ShortcutKey::Digit7, role: Role::Shot, extended: false },
-    ElementBinding { digit: ShortcutKey::Digit8, role: Role::CastList, extended: false },
-    ElementBinding { digit: ShortcutKey::Digit9, role: Role::NewAct, extended: false },
-    ElementBinding { digit: ShortcutKey::Digit8, role: Role::Sequence, extended: true },
-    ElementBinding { digit: ShortcutKey::Digit9, role: Role::EndOfAct, extended: true },
-    ElementBinding { digit: ShortcutKey::Digit0, role: Role::Summary, extended: true },
-    ElementBinding { digit: ShortcutKey::Digit1, role: Role::Outline1, extended: true },
-    ElementBinding { digit: ShortcutKey::Digit2, role: Role::Outline2, extended: true },
-    ElementBinding { digit: ShortcutKey::Digit3, role: Role::Outline3, extended: true },
-    ElementBinding { digit: ShortcutKey::Digit4, role: Role::Note, extended: true },
+    ElementBinding {
+        digit: ShortcutKey::Digit0,
+        role: Role::General,
+        extended: false,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit1,
+        role: Role::SceneHeading,
+        extended: false,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit2,
+        role: Role::Action,
+        extended: false,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit3,
+        role: Role::Character,
+        extended: false,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit4,
+        role: Role::Parenthetical,
+        extended: false,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit5,
+        role: Role::Dialogue,
+        extended: false,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit6,
+        role: Role::Transition,
+        extended: false,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit7,
+        role: Role::Shot,
+        extended: false,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit8,
+        role: Role::CastList,
+        extended: false,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit9,
+        role: Role::NewAct,
+        extended: false,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit8,
+        role: Role::Sequence,
+        extended: true,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit9,
+        role: Role::EndOfAct,
+        extended: true,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit0,
+        role: Role::Summary,
+        extended: true,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit1,
+        role: Role::Outline1,
+        extended: true,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit2,
+        role: Role::Outline2,
+        extended: true,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit3,
+        role: Role::Outline3,
+        extended: true,
+    },
+    ElementBinding {
+        digit: ShortcutKey::Digit4,
+        role: Role::Note,
+        extended: true,
+    },
 ];
 
 /// Resolves editor-local bindings without consulting the menu catalog. The

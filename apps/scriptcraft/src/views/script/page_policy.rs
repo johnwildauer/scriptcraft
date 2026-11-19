@@ -93,10 +93,7 @@ pub(super) fn screen_y_to_document(page: PresentedPage, screen_y: f32, scale: f3
 }
 
 pub(super) fn page_local_screen_origin(page: PresentedPage, scale: f32) -> egui::Pos2 {
-    egui::pos2(
-        page.rect.left(),
-        document_y_to_screen(page, 0.0, scale),
-    )
+    egui::pos2(page.rect.left(), document_y_to_screen(page, 0.0, scale))
 }
 
 pub(super) fn viewport_paint_page_range(

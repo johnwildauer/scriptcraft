@@ -9,6 +9,6 @@ mod reveal;
 mod text;
 pub(crate) mod zoom_scroll;
 
-pub(super) use crate::app::ScriptCraftApp;
-pub(crate) use self::reveal::RevealIntent;
 pub(crate) use self::frame::{central_panel_frame, chrome_clear_color};
+pub(crate) use self::reveal::RevealIntent;
+pub(super) use crate::app::ScriptCraftApp;

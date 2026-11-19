@@ -1,4 +1,7 @@
-use crate::{identity::StableId, validation::validate_element, ModelError, MAX_TEXT_BYTES};
+use crate::{
+    element_type::ElementTypeKey, identity::StableId, validation::validate_element, ModelError,
+    MAX_TEXT_BYTES,
+};
 use std::collections::BTreeSet;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -101,42 +104,6 @@ impl Role {
             _ => return None,
         })
     }
-
-    /// Legacy JSON profile mapping, scoped to the model adapter.
-    pub(crate) const fn legacy_profile_index(self) -> Option<usize> {
-        match self {
-            Self::SceneHeading => Some(0),
-            Self::Action => Some(1),
-            Self::Character => Some(2),
-            Self::Dialogue => Some(3),
-            Self::Parenthetical => Some(4),
-            Self::Transition => Some(5),
-            Self::Note => Some(6),
-            _ => None,
-        }
-    }
-
-    /// Legacy JSON profile mapping, scoped to the model adapter.
-    pub(crate) const fn additional_profile_index(self) -> Option<usize> {
-        match self {
-            Self::NewAct => Some(0),
-            Self::EndOfAct => Some(1),
-            Self::CastList => Some(2),
-            Self::General => Some(3),
-            Self::Shot => Some(4),
-            Self::Sequence => Some(5),
-            Self::Outline1 => Some(6),
-            Self::Outline2 => Some(7),
-            Self::Outline3 => Some(8),
-            Self::Summary => Some(9),
-            _ => None,
-        }
-    }
-
-    /// Legacy JSON role classification, scoped to the model adapter.
-    pub(crate) const fn is_legacy(self) -> bool {
-        self.legacy_profile_index().is_some()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,7 +144,8 @@ pub struct SourceProvenance {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenplayElement {
     pub id: StableId,
-    pub role: Role,
+    /// Canonical exact, document-owned element-type identity.
+    pub element_type: ElementTypeKey,
     /// Plain-text compatibility projection used by existing editing/layout clients.
     pub text: String,
     /// Empty for legacy plain-text elements; populated runs remain source ordered.
@@ -186,9 +154,30 @@ pub struct ScreenplayElement {
 }
 
 impl ScreenplayElement {
+    /// Returns the canonical exact element-type key.
+    pub fn element_type(&self) -> ElementTypeKey {
+        self.element_type.clone()
+    }
+
+    /// Sets the canonical key without changing any other paragraph value.
+    pub fn set_element_type(&mut self, element_type: ElementTypeKey) {
+        self.element_type = element_type;
+    }
+
+    /// Transitional static adapter. Arbitrary keys project to General only for
+    /// consumers that still require the closed Role vocabulary.
+    pub fn transitional_role(&self) -> Role {
+        self.element_type.to_role().unwrap_or(Role::General)
+    }
+
+    /// Updates canonical storage through the exact known-role compatibility adapter.
+    pub fn set_transitional_role(&mut self, role: Role) {
+        self.element_type = ElementTypeKey::from_role(role);
+    }
+
     pub fn new(
         id: impl Into<String>,
-        role: Role,
+        element_type: impl Into<ElementTypeKey>,
         text: impl Into<String>,
     ) -> Result<Self, ModelError> {
         let id = StableId::new(id)?;
@@ -198,7 +187,7 @@ impl ScreenplayElement {
         }
         Ok(Self {
             id,
-            role,
+            element_type: element_type.into(),
             text,
             runs: Vec::new(),
             source_provenance: None,
@@ -207,7 +196,7 @@ impl ScreenplayElement {
 
     pub fn with_runs(
         id: impl Into<String>,
-        role: Role,
+        element_type: impl Into<ElementTypeKey>,
         runs: Vec<TextRun>,
         source_provenance: Option<SourceProvenance>,
     ) -> Result<Self, ModelError> {
@@ -229,7 +218,7 @@ impl ScreenplayElement {
         }
         let element = Self {
             id: StableId::new(id)?,
-            role,
+            element_type: element_type.into(),
             text,
             runs,
             source_provenance,

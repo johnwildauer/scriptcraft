@@ -114,8 +114,8 @@ pub(crate) fn page_geometry_input_invalidated(
     previous_clip: Option<egui::Rect>,
 ) -> bool {
     ctx.input(|input| {
-        let scroll_changed = has_nonzero_mouse_wheel(&input.raw.events)
-            || input.smooth_scroll_delta != Vec2::ZERO;
+        let scroll_changed =
+            has_nonzero_mouse_wheel(&input.raw.events) || input.smooth_scroll_delta != Vec2::ZERO;
         let pointer_scrolling = input.pointer.any_down()
             && input
                 .pointer
@@ -187,12 +187,10 @@ pub(super) fn prepaint_zoom_scroll_offset(
     let mut page_heights = Vec::with_capacity(page_count);
     let mut page_strides = Vec::with_capacity(page_count);
     let mut next_page_top = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING;
-    let mut content_height = SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING
-        + SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING;
+    let mut content_height =
+        SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING + SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING;
     let mut target_policy = None;
-    for (page_index, (content_top, content_page_height)) in
-        page_content_bounds.enumerate()
-    {
+    for (page_index, (content_top, content_page_height)) in page_content_bounds.enumerate() {
         let policy = presented_page_policy(
             mode,
             paper_height,
@@ -212,8 +210,7 @@ pub(super) fn prepaint_zoom_scroll_offset(
         if page_index == anchor.page_index {
             target_policy = Some((policy, content_top, content_page_height));
         }
-        let page_stride =
-            policy.page_height + policy.explicit_gap + policy.vertical_item_spacing;
+        let page_stride = policy.page_height + policy.explicit_gap + policy.vertical_item_spacing;
         if !page_stride.is_finite() || page_stride <= 0.0 {
             return None;
         }
@@ -224,28 +221,22 @@ pub(super) fn prepaint_zoom_scroll_offset(
         content_height += page_stride;
     }
     let (target_policy, target_content_top, target_content_height) = target_policy?;
-    let content_size = Vec2::new(
-        geometry.content_width,
-        content_height,
-    );
+    let content_size = Vec2::new(geometry.content_width, content_height);
     if !content_size.x.is_finite() || !content_size.y.is_finite() {
         return None;
     }
     let target_document_y = if mode == ScriptViewMode::Speed {
-        anchor
-            .page_local_document_point
-            .y
-            .clamp(target_content_top, target_content_top + target_content_height)
+        anchor.page_local_document_point.y.clamp(
+            target_content_top,
+            target_content_top + target_content_height,
+        )
     } else {
         anchor.page_local_document_point.y.clamp(0.0, paper_height)
     };
     let target_presented_y = target_document_y - target_policy.document_y_offset;
     let content_target = outer_rect.min
         + Vec2::new(geometry.leading_padding, page_origins[anchor.page_index])
-        + Vec2::new(
-            anchor.page_local_document_point.x,
-            target_presented_y,
-        ) * metrics.scale
+        + Vec2::new(anchor.page_local_document_point.x, target_presented_y) * metrics.scale
         + anchor.outside_page_offset_points;
     let viewport_center = outer_rect.min + inner_size * 0.5;
     let requested_offset = content_target - viewport_center;

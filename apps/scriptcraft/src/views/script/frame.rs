@@ -53,8 +53,7 @@ impl ScriptCraftApp {
     }
 
     fn live_document_surface_inner(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
-        let presentation_mode =
-            resolve_presentation_mode(surface, || self.script_view_mode);
+        let presentation_mode = resolve_presentation_mode(surface, || self.script_view_mode);
         let layout = match self.layout_for_render(surface) {
             Ok(layout) => layout,
             Err(error) => {
@@ -73,9 +72,7 @@ impl ScriptCraftApp {
         let mut presented_pages = Vec::with_capacity(layout.pages.len());
         let mut frame_projections = std::iter::repeat_with(|| None)
             .take(layout.pages.len())
-            .collect::<Vec<
-                Option<Vec<Option<presentation_geometry::PresentationLine<'_>>>>,
-            >>();
+            .collect::<Vec<Option<Vec<Option<presentation_geometry::PresentationLine<'_>>>>>>();
         let mut rendered_scale = 1.0;
         let mut visible_pages = 0;
         let reveal_intent = self.reveal_intent;
@@ -345,8 +342,6 @@ impl ScriptCraftApp {
             self.native_input_diagnostics.focus_lock_installed = false;
         }
     }
-
-
 }
 
 fn document_cursor_icon() -> egui::CursorIcon {

@@ -1,13 +1,15 @@
-//! Body structure operations, role mutation, and structural candidate helpers.
+//! Body structure operations, type mutation, and structural candidate helpers.
 
 use super::candidate::MutationValidationScope;
 use super::policy::{repair_parenthetical, resolve_enter, resolve_tab, EnterAction, TabAction};
 use super::selection::SelectionOrdering;
 use super::text::{coalesce_runs, effective_runs, replace_range, slice_runs};
-use super::{EditError, EditingSession, ParagraphKeyTarget, ParagraphKeyTargets, Position, Selection};
+use super::{
+    EditError, EditingSession, ParagraphKeyTarget, ParagraphKeyTargets, Position, Selection,
+};
 use scriptcraft_model::{
-    dual_dialogue, preservation::PreservationError, BodyOwner, ModelError, Project, Role,
-    ScreenplayElement, StableId, MAX_ELEMENTS, MAX_TEXT_BYTES,
+    dual_dialogue, preservation::PreservationError, BodyOwner, ElementTypeKey, ModelError, Project,
+    Role, ScreenplayElement, StableId, MAX_ELEMENTS, MAX_TEXT_BYTES,
 };
 
 impl EditingSession {
@@ -42,7 +44,11 @@ impl EditingSession {
                 if start != end {
                     return Err(EditError::InvalidSelection);
                 }
-                split_at(project, start, project.elements[start.element].role)
+                split_at(
+                    project,
+                    start,
+                    project.elements[start.element].transitional_role(),
+                )
             },
         )
     }
@@ -54,22 +60,34 @@ impl EditingSession {
                 let (start, end) = selection.ordered();
                 if start == end
                     && project.elements.get(start.element).is_some_and(|item| {
-                        item.role == Role::Dialogue && start.offset == item.text.len()
+                        item.transitional_role() == Role::Dialogue
+                            && start.offset == item.text.len()
                     })
                 {
                     let is_final_right_dialogue = dual_dialogue::group_at_element_index(
                         project,
                         start.element,
-                    ).is_some_and(|group| {
+                    )
+                    .is_some_and(|group| {
                         dual_dialogue::last_member(project, group) == Some(start.element)
-                            && group.right.paragraphs.last().is_some_and(|id| {
-                                project.elements.get(start.element).is_some_and(|item| &item.id == id)
-                            })
+                            && dual_dialogue::active_dual_dialogue_projection(project, group)
+                                .is_some_and(|projection| {
+                                    projection.right.paragraphs.last().is_some_and(|id| {
+                                        project
+                                            .elements
+                                            .get(start.element)
+                                            .is_some_and(|item| &item.id == id)
+                                    })
+                                })
                     });
                     if is_final_right_dialogue {
                         let selection = split_at(project, start, Role::Action)?;
-                        let action_id = project.elements.get(start.element + 1)
-                            .ok_or(EditError::InvalidElement)?.id.clone();
+                        let action_id = project
+                            .elements
+                            .get(start.element + 1)
+                            .ok_or(EditError::InvalidElement)?
+                            .id
+                            .clone();
                         dual_dialogue::remove_staged_group_member(project, &action_id);
                         return Ok(selection);
                     }
@@ -84,7 +102,9 @@ impl EditingSession {
                             Role::Parenthetical,
                             if automatic { "()" } else { "" },
                         )?;
-                        if let Some(anchor) = project.elements.get(element).map(|item| item.id.clone()) {
+                        if let Some(anchor) =
+                            project.elements.get(element).map(|item| item.id.clone())
+                        {
                             dual_dialogue::insert_group_member_at_flat_index(
                                 project,
                                 element,
@@ -134,17 +154,16 @@ impl EditingSession {
                         replace_range(
                             project,
                             Position { element, offset: 0 },
-                            Position { element, offset: text_len },
+                            Position {
+                                element,
+                                offset: text_len,
+                            },
                             "",
                         )?;
-                        update_preserved_role(
-                            project,
-                            element,
-                            Role::Parenthetical,
-                            Role::Dialogue,
-                        )?;
+                        let element_type = ElementTypeKey::from_role(Role::Dialogue);
+                        update_preserved_type(project, element, &element_type)?;
                         BodyOwner::update(&mut project.elements[element], |element| {
-                            element.role = Role::Dialogue;
+                            element.set_element_type(element_type);
                         });
                         generated.remove(project.elements[element].id.as_str());
                         Ok(Selection::caret(Position { element, offset: 0 }))
@@ -167,11 +186,12 @@ impl EditingSession {
                             });
                             generated.remove(project.elements[position.element].id.as_str());
                         }
-                        let old_role = project.elements[position.element].role;
+                        let old_role = project.elements[position.element].transitional_role();
                         if old_role != role {
-                            update_preserved_role(project, position.element, old_role, role)?;
+                            let element_type = ElementTypeKey::from_role(role);
+                            update_preserved_type(project, position.element, &element_type)?;
                             BodyOwner::update(&mut project.elements[position.element], |element| {
-                                element.role = role;
+                                element.set_element_type(element_type);
                             });
                         }
                         if policy.auto_parenthetical
@@ -180,13 +200,18 @@ impl EditingSession {
                         {
                             replace_range(
                                 project,
-                                Position { element: position.element, offset: 0 },
-                                Position { element: position.element, offset: 0 },
+                                Position {
+                                    element: position.element,
+                                    offset: 0,
+                                },
+                                Position {
+                                    element: position.element,
+                                    offset: 0,
+                                },
                                 "()",
                             )?;
-                            generated.insert(
-                                project.elements[position.element].id.as_str().to_owned(),
-                            );
+                            generated
+                                .insert(project.elements[position.element].id.as_str().to_owned());
                             return Ok(Selection::caret(Position {
                                 element: position.element,
                                 offset: 1,
@@ -219,39 +244,65 @@ impl EditingSession {
         )
     }
 
-    /// Changes a known role and its exact mapped source Type attribute together.
-    /// A role change that would invalidate attached scene data is rejected.
+    /// Changes the selected body paragraph to an exact document-owned type.
+    /// This operation is nonstructural: it never unwraps a dual-dialogue group
+    /// or changes text, runs, formatting, or source-owned attachments.
+    pub fn change_element_type(&mut self, element_type: ElementTypeKey) -> Result<(), EditError> {
+        self.change_element_type_candidate(element_type, false)
+    }
+
+    /// Transitional command adapter for the existing Role-based controls.
+    /// Source Type values are still projected from the canonical exact key.
     pub fn change_role(&mut self, role: Role) -> Result<(), EditError> {
-        let (start, end) = self.selection.ordered();
-        if start.element == end.element
-            && self.project.elements.get(start.element).is_some_and(|element| {
-                element.role == Role::Dialogue
-                    && role != Role::Dialogue
-                    && self.project.preservation.as_ref()
-                        .is_some_and(|state| state.has_inline_alts(&element.id))
-            })
+        self.change_element_type_candidate(ElementTypeKey::from_role(role), true)
+    }
+
+    fn change_element_type_candidate(
+        &mut self,
+        element_type: ElementTypeKey,
+        role_adapter: bool,
+    ) -> Result<(), EditError> {
+        if self
+            .project
+            .element_definitions()
+            .get(&element_type)
+            .is_none()
         {
-            // Reject before entering the structural planner: role changes are
-            // not repaired by unwrapping an otherwise-valid dual group.
-            return Err(EditError::InlineAltsRoleChange);
+            return Err(EditError::Model(ModelError::MissingElementDefinition(
+                element_type,
+            )));
         }
-        self.mutate_structural(
+        let (start, end) = self.selection.ordered();
+        if start.element != end.element {
+            return Err(EditError::InvalidSelection);
+        }
+        let current = self
+            .project
+            .elements
+            .get(start.element)
+            .ok_or(EditError::InvalidElement)?
+            .element_type();
+        if !role_adapter && current == element_type {
+            return Ok(());
+        }
+
+        self.mutate(
             MutationValidationScope::SingleParagraph,
             |project, selection, generated, policy| {
                 let (start, end) = selection.ordered();
                 if start.element != end.element {
                     return Err(EditError::InvalidSelection);
                 }
-                let old_role = project.elements[start.element].role;
-                if old_role != role {
-                    update_preserved_role(project, start.element, old_role, role)?;
+                if project.elements[start.element].element_type() != element_type {
+                    update_preserved_type(project, start.element, &element_type)?;
+                    BodyOwner::update(&mut project.elements[start.element], |element| {
+                        element.set_element_type(element_type.clone());
+                    });
                 }
-                BodyOwner::update(&mut project.elements[start.element], |element| {
-                    element.role = role;
-                });
-                if role != Role::Parenthetical {
+                if element_type.as_str() != "Parenthetical" {
                     generated.remove(project.elements[start.element].id.as_str());
-                } else if policy.auto_parenthetical
+                } else if role_adapter
+                    && policy.auto_parenthetical
                     && project.elements[start.element].text.is_empty()
                 {
                     replace_range(
@@ -276,26 +327,24 @@ impl EditingSession {
             },
         )
     }
-
 }
 
-pub(super) fn update_preserved_role(
+pub(super) fn update_preserved_type(
     project: &mut Project,
     element_index: usize,
-    old_role: Role,
-    new_role: Role,
+    new_type: &ElementTypeKey,
 ) -> Result<(), EditError> {
     let element = project
         .elements
         .get(element_index)
         .ok_or(EditError::InvalidElement)?;
     let id = element.id.clone();
-    let old_fdx_role = fdx_role_name(old_role);
+    let old_type = element.element_type();
     if element
         .source_provenance
         .as_ref()
         .and_then(|provenance| provenance.foreign_role.as_deref())
-        .is_some_and(|source_role| source_role != old_fdx_role)
+        .is_some_and(|source_type| source_type != old_type.as_str())
     {
         return Err(EditError::Preservation(
             PreservationError::UnsupportedRoleMapping,
@@ -305,11 +354,6 @@ pub(super) fn update_preserved_role(
         .preservation
         .as_ref()
         .is_some_and(|state| state.has_managed_element(&id));
-    if new_role != Role::Dialogue
-        && project.preservation.as_ref().is_some_and(|state| state.has_inline_alts(&id))
-    {
-        return Err(EditError::InlineAltsRoleChange);
-    }
     if has_source_mapping {
         project
             .preservation
@@ -317,7 +361,7 @@ pub(super) fn update_preserved_role(
             .ok_or(EditError::Preservation(
                 PreservationError::ManagedAnchorMissing,
             ))?
-            .change_managed_role(&id, old_fdx_role, fdx_role_name(new_role))
+            .change_managed_element_type(&id, &old_type, new_type)
             .map_err(EditError::Preservation)?;
     } else if element.source_provenance.is_some() {
         return Err(EditError::Preservation(
@@ -326,32 +370,10 @@ pub(super) fn update_preserved_role(
     }
     BodyOwner::update(&mut project.elements[element_index], |element| {
         if let Some(provenance) = &mut element.source_provenance {
-            provenance.foreign_role = Some(fdx_role_name(new_role).to_owned());
+            provenance.foreign_role = Some(new_type.as_str().to_owned());
         }
     });
     Ok(())
-}
-
-fn fdx_role_name(role: Role) -> &'static str {
-    match role {
-        Role::SceneHeading => "Scene Heading",
-        Role::Action => "Action",
-        Role::Character => "Character",
-        Role::Dialogue => "Dialogue",
-        Role::Parenthetical => "Parenthetical",
-        Role::Transition => "Transition",
-        Role::Note => "Note",
-        Role::NewAct => "New Act",
-        Role::EndOfAct => "End of Act",
-        Role::CastList => "Cast List",
-        Role::General => "General",
-        Role::Shot => "Shot",
-        Role::Sequence => "Sequence",
-        Role::Outline1 => "Outline 1",
-        Role::Outline2 => "Outline 2",
-        Role::Outline3 => "Outline 3",
-        Role::Summary => "Summary",
-    }
 }
 
 fn insert_dialogue_below(project: &mut Project, element: usize) -> Result<Selection, EditError> {
@@ -405,7 +427,9 @@ fn split_at(project: &mut Project, position: Position, role: Role) -> Result<Sel
     if !item.runs.is_empty() {
         new_item.runs = right_runs;
     }
-    project.elements.insert(position.element + 1, BodyOwner::shared(new_item));
+    project
+        .elements
+        .insert(position.element + 1, BodyOwner::shared(new_item));
     Ok(Selection::caret(Position {
         element: position.element + 1,
         offset: 0,
@@ -417,21 +441,30 @@ pub(super) fn unwrap_dual_dialogue_groups(
     group_ids: &[StableId],
 ) -> Result<(), EditError> {
     for group_id in group_ids {
-        let index = project.dual_dialogue_groups.iter()
+        let index = project
+            .dual_dialogue_groups
+            .iter()
             .position(|group| &group.id == group_id)
             .ok_or(EditError::InvalidSelection)?;
         let group = project.dual_dialogue_groups[index].clone();
         if let Some(preservation) = project.preservation.as_mut() {
-            let anchor = group.wrapper.preservation_anchor.as_ref().ok_or(
-                EditError::Preservation(PreservationError::ManagedAnchorMissing),
-            )?;
+            let anchor =
+                group
+                    .wrapper
+                    .preservation_anchor
+                    .as_ref()
+                    .ok_or(EditError::Preservation(
+                        PreservationError::ManagedAnchorMissing,
+                    ))?;
             let members = group.member_ids().cloned().collect::<Vec<_>>();
-            preservation.unwrap_dual_dialogue_members(
-                &group.id,
-                &members,
-                anchor,
-                group.wrapper.outer_foreign_id.as_deref(),
-            ).map_err(EditError::Preservation)?;
+            preservation
+                .unwrap_dual_dialogue_members(
+                    &group.id,
+                    &members,
+                    anchor,
+                    group.wrapper.outer_foreign_id.as_deref(),
+                )
+                .map_err(EditError::Preservation)?;
         }
         project.dual_dialogue_groups.remove(index);
         project.dual_dialogue_paragraph_overrides.remove(group_id);
@@ -445,28 +478,54 @@ pub(super) fn remap_selection_by_identity(
     selection: Selection,
 ) -> Result<Selection, EditError> {
     let remap = |position: Position| -> Result<Position, EditError> {
-        let id = &baseline.elements.get(position.element).ok_or(EditError::InvalidElement)?.id;
-        let element = candidate.elements.iter().position(|item| &item.id == id)
+        let id = &baseline
+            .elements
+            .get(position.element)
+            .ok_or(EditError::InvalidElement)?
+            .id;
+        let element = candidate
+            .elements
+            .iter()
+            .position(|item| &item.id == id)
             .ok_or(EditError::InvalidElement)?;
-        Ok(Position { element, offset: position.offset })
+        Ok(Position {
+            element,
+            offset: position.offset,
+        })
     };
-    Ok(Selection { anchor: remap(selection.anchor)?, focus: remap(selection.focus)? })
+    Ok(Selection {
+        anchor: remap(selection.anchor)?,
+        focus: remap(selection.focus)?,
+    })
 }
 
-pub(super) fn groups_touched_by_selection(project: &Project, selection: Selection) -> Vec<StableId> {
+pub(super) fn groups_touched_by_selection(
+    project: &Project,
+    selection: Selection,
+) -> Vec<StableId> {
     let (start, end) = selection.ordered();
-    project.dual_dialogue_groups.iter().filter_map(|group| {
-        let first = dual_dialogue::first_member(project, group)?;
-        let last = dual_dialogue::last_member(project, group)?;
-        let touched = if start == end {
-            (first..=last).contains(&start.element)
-                || start.element.checked_add(1).is_some_and(|next| next == first)
-                || start.element.checked_sub(1).is_some_and(|previous| previous == last)
-        } else {
-            start.element <= last && end.element >= first
-        };
-        touched.then(|| group.id.clone())
-    }).collect()
+    project
+        .dual_dialogue_groups
+        .iter()
+        .filter_map(|group| {
+            let first = dual_dialogue::first_member(project, group)?;
+            let last = dual_dialogue::last_member(project, group)?;
+            let touched = if start == end {
+                (first..=last).contains(&start.element)
+                    || start
+                        .element
+                        .checked_add(1)
+                        .is_some_and(|next| next == first)
+                    || start
+                        .element
+                        .checked_sub(1)
+                        .is_some_and(|previous| previous == last)
+            } else {
+                start.element <= last && end.element >= first
+            };
+            touched.then(|| group.id.clone())
+        })
+        .collect()
 }
 
 fn split_id(project: &Project) -> Result<String, ModelError> {
@@ -474,12 +533,15 @@ fn split_id(project: &Project) -> Result<String, ModelError> {
 }
 
 fn ensure_join_roles_match(project: &Project, index: usize) -> Result<(), EditError> {
-    let left = project.elements.get(index).ok_or(EditError::InvalidElement)?;
+    let left = project
+        .elements
+        .get(index)
+        .ok_or(EditError::InvalidElement)?;
     let right = project
         .elements
         .get(index + 1)
         .ok_or(EditError::InvalidElement)?;
-    if left.role != right.role {
+    if left.element_type() != right.element_type() {
         return Err(EditError::InvalidSelection);
     }
     Ok(())
@@ -488,19 +550,32 @@ fn ensure_join_roles_match(project: &Project, index: usize) -> Result<(), EditEr
 /// Removes one semantic owner and its direct/group registrations. Source-tree
 /// cleanup remains in the transaction-level preservation reconciliation.
 pub(super) fn remove_body_owner(project: &mut Project, index: usize) {
-    let removed_id = project.elements.remove(index).id.clone();
-    project.direct_paragraph_overrides.remove(&removed_id);
-
+    let Some(removed_id) = project
+        .elements
+        .get(index)
+        .map(|element| element.id.clone())
+    else {
+        return;
+    };
     let removed_cue_group_ids = project
         .dual_dialogue_groups
         .iter()
-        .filter(|group| group.left.character == removed_id || group.right.character == removed_id)
+        .filter(|group| {
+            dual_dialogue::active_dual_dialogue_projection(project, group).is_some_and(
+                |projection| {
+                    projection.left.character == removed_id
+                        || projection.right.character == removed_id
+                },
+            )
+        })
         .map(|group| group.id.clone())
         .collect::<Vec<_>>();
+    project.elements.remove(index);
+    project.direct_paragraph_overrides.remove(&removed_id);
+
     if removed_cue_group_ids.is_empty() {
         for group in &mut project.dual_dialogue_groups {
-            group.left.paragraphs.retain(|id| id != &removed_id);
-            group.right.paragraphs.retain(|id| id != &removed_id);
+            group.members.retain(|id| id != &removed_id);
         }
     } else {
         project
@@ -509,6 +584,18 @@ pub(super) fn remove_body_owner(project: &mut Project, index: usize) {
         for group_id in removed_cue_group_ids {
             project.dual_dialogue_paragraph_overrides.remove(&group_id);
         }
+    }
+    let undersized = project
+        .dual_dialogue_groups
+        .iter()
+        .filter(|group| group.members.len() < 2)
+        .map(|group| group.id.clone())
+        .collect::<Vec<_>>();
+    project
+        .dual_dialogue_groups
+        .retain(|group| !undersized.contains(&group.id));
+    for group_id in undersized {
+        project.dual_dialogue_paragraph_overrides.remove(&group_id);
     }
 }
 
@@ -527,7 +614,12 @@ pub(super) fn join_at(project: &mut Project, index: usize) -> Result<(), EditErr
             coalesce_runs(&mut runs);
             runs
         };
-    if project.elements[index].text.len().saturating_add(right.len()) > MAX_TEXT_BYTES {
+    if project.elements[index]
+        .text
+        .len()
+        .saturating_add(right.len())
+        > MAX_TEXT_BYTES
+    {
         return Err(EditError::TextTooLong);
     }
     BodyOwner::update(&mut project.elements[index], |item| {

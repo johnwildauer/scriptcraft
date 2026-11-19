@@ -1,12 +1,12 @@
+use super::DesktopCommandOutcome;
 use crate::app::ScriptCraftApp;
-use scriptcraft_session::editing::{EditError, Position, Selection};
 use eframe::egui;
 use scriptcraft_commands::{
-    pointer_selection, Command, CommandId, CommandOutcome, CommandRejection,
-    EditorSurface, HorizontalDirection, LineEdge, PointerPhase,
-    Position as CommandPosition, Selection as CommandSelection, VerticalDirection,
+    pointer_selection, Command, CommandId, CommandOutcome, CommandRejection, EditorSurface,
+    HorizontalDirection, LineEdge, PointerPhase, Position as CommandPosition,
+    Selection as CommandSelection, VerticalDirection,
 };
-use super::DesktopCommandOutcome;
+use scriptcraft_session::editing::{EditError, Position, Selection};
 
 impl ScriptCraftApp {
     pub(super) fn active_selection(&self) -> Selection {
@@ -22,23 +22,35 @@ impl ScriptCraftApp {
         ctx: &egui::Context,
     ) -> DesktopCommandOutcome {
         match command {
-            Command::EditorSelectionPointer { position, phase, surface } => {
-                self.dispatch_pointer_selection(position, phase, surface, ctx)
-            }
-            Command::EditorNavigationHorizontal { direction, extend, surface } => {
+            Command::EditorSelectionPointer {
+                position,
+                phase,
+                surface,
+            } => self.dispatch_pointer_selection(position, phase, surface, ctx),
+            Command::EditorNavigationHorizontal {
+                direction,
+                extend,
+                surface,
+            } => {
                 let previous_vertical_goal = self.preferred_vertical_x_for(surface);
-                let selection = self.navigation_selection_horizontal_for(surface, direction, extend);
+                let selection =
+                    self.navigation_selection_horizontal_for(surface, direction, extend);
                 let outcome = self.execute_navigation_selection(selection, surface, false, ctx);
                 if matches!(&outcome, DesktopCommandOutcome::Rejected(_)) {
                     self.set_preferred_vertical_x_for(surface, previous_vertical_goal);
                 }
                 outcome
             }
-            Command::EditorNavigationVertical { direction, extend, surface } => {
+            Command::EditorNavigationVertical {
+                direction,
+                extend,
+                surface,
+            } => {
                 let previous_vertical_goal = self.preferred_vertical_x_for(surface);
                 match self.navigation_selection_vertical_for(surface, direction, extend, ctx) {
                     Ok(selection) => {
-                        let outcome = self.execute_navigation_selection(selection, surface, true, ctx);
+                        let outcome =
+                            self.execute_navigation_selection(selection, surface, true, ctx);
                         if matches!(&outcome, DesktopCommandOutcome::Rejected(_)) {
                             self.set_preferred_vertical_x_for(surface, previous_vertical_goal);
                         }
@@ -51,7 +63,11 @@ impl ScriptCraftApp {
                     }
                 }
             }
-            Command::EditorNavigationLineEdge { edge, extend, surface } => {
+            Command::EditorNavigationLineEdge {
+                edge,
+                extend,
+                surface,
+            } => {
                 let previous_vertical_goal = self.preferred_vertical_x_for(surface);
                 let selection = self.navigation_selection_line_edge_for(surface, edge, extend);
                 let outcome = self.execute_navigation_selection(selection, surface, false, ctx);
@@ -64,9 +80,9 @@ impl ScriptCraftApp {
                 self.restore_editor_focus(ctx);
                 DesktopCommandOutcome::EffectDispatched
             }
-            other => DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(
-                other.id(),
-            )),
+            other => {
+                DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id()))
+            }
         }
     }
 
@@ -101,24 +117,49 @@ impl ScriptCraftApp {
         };
         let next = match direction {
             HorizontalDirection::Left if focus.offset > 0 => {
-                let offset = paragraph.text[..focus.offset].char_indices().last().map(|(i, _)| i).unwrap_or(0);
-                Position { element: focus.element, offset }
+                let offset = paragraph.text[..focus.offset]
+                    .char_indices()
+                    .last()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                Position {
+                    element: focus.element,
+                    offset,
+                }
             }
             HorizontalDirection::Left if focus.element > 0 => {
                 let previous = &self.session.project().title_page[focus.element - 1];
-                Position { element: focus.element - 1, offset: previous.text.len() }
+                Position {
+                    element: focus.element - 1,
+                    offset: previous.text.len(),
+                }
             }
             HorizontalDirection::Right if focus.offset < paragraph.text.len() => {
-                let amount = paragraph.text[focus.offset..].chars().next().map(char::len_utf8).unwrap_or(0);
-                Position { element: focus.element, offset: focus.offset + amount }
+                let amount = paragraph.text[focus.offset..]
+                    .chars()
+                    .next()
+                    .map(char::len_utf8)
+                    .unwrap_or(0);
+                Position {
+                    element: focus.element,
+                    offset: focus.offset + amount,
+                }
             }
-            HorizontalDirection::Right if focus.element + 1 < self.session.project().title_page.len() => {
-                Position { element: focus.element + 1, offset: 0 }
+            HorizontalDirection::Right
+                if focus.element + 1 < self.session.project().title_page.len() =>
+            {
+                Position {
+                    element: focus.element + 1,
+                    offset: 0,
+                }
             }
             _ => focus,
         };
         if extend {
-            Selection { anchor: current.anchor, focus: next }
+            Selection {
+                anchor: current.anchor,
+                focus: next,
+            }
         } else {
             Selection::caret(next)
         }
@@ -139,8 +180,7 @@ impl ScriptCraftApp {
         let layout = self
             .layout_for_render(EditorSurface::TitlePage)
             .map_err(|_| EditError::InvalidElement)?;
-        let Some(current_index) =
-            layout.title_line_index_for_position(focus.element, focus.offset)
+        let Some(current_index) = layout.title_line_index_for_position(focus.element, focus.offset)
         else {
             self.set_preferred_vertical_x_for(surface, None);
             return Ok(current);
@@ -163,7 +203,10 @@ impl ScriptCraftApp {
                 },
             };
             return Ok(if extend {
-                Selection { anchor: current.anchor, focus: next }
+                Selection {
+                    anchor: current.anchor,
+                    focus: next,
+                }
             } else {
                 Selection::caret(next)
             });
@@ -205,7 +248,10 @@ impl ScriptCraftApp {
             offset: target_line.source_for_display_char(display_boundary),
         };
         Ok(if extend {
-            Selection { anchor: current.anchor, focus: next }
+            Selection {
+                anchor: current.anchor,
+                focus: next,
+            }
         } else {
             Selection::caret(next)
         })
@@ -224,12 +270,23 @@ impl ScriptCraftApp {
         let current = self.session.title_selection();
         let offset = match edge {
             LineEdge::Start => 0,
-            LineEdge::End => self.session.project().title_page
-                .get(current.focus.element).map(|paragraph| paragraph.text.len()).unwrap_or(0),
+            LineEdge::End => self
+                .session
+                .project()
+                .title_page
+                .get(current.focus.element)
+                .map(|paragraph| paragraph.text.len())
+                .unwrap_or(0),
         };
-        let focus = Position { element: current.focus.element, offset };
+        let focus = Position {
+            element: current.focus.element,
+            offset,
+        };
         if extend {
-            Selection { anchor: current.anchor, focus }
+            Selection {
+                anchor: current.anchor,
+                focus,
+            }
         } else {
             Selection::caret(focus)
         }
@@ -238,8 +295,7 @@ impl ScriptCraftApp {
     /// Returns egui focus to the one screenplay interaction surface after an
     /// Edit command, without making the command target depend on popup focus.
     pub(crate) fn restore_editor_focus(&mut self, ctx: &egui::Context) {
-        if self.active_editor_surface == EditorSurface::TitlePage
-            && !self.title_view_state_swapped
+        if self.active_editor_surface == EditorSurface::TitlePage && !self.title_view_state_swapped
         {
             ctx.send_viewport_cmd_to(
                 crate::views::title_page::viewport_id(),

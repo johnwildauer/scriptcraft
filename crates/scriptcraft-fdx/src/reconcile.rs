@@ -4,16 +4,15 @@
 use crate::constants::FDX_ROOT;
 use crate::diagnostics::{save_diagnostic_at, FdxError, SaveDiagnosticCode};
 use crate::reader::validate_xml_chars;
-use crate::settings::role_from_fdx;
 use crate::writer::validate_qname;
 use scriptcraft_model::dual_dialogue::DualDialogueGroup;
-use scriptcraft_model::formatting::formatting_for_role;
+use scriptcraft_model::element_type::ElementTypeKey;
 use scriptcraft_model::preservation::{
     is_user_paragraph_data_name, DependencyConfidence, PreservedAttribute, PreservedElement,
     PreservedNode, PreservedSection, SectionKind, SharedVec, SourceName, SourceOwnership,
 };
 use scriptcraft_model::title_page::TitlePageParagraph;
-use scriptcraft_model::{Project, Role, RunAttribute, ScreenplayElement, StableId, TextRun};
+use scriptcraft_model::{Project, RunAttribute, ScreenplayElement, StableId, TextRun};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn reconcile_project_elements(
@@ -142,14 +141,7 @@ fn reconcile_node(
             .get(&id)
             .copied()
             .ok_or_else(|| SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error())?;
-        reconcile_dual_dialogue_wrapper(
-            element,
-            group,
-            root_namespace,
-            body,
-            body_order,
-            seen,
-        )?;
+        reconcile_dual_dialogue_wrapper(element, group, root_namespace, body, body_order, seen)?;
         group_order.push(id);
         return Ok(());
     }
@@ -163,10 +155,9 @@ fn reconcile_node(
                     return Err(SaveDiagnosticCode::ReconcileNodeManagedOutsideSection.error());
                 }
                 body_order.push(id.clone());
-                let semantic = body
-                    .get(&id)
-                    .copied()
-                    .ok_or_else(|| SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error())?;
+                let semantic = body.get(&id).copied().ok_or_else(|| {
+                    SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error()
+                })?;
                 reconcile_managed_paragraph(element, semantic).map_err(|error| {
                     save_diagnostic_at(
                         error,
@@ -177,16 +168,15 @@ fn reconcile_node(
             SectionKind::TitlePage => {
                 let exact_title_paragraph = is_fdx_element
                     && element.name.local_name == "Paragraph"
-                    && ((depth == 2 && !in_title_content)
-                        || (depth == 3 && in_title_content));
+                    && depth == 3
+                    && in_title_content;
                 if !exact_title_paragraph {
                     return Err(SaveDiagnosticCode::ReconcileNodeManagedOutsideSection.error());
                 }
                 title_order.push(id.clone());
-                let semantic = title
-                    .get(&id)
-                    .copied()
-                    .ok_or_else(|| SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error())?;
+                let semantic = title.get(&id).copied().ok_or_else(|| {
+                    SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error()
+                })?;
                 reconcile_managed_title_paragraph(element, semantic).map_err(|error| {
                     save_diagnostic_at(
                         error,
@@ -232,9 +222,14 @@ fn reconcile_dual_dialogue_wrapper(
     seen: &mut BTreeSet<StableId>,
 ) -> Result<(), FdxError> {
     if outer.source_type.as_deref() != Some("General")
-        || outer.attributes.iter().filter(|attribute| {
-            attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type"
-        }).count() != 1
+        || outer
+            .attributes
+            .iter()
+            .filter(|attribute| {
+                attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type"
+            })
+            .count()
+            != 1
         || !outer.attributes.iter().any(|attribute| {
             attribute.name.namespace_uri.is_none()
                 && attribute.name.local_name == "Type"
@@ -243,10 +238,14 @@ fn reconcile_dual_dialogue_wrapper(
     {
         return Err(SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch.error());
     }
-    let outer_ids = outer.attributes.iter().filter(|attribute| {
-        attribute.name.namespace_uri.is_none()
-            && attribute.name.local_name.eq_ignore_ascii_case("id")
-    }).collect::<Vec<_>>();
+    let outer_ids = outer
+        .attributes
+        .iter()
+        .filter(|attribute| {
+            attribute.name.namespace_uri.is_none()
+                && attribute.name.local_name.eq_ignore_ascii_case("id")
+        })
+        .collect::<Vec<_>>();
     if outer_ids.len() != 1
         || group.wrapper.outer_foreign_id.as_deref() != Some(outer_ids[0].value.as_str())
     {
@@ -307,10 +306,9 @@ fn reconcile_dual_dialogue_wrapper(
                 {
                     return Err(SaveDiagnosticCode::ReconcileNodeDuplicateManagedIdentity.error());
                 }
-                let semantic = body
-                    .get(&id)
-                    .copied()
-                    .ok_or_else(|| SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error())?;
+                let semantic = body.get(&id).copied().ok_or_else(|| {
+                    SaveDiagnosticCode::ReconcileNodeSemanticElementMissing.error()
+                })?;
                 reconcile_managed_paragraph(element, semantic).map_err(|error| {
                     save_diagnostic_at(
                         error,
@@ -340,11 +338,17 @@ fn is_supported_preserved_spell_block(
             PreservedNode::Element(element)
                 if element.name.namespace_uri.as_deref() == root_namespace
                     && element.ownership == SourceOwnership::Opaque
-                    && element.name.local_name == "IgnoredRanges" => lists.push("IgnoredRanges"),
+                    && element.name.local_name == "IgnoredRanges" =>
+            {
+                lists.push("IgnoredRanges")
+            }
             PreservedNode::Element(element)
                 if element.name.namespace_uri.as_deref() == root_namespace
                     && element.ownership == SourceOwnership::Opaque
-                    && element.name.local_name == "IgnoredWords" => lists.push("IgnoredWords"),
+                    && element.name.local_name == "IgnoredWords" =>
+            {
+                lists.push("IgnoredWords")
+            }
             _ => return false,
         }
     }
@@ -355,20 +359,8 @@ fn reconcile_managed_paragraph(
     paragraph: &mut PreservedElement,
     semantic: &ScreenplayElement,
 ) -> Result<(), FdxError> {
-    let role_type = role_to_fdx(semantic.role);
-    if paragraph.source_type.as_deref() != Some(role_type) {
-        return Err(SaveDiagnosticCode::ReconcileParagraphRoleMismatch.error());
-    }
-    let type_attributes = paragraph
-        .attributes
-        .iter()
-        .filter(|attribute| {
-            attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type"
-        })
-        .collect::<Vec<_>>();
-    if type_attributes.len() != 1 || type_attributes[0].value != role_type {
-        return Err(SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch.error());
-    }
+    let element_type = semantic.element_type();
+    project_required_paragraph_type(paragraph, element_type.as_str())?;
 
     reconcile_managed_text_runs(paragraph, &semantic.text, &semantic.runs)
 }
@@ -377,32 +369,83 @@ fn reconcile_managed_title_paragraph(
     paragraph: &mut PreservedElement,
     semantic: &TitlePageParagraph,
 ) -> Result<(), FdxError> {
-    let type_attributes = paragraph
-        .attributes
-        .iter()
-        .filter(|attribute| {
-            attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type"
-        })
-        .collect::<Vec<_>>();
-    match (semantic.role, paragraph.source_type.as_deref()) {
-        (None, None) if type_attributes.is_empty() => {}
-        (Some(role), Some(source_type))
-            if type_attributes.len() == 1
-                && type_attributes[0].value == source_type
-                && role_from_fdx(source_type) == Some(role) => {}
-        (None, Some(source_type))
-            if type_attributes.len() == 1
-                && type_attributes[0].value == source_type
-                && role_from_fdx(source_type).is_none() => {}
-        (None, _) => {
-            return Err(SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch.error())
-        }
-        (Some(_), _) => {
-            return Err(SaveDiagnosticCode::ReconcileParagraphRoleMismatch.error())
-        }
-    }
+    let element_type = semantic.element_type();
+    project_optional_paragraph_type(paragraph, element_type.as_ref().map(ElementTypeKey::as_str))?;
 
     reconcile_managed_text_runs(paragraph, &semantic.text, &semantic.runs)
+}
+
+fn source_type_attribute_index(paragraph: &PreservedElement) -> Result<Option<usize>, FdxError> {
+    let mut found = None;
+    for (index, attribute) in paragraph.attributes.iter().enumerate() {
+        if attribute.name.namespace_uri.is_none() && attribute.name.local_name == "Type" {
+            if found.replace(index).is_some() {
+                return Err(SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch.error());
+            }
+        }
+    }
+    if let Some(index) = found {
+        let value = &paragraph.attributes[index].value;
+        if value.is_empty()
+            || value.len() > scriptcraft_model::element_type::MAX_ELEMENT_TYPE_KEY_BYTES
+            || ElementTypeKey::new(value.clone()).is_err()
+            || paragraph.source_type.as_deref() != Some(value)
+        {
+            return Err(SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch.error());
+        }
+    } else if paragraph.source_type.is_some() {
+        return Err(SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch.error());
+    }
+    Ok(found)
+}
+
+fn project_required_paragraph_type(
+    paragraph: &mut PreservedElement,
+    target: &str,
+) -> Result<(), FdxError> {
+    let Some(index) = source_type_attribute_index(paragraph)? else {
+        return Err(SaveDiagnosticCode::ReconcileParagraphTypeAttributeMismatch.error());
+    };
+    paragraph.attributes[index].value = target.to_owned();
+    paragraph.source_type = Some(target.to_owned());
+    Ok(())
+}
+
+fn project_optional_paragraph_type(
+    paragraph: &mut PreservedElement,
+    target: Option<&str>,
+) -> Result<(), FdxError> {
+    let index = source_type_attribute_index(paragraph)?;
+    match (index, target) {
+        (Some(index), Some(target)) => paragraph.attributes[index].value = target.to_owned(),
+        (Some(index), None) => {
+            paragraph.attributes.remove(index);
+        }
+        (None, Some(target)) => {
+            let insertion_index = paragraph
+                .attributes
+                .iter()
+                .position(|attribute| {
+                    attribute.name.namespace_uri.is_none()
+                        && attribute.name.local_name.eq_ignore_ascii_case("id")
+                })
+                .unwrap_or(paragraph.attributes.len());
+            paragraph.attributes.insert(
+                insertion_index,
+                PreservedAttribute {
+                    name: SourceName {
+                        namespace_uri: None,
+                        local_name: "Type".to_owned(),
+                        qualified_name: Some("Type".to_owned()),
+                    },
+                    value: target.to_owned(),
+                },
+            );
+        }
+        (None, None) => {}
+    }
+    paragraph.source_type = target.map(str::to_owned);
+    Ok(())
 }
 
 fn reconcile_managed_text_runs(
@@ -414,13 +457,15 @@ fn reconcile_managed_text_runs(
         if !semantic_runs.is_empty() {
             return Err(SaveDiagnosticCode::ReconcileParagraphEmptyRunsMismatch.error());
         }
-        let source_has_managed_text = paragraph.children.iter().any(|child| matches!(
-            child,
-            PreservedNode::Element(element)
-                if element.name.local_name == "Text"
-                    && element.name.namespace_uri == paragraph.name.namespace_uri
-                    && has_managed_text_content(element)
-        ));
+        let source_has_managed_text = paragraph.children.iter().any(|child| {
+            matches!(
+                child,
+                PreservedNode::Element(element)
+                    if element.name.local_name == "Text"
+                        && element.name.namespace_uri == paragraph.name.namespace_uri
+                        && has_managed_text_content(element)
+            )
+        });
         if !source_has_managed_text {
             // An already-empty source Text is part of a no-op source tree. Do
             // not interpret the lack of semantic runs as an instruction to
@@ -499,9 +544,10 @@ fn reconcile_managed_text_runs(
         && templates.iter().skip(runs.len()).any(|element| {
             !element.attributes.is_empty()
                 || !element.namespace_bindings.is_empty()
-                || element.children.iter().any(|child| {
-                    !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_))
-                })
+                || element
+                    .children
+                    .iter()
+                    .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
         })
     {
         // A removed semantic run cannot authorize dropping an opaque Text
@@ -560,9 +606,11 @@ fn reconcile_text_element(
     mut element: PreservedElement,
     run: &TextRun,
 ) -> Result<PreservedElement, FdxError> {
-    if element.children.iter().any(|child| {
-        !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_))
-    }) {
+    if element
+        .children
+        .iter()
+        .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
+    {
         // Inline markup and XML miscellany are source-owned topology. The
         // semantic run cannot identify character spans on either side of those
         // nodes, so unchanged runs pass through verbatim while edits remain a
@@ -616,7 +664,9 @@ fn reconcile_text_element(
             PreservedNode::CData(_) => {
                 text_children.push(PreservedNode::CData(run.text.clone().into()))
             }
-            PreservedNode::Text(_) => text_children.push(PreservedNode::Text(run.text.clone().into())),
+            PreservedNode::Text(_) => {
+                text_children.push(PreservedNode::Text(run.text.clone().into()))
+            }
             _ => return Err(SaveDiagnosticCode::ReconcileParagraphUnexpectedFirstChild.error()),
         }
         for child in element.children.iter().skip(1) {
@@ -655,9 +705,12 @@ fn source_run_attributes_match(element: &PreservedElement, attributes: &[RunAttr
             .iter()
             .zip(attributes)
             .all(|(source, semantic)| {
-                source.name.qualified_name.as_deref().unwrap_or(
-                    source.name.local_name.as_str(),
-                ) == semantic.name
+                source
+                    .name
+                    .qualified_name
+                    .as_deref()
+                    .unwrap_or(source.name.local_name.as_str())
+                    == semantic.name
                     && source.value == semantic.value
             })
 }
@@ -688,7 +741,8 @@ fn new_text_element_for_paragraph(paragraph: &PreservedElement) -> PreservedElem
         .qualified_name
         .as_deref()
         .and_then(|name| name.split_once(':').map(|(prefix, _)| prefix));
-    let qualified_name = prefix.map_or_else(|| "Text".to_owned(), |prefix| format!("{prefix}:Text"));
+    let qualified_name =
+        prefix.map_or_else(|| "Text".to_owned(), |prefix| format!("{prefix}:Text"));
     PreservedElement {
         name: SourceName {
             namespace_uri: paragraph.name.namespace_uri.clone(),
@@ -703,8 +757,4 @@ fn new_text_element_for_paragraph(paragraph: &PreservedElement) -> PreservedElem
         anchor: None,
         children: SharedVec::default(),
     }
-}
-
-fn role_to_fdx(role: Role) -> &'static str {
-    formatting_for_role(role).fdx_label
 }

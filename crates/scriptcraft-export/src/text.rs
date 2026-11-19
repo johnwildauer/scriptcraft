@@ -1,6 +1,6 @@
 use crate::ExportError;
 use scriptcraft_layout::{LayoutLine, LayoutPurpose, ScreenplayLayout};
-use scriptcraft_model::{element::Role, layout_inputs::LayoutInputs, project::Project};
+use scriptcraft_model::{layout_inputs::LayoutInputs, project::Project};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LossReport {
@@ -68,9 +68,4 @@ pub fn export_text_with_layout_inputs(
         text.push('\n');
     }
     Ok(TextExport { text, loss })
-}
-
-#[allow(dead_code)]
-fn role_name(role: Role) -> &'static str {
-    role.as_str()
 }

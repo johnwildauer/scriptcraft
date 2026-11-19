@@ -115,7 +115,7 @@ fn correct_cast_lists_candidate(
     let all_scenes = candidate
         .elements
         .iter()
-        .filter(|element| element.role == Role::SceneHeading)
+        .filter(|element| element.transitional_role() == Role::SceneHeading)
         .map(|element| element.id.as_str().to_owned())
         .collect::<BTreeSet<_>>();
     let scope = requested_scenes
@@ -127,7 +127,7 @@ fn correct_cast_lists_candidate(
         let is_heading = candidate
             .elements
             .get(index)
-            .is_some_and(|element| element.role == Role::SceneHeading);
+            .is_some_and(|element| element.transitional_role() == Role::SceneHeading);
         if is_heading || index == candidate.elements.len() {
             if let Some(start) = scene_start {
                 let scene = &candidate.elements[start + 1..index];
@@ -146,8 +146,9 @@ fn correct_cast_lists_candidate(
         .difference(&source_deferred_scenes)
         .cloned()
         .collect::<BTreeSet<_>>();
-    let reconciliation = reconcile_project_candidate_with_scope(candidate, Some(&reconciliation_scope))
-        .map_err(CastListError::SceneMetadata)?;
+    let reconciliation =
+        reconcile_project_candidate_with_scope(candidate, Some(&reconciliation_scope))
+            .map_err(CastListError::SceneMetadata)?;
     let mut deferred_scenes = source_deferred_scenes;
     deferred_scenes.extend(reconciliation.deferred_scenes.iter().cloned());
     deferred_scenes.extend(scope.difference(&all_scenes).cloned());
@@ -161,7 +162,7 @@ fn correct_cast_lists_candidate(
         let is_heading = candidate
             .elements
             .get(index)
-            .is_some_and(|element| element.role == Role::SceneHeading);
+            .is_some_and(|element| element.transitional_role() == Role::SceneHeading);
         if is_heading || index == candidate.elements.len() {
             if let Some(start) = scene_start {
                 let scene = &candidate.elements[start + 1..index];
@@ -174,7 +175,9 @@ fn correct_cast_lists_candidate(
                     }
                 }
                 if scope.contains(heading_id.as_str())
-                    && scene.iter().any(|element| element.role == Role::CastList)
+                    && scene
+                        .iter()
+                        .any(|element| element.transitional_role() == Role::CastList)
                 {
                     let names = if candidate.preservation.is_some() {
                         scene_arc_names(candidate, heading_id)
@@ -187,7 +190,7 @@ fn correct_cast_lists_candidate(
                     };
                     let cast = scene_cast_text(&names)?;
                     for element_index in start + 1..index {
-                        if candidate.elements[element_index].role == Role::CastList
+                        if candidate.elements[element_index].transitional_role() == Role::CastList
                             && candidate.elements[element_index].text != cast
                         {
                             updates.push((
@@ -243,7 +246,10 @@ fn correct_cast_lists_candidate(
 }
 
 fn scene_needs_cast_list_update(scene: &[Arc<BodyOwner>]) -> Result<bool, CastListError> {
-    if !scene.iter().any(|element| element.role == Role::CastList) {
+    if !scene
+        .iter()
+        .any(|element| element.transitional_role() == Role::CastList)
+    {
         return Ok(false);
     }
     let names = derived_character_projection(scene)
@@ -251,9 +257,9 @@ fn scene_needs_cast_list_update(scene: &[Arc<BodyOwner>]) -> Result<bool, CastLi
         .map(|(_, name)| name)
         .collect::<Vec<_>>();
     let replacement = scene_cast_text(&names)?;
-    Ok(scene
-        .iter()
-        .any(|element| element.role == Role::CastList && element.text != replacement))
+    Ok(scene.iter().any(|element| {
+        element.transitional_role() == Role::CastList && element.text != replacement
+    }))
 }
 
 fn cast_list_source_is_replaceable(
@@ -268,7 +274,7 @@ fn cast_list_source_is_replaceable(
     let mut supported = true;
     for element in scene
         .iter()
-        .filter(|element| element.role == Role::CastList)
+        .filter(|element| element.transitional_role() == Role::CastList)
     {
         if element.text == replacement {
             continue;

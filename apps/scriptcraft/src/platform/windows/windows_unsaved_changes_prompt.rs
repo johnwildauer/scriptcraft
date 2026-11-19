@@ -13,7 +13,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Controls::{
-    TaskDialogIndirect, TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDCBF_CANCEL_BUTTON,
+    TaskDialogIndirect, TASKDIALOGCONFIG, TASKDIALOG_BUTTON, TDCBF_CANCEL_BUTTON,
     TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW,
 };
 
@@ -81,9 +81,7 @@ pub(crate) fn prompt_unsaved_changes(
     // SAFETY: This synchronous call runs on eframe's UI thread. The borrowed
     // root HWND, UTF-16 strings, config, and custom button records all remain
     // alive and unchanged until TaskDialogIndirect returns.
-    let result = unsafe {
-        TaskDialogIndirect(&config, Some(&mut button_id), None, None)
-    };
+    let result = unsafe { TaskDialogIndirect(&config, Some(&mut button_id), None, None) };
     if result.is_err() {
         return UnsavedChangesChoice::Cancel;
     }

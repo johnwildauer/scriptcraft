@@ -5,10 +5,8 @@
 //! adapter turns these records into Direct2D command lists and submits them
 //! through `ID2D1PrintControl::AddPage` without rebuilding the screenplay layout.
 
+use scriptcraft_layout::{FixedRect, LayoutComposition, LayoutError, ScreenplayLayout};
 use scriptcraft_model::formatting::FixedPoint;
-use scriptcraft_layout::{
-    FixedRect, LayoutComposition, LayoutError, ScreenplayLayout,
-};
 use scriptcraft_model::{LayoutInputs, Project};
 use std::sync::Arc;
 
@@ -207,9 +205,10 @@ fn package_from_layout(
     let mut text_bytes = 0usize;
 
     for page in &layout.pages {
-        let required_runs = page.lines.iter().try_fold(0usize, |count, line| {
-            count.checked_add(line.spans.len())
-        });
+        let required_runs = page
+            .lines
+            .iter()
+            .try_fold(0usize, |count, line| count.checked_add(line.spans.len()));
         let Some(required_runs) = required_runs else {
             return Err(PackageBuildError::ResourceLimit);
         };
@@ -231,10 +230,7 @@ fn package_from_layout(
                 if text_bytes > limits.text_bytes {
                     return Err(PackageBuildError::ResourceLimit);
                 }
-                let face = PrintFontFace::for_style(
-                    span.text_style.bold,
-                    span.text_style.italic,
-                );
+                let face = PrintFontFace::for_style(span.text_style.bold, span.text_style.italic);
                 runs.push(VectorTextRun {
                     text: Arc::clone(&span.display_text),
                     geometry: span.geometry,

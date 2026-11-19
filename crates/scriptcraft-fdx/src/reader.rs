@@ -1,7 +1,7 @@
 //! Bounded raw XML ingress for FDX.
 
-use crate::constants::UTF8_BOM;
 use crate::constants::FDX_ROOT;
+use crate::constants::UTF8_BOM;
 use crate::content::{self, ImportedSemanticParagraph};
 use crate::diagnostics::{map_model_error, FdxError};
 use crate::document::{FdxDocument, FdxVersionStatus};
@@ -9,9 +9,7 @@ use crate::identity::{
     collect_identities, validate_image_payload_budgets, validate_user_paragraph_data_locations,
 };
 use crate::lineage::raw_document_ref_datetime;
-use crate::settings::{
-    normalize_root_role_and_page_colors, read_source_layout_settings, role_from_fdx,
-};
+use crate::settings::normalize_root_page_layout_colors;
 use crate::text_state::raw_root_text_state;
 use crate::title_page::make_title_page_paragraph;
 use crate::tree::{preserve_misc_node, preserve_opaque_element};
@@ -20,6 +18,11 @@ use crate::{
     MAX_ATTRIBUTES_PER_ELEMENT, MAX_SOURCE_BYTES, MAX_SOURCE_DEPTH, MAX_SOURCE_EVENTS,
     MAX_SOURCE_NAME_OR_VALUE_BYTES, MAX_SOURCE_TEXT_BYTES,
 };
+use quick_xml::escape::unescape;
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::name::{Namespace, ResolveResult};
+use quick_xml::reader::NsReader;
+use quick_xml::XmlVersion;
 use scriptcraft_model::formatting::SourceLayoutSettings;
 use scriptcraft_model::preservation::{
     is_user_paragraph_data_lookalike, AnchorRelation, AnchorTarget, DependencyConfidence,
@@ -28,11 +31,6 @@ use scriptcraft_model::preservation::{
     SourceName, SourceOwnership, SourceSnapshot,
 };
 use scriptcraft_model::{BodyOwner, Project, SourceFormat};
-use quick_xml::escape::unescape;
-use quick_xml::events::{BytesStart, Event};
-use quick_xml::name::{Namespace, ResolveResult};
-use quick_xml::reader::NsReader;
-use quick_xml::XmlVersion;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
@@ -93,12 +91,9 @@ pub(crate) fn classify_preserved_element(
     if is_fdx_element(element, "Paragraph", root_ns) {
         let body = section == SectionKind::Content
             && depth == 2
-            && (attribute(element, "Type").and_then(role_from_fdx).is_some()
-                || (attribute(element, "Type") == Some("General")
-                    && content::is_supported_dual_dialogue_source(element, root_ns)));
-        let title = section == SectionKind::TitlePage
-            && ((in_title_content && depth == 3)
-                || (depth == 2 && attribute(element, "Type").and_then(role_from_fdx).is_some()));
+            && content::is_managed_direct_body_paragraph(element, root_ns)
+                .is_ok_and(|managed| managed);
+        let title = section == SectionKind::TitlePage && in_title_content && depth == 3;
         if body || title {
             return SourceClass::Managed;
         }
@@ -146,6 +141,8 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     let window_state = raw_root_window_state(root);
 
     let root_namespace = root.name.namespace_uri.as_deref();
+    let imported_element_settings =
+        crate::element_settings::read_element_settings(root, root_namespace)?;
     let mut content_count = 0usize;
     let mut title_count = 0usize;
     for child in &root.children {
@@ -165,8 +162,14 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         return Err(FdxError::DuplicateSection);
     }
 
-    let mut project = Project::empty_projection();
-    let mut source_layout_settings = read_source_layout_settings(root, root_namespace)?;
+    let mut project = Project::empty_projection().map_err(map_model_error)?;
+    crate::element_settings::complete_document_definitions(
+        root,
+        &imported_element_settings,
+        &mut project,
+    )?;
+    let mut source_layout_settings =
+        crate::settings::derive_compatibility_layout_settings(project.element_definitions());
     validate_image_payload_budgets(root, root_namespace)?;
     validate_user_paragraph_data_locations(root, root_namespace)?;
     let (identities, board_graph) = collect_identities(root)?;
@@ -175,7 +178,12 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     let mut next_anchor = 1usize;
     let mut root_owned = RawNode::Element(root.clone());
     if let RawNode::Element(root_owned) = &mut root_owned {
-        normalize_root_role_and_page_colors(root_owned, root_namespace);
+        crate::element_settings::normalize_winning_font_colors(
+            root_owned,
+            root_namespace,
+            &imported_element_settings,
+        )?;
+        normalize_root_page_layout_colors(root_owned, root_namespace);
     }
     let preserved_root = preserve_node(
         &mut root_owned,
@@ -248,10 +256,20 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     }
     preservation.rebuild_indexes();
     project.preservation = Some(preservation);
+    let preservation = project
+        .preservation
+        .as_mut()
+        .ok_or(FdxError::InvalidValue)?;
+    crate::element_settings::anchor_document_element_settings(
+        preservation,
+        &imported_element_settings,
+    )?;
+    preservation.rebuild_indexes();
     project.validate().map_err(map_model_error)?;
     let text_state = raw_root_text_state(&root_for_text_state, &project);
     Ok(FdxDocument {
         project,
+        import_diagnostics: imported_element_settings.diagnostics,
         document_ref_datetime,
         window_state,
         text_state,
@@ -284,14 +302,8 @@ fn preserve_node(
         section
     };
     let paragraph = is_fdx_element(element, "Paragraph", root_ns);
-    let title_content_paragraph = current_section == SectionKind::TitlePage
-        && in_title_content
-        && depth == 3
-        && paragraph;
-    let legacy_title_paragraph = current_section == SectionKind::TitlePage
-        && depth == 2
-        && paragraph
-        && attribute(element, "Type").and_then(role_from_fdx).is_some();
+    let title_content_paragraph =
+        current_section == SectionKind::TitlePage && in_title_content && depth == 3 && paragraph;
     let body_paragraph = current_section == SectionKind::Content && depth == 2 && paragraph;
 
     // A supported dual wrapper is recognized only at the direct managed body
@@ -307,9 +319,9 @@ fn preserve_node(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let has_dual_name = element.children.iter().any(|child| {
-        matches!(child, RawNode::Element(child) if child.name.local_name == "DualDialogue")
-    });
+    let has_dual_name = element.children.iter().any(
+        |child| matches!(child, RawNode::Element(child) if child.name.local_name == "DualDialogue"),
+    );
     if element.name.local_name == "DualDialogue" {
         return preserve_opaque_element(element.clone());
     }
@@ -340,33 +352,25 @@ fn preserve_node(
         };
     }
 
-    let managed = if title_content_paragraph || legacy_title_paragraph {
+    let managed = if title_content_paragraph {
         Some(ImportedSemanticParagraph::Title(make_title_page_paragraph(
             element,
             u32::try_from(project.title_page.len()).map_err(|_| FdxError::ResourceLimit)?,
             next_id,
         )?))
     } else if body_paragraph {
-        if let Some(role) = attribute(element, "Type").and_then(role_from_fdx) {
-            Some(ImportedSemanticParagraph::Body(content::make_semantic_element(
-                element,
-                role,
-                current_section,
-                next_id,
-            )?))
+        if let Some(element_type) = content::paragraph_type_key(element)? {
+            Some(ImportedSemanticParagraph::Body(
+                content::make_semantic_element(element, element_type, current_section, next_id)?,
+            ))
         } else {
             None
         }
     } else {
         None
     };
-    let classification = classify_preserved_element(
-        element,
-        depth,
-        current_section,
-        in_title_content,
-        root_ns,
-    );
+    let classification =
+        classify_preserved_element(element, depth, current_section, in_title_content, root_ns);
     if managed.is_none() && classification != SourceClass::Structural {
         // Unknown and unsupported source is retained as one opaque boundary.
         // No descendant local name can escape this branch into projection.

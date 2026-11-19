@@ -1,11 +1,11 @@
 //! Preservation-safe derived SceneProperties and scene-cast arc projection.
 
 use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
+use crate::preservation::DependencyConfidence;
 use crate::preservation::{
     ForeignIdDomain, ForeignIdentity, PreservationError, PreservationState, PreservedAttribute,
     PreservedElement, PreservedNode, SourceName, SourceOwnership,
 };
-use crate::preservation::DependencyConfidence;
 use crate::{BodyOwner, ModelError, Project, Role, StableId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -250,7 +250,8 @@ pub fn recognized_generated_scene_heading_subtree(
                     }) => {}
             PreservedNode::Text(text) | PreservedNode::CData(text)
                 if text.chars().all(char::is_whitespace) => {}
-            PreservedNode::Element(_) | PreservedNode::Comment(_)
+            PreservedNode::Element(_)
+            | PreservedNode::Comment(_)
             | PreservedNode::ProcessingInstruction { .. } => {}
             _ => return None,
         }
@@ -338,13 +339,11 @@ fn generated_scene_properties_attributes(
 
 /// Projects canonical Character cues into normalized association keys and
 /// uppercase names for generated and imported scene metadata.
-pub fn derived_character_projection(
-    elements: &[Arc<BodyOwner>],
-) -> Vec<(String, String)> {
+pub fn derived_character_projection(elements: &[Arc<BodyOwner>]) -> Vec<(String, String)> {
     let mut seen = BTreeSet::new();
     let mut projection = Vec::new();
     for element in elements {
-        if element.role != Role::Character {
+        if element.transitional_role() != Role::Character {
             continue;
         }
         let Some((key, name)) = projected_character_name(&element.text) else {
@@ -367,14 +366,14 @@ fn scene_casts_with_scope(
     let mut scenes = Vec::new();
     let mut active: Option<ActiveSceneProjection> = None;
     for element in elements {
-        if element.role == Role::SceneHeading {
+        if element.transitional_role() == Role::SceneHeading {
             if let Some((heading, projection, _)) = active.take() {
                 scenes.push((heading, projection));
             }
             if requested_scenes.is_none_or(|requested| requested.contains(element.id.as_str())) {
                 active = Some((element.id.clone(), Vec::new(), BTreeSet::new()));
             }
-        } else if element.role == Role::Character {
+        } else if element.transitional_role() == Role::Character {
             if let Some((_, projection, seen)) = active.as_mut() {
                 if let Some((key, name)) = projected_character_name(&element.text) {
                     if seen.insert(key.clone()) {
@@ -440,7 +439,8 @@ fn reconcile_heading(
             }
             PreservedNode::Text(text) | PreservedNode::CData(text)
                 if text.chars().all(char::is_whitespace) => {}
-            PreservedNode::Element(_) | PreservedNode::Comment(_)
+            PreservedNode::Element(_)
+            | PreservedNode::Comment(_)
             | PreservedNode::ProcessingInstruction { .. } => {}
             _ => return Err(SceneMetadataError::UnsupportedSceneMetadata),
         }
@@ -936,7 +936,8 @@ fn recognized_arc_paragraph_content(
                 .all(|part| matches!(part, PreservedNode::Text(_) | PreservedNode::CData(_)))
         }
         PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => true,
-        PreservedNode::Element(_) | PreservedNode::Comment(_)
+        PreservedNode::Element(_)
+        | PreservedNode::Comment(_)
         | PreservedNode::ProcessingInstruction { .. } => true,
         _ => false,
     })

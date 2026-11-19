@@ -2,12 +2,11 @@
 
 use crate::{
     element::{
-        Role, RunAttribute, ScreenplayElement, SourceProvenance, TextRun,
-        MAX_PROVENANCE_STRING_BYTES, MAX_RUNS_PER_ELEMENT, MAX_RUN_ATTRIBUTES,
-        MAX_RUN_ATTRIBUTE_BYTES,
+        Role, RunAttribute, SourceProvenance, TextRun, MAX_PROVENANCE_STRING_BYTES,
+        MAX_RUNS_PER_ELEMENT, MAX_RUN_ATTRIBUTES, MAX_RUN_ATTRIBUTE_BYTES,
     },
+    element_type::ElementTypeKey,
     formatting::FixedPoint,
-    validation::validate_element,
     identity::{StableId, StableIdAllocator},
     ModelError, MAX_TEXT_BYTES,
 };
@@ -37,9 +36,8 @@ pub struct TitlePageParagraphFormatting {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TitlePageParagraph {
     pub id: StableId,
-    /// Recognized source Type for legacy typed title items; reference title
-    /// paragraphs are Type-less and therefore have no screenplay role.
-    pub role: Option<Role>,
+    /// Canonical exact element type; `None` preserves type-less title paragraphs.
+    pub element_type: Option<ElementTypeKey>,
     /// Canonical UTF-8 paragraph text, projected from the ordered runs.
     pub text: String,
     pub runs: Vec<TextRun>,
@@ -48,6 +46,29 @@ pub struct TitlePageParagraph {
 }
 
 impl TitlePageParagraph {
+    /// Returns the canonical exact element-type key, if this title paragraph is typed.
+    pub fn element_type(&self) -> Option<ElementTypeKey> {
+        self.element_type.clone()
+    }
+
+    /// Sets the optional canonical key without changing any other title value.
+    pub fn set_element_type(&mut self, element_type: Option<ElementTypeKey>) {
+        self.element_type = element_type;
+    }
+
+    /// Transitional static-role adapter; arbitrary typed keys project to General
+    /// only for compatibility consumers, while type-less titles remain `None`.
+    pub fn transitional_role(&self) -> Option<Role> {
+        self.element_type
+            .as_ref()
+            .map(|key| key.to_role().unwrap_or(Role::General))
+    }
+
+    /// Updates canonical storage through the exact known-role compatibility adapter.
+    pub fn set_transitional_role(&mut self, role: Option<Role>) {
+        self.element_type = role.map(ElementTypeKey::from_role);
+    }
+
     pub fn new(
         id: impl Into<String>,
         text: impl Into<String>,
@@ -59,7 +80,7 @@ impl TitlePageParagraph {
         }
         Ok(Self {
             id: StableId::new(id)?,
-            role: None,
+            element_type: None,
             text,
             runs: Vec::new(),
             source_provenance: None,
@@ -69,7 +90,7 @@ impl TitlePageParagraph {
 
     pub fn with_runs(
         id: impl Into<String>,
-        role: Option<Role>,
+        element_type: Option<ElementTypeKey>,
         runs: Vec<TextRun>,
         source_provenance: Option<SourceProvenance>,
         formatting: TitlePageParagraphFormatting,
@@ -92,7 +113,7 @@ impl TitlePageParagraph {
         }
         let paragraph = Self {
             id: StableId::new(id)?,
-            role,
+            element_type,
             text,
             runs,
             source_provenance,
@@ -158,46 +179,6 @@ impl TitlePageParagraph {
         }
         Ok(())
     }
-
-    pub(crate) fn screenplay_projection(&self) -> Result<ScreenplayElement, ModelError> {
-        let element = ScreenplayElement {
-            id: self.id.clone(),
-            // This adapter is available only for legacy typed title paragraphs.
-            // Type-less content must wait for the dedicated FDX writer shape.
-            role: self.role.ok_or(ModelError::UnsupportedJsonState)?,
-            text: self.text.clone(),
-            runs: self.runs.clone(),
-            source_provenance: self.source_provenance.clone(),
-        };
-        validate_element(&element)?;
-        Ok(element)
-    }
-
-    /// Convert only legacy-compatible title content at the JSON compatibility boundary.
-    pub(crate) fn legacy_projection(&self) -> Result<ScreenplayElement, ModelError> {
-        if !self.runs.is_empty()
-            || self.source_provenance.is_some()
-            || self.formatting != TitlePageParagraphFormatting::default()
-        {
-            return Err(ModelError::UnsupportedJsonState);
-        }
-        let role = self.role.ok_or(ModelError::UnsupportedJsonState)?;
-        ScreenplayElement::new(self.id.as_str(), role, self.text.clone())
-    }
-
-    /// Reconstruct a title paragraph from the legacy JSON projection.
-    pub(crate) fn from_legacy_element(element: ScreenplayElement) -> Result<Self, ModelError> {
-        let paragraph = Self {
-            id: element.id,
-            role: Some(element.role),
-            text: element.text,
-            runs: element.runs,
-            source_provenance: element.source_provenance,
-            formatting: TitlePageParagraphFormatting::default(),
-        };
-        paragraph.validate()?;
-        Ok(paragraph)
-    }
 }
 
 /// Reference-backed title-page boilerplate used by a newly constructed Project.
@@ -226,11 +207,26 @@ pub(crate) fn reference_boilerplate(
                 vec![TextRun {
                     text: value.to_owned(),
                     attributes: vec![
-                        RunAttribute { name: "AdornmentStyle".into(), value: "0".into() },
-                        RunAttribute { name: "Font".into(), value: "Courier Final Draft".into() },
-                        RunAttribute { name: "RevisionID".into(), value: "0".into() },
-                        RunAttribute { name: "Size".into(), value: "12".into() },
-                        RunAttribute { name: "Style".into(), value: style.into() },
+                        RunAttribute {
+                            name: "AdornmentStyle".into(),
+                            value: "0".into(),
+                        },
+                        RunAttribute {
+                            name: "Font".into(),
+                            value: "Courier Final Draft".into(),
+                        },
+                        RunAttribute {
+                            name: "RevisionID".into(),
+                            value: "0".into(),
+                        },
+                        RunAttribute {
+                            name: "Size".into(),
+                            value: "12".into(),
+                        },
+                        RunAttribute {
+                            name: "Style".into(),
+                            value: style.into(),
+                        },
                     ],
                 }]
             })

@@ -74,7 +74,10 @@ pub enum PreservedNode {
     Text(SharedText),
     CData(SharedText),
     Comment(SharedText),
-    ProcessingInstruction { target: SharedText, data: SharedText },
+    ProcessingInstruction {
+        target: SharedText,
+        data: SharedText,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

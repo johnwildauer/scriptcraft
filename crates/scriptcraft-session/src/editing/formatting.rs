@@ -46,7 +46,11 @@ impl EditingSession {
         title_surface: bool,
         style: RunStyle,
     ) -> Result<(), EditError> {
-        let selection = if title_surface { self.title_selection } else { self.selection };
+        let selection = if title_surface {
+            self.title_selection
+        } else {
+            self.selection
+        };
         if selection.anchor == selection.focus {
             let position = selection.focus;
             let (text, runs, active) = if title_surface {
@@ -55,14 +59,22 @@ impl EditingSession {
                     .title_page
                     .get(position.element)
                     .ok_or(EditError::InvalidElement)?;
-                (paragraph.text.as_str(), paragraph.runs.as_slice(), self.title_typing_style)
+                (
+                    paragraph.text.as_str(),
+                    paragraph.runs.as_slice(),
+                    self.title_typing_style,
+                )
             } else {
                 let paragraph = self
                     .project
                     .elements
                     .get(position.element)
                     .ok_or(EditError::InvalidElement)?;
-                (paragraph.text.as_str(), paragraph.runs.as_slice(), self.body_typing_style)
+                (
+                    paragraph.text.as_str(),
+                    paragraph.runs.as_slice(),
+                    self.body_typing_style,
+                )
             };
             let current = project_style_at_caret(
                 text,
@@ -82,7 +94,11 @@ impl EditingSession {
             return Ok(());
         }
 
-        let active = if title_surface { self.title_typing_style } else { self.body_typing_style };
+        let active = if title_surface {
+            self.title_typing_style
+        } else {
+            self.body_typing_style
+        };
         let ranges = selection_run_ranges(&self.project, selection, title_surface)?;
         if title_surface {
             self.mutate_title(|project, _, _| {
@@ -100,7 +116,11 @@ impl EditingSession {
     }
 
     fn clear_surface_run_styles(&mut self, title_surface: bool) -> Result<(), EditError> {
-        let selection = if title_surface { self.title_selection } else { self.selection };
+        let selection = if title_surface {
+            self.title_selection
+        } else {
+            self.selection
+        };
         if selection.anchor == selection.focus {
             if title_surface {
                 self.project
@@ -129,15 +149,13 @@ impl EditingSession {
         let ranges = selection_run_ranges(&self.project, selection, title_surface)?;
         if title_surface {
             self.mutate_title(|project, _, typing| {
-                clear_paragraph_run_styles(project, &ranges)
-                    .map_err(EditError::FormattedText)?;
+                clear_paragraph_run_styles(project, &ranges).map_err(EditError::FormattedText)?;
                 *typing = RunStyleFlags::default();
                 Ok(selection)
             })
         } else {
             self.mutate(MutationValidationScope::Complete, |project, _, _, _| {
-                clear_paragraph_run_styles(project, &ranges)
-                    .map_err(EditError::FormattedText)?;
+                clear_paragraph_run_styles(project, &ranges).map_err(EditError::FormattedText)?;
                 Ok(selection)
             })?;
             let typing_changed = self.body_typing_style != RunStyleFlags::default();
@@ -154,7 +172,11 @@ impl EditingSession {
         title_surface: bool,
         alignment: ParagraphAlignment,
     ) -> Result<(), EditError> {
-        let selection = if title_surface { self.title_selection } else { self.selection };
+        let selection = if title_surface {
+            self.title_selection
+        } else {
+            self.selection
+        };
         let targets = selection_paragraph_targets(&self.project, selection, title_surface)?;
         if title_surface {
             self.mutate_title(|project, _, _| {
@@ -186,14 +208,28 @@ fn selection_run_ranges(
     let mut ranges = Vec::new();
     for index in start.element..=end.element {
         let (text_len, target) = if title_surface {
-            let paragraph = project.title_page.get(index).ok_or(EditError::InvalidElement)?;
+            let paragraph = project
+                .title_page
+                .get(index)
+                .ok_or(EditError::InvalidElement)?;
             (paragraph.text.len(), ParagraphTarget::TitlePage(index))
         } else {
-            let paragraph = project.elements.get(index).ok_or(EditError::InvalidElement)?;
+            let paragraph = project
+                .elements
+                .get(index)
+                .ok_or(EditError::InvalidElement)?;
             (paragraph.text.len(), ParagraphTarget::Body(index))
         };
-        let from = if index == start.element { start.offset } else { 0 };
-        let to = if index == end.element { end.offset } else { text_len };
+        let from = if index == start.element {
+            start.offset
+        } else {
+            0
+        };
+        let to = if index == end.element {
+            end.offset
+        } else {
+            text_len
+        };
         ranges.push((target, from..to));
     }
     Ok(ranges)
@@ -218,10 +254,16 @@ fn selection_paragraph_targets(
     (start.element..=last)
         .map(|index| {
             if title_surface {
-                project.title_page.get(index).ok_or(EditError::InvalidElement)?;
+                project
+                    .title_page
+                    .get(index)
+                    .ok_or(EditError::InvalidElement)?;
                 Ok(ParagraphTarget::TitlePage(index))
             } else {
-                project.elements.get(index).ok_or(EditError::InvalidElement)?;
+                project
+                    .elements
+                    .get(index)
+                    .ok_or(EditError::InvalidElement)?;
                 Ok(ParagraphTarget::Body(index))
             }
         })

@@ -1,11 +1,17 @@
-use crate::app::ScriptCraftApp;
 use super::toolbar_items::{
-    EnablementPolicy, IconSpec, OVERFLOW_ITEM_SPEC, ToolbarBehavior, ToolbarGraphic,
-    ToolbarIconVariant, ToolbarItemSpec, ToolbarLayoutPolicy, TEMPORARY_TOOLBAR_ITEMS,
+    EnablementPolicy, IconSpec, ToolbarBehavior, ToolbarGraphic, ToolbarIconVariant,
+    ToolbarItemSpec, ToolbarLayoutPolicy, OVERFLOW_ITEM_SPEC, TEMPORARY_TOOLBAR_ITEMS,
     TITLE_PAGE_TOOLBAR_ITEMS,
 };
-use crate::commands::{command_for_id, CommandInvocation};
+use crate::app::ScriptCraftApp;
 use crate::commands::AppCommandAvailability;
+use crate::commands::{command_for_id, CommandInvocation};
+use eframe::egui::{self, *};
+use egui_material_icons::icons::{
+    ICON_FORMAT_ALIGN_CENTER, ICON_FORMAT_ALIGN_JUSTIFY, ICON_FORMAT_ALIGN_LEFT,
+    ICON_FORMAT_ALIGN_RIGHT, ICON_FORMAT_BOLD, ICON_FORMAT_ITALIC, ICON_FORMAT_STRIKETHROUGH,
+    ICON_FORMAT_UNDERLINED, ICON_TEXT_FIELDS,
+};
 use scriptcraft_commands::{
     Command, CommandOrigin, EditorSurface, ParagraphAlignmentValue, RoleValue, TitleTextStyle,
 };
@@ -15,12 +21,6 @@ use scriptcraft_model::formatted_text::{
 };
 use scriptcraft_model::formatting::{formatting_for_role, ParagraphAlignment};
 use scriptcraft_model::{Position, Role};
-use eframe::egui::{self, *};
-use egui_material_icons::icons::{
-    ICON_FORMAT_ALIGN_CENTER, ICON_FORMAT_ALIGN_JUSTIFY, ICON_FORMAT_ALIGN_LEFT,
-    ICON_FORMAT_ALIGN_RIGHT, ICON_FORMAT_BOLD, ICON_FORMAT_ITALIC,
-    ICON_FORMAT_STRIKETHROUGH, ICON_FORMAT_UNDERLINED, ICON_TEXT_FIELDS,
-};
 
 // Manual toolbar geometry controls: tune Item group width and row spacing here.
 // The 46-point normal slot is the compact baseline recorded by the focused
@@ -69,13 +69,12 @@ impl ToolbarIconHoverPadding {
 }
 
 /// Per-edge hit/hover expansion: left, top, right, bottom (logical points).
-pub(super) const TOOLBAR_ICON_HOVER_PADDING: ToolbarIconHoverPadding =
-    ToolbarIconHoverPadding {
-        left: 8.0,
-        top: 0.0,
-        right: 8.0,
-        bottom: 3.0,
-    };
+pub(super) const TOOLBAR_ICON_HOVER_PADDING: ToolbarIconHoverPadding = ToolbarIconHoverPadding {
+    left: 8.0,
+    top: 0.0,
+    right: 8.0,
+    bottom: 3.0,
+};
 
 /// Toolbar-local visual defaults. These settings are deliberately separate
 /// from status-bar presentation and all dimensions are logical points.
@@ -189,8 +188,7 @@ mod toolbar_presentation {
     }
 
     pub(super) fn icon_point_size(icon: IconSpec) -> f32 {
-        icon.point_size
-            .unwrap_or(DEFAULT_MATERIAL_ICON_POINT_SIZE)
+        icon.point_size.unwrap_or(DEFAULT_MATERIAL_ICON_POINT_SIZE)
     }
 
     pub(super) fn elements_role_option_font_id(ui: &egui::Ui) -> egui::FontId {
@@ -199,9 +197,7 @@ mod toolbar_presentation {
             .text_styles
             .get(&egui::TextStyle::Button)
             .cloned()
-            .unwrap_or_else(|| {
-                egui::FontId::proportional(DEFAULT_ELEMENTS_ROLE_OPTION_POINT_SIZE)
-            });
+            .unwrap_or_else(|| egui::FontId::proportional(DEFAULT_ELEMENTS_ROLE_OPTION_POINT_SIZE));
         font_id.size = DEFAULT_ELEMENTS_ROLE_OPTION_POINT_SIZE;
         font_id
     }
@@ -215,6 +211,9 @@ mod toolbar_presentation {
     }
 }
 
+// Static toolbar choices are a Phase 1 compatibility adapter for existing
+// RoleValue commands. Phase 6 owns replacing this closed list with document
+// definitions; it never populates or validates the project's registry.
 pub(super) const SUPPORTED_SCREENPLAY_ROLES: [(Role, &str); 17] = [
     (Role::SceneHeading, "Scene Heading"),
     (Role::Action, "Action"),
@@ -265,29 +264,23 @@ fn elements_role_popup_max_height(ui: &egui::Ui) -> f32 {
                 .max(text_height + spacing.button_padding.y * 2.0)
         })
         .sum::<f32>();
-    let row_gaps = spacing.item_spacing.y
-        * SUPPORTED_SCREENPLAY_ROLES.len().saturating_sub(1) as f32;
+    let row_gaps =
+        spacing.item_spacing.y * SUPPORTED_SCREENPLAY_ROLES.len().saturating_sub(1) as f32;
     let desired_content_height = row_height + row_gaps;
 
     let popup_margin = egui::Frame::popup(ui.style()).total_margin();
-    let available_content_height = (ui.ctx().content_rect().height()
-        - popup_margin.top
-        - popup_margin.bottom)
-        .max(0.0);
+    let available_content_height =
+        (ui.ctx().content_rect().height() - popup_margin.top - popup_margin.bottom).max(0.0);
     desired_content_height.min(available_content_height)
 }
 
-pub(super) fn toolbar_items_for(
-    availability: AppCommandAvailability,
-) -> [ToolbarItemSpec; 14] {
+pub(super) fn toolbar_items_for(availability: AppCommandAvailability) -> [ToolbarItemSpec; 14] {
     let mut items = TEMPORARY_TOOLBAR_ITEMS;
     apply_toolbar_enablement(&mut items, availability);
     items
 }
 
-fn title_page_toolbar_items_for(
-    availability: AppCommandAvailability,
-) -> [ToolbarItemSpec; 6] {
+fn title_page_toolbar_items_for(availability: AppCommandAvailability) -> [ToolbarItemSpec; 6] {
     let mut items = TITLE_PAGE_TOOLBAR_ITEMS;
     apply_toolbar_enablement(&mut items, availability);
     items
@@ -348,11 +341,15 @@ where
             ) {
                 let row_width = match item.graphic {
                     ToolbarGraphic::Icons(icons) => {
-                        icons.iter().copied().map(|icon| {
-                            toolbar_presentation::icon_point_size(icon)
-                                + TOOLBAR_ICON_HOVER_PADDING.left
-                                + TOOLBAR_ICON_HOVER_PADDING.right
-                        }).sum::<f32>()
+                        icons
+                            .iter()
+                            .copied()
+                            .map(|icon| {
+                                toolbar_presentation::icon_point_size(icon)
+                                    + TOOLBAR_ICON_HOVER_PADDING.left
+                                    + TOOLBAR_ICON_HOVER_PADDING.right
+                            })
+                            .sum::<f32>()
                             + icons.len().saturating_sub(1) as f32
                                 * TOOLBAR_FORMATTING_SEPARATOR_SLOT_WIDTH
                     }
@@ -371,22 +368,21 @@ where
             } else {
                 0.0
             };
-            TOOLBAR_NORMAL_ITEM_WIDTH.max(graphic_width).max(caption_width)
+            TOOLBAR_NORMAL_ITEM_WIDTH
+                .max(graphic_width)
+                .max(caption_width)
         }
     }
 }
 
 pub(super) fn toolbar_graphic_width(graphic: &ToolbarGraphic) -> f32 {
-    let icon_width = |icon: IconSpec| {
-        toolbar_presentation::icon_point_size(icon)
-    };
+    let icon_width = |icon: IconSpec| toolbar_presentation::icon_point_size(icon);
     match graphic {
         ToolbarGraphic::None | ToolbarGraphic::TextDropdown => 0.0,
         ToolbarGraphic::Icon(icon) => icon_width(*icon),
         ToolbarGraphic::Icons(icons) => {
             icons.iter().copied().map(icon_width).sum::<f32>()
-                + icons.len().saturating_sub(1) as f32
-                    * toolbar_presentation::DEFAULT_GRAPHIC_GAP
+                + icons.len().saturating_sub(1) as f32 * toolbar_presentation::DEFAULT_GRAPHIC_GAP
         }
         ToolbarGraphic::IconDisclosure {
             primary,
@@ -407,10 +403,7 @@ pub(super) fn toolbar_label_width(ui: &egui::Ui, label: &str) -> f32 {
         .x
 }
 
-pub(super) fn toolbar_content_width(
-    widths: &[(ToolbarItemSpec, f32)],
-    overflow_width: f32,
-) -> f32 {
+pub(super) fn toolbar_content_width(widths: &[(ToolbarItemSpec, f32)], overflow_width: f32) -> f32 {
     let child_count = widths.len() as f32 + f32::from(overflow_width > 0.0);
     widths.iter().map(|(_, width)| width).sum::<f32>()
         + TOOLBAR_ROW_PADDING * 2.0
@@ -418,10 +411,7 @@ pub(super) fn toolbar_content_width(
         + overflow_width
 }
 
-pub(super) fn toolbar_row_width(
-    widths: &[(ToolbarItemSpec, f32)],
-    overflow_width: f32,
-) -> f32 {
+pub(super) fn toolbar_row_width(widths: &[(ToolbarItemSpec, f32)], overflow_width: f32) -> f32 {
     toolbar_content_width(widths, overflow_width)
 }
 
@@ -491,7 +481,7 @@ where
         + (items.len().saturating_sub(1) as f32) * TOOLBAR_ITEM_GAP;
     let flexible_count = items
         .iter()
-            .filter(|item| matches!(item.layout, ToolbarLayoutPolicy::FlexibleSpace))
+        .filter(|item| matches!(item.layout, ToolbarLayoutPolicy::FlexibleSpace))
         .count();
 
     if full_fixed_width <= available_width {
@@ -531,12 +521,7 @@ where
                 item,
                 toolbar_item_width(item, measure_label, measure_graphic),
             ));
-            if fitting
-                && toolbar_content_width(
-                    &candidate,
-                    overflow_width,
-                ) <= available_width
-            {
+            if fitting && toolbar_content_width(&candidate, overflow_width) <= available_width {
                 visible.push((
                     item,
                     toolbar_item_width(item, measure_label, measure_graphic),
@@ -675,8 +660,7 @@ fn paint_toolbar_graphic(
             .copied()
             .map(toolbar_presentation::icon_point_size)
             .sum::<f32>()
-            + icons.len().saturating_sub(1) as f32
-                * toolbar_presentation::DEFAULT_GRAPHIC_GAP;
+            + icons.len().saturating_sub(1) as f32 * toolbar_presentation::DEFAULT_GRAPHIC_GAP;
         let mut x = center.x - total_width / 2.0;
         for icon in icons.iter().copied() {
             let point_size = toolbar_presentation::icon_point_size(icon);
@@ -717,11 +701,7 @@ impl ScriptCraftApp {
         let icon_rect = toolbar_icon_hover_rect(icon_control_rect, TOOLBAR_ICON_HOVER_PADDING);
         let enabled = toolbar_action_enabled(item);
         let response = ui
-            .interact(
-                icon_rect,
-                id.with("icon"),
-                toolbar_action_sense(enabled),
-            )
+            .interact(icon_rect, id.with("icon"), toolbar_action_sense(enabled))
             .on_hover_cursor(egui::CursorIcon::Default);
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
@@ -746,20 +726,15 @@ impl ScriptCraftApp {
             } else {
                 toolbar_presentation::disabled_caption_foreground(item, palette)
             };
-            let label_galley = ui.painter().layout_no_wrap(
-                item.label.to_owned(),
-                body_font,
-                label_color,
-            );
+            let label_galley =
+                ui.painter()
+                    .layout_no_wrap(item.label.to_owned(), body_font, label_color);
             let caption_rect = toolbar_caption_rect(
                 rect,
                 icon_control_rect.height(),
                 TOOLBAR_CONTROL_CAPTION_GAP,
             );
-            let label_center = egui::pos2(
-                caption_rect.center().x,
-                caption_rect.center().y,
-            );
+            let label_center = egui::pos2(caption_rect.center().x, caption_rect.center().y);
             paint_toolbar_galley_with_color(
                 ui,
                 label_center - label_galley.size() / 2.0,
@@ -827,9 +802,19 @@ impl ScriptCraftApp {
                         .get(index)
                         .map(|paragraph| (&paragraph.text, &paragraph.runs)),
                 };
-                let Some((text, runs)) = paragraph else { continue };
-                let range_start = if index == start.element { start.offset } else { 0 };
-                let range_end = if index == end.element { end.offset } else { text.len() };
+                let Some((text, runs)) = paragraph else {
+                    continue;
+                };
+                let range_start = if index == start.element {
+                    start.offset
+                } else {
+                    0
+                };
+                let range_end = if index == end.element {
+                    end.offset
+                } else {
+                    text.len()
+                };
                 if range_start >= range_end {
                     continue;
                 }
@@ -841,22 +826,32 @@ impl ScriptCraftApp {
         };
 
         let first_paragraph = start.element;
-        let last_paragraph = if start == end { start.element } else { end.element };
+        let last_paragraph = if start == end {
+            start.element
+        } else {
+            end.element
+        };
         let alignments = (first_paragraph..=last_paragraph)
             .map(|index| match surface {
                 EditorSurface::Body => project.elements.get(index).map(|element| {
-                    let role = formatting_for_role(element.role).paragraph.alignment;
-                    let default = ParagraphAlignment::from_fdx(role)
-                        .unwrap_or(ParagraphAlignment::Left);
+                    let element_role = element.transitional_role();
+                    let role = formatting_for_role(element_role).paragraph.alignment;
+                    let default =
+                        ParagraphAlignment::from_fdx(role).unwrap_or(ParagraphAlignment::Left);
                     let source = project
                         .preservation
                         .as_ref()
                         .map(|preservation| preservation.source_layout_settings());
                     let role_override = source
-                        .map(|settings| settings.paragraph_spec(element.role).alignment)
+                        .map(|settings| settings.paragraph_spec(element_role).alignment)
                         .flatten();
                     let source_direct = source
-                        .map(|settings| settings.direct_paragraph_spec(&element.id).paragraph.alignment)
+                        .map(|settings| {
+                            settings
+                                .direct_paragraph_spec(&element.id)
+                                .paragraph
+                                .alignment
+                        })
                         .flatten();
                     let semantic_direct = project
                         .direct_paragraph_overrides
@@ -887,7 +882,10 @@ impl ScriptCraftApp {
         ctx: &egui::Context,
     ) {
         self.dispatch_command(
-            CommandInvocation::new(formatting_choice_command(choice, surface), CommandOrigin::Toolbar),
+            CommandInvocation::new(
+                formatting_choice_command(choice, surface),
+                CommandOrigin::Toolbar,
+            ),
             ctx,
         );
     }
@@ -905,14 +903,12 @@ impl ScriptCraftApp {
         let row_width = (ui.available_width() - 4.0).max(120.0);
         let response = ui.add_enabled(
             enabled,
-            egui::Button::new("").frame(false).min_size(Vec2::new(row_width, ROW_HEIGHT)),
+            egui::Button::new("")
+                .frame(false)
+                .min_size(Vec2::new(row_width, ROW_HEIGHT)),
         );
         response.widget_info(|| {
-            egui::WidgetInfo::labeled(
-                egui::WidgetType::Button,
-                enabled,
-                choice.label.to_owned(),
-            )
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, choice.label.to_owned())
         });
         let response = response.on_hover_cursor(toolbar_cursor_icon());
         let fill = toolbar_group_fill(ui.style(), active || response.hovered());
@@ -932,7 +928,10 @@ impl ScriptCraftApp {
         );
         paint_toolbar_galley_with_color(
             ui,
-            egui::pos2(center.x + ICON_SIZE / 2.0 + 8.0, response.rect.center().y - label.size().y / 2.0),
+            egui::pos2(
+                center.x + ICON_SIZE / 2.0 + 8.0,
+                response.rect.center().y - label.size().y / 2.0,
+            ),
             label,
             label_color,
         );
@@ -971,7 +970,11 @@ impl ScriptCraftApp {
                 .interact(
                     geometry.interaction_rects[index],
                     group_id.with(("formatting-choice", choice.label)),
-                    if enabled { Sense::click() } else { Sense::hover() },
+                    if enabled {
+                        Sense::click()
+                    } else {
+                        Sense::hover()
+                    },
                 )
                 .on_hover_cursor(if enabled {
                     toolbar_cursor_icon()
@@ -1005,8 +1008,7 @@ impl ScriptCraftApp {
             );
             let keyboard_activated = response.has_focus()
                 && ui.input(|input| {
-                    input.key_pressed(egui::Key::Enter)
-                        || input.key_pressed(egui::Key::Space)
+                    input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
                 });
             if response.clicked() || keyboard_activated {
                 chosen = Some(choice.choice);
@@ -1068,7 +1070,7 @@ impl ScriptCraftApp {
             .project()
             .elements
             .get(self.session.selection().focus.element)
-            .map(|element| element.role)
+            .map(|element| element.transitional_role())
     }
 
     pub(super) fn change_role_from_toolbar(&mut self, role: Role, ctx: &egui::Context) {
@@ -1196,16 +1198,12 @@ impl ScriptCraftApp {
                 }
                 // This caption is decorative. Allocate/paint it instead of adding a
                 // label response that can compete with the ComboBox cursor owner.
-                let remaining_caption_height = (group_height
-                    - combo_response.rect.height()
-                    - TOOLBAR_CONTROL_CAPTION_GAP)
-                    .max(0.0);
-                let (_gap_id, _gap_rect) = ui.allocate_space(Vec2::new(
-                    width,
-                    TOOLBAR_CONTROL_CAPTION_GAP,
-                ));
-                let (_, label_rect) =
-                    ui.allocate_space(Vec2::new(width, remaining_caption_height));
+                let remaining_caption_height =
+                    (group_height - combo_response.rect.height() - TOOLBAR_CONTROL_CAPTION_GAP)
+                        .max(0.0);
+                let (_gap_id, _gap_rect) =
+                    ui.allocate_space(Vec2::new(width, TOOLBAR_CONTROL_CAPTION_GAP));
+                let (_, label_rect) = ui.allocate_space(Vec2::new(width, remaining_caption_height));
                 let label_font = presentation.font_id();
                 let caption_rect = toolbar_caption_rect(
                     group_rect,
@@ -1256,70 +1254,73 @@ impl ScriptCraftApp {
                 .size(toolbar_presentation::icon_point_size(icon))
                 .color(icon_color),
             |ui| {
-            for item in items.iter().copied() {
-                match item.behavior {
-                    ToolbarBehavior::Action(action) => {
-                        if ui
-                            .add_enabled(
-                                item.enablement == EnablementPolicy::Enabled,
-                                egui::Button::new(item.label),
-                            )
-                            .clicked()
-                        {
-                            chosen_action = Some(action);
-                            ui.close();
+                for item in items.iter().copied() {
+                    match item.behavior {
+                        ToolbarBehavior::Action(action) => {
+                            if ui
+                                .add_enabled(
+                                    item.enablement == EnablementPolicy::Enabled,
+                                    egui::Button::new(item.label),
+                                )
+                                .clicked()
+                            {
+                                chosen_action = Some(action);
+                                ui.close();
+                            }
                         }
-                    }
-                    ToolbarBehavior::ElementsRoleDropdown => {
-                        let selected_role = self.focused_role();
-                        ui.menu_button(item.label, |ui| {
-                            ui.spacing_mut().button_padding.x = toolbar_presentation::
+                        ToolbarBehavior::ElementsRoleDropdown => {
+                            let selected_role = self.focused_role();
+                            ui.menu_button(item.label, |ui| {
+                                ui.spacing_mut().button_padding.x = toolbar_presentation::
                                 DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING;
-                            let role_popup_height = elements_role_popup_max_height(ui);
-                            let role_option_font =
-                                toolbar_presentation::elements_role_option_font_id(ui);
-                            egui::ScrollArea::vertical()
-                                .max_height(role_popup_height)
-                                .show(ui, |ui| {
-                                    for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
-                                        if ui
-                                            .selectable_label(
-                                                selected_role == Some(role),
-                                                RichText::new(label)
-                                                    .font(role_option_font.clone()),
-                                            )
-                                            .clicked()
-                                        {
-                                            chosen_role = Some(role);
-                                            ui.close();
+                                let role_popup_height = elements_role_popup_max_height(ui);
+                                let role_option_font =
+                                    toolbar_presentation::elements_role_option_font_id(ui);
+                                egui::ScrollArea::vertical()
+                                    .max_height(role_popup_height)
+                                    .show(ui, |ui| {
+                                        for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
+                                            if ui
+                                                .selectable_label(
+                                                    selected_role == Some(role),
+                                                    RichText::new(label)
+                                                        .font(role_option_font.clone()),
+                                                )
+                                                .clicked()
+                                            {
+                                                chosen_role = Some(role);
+                                                ui.close();
+                                            }
                                         }
-                                    }
-                                });
-                        });
-                    }
-                    ToolbarBehavior::StylesInlineGroup | ToolbarBehavior::AlignmentInlineGroup => {
-                        if item.enablement == EnablementPolicy::Enabled {
-                            self.formatting_overflow_submenu(ui, item, surface);
-                        } else {
-                            ui.add_enabled(false, egui::Button::new(item.label));
+                                    });
+                            });
                         }
-                    }
-                    ToolbarBehavior::None if is_disabled_overflow_label(item) => {
-                        if let Some(color) =
-                            toolbar_presentation::disabled_overflow_label_foreground(
-                                item,
-                                self.theme_palette.toolbar,
-                            )
-                        {
-                            paint_disabled_toolbar_overflow_label(ui, item, color);
+                        ToolbarBehavior::StylesInlineGroup
+                        | ToolbarBehavior::AlignmentInlineGroup => {
+                            if item.enablement == EnablementPolicy::Enabled {
+                                self.formatting_overflow_submenu(ui, item, surface);
+                            } else {
+                                ui.add_enabled(false, egui::Button::new(item.label));
+                            }
                         }
+                        ToolbarBehavior::None if is_disabled_overflow_label(item) => {
+                            if let Some(color) =
+                                toolbar_presentation::disabled_overflow_label_foreground(
+                                    item,
+                                    self.theme_palette.toolbar,
+                                )
+                            {
+                                paint_disabled_toolbar_overflow_label(ui, item, color);
+                            }
+                        }
+                        ToolbarBehavior::None | ToolbarBehavior::OverflowMenu => {}
                     }
-                    ToolbarBehavior::None | ToolbarBehavior::OverflowMenu => {}
                 }
-            }
             },
         );
-        let response = menu_result.response.on_hover_cursor(egui::CursorIcon::Default);
+        let response = menu_result
+            .response
+            .on_hover_cursor(egui::CursorIcon::Default);
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
                 egui::WidgetType::Button,
@@ -1393,10 +1394,7 @@ impl ScriptCraftApp {
             }
             ui.add_space(TOOLBAR_TOP_PADDING);
             ui.allocate_ui_with_layout(
-                Vec2::new(
-                    allocation.row_width,
-                    toolbar_item_group_height(ui.style()),
-                ),
+                Vec2::new(allocation.row_width, toolbar_item_group_height(ui.style())),
                 egui::Layout::left_to_right(egui::Align::Min),
                 |ui| {
                     // Descendant controls and popup rows retain the normal style
@@ -1417,15 +1415,14 @@ impl ScriptCraftApp {
                                 self.elements_toolbar_item(ui, item, width, presentation)
                             }
                             ToolbarBehavior::StylesInlineGroup
-                            | ToolbarBehavior::AlignmentInlineGroup => {
-                                self.formatting_inline_group_button(
+                            | ToolbarBehavior::AlignmentInlineGroup => self
+                                .formatting_inline_group_button(
                                     ui,
                                     item,
                                     width,
                                     presentation,
                                     surface,
-                                )
-                            }
+                                ),
                             ToolbarBehavior::None | ToolbarBehavior::OverflowMenu => {
                                 if matches!(
                                     item.layout,
@@ -1474,7 +1471,6 @@ impl ScriptCraftApp {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ToolbarPresentationMetrics {
@@ -1644,8 +1640,14 @@ fn formatting_separator_stroke_width(pixels_per_point: f32) -> f32 {
 fn formatting_separator_line(slot: egui::Rect) -> [egui::Pos2; 2] {
     let center = slot.center();
     [
-        egui::pos2(center.x, center.y - TOOLBAR_FORMATTING_SEPARATOR_LENGTH * 0.5),
-        egui::pos2(center.x, center.y + TOOLBAR_FORMATTING_SEPARATOR_LENGTH * 0.5),
+        egui::pos2(
+            center.x,
+            center.y - TOOLBAR_FORMATTING_SEPARATOR_LENGTH * 0.5,
+        ),
+        egui::pos2(
+            center.x,
+            center.y + TOOLBAR_FORMATTING_SEPARATOR_LENGTH * 0.5,
+        ),
     ]
 }
 
@@ -1755,7 +1757,9 @@ const ALIGNMENT_CHOICES: [FormattingChoiceSpec; 4] = [
     },
 ];
 
-fn ordered_editor_selection(selection: scriptcraft_session::editing::Selection) -> (Position, Position) {
+fn ordered_editor_selection(
+    selection: scriptcraft_session::editing::Selection,
+) -> (Position, Position) {
     if (selection.anchor.element, selection.anchor.offset)
         <= (selection.focus.element, selection.focus.offset)
     {
@@ -1775,7 +1779,11 @@ fn style_union(left: RunStyleFlags, right: RunStyleFlags) -> RunStyleFlags {
     }
 }
 
-fn formatting_choice_active(choice: FormattingChoice, styles: RunStyleFlags, alignment: Option<ParagraphAlignment>) -> bool {
+fn formatting_choice_active(
+    choice: FormattingChoice,
+    styles: RunStyleFlags,
+    alignment: Option<ParagraphAlignment>,
+) -> bool {
     match choice {
         FormattingChoice::Style(style) => match style {
             TitleTextStyle::Bold => styles.bold,
@@ -1784,9 +1792,7 @@ fn formatting_choice_active(choice: FormattingChoice, styles: RunStyleFlags, ali
             TitleTextStyle::AllCaps => styles.all_caps,
             TitleTextStyle::Strikethrough => styles.strikethrough,
         },
-        FormattingChoice::Alignment(value) => {
-            alignment == Some(value.as_core())
-        }
+        FormattingChoice::Alignment(value) => alignment == Some(value.as_core()),
     }
 }
 

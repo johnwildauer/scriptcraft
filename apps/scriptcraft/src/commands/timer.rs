@@ -23,10 +23,8 @@ impl ScriptCraftApp {
         match command {
             Command::ToolsSprintTimerTogglePopup => {
                 if self.sprint_timer.popup_open {
-                    self.sprint_timer.request_popup_close(
-                        ctx.input(|input| input.time),
-                        ctx.content_rect(),
-                    );
+                    self.sprint_timer
+                        .request_popup_close(ctx.input(|input| input.time), ctx.content_rect());
                 } else {
                     self.sprint_timer.clear_popup_transition(ctx);
                     self.clear_sprint_timer_popup_geometry();
@@ -39,17 +37,19 @@ impl ScriptCraftApp {
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::ToolsSprintTimerClosePopup => {
-                self.sprint_timer.request_popup_close(
-                    ctx.input(|input| input.time),
-                    ctx.content_rect(),
-                );
+                self.sprint_timer
+                    .request_popup_close(ctx.input(|input| input.time), ctx.content_rect());
                 ctx.request_repaint();
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::ToolsSprintTimerSetMode { mode } => {
                 let mode = match mode {
-                    SprintTimerMode::Countdown => crate::widgets::sprint_timer::TimerMode::Countdown,
-                    SprintTimerMode::Stopwatch => crate::widgets::sprint_timer::TimerMode::Stopwatch,
+                    SprintTimerMode::Countdown => {
+                        crate::widgets::sprint_timer::TimerMode::Countdown
+                    }
+                    SprintTimerMode::Stopwatch => {
+                        crate::widgets::sprint_timer::TimerMode::Stopwatch
+                    }
                 };
                 self.sprint_timer.select_mode(mode);
                 ctx.request_repaint();
@@ -97,9 +97,9 @@ impl ScriptCraftApp {
                 ctx.request_repaint();
                 DesktopCommandOutcome::EffectDispatched
             }
-            other => DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(
-                other.id(),
-            )),
+            other => {
+                DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id()))
+            }
         }
     }
 
@@ -108,10 +108,8 @@ impl ScriptCraftApp {
         notification: Option<crate::widgets::sprint_timer::notifications::CompletionNotification>,
     ) {
         if let Some(notification) = notification {
-            let result = DesktopTimerNotificationEffects::request(
-                &mut self.notification_sink,
-                notification,
-            );
+            let result =
+                DesktopTimerNotificationEffects::request(&mut self.notification_sink, notification);
             DesktopTimerNotificationEffects::apply_result(
                 &mut self.sprint_timer,
                 notification.generation,
@@ -125,11 +123,7 @@ impl ScriptCraftApp {
         generation: u64,
         result: crate::widgets::sprint_timer::notifications::NotificationResult,
     ) -> bool {
-        DesktopTimerNotificationEffects::apply_result(
-            &mut self.sprint_timer,
-            generation,
-            result,
-        )
+        DesktopTimerNotificationEffects::apply_result(&mut self.sprint_timer, generation, result)
     }
 
     /// Completes an app-owned popup transition, or immediately tears it down

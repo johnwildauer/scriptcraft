@@ -1,12 +1,10 @@
 //! Body text insertion and deletion operations.
 
 use super::candidate::MutationValidationScope;
-use super::selection::SelectionOrdering;
-use super::text::{
-    next_boundary, previous_boundary, replace_range, synchronize_body_typing_style,
-};
 use super::policy::is_delimiter_only_parenthetical;
-use super::structure::{join_at, remove_body_owner, update_preserved_role};
+use super::selection::SelectionOrdering;
+use super::structure::{join_at, remove_body_owner, update_preserved_type};
+use super::text::{next_boundary, previous_boundary, replace_range, synchronize_body_typing_style};
 use super::{EditError, EditingSession, Position, Selection};
 use scriptcraft_model::{BodyOwner, Project, Role};
 use std::collections::BTreeSet;
@@ -76,7 +74,7 @@ impl EditingSession {
                 .filter(|(index, element)| {
                     *index > selection_start.element
                         && *index <= selection_end.element
-                        && element.role == Role::SceneHeading
+                        && element.transitional_role() == Role::SceneHeading
                         && (*index < selection_end.element
                             || selection_end.offset == element.text.len())
                 })
@@ -90,7 +88,7 @@ impl EditingSession {
             )
             .into_iter()
             .filter_map(|index| self.project.elements.get(index))
-            .filter(|element| element.role == Role::SceneHeading)
+            .filter(|element| element.transitional_role() == Role::SceneHeading)
             .map(|element| element.id.clone())
             .collect()
         } else {
@@ -119,7 +117,7 @@ impl EditingSession {
                         DeleteDirection::Forward,
                     ));
                 }
-                if item.role == Role::Parenthetical
+                if item.transitional_role() == Role::Parenthetical
                     && is_delimiter_only_parenthetical(item.text.as_str())
                 {
                     let item_text_len = item.text.len();
@@ -138,9 +136,11 @@ impl EditingSession {
                             },
                             "",
                         )?;
-                        update_preserved_role(project, 0, Role::Parenthetical, Role::Dialogue)?;
+                        let element_type =
+                            scriptcraft_model::ElementTypeKey::from_role(Role::Dialogue);
+                        update_preserved_type(project, 0, &element_type)?;
                         BodyOwner::update(&mut project.elements[0], |element| {
-                            element.role = Role::Dialogue;
+                            element.set_element_type(element_type);
                         });
                         return Ok(Selection::caret(Position {
                             element: 0,
@@ -189,7 +189,7 @@ impl EditingSession {
             deletion_candidate_empty_element(&self.project, start, DeleteDirection::Backward)
                 .into_iter()
                 .filter_map(|index| self.project.elements.get(index))
-                .filter(|element| element.role == Role::SceneHeading)
+                .filter(|element| element.transitional_role() == Role::SceneHeading)
                 .map(|element| element.id.clone())
                 .collect()
         } else {

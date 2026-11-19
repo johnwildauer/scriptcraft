@@ -1,11 +1,12 @@
 //! Process startup parsing, presentation, and native launch orchestration.
 
+use crate::documents::{replacement_protocol, save::UNTITLED_DOCUMENT_TITLE};
 use crate::{
+    app::ScriptCraftApp,
     chrome::{menu, toolbar_items},
     presentation::{document_font, material_font, runtime_icon},
-    app::ScriptCraftApp, StartupFailureKind,
+    StartupFailureKind,
 };
-use crate::documents::{replacement_protocol, save::UNTITLED_DOCUMENT_TITLE};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -46,9 +47,7 @@ struct StartupConfig {
     startup_document: Option<StartupDocumentInput>,
 }
 
-fn parse_startup_args(
-    args: impl IntoIterator<Item = OsString>,
-) -> Result<StartupConfig, String> {
+fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<StartupConfig, String> {
     let mut seen_development = false;
     let mut seen_menu_platform = false;
     let mut seen_document_path = false;
@@ -75,7 +74,9 @@ fn parse_startup_args(
                 return Err(format!("duplicate --menu-platform option\n{STARTUP_USAGE}"));
             }
             seen_menu_platform = true;
-            return Err(format!("--menu-platform requires an equals-form value\n{STARTUP_USAGE}"));
+            return Err(format!(
+                "--menu-platform requires an equals-form value\n{STARTUP_USAGE}"
+            ));
         } else if let Some(value) = argument.strip_prefix("--menu-platform=") {
             if seen_menu_platform {
                 return Err(format!("duplicate --menu-platform option\n{STARTUP_USAGE}"));
@@ -104,7 +105,9 @@ fn parse_startup_args(
                     "ambiguous document sources: use one positional path or --document-path, not both\n{STARTUP_USAGE}"
                 ));
             }
-            return Err(format!("--document-path requires an equals-form value\n{STARTUP_USAGE}"));
+            return Err(format!(
+                "--document-path requires an equals-form value\n{STARTUP_USAGE}"
+            ));
         } else if let Some(value) = argument.strip_prefix("--document-path=") {
             if seen_document_path {
                 return Err(format!("duplicate --document-path option\n{STARTUP_USAGE}"));
@@ -126,22 +129,26 @@ fn parse_startup_args(
                 };
                 format!("{reason}\n{STARTUP_USAGE}")
             })?;
-            document_input = Some((path.as_path().to_path_buf(), StartupDocumentSource::CustomOption));
+            document_input = Some((
+                path.as_path().to_path_buf(),
+                StartupDocumentSource::CustomOption,
+            ));
         } else if argument == "--open-handoff" {
             if seen_open_handoff {
                 return Err(format!("duplicate --open-handoff option\n{STARTUP_USAGE}"));
             }
             seen_open_handoff = true;
-            return Err(format!("--open-handoff requires an equals-form value\n{STARTUP_USAGE}"));
+            return Err(format!(
+                "--open-handoff requires an equals-form value\n{STARTUP_USAGE}"
+            ));
         } else if let Some(value) = argument.strip_prefix("--open-handoff=") {
             if seen_open_handoff {
                 return Err(format!("duplicate --open-handoff option\n{STARTUP_USAGE}"));
             }
             seen_open_handoff = true;
             handoff_id = Some(
-                replacement_protocol::HandoffId::parse_decimal(value).map_err(|_| {
-                    format!("invalid --open-handoff identity\n{STARTUP_USAGE}")
-                })?,
+                replacement_protocol::HandoffId::parse_decimal(value)
+                    .map_err(|_| format!("invalid --open-handoff identity\n{STARTUP_USAGE}"))?,
             );
         } else {
             if argument.starts_with('-') {
@@ -160,17 +167,19 @@ fn parse_startup_args(
                 }
                 Some(StartupDocumentSource::NativeOpenDocuments) | None => {}
             }
-            let path = DocumentPath::new(argument.to_owned()).map_err(|_| {
-                format!("invalid positional document path\n{STARTUP_USAGE}")
-            })?;
-            document_input = Some((path.as_path().to_path_buf(), StartupDocumentSource::PositionalArgument));
+            let path = DocumentPath::new(argument.to_owned())
+                .map_err(|_| format!("invalid positional document path\n{STARTUP_USAGE}"))?;
+            document_input = Some((
+                path.as_path().to_path_buf(),
+                StartupDocumentSource::PositionalArgument,
+            ));
         };
     }
 
     if handoff_id.is_some()
-        && !document_input.as_ref().is_some_and(|(_, source)| {
-            *source == StartupDocumentSource::CustomOption
-        })
+        && !document_input
+            .as_ref()
+            .is_some_and(|(_, source)| *source == StartupDocumentSource::CustomOption)
     {
         return Err(format!(
             "--open-handoff requires --document-path\n{STARTUP_USAGE}"
@@ -256,9 +265,7 @@ fn resolve_startup_menu_policy(
             menu::MenuHostPlatform::Windows => "Windows",
             menu::MenuHostPlatform::Other => "this target",
         };
-        format!(
-            "--menu-platform={requested} is unsupported on {host}\n{STARTUP_USAGE}"
-        )
+        format!("--menu-platform={requested} is unsupported on {host}\n{STARTUP_USAGE}")
     })
 }
 
@@ -308,10 +315,7 @@ pub(crate) fn run() -> eframe::Result {
             let startup_document = startup.startup_document;
 
             let document_font_availability = document_font::install(&cc.egui_ctx);
-            material_font::install(
-                &cc.egui_ctx,
-                &toolbar_items::custom_material_icon_axes(),
-            );
+            material_font::install(&cc.egui_ctx, &toolbar_items::custom_material_icon_axes());
             ScriptCraftApp::new_with_startup(
                 menu_policy,
                 startup.menu_platform,

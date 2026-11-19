@@ -1,9 +1,7 @@
 //! Title Page text and structure operations.
 
 use super::history::Snapshot;
-use super::selection::{
-    validate_title_position, validate_title_selection, SelectionOrdering,
-};
+use super::selection::{validate_title_position, validate_title_selection, SelectionOrdering};
 use super::text::{
     apply_typing_styles, coalesce_runs, effective_title_runs, next_boundary, previous_boundary,
     push_run, slice_runs, title_run_attributes_at,
@@ -14,10 +12,84 @@ use scriptcraft_model::formatted_text::{
 };
 use scriptcraft_model::preservation::PreservationError;
 use scriptcraft_model::{
-    Project, TextRun, TitlePageParagraph, TitlePageParagraphFormatting, MAX_TEXT_BYTES,
+    ElementTypeKey, ModelError, Project, TextRun, TitlePageParagraph, TitlePageParagraphFormatting,
+    MAX_TEXT_BYTES,
 };
 
 impl EditingSession {
+    /// Changes the selected title paragraph's optional exact document type.
+    /// Type-less title paragraphs remain addressable and can be assigned a
+    /// registered key without changing their text or formatting.
+    pub fn change_title_element_type(
+        &mut self,
+        element_type: Option<ElementTypeKey>,
+    ) -> Result<(), EditError> {
+        if let Some(key) = &element_type {
+            if self.project.element_definitions().get(key).is_none() {
+                return Err(EditError::Model(ModelError::MissingElementDefinition(
+                    key.clone(),
+                )));
+            }
+        }
+        let (start, end) = self.title_selection.ordered();
+        if start.element != end.element {
+            return Err(EditError::InvalidSelection);
+        }
+        let current = self
+            .project
+            .title_page
+            .get(start.element)
+            .ok_or(EditError::InvalidElement)?
+            .element_type();
+        if current == element_type {
+            return Ok(());
+        }
+
+        self.mutate_title(|project, selection, _typing| {
+            let paragraph = project
+                .title_page
+                .get(start.element)
+                .cloned()
+                .ok_or(EditError::InvalidElement)?;
+            if paragraph.element_type() != current {
+                return Err(EditError::Preservation(
+                    PreservationError::UnsupportedRoleMapping,
+                ));
+            }
+            if paragraph
+                .source_provenance
+                .as_ref()
+                .and_then(|provenance| provenance.foreign_role.as_deref())
+                != current.as_ref().map(ElementTypeKey::as_str)
+                && paragraph.source_provenance.is_some()
+            {
+                return Err(EditError::Preservation(
+                    PreservationError::UnsupportedRoleMapping,
+                ));
+            }
+            if paragraph.source_provenance.is_some() {
+                project
+                    .preservation
+                    .as_mut()
+                    .ok_or(EditError::Preservation(
+                        PreservationError::ManagedAnchorMissing,
+                    ))?
+                    .change_managed_title_element_type(
+                        &paragraph,
+                        current.as_ref(),
+                        element_type.as_ref(),
+                    )
+                    .map_err(EditError::Preservation)?;
+            }
+            let updated = &mut project.title_page[start.element];
+            updated.set_element_type(element_type.clone());
+            if let Some(provenance) = &mut updated.source_provenance {
+                provenance.foreign_role = element_type.as_ref().map(|key| key.as_str().to_owned());
+            }
+            Ok(*selection)
+        })
+    }
+
     /// Inserts or replaces canonical title text in one paragraph. Paste is an
     /// alias so one clipboard operation always creates one history entry.
     pub fn insert_title(&mut self, text: &str) -> Result<(), EditError> {
@@ -89,7 +161,10 @@ impl EditingSession {
                 return Ok(*selection);
             }
             let next = next_boundary(&paragraph_text, start.offset);
-            let finish = Position { offset: next, ..start };
+            let finish = Position {
+                offset: next,
+                ..start
+            };
             replace_title_range(project, start, finish, "", *typing)?;
             Ok(Selection::caret(start))
         })
@@ -129,12 +204,18 @@ impl EditingSession {
                     let left = start.element - 1;
                     let offset = project.title_page[left].text.len();
                     join_title_at(project, left)?;
-                    return Ok(Selection::caret(Position { element: left, offset }));
+                    return Ok(Selection::caret(Position {
+                        element: left,
+                        offset,
+                    }));
                 }
                 return Ok(*selection);
             }
             let previous = previous_boundary(&paragraph_text, start.offset);
-            let from = Position { offset: previous, ..start };
+            let from = Position {
+                offset: previous,
+                ..start
+            };
             replace_title_range(project, from, start, "", *typing)?;
             Ok(Selection::caret(from))
         })
@@ -208,11 +289,7 @@ impl EditingSession {
 
     pub(super) fn mutate_title<F>(&mut self, operation: F) -> Result<(), EditError>
     where
-        F: FnOnce(
-            &mut Project,
-            &Selection,
-            &mut RunStyleFlags,
-        ) -> Result<Selection, EditError>,
+        F: FnOnce(&mut Project, &Selection, &mut RunStyleFlags) -> Result<Selection, EditError>,
     {
         let mut project = self.project.clone();
         let before_title = self.project.title_page.clone();
@@ -251,8 +328,8 @@ impl EditingSession {
         validate_full_candidate(&project)?;
         validate_title_selection(&project, selection)?;
         if project == self.project {
-            let transient_changed = self.title_selection != selection
-                || self.title_typing_style != typing;
+            let transient_changed =
+                self.title_selection != selection || self.title_typing_style != typing;
             self.title_selection = selection;
             self.title_typing_style = typing;
             if transient_changed {
@@ -304,7 +381,11 @@ fn join_title_at(project: &mut Project, left_index: usize) -> Result<(), EditErr
     runs.extend(effective_title_runs(&right));
     left.text.push_str(&right.text);
     coalesce_runs(&mut runs);
-    left.runs = if left.text.is_empty() { Vec::new() } else { runs };
+    left.runs = if left.text.is_empty() {
+        Vec::new()
+    } else {
+        runs
+    };
     project.title_page[left_index] = left;
     project.title_page.remove(right_index);
     Ok(())
@@ -364,7 +445,11 @@ fn replace_title_range(
                         .ensure_run_range_is_contiguous(&old.id, start.offset..end.offset)
                         .map_err(EditError::Preservation)?;
                 }
-                let expected = old.runs.iter().map(|run| run.text.clone()).collect::<Vec<_>>();
+                let expected = old
+                    .runs
+                    .iter()
+                    .map(|run| run.text.clone())
+                    .collect::<Vec<_>>();
                 preservation
                     .replace_managed_text(
                         &old.id,

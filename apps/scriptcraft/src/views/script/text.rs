@@ -1,12 +1,12 @@
 //! Script View span styling, galley construction, and interaction projection.
 
 use super::ScriptCraftApp;
+use crate::presentation::style::AdvanceMode;
 use crate::{
     app::PerformanceDiagnostics,
     chrome::theme,
     presentation::{document_font, geometry as presentation_geometry, style},
 };
-use crate::presentation::style::AdvanceMode;
 use eframe::egui::{self, Color32, FontFamily, FontId};
 use egui::epaint::text::{Galley, LayoutJob};
 use scriptcraft_layout::LayoutLine;
@@ -20,15 +20,22 @@ impl ScriptCraftApp {
         scale: f32,
     ) -> Result<Option<presentation_geometry::PresentationLine<'a>>, ()> {
         let palette = self.theme_palette.script_workspace.page;
-        let resolved = line.spans.iter().map(|span| {
-            resolve_span_paint(
-                &span.text_style,
-                span.text_style.size as f32 * scale,
-                palette,
-                &self.document_font_availability,
-            )
-        }).collect::<Vec<_>>();
-        if !resolved.iter().any(|paint| paint.advance_mode == AdvanceMode::Proportional) {
+        let resolved = line
+            .spans
+            .iter()
+            .map(|span| {
+                resolve_span_paint(
+                    &span.text_style,
+                    span.text_style.size as f32 * scale,
+                    palette,
+                    &self.document_font_availability,
+                )
+            })
+            .collect::<Vec<_>>();
+        if !resolved
+            .iter()
+            .any(|paint| paint.advance_mode == AdvanceMode::Proportional)
+        {
             return Ok(None);
         }
         let painter = ctx.layer_painter(egui::LayerId::new(
@@ -44,18 +51,24 @@ impl ScriptCraftApp {
                     &paint.font,
                     paint.advance_mode,
                     paint.color,
-                ).map_err(|_| ())?;
+                )
+                .map_err(|_| ())?;
                 if reused {
-                    self.performance.galleys_reused = self.performance.galleys_reused.saturating_add(1);
+                    self.performance.galleys_reused =
+                        self.performance.galleys_reused.saturating_add(1);
                 } else {
-                    self.performance.galleys_built = self.performance.galleys_built.saturating_add(1);
+                    self.performance.galleys_built =
+                        self.performance.galleys_built.saturating_add(1);
                 }
                 natural.push(Some(geometry));
             } else {
                 natural.push(None);
             }
         }
-        let modes = resolved.iter().map(|paint| paint.advance_mode).collect::<Vec<_>>();
+        let modes = resolved
+            .iter()
+            .map(|paint| paint.advance_mode)
+            .collect::<Vec<_>>();
         presentation_geometry::project_line(line, &modes, &natural, scale)
             .map(Some)
             .map_err(|_| ())
@@ -123,13 +136,8 @@ pub(super) fn paint_fixed_metric_text_with_selection(
         }
         let color = style.color_for(selected);
         let span_origin = egui::pos2(fixed_metric_x(origin.x, start_column, char_width), origin.y);
-        let (galley, reused, fixed_geometry) = fixed_cell_span_galley(
-            painter,
-            span_text,
-            &font,
-            char_width,
-            color,
-        );
+        let (galley, reused, fixed_geometry) =
+            fixed_cell_span_galley(painter, span_text, &font, char_width, color);
         if reused {
             performance.galleys_reused = performance.galleys_reused.saturating_add(1);
         } else {
@@ -292,8 +300,6 @@ pub(super) fn resolve_span_paint(
         advance_mode: face.advance_mode,
     }
 }
-
-
 
 fn fixed_metric_x(origin: f32, column: usize, char_width: f32) -> f32 {
     origin + column as f32 * char_width

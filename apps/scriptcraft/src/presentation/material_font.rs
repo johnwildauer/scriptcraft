@@ -163,18 +163,8 @@ pub(crate) fn install(context: &egui::Context, custom_axes: &[MaterialIconAxes])
     }
 
     for axes in registered_axes {
-        add_face(
-            context,
-            egui_material_icons::IconStyle::Filled,
-            axes,
-            1.0,
-        );
-        add_face(
-            context,
-            egui_material_icons::IconStyle::Outlined,
-            axes,
-            0.0,
-        );
+        add_face(context, egui_material_icons::IconStyle::Filled, axes, 1.0);
+        add_face(context, egui_material_icons::IconStyle::Outlined, axes, 0.0);
     }
 }
 
@@ -225,9 +215,7 @@ fn add_face(
 fn family_name(style: egui_material_icons::IconStyle, axes: MaterialIconAxes) -> String {
     if axes == MaterialIconAxes::DEFAULT {
         return match style {
-            egui_material_icons::IconStyle::Filled => {
-                egui_material_icons::FONT_FAMILY.to_owned()
-            }
+            egui_material_icons::IconStyle::Filled => egui_material_icons::FONT_FAMILY.to_owned(),
             egui_material_icons::IconStyle::Outlined => {
                 egui_material_icons::FONT_FAMILY_OUTLINED.to_owned()
             }

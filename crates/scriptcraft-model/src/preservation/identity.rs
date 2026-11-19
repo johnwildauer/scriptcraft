@@ -1,6 +1,6 @@
 use super::error::PreservationError;
 use super::tree::SourceOwnership;
-use super::tree::MAX_SOURCE_NAME_OR_VALUE_BYTES;
+use super::tree::{MAX_SOURCE_EVENTS, MAX_SOURCE_NAME_OR_VALUE_BYTES};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourceAnchorId(String);
@@ -15,6 +15,16 @@ impl SourceAnchorId {
             return Err(PreservationError::InvalidAnchor);
         }
         Ok(Self(value))
+    }
+
+    /// Allocates the bounded deterministic namespace used for retained
+    /// ElementSettings anchors. The ordinal is limited by the source event
+    /// budget rather than being derived from an untrusted source label.
+    pub fn for_element_definition(ordinal: usize) -> Result<Self, PreservationError> {
+        if ordinal >= MAX_SOURCE_EVENTS {
+            return Err(PreservationError::InvalidAnchor);
+        }
+        Self::new(format!("fdx-definition-{ordinal}"))
     }
 
     pub fn as_str(&self) -> &str {
@@ -66,6 +76,7 @@ impl ForeignIdentity {
 pub enum AnchorTarget {
     ProjectElement(crate::StableId),
     DualDialogueWrapper(crate::StableId),
+    ElementDefinition(crate::element_type::ElementTypeKey),
     Foreign(ForeignIdentity),
 }
 

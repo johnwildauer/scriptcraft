@@ -1,12 +1,14 @@
-use super::*;
-use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
-use crate::{BodyOwner, Role, ScreenplayElement, SourceFormat, SourceProvenance, SourceSection, StableId};
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use super::dual_dialogue::is_exact_dual_dialogue_member_location;
 use super::navigation::element_at_path_mut;
 use super::text::is_text_element;
-use super::text::{fdx_role_name, semantic_text_runs, source_name_from_qname};
-use super::dual_dialogue::is_exact_dual_dialogue_member_location;
+use super::text::{semantic_text_runs, source_name_from_qname};
+use super::*;
+use crate::paragraph_id::{ParagraphIdAllocationError, ParagraphIdAllocator};
+use crate::{
+    BodyOwner, Role, ScreenplayElement, SourceFormat, SourceProvenance, SourceSection, StableId,
+};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub(super) struct ManagedParagraphTemplate {
     pub(super) paragraph_name: SourceName,
@@ -64,7 +66,7 @@ pub(super) fn paragraph_template(
 }
 
 impl PreservationState {
-/// Reconciles a body-structure edit in the same candidate as its semantic
+    /// Reconciles a body-structure edit in the same candidate as its semantic
     /// model. Existing foreign paragraph IDs stay with surviving elements;
     /// newly inserted paragraphs receive fresh foreign and source-anchor IDs.
     /// Surviving owners keep strict text-mapping safeguards. Deleted owners'
@@ -111,22 +113,26 @@ impl PreservationState {
             };
             let final_removed = &removed[removed.len() - 1];
             let has_inline_attachment = self.has_owner_opaque_data(&previous.id)
-                || removed.iter().any(|item| self.has_owner_opaque_data(&item.id));
-            if !has_inline_attachment
-            {
+                || removed
+                    .iter()
+                    .any(|item| self.has_owner_opaque_data(&item.id));
+            if !has_inline_attachment {
                 continue;
             }
-            if (self.has_inline_alts(&previous.id) && previous.role != Role::Dialogue)
+            if (self.has_inline_alts(&previous.id)
+                && previous.transitional_role() != Role::Dialogue)
                 || removed.iter().any(|item| {
-                    self.has_inline_alts(&item.id) && item.role != Role::Dialogue
+                    self.has_inline_alts(&item.id) && item.transitional_role() != Role::Dialogue
                 })
             {
                 return Err(PreservationError::StructuralAttachmentConflict);
             }
             let mut partitions = Vec::new();
-            for (prefix_len, _) in previous.text.char_indices().chain(
-                std::iter::once((previous.text.len(), '\0')),
-            ) {
+            for (prefix_len, _) in previous
+                .text
+                .char_indices()
+                .chain(std::iter::once((previous.text.len(), '\0')))
+            {
                 if !updated.text.starts_with(&previous.text[..prefix_len]) {
                     continue;
                 }
@@ -143,7 +149,11 @@ impl PreservationState {
             let [(prefix_len, suffix_start)] = partitions.as_slice() else {
                 return Err(PreservationError::UnsupportedTextMapping);
             };
-            let expected_runs = previous.runs.iter().map(|run| run.text.clone()).collect::<Vec<_>>();
+            let expected_runs = previous
+                .runs
+                .iter()
+                .map(|run| run.text.clone())
+                .collect::<Vec<_>>();
             self.reconcile_joined_text_nodes(
                 &previous.id,
                 &previous.text,
@@ -159,10 +169,7 @@ impl PreservationState {
 
         for element in before {
             if !after_ids.contains(&element.id) && self.has_managed_element(&element.id) {
-                self.remove_managed_paragraph(
-                    &element.id,
-                    element.source_provenance.as_ref(),
-                )?;
+                self.remove_managed_paragraph(&element.id, element.source_provenance.as_ref())?;
             }
         }
 
@@ -197,7 +204,11 @@ impl PreservationState {
             {
                 continue;
             }
-            let expected = original.runs.iter().map(|run| run.text.clone()).collect::<Vec<_>>();
+            let expected = original
+                .runs
+                .iter()
+                .map(|run| run.text.clone())
+                .collect::<Vec<_>>();
             self.trim_split_text(
                 &original.id,
                 &original.text,
@@ -225,16 +236,17 @@ impl PreservationState {
         Ok(())
     }
 
-fn insert_managed_paragraph(
+    fn insert_managed_paragraph(
         &mut self,
         semantic: &ScreenplayElement,
         index: usize,
         ordered: &[StableId],
         groups: &[crate::dual_dialogue::DualDialogueGroup],
     ) -> Result<SourceProvenance, PreservationError> {
-        if let Some(group) = groups.iter().find(|group| {
-            group.member_ids().any(|member| member == &semantic.id)
-        }) {
+        if let Some(group) = groups
+            .iter()
+            .find(|group| group.member_ids().any(|member| member == &semantic.id))
+        {
             return self.insert_nested_managed_paragraph(semantic, index, group);
         }
         let ManagedParagraphTemplate {
@@ -253,12 +265,15 @@ fn insert_managed_paragraph(
         let foreign_id = self.fresh_foreign_paragraph_id()?;
         let anchor_id = self.fresh_anchor_id()?;
         let text_runs = semantic_text_runs(semantic);
+        let type_label = semantic.element_type();
+        // Managed Type and provenance projections follow the exact key facade;
+        // static-role checks above remain transitional formatting policy only.
         let mut paragraph = PreservedElement {
             name: paragraph_name,
             attributes: vec![
                 PreservedAttribute {
                     name: plain_source_name("Type"),
-                    value: fdx_role_name(semantic.role).to_owned(),
+                    value: type_label.as_str().to_owned(),
                 },
                 PreservedAttribute {
                     name: plain_source_name(&id_spelling),
@@ -266,7 +281,7 @@ fn insert_managed_paragraph(
                 },
             ],
             namespace_bindings: paragraph_bindings,
-            source_type: Some(fdx_role_name(semantic.role).to_owned()),
+            source_type: Some(type_label.as_str().to_owned()),
             ownership: SourceOwnership::Managed(semantic.id.clone()),
             dependency_confidence: DependencyConfidence::Unknown,
             anchor: Some(anchor_id.clone()),
@@ -347,12 +362,11 @@ fn insert_managed_paragraph(
             section: SourceSection::Content,
             ordinal: u32::try_from(index).map_err(|_| PreservationError::TooManyEvents)?,
             foreign_id: Some(foreign_id),
-            foreign_role: Some(fdx_role_name(semantic.role).to_owned()),
+            foreign_role: Some(type_label.as_str().to_owned()),
         })
     }
 
-
-pub(super) fn remove_managed_paragraph(
+    pub(super) fn remove_managed_paragraph(
         &mut self,
         id: &StableId,
         provenance: Option<&SourceProvenance>,
@@ -404,6 +418,7 @@ pub(super) fn remove_managed_paragraph(
                         AnchorTarget::DualDialogueWrapper(target) => {
                             removed_project_ids.contains(target)
                         }
+                        AnchorTarget::ElementDefinition(_) => false,
                     }
             })
             .map(|anchor| anchor.id.clone())
@@ -421,12 +436,11 @@ pub(super) fn remove_managed_paragraph(
             !(identity.domain == ForeignIdDomain::Paragraph
                 && removed_foreign_ids.contains(&identity.value))
         });
-        self.references.retain(|reference| {
-            !paragraph_reference_touches(reference, &removed_foreign_ids)
-        });
-        self.board_graph.references.retain(|reference| {
-            !paragraph_reference_touches(reference, &removed_foreign_ids)
-        });
+        self.references
+            .retain(|reference| !paragraph_reference_touches(reference, &removed_foreign_ids));
+        self.board_graph
+            .references
+            .retain(|reference| !paragraph_reference_touches(reference, &removed_foreign_ids));
         for removed_id in removed_project_ids {
             self.source_layout_settings
                 .direct_paragraph_overrides
@@ -439,7 +453,7 @@ pub(super) fn remove_managed_paragraph(
         Ok(())
     }
 
-pub(super) fn fresh_foreign_paragraph_id(&mut self) -> Result<String, PreservationError> {
+    pub(super) fn fresh_foreign_paragraph_id(&mut self) -> Result<String, PreservationError> {
         self.ensure_source_identity_use_index();
         let indexed_source_ids = self.indexed_source_id_values();
         let reserved = self
@@ -476,7 +490,7 @@ pub(super) fn fresh_foreign_paragraph_id(&mut self) -> Result<String, Preservati
         })
     }
 
-pub(super) fn fresh_anchor_id(&self) -> Result<SourceAnchorId, PreservationError> {
+    pub(super) fn fresh_anchor_id(&self) -> Result<SourceAnchorId, PreservationError> {
         for serial in 1..=u64::try_from(MAX_SOURCE_EVENTS).unwrap_or(u64::MAX) {
             let candidate = SourceAnchorId::new(format!("scriptcraft-anchor-{serial}"))?;
             if !self.anchors.iter().any(|anchor| anchor.id == candidate) {
@@ -540,7 +554,6 @@ pub(super) fn managed_child_index(nodes: &[PreservedNode], id: &StableId) -> Opt
     })
 }
 
-
 fn collect_owner_registrations(
     root: &PreservedElement,
     foreign_ids: &mut BTreeSet<String>,
@@ -594,7 +607,15 @@ fn collect_owner_registrations(
             }
         }
     }
-    collect(root, None, None, false, foreign_ids, project_ids, anchor_ids);
+    collect(
+        root,
+        None,
+        None,
+        false,
+        foreign_ids,
+        project_ids,
+        anchor_ids,
+    );
 }
 
 fn clear_stale_anchor_bindings(
@@ -620,11 +641,7 @@ fn clear_stale_anchor_bindings(
             element.ownership = SourceOwnership::Opaque;
             element.anchor = None;
         }
-        clear_stale_anchor_bindings(
-            &mut element.children,
-            stale_anchors,
-            removed_foreign_ids,
-        );
+        clear_stale_anchor_bindings(&mut element.children, stale_anchors, removed_foreign_ids);
     }
 }
 
@@ -666,20 +683,30 @@ fn remove_managed_at_location(
 }
 
 pub(super) fn paragraph_id_attribute_count(paragraph: &PreservedElement) -> usize {
-    paragraph.attributes.iter().filter(|attribute| {
-        attribute.name.namespace_uri.is_none()
-            && attribute.name.local_name.eq_ignore_ascii_case("id")
-    }).count()
+    paragraph
+        .attributes
+        .iter()
+        .filter(|attribute| {
+            attribute.name.namespace_uri.is_none()
+                && attribute.name.local_name.eq_ignore_ascii_case("id")
+        })
+        .count()
 }
 
 pub(super) fn set_paragraph_foreign_id(
     paragraph: &mut PreservedElement,
     value: &str,
 ) -> Result<(), PreservationError> {
-    let indexes = paragraph.attributes.iter().enumerate().filter(|(_, attribute)| {
-        attribute.name.namespace_uri.is_none()
-            && attribute.name.local_name.eq_ignore_ascii_case("id")
-    }).map(|(index, _)| index).collect::<Vec<_>>();
+    let indexes = paragraph
+        .attributes
+        .iter()
+        .enumerate()
+        .filter(|(_, attribute)| {
+            attribute.name.namespace_uri.is_none()
+                && attribute.name.local_name.eq_ignore_ascii_case("id")
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
     match indexes.as_slice() {
         [index] => paragraph.attributes[*index].value = value.to_owned(),
         [] => paragraph.attributes.push(PreservedAttribute {

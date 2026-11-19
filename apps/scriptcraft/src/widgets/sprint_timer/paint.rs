@@ -4,11 +4,10 @@ use std::time::Duration;
 use super::geometry::{
     centered_active_display_panel_rect, mode_focus_rect, mode_switch_knob_center,
     mode_switch_track_rect, PopupGeometryLedger, SprintTimerPopupPlacement,
-    POPUP_COUNTDOWN_EDITOR_HEIGHT, POPUP_COUNTDOWN_EDITOR_WIDTH,
-    POPUP_MODE_SWITCH_KNOB_DIAMETER,
+    POPUP_COUNTDOWN_EDITOR_HEIGHT, POPUP_COUNTDOWN_EDITOR_WIDTH, POPUP_MODE_SWITCH_KNOB_DIAMETER,
 };
-use super::state::NotificationFeedback;
 use super::interaction::ModeSelectorAccessibility;
+use super::state::NotificationFeedback;
 use super::SprintTimer;
 
 pub(super) const POPUP_MODE_LABEL_FONT_SIZE: f32 = 13.0;
@@ -145,11 +144,7 @@ pub(super) fn paint_popup_feedback(
         egui::Sense::hover(),
     );
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::WidgetType::Label,
-            true,
-            feedback_text.to_owned(),
-        )
+        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, feedback_text.to_owned())
     });
     let color = if timer.validation_error.is_some() {
         ui.visuals().error_fg_color
@@ -304,10 +299,7 @@ pub(super) fn paint_popup_notch(
     ));
     // Erase the body's straight bottom stroke across the join so the triangle
     // and rounded body read as one silhouette rather than two stacked shapes.
-    painter.line_segment(
-        [left_base, right_base],
-        egui::Stroke::new(2.0, fill),
-    );
+    painter.line_segment([left_base, right_base], egui::Stroke::new(2.0, fill));
     if border.width > 0.0 && border.color != egui::Color32::TRANSPARENT {
         let notch_stroke = egui::Stroke::new(border.width.max(1.0), border.color);
         painter.line_segment([left_base, tip], notch_stroke);

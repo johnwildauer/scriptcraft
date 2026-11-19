@@ -5,7 +5,9 @@ use crate::document::WindowState;
 use crate::reader::{RawElement, RawNode};
 use crate::tree::new_lineage_element;
 use crate::FdxError;
-use scriptcraft_model::preservation::{PreservedElement, PreservedNode, PreservedSection, SourceName};
+use scriptcraft_model::preservation::{
+    PreservedElement, PreservedNode, PreservedSection, SourceName,
+};
 use std::collections::BTreeMap;
 
 /// Project one unambiguous direct-root WindowState from bounded raw XML.
@@ -25,7 +27,10 @@ pub(crate) fn raw_root_window_state(root: &RawElement) -> Option<WindowState> {
     let mut parsed = BTreeMap::new();
     for attribute in &window.attributes {
         if attribute.name.namespace_uri.is_none()
-            && matches!(attribute.name.local_name.as_str(), "Left" | "Top" | "Width" | "Height")
+            && matches!(
+                attribute.name.local_name.as_str(),
+                "Left" | "Top" | "Width" | "Height"
+            )
             && parsed
                 .insert(attribute.name.local_name.as_str(), attribute.value.as_str())
                 .is_some()
@@ -34,7 +39,12 @@ pub(crate) fn raw_root_window_state(root: &RawElement) -> Option<WindowState> {
         }
     }
     let parse = |name: &'static str| parsed.get(name)?.parse::<i32>().ok();
-    WindowState::new(parse("Left")?, parse("Top")?, parse("Width")?, parse("Height")?)
+    WindowState::new(
+        parse("Left")?,
+        parse("Top")?,
+        parse("Width")?,
+        parse("Height")?,
+    )
 }
 
 /// Generate the canonical root WindowState block.
@@ -127,7 +137,9 @@ pub(crate) fn reconcile_root_window_state(
     }
     let needs_leading_space = insertion == 0
         || matches!(
-            insertion.checked_sub(1).and_then(|index| root.children.get(index)),
+            insertion
+                .checked_sub(1)
+                .and_then(|index| root.children.get(index)),
             Some(PreservedNode::Element(_))
         );
     if needs_leading_space {

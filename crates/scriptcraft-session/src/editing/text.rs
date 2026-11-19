@@ -237,7 +237,9 @@ pub(super) fn replace_element_text(
         project
             .preservation
             .as_mut()
-            .ok_or(EditError::Preservation(PreservationError::ManagedAnchorMissing))?
+            .ok_or(EditError::Preservation(
+                PreservationError::ManagedAnchorMissing,
+            ))?
             .sync_managed_text_runs(
                 &id,
                 &project.elements[element_index].text,

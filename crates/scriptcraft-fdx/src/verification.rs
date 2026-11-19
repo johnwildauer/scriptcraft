@@ -9,8 +9,8 @@ use crate::{
 };
 use scriptcraft_model::dual_dialogue::DualDialogueGroup;
 use scriptcraft_model::preservation::{
-    ForeignIdDomain, ForeignIdentity, PreservedElement, PreservedNode, PreservedSection,
-    SourceAnchorId, SourceName, SourceOwnership,
+    ForeignIdDomain, ForeignIdentity, PreservedNode, PreservedSection, SourceAnchorId, SourceName,
+    SourceOwnership,
 };
 use scriptcraft_model::{BodyOwner, Project, TitlePageParagraph};
 use std::collections::BTreeSet;
@@ -38,7 +38,10 @@ pub(crate) struct IdentitySetDifference {
     unexpected: bool,
 }
 
-pub(crate) fn same_non_paragraph_identities(left: &[ForeignIdentity], right: &[ForeignIdentity]) -> bool {
+pub(crate) fn same_non_paragraph_identities(
+    left: &[ForeignIdentity],
+    right: &[ForeignIdentity],
+) -> bool {
     left.iter()
         .filter(|identity| identity.domain != ForeignIdDomain::Paragraph)
         .eq(right
@@ -94,7 +97,7 @@ pub(crate) fn same_semantic_elements(
 ) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
-            left.role == right.role
+            left.element_type() == right.element_type()
                 && left.text == right.text
                 && if left.runs.is_empty() {
                     right.runs.iter().all(|run| run.attributes.is_empty())
@@ -104,12 +107,40 @@ pub(crate) fn same_semantic_elements(
         })
 }
 
+pub(crate) fn same_semantic_element_definitions(left: &Project, right: &Project) -> bool {
+    left.element_definitions() == right.element_definitions()
+}
+
 pub fn same_dual_dialogue_projection(left: &Project, right: &Project) -> bool {
     fn member_positions(project: &Project, group: &DualDialogueGroup) -> Option<Vec<usize>> {
         group
             .member_ids()
-            .map(|id| project.elements.iter().position(|element| &element.id == id))
+            .map(|id| {
+                project
+                    .elements
+                    .iter()
+                    .position(|element| &element.id == id)
+            })
             .collect()
+    }
+
+    fn active_side_positions(
+        project: &Project,
+        group: &DualDialogueGroup,
+    ) -> Option<(Vec<usize>, Vec<usize>)> {
+        let projection =
+            scriptcraft_model::dual_dialogue::active_dual_dialogue_projection(project, group)?;
+        let positions = |side: &scriptcraft_model::dual_dialogue::DualDialogueSide| {
+            side.member_ids()
+                .map(|id| {
+                    project
+                        .elements
+                        .iter()
+                        .position(|element| &element.id == id)
+                })
+                .collect::<Option<Vec<_>>>()
+        };
+        Some((positions(&projection.left)?, positions(&projection.right)?))
     }
 
     if left.dual_dialogue_groups.len() != right.dual_dialogue_groups.len() {
@@ -120,9 +151,10 @@ pub fn same_dual_dialogue_projection(left: &Project, right: &Project) -> bool {
         .iter()
         .zip(&right.dual_dialogue_groups)
     {
-        if left_group.left.paragraphs.len() != right_group.left.paragraphs.len()
-            || left_group.right.paragraphs.len() != right_group.right.paragraphs.len()
+        if left_group.members.len() != right_group.members.len()
+            || active_side_positions(left, left_group) != active_side_positions(right, right_group)
             || member_positions(left, left_group) != member_positions(right, right_group)
+            || (left.preservation.is_some() && left_group.members != right_group.members)
         {
             return false;
         }
@@ -131,16 +163,16 @@ pub fn same_dual_dialogue_projection(left: &Project, right: &Project) -> bool {
         {
             return false;
         }
-        if left_group.wrapper.outer_foreign_id.is_some()
-            && !left_group.wrapper.source.as_ref().zip(right_group.wrapper.source.as_ref())
-                .is_some_and(|(expected, actual)| {
-                    expected.format == actual.format
-                        && expected.section == actual.section
-                        && expected.foreign_id == actual.foreign_id
-                        && expected.foreign_role == actual.foreign_role
-                })
-        {
-            return false;
+        if let Some(expected) = left_group.wrapper.source.as_ref() {
+            if !right_group.wrapper.source.as_ref().is_some_and(|actual| {
+                expected.format == actual.format
+                    && expected.section == actual.section
+                    && expected.ordinal == actual.ordinal
+                    && expected.foreign_id == actual.foreign_id
+                    && expected.foreign_role == actual.foreign_role
+            }) {
+                return false;
+            }
         }
         let left_overrides = left.dual_dialogue_paragraph_overrides.get(&left_group.id);
         let right_overrides = right.dual_dialogue_paragraph_overrides.get(&right_group.id);
@@ -162,7 +194,6 @@ pub fn same_dual_dialogue_projection(left: &Project, right: &Project) -> bool {
                         if !actual_source.is_some_and(|actual| {
                             actual.foreign_id.as_deref() == Some(expected_foreign_id)
                                 && actual.section == expected_source.section
-                                && actual.foreign_role == expected_source.foreign_role
                         }) {
                             return false;
                         }
@@ -185,7 +216,7 @@ pub(crate) fn same_semantic_title_paragraphs(
 ) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(left, right)| {
-            left.role == right.role
+            left.element_type() == right.element_type()
                 && left.text == right.text
                 && left.formatting == right.formatting
                 && if left.runs.is_empty() {
@@ -194,6 +225,232 @@ pub(crate) fn same_semantic_title_paragraphs(
                     left.runs == right.runs
                 }
         })
+}
+
+pub(crate) fn same_writer_semantic_projection(left: &Project, right: &Project) -> bool {
+    same_semantic_element_definitions(left, right)
+        && same_semantic_title_paragraphs(&left.title_page, &right.title_page)
+        && same_semantic_elements(&left.elements, &right.elements)
+        && same_dual_dialogue_projection(left, right)
+}
+
+pub(crate) fn verify_writer_semantic_projection(
+    expected: &Project,
+    actual: &Project,
+) -> Result<(), FdxError> {
+    if same_writer_semantic_projection(expected, actual) {
+        Ok(())
+    } else {
+        Err(SaveDiagnosticCode::WriteSemanticRereadMismatch.error())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scriptcraft_model::{BodyOwner, ElementDefinition, ElementTypeKey};
+
+    fn project_with_changed_action(change: impl FnOnce(&mut ElementDefinition)) -> Project {
+        let mut project = Project::new().expect("the default project should be valid");
+        let mut definitions = project
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let action = definitions
+            .iter_mut()
+            .find(|definition| definition.key.as_str() == "Action")
+            .expect("the default project should define Action");
+        change(action);
+        project
+            .replace_element_definitions(definitions)
+            .expect("the changed definitions should remain valid");
+        project
+    }
+
+    #[test]
+    fn semantic_definition_comparison_includes_order_and_complete_values() {
+        let original = Project::new().expect("the default project should be valid");
+        let identical = original.clone();
+        assert!(same_semantic_element_definitions(&original, &identical));
+
+        let mut reordered = original.clone();
+        let definitions = reordered
+            .element_definitions()
+            .iter()
+            .cloned()
+            .rev()
+            .collect::<Vec<_>>();
+        reordered
+            .replace_element_definitions(definitions)
+            .expect("reordered unique definitions should remain valid");
+        assert!(!same_semantic_element_definitions(&original, &reordered));
+
+        let changed_behavior = project_with_changed_action(|definition| {
+            definition.behavior.paginate_as = Some("Dialogue".to_owned());
+        });
+        assert!(!same_semantic_element_definitions(
+            &original,
+            &changed_behavior
+        ));
+
+        let changed_outline = project_with_changed_action(|definition| {
+            definition.outline.can_hide = !definition.outline.can_hide;
+        });
+        assert!(!same_semantic_element_definitions(
+            &original,
+            &changed_outline
+        ));
+
+        let changed_font = project_with_changed_action(|definition| {
+            definition.font.family = "Changed font family".to_owned();
+        });
+        assert!(!same_semantic_element_definitions(&original, &changed_font));
+
+        let changed_paragraph = project_with_changed_action(|definition| {
+            definition.paragraph.spacing = definition.paragraph.spacing.saturating_add(1);
+        });
+        assert!(!same_semantic_element_definitions(
+            &original,
+            &changed_paragraph
+        ));
+
+        let changed_color = project_with_changed_action(|definition| {
+            definition.font.color = Some("#87878F8FE0E0".to_owned());
+        });
+        assert!(!same_semantic_element_definitions(
+            &original,
+            &changed_color
+        ));
+
+        let changed_case = project_with_changed_action(|definition| {
+            definition.key =
+                ElementTypeKey::new("action").expect("a case-distinct key should be valid");
+        });
+        assert_eq!(original.elements, changed_case.elements);
+        assert_eq!(original.title_page, changed_case.title_page);
+        assert!(!same_semantic_element_definitions(&original, &changed_case));
+    }
+
+    #[test]
+    fn writer_semantic_gate_detects_body_and_optional_title_key_changes() {
+        let mut original = Project::new().expect("the default project should be valid");
+
+        let mut changed_body = original.clone();
+        let general = ElementTypeKey::new("General").expect("General is a valid key");
+        BodyOwner::update(&mut changed_body.elements[0], |element| {
+            element.set_element_type(general);
+        });
+        assert!(!same_writer_semantic_projection(&original, &changed_body));
+
+        original.title_page[0].element_type = Some(
+            ElementTypeKey::new("Action").expect("Action is a valid title key for comparison"),
+        );
+        let mut changed_title = original.clone();
+        changed_title.title_page[0].element_type = None;
+        assert!(!same_writer_semantic_projection(&original, &changed_title));
+
+        assert!(same_writer_semantic_projection(
+            &original,
+            &original.clone()
+        ));
+    }
+
+    #[test]
+    fn writer_semantic_mismatches_use_semantic_diagnostic_before_source_comparison() {
+        fn with_changed_action(
+            project: &Project,
+            change: impl FnOnce(&mut ElementDefinition),
+        ) -> Project {
+            let mut candidate = project.clone();
+            let mut definitions = candidate
+                .element_definitions()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            let action = definitions
+                .iter_mut()
+                .find(|definition| definition.key.as_str() == "Action")
+                .expect("fixture defines Action");
+            change(action);
+            candidate
+                .replace_element_definitions(definitions)
+                .expect("changed definition remains valid");
+            candidate
+        }
+
+        let original =
+            crate::reader::read_v6(include_bytes!("../tests/fixtures/smoke_screenplay.fdx"))
+                .expect("round-trip fixture imports")
+                .project;
+        let original_sections = normalize_sections(
+            &original
+                .preservation
+                .as_ref()
+                .expect("fixture has retained source")
+                .sections,
+        );
+        let mut changed_font = with_changed_action(&original, |definition| {
+            definition.font.family.push_str(" changed");
+        });
+        let mut changed_paragraph = with_changed_action(&original, |definition| {
+            definition.paragraph.spacing = definition.paragraph.spacing.saturating_add(1);
+        });
+        let mut changed_behavior = with_changed_action(&original, |definition| {
+            definition.behavior.paginate_as = Some("Other".to_owned());
+        });
+        let mut changed_outline = with_changed_action(&original, |definition| {
+            definition.outline.level = definition.outline.level.saturating_add(1);
+        });
+        let mut changed_color = with_changed_action(&original, |definition| {
+            definition.font.color = Some("#123456789ABC".to_owned());
+        });
+        let mut changed_order = original.clone();
+        let mut reordered = changed_order
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        reordered.reverse();
+        changed_order
+            .replace_element_definitions(reordered)
+            .expect("reversed unique registry remains valid");
+
+        let mut changed_body_key = original.clone();
+        BodyOwner::update(&mut changed_body_key.elements[1], |element| {
+            element
+                .set_element_type(ElementTypeKey::new("General").expect("General is a valid key"));
+        });
+        let mut changed_title_key = original.clone();
+        changed_title_key.title_page[0].element_type = None;
+
+        for candidate in [
+            &mut changed_font,
+            &mut changed_paragraph,
+            &mut changed_behavior,
+            &mut changed_outline,
+            &mut changed_color,
+            &mut changed_order,
+            &mut changed_body_key,
+            &mut changed_title_key,
+        ] {
+            assert_eq!(
+                normalize_sections(
+                    &candidate
+                        .preservation
+                        .as_ref()
+                        .expect("candidate keeps original source")
+                        .sections
+                ),
+                original_sections,
+                "semantic differences must not be obscured by equal retained source"
+            );
+            assert_eq!(
+                verify_writer_semantic_projection(&original, candidate),
+                Err(SaveDiagnosticCode::WriteSemanticRereadMismatch.error())
+            );
+        }
+    }
 }
 
 pub(crate) fn validate_project_output_budgets(project: &Project) -> Result<(), FdxError> {
@@ -792,7 +1049,11 @@ fn first_node_sequence_difference(
                         actual_summary,
                     ));
                 }
-                if expected_element.anchor != actual_element.anchor {
+                // Anchor identifiers are in-memory keys and are allocated
+                // again when the emitted XML is re-read. Retain the semantic
+                // source projection check: a winning settings node must stay
+                // anchored and an inert duplicate must stay unanchored.
+                if expected_element.anchor.is_some() != actual_element.anchor.is_some() {
                     return Some(difference(
                         child_path,
                         "anchor",
@@ -905,6 +1166,7 @@ fn first_node_sequence_difference(
 
 fn normalize_source_tree(nodes: &[PreservedNode]) -> Vec<PreservedNode> {
     let mut normalized = normalize_text_nodes(nodes);
+    let normalized_definition_anchor = SourceAnchorId::for_element_definition(0).ok();
     let mut stack = normalized.iter_mut().collect::<Vec<_>>();
     while let Some(node) = stack.pop() {
         if let PreservedNode::Element(element) = node {
@@ -914,6 +1176,15 @@ fn normalize_source_tree(nodes: &[PreservedNode]) -> Vec<PreservedNode> {
                 // reread. Compare the source XML structure, not these keys.
                 element.ownership = SourceOwnership::Opaque;
                 element.anchor = None;
+            } else if element.name.local_name == "ElementSettings" {
+                // Definition anchors are not serialized. Normalize only their
+                // allocation identity while preserving presence, so winners
+                // remain distinguishable from inert, unanchored duplicates.
+                if element.anchor.is_some() {
+                    element.anchor = normalized_definition_anchor
+                        .clone()
+                        .or_else(|| element.anchor.clone());
+                }
             }
             stack.extend(element.children.iter_mut());
         }

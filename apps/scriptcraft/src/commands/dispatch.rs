@@ -2,9 +2,8 @@ use crate::app::ScriptCraftApp;
 use crate::documents::lifecycle::SaveOutcome;
 use eframe::egui;
 use scriptcraft_commands::{
-    Command, CommandId, CommandOrigin, CommandOutcome, CommandRejection,
-    DiagnosticMessage, EditorSurface, HostEffectDescription,
-    MAX_DIAGNOSTIC_MESSAGE_BYTES,
+    Command, CommandId, CommandOrigin, CommandOutcome, CommandRejection, DiagnosticMessage,
+    EditorSurface, HostEffectDescription, MAX_DIAGNOSTIC_MESSAGE_BYTES,
 };
 use std::collections::VecDeque;
 
@@ -44,7 +43,9 @@ pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::WindowTitlePageOpen => Command::WindowTitlePageOpen,
         CommandId::WindowTitlePageClose => Command::WindowTitlePageClose,
         CommandId::EditorDualDialogueToggle => Command::EditorDualDialogueToggle,
-        CommandId::EditorStyleClear => Command::EditorStyleClear { surface: EditorSurface::Body },
+        CommandId::EditorStyleClear => Command::EditorStyleClear {
+            surface: EditorSurface::Body,
+        },
         _ => return None,
     })
 }
@@ -101,11 +102,8 @@ impl ScriptCraftApp {
         let origin = invocation.origin;
         self.flush_pending_diagnostic_commands(ctx);
         let restore_focus = super::navigation::command_restores_editor_focus(command_id);
-        let command = route_to_focused_surface(
-            invocation.command,
-            origin,
-            self.active_editor_surface(),
-        );
+        let command =
+            route_to_focused_surface(invocation.command, origin, self.active_editor_surface());
         let outcome = self.dispatch_command_inner_with_pdf_handlers(
             command,
             ctx,
@@ -176,14 +174,13 @@ impl ScriptCraftApp {
             | Command::FileImportResolve { .. }
             | Command::FileSaveAsPdf
             | Command::FilePrint
-            | Command::PdfIncludeTitlePageResolve { .. }) => self
-                .dispatch_document_command(
-                    command,
-                    ctx,
-                    export_pdf,
-                    resolve_pdf_options,
-                    open_print_panel,
-                ),
+            | Command::PdfIncludeTitlePageResolve { .. }) => self.dispatch_document_command(
+                command,
+                ctx,
+                export_pdf,
+                resolve_pdf_options,
+                open_print_panel,
+            ),
             command @ (Command::WindowTitlePageOpen | Command::WindowTitlePageClose) => {
                 self.dispatch_view_command(command, ctx)
             }
@@ -224,9 +221,9 @@ impl ScriptCraftApp {
             command @ (Command::EditCopy | Command::EditCut | Command::EditPaste) => {
                 self.dispatch_clipboard_command(command, ctx)
             }
-            other => DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(
-                other.id(),
-            )),
+            other => {
+                DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id()))
+            }
         }
     }
 
@@ -259,13 +256,12 @@ impl ScriptCraftApp {
     pub(crate) fn post_diagnostic(&mut self, message: &str) {
         let mut bounded = String::new();
         for character in message.chars() {
-            let character = if character.is_control()
-                || matches!(character, '\u{2028}' | '\u{2029}')
-            {
-                ' '
-            } else {
-                character
-            };
+            let character =
+                if character.is_control() || matches!(character, '\u{2028}' | '\u{2029}') {
+                    ' '
+                } else {
+                    character
+                };
             if bounded.len() + character.len_utf8() > MAX_DIAGNOSTIC_MESSAGE_BYTES {
                 break;
             }
@@ -285,7 +281,6 @@ impl ScriptCraftApp {
                 message: Some(message),
             });
     }
-
 }
 
 fn route_to_focused_surface(
@@ -313,18 +308,36 @@ fn route_to_focused_surface(
         Command::EditorAlignmentSet { alignment, .. } => {
             Command::EditorAlignmentSet { surface, alignment }
         }
-        Command::EditorSelectionSet { selection, .. } => Command::EditorSelectionSet { selection, surface },
-        Command::EditorSelectionPointer { position, phase, .. } => {
-            Command::EditorSelectionPointer { position, phase, surface }
+        Command::EditorSelectionSet { selection, .. } => {
+            Command::EditorSelectionSet { selection, surface }
         }
-        Command::EditorNavigationHorizontal { direction, extend, .. } => {
-            Command::EditorNavigationHorizontal { direction, extend, surface }
-        }
-        Command::EditorNavigationVertical { direction, extend, .. } => {
-            Command::EditorNavigationVertical { direction, extend, surface }
-        }
+        Command::EditorSelectionPointer {
+            position, phase, ..
+        } => Command::EditorSelectionPointer {
+            position,
+            phase,
+            surface,
+        },
+        Command::EditorNavigationHorizontal {
+            direction, extend, ..
+        } => Command::EditorNavigationHorizontal {
+            direction,
+            extend,
+            surface,
+        },
+        Command::EditorNavigationVertical {
+            direction, extend, ..
+        } => Command::EditorNavigationVertical {
+            direction,
+            extend,
+            surface,
+        },
         Command::EditorNavigationLineEdge { edge, extend, .. } => {
-            Command::EditorNavigationLineEdge { edge, extend, surface }
+            Command::EditorNavigationLineEdge {
+                edge,
+                extend,
+                surface,
+            }
         }
         other => other,
     }
