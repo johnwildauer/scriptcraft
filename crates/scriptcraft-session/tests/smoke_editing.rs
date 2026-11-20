@@ -115,6 +115,7 @@ fn arbitrary_paginate_as_text_edit_keeps_scoped_derived_fast_path() {
         scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
             .map(|document| document.project),
     );
+    project.preservation = None;
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -136,6 +137,7 @@ fn arbitrary_paginate_as_text_edit_keeps_scoped_derived_fast_path() {
     )))];
 
     let mut session = valid(EditingSession::new(project));
+    valid(session.refresh_cast_lists());
     valid(session.set_selection(Selection::caret(Position {
         element: 0,
         offset: 0,
@@ -150,6 +152,7 @@ fn current_behavior_guidance_and_enter_use_the_exact_document_key() {
         scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
             .map(|document| document.project),
     );
+    project.preservation = None;
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -203,6 +206,11 @@ fn preservation_free_definition_replacement_is_one_undoable_registry_edit() {
                 .collect(),
         ),
     );
+    project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
+        "preservation-free-definition-replacement-body",
+        valid(ElementTypeKey::new("Action")),
+        "",
+    )))];
     let mut session = valid(EditingSession::new(project.clone()));
     let initial_revision = session.revision();
     let definitions = project
@@ -504,6 +512,7 @@ fn generic_body_type_change_never_unwraps_an_invalidated_dual_group() {
         scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
             .map(|document| document.project),
     );
+    project.preservation = None;
     let left_cue = valid(ScreenplayElement::new(
         "left-cue",
         scriptcraft_model::ElementTypeKey::new("Character").expect("valid fixture label"),

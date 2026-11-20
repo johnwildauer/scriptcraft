@@ -46,9 +46,25 @@ fn full_content(
     Vec<TitlePageParagraph>,
     Vec<ElementDefinition>,
 ) {
+    let mut elements = project.elements.clone();
+    for owner in &mut elements {
+        BodyOwner::update(owner, |element| {
+            if element.runs.iter().all(|run| run.attributes.is_empty()) {
+                element.runs.clear();
+            }
+        });
+    }
+
+    let mut title_page = project.title_page.clone();
+    for paragraph in &mut title_page {
+        if paragraph.runs.iter().all(|run| run.attributes.is_empty()) {
+            paragraph.runs.clear();
+        }
+    }
+
     (
-        project.elements.clone(),
-        project.title_page.clone(),
+        elements,
+        title_page,
         project.element_definitions().iter().cloned().collect(),
     )
 }

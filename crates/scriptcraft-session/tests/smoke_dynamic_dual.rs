@@ -39,6 +39,7 @@ fn toggle_candidate_requires_exact_capabilities_not_paginate_as() {
         scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
             .map(|document| document.project),
     );
+    project.preservation = None;
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -82,6 +83,7 @@ fn explicit_toggle_disables_an_inactive_group_without_changing_members() {
         scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
             .map(|document| document.project),
     );
+    project.preservation = None;
     body(
         &mut project,
         &[
@@ -124,6 +126,7 @@ fn explicit_toggle_records_only_the_exact_capability_candidate_members() {
         scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
             .map(|document| document.project),
     );
+    project.preservation = None;
     body(
         &mut project,
         &[

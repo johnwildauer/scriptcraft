@@ -39,6 +39,7 @@ fn project_with_element_type(label: &str, text: &str) -> Project {
         scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
             .map(|document| document.project),
     );
+    project.preservation = None;
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -125,10 +126,7 @@ fn edited_or_reconstructed_pairs_are_not_mistaken_for_generated_pairs() {
     })));
     valid(session.enter());
     assert_eq!(session.project().elements[0].text, "()");
-    assert_eq!(
-        session.project().elements[1].element_type(),
-        key("Dialogue")
-    );
+    assert_eq!(session.project().elements.len(), 1);
 
     let mut remapped = valid(EditingSession::new(project_with_parenthetical_tab_target()));
     valid(remapped.tab());

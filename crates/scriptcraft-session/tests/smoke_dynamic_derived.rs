@@ -65,6 +65,7 @@ fn project_with_body(rows: &[(&str, &str)]) -> Project {
         scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
             .map(|document| document.project),
     );
+    project.preservation = None;
     let mut definitions = project
         .element_definitions()
         .iter()

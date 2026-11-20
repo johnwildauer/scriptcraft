@@ -342,6 +342,18 @@ impl PreservationState {
             .clone();
         let survivor_runs = paragraph_text_nodes_with_supported_attachments(&survivor)?;
         let removed_runs = paragraph_text_nodes_with_supported_attachments(&removed)?;
+        // Empty attributed Text nodes can remain in the source after a prior split.
+        let survivor_source_runs = survivor_runs
+            .iter()
+            .map(|node| text_of_nodes(std::slice::from_ref(node)))
+            .collect::<Vec<_>>();
+        if expected_runs.is_some_and(|runs| {
+            runs.iter()
+                .filter(|run| !run.is_empty())
+                .ne(survivor_source_runs.iter().filter(|run| !run.is_empty()))
+        }) {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
         if text_of_nodes(&survivor_runs) != original_survivor_text
             || text_of_nodes(&removed_runs) != final_removed_text
             || survivor_prefix_len > original_survivor_text.len()
@@ -367,7 +379,7 @@ impl PreservationState {
             survivor_prefix_len,
             original_survivor_text.len(),
             "",
-            expected_runs,
+            Some(&survivor_source_runs),
         )?;
         let target = self.managed_element_mut(survivor_id)?;
         target.children.extend(suffix_runs);

@@ -391,6 +391,7 @@ fn definition_replacement_deactivates_dual_projection_without_unwrapping() {
         scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
             .map(|document| document.project),
     );
+    project.preservation = None;
     let cue_left = valid(ScreenplayElement::new(
         "cue-left",
         scriptcraft_model::ElementTypeKey::new("Character").expect("valid fixture label"),
