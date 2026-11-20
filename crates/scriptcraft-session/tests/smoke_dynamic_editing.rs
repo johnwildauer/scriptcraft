@@ -18,6 +18,10 @@ use std::path::PathBuf;
 
 const DYNAMIC_FIXTURE: &[u8] =
     include_bytes!("../../scriptcraft-fdx/tests/fixtures/dynamic_editing.fdx");
+const ACTIVE_DUAL_FIXTURE: &[u8] =
+    include_bytes!("../../scriptcraft-fdx/tests/fixtures/active_dual_dialogue.fdx");
+const INACTIVE_DUAL_FIXTURE: &[u8] =
+    include_bytes!("../../scriptcraft-fdx/tests/fixtures/inactive_dual_dialogue.fdx");
 
 #[track_caller]
 fn valid<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -477,6 +481,107 @@ fn dynamic_save_rebase_keeps_eligible_generation_and_inactive_dual_source() {
     assert!(active_dual_dialogue_projection(
         reopened_session.project(),
         &reopened_session.project().dual_dialogue_groups[0]
+    )
+    .is_some());
+}
+
+#[test]
+fn real_template_apply_preserves_inactive_and_active_dual_projections_through_history() {
+    let target_document = valid(scriptcraft_fdx::instantiate_builtin_template(
+        scriptcraft_fdx::BuiltinTemplateId::Screenplay,
+    ));
+    let target = valid(scriptcraft_fdx::extract_element_template_settings(
+        &target_document,
+    ));
+
+    let inactive_project = valid(read_v6(INACTIVE_DUAL_FIXTURE)).project;
+    let inactive_group = inactive_project.dual_dialogue_groups[0].clone();
+    let inactive_original = inactive_project.clone();
+    let inactive_members = inactive_group
+        .members
+        .iter()
+        .map(|id| {
+            let owner = inactive_project
+                .elements
+                .iter()
+                .find(|owner| &owner.id == id)
+                .unwrap_or_else(|| unreachable!("every source member has one managed owner"));
+            (
+                owner.id.clone(),
+                owner.text.clone(),
+                owner.as_element().runs.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(active_dual_dialogue_projection(&inactive_project, &inactive_group).is_none());
+
+    let mut inactive = valid(EditingSession::new(inactive_project));
+    assert_eq!(
+        valid(inactive.apply_element_template_settings(&target)),
+        scriptcraft_session::editing::ApplyTemplateOutcome::Changed
+    );
+    let inactive_after = &inactive.project().dual_dialogue_groups[0];
+    assert_eq!(
+        inactive_after, &inactive_group,
+        "wrapper provenance and ordered source membership are retained"
+    );
+    assert!(active_dual_dialogue_projection(inactive.project(), inactive_after).is_none());
+    for (index, member_id) in inactive_after.members.iter().enumerate() {
+        let owner = inactive
+            .project()
+            .elements
+            .iter()
+            .find(|owner| &owner.id == member_id)
+            .unwrap_or_else(|| unreachable!("Apply does not remove a source member"));
+        assert_eq!(owner.element_type(), key("Action"));
+        assert_eq!(owner.id, inactive_members[index].0);
+        assert_eq!(owner.text, inactive_members[index].1);
+        assert_eq!(owner.as_element().runs, inactive_members[index].2);
+    }
+    valid(inactive.undo());
+    assert_eq!(inactive.project(), &inactive_original);
+    assert!(active_dual_dialogue_projection(
+        inactive.project(),
+        &inactive.project().dual_dialogue_groups[0]
+    )
+    .is_none());
+    valid(inactive.redo());
+    assert_eq!(&inactive.project().dual_dialogue_groups[0], &inactive_group);
+    assert!(active_dual_dialogue_projection(
+        inactive.project(),
+        &inactive.project().dual_dialogue_groups[0]
+    )
+    .is_none());
+
+    let active_project = valid(read_v6(ACTIVE_DUAL_FIXTURE)).project;
+    let active_group = active_project.dual_dialogue_groups[0].clone();
+    let active_original = active_project.clone();
+    assert!(active_dual_dialogue_projection(&active_project, &active_group).is_some());
+    let mut active = valid(EditingSession::new(active_project));
+    assert_eq!(
+        valid(active.apply_element_template_settings(&target)),
+        scriptcraft_session::editing::ApplyTemplateOutcome::Changed
+    );
+    assert_eq!(active.project().dual_dialogue_groups[0], active_group);
+    assert!(
+        active_dual_dialogue_projection(
+            active.project(),
+            &active.project().dual_dialogue_groups[0]
+        )
+        .is_some(),
+        "the built-in retains exact base-type dual capabilities"
+    );
+    valid(active.undo());
+    assert_eq!(active.project(), &active_original);
+    assert!(active_dual_dialogue_projection(
+        active.project(),
+        &active.project().dual_dialogue_groups[0]
+    )
+    .is_some());
+    valid(active.redo());
+    assert!(active_dual_dialogue_projection(
+        active.project(),
+        &active.project().dual_dialogue_groups[0]
     )
     .is_some());
 }

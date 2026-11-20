@@ -354,3 +354,215 @@ fn pending_capability_invalidation_is_corrected_during_save_preflight() {
     assert!(!session.pending_derived_work_summary().pending);
     assert!(!session.dirty());
 }
+
+#[test]
+fn ordinary_undo_redo_restore_stale_derived_snapshot_exactly() {
+    let project = valid(read_v6(SAVE_CORRECTION_FDX)).project;
+    let content_source = |project: &Project| {
+        project
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("the derived-history fixture is source-backed"))
+            .sections
+            .iter()
+            .filter(|section| section.kind == scriptcraft_model::preservation::SectionKind::Content)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let cue = project
+        .elements
+        .iter()
+        .position(|owner| {
+            owner
+                .source_provenance
+                .as_ref()
+                .and_then(|source| source.foreign_id.as_deref())
+                == Some("derived-save-cue")
+        })
+        .unwrap_or_else(|| unreachable!("fixture Character cue is managed"));
+    let cast = project
+        .elements
+        .iter()
+        .position(|owner| {
+            owner
+                .source_provenance
+                .as_ref()
+                .and_then(|source| source.foreign_id.as_deref())
+                == Some("derived-save-cast")
+        })
+        .unwrap_or_else(|| unreachable!("fixture Cast List is managed"));
+    let before_content_source = content_source(&project);
+    let mut session = valid(EditingSession::new(project));
+    let before = session.project().clone();
+    assert_eq!(session.project().elements[cast].text, "(OLD)");
+
+    valid(session.set_selection(caret(cue, 0)));
+    valid(session.insert("X"));
+    let after = session.project().clone();
+    assert_ne!(after, before);
+
+    valid(session.undo());
+    assert_eq!(session.project(), &before);
+    assert_eq!(session.project().elements[cast].text, "(OLD)");
+    assert_eq!(
+        content_source(session.project()),
+        before_content_source,
+        "undo retains the exact stale SceneProperties source snapshot"
+    );
+
+    valid(session.redo());
+    assert_eq!(session.project(), &after);
+    assert_eq!(session.project().elements[cast].text, "(OLD)");
+    assert_eq!(
+        content_source(session.project()),
+        before_content_source,
+        "redo retains the exact stale SceneProperties source snapshot"
+    );
+}
+
+#[test]
+fn real_template_apply_invalidates_complete_derived_state_without_correcting_content() {
+    let target_document = valid(scriptcraft_fdx::instantiate_builtin_template(
+        scriptcraft_fdx::BuiltinTemplateId::Screenplay,
+    ));
+    let target = valid(scriptcraft_fdx::extract_element_template_settings(
+        &target_document,
+    ));
+    let current = valid(read_v6(SAVE_CORRECTION_FDX)).project;
+    let content_source = current
+        .preservation
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("the correction fixture is source-backed"))
+        .sections
+        .iter()
+        .filter(|section| section.kind == scriptcraft_model::preservation::SectionKind::Content)
+        .cloned()
+        .collect::<Vec<_>>();
+    let current_types = current
+        .elements
+        .iter()
+        .map(|owner| owner.element_type())
+        .collect::<Vec<_>>();
+    let before_capabilities = current_types
+        .iter()
+        .map(|key| {
+            current
+                .element_semantics(key)
+                .map(|semantics| semantics.capabilities())
+                .unwrap_or_else(|| unreachable!("the before registry resolves every managed key"))
+        })
+        .collect::<Vec<_>>();
+    assert!(current_types
+        .iter()
+        .all(|key| target.definitions().get(key).is_some()));
+    let current_text = current
+        .elements
+        .iter()
+        .map(|owner| owner.text.clone())
+        .collect::<Vec<_>>();
+    let cast_list_text = current
+        .elements
+        .iter()
+        .find(|owner| owner.element_type().as_str() == "Cast List")
+        .map(|owner| owner.text.clone())
+        .unwrap_or_else(|| {
+            unreachable!("the source contains a Cast List needing later correction")
+        });
+    assert_eq!(cast_list_text, "(OLD)");
+
+    let before_revision = 0;
+    let mut session = valid(EditingSession::new(current));
+    let before_token = session.mutation_token();
+    assert_eq!(session.revision(), before_revision);
+
+    assert_eq!(
+        valid(session.apply_element_template_settings(&target)),
+        scriptcraft_session::editing::ApplyTemplateOutcome::Changed
+    );
+
+    assert_eq!(session.revision(), before_revision + 1);
+    assert_eq!(session.mutation_token(), before_token + 1);
+    assert!(session.pending_derived_work_summary().complete);
+    assert_eq!(
+        session
+            .project()
+            .elements
+            .iter()
+            .map(|owner| owner.element_type())
+            .collect::<Vec<_>>(),
+        current_types,
+        "all current keys match Screenplay, so Apply changes the registry/settings without relying on a Type remap"
+    );
+    assert_eq!(
+        session
+            .project()
+            .elements
+            .iter()
+            .map(|owner| owner.text.clone())
+            .collect::<Vec<_>>(),
+        current_text,
+        "Apply schedules rather than synchronously performing derived content corrections"
+    );
+    assert_eq!(
+        session
+            .project()
+            .elements
+            .iter()
+            .find(|owner| owner.element_type().as_str() == "Cast List")
+            .map(|owner| owner.text.as_str()),
+        Some("(OLD)")
+    );
+    assert_eq!(
+        session
+            .project()
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("Apply retains current preservation"))
+            .sections
+            .iter()
+            .filter(|section| section.kind == scriptcraft_model::preservation::SectionKind::Content)
+            .cloned()
+            .collect::<Vec<_>>(),
+        content_source,
+        "Apply does not synchronously rewrite SceneProperties or other current Content source"
+    );
+    assert_eq!(
+        session.project().element_definitions(),
+        target.definitions(),
+        "the post-Apply semantic registry, including Behavior and capabilities, is the extracted target registry"
+    );
+    let after_capabilities = current_types
+        .iter()
+        .map(|key| {
+            session
+                .project()
+                .element_semantics(key)
+                .map(|semantics| semantics.capabilities())
+                .unwrap_or_else(|| unreachable!("the after registry resolves every retained key"))
+        })
+        .collect::<Vec<_>>();
+    let target_capabilities = current_types
+        .iter()
+        .map(|key| {
+            target_document
+                .project
+                .element_semantics(key)
+                .map(|semantics| semantics.capabilities())
+                .unwrap_or_else(|| {
+                    unreachable!("the normalized target resolves every retained key")
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(after_capabilities, target_capabilities);
+    assert_eq!(before_capabilities.len(), current_types.len());
+    for definition in target.definitions().iter() {
+        assert_eq!(
+            session
+                .project()
+                .element_semantics(&definition.key)
+                .map(|semantics| semantics.definition()),
+            Some(definition),
+            "semantic reads resolve against the replacement registry"
+        );
+    }
+}

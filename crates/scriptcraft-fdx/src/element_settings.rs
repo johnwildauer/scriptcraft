@@ -353,6 +353,104 @@ pub fn reconcile_project_element_settings(project: &mut Project) -> Result<(), F
     reconcile_retained_project_element_settings(preservation, &definitions)
 }
 
+/// Returns the winning direct-root settings nodes in registry order, detached
+/// from the source document's anchor and ownership bookkeeping. Inert duplicate
+/// settings, non-winning nodes, and other root children are never returned.
+pub(crate) fn ordered_detached_element_settings_winners(
+    preservation: &PreservationState,
+    definitions: &DocumentElementDefinitions,
+) -> Result<Vec<PreservedElement>, FdxError> {
+    definitions
+        .validate()
+        .map_err(crate::diagnostics::map_model_error)?;
+    let definition_keys = definitions
+        .iter()
+        .map(|definition| definition.key.clone())
+        .collect::<BTreeSet<_>>();
+    preservation
+        .validate_element_definition_anchors(&definition_keys)
+        .map_err(crate::diagnostics::map_preservation_error)?;
+
+    let mut root = None;
+    for section in &preservation.sections {
+        for node in &section.children {
+            let PreservedNode::Element(element) = node else {
+                continue;
+            };
+            if element.name.local_name != crate::constants::FDX_ROOT {
+                continue;
+            }
+            if root.replace(element).is_some() {
+                return Err(FdxError::InvalidValue);
+            }
+        }
+    }
+    let root = root.ok_or(FdxError::InvalidValue)?;
+    let root_ns = root.name.namespace_uri.as_deref();
+
+    let mut targets = BTreeMap::<SourceAnchorId, (&ElementTypeKey, AnchorRelation)>::new();
+    for anchor in &preservation.anchors {
+        if let AnchorTarget::ElementDefinition(key) = &anchor.target {
+            if targets
+                .insert(anchor.id.clone(), (key, anchor.relation))
+                .is_some()
+            {
+                return Err(FdxError::InvalidValue);
+            }
+        }
+    }
+
+    let mut winners = BTreeMap::<ElementTypeKey, PreservedElement>::new();
+    for child in &root.children {
+        let PreservedNode::Element(setting) = child else {
+            continue;
+        };
+        if !is_preserved_fdx_element(setting, "ElementSettings", root_ns) {
+            continue;
+        }
+        let Some(anchor_id) = setting.anchor.as_ref() else {
+            continue;
+        };
+        let (key, relation) = targets.get(anchor_id).ok_or(FdxError::InvalidValue)?;
+        if *relation != AnchorRelation::Represents
+            || setting.ownership != SourceOwnership::Opaque
+            || setting.source_type.as_deref() != Some(key.as_str())
+            || exact_unqualified_attribute(setting, "Type") != Some(key.as_str())
+            || !definition_keys.contains(*key)
+        {
+            return Err(FdxError::InvalidValue);
+        }
+        let mut detached = setting.clone();
+        detach_target_source_authority(&mut detached);
+        if winners.insert((**key).clone(), detached).is_some() {
+            return Err(FdxError::InvalidValue);
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(definitions.len());
+    for definition in definitions.iter() {
+        let winner = winners
+            .remove(&definition.key)
+            .ok_or(FdxError::InvalidValue)?;
+        ordered.push(winner);
+    }
+    if !winners.is_empty() {
+        return Err(FdxError::InvalidValue);
+    }
+    Ok(ordered)
+}
+
+fn detach_target_source_authority(element: &mut PreservedElement) {
+    element.anchor = None;
+    element.ownership = SourceOwnership::Opaque;
+    element.dependency_confidence = scriptcraft_model::preservation::DependencyConfidence::Unknown;
+    for child in &mut element.children {
+        if let PreservedNode::Element(child) = child {
+            detach_target_source_authority(child);
+        }
+    }
+}
+
 pub(crate) fn reconcile_retained_project_element_settings(
     preservation: &mut PreservationState,
     definitions: &DocumentElementDefinitions,
@@ -596,7 +694,7 @@ pub fn replace_project_element_settings(
             definition,
             node.name.namespace_uri.as_deref(),
         )?;
-        if projected != node {
+        if projected != node || !is_detached_opaque_subtree(&node) {
             return Err(FdxError::InvalidValue);
         }
         validated_nodes.push(node);
@@ -622,6 +720,7 @@ pub fn replace_project_element_settings(
 
     with_direct_root_mut(&mut staged.sections, |root| {
         let root_ns = root.name.namespace_uri.as_deref();
+        let root_namespaces = namespace_scope(&BTreeMap::new(), &root.namespace_bindings)?;
         let original = std::mem::take(&mut root.children)
             .into_iter()
             .collect::<Vec<_>>();
@@ -642,7 +741,9 @@ pub fn replace_project_element_settings(
         });
         let mut ordered_nodes = Vec::with_capacity(validated_nodes.len());
         for (mut node, definition) in validated_nodes.clone().into_iter().zip(definitions.iter()) {
-            if node.name.namespace_uri.as_deref() != root_ns {
+            if node.name.namespace_uri.as_deref() != root_ns
+                || !validate_detached_node_namespaces(&node, &root_namespaces)
+            {
                 return Err(FdxError::InvalidValue);
             }
             let anchor_id = allocate_definition_anchor(&used_anchor_ids, &mut next_anchor_ordinal)?;
@@ -681,9 +782,119 @@ pub fn replace_project_element_settings(
     staged
         .validate_element_definition_anchors(&definition_keys)
         .map_err(crate::diagnostics::map_preservation_error)?;
-    preservation.sections = staged.sections;
-    preservation.anchors = staged.anchors;
+    // ElementSettings contributes to the retained source identity-use and text
+    // indexes. Rebuild them on the staged tree before the atomic publication.
+    staged.rebuild_indexes();
+    *preservation = staged;
     Ok(())
+}
+
+const XML_NAMESPACE_URI: &str = "http://www.w3.org/XML/1998/namespace";
+const XMLNS_NAMESPACE_URI: &str = "http://www.w3.org/2000/xmlns/";
+
+fn is_detached_opaque_subtree(element: &PreservedElement) -> bool {
+    element.anchor.is_none()
+        && element.ownership == SourceOwnership::Opaque
+        && element.children.iter().all(|node| match node {
+            PreservedNode::Element(child) => is_detached_opaque_subtree(child),
+            _ => true,
+        })
+}
+
+fn namespace_scope(
+    inherited: &BTreeMap<String, Option<String>>,
+    declarations: &[scriptcraft_model::preservation::NamespaceBinding],
+) -> Result<BTreeMap<String, Option<String>>, FdxError> {
+    let mut scope = inherited.clone();
+    let mut declared = BTreeSet::new();
+    for binding in declarations {
+        if !declared.insert(binding.prefix.as_str())
+            || binding.prefix == "xmlns"
+            || binding.namespace_uri == XMLNS_NAMESPACE_URI
+            || (binding.prefix == "xml" && binding.namespace_uri != XML_NAMESPACE_URI)
+            || (binding.prefix != "xml" && binding.namespace_uri == XML_NAMESPACE_URI)
+            || (!binding.prefix.is_empty() && binding.namespace_uri.is_empty())
+        {
+            return Err(FdxError::InvalidValue);
+        }
+        scope.insert(
+            binding.prefix.clone(),
+            (!binding.namespace_uri.is_empty()).then(|| binding.namespace_uri.clone()),
+        );
+    }
+    scope.insert("xml".to_owned(), Some(XML_NAMESPACE_URI.to_owned()));
+    Ok(scope)
+}
+
+fn source_name_resolves(
+    name: &SourceName,
+    is_attribute: bool,
+    scope: &BTreeMap<String, Option<String>>,
+) -> bool {
+    let Some(qualified_name) = name.qualified_name.as_deref() else {
+        return false;
+    };
+    let mut parts = qualified_name.split(':');
+    let first = parts.next().unwrap_or_default();
+    let second = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
+    let (prefix, local_name) = match second {
+        Some(local_name) if !first.is_empty() && !local_name.is_empty() => {
+            (Some(first), local_name)
+        }
+        Some(_) => return false,
+        None => (None, first),
+    };
+    if local_name != name.local_name
+        || local_name.is_empty()
+        || name.local_name == "xmlns"
+        || name.namespace_uri.as_deref() == Some(XMLNS_NAMESPACE_URI)
+    {
+        return false;
+    }
+    let resolved = if let Some(prefix) = prefix {
+        if prefix == "xmlns" {
+            return false;
+        }
+        match scope.get(prefix) {
+            Some(Some(namespace_uri)) => Some(namespace_uri.clone()),
+            _ => return false,
+        }
+    } else if is_attribute {
+        None
+    } else {
+        scope.get("").cloned().flatten()
+    };
+    resolved == name.namespace_uri
+}
+
+fn validate_detached_node_namespaces(
+    element: &PreservedElement,
+    inherited: &BTreeMap<String, Option<String>>,
+) -> bool {
+    let Ok(scope) = namespace_scope(inherited, &element.namespace_bindings) else {
+        return false;
+    };
+    if !source_name_resolves(&element.name, false, &scope) {
+        return false;
+    }
+    let mut attribute_names = BTreeSet::new();
+    for attribute in &element.attributes {
+        if !source_name_resolves(&attribute.name, true, &scope)
+            || !attribute_names.insert((
+                attribute.name.namespace_uri.as_deref(),
+                attribute.name.local_name.as_str(),
+            ))
+        {
+            return false;
+        }
+    }
+    element.children.iter().all(|node| match node {
+        PreservedNode::Element(child) => validate_detached_node_namespaces(child, &scope),
+        _ => true,
+    })
 }
 
 fn append_ordered_settings(
@@ -2522,6 +2733,203 @@ mod tests {
             !matches!(&anchor.target, AnchorTarget::ElementDefinition(_))
                 || !previous_definition_anchor_ids.contains(&anchor.id)
         }));
+    }
+
+    #[test]
+    fn detached_cross_document_replacement_preserves_only_current_nondefinition_source() {
+        let Some(current) = imported_open_fixture() else {
+            assert!(false, "the source-backed current fixture should import");
+            return;
+        };
+        let Ok(target) = crate::instantiate_builtin_template(crate::BuiltinTemplateId::Screenplay)
+        else {
+            assert!(false, "the built-in target should common-load");
+            return;
+        };
+        let Ok(extraction) = crate::extract_element_template_settings(&target) else {
+            assert!(false, "the target settings should extract");
+            return;
+        };
+        let definitions = extraction.definitions().clone();
+        let mut replacement = extraction.retained_settings().to_vec();
+        let Some(first) = replacement.first_mut() else {
+            assert!(false, "the built-in target has ordered definitions");
+            return;
+        };
+        first
+            .children
+            .push(PreservedNode::Element(PreservedElement {
+                name: SourceName {
+                    namespace_uri: Some("urn:template-payload".to_owned()),
+                    local_name: "OpaquePayload".to_owned(),
+                    qualified_name: Some("v:OpaquePayload".to_owned()),
+                },
+                attributes: vec![PreservedAttribute {
+                    name: SourceName {
+                        namespace_uri: Some("urn:template-payload".to_owned()),
+                        local_name: "marker".to_owned(),
+                        qualified_name: Some("v:marker".to_owned()),
+                    },
+                    value: "target-winner-payload".to_owned(),
+                }],
+                namespace_bindings: vec![scriptcraft_model::preservation::NamespaceBinding {
+                    prefix: "v".to_owned(),
+                    namespace_uri: "urn:template-payload".to_owned(),
+                }],
+                source_type: None,
+                ownership: SourceOwnership::Opaque,
+                dependency_confidence:
+                    scriptcraft_model::preservation::DependencyConfidence::Unknown,
+                anchor: None,
+                children: vec![PreservedNode::Comment("target retained comment".into())].into(),
+            }));
+
+        let Some(current_preservation) = current.project.preservation.as_ref() else {
+            assert!(false, "the current project should retain its source");
+            return;
+        };
+        let mut preservation = current_preservation.clone();
+        let original_bytes = preservation.source.original_bytes.clone();
+        let original_identities = preservation.identities.clone();
+        let original_references = preservation.references.clone();
+        let original_board_graph = preservation.board_graph.clone();
+        let previous_definition_anchor_ids = preservation
+            .anchors
+            .iter()
+            .filter(|anchor| matches!(&anchor.target, AnchorTarget::ElementDefinition(_)))
+            .map(|anchor| anchor.id.clone())
+            .collect::<BTreeSet<_>>();
+        let root = preserved_root(&preservation);
+        let Some(root) = root else {
+            assert!(false, "the current FinalDraft root should be retained");
+            return;
+        };
+        let original_non_settings = root
+            .children
+            .iter()
+            .filter(|node| {
+                !matches!(node, PreservedNode::Element(element) if is_preserved_fdx_element(element, "ElementSettings", root.name.namespace_uri.as_deref()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(
+            replace_project_element_settings(&mut preservation, &definitions, replacement,).is_ok()
+        );
+
+        let settings = direct_settings(&preservation);
+        assert_eq!(settings.len(), definitions.len());
+        assert_eq!(
+            settings
+                .iter()
+                .map(|setting| attr_value(setting, "Type"))
+                .collect::<Vec<_>>(),
+            definitions
+                .iter()
+                .map(|definition| Some(definition.key.as_str()))
+                .collect::<Vec<_>>()
+        );
+        assert!(settings.iter().all(|setting| setting.anchor.is_some()));
+        assert!(preservation.anchors.iter().all(|anchor| {
+            !matches!(&anchor.target, AnchorTarget::ElementDefinition(_))
+                || !previous_definition_anchor_ids.contains(&anchor.id)
+        }));
+        assert_eq!(
+            preservation
+                .anchors
+                .iter()
+                .filter(|anchor| matches!(&anchor.target, AnchorTarget::ElementDefinition(_)))
+                .count(),
+            definitions.len()
+        );
+        assert_eq!(preservation.source.original_bytes, original_bytes);
+        assert_eq!(preservation.identities, original_identities);
+        assert_eq!(preservation.references, original_references);
+        assert_eq!(preservation.board_graph, original_board_graph);
+
+        let Some(replaced_root) = preserved_root(&preservation) else {
+            assert!(false, "the current FinalDraft root should remain");
+            return;
+        };
+        let non_settings = replaced_root
+            .children
+            .iter()
+            .filter(|node| {
+                !matches!(node, PreservedNode::Element(element) if is_preserved_fdx_element(element, "ElementSettings", replaced_root.name.namespace_uri.as_deref()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(non_settings, original_non_settings);
+        assert!(settings[0].children.iter().any(|node| matches!(
+            node,
+            PreservedNode::Element(element)
+                if element.name.local_name == "OpaquePayload"
+                    && element.namespace_bindings.iter().any(|binding| {
+                        binding.prefix == "v" && binding.namespace_uri == "urn:template-payload"
+                    })
+                    && element.children.iter().any(|child| matches!(
+                        child,
+                        PreservedNode::Comment(comment) if comment.as_str() == "target retained comment"
+                    ))
+        )));
+        assert!(preservation.validate().is_ok());
+    }
+
+    #[test]
+    fn detached_settings_replacement_rejects_unbound_namespaces_identity_and_order_atomically() {
+        let Some(current) = imported_open_fixture() else {
+            assert!(false, "the source-backed current fixture should import");
+            return;
+        };
+        let Ok(target) = crate::instantiate_builtin_template(crate::BuiltinTemplateId::Screenplay)
+        else {
+            assert!(false, "the built-in target should common-load");
+            return;
+        };
+        let Ok(extraction) = crate::extract_element_template_settings(&target) else {
+            assert!(false, "the target settings should extract");
+            return;
+        };
+        let definitions = extraction.definitions().clone();
+        let Some(current_preservation) = current.project.preservation.as_ref() else {
+            assert!(false, "the current project should retain its source");
+            return;
+        };
+        let baseline = current_preservation.clone();
+        let mut nodes = extraction.retained_settings().to_vec();
+        nodes.swap(0, 1);
+        let mut preservation = baseline.clone();
+        assert!(replace_project_element_settings(&mut preservation, &definitions, nodes).is_err());
+        assert_eq!(preservation, baseline);
+
+        let mut nodes = extraction.retained_settings().to_vec();
+        let Some(first) = nodes.first_mut() else {
+            assert!(false, "the built-in target has ordered settings");
+            return;
+        };
+        first.name.qualified_name = Some("missing:ElementSettings".to_owned());
+        let mut preservation = baseline.clone();
+        assert!(replace_project_element_settings(&mut preservation, &definitions, nodes).is_err());
+        assert_eq!(preservation, baseline);
+
+        let mut nodes = extraction.retained_settings().to_vec();
+        let Some(first) = nodes.first_mut() else {
+            assert!(false, "the built-in target has ordered settings");
+            return;
+        };
+        let Some(PreservedNode::Element(payload)) = first.children.iter_mut().find(|node| {
+            matches!(node, PreservedNode::Element(element) if element.name.local_name == "FontSpec")
+        }) else {
+            assert!(false, "the winning source contains its FontSpec");
+            return;
+        };
+        payload.anchor = Some(
+            SourceAnchorId::new("foreign-target-anchor")
+                .unwrap_or_else(|_| unreachable!("the test anchor is bounded")),
+        );
+        let mut preservation = baseline.clone();
+        assert!(replace_project_element_settings(&mut preservation, &definitions, nodes).is_err());
+        assert_eq!(preservation, baseline);
     }
 
     #[test]

@@ -544,6 +544,101 @@ fn dual_source_members_switch_between_sequential_and_active_columns() {
 }
 
 #[test]
+fn real_template_apply_keeps_inactive_members_sequential_and_invalidates_cached_layout() {
+    let mut session = valid(scriptcraft_session::editing::EditingSession::new(
+        valid(scriptcraft_fdx::read_v6(include_bytes!(
+            "../../scriptcraft-fdx/tests/fixtures/inactive_dual_dialogue.fdx"
+        )))
+        .project,
+    ));
+    let target_document = valid(scriptcraft_fdx::instantiate_builtin_template(
+        scriptcraft_fdx::BuiltinTemplateId::Screenplay,
+    ));
+    let target = valid(scriptcraft_fdx::extract_element_template_settings(
+        &target_document,
+    ));
+    let original_group = session.project().dual_dialogue_groups[0].clone();
+    assert!(active_dual_dialogue_projection(session.project(), &original_group).is_none());
+    let member_indices = original_group
+        .members
+        .iter()
+        .map(|member| {
+            session
+                .project()
+                .elements
+                .iter()
+                .position(|owner| &owner.id == member)
+                .unwrap_or_else(|| unreachable!("each retained group member has one Body index"))
+        })
+        .collect::<Vec<_>>();
+
+    let mut cache = LayoutCache::default();
+    let old_inputs = session.project().session_layout_inputs();
+    let (_, old_cache_hit) = valid(cache.get_or_build_with_composition(
+        session.revision(),
+        session.project(),
+        &old_inputs,
+        LayoutComposition::BodyEditor,
+    ));
+    assert!(!old_cache_hit);
+
+    assert_eq!(
+        valid(session.apply_element_template_settings(&target)),
+        scriptcraft_session::editing::ApplyTemplateOutcome::Changed
+    );
+    assert_eq!(
+        session.project().dual_dialogue_groups[0],
+        original_group,
+        "Apply retains the source wrapper and ordered member identities"
+    );
+    assert!(active_dual_dialogue_projection(
+        session.project(),
+        &session.project().dual_dialogue_groups[0]
+    )
+    .is_none());
+    let inputs = session.project().session_layout_inputs();
+    let (cached, cache_hit) = valid(cache.get_or_build_with_composition(
+        session.revision(),
+        session.project(),
+        &inputs,
+        LayoutComposition::BodyEditor,
+    ));
+    assert!(
+        !cache_hit,
+        "Apply's revision/registry cannot reuse the pre-Apply complete layout"
+    );
+
+    let mut source_settings = session
+        .project()
+        .preservation
+        .as_ref()
+        .map(|preservation| preservation.source_layout_settings().clone())
+        .unwrap_or_default();
+    source_settings
+        .direct_paragraph_overrides
+        .extend(session.project().direct_paragraph_overrides.clone());
+    let fresh = valid(ScreenplayLayout::build_with_composition(
+        session.project(),
+        &inputs,
+        &source_settings,
+        LayoutComposition::BodyEditor,
+    ));
+    assert_eq!(cached.pages, fresh.pages);
+
+    let emitted_members = cached
+        .pages
+        .iter()
+        .flat_map(|page| &page.lines)
+        .filter(|line| member_indices.contains(&line.element))
+        .map(|line| line.element)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        emitted_members, member_indices,
+        "inactive source members must use sequential composition once each in source order"
+    );
+}
+
+#[test]
 fn vertical_page_fit_ignores_legacy_occupied_line_capacity() {
     let mut project = synthetic_body_project();
     project.elements = vec![

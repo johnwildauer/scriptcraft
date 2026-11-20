@@ -3,7 +3,7 @@
 use super::derived::PendingDerivedInvalidation;
 use super::selection::{validate_selection, validate_title_selection};
 use super::{validate_full_candidate, EditError, EditingSession, Selection};
-use scriptcraft_model::{cast_list, formatted_text::RunStyleFlags, Project};
+use scriptcraft_model::{formatted_text::RunStyleFlags, Project};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,10 +33,6 @@ impl EditingSession {
             .last()
             .cloned()
             .ok_or(EditError::EmptyHistory)?;
-        // Undo must remain available even when a derived list's source mapping
-        // cannot be changed safely; retain that snapshot unchanged and let the
-        // scheduled refresh/save preflight report the mapping limitation.
-        let _ = cast_list::correct_cast_lists(&mut snapshot.project);
         validate_full_candidate(&snapshot.project)?;
         if let Some(preservation) = snapshot.project.preservation.as_mut() {
             preservation.rebuild_indexes();
@@ -72,7 +68,6 @@ impl EditingSession {
 
     pub fn redo(&mut self) -> Result<(), EditError> {
         let mut snapshot = self.redo.last().cloned().ok_or(EditError::EmptyHistory)?;
-        let _ = cast_list::correct_cast_lists(&mut snapshot.project);
         validate_full_candidate(&snapshot.project)?;
         if let Some(preservation) = snapshot.project.preservation.as_mut() {
             preservation.rebuild_indexes();

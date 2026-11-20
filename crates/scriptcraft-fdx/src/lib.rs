@@ -4,6 +4,7 @@
 //! FDX version/settings mapping, outcomes, save context, diagnostics, and root
 //! view-state mapping.
 
+mod apply_template;
 mod builtin_screenplay;
 mod builtin_templates;
 mod constants;
@@ -28,6 +29,7 @@ mod whitespace;
 mod window_state;
 mod writer;
 
+pub use apply_template::{extract_element_template_settings, ElementTemplateSettings};
 pub use builtin_templates::{
     builtin_template_metadata, builtin_templates, instantiate_builtin_template, BuiltinTemplateId,
     BuiltinTemplateMetadata, DEFAULT_BUILTIN_TEMPLATE_ID,

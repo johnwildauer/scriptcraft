@@ -8,6 +8,7 @@ pub mod persistence;
 pub mod storage;
 
 pub use editing::{
-    DerivedWorkSummary, EditError, EditMutationDiagnostics, EditPolicy, ParagraphKeyTarget,
-    ParagraphKeyTargets, Position, Selection,
+    ApplyTemplateError, ApplyTemplateOutcome, DerivedWorkSummary, EditError,
+    EditMutationDiagnostics, EditPolicy, ParagraphKeyTarget, ParagraphKeyTargets, Position,
+    Selection,
 };

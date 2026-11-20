@@ -560,13 +560,23 @@ pub(crate) fn parse_document(input: &[u8]) -> Result<Vec<RawNode>, FdxError> {
                     .map_err(|_| FdxError::InvalidEncoding)?;
                 add_text_budget(&mut text_bytes, target.len().saturating_add(data.len()))?;
                 add_retained_budget(&mut retained_count, 1)?;
-                validate_xml_chars(&data)?;
+                let data = data.as_ref();
+                let data = if data
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| matches!(*byte, b' ' | b'\t' | b'\n' | b'\r'))
+                {
+                    &data[1..]
+                } else {
+                    data
+                };
+                validate_xml_chars(data)?;
                 append_node(
                     &mut stack,
                     &mut document_nodes,
                     RawNode::ProcessingInstruction {
                         target,
-                        data: data.into_owned(),
+                        data: data.to_owned(),
                     },
                 )?;
             }
