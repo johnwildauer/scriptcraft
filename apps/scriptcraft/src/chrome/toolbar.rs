@@ -4,6 +4,7 @@ use super::toolbar_items::{
     TITLE_PAGE_TOOLBAR_ITEMS,
 };
 use crate::app::ScriptCraftApp;
+use crate::chrome::element_choices::ElementChoice;
 use crate::commands::AppCommandAvailability;
 use crate::commands::{command_for_id, CommandInvocation};
 use eframe::egui::{self, *};
@@ -13,14 +14,15 @@ use egui_material_icons::icons::{
     ICON_FORMAT_UNDERLINED, ICON_TEXT_FIELDS,
 };
 use scriptcraft_commands::{
-    Command, CommandOrigin, EditorSurface, ParagraphAlignmentValue, RoleValue, TitleTextStyle,
+    Command, CommandOrigin, EditorSurface, ElementTypeValue, ParagraphAlignmentValue,
+    TitleTextStyle,
 };
 use scriptcraft_model::formatted_text::{
     project_lit_styles, project_paragraph_alignment, project_style_at_caret, RunBoundaryAffinity,
     RunStyleFlags,
 };
-use scriptcraft_model::formatting::{formatting_for_role, ParagraphAlignment};
-use scriptcraft_model::{Position, Role};
+use scriptcraft_model::formatting::ParagraphAlignment;
+use scriptcraft_model::{ElementTypeKey, Position, Project};
 
 // Manual toolbar geometry controls: tune Item group width and row spacing here.
 // The 46-point normal slot is the compact baseline recorded by the focused
@@ -95,9 +97,9 @@ mod toolbar_presentation {
         ToolbarIconVariant::Outlined;
     /// Default toolbar caption and menu text size, in logical points.
     pub(super) const DEFAULT_ITEM_TEXT_POINT_SIZE: f32 = 11.0;
-    /// Elements role-option text size, independent of toolbar item text.
+    /// Elements option text size, independent of toolbar item text.
     pub(super) const DEFAULT_ELEMENTS_ROLE_OPTION_POINT_SIZE: f32 = 13.0;
-    /// Horizontal padding on each side of an Elements role-option row, in points.
+    /// Horizontal padding on each side of an Elements option row, in points.
     pub(super) const DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING: f32 = 18.0;
     /// Stroke width for the closed Elements ComboBox outline, in logical points.
     pub(super) const DEFAULT_ELEMENTS_CLOSED_COMBO_OUTLINE_WIDTH: f32 = 1.0;
@@ -191,7 +193,7 @@ mod toolbar_presentation {
         icon.point_size.unwrap_or(DEFAULT_MATERIAL_ICON_POINT_SIZE)
     }
 
-    pub(super) fn elements_role_option_font_id(ui: &egui::Ui) -> egui::FontId {
+    pub(super) fn elements_option_font_id(ui: &egui::Ui) -> egui::FontId {
         let mut font_id = ui
             .style()
             .text_styles
@@ -211,48 +213,18 @@ mod toolbar_presentation {
     }
 }
 
-// Static toolbar choices are a Phase 1 compatibility adapter for existing
-// RoleValue commands. Phase 6 owns replacing this closed list with document
-// definitions; it never populates or validates the project's registry.
-pub(super) const SUPPORTED_SCREENPLAY_ROLES: [(Role, &str); 17] = [
-    (Role::SceneHeading, "Scene Heading"),
-    (Role::Action, "Action"),
-    (Role::Character, "Character"),
-    (Role::Dialogue, "Dialogue"),
-    (Role::Parenthetical, "Parenthetical"),
-    (Role::Transition, "Transition"),
-    (Role::Note, "Note"),
-    (Role::NewAct, "New Act"),
-    (Role::EndOfAct, "End of Act"),
-    (Role::CastList, "Cast List"),
-    (Role::General, "General"),
-    (Role::Shot, "Shot"),
-    (Role::Sequence, "Sequence"),
-    (Role::Outline1, "Outline 1"),
-    (Role::Outline2, "Outline 2"),
-    (Role::Outline3, "Outline 3"),
-    (Role::Summary, "Summary"),
-];
-
-pub(super) fn screenplay_role_label(role: Role) -> &'static str {
-    SUPPORTED_SCREENPLAY_ROLES
-        .iter()
-        .find_map(|(supported, label)| (*supported == role).then_some(*label))
-        .unwrap_or("Unknown")
-}
-
 /// Desired inner scroll height for all Elements rows, bounded by the usable
 /// egui content viewport after accounting for the popup frame.
-fn elements_role_popup_max_height(ui: &egui::Ui) -> f32 {
-    let button_font = toolbar_presentation::elements_role_option_font_id(ui);
+fn elements_popup_max_height(ui: &egui::Ui, choices: &[ElementChoice]) -> f32 {
+    let button_font = toolbar_presentation::elements_option_font_id(ui);
     let spacing = ui.spacing();
-    let row_height = SUPPORTED_SCREENPLAY_ROLES
+    let row_height = choices
         .iter()
-        .map(|(_, label)| {
+        .map(|choice| {
             let text_height = ui
                 .painter()
                 .layout_no_wrap(
-                    (*label).to_owned(),
+                    choice.label().to_owned(),
                     button_font.clone(),
                     Color32::TRANSPARENT,
                 )
@@ -264,14 +236,37 @@ fn elements_role_popup_max_height(ui: &egui::Ui) -> f32 {
                 .max(text_height + spacing.button_padding.y * 2.0)
         })
         .sum::<f32>();
-    let row_gaps =
-        spacing.item_spacing.y * SUPPORTED_SCREENPLAY_ROLES.len().saturating_sub(1) as f32;
+    let row_gaps = spacing.item_spacing.y * choices.len().saturating_sub(1) as f32;
     let desired_content_height = row_height + row_gaps;
 
     let popup_margin = egui::Frame::popup(ui.style()).total_margin();
     let available_content_height =
         (ui.ctx().content_rect().height() - popup_margin.top - popup_margin.bottom).max(0.0);
-    desired_content_height.min(available_content_height)
+    bounded_elements_popup_height(desired_content_height, available_content_height)
+}
+
+fn bounded_elements_popup_height(
+    desired_content_height: f32,
+    available_content_height: f32,
+) -> f32 {
+    desired_content_height
+        .max(0.0)
+        .min(available_content_height.max(0.0))
+}
+
+fn element_change_command(key: ElementTypeKey) -> Command {
+    Command::EditorElementChange {
+        element_type: ElementTypeValue::from_key(key),
+        surface: EditorSurface::Body,
+    }
+}
+
+fn focused_body_element_type_key(project: &Project, focus: Position) -> Option<ElementTypeKey> {
+    let key = project.elements.get(focus.element)?.element_type();
+    project
+        .element_definitions()
+        .get(&key)
+        .map(|definition| definition.key.clone())
 }
 
 pub(super) fn toolbar_items_for(availability: AppCommandAvailability) -> [ToolbarItemSpec; 14] {
@@ -834,17 +829,15 @@ impl ScriptCraftApp {
         let alignments = (first_paragraph..=last_paragraph)
             .map(|index| match surface {
                 EditorSurface::Body => project.elements.get(index).map(|element| {
-                    let element_role = element.transitional_role();
-                    let role = formatting_for_role(element_role).paragraph.alignment;
-                    let default =
-                        ParagraphAlignment::from_fdx(role).unwrap_or(ParagraphAlignment::Left);
+                    let default = project
+                        .element_definitions()
+                        .get(&element.element_type())
+                        .map(|definition| definition.paragraph.alignment)
+                        .unwrap_or(ParagraphAlignment::Left);
                     let source = project
                         .preservation
                         .as_ref()
                         .map(|preservation| preservation.source_layout_settings());
-                    let role_override = source
-                        .map(|settings| settings.paragraph_spec(element_role).alignment)
-                        .flatten();
                     let source_direct = source
                         .map(|settings| {
                             settings
@@ -857,10 +850,7 @@ impl ScriptCraftApp {
                         .direct_paragraph_overrides
                         .get(&element.id)
                         .and_then(|overrides| overrides.paragraph.alignment);
-                    semantic_direct
-                        .or(source_direct)
-                        .or(role_override)
-                        .unwrap_or(default)
+                    semantic_direct.or(source_direct).unwrap_or(default)
                 }),
                 EditorSurface::TitlePage => project.title_page.get(index).map(|paragraph| {
                     paragraph
@@ -1065,23 +1055,17 @@ impl ScriptCraftApp {
         }
     }
 
-    pub(super) fn focused_role(&self) -> Option<Role> {
-        self.session
-            .project()
-            .elements
-            .get(self.session.selection().focus.element)
-            .map(|element| element.transitional_role())
+    pub(super) fn focused_element_type_key(&self) -> Option<ElementTypeKey> {
+        focused_body_element_type_key(self.session.project(), self.session.selection().focus)
     }
 
-    pub(super) fn change_role_from_toolbar(&mut self, role: Role, ctx: &egui::Context) {
+    pub(super) fn change_element_type_from_toolbar(
+        &mut self,
+        key: ElementTypeKey,
+        ctx: &egui::Context,
+    ) {
         self.dispatch_command(
-            CommandInvocation::new(
-                Command::EditorElementChange {
-                    role: RoleValue::new(role),
-                    surface: EditorSurface::Body,
-                },
-                CommandOrigin::Toolbar,
-            ),
+            CommandInvocation::new(element_change_command(key), CommandOrigin::Toolbar),
             ctx,
         );
     }
@@ -1092,9 +1076,10 @@ impl ScriptCraftApp {
         item: ToolbarItemSpec,
         width: f32,
         presentation: ToolbarPresentationMetrics,
+        choices: &[ElementChoice],
     ) {
-        let selected_role = self.focused_role();
-        let mut next_role = selected_role.unwrap_or(Role::Action);
+        let selected_key = self.focused_element_type_key();
+        let mut next_key = selected_key.clone();
         let group_height = toolbar_item_group_height(ui.style());
         let group_response = ui.allocate_ui_with_layout(
             Vec2::new(width, group_height),
@@ -1107,7 +1092,7 @@ impl ScriptCraftApp {
                 let group_rect = ui.max_rect();
                 let vertical_item_spacing = ui.spacing().item_spacing.y;
                 let original_interact_height = ui.spacing().interact_size.y;
-                let role_popup_height = elements_role_popup_max_height(ui);
+                let popup_height = elements_popup_max_height(ui, choices);
                 // The closed control is followed by explicitly budgeted caption
                 // allocations, so do not let ComboBox's post-widget spacing push
                 // those allocations beyond this Item group's declared height.
@@ -1116,7 +1101,7 @@ impl ScriptCraftApp {
                     toolbar_presentation::DEFAULT_ELEMENTS_CLOSED_COMBO_HEIGHT;
                 let combo_result = egui::ComboBox::from_id_salt(item.id)
                     .width(width)
-                    .height(role_popup_height)
+                    .height(popup_height)
                     .wrap_mode(TextWrapMode::Truncate)
                     // Keep the stock ComboBox button, popup, ID, and keyboard behavior,
                     // but replace its triangle with the outlined up/down Material glyph.
@@ -1140,20 +1125,19 @@ impl ScriptCraftApp {
                     })
                     .selected_text("")
                     .show_ui(ui, |ui| {
-                        // Popup role rows retain the normal vertical rhythm even
+                        // Popup type rows retain the normal vertical rhythm even
                         // though the closed control/caption composition does not.
                         // The closed button's local height must not resize popup rows.
                         ui.spacing_mut().item_spacing.y = vertical_item_spacing;
                         ui.spacing_mut().interact_size.y = original_interact_height;
                         ui.spacing_mut().button_padding.x =
                             toolbar_presentation::DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING;
-                        let role_option_font =
-                            toolbar_presentation::elements_role_option_font_id(ui);
-                        for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
+                        let option_font = toolbar_presentation::elements_option_font_id(ui);
+                        for choice in choices {
                             ui.selectable_value(
-                                &mut next_role,
-                                role,
-                                RichText::new(label).font(role_option_font.clone()),
+                                &mut next_key,
+                                Some(choice.key.clone()),
+                                RichText::new(choice.label()).font(option_font.clone()),
                             );
                         }
                     });
@@ -1162,6 +1146,17 @@ impl ScriptCraftApp {
                 ui.spacing_mut().interact_size.y = original_interact_height;
                 let popup_open = combo_result.inner.is_some();
                 let combo_response = combo_result.response.on_hover_cursor(toolbar_cursor_icon());
+                let accessible_name = selected_key
+                    .as_ref()
+                    .map(|key| format!("{}: {}", item.accessibility_name, key.as_str()))
+                    .unwrap_or_else(|| item.accessibility_name.to_owned());
+                combo_response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        accessible_name.clone(),
+                    )
+                });
                 if !popup_open {
                     let text_rect = elements_closed_text_rect(
                         combo_response.rect,
@@ -1171,8 +1166,8 @@ impl ScriptCraftApp {
                     );
                     let text_color = toolbar_presentation::enabled_foreground(ui, item, None);
                     let galley = WidgetText::from(
-                        RichText::new(screenplay_role_label(next_role))
-                            .font(toolbar_presentation::elements_role_option_font_id(ui))
+                        RichText::new(next_key.as_ref().map_or("", ElementTypeKey::as_str))
+                            .font(toolbar_presentation::elements_option_font_id(ui))
                             .color(text_color),
                     )
                     .into_galley(
@@ -1185,7 +1180,7 @@ impl ScriptCraftApp {
                     ui.painter().galley(text_position, galley, text_color);
                     // Paint only the closed control's outline, using the app-owned
                     // toolbar hover foreground without changing widget visuals, the
-                    // separate hover fill, or popup role rows.
+                    // separate hover fill, or popup type rows.
                     ui.painter().rect_stroke(
                         combo_response.rect,
                         ui.visuals().widgets.inactive.corner_radius,
@@ -1227,8 +1222,8 @@ impl ScriptCraftApp {
         group_response
             .response
             .on_hover_cursor(toolbar_cursor_icon());
-        if selected_role != Some(next_role) {
-            self.change_role_from_toolbar(next_role, ui.ctx());
+        if let Some(next_key) = next_key.filter(|key| Some(key) != selected_key.as_ref()) {
+            self.change_element_type_from_toolbar(next_key, ui.ctx());
         }
     }
 
@@ -1238,9 +1233,10 @@ impl ScriptCraftApp {
         indicator: ToolbarItemSpec,
         items: &[ToolbarItemSpec],
         surface: EditorSurface,
+        choices: &[ElementChoice],
     ) {
         let mut chosen_action = None;
-        let mut chosen_role = None;
+        let mut chosen_element_type = None;
         let icon = match indicator.graphic {
             ToolbarGraphic::Icon(icon) => icon,
             _ => unreachable!("overflow indicator must use a single Material icon"),
@@ -1269,30 +1265,30 @@ impl ScriptCraftApp {
                             }
                         }
                         ToolbarBehavior::ElementsRoleDropdown => {
-                            let selected_role = self.focused_role();
+                            let selected_key = self.focused_element_type_key();
                             ui.menu_button(item.label, |ui| {
                                 ui.spacing_mut().button_padding.x = toolbar_presentation::
                                 DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING;
-                                let role_popup_height = elements_role_popup_max_height(ui);
-                                let role_option_font =
-                                    toolbar_presentation::elements_role_option_font_id(ui);
-                                egui::ScrollArea::vertical()
-                                    .max_height(role_popup_height)
-                                    .show(ui, |ui| {
-                                        for (role, label) in SUPPORTED_SCREENPLAY_ROLES {
+                                let popup_height = elements_popup_max_height(ui, choices);
+                                let option_font = toolbar_presentation::elements_option_font_id(ui);
+                                egui::ScrollArea::vertical().max_height(popup_height).show(
+                                    ui,
+                                    |ui| {
+                                        for choice in choices {
                                             if ui
                                                 .selectable_label(
-                                                    selected_role == Some(role),
-                                                    RichText::new(label)
-                                                        .font(role_option_font.clone()),
+                                                    selected_key.as_ref() == Some(&choice.key),
+                                                    RichText::new(choice.label())
+                                                        .font(option_font.clone()),
                                                 )
                                                 .clicked()
                                             {
-                                                chosen_role = Some(role);
+                                                chosen_element_type = Some(choice.key.clone());
                                                 ui.close();
                                             }
                                         }
-                                    });
+                                    },
+                                );
                             });
                         }
                         ToolbarBehavior::StylesInlineGroup
@@ -1336,8 +1332,8 @@ impl ScriptCraftApp {
                 );
             }
         }
-        if let Some(role) = chosen_role {
-            self.change_role_from_toolbar(role, ui.ctx());
+        if let Some(key) = chosen_element_type {
+            self.change_element_type_from_toolbar(key, ui.ctx());
         }
     }
 
@@ -1374,6 +1370,7 @@ impl ScriptCraftApp {
         } else {
             toolbar_items_for(availability).to_vec()
         };
+        let element_choices = self.refresh_dynamic_controls().choices.clone();
         let allocation = allocate_toolbar(
             &toolbar_items,
             available_width,
@@ -1411,9 +1408,13 @@ impl ScriptCraftApp {
                             ToolbarBehavior::Action(_) => {
                                 self.toolbar_action_button(ui, item, width, presentation)
                             }
-                            ToolbarBehavior::ElementsRoleDropdown => {
-                                self.elements_toolbar_item(ui, item, width, presentation)
-                            }
+                            ToolbarBehavior::ElementsRoleDropdown => self.elements_toolbar_item(
+                                ui,
+                                item,
+                                width,
+                                presentation,
+                                &element_choices,
+                            ),
                             ToolbarBehavior::StylesInlineGroup
                             | ToolbarBehavior::AlignmentInlineGroup => self
                                 .formatting_inline_group_button(
@@ -1449,6 +1450,7 @@ impl ScriptCraftApp {
                                     OVERFLOW_ITEM_SPEC,
                                     &allocation.overflow,
                                     surface,
+                                    &element_choices,
                                 )
                             },
                         );
@@ -1469,6 +1471,92 @@ impl ScriptCraftApp {
                 egui::Stroke::new(TOOLBAR_BOTTOM_BORDER_WIDTH, palette.border),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod element_change_command_tests {
+    use super::*;
+
+    const DYNAMIC_CONTROLS_FDX: &[u8] = include_bytes!("../../tests/fixtures/dynamic_controls.fdx");
+
+    #[test]
+    fn toolbar_command_preserves_an_arbitrary_exact_type_key() {
+        let Ok(key) = ElementTypeKey::new("stage Cue") else {
+            assert!(false, "bounded open type key should be valid");
+            return;
+        };
+        let command = element_change_command(key);
+        let Command::EditorElementChange {
+            element_type,
+            surface,
+        } = command
+        else {
+            assert!(false, "toolbar should create the element-change command");
+            return;
+        };
+
+        assert_eq!(element_type.as_str(), "stage Cue");
+        assert_eq!(surface, EditorSurface::Body);
+    }
+
+    #[test]
+    fn fixture_toolbar_activation_keeps_the_exact_dynamic_key_and_body_surface() {
+        let project = scriptcraft_fdx::read_v6(DYNAMIC_CONTROLS_FDX)
+            .unwrap_or_else(|_| unreachable!("checked-in dynamic controls fixture is valid"))
+            .project;
+        let choice =
+            crate::chrome::element_choices::ordered_element_choices(project.element_definitions())
+                .into_iter()
+                .find(|choice| choice.label() == "Notations")
+                .unwrap_or_else(|| unreachable!("fixture includes its arbitrary toolbar choice"));
+        let Command::EditorElementChange {
+            element_type,
+            surface,
+        } = element_change_command(choice.key)
+        else {
+            assert!(false, "toolbar activation creates the open-key command");
+            return;
+        };
+
+        assert_eq!(element_type.as_str(), "Notations");
+        assert_eq!(surface, EditorSurface::Body);
+    }
+
+    #[test]
+    fn elements_popup_height_is_bounded_by_available_content() {
+        assert_eq!(bounded_elements_popup_height(900.0, 120.0), 120.0);
+        assert_eq!(bounded_elements_popup_height(0.0, 120.0), 0.0);
+        assert_eq!(bounded_elements_popup_height(90.0, -1.0), 0.0);
+    }
+
+    #[test]
+    fn focused_type_projection_does_not_invent_a_choice_for_an_invalid_position() {
+        let Ok(project) = scriptcraft_fdx::new_project() else {
+            assert!(false, "test project should be valid");
+            return;
+        };
+
+        assert!(focused_body_element_type_key(
+            &project,
+            Position {
+                element: usize::MAX,
+                offset: 0,
+            }
+        )
+        .is_none());
+        assert_eq!(
+            focused_body_element_type_key(
+                &project,
+                Position {
+                    element: 0,
+                    offset: 0,
+                }
+            )
+            .as_ref()
+            .map(ElementTypeKey::as_str),
+            Some("Scene Heading")
+        );
     }
 }
 

@@ -11,7 +11,7 @@ use scriptcraft_model::{
         ResolvedFaceMetrics, ResolvedFontFace, ResolvedFontId, ResolvedFontSourceKind,
         ScalarAdvance,
     },
-    BodyOwner, Project, Role, ScreenplayElement, TitlePageParagraph,
+    BodyOwner, Project, ScreenplayElement, TitlePageParagraph,
 };
 use std::collections::BTreeSet;
 
@@ -129,10 +129,10 @@ fn synthetic_layout_environment(project: &Project) -> LayoutEnvironment {
 
 #[test]
 fn export_public_api_smoke() {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
         "export-action",
-        Role::Action,
+        scriptcraft_model::ElementTypeKey::new("Action").expect("valid fixture label"),
         "Export body smoke café",
     )))];
     project.title_page = vec![valid(TitlePageParagraph::new(

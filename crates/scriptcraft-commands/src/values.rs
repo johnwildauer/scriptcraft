@@ -1,26 +1,43 @@
-use scriptcraft_model::{element::Role, formatted_text::RunStyle, formatting::ParagraphAlignment};
+use scriptcraft_model::{
+    element_type::ElementTypeKey, formatted_text::RunStyle, formatting::ParagraphAlignment,
+    ModelError,
+};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
-/// Phase 1 compatibility payload for command ID 22, serialized with the exact
-/// stable role spelling. Phase 6 owns transition to open element-type commands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RoleValue(Role);
+/// Owned, exact element-type key carried by command 22.
+///
+/// This value is open: it preserves arbitrary labels and case distinctions and
+/// never normalizes or interprets a key through a closed vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ElementTypeValue(ElementTypeKey);
 
-impl RoleValue {
-    pub const fn new(role: Role) -> Self {
-        Self(role)
+impl ElementTypeValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, ModelError> {
+        ElementTypeKey::new(value).map(Self)
     }
 
-    pub const fn as_core(self) -> Role {
+    pub fn from_key(key: ElementTypeKey) -> Self {
+        Self(key)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn as_key(&self) -> &ElementTypeKey {
+        &self.0
+    }
+
+    pub fn into_key(self) -> ElementTypeKey {
         self.0
     }
 
-    pub const fn as_str(self) -> &'static str {
-        self.0.as_str()
+    pub fn into_string(self) -> String {
+        self.0.into_string()
     }
 }
 
-impl Serialize for RoleValue {
+impl Serialize for ElementTypeValue {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -29,15 +46,13 @@ impl Serialize for RoleValue {
     }
 }
 
-impl<'de> Deserialize<'de> for RoleValue {
+impl<'de> Deserialize<'de> for ElementTypeValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Role::parse(&value)
-            .map(Self::new)
-            .ok_or_else(|| de::Error::custom(format!("unknown screenplay role: {value}")))
+        Self::new(value).map_err(|_| de::Error::custom("invalid bounded element-type key"))
     }
 }
 

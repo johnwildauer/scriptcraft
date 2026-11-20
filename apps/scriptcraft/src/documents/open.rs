@@ -495,6 +495,7 @@ impl ScriptCraftApp {
         self.active_body_dual_dialogue_group = None;
         self.surface_focused = false;
         self.session = replacement;
+        self.invalidate_dynamic_controls();
         self.zoom_percent = text_state.scaling.clamp(
             scriptcraft_fdx::MIN_TEXT_SCALING,
             scriptcraft_fdx::MAX_TEXT_SCALING,

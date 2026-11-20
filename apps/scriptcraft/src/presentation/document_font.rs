@@ -1057,7 +1057,7 @@ mod resolved_font_tests {
     use eframe::egui::{Color32, FontId};
 
     fn project_with_family(family: &str) -> Option<Project> {
-        let Ok(mut project) = Project::new() else {
+        let Ok(mut project) = scriptcraft_fdx::new_project() else {
             return None;
         };
         let mut definitions = project
@@ -1502,7 +1502,7 @@ mod resolved_font_tests {
 
     #[test]
     fn direct_inline_font_run_family_is_prepared_exactly() {
-        let Ok(mut project) = Project::new() else {
+        let Ok(mut project) = scriptcraft_fdx::new_project() else {
             assert!(false, "default project should be constructible");
             return;
         };
@@ -1842,7 +1842,7 @@ mod resolved_font_tests {
 
     #[test]
     fn empty_default_project_waits_for_activation_pass_before_galley_paint() {
-        let Ok(project) = Project::new() else {
+        let Ok(project) = scriptcraft_fdx::new_project() else {
             assert!(false, "default Project should be constructible");
             return;
         };
@@ -1874,7 +1874,7 @@ mod resolved_font_tests {
 
     #[test]
     fn prepared_replacement_environments_wait_until_all_new_face_bindings_activate() {
-        let Ok(default_project) = Project::new() else {
+        let Ok(default_project) = scriptcraft_fdx::new_project() else {
             assert!(false, "default Project should be constructible");
             return;
         };

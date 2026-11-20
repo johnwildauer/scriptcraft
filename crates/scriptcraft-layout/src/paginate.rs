@@ -276,8 +276,6 @@ impl ScreenplayLayout {
         let mut index = 0;
         while include_body && index < project.elements.len() {
             let element = &project.elements[index];
-            // Phase 5 replaces this static-layout adapter with definition-driven layout.
-            let role = element.transitional_role();
             if let Some(next_index) = dual_dialogue::prepare_group(
                 &mut output,
                 project,
@@ -315,11 +313,17 @@ impl ScreenplayLayout {
                         paragraph,
                     )
                 } else {
-                    let text_style = output.source_settings.text_style(role);
+                    let definition = project
+                        .element_definitions()
+                        .get(&element.element_type())
+                        .ok_or(LayoutError {
+                            kind: LayoutErrorKind::NoGeometry,
+                        })?;
+                    let text_style = super::inputs::compatibility_text_style(definition);
                     let paragraph = effective_paragraph(
                         &output.inputs,
                         source_settings,
-                        role,
+                        definition,
                         &element.id,
                         &text_style,
                     );
@@ -330,9 +334,7 @@ impl ScreenplayLayout {
                 continue;
             }
             if resolved_text_style.is_none()
-                && output
-                    .source_settings
-                    .starts_new_page_for_element(role, &element.id)
+                && paragraph.starts_new_page
                 && output
                     .pages
                     .last()
@@ -340,6 +342,14 @@ impl ScreenplayLayout {
             {
                 output.pages.push(output.new_page(false));
             }
+            let effective_color = resolved_text_style.as_ref().map_or_else(
+                || {
+                    scriptcraft_model::typography::parse_effective_text_color(
+                        text_style.source_color.as_deref(),
+                    )
+                },
+                |style| style.color,
+            );
             let environment = PreparedBodyEnvironment {
                 purpose,
                 composition,
@@ -350,18 +360,7 @@ impl ScreenplayLayout {
                 char_width: paragraph.char_width,
                 element_key: Some(element.element_type()),
                 layout_environment: output.layout_environment.clone(),
-                effective_color: resolved_text_style.as_ref().map_or_else(
-                    || {
-                        scriptcraft_model::typography::parse_effective_text_color(
-                            output
-                                .source_settings
-                                .text_style(role)
-                                .source_color
-                                .as_deref(),
-                        )
-                    },
-                    |style| style.color,
-                ),
+                effective_color,
             };
             let prepared = prepare_body_for_layout(
                 prepared_body_cache.as_deref_mut(),
@@ -560,7 +559,7 @@ impl ScreenplayLayout {
         }
         LayoutLine {
             page: page_number,
-            role: line.role,
+            element_type: line.element_type,
             element: line.element,
             source: SourceRange {
                 element: line.element,

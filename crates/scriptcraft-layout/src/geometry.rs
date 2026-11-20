@@ -6,7 +6,7 @@ use crate::inputs::LayoutEnvironment;
 use scriptcraft_model::{
     formatting::{EffectiveTextStyle, FixedPoint, ParagraphAlignment, SourceLayoutSettings},
     typography::EffectiveTextStyle as ResolvedTextStyle,
-    LayoutInputs, ModelError, Role, StableId,
+    ElementTypeKey, LayoutInputs, ModelError, StableId,
 };
 use std::sync::Arc;
 
@@ -45,7 +45,7 @@ pub struct SourceRange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutLine {
     pub page: usize,
-    pub role: Role,
+    pub element_type: Option<ElementTypeKey>,
     pub element: usize,
     pub source: SourceRange,
     pub text: Arc<str>,

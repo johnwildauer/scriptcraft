@@ -9,5 +9,8 @@ publish.workspace = true
 scriptcraft-layout = { path = "../scriptcraft-layout" }
 scriptcraft-model = { path = "../scriptcraft-model" }
 
+[dev-dependencies]
+scriptcraft-fdx = { path = "../scriptcraft-fdx" }
+
 [lints]
 workspace = true

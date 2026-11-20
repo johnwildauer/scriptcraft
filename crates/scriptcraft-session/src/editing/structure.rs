@@ -9,7 +9,7 @@ use super::{
 };
 use scriptcraft_model::{
     dual_dialogue, preservation::PreservationError, BodyOwner, ElementTypeKey, ModelError, Project,
-    Role, ScreenplayElement, StableId, MAX_ELEMENTS, MAX_TEXT_BYTES,
+    ScreenplayElement, StableId, MAX_ELEMENTS, MAX_TEXT_BYTES,
 };
 
 impl EditingSession {
@@ -273,12 +273,6 @@ impl EditingSession {
     /// or changes text, runs, formatting, or source-owned attachments.
     pub fn change_element_type(&mut self, element_type: ElementTypeKey) -> Result<(), EditError> {
         self.change_element_type_candidate(element_type, false)
-    }
-
-    /// Transitional command adapter for the existing Role-based controls.
-    /// Source Type values are still projected from the canonical exact key.
-    pub fn change_role(&mut self, role: Role) -> Result<(), EditError> {
-        self.change_element_type_candidate(ElementTypeKey::from_role(role), true)
     }
 
     fn change_element_type_candidate(

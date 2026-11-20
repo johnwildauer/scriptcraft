@@ -195,7 +195,6 @@ fn validate_definition_string(value: &str) -> Result<(), ModelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::element::Role;
 
     fn valid_font() -> ElementFontSpec {
         ElementFontSpec {
@@ -260,7 +259,11 @@ mod tests {
         };
         let mut definition = valid_definition(key);
         definition.behavior.return_key = Some(target);
-        definition.behavior.tab_key = Some(ElementTypeKey::from_role(Role::Action));
+        let Ok(action) = ElementTypeKey::new("Action") else {
+            assert!(false, "base key construction should succeed");
+            return;
+        };
+        definition.behavior.tab_key = Some(action);
 
         assert!(definition.validate().is_ok());
         assert_eq!(definition.clone(), definition);
@@ -273,7 +276,7 @@ mod tests {
                 .map(ElementTypeKey::as_str),
             Some("Later Type")
         );
-        assert!(definition.key.to_role().is_none());
+        assert_eq!(definition.key.as_str(), "Lyrics");
     }
 
     #[test]
@@ -340,9 +343,13 @@ mod tests {
     fn definition_constructor_validates_nested_values() {
         let mut font = valid_font();
         font.size = 0;
+        let Ok(action) = ElementTypeKey::new("Action") else {
+            assert!(false, "base key construction should succeed");
+            return;
+        };
         assert_eq!(
             ElementDefinition::new(
-                ElementTypeKey::from_role(Role::Action),
+                action,
                 font,
                 valid_paragraph(),
                 valid_behavior(),

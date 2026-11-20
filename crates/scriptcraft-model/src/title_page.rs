@@ -2,8 +2,8 @@
 
 use crate::{
     element::{
-        Role, RunAttribute, SourceProvenance, TextRun, MAX_PROVENANCE_STRING_BYTES,
-        MAX_RUNS_PER_ELEMENT, MAX_RUN_ATTRIBUTES, MAX_RUN_ATTRIBUTE_BYTES,
+        RunAttribute, SourceProvenance, TextRun, MAX_PROVENANCE_STRING_BYTES, MAX_RUNS_PER_ELEMENT,
+        MAX_RUN_ATTRIBUTES, MAX_RUN_ATTRIBUTE_BYTES,
     },
     element_type::ElementTypeKey,
     formatting::FixedPoint,
@@ -54,19 +54,6 @@ impl TitlePageParagraph {
     /// Sets the optional canonical key without changing any other title value.
     pub fn set_element_type(&mut self, element_type: Option<ElementTypeKey>) {
         self.element_type = element_type;
-    }
-
-    /// Transitional static-role adapter; arbitrary typed keys project to General
-    /// only for compatibility consumers, while type-less titles remain `None`.
-    pub fn transitional_role(&self) -> Option<Role> {
-        self.element_type
-            .as_ref()
-            .map(|key| key.to_role().unwrap_or(Role::General))
-    }
-
-    /// Updates canonical storage through the exact known-role compatibility adapter.
-    pub fn set_transitional_role(&mut self, role: Option<Role>) {
-        self.element_type = role.map(ElementTypeKey::from_role);
     }
 
     pub fn new(

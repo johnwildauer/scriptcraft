@@ -763,7 +763,7 @@ fn title_composition_uses_resolved_styles_metrics_and_editable_formatting() {
                 .is_some_and(|style| style.declared_family == "Courier Prime")
         }));
 
-    let mut title_only_project = valid(Project::new());
+    let mut title_only_project = valid(scriptcraft_fdx::new_project());
     let mut definitions = title_only_project
         .element_definitions()
         .iter()

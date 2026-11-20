@@ -9,9 +9,9 @@
 
 mod values;
 pub use values::{
-    Appearance, EditorSurface, HorizontalDirection, ImportResolution, LineEdge,
-    ParagraphAlignmentValue, PdfExportOptions, PointerPhase, RoleValue, ScriptViewMode,
-    SprintTimerMode, TitleTextStyle, VerticalDirection,
+    Appearance, EditorSurface, ElementTypeValue, HorizontalDirection, ImportResolution, LineEdge,
+    ParagraphAlignmentValue, PdfExportOptions, PointerPhase, ScriptViewMode, SprintTimerMode,
+    TitleTextStyle, VerticalDirection,
 };
 
 mod conversions;
@@ -25,7 +25,9 @@ mod command;
 pub use command::{Command, CommandId, HostEffectDescription, UnknownCommandId};
 
 mod wire;
-pub use wire::{CommandEnvelope, CommandOrigin, EnvelopeError, COMMAND_WIRE_VERSION};
+pub use wire::{
+    CommandEnvelope, CommandOrigin, EnvelopeError, COMMAND_WIRE_VERSION, COMMAND_WIRE_VERSION_1,
+};
 
 mod catalog;
 pub use catalog::{

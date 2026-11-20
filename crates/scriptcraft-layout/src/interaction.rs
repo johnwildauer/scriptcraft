@@ -697,7 +697,7 @@ mod canonical_boundary_tests {
         };
         LayoutLine {
             page: 0,
-            role: scriptcraft_model::Role::Action,
+            element_type: None,
             element: 0,
             source,
             text,

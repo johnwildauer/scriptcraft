@@ -11,7 +11,7 @@ use scriptcraft_model::{
         ResolvedFaceMetrics, ResolvedFontFace, ResolvedFontId, ResolvedFontSourceKind,
         ScalarAdvance,
     },
-    BodyOwner, Project, Role, ScreenplayElement,
+    BodyOwner, Project, ScreenplayElement,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -136,7 +136,7 @@ fn synthetic_environment(project: &Project) -> LayoutEnvironment {
 
 #[test]
 fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -168,31 +168,39 @@ fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
         .find(|definition| definition.key.as_str() == "Transition")
         .unwrap_or_else(|| unreachable!("required Transition definition exists"));
     transition.font.family = "Futura Exact".to_owned();
+    let mut summary = definitions
+        .iter()
+        .find(|definition| definition.key.as_str() == "Action")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("required Action definition exists"));
+    summary.key = scriptcraft_model::ElementTypeKey::new("Summary").expect("valid fixture label");
+    summary.font.hidden_text = true;
+    definitions.push(summary);
     valid(project.replace_element_definitions(definitions));
     project.elements = vec![
         BodyOwner::shared(valid(ScreenplayElement::new(
             "typography-output-action",
-            Role::Action,
+            scriptcraft_model::ElementTypeKey::new("Action").expect("valid fixture label"),
             "Output report café — proportional Wiii WWW",
         ))),
         BodyOwner::shared(valid(ScreenplayElement::new(
             "typography-output-dialogue",
-            Role::Dialogue,
+            scriptcraft_model::ElementTypeKey::new("Dialogue").expect("valid fixture label"),
             "Serif resource and explicit RGB output.",
         ))),
         BodyOwner::shared(valid(ScreenplayElement::new(
             "typography-output-scene",
-            Role::SceneHeading,
+            scriptcraft_model::ElementTypeKey::new("Scene Heading").expect("valid fixture label"),
             "Unknown-family output substitution.",
         ))),
         BodyOwner::shared(valid(ScreenplayElement::new(
             "typography-output-exact-host",
-            Role::Transition,
+            scriptcraft_model::ElementTypeKey::new("Transition").expect("valid fixture label"),
             "Exact host family uses a generic PDF resource.",
         ))),
         BodyOwner::shared(valid(ScreenplayElement::new(
             "typography-output-hidden",
-            Role::Summary,
+            scriptcraft_model::ElementTypeKey::new("Summary").expect("valid fixture label"),
             "PRIVATE HIDDEN FIXTURE CONTENT",
         ))),
     ];

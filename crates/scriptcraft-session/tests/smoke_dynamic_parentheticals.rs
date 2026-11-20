@@ -3,7 +3,7 @@
 use scriptcraft_fdx::read_v6;
 use scriptcraft_model::preservation::{PreservedElement, PreservedNode};
 use scriptcraft_model::{
-    BodyOwner, ElementTypeKey, Position, Project, Role, ScreenplayElement, Selection,
+    BodyOwner, ElementTypeKey, Position, Project, ScreenplayElement, Selection,
 };
 use scriptcraft_session::editing::{EditPolicy, EditingSession};
 
@@ -35,7 +35,7 @@ fn ensure_definition(definitions: &mut Vec<scriptcraft_model::ElementDefinition>
 }
 
 fn project_with_element_type(label: &str, text: &str) -> Project {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -54,6 +54,23 @@ fn project_with_element_type(label: &str, text: &str) -> Project {
         key(label),
         text,
     )))];
+    project
+}
+
+fn project_with_parenthetical_tab_target() -> Project {
+    let mut project = project_with_element_type("Verse", "");
+    let mut definitions = project
+        .element_definitions()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    definitions
+        .iter_mut()
+        .find(|definition| definition.key.as_str() == "Verse")
+        .unwrap_or_else(|| unreachable!("the current arbitrary source definition exists"))
+        .behavior
+        .tab_key = Some(key("Parenthetical"));
+    valid(project.replace_element_definitions(definitions));
     project
 }
 
@@ -77,38 +94,25 @@ fn retained_paragraph<'a>(
 }
 
 #[test]
-fn generic_type_assignment_is_type_only_but_known_role_assignment_may_generate() {
-    let mut generic = valid(EditingSession::new(project_with_element_type("Verse", "")));
-    valid(generic.change_element_type(key("Parenthetical")));
-    assert_eq!(generic.project().elements[0].text, "");
-
+fn exact_type_assignment_does_not_generate_parenthetical_text() {
     let mut assigned = valid(EditingSession::new(project_with_element_type("Verse", "")));
-    valid(assigned.change_role(Role::Parenthetical));
-    assert_eq!(assigned.project().elements[0].text, "()");
+    valid(assigned.change_element_type(key("Parenthetical")));
     assert_eq!(
-        assigned.selection(),
-        Selection::caret(Position {
-            element: 0,
-            offset: 1
-        })
+        assigned.project().elements[0].element_type(),
+        key("Parenthetical")
     );
+    assert_eq!(assigned.project().elements[0].text, "");
 
     valid(assigned.undo());
     assert_eq!(assigned.project().elements[0].element_type(), key("Verse"));
     valid(assigned.redo());
-    assert_eq!(assigned.project().elements[0].text, "()");
-    valid(assigned.enter());
     assert_eq!(assigned.project().elements[0].text, "");
-    assert_eq!(
-        assigned.project().elements[1].element_type(),
-        key("Dialogue")
-    );
 }
 
 #[test]
 fn edited_or_reconstructed_pairs_are_not_mistaken_for_generated_pairs() {
-    let mut session = valid(EditingSession::new(project_with_element_type("Verse", "")));
-    valid(session.change_role(Role::Parenthetical));
+    let mut session = valid(EditingSession::new(project_with_parenthetical_tab_target()));
+    valid(session.tab());
     valid(session.insert("x"));
     valid(session.backspace());
     assert_eq!(session.project().elements[0].text, "()");
@@ -123,8 +127,8 @@ fn edited_or_reconstructed_pairs_are_not_mistaken_for_generated_pairs() {
         key("Dialogue")
     );
 
-    let mut remapped = valid(EditingSession::new(project_with_element_type("Verse", "")));
-    valid(remapped.change_role(Role::Parenthetical));
+    let mut remapped = valid(EditingSession::new(project_with_parenthetical_tab_target()));
+    valid(remapped.tab());
     valid(remapped.change_element_type(key("Action")));
     assert_eq!(remapped.project().elements[0].text, "()");
     valid(remapped.change_element_type(key("Parenthetical")));
@@ -143,7 +147,7 @@ fn disabled_automation_and_generic_type_changes_never_clear_authored_delimiters(
         auto_parenthetical: false,
         ..EditPolicy::default()
     });
-    valid(session.change_role(Role::Parenthetical));
+    valid(session.change_element_type(key("Parenthetical")));
     assert_eq!(session.project().elements[0].text, "");
     valid(session.insert("()"));
     valid(session.set_selection(Selection::caret(Position {
@@ -160,8 +164,8 @@ fn disabled_automation_and_generic_type_changes_never_clear_authored_delimiters(
     valid(session.change_element_type(key("Action")));
     assert_eq!(session.project().elements[0].text, "()");
 
-    let mut generated = valid(EditingSession::new(project_with_element_type("Verse", "")));
-    valid(generated.change_role(Role::Parenthetical));
+    let mut generated = valid(EditingSession::new(project_with_parenthetical_tab_target()));
+    valid(generated.tab());
     generated.set_policy(EditPolicy {
         auto_parenthetical: false,
         ..EditPolicy::default()

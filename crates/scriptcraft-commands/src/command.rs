@@ -3,10 +3,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Appearance, DiagnosticMessage, DocumentPath, EditorSurface, HorizontalDirection,
-    ImportResolution, LineEdge, ParagraphAlignmentValue, PdfExportOptions, PointerPhase, Position,
-    RoleValue, ScriptViewMode, Selection, SprintTimerMode, TitleTextStyle, VerticalDirection,
-    ZoomFactor, ZoomPercent,
+    Appearance, DiagnosticMessage, DocumentPath, EditorSurface, ElementTypeValue,
+    HorizontalDirection, ImportResolution, LineEdge, ParagraphAlignmentValue, PdfExportOptions,
+    PointerPhase, Position, ScriptViewMode, Selection, SprintTimerMode, TitleTextStyle,
+    VerticalDirection, ZoomFactor, ZoomPercent,
 };
 
 /// Stable identifier for a command. Identifiers are intentionally independent
@@ -288,7 +288,7 @@ pub enum Command {
     EditorParagraphTab,
     #[serde(rename = "editor.element.change")]
     EditorElementChange {
-        role: RoleValue,
+        element_type: ElementTypeValue,
         #[serde(default)]
         surface: EditorSurface,
     },

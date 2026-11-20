@@ -517,6 +517,7 @@ fn native_key(key: ShortcutKey) -> Code {
         ShortcutKey::Z => Code::KeyZ,
         ShortcutKey::Comma => Code::Comma,
         ShortcutKey::Semicolon => Code::Semicolon,
+        ShortcutKey::Colon => Code::Semicolon,
         ShortcutKey::Period => Code::Period,
         ShortcutKey::Enter => Code::Enter,
         ShortcutKey::Tab => Code::Tab,
@@ -536,5 +537,10 @@ fn native_key(key: ShortcutKey) -> Code {
         ShortcutKey::BracketRight => Code::BracketRight,
         ShortcutKey::Backslash | ShortcutKey::Pipe => Code::Backslash,
         ShortcutKey::ArrowRight => Code::ArrowRight,
+        ShortcutKey::ArrowLeft => Code::ArrowLeft,
+        ShortcutKey::ArrowUp => Code::ArrowUp,
+        ShortcutKey::ArrowDown => Code::ArrowDown,
+        ShortcutKey::Home => Code::Home,
+        ShortcutKey::End => Code::End,
     }
 }

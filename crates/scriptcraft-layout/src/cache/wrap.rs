@@ -9,7 +9,7 @@ use scriptcraft_model::formatting::{EffectiveTextStyle, FixedPoint};
 use scriptcraft_model::typography::{
     parse_effective_text_color, EffectiveTextColor, EffectiveTextStyle as ResolvedTextStyle,
 };
-use scriptcraft_model::{ElementTypeKey, Role, RunAttribute, StableId, TextRun};
+use scriptcraft_model::{ElementTypeKey, StableId, TextRun};
 use std::{
     collections::{BTreeSet, HashMap},
     hash::{Hash, Hasher},
@@ -24,7 +24,7 @@ const MAX_CACHED_ELEMENT_WRAP_BYTES: usize = 32 * 1024 * 1024;
 struct ElementWrapContext {
     element_id: StableId,
     element_key: Option<ElementTypeKey>,
-    role: Role,
+    element_type: Option<ElementTypeKey>,
     purpose: LayoutPurpose,
     title_page: bool,
     geometry_mode: EffectiveGeometryMode,
@@ -37,11 +37,11 @@ struct ElementWrapContext {
     atomic_ranges: Arc<[std::ops::Range<usize>]>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ElementWrapIdentity<'a> {
     element_id: &'a StableId,
     element_key: Option<&'a ElementTypeKey>,
-    role: Role,
+    element_type: Option<ElementTypeKey>,
     purpose: LayoutPurpose,
     title_page: bool,
     geometry_mode: EffectiveGeometryMode,
@@ -58,7 +58,7 @@ impl ElementWrapContext {
         Self {
             element_id: identity.element_id.clone(),
             element_key: identity.element_key.cloned(),
-            role: identity.role,
+            element_type: identity.element_type,
             purpose: identity.purpose,
             title_page: identity.title_page,
             geometry_mode: identity.geometry_mode,
@@ -74,10 +74,10 @@ impl ElementWrapContext {
         }
     }
 
-    fn matches(&self, identity: ElementWrapIdentity<'_>) -> bool {
+    fn matches(&self, identity: &ElementWrapIdentity<'_>) -> bool {
         &self.element_id == identity.element_id
             && self.element_key.as_ref() == identity.element_key
-            && self.role == identity.role
+            && self.element_type == identity.element_type
             && self.purpose == identity.purpose
             && self.title_page == identity.title_page
             && self.geometry_mode == identity.geometry_mode
@@ -194,7 +194,7 @@ impl ElementWrapCache {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         identity.element_id.hash(&mut hasher);
         identity.element_key.hash(&mut hasher);
-        identity.role.hash(&mut hasher);
+        identity.element_type.hash(&mut hasher);
         identity.purpose.hash(&mut hasher);
         identity.title_page.hash(&mut hasher);
         identity.geometry_mode.hash(&mut hasher);
@@ -230,7 +230,7 @@ impl ElementWrapCache {
         element_key: Option<&ElementTypeKey>,
         text: &str,
         element: usize,
-        role: Role,
+        element_type: Option<ElementTypeKey>,
         paragraph: EffectiveParagraph,
         text_style: EffectiveTextStyle,
         char_width: FixedPoint,
@@ -245,7 +245,7 @@ impl ElementWrapCache {
         let identity = ElementWrapIdentity {
             element_id,
             element_key,
-            role,
+            element_type: element_type.clone(),
             purpose,
             title_page,
             geometry_mode,
@@ -259,7 +259,7 @@ impl ElementWrapCache {
         let fingerprint = self.fingerprint(&identity, text);
         if let Some(entry) = self.buckets.get_mut(&fingerprint).and_then(|bucket| {
             bucket.iter_mut().find(|entry| {
-                entry.context.matches(identity) && entry.canonical_text.as_ref() == text
+                entry.context.matches(&identity) && entry.canonical_text.as_ref() == text
             })
         }) {
             self.usage_order.remove(&(
@@ -293,7 +293,7 @@ impl ElementWrapCache {
         let lines = layout_wrap::wrap_element(
             text,
             element,
-            role,
+            element_type,
             paragraph,
             text_style,
             char_width,
@@ -378,7 +378,7 @@ impl ElementWrapCache {
         element_key: Option<&ElementTypeKey>,
         text: &str,
         element: usize,
-        role: Role,
+        element_type: Option<ElementTypeKey>,
         paragraph: EffectiveParagraph,
         text_style: EffectiveTextStyle,
         resolved_text_style: ResolvedTextStyle,
@@ -391,7 +391,7 @@ impl ElementWrapCache {
         let identity = ElementWrapIdentity {
             element_id,
             element_key,
-            role,
+            element_type: element_type.clone(),
             purpose,
             title_page,
             geometry_mode,
@@ -405,7 +405,7 @@ impl ElementWrapCache {
         let fingerprint = self.fingerprint(&identity, text);
         if let Some(entry) = self.buckets.get_mut(&fingerprint).and_then(|bucket| {
             bucket.iter_mut().find(|entry| {
-                entry.context.matches(identity) && entry.canonical_text.as_ref() == text
+                entry.context.matches(&identity) && entry.canonical_text.as_ref() == text
             })
         }) {
             self.usage_order.remove(&(
@@ -444,7 +444,7 @@ impl ElementWrapCache {
         let lines = layout_wrap::wrap_resolved_for_layout(
             text,
             element,
-            role,
+            element_type,
             paragraph,
             &resolved_text_style,
             &environment.fonts,
@@ -569,154 +569,4 @@ fn layout_environment_byte_cost(environment: &LayoutEnvironment) -> usize {
 }
 
 #[cfg(test)]
-mod identity_tests {
-    use super::*;
-    use scriptcraft_model::formatting::{FontFallback, ParagraphAlignment};
-
-    fn paragraph() -> EffectiveParagraph {
-        EffectiveParagraph {
-            left: FixedPoint::default(),
-            right: FixedPoint::from_points(500),
-            first_indent: FixedPoint::default(),
-            alignment: ParagraphAlignment::Left,
-            space_before: FixedPoint::default(),
-            line_advance: FixedPoint::from_points(12),
-            char_width: FixedPoint::from_points(7),
-            starts_new_page: false,
-            pagination: Default::default(),
-        }
-    }
-
-    fn style(color: Option<&str>) -> EffectiveTextStyle {
-        EffectiveTextStyle {
-            declared_family: "Courier Prime".to_owned(),
-            family: FontFallback::CourierPrime,
-            size: 12,
-            bold: false,
-            italic: false,
-            underline: false,
-            all_caps: false,
-            hidden_text: false,
-            source_color: color.map(str::to_owned),
-        }
-    }
-
-    #[test]
-    fn open_key_and_effective_color_remain_full_equality_after_fingerprint_lookup(
-    ) -> Result<(), scriptcraft_model::ModelError> {
-        let element_id = StableId::new("owner")?;
-        let action = ElementTypeKey::new("Action")?;
-        let custom = ElementTypeKey::new("Custom Action")?;
-        let base_style = style(None);
-        let runs: [TextRun; 0] = [];
-        let atomic: [std::ops::Range<usize>; 0] = [];
-        let original_identity = ElementWrapIdentity {
-            element_id: &element_id,
-            element_key: Some(&action),
-            role: Role::Action,
-            purpose: LayoutPurpose::Editor,
-            title_page: false,
-            geometry_mode: EffectiveGeometryMode::Sequential,
-            paragraph: paragraph(),
-            text_style: &base_style,
-            resolved_text_style: None,
-            char_width: FixedPoint::from_points(7),
-            runs: &runs,
-            atomic_ranges: &atomic,
-        };
-        let retained = ElementWrapContext::from_identity(original_identity);
-        let different_key = ElementWrapIdentity {
-            element_key: Some(&custom),
-            ..original_identity
-        };
-        assert!(!retained.matches(different_key));
-        let explicit_color = style(Some("unsupported-explicit-color"));
-        let different_color = ElementWrapIdentity {
-            text_style: &explicit_color,
-            ..original_identity
-        };
-        assert!(!retained.matches(different_color));
-        let custom_color = style(Some("#87878F8FE0E0"));
-        let different_explicit_rgb = ElementWrapIdentity {
-            text_style: &custom_color,
-            ..original_identity
-        };
-        assert!(!retained.matches(different_explicit_rgb));
-        let expanded_runs = [TextRun {
-            text: "x".to_owned(),
-            attributes: Vec::new(),
-        }];
-        let different_run_repertoire = ElementWrapIdentity {
-            runs: &expanded_runs,
-            ..original_identity
-        };
-        assert!(!retained.matches(different_run_repertoire));
-        let attributed_runs = [TextRun {
-            text: "x".to_owned(),
-            attributes: vec![RunAttribute {
-                name: "Bold".to_owned(),
-                value: "Yes".to_owned(),
-            }],
-        }];
-        let different_run_attributes = ElementWrapIdentity {
-            runs: &attributed_runs,
-            ..original_identity
-        };
-        assert!(!retained.matches(different_run_attributes));
-
-        // Force two unequal identities into the same candidate bucket so the
-        // lookup path proves that a fingerprint is not accepted as equality.
-        let mut cache = ElementWrapCache::default();
-        let mut diagnostics = LayoutBuildDiagnostics::default();
-        let original_fingerprint = cache.fingerprint(&original_identity, "x");
-        let _ = cache.wrap(
-            &element_id,
-            Some(&action),
-            "x",
-            0,
-            Role::Action,
-            original_identity.paragraph,
-            base_style.clone(),
-            original_identity.char_width,
-            &runs,
-            &atomic,
-            &atomic,
-            LayoutPurpose::Editor,
-            false,
-            EffectiveGeometryMode::Sequential,
-            Some(&mut diagnostics),
-        );
-        let different_fingerprint = cache.fingerprint(&different_key, "x");
-        let mut retained_bucket = cache
-            .buckets
-            .remove(&original_fingerprint)
-            .expect("the original wrap should be retained");
-        let retained_entry = retained_bucket
-            .pop()
-            .expect("the original wrap bucket should contain an entry");
-        cache
-            .buckets
-            .entry(different_fingerprint)
-            .or_default()
-            .push(retained_entry);
-        let _ = cache.wrap(
-            &element_id,
-            Some(&custom),
-            "x",
-            0,
-            Role::Action,
-            different_key.paragraph,
-            base_style.clone(),
-            different_key.char_width,
-            &runs,
-            &atomic,
-            &atomic,
-            LayoutPurpose::Editor,
-            false,
-            EffectiveGeometryMode::Sequential,
-            Some(&mut diagnostics),
-        );
-        assert_eq!(diagnostics.element_wraps_reused, 0);
-        Ok(())
-    }
-}
+mod tests;

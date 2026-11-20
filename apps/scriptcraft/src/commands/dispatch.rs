@@ -22,7 +22,7 @@ impl CommandInvocation {
 }
 
 /// Static menu, toolbar, and native application-menu IDs map to parameterless
-/// commands. Dynamic payloads (such as a toolbar Role) are built at activation.
+/// commands. Dynamic payloads (such as an exact toolbar element type) are built at activation.
 pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
     Some(match id {
         CommandId::FileNew => Command::FileNew,
@@ -144,7 +144,7 @@ impl ScriptCraftApp {
         resolve_pdf_options: impl FnOnce(&mut ScriptCraftApp, scriptcraft_commands::PdfExportOptions),
         open_print_panel: impl FnOnce(&mut ScriptCraftApp),
     ) -> DesktopCommandOutcome {
-        let availability = self.command_dispatch_availability(command.id());
+        let availability = self.command_dispatch_availability(&command);
         if !availability.is_enabled(command.id()) {
             if let Some(outcome) = self.unavailable_save_outcome(
                 command.id(),
@@ -302,7 +302,10 @@ fn route_to_focused_surface(
     match command {
         Command::EditorTextInsert { text, .. } => Command::EditorTextInsert { text, surface },
         Command::EditorTextPaste { text, .. } => Command::EditorTextPaste { text, surface },
-        Command::EditorElementChange { role, .. } => Command::EditorElementChange { role, surface },
+        Command::EditorElementChange { element_type, .. } => Command::EditorElementChange {
+            element_type,
+            surface,
+        },
         Command::EditorStyleToggle { style, .. } => Command::EditorStyleToggle { surface, style },
         Command::EditorStyleClear { .. } => Command::EditorStyleClear { surface },
         Command::EditorAlignmentSet { alignment, .. } => {

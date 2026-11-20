@@ -120,12 +120,27 @@ impl ScriptCraftApp {
     /// that target resolution and candidate scan.
     pub(super) fn command_dispatch_availability(
         &mut self,
-        command: CommandId,
+        command: &scriptcraft_commands::Command,
     ) -> AppCommandAvailability {
+        let command_id = command.id();
         let mut availability = self.app_command_availability_without_dual_dialogue();
-        if command == CommandId::EditorDualDialogueToggle {
+        if command_id == CommandId::EditorDualDialogueToggle {
             availability.dual_dialogue_toggle =
                 !availability.replacement_pending && self.dual_dialogue_toggle_target().is_some();
+        }
+        if let scriptcraft_commands::Command::EditorElementChange { surface, .. } = command {
+            let core_selection = match surface {
+                EditorSurface::Body => self.session.selection(),
+                EditorSurface::TitlePage => self.session.title_selection(),
+            };
+            availability.body_only = scriptcraft_commands::Selection::from_core(core_selection)
+                .ok()
+                .is_some_and(|selection| {
+                    selection
+                        .validate_for_surface(self.session.project(), *surface)
+                        .is_ok()
+                        && selection.anchor.element == selection.focus.element
+                });
         }
         availability
     }
@@ -143,7 +158,7 @@ impl ScriptCraftApp {
                         selection,
                         element.map(|e| e.text.len()).unwrap_or(0),
                         element.is_some_and(|e| {
-                            e.transitional_role() == scriptcraft_model::Role::Parenthetical
+                            e.element_type().as_str() == "Parenthetical"
                                 && matches!(e.text.as_str(), "(" | "()" | ")")
                         }),
                         self.session.project().elements.len(),

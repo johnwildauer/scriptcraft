@@ -18,94 +18,6 @@ pub const MAX_RUN_ATTRIBUTES: usize = 128;
 pub const MAX_RUN_ATTRIBUTE_BYTES: usize = 4_096;
 pub const MAX_PROVENANCE_STRING_BYTES: usize = 4_096;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Role {
-    SceneHeading,
-    Action,
-    Character,
-    Dialogue,
-    Parenthetical,
-    Transition,
-    Note,
-    NewAct,
-    EndOfAct,
-    CastList,
-    General,
-    Shot,
-    Sequence,
-    Outline1,
-    Outline2,
-    Outline3,
-    Summary,
-}
-
-impl Role {
-    pub const ALL: [Self; 17] = [
-        Self::SceneHeading,
-        Self::Action,
-        Self::Character,
-        Self::Dialogue,
-        Self::Parenthetical,
-        Self::Transition,
-        Self::Note,
-        Self::NewAct,
-        Self::EndOfAct,
-        Self::CastList,
-        Self::General,
-        Self::Shot,
-        Self::Sequence,
-        Self::Outline1,
-        Self::Outline2,
-        Self::Outline3,
-        Self::Summary,
-    ];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SceneHeading => "scene_heading",
-            Self::Action => "action",
-            Self::Character => "character",
-            Self::Dialogue => "dialogue",
-            Self::Parenthetical => "parenthetical",
-            Self::Transition => "transition",
-            Self::Note => "note",
-            Self::NewAct => "new_act",
-            Self::EndOfAct => "end_of_act",
-            Self::CastList => "cast_list",
-            Self::General => "general",
-            Self::Shot => "shot",
-            Self::Sequence => "sequence",
-            Self::Outline1 => "outline_1",
-            Self::Outline2 => "outline_2",
-            Self::Outline3 => "outline_3",
-            Self::Summary => "summary",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "scene_heading" => Self::SceneHeading,
-            "action" => Self::Action,
-            "character" => Self::Character,
-            "dialogue" => Self::Dialogue,
-            "parenthetical" => Self::Parenthetical,
-            "transition" => Self::Transition,
-            "note" => Self::Note,
-            "new_act" => Self::NewAct,
-            "end_of_act" => Self::EndOfAct,
-            "cast_list" => Self::CastList,
-            "general" => Self::General,
-            "shot" => Self::Shot,
-            "sequence" => Self::Sequence,
-            "outline_1" => Self::Outline1,
-            "outline_2" => Self::Outline2,
-            "outline_3" => Self::Outline3,
-            "summary" => Self::Summary,
-            _ => return None,
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextRun {
     pub text: String,
@@ -162,17 +74,6 @@ impl ScreenplayElement {
     /// Sets the canonical key without changing any other paragraph value.
     pub fn set_element_type(&mut self, element_type: ElementTypeKey) {
         self.element_type = element_type;
-    }
-
-    /// Transitional static adapter. Arbitrary keys project to General only for
-    /// consumers that still require the closed Role vocabulary.
-    pub fn transitional_role(&self) -> Role {
-        self.element_type.to_role().unwrap_or(Role::General)
-    }
-
-    /// Updates canonical storage through the exact known-role compatibility adapter.
-    pub fn set_transitional_role(&mut self, role: Role) {
-        self.element_type = ElementTypeKey::from_role(role);
     }
 
     pub fn new(

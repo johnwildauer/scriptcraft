@@ -61,7 +61,7 @@ fn key(label: &str) -> ElementTypeKey {
 }
 
 fn project_with_body(rows: &[(&str, &str)]) -> Project {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     let mut definitions = project
         .element_definitions()
         .iter()

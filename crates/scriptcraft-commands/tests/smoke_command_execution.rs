@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
 use scriptcraft_commands::{
-    execute_editor_command, Command, CommandOutcome, CommandRejection, EditorSurface, Position,
-    RoleValue, Selection, SelectionError,
+    execute_editor_command, Command, CommandOutcome, CommandRejection, EditorSurface,
+    ElementTypeValue, Position, Selection, SelectionError,
 };
-use scriptcraft_model::{element::Role, element_type::ElementTypeKey, Project};
+use scriptcraft_model::ElementTypeKey;
 use scriptcraft_session::editing::{
     EditingSession, Position as CorePosition, Selection as CoreSelection,
 };
@@ -14,42 +14,35 @@ fn valid<T, E>(result: Result<T, E>) -> T {
 }
 
 #[test]
-fn version_1_role_spellings_map_to_exact_element_type_labels() {
-    const EXACT_ELEMENT_LABELS: [&str; 17] = [
-        "Scene Heading",
-        "Action",
-        "Character",
-        "Dialogue",
-        "Parenthetical",
-        "Transition",
-        "Note",
-        "New Act",
-        "End of Act",
-        "Cast List",
-        "General",
-        "Shot",
-        "Sequence",
-        "Outline 1",
-        "Outline 2",
-        "Outline 3",
-        "Summary",
-    ];
-
-    for (role, exact_label) in Role::ALL.into_iter().zip(EXACT_ELEMENT_LABELS) {
-        let wire_value = RoleValue::new(role);
-        let element_type = ElementTypeKey::from_role(role);
-
-        assert_eq!(wire_value.as_str(), role.as_str());
-        assert_eq!(element_type.as_str(), exact_label);
-        assert_eq!(element_type.to_role(), Some(wire_value.as_core()));
-    }
+fn open_element_type_values_preserve_exact_labels() {
+    let value = valid(ElementTypeValue::new("Lyrics"));
+    let encoded = serde_json::to_string(&value)
+        .unwrap_or_else(|_| unreachable!("open element value serializes"));
+    assert_eq!(encoded, "\"Lyrics\"");
+    let decoded: ElementTypeValue = serde_json::from_str(&encoded)
+        .unwrap_or_else(|_| unreachable!("open element value deserializes"));
+    assert_eq!(decoded.as_str(), "Lyrics");
 }
 
 #[test]
 fn command_execution_public_api_smoke() {
     const INSERTED_TEXT: &str = "Command café";
 
-    let mut session = valid(EditingSession::new(valid(Project::new())));
+    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut definitions = project
+        .element_definitions()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut lyrics = definitions
+        .iter()
+        .find(|definition| definition.key.as_str() == "Action")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("default project defines Action"));
+    lyrics.key = valid(ElementTypeKey::new("Lyrics"));
+    definitions.push(lyrics);
+    valid(project.replace_element_definitions(definitions));
+    let mut session = valid(EditingSession::new(project));
     assert_eq!(
         execute_editor_command(
             &mut session,
@@ -103,4 +96,20 @@ fn command_execution_public_api_smoke() {
     assert_eq!(session.dirty(), before_rejection.dirty());
     assert_eq!(session.can_undo(), before_rejection.can_undo());
     assert_eq!(session.can_redo(), before_rejection.can_redo());
+
+    let arbitrary_type = valid(ElementTypeValue::new("Lyrics"));
+    assert_eq!(
+        execute_editor_command(
+            &mut session,
+            &Command::EditorElementChange {
+                element_type: arbitrary_type,
+                surface: EditorSurface::Body,
+            },
+        ),
+        CommandOutcome::Changed
+    );
+    assert_eq!(
+        session.project().elements[0].element_type().as_str(),
+        "Lyrics"
+    );
 }

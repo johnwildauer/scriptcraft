@@ -68,8 +68,14 @@ impl ScriptCraftApp {
             Command::EditSelectAll => {
                 self.execute_editor(&Command::EditSelectAll, RevealIntent::Conditional, ctx)
             }
-            Command::EditorElementChange { role, surface } => self.execute_editor(
-                &Command::EditorElementChange { role, surface },
+            Command::EditorElementChange {
+                element_type,
+                surface,
+            } => self.execute_editor(
+                &Command::EditorElementChange {
+                    element_type,
+                    surface,
+                },
                 RevealIntent::None,
                 ctx,
             ),

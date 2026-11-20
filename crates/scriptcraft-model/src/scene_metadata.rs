@@ -1088,7 +1088,7 @@ mod tests {
     }
 
     fn project_with_misleading_pagination() -> Project {
-        let mut project = must(Project::new());
+        let mut project = must(crate::project::test_project());
         project.elements.clear();
         let mut definitions = project
             .element_definitions()

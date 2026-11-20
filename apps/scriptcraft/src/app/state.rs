@@ -11,7 +11,10 @@ use crate::platform::macos::{
 };
 use crate::views::script::RevealIntent;
 use crate::{
-    chrome::{focus_mode, menu, theme},
+    chrome::{
+        dynamic_controls::{DynamicElementControls, DynamicIssueSummary},
+        focus_mode, menu, theme,
+    },
     commands::CachedAppCommandProjection,
     documents::{
         lifecycle::RootCloseLifecycle, open::PendingFdxOpen, replacement, replacement_protocol,
@@ -83,6 +86,8 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) prepared_document_fonts: Option<document_font::PreparedDocumentFonts>,
     pub(crate) pending_commands: menu::PendingDesktopCommands,
     pub(crate) command_projection_cache: Option<CachedAppCommandProjection>,
+    pub(crate) dynamic_controls: Option<DynamicElementControls>,
+    pub(crate) reported_dynamic_issue_summary: Option<DynamicIssueSummary>,
     pub(crate) menu_policy: menu::RuntimeMenuPolicy,
     pub(crate) menu_platform_choice: menu::MenuPlatformChoice,
     pub(crate) development_mode: bool,
@@ -186,7 +191,8 @@ impl ScriptCraftApp {
         startup_document: Option<StartupDocumentInput>,
         development_mode: bool,
     ) -> Result<Self, String> {
-        let project = Project::new().map_err(|error| format!("new project failed: {error:?}"))?;
+        let project = scriptcraft_fdx::new_project()
+            .map_err(|error| format!("new project failed: {error:?}"))?;
         let session = EditingSession::with_policy(project, EditPolicy::default())
             .map_err(|error| format!("session failed: {error:?}"))?;
         let (notification_sink, notification_results) =
@@ -202,6 +208,8 @@ impl ScriptCraftApp {
             prepared_document_fonts: None,
             pending_commands: menu::PendingDesktopCommands::default(),
             command_projection_cache: None,
+            dynamic_controls: None,
+            reported_dynamic_issue_summary: None,
             menu_policy,
             menu_platform_choice,
             development_mode,
@@ -288,6 +296,212 @@ impl ScriptCraftApp {
             responsiveness: responsiveness::ResponsivenessDiagnostics::default(),
             last_layout_identity: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod dynamic_controls_refresh_tests {
+    use super::*;
+    use crate::chrome::shortcuts::ShortcutPlatform;
+    use scriptcraft_session::editing::{ElementDefinitionCandidate, ElementTypeRemapping};
+    use std::sync::Arc;
+
+    const DYNAMIC_CONTROLS_FDX: &[u8] = include_bytes!("../../tests/fixtures/dynamic_controls.fdx");
+
+    fn valid<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| panic!("prepared regression input failed: {error:?}"))
+    }
+
+    fn imported_fixture() -> Project {
+        valid(scriptcraft_fdx::read_v6(DYNAMIC_CONTROLS_FDX)).project
+    }
+
+    fn assert_choices_refresh(
+        app: &mut ScriptCraftApp,
+        previous: &Arc<[crate::chrome::element_choices::ElementChoice]>,
+    ) -> Arc<[crate::chrome::element_choices::ElementChoice]> {
+        let current = Arc::clone(&app.refresh_dynamic_controls().choices);
+        assert!(!Arc::ptr_eq(previous, &current));
+        current
+    }
+
+    fn labels(choices: &[crate::chrome::element_choices::ElementChoice]) -> Vec<&str> {
+        choices
+            .iter()
+            .map(crate::chrome::element_choices::ElementChoice::label)
+            .collect()
+    }
+
+    #[test]
+    fn controls_refresh_after_same_revision_open_type_history_and_generic_remap() {
+        let mut app = valid(ScriptCraftApp::new());
+        app.session = valid(EditingSession::new(imported_fixture()));
+        let first_choices = Arc::clone(&app.refresh_dynamic_controls().choices);
+        assert_eq!(labels(&first_choices)[0], "Notations");
+        if ShortcutPlatform::current() == ShortcutPlatform::Other {
+            assert!(app.reported_dynamic_issue_summary.is_none());
+        } else {
+            assert!(app.reported_dynamic_issue_summary.is_some());
+        }
+
+        // Opening a distinct document at the same revision and mutation token
+        // must not reuse the first document's controls or shortcut diagnostics.
+        let predecessor_revision = app.session.revision();
+        let predecessor_token = app.session.mutation_token();
+        let mut replacement_xml = String::from_utf8_lossy(DYNAMIC_CONTROLS_FDX).into_owned();
+        replacement_xml = replacement_xml.replace("Notations", "Reopened");
+        for source in [
+            "Shortcut=\"2\" WinShortcut=\"2\"",
+            "Shortcut=\"Ctrl+Alt+Shift+3\" WinShortcut=\"Shift+3\"",
+            "Shortcut=\"Ctrl+Alt+;\" WinShortcut=\"Alt+;\"",
+            "Shortcut=\":\" WinShortcut=\":\"",
+            "Shortcut=\"Shift+;\" WinShortcut=\"Shift+;\"",
+            "Shortcut=\"Alt+K\" WinShortcut=\"Alt+K\"",
+            "Shortcut=\"Alt+k\" WinShortcut=\"Alt+k\"",
+            "Shortcut=\"Q\" WinShortcut=\"\"",
+            "Shortcut=\"\" WinShortcut=\"Alt+D\"",
+        ] {
+            replacement_xml = replacement_xml.replace(source, "Shortcut=\"\" WinShortcut=\"\"");
+        }
+        let replacement_project =
+            valid(scriptcraft_fdx::read_v6(replacement_xml.as_bytes())).project;
+        let replacement_session = valid(EditingSession::new(replacement_project));
+        assert_eq!(replacement_session.revision(), predecessor_revision);
+        assert_eq!(replacement_session.mutation_token(), predecessor_token);
+        app.session = replacement_session;
+        let reopened_choices = assert_choices_refresh(&mut app, &first_choices);
+        assert_eq!(labels(&reopened_choices)[0], "Reopened");
+        assert!(!labels(&reopened_choices).contains(&"Notations"));
+        let reopened_controls = app.refresh_dynamic_controls();
+        assert!(reopened_controls.shortcuts.bindings.is_empty());
+        assert!(reopened_controls.shortcuts.issues.is_empty());
+        assert!(app.reported_dynamic_issue_summary.is_none());
+        assert!(!app.pending_diagnostic_commands.iter().any(|command| {
+            matches!(command, Command::UiStatusSet { message: Some(message) }
+                if message.as_str().starts_with("ELEMENT_SHORTCUTS:"))
+        }));
+
+        let before_type_change = Arc::clone(&app.dynamic_controls.as_ref().unwrap().choices);
+        valid(
+            app.session
+                .change_element_type(valid(scriptcraft_model::ElementTypeKey::new("Lyrics"))),
+        );
+        let after_type_change = assert_choices_refresh(&mut app, &before_type_change);
+        assert_eq!(
+            app.session.project().elements[0].element_type().as_str(),
+            "Lyrics"
+        );
+
+        valid(app.session.undo());
+        let after_undo = assert_choices_refresh(&mut app, &after_type_change);
+        assert_eq!(
+            app.session.project().elements[0].element_type().as_str(),
+            "Reopened"
+        );
+        valid(app.session.redo());
+        let after_redo = assert_choices_refresh(&mut app, &after_undo);
+        assert_eq!(
+            app.session.project().elements[0].element_type().as_str(),
+            "Lyrics"
+        );
+
+        let mut definitions = app
+            .session
+            .project()
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let lyrics = valid(scriptcraft_model::ElementTypeKey::new("Lyrics"));
+        let songs = valid(scriptcraft_model::ElementTypeKey::new("Songs"));
+        let replacement_definition = definitions
+            .iter_mut()
+            .find(|definition| definition.key == lyrics)
+            .unwrap_or_else(|| unreachable!("fixture contains the Lyrics definition"));
+        replacement_definition.key = songs.clone();
+        let mut candidate = ElementDefinitionCandidate::new(definitions);
+        candidate
+            .body_remappings
+            .push(ElementTypeRemapping::new(lyrics, songs));
+        valid(
+            app.session
+                .replace_element_definitions_and_remap_types(candidate),
+        );
+        let after_definition_replacement = assert_choices_refresh(&mut app, &after_redo);
+        assert!(labels(&after_definition_replacement).contains(&"Songs"));
+        assert!(!labels(&after_definition_replacement).contains(&"Lyrics"));
+        valid(app.session.undo());
+        let after_definition_undo = assert_choices_refresh(&mut app, &after_definition_replacement);
+        assert!(labels(&after_definition_undo).contains(&"Lyrics"));
+        valid(app.session.redo());
+        let after_definition_redo = assert_choices_refresh(&mut app, &after_definition_undo);
+        assert!(labels(&after_definition_redo).contains(&"Songs"));
+    }
+
+    #[test]
+    fn accepted_fixture_text_binding_changes_type_once_without_inserting_its_text() {
+        let platform = ShortcutPlatform::current();
+        if platform == ShortcutPlatform::Other {
+            return;
+        }
+        let mut app = valid(ScriptCraftApp::new());
+        app.session = valid(EditingSession::new(imported_fixture()));
+        app.surface_focused = true;
+        app.active_editor_surface = EditorSurface::Body;
+        let original_text = app.session.project().elements[0].text.clone();
+        let original_revision = app.session.revision();
+        let modifiers = eframe::egui::Modifiers {
+            command: true,
+            ctrl: platform == ShortcutPlatform::MacOS,
+            alt: true,
+            ..eframe::egui::Modifiers::default()
+        };
+        app.dispatch_surface_events_for_test(
+            &[eframe::egui::Event::Text(";".to_owned())],
+            modifiers,
+            &eframe::egui::Context::default(),
+            EditorSurface::Body,
+        );
+
+        assert_eq!(
+            app.session.project().elements[0].element_type().as_str(),
+            "Punctuation"
+        );
+        assert_eq!(app.session.project().elements[0].text, original_text);
+        assert_eq!(app.session.revision(), original_revision + 1);
+    }
+
+    #[test]
+    fn same_frame_ime_event_suppresses_fixture_text_binding() {
+        if ShortcutPlatform::current() == ShortcutPlatform::Other {
+            return;
+        }
+        let mut app = valid(ScriptCraftApp::new());
+        app.session = valid(EditingSession::new(imported_fixture()));
+        app.surface_focused = true;
+        app.active_editor_surface = EditorSurface::Body;
+        let original_text = app.session.project().elements[0].text.clone();
+        let modifiers = eframe::egui::Modifiers {
+            command: true,
+            ..eframe::egui::Modifiers::default()
+        };
+        app.dispatch_surface_events_for_test(
+            &[
+                eframe::egui::Event::Text(";".to_owned()),
+                eframe::egui::Event::Ime(eframe::egui::ImeEvent::Preedit("compose".to_owned())),
+            ],
+            modifiers,
+            &eframe::egui::Context::default(),
+            EditorSurface::Body,
+        );
+
+        assert_eq!(
+            app.session.project().elements[0].element_type().as_str(),
+            "Notations"
+        );
+        assert_eq!(app.session.project().elements[0].text, original_text);
+        assert!(app.ime_active);
+        assert_eq!(app.ime_preedit, "compose");
     }
 }
 

@@ -27,6 +27,7 @@ mod whitespace;
 mod window_state;
 mod writer;
 
+pub use builtin_screenplay::new_project;
 pub use context::{current_timestamp, SaveContext, SaveOperation};
 pub use diagnostics::{
     save_diagnostic_at, FdxError, ModelErrorKind, PreservationErrorKind, SaveDiagnosticCode,

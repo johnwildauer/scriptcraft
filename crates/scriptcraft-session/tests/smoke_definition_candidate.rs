@@ -4,8 +4,8 @@ use scriptcraft_fdx::{read_v6, reconcile_project_element_settings};
 use scriptcraft_model::dual_dialogue::DualDialogueGroup;
 use scriptcraft_model::preservation::{PreservedElement, PreservedNode};
 use scriptcraft_model::{
-    BodyOwner, ElementDefinition, ElementTypeKey, Position, Project, Role, ScreenplayElement,
-    Selection, StableId,
+    BodyOwner, ElementDefinition, ElementTypeKey, Position, Project, ScreenplayElement, Selection,
+    StableId,
 };
 use scriptcraft_session::editing::{
     EditError, EditingSession, ElementDefinitionCandidate, ElementTypeRemapping,
@@ -331,7 +331,7 @@ fn source_backed_definition_candidate_remaps_body_and_content_titles_atomically(
 
 #[test]
 fn definition_candidate_rejects_incomplete_and_ambiguous_requests_atomically() {
-    let mut session = valid(EditingSession::new(valid(Project::new())));
+    let mut session = valid(EditingSession::new(valid(scriptcraft_fdx::new_project())));
     let baseline = session.clone();
 
     let missing_target = session
@@ -384,21 +384,25 @@ fn definition_candidate_rejects_incomplete_and_ambiguous_requests_atomically() {
 
 #[test]
 fn definition_replacement_deactivates_dual_projection_without_unwrapping() {
-    let mut project = valid(Project::new());
-    let cue_left = valid(ScreenplayElement::new("cue-left", Role::Character, "LEFT"));
+    let mut project = valid(scriptcraft_fdx::new_project());
+    let cue_left = valid(ScreenplayElement::new(
+        "cue-left",
+        scriptcraft_model::ElementTypeKey::new("Character").expect("valid fixture label"),
+        "LEFT",
+    ));
     let dialogue_left = valid(ScreenplayElement::new(
         "dialogue-left",
-        Role::Dialogue,
+        scriptcraft_model::ElementTypeKey::new("Dialogue").expect("valid fixture label"),
         "left",
     ));
     let cue_right = valid(ScreenplayElement::new(
         "cue-right",
-        Role::Character,
+        scriptcraft_model::ElementTypeKey::new("Character").expect("valid fixture label"),
         "RIGHT",
     ));
     let dialogue_right = valid(ScreenplayElement::new(
         "dialogue-right",
-        Role::Dialogue,
+        scriptcraft_model::ElementTypeKey::new("Dialogue").expect("valid fixture label"),
         "right",
     ));
     project.elements = vec![

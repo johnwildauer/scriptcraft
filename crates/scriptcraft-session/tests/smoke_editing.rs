@@ -4,7 +4,7 @@ use scriptcraft_fdx::read_v6;
 use scriptcraft_model::dual_dialogue::DualDialogueGroup;
 use scriptcraft_model::preservation::{PreservedElement, PreservedNode};
 use scriptcraft_model::{
-    BodyOwner, ElementTypeKey, Position, Project, Role, ScreenplayElement, Selection, StableId,
+    BodyOwner, ElementTypeKey, Position, Project, ScreenplayElement, Selection, StableId,
 };
 use scriptcraft_session::editing::{EditingSession, ElementDefinitionCandidate};
 
@@ -63,7 +63,7 @@ fn unqualified_attribute<'a>(element: &'a PreservedElement, name: &str) -> Optio
 fn editing_history_public_api_smoke() {
     const EDIT_TEXT: &str = "Café — répétition";
 
-    let original = valid(Project::new());
+    let original = valid(scriptcraft_fdx::new_project());
     let original_selection = Selection::caret(Position {
         element: 0,
         offset: 0,
@@ -108,7 +108,7 @@ fn editing_history_public_api_smoke() {
 
 #[test]
 fn arbitrary_paginate_as_text_edit_keeps_scoped_derived_fast_path() {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -140,7 +140,7 @@ fn arbitrary_paginate_as_text_edit_keeps_scoped_derived_fast_path() {
 
 #[test]
 fn current_behavior_guidance_and_enter_use_the_exact_document_key() {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -180,7 +180,7 @@ fn current_behavior_guidance_and_enter_use_the_exact_document_key() {
 
 #[test]
 fn preservation_free_definition_replacement_is_one_undoable_registry_edit() {
-    let project = valid(Project::new());
+    let project = valid(scriptcraft_fdx::new_project());
     let mut session = valid(EditingSession::new(project.clone()));
     let initial_revision = session.revision();
     let definitions = project
@@ -445,23 +445,25 @@ fn source_backed_title_type_changes_support_optional_keys_and_history() {
 }
 
 #[test]
-fn legacy_role_adapter_keeps_automatic_parenthetical_in_its_type_candidate() {
-    let project = valid(Project::new());
+fn open_type_change_is_type_only_without_the_removed_role_adapter() {
+    let project = valid(scriptcraft_fdx::new_project());
     let mut session = valid(EditingSession::new(project.clone()));
     let initial_revision = session.revision();
 
-    valid(session.change_role(Role::Parenthetical));
+    valid(session.change_element_type(
+        scriptcraft_model::ElementTypeKey::new("Parenthetical").expect("valid fixture label"),
+    ));
 
     assert_eq!(
         session.project().elements[0].element_type().as_str(),
         "Parenthetical"
     );
-    assert_eq!(session.project().elements[0].text, "()");
+    assert_eq!(session.project().elements[0].text, "");
     assert_eq!(
         session.selection(),
         Selection::caret(Position {
             element: 0,
-            offset: 1
+            offset: 0
         })
     );
     assert_eq!(session.revision(), initial_revision + 1);
@@ -473,21 +475,25 @@ fn legacy_role_adapter_keeps_automatic_parenthetical_in_its_type_candidate() {
 
 #[test]
 fn generic_body_type_change_never_unwraps_an_invalidated_dual_group() {
-    let mut project = valid(Project::new());
-    let left_cue = valid(ScreenplayElement::new("left-cue", Role::Character, "LEFT"));
+    let mut project = valid(scriptcraft_fdx::new_project());
+    let left_cue = valid(ScreenplayElement::new(
+        "left-cue",
+        scriptcraft_model::ElementTypeKey::new("Character").expect("valid fixture label"),
+        "LEFT",
+    ));
     let left_dialogue = valid(ScreenplayElement::new(
         "left-dialogue",
-        Role::Dialogue,
+        scriptcraft_model::ElementTypeKey::new("Dialogue").expect("valid fixture label"),
         "left",
     ));
     let right_cue = valid(ScreenplayElement::new(
         "right-cue",
-        Role::Character,
+        scriptcraft_model::ElementTypeKey::new("Character").expect("valid fixture label"),
         "RIGHT",
     ));
     let right_dialogue = valid(ScreenplayElement::new(
         "right-dialogue",
-        Role::Dialogue,
+        scriptcraft_model::ElementTypeKey::new("Dialogue").expect("valid fixture label"),
         "right",
     ));
     let group_id = valid(StableId::new("dual-group"));

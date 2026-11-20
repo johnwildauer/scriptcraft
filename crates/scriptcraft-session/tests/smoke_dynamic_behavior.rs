@@ -40,7 +40,7 @@ fn behavior_project(
     return_label: Option<&str>,
     tab_label: Option<&str>,
 ) -> Project {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     let mut definitions = project
         .element_definitions()
         .iter()

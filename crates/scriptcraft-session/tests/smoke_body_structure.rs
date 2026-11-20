@@ -6,7 +6,7 @@ use scriptcraft_model::formatting::{
 };
 use scriptcraft_model::preservation::{PreservedElement, PreservedNode};
 use scriptcraft_model::{
-    BodyOwner, ElementTypeKey, Position, Project, Role, RunAttribute, ScreenplayElement, Selection,
+    BodyOwner, ElementTypeKey, Position, Project, RunAttribute, ScreenplayElement, Selection,
     TextRun,
 };
 use scriptcraft_session::editing::EditingSession;
@@ -150,7 +150,7 @@ fn source_backed_arbitrary_split_join_keeps_owner_identity_and_attachments_left_
 }
 
 fn custom_open_key_project() -> (Project, ElementTypeKey, Vec<TextRun>) {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     let custom_key = valid(ElementTypeKey::new("Custom prose"));
     let mut definitions = project
         .element_definitions()

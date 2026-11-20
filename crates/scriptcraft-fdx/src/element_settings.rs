@@ -2114,21 +2114,6 @@ mod tests {
             .get_by_label("action")
             .is_some_and(|definition| definition.capabilities()
                 == scriptcraft_model::element_definition::SemanticCapabilities::default()));
-
-        let layout = crate::settings::derive_compatibility_layout_settings(definitions);
-        assert_eq!(
-            layout.role_font_specs
-                [scriptcraft_model::formatting::role_index(scriptcraft_model::Role::General)]
-            .family
-            .as_deref(),
-            Some("Source General")
-        );
-        assert_eq!(
-            layout.role_paragraph_specs
-                [scriptcraft_model::formatting::role_index(scriptcraft_model::Role::General)]
-            .alignment,
-            Some(ParagraphAlignment::Center)
-        );
     }
 
     #[test]

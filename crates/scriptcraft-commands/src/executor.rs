@@ -29,6 +29,7 @@ pub enum UnavailableReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandRejection {
     UnsupportedCommand(CommandId),
+    InvalidElementTarget,
     InvalidSelection(SelectionError),
     PositionOutOfRange(PositionError),
 }
@@ -45,6 +46,39 @@ pub fn execute_editor_command_on_surface(
     command: &Command,
     active_surface: EditorSurface,
 ) -> CommandOutcome {
+    if let Command::EditorElementChange {
+        element_type,
+        surface,
+    } = command
+    {
+        if session
+            .project()
+            .element_definitions()
+            .get(element_type.as_key())
+            .is_none()
+        {
+            return CommandOutcome::Rejected(CommandRejection::InvalidElementTarget);
+        }
+        let core_selection = match surface {
+            EditorSurface::Body => session.selection(),
+            EditorSurface::TitlePage => session.title_selection(),
+        };
+        let selection = match crate::Selection::from_core(core_selection) {
+            Ok(selection) => selection,
+            Err(error) => {
+                return CommandOutcome::Rejected(CommandRejection::PositionOutOfRange(error))
+            }
+        };
+        if let Err(error) = selection.validate_for_surface(session.project(), *surface) {
+            return CommandOutcome::Rejected(CommandRejection::InvalidSelection(error));
+        }
+        if selection.anchor.element != selection.focus.element {
+            return CommandOutcome::Rejected(CommandRejection::InvalidSelection(
+                SelectionError::CrossElementRange,
+            ));
+        }
+    }
+
     if matches!(command, Command::EditUndo) && !session.can_undo() {
         return CommandOutcome::Unavailable(UnavailableReason::UndoHistory);
     }
@@ -74,10 +108,13 @@ pub fn execute_editor_command_on_surface(
         Command::EditorParagraphEnter => enter(session, active_surface),
         Command::EditorParagraphTab => tab(session, active_surface),
         Command::EditorDualDialogueToggle => session.toggle_dual_dialogue(),
-        Command::EditorElementChange { role, surface } => match surface {
-            EditorSurface::Body => session.change_role(role.as_core()),
+        Command::EditorElementChange {
+            element_type,
+            surface,
+        } => match surface {
+            EditorSurface::Body => session.change_element_type(element_type.clone().into_key()),
             EditorSurface::TitlePage => {
-                return rejected(command);
+                session.change_title_element_type(Some(element_type.clone().into_key()))
             }
         },
         Command::EditUndo => session.undo(),

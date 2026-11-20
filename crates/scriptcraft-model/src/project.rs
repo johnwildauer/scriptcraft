@@ -8,11 +8,11 @@ use crate::{
     element::{body_owners_equal, BodyOwner},
     element_definitions::DocumentElementDefinitions,
     element_semantics::{BehaviorTargetResolution, ElementSemantics, ParagraphBehaviorKey},
-    formatting::{transitional_static_role_definitions, SourceParagraphOverrides},
+    formatting::SourceParagraphOverrides,
     identity::{StableId, StableIdAllocator},
     preservation::PreservationState,
     title_page::{reference_boilerplate, TitlePageParagraph},
-    ModelError, ScreenplayElement,
+    ElementDefinition, ElementTypeKey, ModelError, ScreenplayElement,
 };
 
 #[derive(Debug, Clone)]
@@ -51,15 +51,22 @@ impl PartialEq for Project {
 impl Eq for Project {}
 
 impl Project {
-    pub fn new() -> Result<Self, ModelError> {
+    /// Creates a new unsaved project using the caller-supplied ordered registry.
+    ///
+    /// Runtime defaults belong to the packaged-template provider, not the model.
+    pub fn with_element_definitions(
+        definitions: Vec<ElementDefinition>,
+    ) -> Result<Self, ModelError> {
+        let element_definitions = DocumentElementDefinitions::new(definitions)?;
+        let scene_heading = ElementTypeKey::new("Scene Heading")?;
+        if element_definitions.get(&scene_heading).is_none() {
+            return Err(ModelError::MissingElementDefinition(scene_heading));
+        }
         let mut ids = StableIdAllocator::new();
         let title_page = reference_boilerplate(&mut ids)?;
-        // Transitional static-role bootstrap. Phase 7 replaces this with the
-        // packaged Screenplay template; FDX import has its own Phase 2 handoff.
-        let element_definitions = transitional_static_role_definitions()?;
         let start = ScreenplayElement::new(
             ids.allocate("element")?.as_str().to_owned(),
-            crate::Role::SceneHeading,
+            scene_heading,
             "",
         )?;
         Ok(Self {
@@ -75,9 +82,8 @@ impl Project {
     }
 
     /// Creates the empty semantic projection required while importing FDX.
-    /// It carries no title, body, group, override, or preservation state, but
-    /// uses the transitional static bootstrap until the common FDX reader
-    /// replaces it with WO-002.3's completed document-owned definitions.
+    /// The common reader installs the complete ordered registry before it
+    /// publishes or validates the imported project.
     pub fn empty_projection() -> Result<Self, ModelError> {
         Ok(Self {
             title_page: Vec::new(),
@@ -86,7 +92,7 @@ impl Project {
             direct_paragraph_overrides: BTreeMap::new(),
             dual_dialogue_paragraph_overrides: BTreeMap::new(),
             preservation: None,
-            element_definitions: transitional_static_role_definitions()?,
+            element_definitions: DocumentElementDefinitions::default(),
             layout_identity: Arc::new(()),
         })
     }
@@ -179,14 +185,77 @@ impl Project {
 }
 
 #[cfg(test)]
+pub(crate) fn test_project() -> Result<Project, ModelError> {
+    use crate::{
+        element_definition::{
+            ElementBehavior, ElementFontSpec, ElementOutline, ElementParagraphSpec,
+        },
+        formatting::{FixedPoint, ParagraphAlignment},
+    };
+
+    let definitions = [
+        "Scene Heading",
+        "Action",
+        "Character",
+        "Dialogue",
+        "Parenthetical",
+        "Transition",
+        "General",
+        "Shot",
+        "Cast List",
+    ]
+    .into_iter()
+    .map(|label| {
+        ElementDefinition::new(
+            ElementTypeKey::new(label)?,
+            ElementFontSpec {
+                family: "Courier Prime".to_owned(),
+                size: 12,
+                bold: false,
+                italic: false,
+                underline: false,
+                all_caps: false,
+                hidden_text: false,
+                color: None,
+                adornment_style: 0,
+                revision_id: 0,
+            },
+            ElementParagraphSpec {
+                alignment: ParagraphAlignment::Left,
+                first_indent: FixedPoint::default(),
+                left_indent: FixedPoint::default(),
+                right_indent: FixedPoint::from_points(500),
+                leading: "Regular".to_owned(),
+                space_before: FixedPoint::default(),
+                spacing: 1,
+                starts_new_page: false,
+            },
+            ElementBehavior {
+                paginate_as: None,
+                return_key: None,
+                shortcut: None,
+                tab_key: None,
+                win_shortcut: None,
+            },
+            ElementOutline {
+                can_hide: false,
+                level: 0,
+            },
+        )
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    Project::with_element_definitions(definitions)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::ModelError;
 
     #[test]
     fn definition_order_participates_in_project_equality() {
-        let Ok(project) = Project::new() else {
-            assert!(false, "static bootstrap should produce valid definitions");
+        let Ok(project) = test_project() else {
+            assert!(false, "test fixture should provide valid definitions");
             return;
         };
         let mut reordered = project.clone();
@@ -202,8 +271,8 @@ mod tests {
 
     #[test]
     fn failed_definition_replacement_is_atomic() {
-        let Ok(mut project) = Project::new() else {
-            assert!(false, "static bootstrap should produce valid definitions");
+        let Ok(mut project) = test_project() else {
+            assert!(false, "test fixture should provide valid definitions");
             return;
         };
         let original = project.clone();

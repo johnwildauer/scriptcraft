@@ -13,10 +13,9 @@ use scriptcraft_model::dual_dialogue::{
     self as model_dual_dialogue, DualDialogueGroup, DualDialogueSide,
 };
 use scriptcraft_model::formatting::{
-    formatting_for_role, FixedPoint, ParagraphAlignment, SourceLayoutSettings,
-    SourceParagraphOverrides,
+    FixedPoint, ParagraphAlignment, SourceLayoutSettings, SourceParagraphOverrides,
 };
-use scriptcraft_model::{LayoutInputs, Project, Role, StableId};
+use scriptcraft_model::{ElementDefinition, LayoutInputs, Project, StableId};
 use std::{sync::Arc, time::Instant};
 
 #[allow(clippy::too_many_arguments)]
@@ -143,18 +142,15 @@ impl ScreenplayLayout {
                 (wrapper.starts_new_page, wrapper.space_before)
             } else {
                 let wrapper = wrapper_overrides(project, source_settings, &group.id);
-                let native_general = formatting_for_role(Role::General).paragraph;
+                let general = general_definition(project)?;
                 (
                     wrapper
                         .starts_new_page
-                        .unwrap_or_else(|| source_settings.starts_new_page(Role::General)),
+                        .unwrap_or(general.paragraph.starts_new_page),
                     wrapper
                         .paragraph
                         .space_before
-                        .or(source_settings.paragraph_spec(Role::General).space_before)
-                        .unwrap_or_else(|| {
-                            FixedPoint::from_points(i64::from(native_general.space_before))
-                        }),
+                        .unwrap_or(general.paragraph.space_before),
                 )
             };
             let first_visible_space_before = |side: &WrappedDualSide| {
@@ -537,21 +533,28 @@ fn dual_outer_extent(
     project: &Project,
     group: &DualDialogueGroup,
 ) -> Result<(FixedPoint, FixedPoint), LayoutError> {
-    let native = formatting_for_role(Role::General).paragraph;
+    let general = general_definition(project)?;
     let app_left = FixedPoint::from_points(i64::from(inputs.margin_left));
     let app_right = FixedPoint::from_points(i64::from(
         inputs.paper_width.saturating_sub(inputs.margin_right),
     ));
-    let general = source.paragraph_spec(Role::General);
-    let role_left = general
-        .left_indent
-        .unwrap_or_else(|| FixedPoint::parse_inches(native.left_indent).unwrap_or(app_left));
-    let role_right = general
-        .right_indent
-        .unwrap_or_else(|| FixedPoint::parse_inches(native.right_indent).unwrap_or(app_right));
+    let definition_left = general.paragraph.left_indent;
+    let definition_right = general.paragraph.right_indent;
     let wrapper = wrapper_overrides(project, source, &group.id).paragraph;
-    let left = wrapper.left_indent.unwrap_or(role_left);
-    let right = wrapper.right_indent.unwrap_or(role_right);
+    let left = wrapper.left_indent.unwrap_or_else(|| {
+        if definition_left.raw() >= 0 {
+            definition_left
+        } else {
+            app_left
+        }
+    });
+    let right = wrapper.right_indent.unwrap_or_else(|| {
+        if definition_right > definition_left {
+            definition_right
+        } else {
+            app_right
+        }
+    });
     let page_right = FixedPoint::from_points(i64::from(inputs.paper_width));
     let gap = FixedPoint::from_points(geometry::DUAL_DIALOGUE_COLUMN_GAP_POINTS);
     if left.raw() < 0
@@ -564,6 +567,15 @@ fn dual_outer_extent(
         });
     }
     Ok((left, right))
+}
+
+fn general_definition(project: &Project) -> Result<&ElementDefinition, LayoutError> {
+    project
+        .element_definitions()
+        .get_by_label("General")
+        .ok_or(LayoutError {
+            kind: LayoutErrorKind::NoGeometry,
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -592,7 +604,6 @@ fn wrap_dual_side(
         else {
             continue;
         };
-        let role = element.transitional_role();
         let prepared_lookup_started = diagnostics.as_ref().map(|_| Instant::now());
         let (text_style, resolved_text_style, mut paragraph, effective_color) =
             if let Some(layout_environment) = layout.layout_environment.as_deref() {
@@ -613,8 +624,15 @@ fn wrap_dual_side(
                     resolved_text_style.color,
                 )
             } else {
-                let text_style = source.text_style(role);
-                let paragraph = effective_paragraph(inputs, source, role, &element.id, &text_style);
+                let definition = project
+                    .element_definitions()
+                    .get(&element.element_type())
+                    .ok_or(LayoutError {
+                        kind: LayoutErrorKind::NoGeometry,
+                    })?;
+                let text_style = super::inputs::compatibility_text_style(definition);
+                let paragraph =
+                    effective_paragraph(inputs, source, definition, &element.id, &text_style);
                 let effective_color = scriptcraft_model::typography::parse_effective_text_color(
                     text_style.source_color.as_deref(),
                 );

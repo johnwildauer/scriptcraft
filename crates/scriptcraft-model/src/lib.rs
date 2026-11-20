@@ -26,8 +26,8 @@ pub mod validation;
 
 pub use dual_dialogue::DualDialogueError;
 pub use element::{
-    BodyOwner, Role, RunAttribute, ScreenplayElement, SourceFormat, SourceProvenance,
-    SourceSection, TextRun,
+    BodyOwner, RunAttribute, ScreenplayElement, SourceFormat, SourceProvenance, SourceSection,
+    TextRun,
 };
 pub use element_definition::{
     ElementBehavior, ElementDefinition, ElementFontSpec, ElementOutline, ElementParagraphSpec,

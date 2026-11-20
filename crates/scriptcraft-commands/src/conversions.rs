@@ -101,6 +101,7 @@ pub enum SelectionError {
     ElementOutOfRange,
     OffsetOutOfRange,
     InvalidUtf8Boundary,
+    CrossElementRange,
 }
 
 impl fmt::Display for SelectionError {
@@ -110,6 +111,9 @@ impl fmt::Display for SelectionError {
             Self::OffsetOutOfRange => formatter.write_str("selection byte offset is out of range"),
             Self::InvalidUtf8Boundary => {
                 formatter.write_str("selection is not on a UTF-8 boundary")
+            }
+            Self::CrossElementRange => {
+                formatter.write_str("element-type change must select one paragraph")
             }
         }
     }

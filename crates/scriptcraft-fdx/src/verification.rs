@@ -251,7 +251,7 @@ mod tests {
     use scriptcraft_model::{BodyOwner, ElementDefinition, ElementTypeKey};
 
     fn project_with_changed_action(change: impl FnOnce(&mut ElementDefinition)) -> Project {
-        let mut project = Project::new().expect("the default project should be valid");
+        let mut project = crate::new_project().expect("the default project should be valid");
         let mut definitions = project
             .element_definitions()
             .iter()
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn semantic_definition_comparison_includes_order_and_complete_values() {
-        let original = Project::new().expect("the default project should be valid");
+        let original = crate::new_project().expect("the default project should be valid");
         let identical = original.clone();
         assert!(same_semantic_element_definitions(&original, &identical));
 
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn writer_semantic_gate_detects_body_and_optional_title_key_changes() {
-        let mut original = Project::new().expect("the default project should be valid");
+        let mut original = crate::new_project().expect("the default project should be valid");
 
         let mut changed_body = original.clone();
         let general = ElementTypeKey::new("General").expect("General is a valid key");

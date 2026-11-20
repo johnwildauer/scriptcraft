@@ -13,8 +13,8 @@ use scriptcraft_model::{
         ResolvedFaceMetrics, ResolvedFontFace, ResolvedFontId, ResolvedFontSourceKind,
         ScalarAdvance,
     },
-    BodyOwner, ElementTypeKey, LayoutInputs, Project, Role, RunAttribute, ScreenplayElement,
-    StableId, TextRun,
+    BodyOwner, ElementTypeKey, LayoutInputs, Project, RunAttribute, ScreenplayElement, StableId,
+    TextRun,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -127,10 +127,10 @@ fn synthetic_layout_environment(project: &Project) -> LayoutEnvironment {
 #[test]
 fn layout_public_api_smoke() {
     let text = format!("{}éZ", "a".repeat(60));
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
         "layout-action",
-        Role::Action,
+        scriptcraft_model::ElementTypeKey::new("Action").expect("valid fixture label"),
         text.clone(),
     )))];
     let original = project.clone();
@@ -199,7 +199,7 @@ fn layout_public_api_smoke() {
 
 #[test]
 fn sequential_body_uses_current_definition_inline_metrics_and_complete_cache_identity() {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     let action = valid(ElementTypeKey::new("Action"));
     let mut definitions = project
         .element_definitions()
@@ -242,12 +242,12 @@ fn sequential_body_uses_current_definition_inline_metrics_and_complete_cache_ide
     project.elements = vec![
         BodyOwner::shared(valid(ScreenplayElement::new(
             "prior-action",
-            Role::Action,
+            scriptcraft_model::ElementTypeKey::new("Action").expect("valid fixture label"),
             "preceding paragraph",
         ))),
         BodyOwner::shared(valid(ScreenplayElement::new(
             "metric-action",
-            Role::Action,
+            scriptcraft_model::ElementTypeKey::new("Action").expect("valid fixture label"),
             text,
         ))),
     ];
@@ -431,26 +431,26 @@ fn sequential_body_uses_current_definition_inline_metrics_and_complete_cache_ide
 
 #[test]
 fn dual_source_members_switch_between_sequential_and_active_columns() {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     let members = [
         valid(ScreenplayElement::new(
             "inactive-left-cue",
-            Role::Character,
+            scriptcraft_model::ElementTypeKey::new("Character").expect("valid fixture label"),
             "LEFT",
         )),
         valid(ScreenplayElement::new(
             "inactive-left-line",
-            Role::Action,
+            scriptcraft_model::ElementTypeKey::new("Action").expect("valid fixture label"),
             "left line",
         )),
         valid(ScreenplayElement::new(
             "inactive-right-cue",
-            Role::Character,
+            scriptcraft_model::ElementTypeKey::new("Character").expect("valid fixture label"),
             "RIGHT",
         )),
         valid(ScreenplayElement::new(
             "inactive-right-line",
-            Role::Dialogue,
+            scriptcraft_model::ElementTypeKey::new("Dialogue").expect("valid fixture label"),
             "right line",
         )),
     ];
@@ -510,7 +510,7 @@ fn dual_source_members_switch_between_sequential_and_active_columns() {
     );
 
     BodyOwner::update(&mut project.elements[1], |element| {
-        element.set_transitional_role(Role::Dialogue);
+        element.set_element_type(ElementTypeKey::new("Dialogue").expect("valid fixture label"));
     });
     assert!(active_dual_dialogue_projection(&project, &project.dual_dialogue_groups[0]).is_some());
     let active_layout = valid(ScreenplayLayout::build_with_composition(
@@ -536,16 +536,16 @@ fn dual_source_members_switch_between_sequential_and_active_columns() {
 
 #[test]
 fn vertical_page_fit_ignores_legacy_occupied_line_capacity() {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     project.elements = vec![
         BodyOwner::shared(valid(ScreenplayElement::new(
             "fit-one",
-            Role::Action,
+            scriptcraft_model::ElementTypeKey::new("Action").expect("valid fixture label"),
             "one",
         ))),
         BodyOwner::shared(valid(ScreenplayElement::new(
             "fit-two",
-            Role::Action,
+            scriptcraft_model::ElementTypeKey::new("Action").expect("valid fixture label"),
             "two",
         ))),
     ];

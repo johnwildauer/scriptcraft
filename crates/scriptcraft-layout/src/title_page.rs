@@ -7,7 +7,7 @@ use crate::geometry::LayoutError;
 use scriptcraft_model::formatting::{
     EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment,
 };
-use scriptcraft_model::{LayoutInputs, Project, Role};
+use scriptcraft_model::{ElementTypeKey, LayoutInputs, Project};
 use std::time::Instant;
 
 #[allow(clippy::too_many_arguments)]
@@ -96,14 +96,14 @@ pub(super) fn compose_title_pages(
                 };
                 let style = plain_title_style(inputs);
                 // This branch is the legacy API without a prepared resolved-font environment.
-                let role = element.transitional_role().unwrap_or(Role::General);
+                let element_type = element.element_type.clone();
                 let lines = wrap::wrap_for_layout(
                     wrap_cache.as_deref_mut(),
                     diagnostics.as_deref_mut(),
                     &element.id,
                     &element.text,
                     index,
-                    role,
+                    element_type,
                     element.element_type.as_ref(),
                     paragraph,
                     style,
@@ -175,7 +175,7 @@ fn compose_resolved_title_pages(
             layout.pages.push(page);
             page = layout.new_page(true);
         }
-        let role = title.transitional_role().unwrap_or(Role::General);
+        let element_type = title.element_type.clone();
         let text_style = spans::compatibility_style(&resolved_style);
         let lines = if let Some(cache) = wrap_cache.as_deref_mut() {
             cache.wrap_resolved(
@@ -183,7 +183,7 @@ fn compose_resolved_title_pages(
                 title.element_type.as_ref(),
                 &title.text,
                 index,
-                role,
+                element_type,
                 paragraph,
                 text_style,
                 resolved_style,
@@ -198,7 +198,7 @@ fn compose_resolved_title_pages(
             let lines = wrap::wrap_resolved_for_layout(
                 &title.text,
                 index,
-                role,
+                element_type,
                 paragraph,
                 &resolved_style,
                 &environment.fonts,

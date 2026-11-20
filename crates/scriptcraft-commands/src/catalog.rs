@@ -89,7 +89,7 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 52] = [
     descriptor(
         CommandId::EditorElementChange,
         "editor",
-        "role: screenplay_role, surface: editor_surface (default body)",
+        "element_type: element_type_key (exact open label), surface: editor_surface (default body); v1 role envelope compatibility",
     ),
     descriptor(
         CommandId::EditorSelectionSet,

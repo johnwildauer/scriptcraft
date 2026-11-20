@@ -5,7 +5,7 @@ use scriptcraft_model::dual_dialogue::{
     active_dual_dialogue_projection, map_group_identity, SelectionSurface,
 };
 use scriptcraft_model::{
-    ElementDefinition, ElementTypeKey, Position, Project, Role, Selection, SemanticCapabilities,
+    ElementDefinition, ElementTypeKey, Position, Project, Selection, SemanticCapabilities,
 };
 use scriptcraft_session::editing::{
     EditingSession, ElementDefinitionCandidate, ElementTypeRemapping,
@@ -232,7 +232,8 @@ fn dynamic_fixture_drives_exact_behavior_capabilities_and_body_operations() {
 
     let generated_index = foreign_body_index(session.project(), "dynamic-generated-parenthetical");
     valid(session.set_selection(caret(generated_index, 0)));
-    valid(session.change_role(Role::Parenthetical));
+    valid(session.change_element_type(key("Character")));
+    valid(session.tab());
     assert_eq!(session.project().elements[generated_index].text, "()");
     assert_eq!(
         session.project().elements[generated_index].element_type(),
@@ -254,7 +255,8 @@ fn dynamic_save_rebase_keeps_eligible_generation_and_inactive_dual_source() {
         .collect::<Vec<_>>();
     let generated_index = foreign_body_index(session.project(), "dynamic-generated-parenthetical");
     valid(session.set_selection(caret(generated_index, 0)));
-    valid(session.change_role(Role::Parenthetical));
+    valid(session.change_element_type(key("Character")));
+    valid(session.tab());
     let generated_id = session.project().elements[generated_index].id.clone();
 
     let scene_cue = foreign_body_index(session.project(), "dynamic-scene-cue");

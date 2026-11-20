@@ -237,8 +237,8 @@ mod tests {
 
     #[test]
     fn a_registry_change_falls_back_from_scoped_validation() {
-        let Ok(baseline) = Project::new() else {
-            assert!(false, "static bootstrap should produce valid definitions");
+        let Ok(baseline) = crate::project::test_project() else {
+            assert!(false, "test fixture should provide valid definitions");
             return;
         };
         let mut candidate = baseline.clone();

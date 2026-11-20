@@ -4,12 +4,11 @@ use super::{
 };
 use scriptcraft_model::{
     formatting::{
-        formatting_for_role, EffectiveTextStyle, FixedPoint, ParagraphAlignment,
-        SourceLayoutSettings,
+        EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment, SourceLayoutSettings,
     },
     layout_inputs::PageLayoutInputs,
     typography::{DocumentFontEnvironment, EffectiveTextStyle as ResolvedTextStyle, FaceStyle},
-    ElementDefinition, ElementTypeKey, LayoutInputs, ModelError, Project, Role, StableId, TextRun,
+    ElementDefinition, ElementTypeKey, LayoutInputs, ModelError, Project, StableId, TextRun,
     TitlePageParagraph,
 };
 use std::{
@@ -213,75 +212,54 @@ pub(super) fn validate_page_profile(inputs: &LayoutInputs) -> Result<(), LayoutE
 pub(super) fn effective_paragraph(
     inputs: &LayoutInputs,
     source: &SourceLayoutSettings,
-    role: Role,
+    definition: &ElementDefinition,
     element_id: &StableId,
     text_style: &EffectiveTextStyle,
 ) -> EffectiveParagraph {
-    let native = formatting_for_role(role).paragraph;
     let fallback_left = FixedPoint::from_points(i64::from(inputs.margin_left));
     let fallback_right = FixedPoint::from_points(i64::from(
         inputs.paper_width.saturating_sub(inputs.margin_right),
     ));
-    let default_left = FixedPoint::parse_inches(native.left_indent).unwrap_or(fallback_left);
-    let default_right = FixedPoint::parse_inches(native.right_indent).unwrap_or(fallback_right);
-    let projected = source.paragraph_spec(role);
-    let direct = source.direct_paragraph_spec(element_id).paragraph;
-    let mut left = projected.left_indent.unwrap_or(default_left);
-    let mut right = projected.right_indent.unwrap_or(default_right);
-
-    // Until Phase 5 replaces static role formatting, imported role settings
-    // override its paragraph defaults; per-element direct overrides remain topmost.
+    let mut left = definition.paragraph.left_indent;
+    let mut right = definition.paragraph.right_indent;
+    let direct = source.direct_paragraph_spec(element_id);
     let page_right = FixedPoint::from_points(i64::from(inputs.paper_width));
-    if left.raw() < 0 || right <= left || right > page_right {
-        left = default_left;
-        right = default_right;
-    }
     if left.raw() < 0 || right <= left || right > page_right {
         left = fallback_left;
         right = fallback_right;
     }
-
-    // Direct bounds are a pair at the geometry-validation boundary. If their
-    // combination is unusable, discard that direct pair and retain the already
-    // resolved role/default pair rather than losing a valid role override.
-    let direct_left = direct.left_indent.unwrap_or(left);
-    let direct_right = direct.right_indent.unwrap_or(right);
+    let direct_left = direct.paragraph.left_indent.unwrap_or(left);
+    let direct_right = direct.paragraph.right_indent.unwrap_or(right);
     if direct_left.raw() >= 0 && direct_right > direct_left && direct_right <= page_right {
         left = direct_left;
         right = direct_right;
     }
-
-    let default_indent = FixedPoint::parse_inches(native.first_indent).unwrap_or_default();
+    let default_indent = definition.paragraph.first_indent;
     let char_width = i64::from(inputs.char_width.max(1)).saturating_mul(FixedPoint::SCALE);
     let usable = right.raw().saturating_sub(left.raw());
     let indent_fits = |indent: FixedPoint| {
         left.raw().saturating_add(indent.raw()) >= 0
             && usable.saturating_sub(indent.raw()) >= char_width
     };
-    let role_indent = projected.first_indent.unwrap_or(default_indent);
-    let role_indent = if indent_fits(role_indent) {
-        role_indent
-    } else if indent_fits(default_indent) {
-        default_indent
-    } else {
-        FixedPoint::default()
-    };
     let first_indent = direct
+        .paragraph
         .first_indent
         .filter(|indent| indent_fits(*indent))
-        .unwrap_or(role_indent);
-
-    let default_alignment =
-        ParagraphAlignment::from_fdx(native.alignment).unwrap_or(ParagraphAlignment::Left);
+        .unwrap_or_else(|| {
+            if indent_fits(default_indent) {
+                default_indent
+            } else {
+                FixedPoint::default()
+            }
+        });
     let alignment = direct
+        .paragraph
         .alignment
-        .or(projected.alignment)
-        .unwrap_or(default_alignment);
-    let default_space = FixedPoint::from_points(i64::from(native.space_before));
+        .unwrap_or(definition.paragraph.alignment);
     let space_before = direct
+        .paragraph
         .space_before
-        .or(projected.space_before)
-        .unwrap_or(default_space);
+        .unwrap_or(definition.paragraph.space_before);
     let scaled_metric = |base: u32| {
         let numerator = i64::from(base)
             .saturating_mul(i64::from(text_style.size))
@@ -296,8 +274,24 @@ pub(super) fn effective_paragraph(
         space_before,
         line_advance: scaled_metric(inputs.line_advance),
         char_width: scaled_metric(inputs.char_width),
-        starts_new_page: false,
+        starts_new_page: direct
+            .starts_new_page
+            .unwrap_or(definition.paragraph.starts_new_page),
         pagination: PaginationPolicy::Ordinary,
+    }
+}
+
+pub(super) fn compatibility_text_style(definition: &ElementDefinition) -> EffectiveTextStyle {
+    EffectiveTextStyle {
+        declared_family: definition.font.family.clone(),
+        family: FontFallback::CourierPrime,
+        size: definition.font.size,
+        bold: definition.font.bold,
+        italic: definition.font.italic,
+        underline: definition.font.underline,
+        all_caps: definition.font.all_caps,
+        hidden_text: definition.font.hidden_text,
+        source_color: definition.font.color.clone(),
     }
 }
 
@@ -888,7 +882,8 @@ mod dynamic_resolution_tests {
 
     #[test]
     fn resolves_exact_definition_and_matching_direct_overrides_only() -> Result<(), ModelError> {
-        let mut project = Project::new()?;
+        let mut project = scriptcraft_fdx::new_project()
+            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let action = ElementTypeKey::new("Action")?;
         let id = StableId::new("action-owner")?;
         let mut overrides = SourceParagraphOverrides::default();
@@ -939,7 +934,8 @@ mod dynamic_resolution_tests {
     #[test]
     fn dual_wrapper_uses_current_general_definition_and_its_own_direct_values(
     ) -> Result<(), ModelError> {
-        let mut project = Project::new()?;
+        let mut project = scriptcraft_fdx::new_project()
+            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let wrapper = StableId::new("dual-wrapper")?;
         let mut direct = SourceParagraphOverrides::default();
         direct.paragraph.left_indent = Some(FixedPoint::from_points(140));
@@ -981,7 +977,8 @@ mod dynamic_resolution_tests {
     #[test]
     fn arbitrary_case_distinct_definition_and_run_overlays_resolve_from_current_values(
     ) -> Result<(), ModelError> {
-        let mut project = Project::new()?;
+        let mut project = scriptcraft_fdx::new_project()
+            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let mut definitions = project
             .element_definitions()
             .iter()
@@ -1070,7 +1067,8 @@ mod dynamic_resolution_tests {
     #[test]
     fn unavailable_inline_style_prefers_the_element_face_before_family_cascade(
     ) -> Result<(), ModelError> {
-        let mut project = Project::new()?;
+        let mut project = scriptcraft_fdx::new_project()
+            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let mut definitions = project
             .element_definitions()
             .iter()
@@ -1119,7 +1117,25 @@ mod dynamic_resolution_tests {
     #[test]
     fn typed_and_typeless_titles_use_definition_and_explicit_neutral_style(
     ) -> Result<(), ModelError> {
-        let project = Project::new()?;
+        let mut project = scriptcraft_fdx::new_project()
+            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let mut definitions = project
+            .element_definitions()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut summary = definitions
+            .iter()
+            .find(|definition| definition.key.as_str() == "Action")
+            .cloned()
+            .unwrap_or_else(|| unreachable!("packaged Screenplay includes Action"));
+        summary.key = ElementTypeKey::new("Summary")?;
+        summary.font.family = "Arial".to_owned();
+        summary.font.hidden_text = true;
+        summary.paragraph.left_indent = FixedPoint::from_raw(6_336);
+        summary.paragraph.right_indent = FixedPoint::from_points(500);
+        definitions.push(summary);
+        project.replace_element_definitions(definitions)?;
         let env = environment()?;
         let typed = TitlePageParagraph::new("typed", "TITLE", Default::default())?;
         let mut typed = typed;

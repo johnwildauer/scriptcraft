@@ -460,12 +460,12 @@ mod tests {
 
     #[test]
     fn proportional_canonical_boundaries_drive_pointer_and_caret_projection() {
-        let mut project = scriptcraft_model::Project::new()
+        let mut project = scriptcraft_fdx::new_project()
             .unwrap_or_else(|_| unreachable!("default project is valid"));
         project.elements = vec![scriptcraft_model::BodyOwner::shared(
             scriptcraft_model::ScreenplayElement::new(
                 "desktop-proportional-boundary",
-                scriptcraft_model::Role::Action,
+                scriptcraft_model::ElementTypeKey::new("Action").expect("valid fixture label"),
                 "Wi",
             )
             .unwrap_or_else(|_| unreachable!("bounded short element is valid")),

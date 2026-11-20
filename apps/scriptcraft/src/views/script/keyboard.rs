@@ -2,7 +2,10 @@
 
 use super::{zoom_scroll::has_nonzero_mouse_wheel, ScriptCraftApp};
 use crate::app::add_performance_counter;
-use crate::chrome::shortcuts::{editor_command_for_key_event, ShortcutPlatform};
+use crate::chrome::shortcuts::{
+    editor_command_for_key_event, editor_command_for_text_event, shortcut_input_allowed,
+    ShortcutPlatform,
+};
 use crate::commands::CommandInvocation;
 use crate::views::script::RevealIntent;
 use eframe::egui::{self, Key};
@@ -49,25 +52,41 @@ impl ScriptCraftApp {
                     }
                     None
                 }
-                egui::Event::Text(text)
-                    if !text.is_empty()
+                egui::Event::Text(text) if !text.is_empty() => {
+                    if shortcut_input_allowed(self.ime_active, ime_event_in_frame)
+                        && self.dynamic_shortcuts_allowed(surface)
+                    {
+                        let controls = self.refresh_dynamic_controls();
+                        command = editor_command_for_text_event(
+                            text,
+                            modifiers,
+                            ShortcutPlatform::current(),
+                            &controls.shortcuts.bindings,
+                        )
+                        .map(|command| CommandInvocation::new(command, CommandOrigin::Shortcut));
+                    }
+                    if command.is_none()
                         && !self.ime_active
                         && !events[index + 1..].iter().any(|next| {
                             matches!(next, egui::Event::Ime(egui::ImeEvent::Commit(commit)) if commit == text)
                         })
                         && !modifiers.command
                         && !(modifiers.ctrl && !cfg!(target_os = "macos"))
-                        && text.chars().all(|character| !character.is_control()) =>
-                {
-                    command = Some(CommandInvocation::new(
-                        Command::EditorTextInsert { text: text.clone(), surface },
-                        CommandOrigin::Keyboard,
-                    ));
+                        && text.chars().all(|character| !character.is_control())
+                    {
+                        command = Some(CommandInvocation::new(
+                            Command::EditorTextInsert { text: text.clone(), surface },
+                            CommandOrigin::Keyboard,
+                        ));
+                    }
                     None
                 }
                 egui::Event::Paste(text) if !text.is_empty() => {
                     command = Some(CommandInvocation::new(
-                        Command::EditorTextPaste { text: text.clone(), surface },
+                        Command::EditorTextPaste {
+                            text: text.clone(),
+                            surface,
+                        },
                         CommandOrigin::Keyboard,
                     ));
                     None
@@ -83,7 +102,10 @@ impl ScriptCraftApp {
                     self.ime_preedit.clear();
                     if !text.is_empty() {
                         command = Some(CommandInvocation::new(
-                            Command::EditorTextInsert { text: text.clone(), surface },
+                            Command::EditorTextInsert {
+                                text: text.clone(),
+                                surface,
+                            },
                             CommandOrigin::ImeCommit,
                         ));
                     }
@@ -112,10 +134,12 @@ impl ScriptCraftApp {
                         if surface == EditorSurface::TitlePage
                             && self.menu_policy.in_window_shortcuts_owned()
                         {
-                            command = crate::chrome::menu::command_for_key_event_command(*key, *modifiers)
-                                .map(|command| {
-                                    CommandInvocation::new(command, CommandOrigin::Shortcut)
-                                });
+                            command = crate::chrome::menu::command_for_key_event_command(
+                                *key, *modifiers,
+                            )
+                            .map(|command| {
+                                CommandInvocation::new(command, CommandOrigin::Shortcut)
+                            });
                         }
                         if command.is_none() {
                             command = crate::chrome::shortcuts::dual_dialogue_toggle_for_focused_key_event(
@@ -131,11 +155,18 @@ impl ScriptCraftApp {
                             });
                         }
                         if command.is_none() {
+                            let dynamic_enabled = self.dynamic_shortcuts_allowed(surface);
+                            let controls = self.refresh_dynamic_controls();
                             command = editor_command_for_key_event(
                                 *key,
                                 *physical_key,
                                 *modifiers,
                                 ShortcutPlatform::current(),
+                                if dynamic_enabled {
+                                    &controls.shortcuts.bindings
+                                } else {
+                                    &[]
+                                },
                             )
                             .filter(|command| {
                                 surface == EditorSurface::Body
@@ -157,11 +188,11 @@ impl ScriptCraftApp {
                         }
                     }
                     if command.is_none() {
-                        command = self
-                            .navigation_key_event(*key, *modifiers, surface)
-                            .map(|command| {
-                            CommandInvocation::new(command, CommandOrigin::Keyboard)
-                        });
+                        command =
+                            self.navigation_key_event(*key, *modifiers, surface)
+                                .map(|command| {
+                                    CommandInvocation::new(command, CommandOrigin::Keyboard)
+                                });
                     }
                     None
                 }
@@ -179,6 +210,17 @@ impl ScriptCraftApp {
             .performance
             .event_nanos
             .saturating_add(started.elapsed().as_nanos());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dispatch_surface_events_for_test(
+        &mut self,
+        events: &[egui::Event],
+        modifiers: egui::Modifiers,
+        ctx: &egui::Context,
+        surface: EditorSurface,
+    ) {
+        self.dispatch_surface_events(events, modifiers, ctx, surface);
     }
 
     fn navigation_key_event(
@@ -222,6 +264,24 @@ impl ScriptCraftApp {
         }
     }
 
+    fn dynamic_shortcuts_allowed(&mut self, surface: EditorSurface) -> bool {
+        if !dynamic_shortcut_surface_allowed(
+            surface,
+            self.surface_focused,
+            self.active_editor_surface(),
+            self.replacement_open_pending(),
+        ) {
+            return false;
+        }
+        let availability = self.app_command_availability();
+        dynamic_shortcut_availability_allowed(
+            availability.modal_blocked,
+            availability.replacement_pending,
+            availability.native_output_active,
+            availability.body_only,
+        )
+    }
+
     pub(crate) fn handle_surface_input(&mut self, ctx: &egui::Context, surface: EditorSurface) {
         if self.replacement_open_pending() {
             // Do not consume Body or Title Page semantic input while a selected
@@ -247,6 +307,12 @@ impl ScriptCraftApp {
         ) {
             return;
         }
+        if self.menu_policy.in_window_shortcuts_owned()
+            && crate::chrome::menu::in_window_menu_popup_open(ctx)
+        {
+            return;
+        }
+        let _ = self.refresh_dynamic_controls();
         self.native_input_diagnostics.dispatched_frames = self
             .native_input_diagnostics
             .dispatched_frames
@@ -266,4 +332,98 @@ fn surface_input_is_dispatchable(
     requested_surface: EditorSurface,
 ) -> bool {
     surface_focused && active_surface == requested_surface
+}
+
+fn dynamic_shortcut_surface_allowed(
+    requested_surface: EditorSurface,
+    surface_focused: bool,
+    active_surface: EditorSurface,
+    replacement_pending: bool,
+) -> bool {
+    requested_surface == EditorSurface::Body
+        && surface_focused
+        && active_surface == EditorSurface::Body
+        && !replacement_pending
+}
+
+fn dynamic_shortcut_availability_allowed(
+    modal_blocked: bool,
+    replacement_pending: bool,
+    native_output_active: bool,
+    body_only: bool,
+) -> bool {
+    !modal_blocked && !replacement_pending && !native_output_active && body_only
+}
+
+#[cfg(test)]
+mod dynamic_input_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn focused_surface_gate_keeps_body_and_title_ownership_separate() {
+        assert!(surface_input_is_dispatchable(
+            true,
+            EditorSurface::Body,
+            EditorSurface::Body
+        ));
+        assert!(!surface_input_is_dispatchable(
+            false,
+            EditorSurface::Body,
+            EditorSurface::Body
+        ));
+        assert!(!surface_input_is_dispatchable(
+            true,
+            EditorSurface::TitlePage,
+            EditorSurface::Body
+        ));
+        assert!(surface_input_is_dispatchable(
+            true,
+            EditorSurface::TitlePage,
+            EditorSurface::TitlePage
+        ));
+    }
+
+    #[test]
+    fn dynamic_bindings_require_focused_body_and_unlocked_command_availability() {
+        assert!(dynamic_shortcut_surface_allowed(
+            EditorSurface::Body,
+            true,
+            EditorSurface::Body,
+            false
+        ));
+        assert!(!dynamic_shortcut_surface_allowed(
+            EditorSurface::Body,
+            false,
+            EditorSurface::Body,
+            false
+        ));
+        assert!(!dynamic_shortcut_surface_allowed(
+            EditorSurface::TitlePage,
+            true,
+            EditorSurface::TitlePage,
+            false
+        ));
+        assert!(!dynamic_shortcut_surface_allowed(
+            EditorSurface::Body,
+            true,
+            EditorSurface::Body,
+            true
+        ));
+
+        assert!(dynamic_shortcut_availability_allowed(
+            false, false, false, true
+        ));
+        assert!(!dynamic_shortcut_availability_allowed(
+            true, false, false, true
+        ));
+        assert!(!dynamic_shortcut_availability_allowed(
+            false, true, false, true
+        ));
+        assert!(!dynamic_shortcut_availability_allowed(
+            false, false, true, true
+        ));
+        assert!(!dynamic_shortcut_availability_allowed(
+            false, false, false, false
+        ));
+    }
 }

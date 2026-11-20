@@ -6,13 +6,69 @@ use scriptcraft_model::dual_dialogue::{
 };
 use scriptcraft_model::formatted_text::{parse_style_attribute, RunStyleFlags};
 use scriptcraft_model::{
-    BodyOwner, ElementTypeKey, ModelError, Position, Project, Role, RunAttribute,
+    BodyOwner, ElementBehavior, ElementDefinition, ElementFontSpec, ElementOutline,
+    ElementParagraphSpec, ElementTypeKey, ModelError, Position, Project, RunAttribute,
     ScreenplayElement, Selection, SourceFormat, SourceProvenance, SourceSection, TextRun,
     TitlePageAlignment, TitlePageParagraph, TitlePageParagraphFormatting,
 };
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("model smoke uses valid bounded input"))
+}
+
+fn test_project() -> Project {
+    let definitions = [
+        "Scene Heading",
+        "Action",
+        "Character",
+        "Dialogue",
+        "Parenthetical",
+        "Transition",
+        "General",
+        "Shot",
+        "Cast List",
+    ]
+    .into_iter()
+    .map(|label| {
+        valid(ElementDefinition::new(
+            valid(ElementTypeKey::new(label)),
+            ElementFontSpec {
+                family: "Courier Prime".to_owned(),
+                size: 12,
+                bold: false,
+                italic: false,
+                underline: false,
+                all_caps: false,
+                hidden_text: false,
+                color: None,
+                adornment_style: 0,
+                revision_id: 0,
+            },
+            ElementParagraphSpec {
+                alignment: scriptcraft_model::formatting::ParagraphAlignment::Left,
+                first_indent: Default::default(),
+                left_indent: Default::default(),
+                right_indent: scriptcraft_model::formatting::FixedPoint::from_points(500),
+                leading: "Regular".to_owned(),
+                space_before: Default::default(),
+                spacing: 1,
+                starts_new_page: false,
+            },
+            ElementBehavior {
+                paginate_as: None,
+                return_key: None,
+                shortcut: None,
+                tab_key: None,
+                win_shortcut: None,
+            },
+            ElementOutline {
+                can_hide: false,
+                level: 0,
+            },
+        ))
+    })
+    .collect();
+    valid(Project::with_element_definitions(definitions))
 }
 
 fn add_custom_type(project: &mut Project, label: &str, paginate_as: Option<&str>) {
@@ -25,7 +81,7 @@ fn add_custom_type(project: &mut Project, label: &str, paginate_as: Option<&str>
         .iter()
         .find(|definition| definition.key.as_str() == "Action")
         .cloned()
-        .unwrap_or_else(|| unreachable!("Project::new supplies the base Action definition"));
+        .unwrap_or_else(|| unreachable!("test fixture supplies the base Action definition"));
     definition.key = valid(ElementTypeKey::new(label));
     definition.behavior.paginate_as = paginate_as.map(str::to_owned);
     definitions.push(definition);
@@ -36,10 +92,10 @@ fn add_custom_type(project: &mut Project, label: &str, paginate_as: Option<&str>
 fn model_public_api_smoke() {
     const BODY_TEXT: &str = "Café — opening";
 
-    let mut project = valid(Project::new());
+    let mut project = test_project();
     let element = valid(ScreenplayElement::with_runs(
         "smoke-body",
-        Role::Action,
+        valid(ElementTypeKey::new("Action")),
         vec![
             TextRun {
                 text: "Café".into(),
@@ -67,12 +123,10 @@ fn model_public_api_smoke() {
     let body = project.elements[0].as_element();
     let title = &project.title_page[0];
     assert_eq!(body.id.as_str(), "smoke-body");
-    assert_eq!(body.element_type(), ElementTypeKey::from_role(Role::Action));
-    assert_eq!(body.transitional_role(), Role::Action);
+    assert_eq!(body.element_type().as_str(), "Action");
     assert_eq!(body.text, BODY_TEXT);
     assert_eq!(title.id.as_str(), "smoke-title");
     assert_eq!(title.element_type(), None);
-    assert_eq!(title.transitional_role(), None);
     assert_eq!(title.text, "Smoke Story");
 
     let run_text = body
@@ -115,26 +169,26 @@ fn model_public_api_smoke() {
 
 #[test]
 fn typed_paragraphs_resolve_definitions_and_typeless_titles_are_valid() {
-    let mut body_project = valid(Project::new());
+    let mut body_project = test_project();
     body_project.title_page.clear();
     body_project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
         "missing-body-type",
-        Role::Action,
+        valid(ElementTypeKey::new("Action")),
         "body",
     )))];
     valid(body_project.replace_element_definitions(Vec::new()));
     assert_eq!(
         body_project.validate(),
-        Err(ModelError::MissingElementDefinition(
-            ElementTypeKey::from_role(Role::Action)
-        ))
+        Err(ModelError::MissingElementDefinition(valid(
+            ElementTypeKey::new("Action")
+        )))
     );
 
-    let mut title_project = valid(Project::new());
+    let mut title_project = test_project();
     title_project.elements.clear();
     title_project.title_page = vec![valid(TitlePageParagraph::with_runs(
         "missing-title-type",
-        Some(ElementTypeKey::from_role(Role::Action)),
+        Some(valid(ElementTypeKey::new("Action"))),
         Vec::new(),
         None,
         Default::default(),
@@ -142,46 +196,21 @@ fn typed_paragraphs_resolve_definitions_and_typeless_titles_are_valid() {
     valid(title_project.replace_element_definitions(Vec::new()));
     assert_eq!(
         title_project.validate(),
-        Err(ModelError::MissingElementDefinition(
-            ElementTypeKey::from_role(Role::Action)
-        ))
+        Err(ModelError::MissingElementDefinition(valid(
+            ElementTypeKey::new("Action")
+        )))
     );
 
-    let mut typeless_title_project = valid(Project::new());
+    let mut typeless_title_project = test_project();
     typeless_title_project.elements.clear();
     valid(typeless_title_project.replace_element_definitions(Vec::new()));
     assert_eq!(typeless_title_project.validate(), Ok(()));
 }
 
 #[test]
-fn transitional_role_setters_keep_key_facades_in_sync() {
-    let mut body = valid(ScreenplayElement::new("body-key", Role::Action, "body"));
-    body.set_transitional_role(Role::Character);
-    assert_eq!(body.transitional_role(), Role::Character);
-    assert_eq!(
-        body.element_type(),
-        ElementTypeKey::from_role(Role::Character)
-    );
-
-    let mut title = valid(TitlePageParagraph::new(
-        "title-key",
-        "title",
-        Default::default(),
-    ));
-    title.set_transitional_role(Some(Role::Dialogue));
-    assert_eq!(title.transitional_role(), Some(Role::Dialogue));
-    assert_eq!(
-        title.element_type(),
-        Some(ElementTypeKey::from_role(Role::Dialogue))
-    );
-    title.set_transitional_role(None);
-    assert_eq!(title.element_type(), None);
-}
-
-#[test]
 fn canonical_open_keys_preserve_paragraph_identity_and_direct_formatting() {
-    let mut project = valid(Project::new());
-    let action_key = ElementTypeKey::from_role(Role::Action);
+    let mut project = test_project();
+    let action_key = valid(ElementTypeKey::new("Action"));
     let lyrics_key = valid(ElementTypeKey::new("Lyrics"));
     let lowercase_lyrics_key = valid(ElementTypeKey::new("lyrics"));
 
@@ -247,7 +276,7 @@ fn canonical_open_keys_preserve_paragraph_identity_and_direct_formatting() {
     };
     let title = valid(TitlePageParagraph::with_runs(
         "open-key-title",
-        Some(ElementTypeKey::from_role(Role::Action)),
+        Some(valid(ElementTypeKey::new("Action"))),
         vec![TextRun {
             text: "Song title".to_owned(),
             attributes: Vec::new(),
@@ -276,13 +305,11 @@ fn canonical_open_keys_preserve_paragraph_identity_and_direct_formatting() {
     let body = project.elements[0].as_element();
     let title = &project.title_page[0];
     assert_eq!(body.element_type(), lyrics_key);
-    assert_eq!(body.transitional_role(), Role::General);
     assert_eq!(body.id, body_id);
     assert_eq!(body.runs, body_runs);
     assert_eq!(body.source_provenance, body_provenance);
     assert!(project.direct_paragraph_overrides.contains_key(&body_id));
     assert_eq!(title.element_type(), Some(lyrics_key));
-    assert_eq!(title.transitional_role(), Some(Role::General));
     assert_eq!(title.id, title_id);
     assert_eq!(title.runs, title_runs);
     assert_eq!(title.source_provenance, title_provenance);
@@ -293,7 +320,7 @@ fn canonical_open_keys_preserve_paragraph_identity_and_direct_formatting() {
 #[test]
 fn arbitrary_missing_definition_fails_and_definition_values_affect_equality() {
     let lyrics_key = valid(ElementTypeKey::new("Lyrics"));
-    let mut missing = valid(Project::new());
+    let mut missing = test_project();
     missing.title_page.clear();
     missing.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
         "missing-lyrics",
@@ -306,7 +333,7 @@ fn arbitrary_missing_definition_fails_and_definition_values_affect_equality() {
         Err(ModelError::MissingElementDefinition(lyrics_key))
     );
 
-    let project = valid(Project::new());
+    let project = test_project();
     let mut equivalent_with_fresh_owner = project.clone();
     equivalent_with_fresh_owner.elements = project
         .elements
@@ -328,26 +355,26 @@ fn arbitrary_missing_definition_fails_and_definition_values_affect_equality() {
 
 #[test]
 fn dual_group_membership_survives_inactive_projection_and_reactivation() {
-    let mut project = valid(Project::new());
+    let mut project = test_project();
     let members = [
         valid(ScreenplayElement::new(
             "dual-left-cue",
-            Role::Character,
+            valid(ElementTypeKey::new("Character")),
             "LEFT",
         )),
         valid(ScreenplayElement::new(
             "dual-left-line",
-            Role::Dialogue,
+            valid(ElementTypeKey::new("Dialogue")),
             "left line",
         )),
         valid(ScreenplayElement::new(
             "dual-right-cue",
-            Role::Character,
+            valid(ElementTypeKey::new("Character")),
             "RIGHT",
         )),
         valid(ScreenplayElement::new(
             "dual-right-line",
-            Role::Parenthetical,
+            valid(ElementTypeKey::new("Parenthetical")),
             "(right)",
         )),
     ];
@@ -372,7 +399,7 @@ fn dual_group_membership_survives_inactive_projection_and_reactivation() {
 
     let active_baseline = project.clone();
     BodyOwner::update(&mut project.elements[1], |element| {
-        element.set_element_type(ElementTypeKey::from_role(Role::Action));
+        element.set_element_type(valid(ElementTypeKey::new("Action")));
     });
     assert_eq!(project.validate(), Ok(()));
     assert_eq!(project.dual_dialogue_groups[0].members, source_members);
@@ -391,7 +418,7 @@ fn dual_group_membership_survives_inactive_projection_and_reactivation() {
     );
 
     BodyOwner::update(&mut project.elements[1], |element| {
-        element.set_element_type(ElementTypeKey::from_role(Role::Dialogue));
+        element.set_element_type(valid(ElementTypeKey::new("Dialogue")));
     });
     assert_eq!(project.validate(), Ok(()));
     assert!(active_dual_dialogue_projection(&project, &project.dual_dialogue_groups[0]).is_some());
@@ -399,7 +426,7 @@ fn dual_group_membership_survives_inactive_projection_and_reactivation() {
 
 #[test]
 fn dual_recognition_uses_exact_capabilities_not_paginate_as_or_type_spelling() {
-    let mut project = valid(Project::new());
+    let mut project = test_project();
     add_custom_type(&mut project, "character", Some("Character"));
     add_custom_type(&mut project, "Dialogue-like", Some("Dialogue"));
     add_custom_type(&mut project, "Parenthetical-like", Some("Parenthetical"));
@@ -453,7 +480,7 @@ fn dual_recognition_uses_exact_capabilities_not_paginate_as_or_type_spelling() {
 
 #[test]
 fn dual_projection_allows_empty_sides_and_rejects_a_third_cue() {
-    let mut project = valid(Project::new());
+    let mut project = test_project();
     project.elements = [
         ("empty-left-cue", "Character", "LEFT"),
         ("empty-right-cue", "Character", "RIGHT"),
@@ -484,7 +511,7 @@ fn dual_projection_allows_empty_sides_and_rejects_a_third_cue() {
 
     let third_cue = BodyOwner::shared(valid(ScreenplayElement::new(
         "third-dual-cue",
-        Role::Character,
+        valid(ElementTypeKey::new("Character")),
         "THIRD",
     )));
     project.elements.push(third_cue.clone());

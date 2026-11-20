@@ -615,7 +615,8 @@ fn source_backed_writer_keeps_inert_duplicates_and_cannot_resurrect_removed_defi
 
 #[test]
 fn preservation_free_writer_emits_only_current_registry_and_open_types() {
-    let mut project = Project::new().unwrap_or_else(|_| unreachable!("new project is valid"));
+    let mut project =
+        scriptcraft_fdx::new_project().unwrap_or_else(|_| unreachable!("new project is valid"));
     let lyrics_key = ElementTypeKey::new("Lyrics").unwrap_or_else(|_| unreachable!());
     let title_key = ElementTypeKey::new("TitleCustom").unwrap_or_else(|_| unreachable!());
     let lyrics = derived_definition(&project, "Lyrics");
@@ -851,9 +852,7 @@ fn fdx_dual_source_roundtrips_active_and_inactive_membership() {
     assert_eq!(attribute(deactivated_wrapper, "Type"), Some("General"));
 
     BodyOwner::update(&mut active.elements[0], |element| {
-        element.set_element_type(ElementTypeKey::from_role(
-            scriptcraft_model::Role::Character,
-        ));
+        element.set_element_type(ElementTypeKey::new("Character").expect("valid fixture label"));
     });
     assert!(active_dual_dialogue_projection(&active, &active.dual_dialogue_groups[0]).is_some());
     let reactivated = valid(read_v6(&valid(write_v6(&active)))).project;

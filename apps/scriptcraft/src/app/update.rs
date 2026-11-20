@@ -29,6 +29,7 @@ fn chrome_frame(palette: theme::ToolbarPalette) -> egui::Frame {
 
 fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui::Rect {
     let ctx = ui.ctx().clone();
+    let _ = app.refresh_dynamic_controls();
     let now = app.timer_now();
     app.reconcile_sprint_timer(now);
     let fullscreen = ctx.input(|input| input.viewport().fullscreen);
@@ -91,13 +92,28 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                 .any(|event| matches!(event, egui::Event::Ime(_))),
         )
     });
+    let availability = app.app_command_availability();
+    let body_focused = app.surface_focused
+        && app.active_editor_surface() == EditorSurface::Body
+        && !availability.replacement_pending
+        && !availability.modal_blocked
+        && !availability.native_output_active
+        && !(app.menu_policy.in_window_shortcuts_owned() && menu::in_window_menu_popup_open(&ctx));
+    let _ = app.refresh_dynamic_controls();
+    let controls = app
+        .dynamic_controls
+        .as_ref()
+        .expect("current controls refreshed before status composition");
     let center = status_bar::project_center(
         &app.session,
-        app.surface_focused,
+        body_focused,
         app.ime_active || ime_event_in_frame,
-        app.pending_fdx_open.is_some(),
+        availability.replacement_pending
+            || availability.modal_blocked
+            || availability.native_output_active,
         modifiers,
         shortcuts::ShortcutPlatform::current(),
+        &controls.shortcuts,
     );
     let diagnostics_calculation_started = app.development_mode.then(Instant::now);
     let performance_summary = app

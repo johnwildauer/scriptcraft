@@ -321,7 +321,7 @@ fn source_reconciliation_fixture_roundtrips_managed_and_opaque_source() {
 
 #[test]
 fn preservation_free_scene_metadata_uses_only_exact_capabilities() {
-    let mut project = valid(Project::new());
+    let mut project = valid(scriptcraft_fdx::new_project());
     let mut definitions = project
         .element_definitions()
         .iter()

@@ -1,5 +1,6 @@
 //! Menu presentation policy and the shared ordered desktop-command handoff.
 
+use super::element_shortcuts::ReservedElementChords;
 use super::menu_items::{
     command_for_action, LogicalShortcut, MenuAction, MenuEntrySpec, MenuItemBehavior, MenuItemSpec,
     PlaceholderKind, SemanticIcon, ShortcutKey, MENU_CATALOG,
@@ -90,10 +91,75 @@ pub(super) enum MenuBackend {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MenuAcceleratorOwner {
+pub(crate) enum MenuAcceleratorOwner {
     NativeMacOS,
     InWindow,
     None,
+}
+
+/// Build conservative reserved policy from every catalog accelerator, including
+/// disabled placeholders and platform aliases. Chords remain reserved even if
+/// the requested menu backend is unavailable.
+pub(crate) fn reserved_element_chords(platform: ShortcutPlatform) -> ReservedElementChords {
+    fn append(
+        entries: &'static [MenuEntrySpec],
+        platform: ShortcutPlatform,
+        out: &mut Vec<LogicalShortcut>,
+    ) {
+        for entry in entries {
+            match entry {
+                MenuEntrySpec::Item(item) => {
+                    let windows_dual_alias = platform == ShortcutPlatform::Windows
+                        && item.behavior
+                            == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle);
+                    if !windows_dual_alias {
+                        if let Some(shortcut) = item.shortcut {
+                            out.push(shortcut);
+                        }
+                    }
+                    if platform == ShortcutPlatform::Windows {
+                        if let Some(alias) = item.windows_alias {
+                            out.push(alias);
+                        }
+                    }
+                }
+                MenuEntrySpec::Submenu(menu) => append(menu.entries, platform, out),
+                MenuEntrySpec::Separator => {}
+            }
+        }
+    }
+
+    let mut menu_shortcuts = Vec::new();
+    for menu in MENU_CATALOG {
+        append(menu.entries, platform, &mut menu_shortcuts);
+    }
+    let mut reserved = ReservedElementChords::from_menu_shortcuts(menu_shortcuts);
+    if platform == ShortcutPlatform::MacOS {
+        // Native application Quit is not a shared File/Edit catalog row.
+        reserved.reserve_exact(super::shortcuts::primary_shortcut(ShortcutKey::Q, false));
+    }
+    for key in [
+        ShortcutKey::Backspace,
+        ShortcutKey::Delete,
+        ShortcutKey::ArrowLeft,
+        ShortcutKey::ArrowRight,
+        ShortcutKey::ArrowUp,
+        ShortcutKey::ArrowDown,
+        ShortcutKey::Home,
+        ShortcutKey::End,
+    ] {
+        reserved.reserve_wildcard_key(key);
+    }
+    for key in [ShortcutKey::Enter, ShortcutKey::Tab] {
+        reserved.reserve_exact(LogicalShortcut {
+            key,
+            primary: false,
+            control: false,
+            option: false,
+            shift: false,
+        });
+    }
+    reserved
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,13 +222,21 @@ impl RuntimeMenuPolicy {
         matches!(self.accelerator_owner(), MenuAcceleratorOwner::InWindow)
     }
 
-    pub(super) const fn accelerator_owner(self) -> MenuAcceleratorOwner {
+    pub(crate) const fn accelerator_owner(self) -> MenuAcceleratorOwner {
         match self.backend {
             MenuBackend::NativeMacOS => MenuAcceleratorOwner::NativeMacOS,
             MenuBackend::InWindow => MenuAcceleratorOwner::InWindow,
             MenuBackend::None => MenuAcceleratorOwner::None,
         }
     }
+}
+
+/// Whether an in-window top-level menu popup currently owns keyboard focus.
+/// The menu popup identity is stored by `show_menu_bar` for cross-menu hover.
+pub(crate) fn in_window_menu_popup_open(ctx: &egui::Context) -> bool {
+    let key = egui::Id::new("scriptcraft-active-top-level-menu-popup");
+    ctx.data(|data| data.get_temp::<egui::Id>(key))
+        .is_some_and(|popup_id| egui::Popup::is_id_open(ctx, popup_id))
 }
 
 /// Resolves catalog shortcuts and the Windows-only Redo alias from the logical
@@ -596,6 +670,7 @@ fn shortcut_label(shortcut: LogicalShortcut) -> String {
         ShortcutKey::Z => "Z",
         ShortcutKey::Comma => ",",
         ShortcutKey::Semicolon => ";",
+        ShortcutKey::Colon => ":",
         ShortcutKey::Period => ".",
         ShortcutKey::Enter => "Enter",
         ShortcutKey::Tab => "Tab",
@@ -629,6 +704,11 @@ fn shortcut_label(shortcut: LogicalShortcut) -> String {
         ShortcutKey::Backslash => "\\",
         ShortcutKey::Pipe => "|",
         ShortcutKey::ArrowRight => "→",
+        ShortcutKey::ArrowLeft => "←",
+        ShortcutKey::ArrowUp => "↑",
+        ShortcutKey::ArrowDown => "↓",
+        ShortcutKey::Home => "Home",
+        ShortcutKey::End => "End",
     };
     let mut parts = Vec::with_capacity(4);
     if shortcut.control {
@@ -654,5 +734,45 @@ impl crate::app::ScriptCraftApp {
         for invocation in self.pending_commands.take_pending() {
             self.dispatch_command(invocation, ctx);
         }
+    }
+}
+
+#[cfg(test)]
+mod dynamic_reservation_tests {
+    use super::*;
+
+    #[test]
+    fn actual_menu_aliases_placeholders_quit_and_fixed_keys_are_reserved() {
+        let mac = reserved_element_chords(ShortcutPlatform::MacOS);
+        assert!(mac.contains(LogicalShortcut {
+            key: ShortcutKey::Q,
+            primary: true,
+            control: false,
+            option: false,
+            shift: false,
+        }));
+        assert!(mac.contains(LogicalShortcut {
+            key: ShortcutKey::N,
+            primary: true,
+            control: false,
+            option: false,
+            shift: true,
+        }));
+        assert!(mac.contains(LogicalShortcut {
+            key: ShortcutKey::ArrowLeft,
+            primary: true,
+            control: true,
+            option: true,
+            shift: true,
+        }));
+
+        let windows = reserved_element_chords(ShortcutPlatform::Windows);
+        assert!(windows.contains(LogicalShortcut {
+            key: ShortcutKey::D,
+            primary: true,
+            control: false,
+            option: true,
+            shift: false,
+        }));
     }
 }

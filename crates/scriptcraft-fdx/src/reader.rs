@@ -168,8 +168,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         &imported_element_settings,
         &mut project,
     )?;
-    let mut source_layout_settings =
-        crate::settings::derive_compatibility_layout_settings(project.element_definitions());
+    let mut source_layout_settings = SourceLayoutSettings::default();
     validate_image_payload_budgets(root, root_namespace)?;
     validate_user_paragraph_data_locations(root, root_namespace)?;
     let (identities, board_graph) = collect_identities(root)?;

@@ -8,7 +8,7 @@ use scriptcraft_model::{
     formatted_text::parse_style_attribute,
     formatting::{EffectiveTextStyle, FixedPoint},
     typography::{DocumentFontEnvironment, EffectiveTextStyle as ResolvedTextStyle},
-    ElementTypeKey, Role, StableId, TextRun,
+    ElementTypeKey, StableId, TextRun,
 };
 use std::{ops::Range, sync::Arc, time::Instant};
 
@@ -238,7 +238,7 @@ pub(super) fn wrap_resolved_display_scalars(
 pub(super) fn wrap_resolved_for_layout(
     text: &str,
     element: usize,
-    role: Role,
+    element_type: Option<ElementTypeKey>,
     paragraph: EffectiveParagraph,
     base_style: &ResolvedTextStyle,
     fonts: &DocumentFontEnvironment,
@@ -282,7 +282,7 @@ pub(super) fn wrap_resolved_for_layout(
             let source = range.source_range;
             WrappedLine {
                 element,
-                role,
+                element_type: element_type.clone(),
                 start: source.start,
                 end: source.end,
                 text: Arc::from(&text[source.clone()]),
@@ -404,7 +404,7 @@ fn wrap_resolved_segment(
 #[derive(Debug, Clone)]
 pub(super) struct WrappedLine {
     pub(super) element: usize,
-    pub(super) role: Role,
+    pub(super) element_type: Option<ElementTypeKey>,
     pub(super) start: usize,
     pub(super) end: usize,
     pub(super) text: Arc<str>,
@@ -428,7 +428,7 @@ pub(super) fn wrap_for_layout(
     element_id: &StableId,
     text: &str,
     element: usize,
-    role: Role,
+    element_type: Option<ElementTypeKey>,
     element_key: Option<&ElementTypeKey>,
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
@@ -447,7 +447,7 @@ pub(super) fn wrap_for_layout(
         true,
         0,
         element,
-        role,
+        element_type,
         element_key,
         paragraph,
         text_style,
@@ -469,7 +469,7 @@ pub(super) fn wrap_for_layout_range(
     first_visual_line: bool,
     line_offset: usize,
     element: usize,
-    role: Role,
+    element_type: Option<ElementTypeKey>,
     element_key: Option<&ElementTypeKey>,
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
@@ -550,7 +550,7 @@ pub(super) fn wrap_for_layout_range(
             element_key,
             &projected_text,
             element,
-            role,
+            element_type,
             paragraph,
             {
                 let mut wrapping_style = text_style.clone();
@@ -575,7 +575,7 @@ pub(super) fn wrap_for_layout_range(
         let lines = wrap_element(
             &projected_text,
             element,
-            role,
+            element_type,
             paragraph,
             wrapping_style,
             wrapping_char_width,
@@ -686,7 +686,7 @@ fn atomic_boundary_is_forbidden(
 pub(super) fn wrap_element(
     text: &str,
     element: usize,
-    role: Role,
+    element_type: Option<ElementTypeKey>,
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
     char_width: FixedPoint,
@@ -698,7 +698,7 @@ pub(super) fn wrap_element(
     wrap_element_with_advances(
         text,
         element,
-        role,
+        element_type,
         paragraph,
         text_style,
         char_width,
@@ -717,7 +717,7 @@ pub(super) fn wrap_element(
 pub(super) fn wrap_element_with_advances(
     text: &str,
     element: usize,
-    role: Role,
+    element_type: Option<ElementTypeKey>,
     paragraph: EffectiveParagraph,
     text_style: EffectiveTextStyle,
     char_width: FixedPoint,
@@ -750,7 +750,7 @@ pub(super) fn wrap_element_with_advances(
             &text[paragraph_start..newline],
             paragraph_start,
             element,
-            role,
+            element_type.clone(),
             first_limit,
             rest_limit,
             paragraph,
@@ -777,7 +777,7 @@ pub(super) fn wrap_element_with_advances(
         text[paragraph_start..].as_ref(),
         paragraph_start,
         element,
-        role,
+        element_type.clone(),
         first_limit,
         rest_limit,
         paragraph,
@@ -792,7 +792,7 @@ pub(super) fn wrap_element_with_advances(
     if output.is_empty() {
         output.push(WrappedLine {
             element,
-            role,
+            element_type,
             start: 0,
             end: 0,
             text: Arc::from(""),
@@ -829,7 +829,7 @@ fn wrap_segment(
     text: &str,
     base: usize,
     element: usize,
-    role: Role,
+    element_type: Option<ElementTypeKey>,
     first_limit: i64,
     rest_limit: i64,
     paragraph: EffectiveParagraph,
@@ -844,7 +844,7 @@ fn wrap_segment(
     if text.is_empty() {
         output.push(WrappedLine {
             element,
-            role,
+            element_type: element_type.clone(),
             start: base,
             end: base,
             text: Arc::from(""),
@@ -973,7 +973,7 @@ fn wrap_segment(
         }
         output.push(WrappedLine {
             element,
-            role,
+            element_type: element_type.clone(),
             start: source_start,
             end: source_end,
             text: Arc::from(&text[first_cell.local_start..last_cell.local_end]),
@@ -1052,7 +1052,7 @@ mod metric_wrap_tests {
         let lines = wrap_element_with_advances(
             text,
             0,
-            Role::Action,
+            None,
             paragraph(1_000),
             style(),
             FixedPoint::from_points(7),
@@ -1073,7 +1073,7 @@ mod metric_wrap_tests {
         let lines = wrap_element_with_advances(
             "界",
             0,
-            Role::Action,
+            None,
             paragraph(100),
             style(),
             FixedPoint::from_points(7),

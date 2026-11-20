@@ -454,8 +454,7 @@ pub(crate) fn prepare_body_for_layout(
     }
     let element = owner.as_element();
     let paragraph = environment.paragraph;
-    // Phase 5 replaces this static-layout adapter with definition-driven layout.
-    let role = element.transitional_role();
+    let element_type = Some(element.element_type());
     let prepared = if let Some(prepared) = incremental {
         prepared
     } else {
@@ -472,7 +471,7 @@ pub(crate) fn prepare_body_for_layout(
                     Some(key),
                     &element.text,
                     0,
-                    role,
+                    element_type.clone(),
                     paragraph,
                     environment.text_style.clone(),
                     resolved_style,
@@ -491,7 +490,7 @@ pub(crate) fn prepare_body_for_layout(
                 wrap::wrap_resolved_for_layout(
                     &element.text,
                     0,
-                    role,
+                    element_type.clone(),
                     paragraph,
                     &resolved_style,
                     &layout_environment.fonts,
@@ -508,7 +507,7 @@ pub(crate) fn prepare_body_for_layout(
                 &element.id,
                 &element.text,
                 0,
-                role,
+                element_type,
                 environment.element_key.as_ref(),
                 paragraph,
                 environment.text_style.clone(),
@@ -636,8 +635,6 @@ fn prepare_incremental_body_for_layout(
 ) -> Option<Arc<PreparedBodyParagraph>> {
     let old = previous_owner.as_element();
     let new = owner.as_element();
-    // Phase 5 replaces this static-role projection with definition-driven layout.
-    let new_role = new.transitional_role();
     if old.id != new.id
         || old.element_type() != new.element_type()
         || old.source_provenance != new.source_provenance
@@ -678,7 +675,7 @@ fn prepare_incremental_body_for_layout(
         false,
         reused_lines,
         0,
-        new_role,
+        Some(new.element_type()),
         Some(&new.element_type()),
         environment.paragraph,
         environment.text_style.clone(),
@@ -748,7 +745,8 @@ mod typography_cache_identity_tests {
     }
 
     fn test_owner() -> Result<Arc<BodyOwner>, scriptcraft_model::ModelError> {
-        let project = Project::new()?;
+        let project = scriptcraft_fdx::new_project()
+            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         project
             .elements
             .first()
@@ -788,7 +786,8 @@ mod typography_cache_identity_tests {
     #[test]
     fn incremental_preparation_matches_a_fresh_owner_preparation(
     ) -> Result<(), scriptcraft_model::ModelError> {
-        let project = Project::new()?;
+        let project = scriptcraft_fdx::new_project()
+            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let layout = ScreenplayLayout::build(&project)
             .map_err(|_| scriptcraft_model::ModelError::InvalidNumber)?;
         let mut old_owner = project
