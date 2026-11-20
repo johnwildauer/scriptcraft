@@ -28,7 +28,10 @@ fn open_element_type_values_preserve_exact_labels() {
 fn command_execution_public_api_smoke() {
     const INSERTED_TEXT: &str = "Command café";
 
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let mut definitions = project
         .element_definitions()
         .iter()

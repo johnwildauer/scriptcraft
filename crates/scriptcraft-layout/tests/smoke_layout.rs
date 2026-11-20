@@ -127,7 +127,10 @@ fn synthetic_layout_environment(project: &Project) -> LayoutEnvironment {
 #[test]
 fn layout_public_api_smoke() {
     let text = format!("{}éZ", "a".repeat(60));
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
         "layout-action",
         scriptcraft_model::ElementTypeKey::new("Action").expect("valid fixture label"),
@@ -199,7 +202,10 @@ fn layout_public_api_smoke() {
 
 #[test]
 fn sequential_body_uses_current_definition_inline_metrics_and_complete_cache_identity() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let action = valid(ElementTypeKey::new("Action"));
     let mut definitions = project
         .element_definitions()
@@ -431,7 +437,10 @@ fn sequential_body_uses_current_definition_inline_metrics_and_complete_cache_ide
 
 #[test]
 fn dual_source_members_switch_between_sequential_and_active_columns() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let members = [
         valid(ScreenplayElement::new(
             "inactive-left-cue",
@@ -536,7 +545,10 @@ fn dual_source_members_switch_between_sequential_and_active_columns() {
 
 #[test]
 fn vertical_page_fit_ignores_legacy_occupied_line_capacity() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     project.elements = vec![
         BodyOwner::shared(valid(ScreenplayElement::new(
             "fit-one",

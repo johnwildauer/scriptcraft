@@ -321,12 +321,18 @@ fn source_reconciliation_fixture_roundtrips_managed_and_opaque_source() {
 
 #[test]
 fn preservation_free_scene_metadata_uses_only_exact_capabilities() {
-    let mut project = valid(scriptcraft_fdx::new_project());
-    let mut definitions = project
+    let template = valid(scriptcraft_fdx::instantiate_builtin_template(
+        scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+    ));
+    let definitions = template
+        .project
         .element_definitions()
         .iter()
         .cloned()
         .collect::<Vec<_>>();
+    let mut project = valid(Project::empty_projection());
+    valid(project.replace_element_definitions(definitions.clone()));
+    let mut definitions = definitions;
     let mut lyrics = definitions
         .iter()
         .find(|definition| definition.key.as_str() == "Action")

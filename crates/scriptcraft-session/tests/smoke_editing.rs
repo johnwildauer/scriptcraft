@@ -63,7 +63,10 @@ fn unqualified_attribute<'a>(element: &'a PreservedElement, name: &str) -> Optio
 fn editing_history_public_api_smoke() {
     const EDIT_TEXT: &str = "Café — répétition";
 
-    let original = valid(scriptcraft_fdx::new_project());
+    let original = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let original_selection = Selection::caret(Position {
         element: 0,
         offset: 0,
@@ -108,7 +111,10 @@ fn editing_history_public_api_smoke() {
 
 #[test]
 fn arbitrary_paginate_as_text_edit_keeps_scoped_derived_fast_path() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -140,7 +146,10 @@ fn arbitrary_paginate_as_text_edit_keeps_scoped_derived_fast_path() {
 
 #[test]
 fn current_behavior_guidance_and_enter_use_the_exact_document_key() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -180,7 +189,20 @@ fn current_behavior_guidance_and_enter_use_the_exact_document_key() {
 
 #[test]
 fn preservation_free_definition_replacement_is_one_undoable_registry_edit() {
-    let project = valid(scriptcraft_fdx::new_project());
+    let template = valid(scriptcraft_fdx::instantiate_builtin_template(
+        scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+    ));
+    let mut project = valid(Project::empty_projection());
+    valid(
+        project.replace_element_definitions(
+            template
+                .project
+                .element_definitions()
+                .iter()
+                .cloned()
+                .collect(),
+        ),
+    );
     let mut session = valid(EditingSession::new(project.clone()));
     let initial_revision = session.revision();
     let definitions = project
@@ -446,7 +468,10 @@ fn source_backed_title_type_changes_support_optional_keys_and_history() {
 
 #[test]
 fn open_type_change_is_type_only_without_the_removed_role_adapter() {
-    let project = valid(scriptcraft_fdx::new_project());
+    let project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let mut session = valid(EditingSession::new(project.clone()));
     let initial_revision = session.revision();
 
@@ -475,7 +500,10 @@ fn open_type_change_is_type_only_without_the_removed_role_adapter() {
 
 #[test]
 fn generic_body_type_change_never_unwraps_an_invalidated_dual_group() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let left_cue = valid(ScreenplayElement::new(
         "left-cue",
         scriptcraft_model::ElementTypeKey::new("Character").expect("valid fixture label"),

@@ -1,7 +1,4 @@
-//! Minimal packaged Screenplay definitions used to complete imported registries.
-//!
-//! This is intentionally not the built-in template catalog. Phase 7 owns that
-//! catalog and the application lifecycle which consumes it.
+//! Screenplay-derived required-base definitions used to complete imported registries.
 
 use crate::constants::FDX_ROOT;
 use crate::diagnostics::FdxError;
@@ -9,10 +6,7 @@ use crate::element_settings::{read_element_settings, ElementSettingsDraft};
 use crate::reader::{attribute, parse_document, RawElement, RawNode};
 use scriptcraft_model::element_definition::ElementDefinition;
 use scriptcraft_model::element_type::ElementTypeKey;
-use scriptcraft_model::Project;
 use std::sync::OnceLock;
-
-const SCREENPLAY_FDXT: &[u8] = include_bytes!("../resources/Screenplay.fdxt");
 
 /// The only required-base labels and their canonical append order.
 pub(crate) const REQUIRED_BASE_LABELS: [&str; 9] = [
@@ -60,19 +54,12 @@ pub(crate) fn screenplay_defaults() -> Result<ScreenplayDefaults, FdxError> {
     DEFAULTS.get_or_init(parse_screenplay_defaults).clone()
 }
 
-/// Constructs a fresh unsaved project from the packaged required Screenplay
-/// definitions. Example content/catalog lifecycle remains owned by Phase 7.
-pub fn new_project() -> Result<Project, FdxError> {
-    let defaults = screenplay_defaults()?;
-    Project::with_element_definitions(defaults.definitions())
-        .map_err(crate::diagnostics::map_model_error)
-}
-
 fn parse_screenplay_defaults() -> Result<ScreenplayDefaults, FdxError> {
-    if SCREENPLAY_FDXT.len() > crate::MAX_SOURCE_BYTES {
+    let screenplay_bytes = crate::builtin_templates::screenplay_bytes();
+    if screenplay_bytes.len() > crate::MAX_SOURCE_BYTES {
         return Err(FdxError::ResourceLimit);
     }
-    let document = parse_document(SCREENPLAY_FDXT)?;
+    let document = parse_document(screenplay_bytes)?;
     let roots = document
         .iter()
         .filter_map(|node| match node {
@@ -220,25 +207,5 @@ mod tests {
             first.map(|definition| definition.font.family),
             Some(String::new())
         );
-    }
-
-    #[test]
-    fn new_project_uses_packaged_base_definitions_and_keeps_the_existing_seed() {
-        let Ok(project) = new_project() else {
-            assert!(false, "packaged Screenplay project should construct");
-            return;
-        };
-
-        assert_eq!(
-            project
-                .element_definitions()
-                .iter()
-                .map(|definition| definition.key.as_str())
-                .collect::<Vec<_>>(),
-            REQUIRED_BASE_LABELS.to_vec()
-        );
-        assert_eq!(project.elements.len(), 1);
-        assert_eq!(project.elements[0].element_type().as_str(), "Scene Heading");
-        assert!(project.preservation.is_none());
     }
 }

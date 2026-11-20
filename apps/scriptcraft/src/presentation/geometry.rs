@@ -460,8 +460,11 @@ mod tests {
 
     #[test]
     fn proportional_canonical_boundaries_drive_pointer_and_caret_projection() {
-        let mut project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("default project is valid"));
+        let mut project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("default project is valid"));
         project.elements = vec![scriptcraft_model::BodyOwner::shared(
             scriptcraft_model::ScreenplayElement::new(
                 "desktop-proportional-boundary",
@@ -470,6 +473,7 @@ mod tests {
             )
             .unwrap_or_else(|_| unreachable!("bounded short element is valid")),
         )];
+        project.preservation = None;
         let layout = scriptcraft_layout::ScreenplayLayout::build(&project)
             .unwrap_or_else(|_| unreachable!("default layout inputs are valid"));
         let source_line = layout

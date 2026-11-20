@@ -35,7 +35,10 @@ fn body(project: &mut Project, elements: &[(&str, &str, &str)]) {
 
 #[test]
 fn toggle_candidate_requires_exact_capabilities_not_paginate_as() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -75,7 +78,10 @@ fn toggle_candidate_requires_exact_capabilities_not_paginate_as() {
 
 #[test]
 fn explicit_toggle_disables_an_inactive_group_without_changing_members() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     body(
         &mut project,
         &[
@@ -114,7 +120,10 @@ fn explicit_toggle_disables_an_inactive_group_without_changing_members() {
 
 #[test]
 fn explicit_toggle_records_only_the_exact_capability_candidate_members() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     body(
         &mut project,
         &[

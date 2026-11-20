@@ -1,4 +1,4 @@
-//! Semantic title-page paragraphs and the reference-backed New-document template.
+//! Semantic title-page paragraphs and their canonical formatting values.
 
 use crate::{
     element::{
@@ -7,7 +7,7 @@ use crate::{
     },
     element_type::ElementTypeKey,
     formatting::FixedPoint,
-    identity::{StableId, StableIdAllocator},
+    identity::StableId,
     ModelError, MAX_TEXT_BYTES,
 };
 
@@ -165,79 +165,5 @@ impl TitlePageParagraph {
             return Err(ModelError::StringTooLong);
         }
         Ok(())
-    }
-}
-
-/// Reference-backed title-page boilerplate used by a newly constructed Project.
-pub(crate) fn reference_boilerplate(
-    ids: &mut StableIdAllocator,
-) -> Result<Vec<TitlePageParagraph>, ModelError> {
-    let mut paragraphs = Vec::with_capacity(54);
-    for index in 0..54 {
-        let alignment = match index {
-            0..=16 | 42..=43 => TitlePageAlignment::Left,
-            17..=41 => TitlePageAlignment::Center,
-            _ => TitlePageAlignment::Justified,
-        };
-        let text = match index {
-            17 => Some(("Script Title", "Underline+AllCaps")),
-            21 => Some(("Written by", "")),
-            24 => Some(("Name of First Writer", "")),
-            29 => Some(("Based on, If Any", "")),
-            52 => Some(("Address", "")),
-            53 => Some(("Phone Number", "")),
-            _ => None,
-        };
-        let formatting = reference_formatting(alignment);
-        let runs = text
-            .map(|(value, style)| {
-                vec![TextRun {
-                    text: value.to_owned(),
-                    attributes: vec![
-                        RunAttribute {
-                            name: "AdornmentStyle".into(),
-                            value: "0".into(),
-                        },
-                        RunAttribute {
-                            name: "Font".into(),
-                            value: "Courier Final Draft".into(),
-                        },
-                        RunAttribute {
-                            name: "RevisionID".into(),
-                            value: "0".into(),
-                        },
-                        RunAttribute {
-                            name: "Size".into(),
-                            value: "12".into(),
-                        },
-                        RunAttribute {
-                            name: "Style".into(),
-                            value: style.into(),
-                        },
-                    ],
-                }]
-            })
-            .unwrap_or_default();
-        paragraphs.push(TitlePageParagraph::with_runs(
-            ids.allocate("title")?.as_str().to_owned(),
-            None,
-            runs,
-            None,
-            formatting,
-        )?);
-    }
-    Ok(paragraphs)
-}
-
-fn reference_formatting(alignment: TitlePageAlignment) -> TitlePageParagraphFormatting {
-    TitlePageParagraphFormatting {
-        alignment: Some(alignment),
-        first_indent: Some(FixedPoint::from_points(0)),
-        left_indent: Some(FixedPoint::from_points(72)),
-        right_indent: Some(FixedPoint::from_raw(54_000)),
-        leading_regular: Some(true),
-        space_before: Some(FixedPoint::from_points(0)),
-        spacing_single: Some(true),
-        starts_new_page: Some(false),
     }
 }

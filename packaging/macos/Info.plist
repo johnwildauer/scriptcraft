@@ -41,6 +41,19 @@
 			<key>LSHandlerRank</key>
 			<string>Alternate</string>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Final Draft template</string>
+			<!-- Viewer is the source's non-writable role; the opened instance is editable. -->
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>fdxt</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+		</dict>
 	</array>
 </dict>
 </plist>

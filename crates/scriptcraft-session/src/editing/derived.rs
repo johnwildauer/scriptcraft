@@ -444,7 +444,10 @@ mod tests {
 
     #[test]
     fn ambiguous_stable_identity_uses_complete_derived_fallback() {
-        let Ok(mut project) = scriptcraft_fdx::new_project() else {
+        let Ok(mut project) = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project) else {
             assert!(false, "default project is valid");
             return;
         };

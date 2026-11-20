@@ -68,7 +68,19 @@ fn test_project() -> Project {
         ))
     })
     .collect();
-    valid(Project::with_element_definitions(definitions))
+    let mut project = valid(Project::empty_projection());
+    valid(project.replace_element_definitions(definitions));
+    project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
+        "synthetic-scene-heading",
+        valid(ElementTypeKey::new("Scene Heading")),
+        "INT. TEST ROOM",
+    )))];
+    project.title_page = vec![valid(TitlePageParagraph::new(
+        "synthetic-title",
+        "Synthetic Test Project",
+        Default::default(),
+    ))];
+    project
 }
 
 fn add_custom_type(project: &mut Project, label: &str, paginate_as: Option<&str>) {

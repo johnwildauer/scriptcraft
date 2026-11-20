@@ -10,7 +10,7 @@ use scriptcraft_fdx as fdx;
 use scriptcraft_layout::LayoutCache;
 use scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL;
 use scriptcraft_session::storage::{
-    self as fdx_storage, FdxSaveMode, FdxSaveTarget, StdFdxStorageFileSystem,
+    self as fdx_storage, FdxBaseline, FdxSaveMode, FdxSaveTarget, StdFdxStorageFileSystem,
 };
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -48,13 +48,31 @@ fn has_extension(path: &std::path::Path, expected: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
 }
 
+fn is_fdxt_source_path(path: &Path) -> bool {
+    has_extension(path, "fdxt")
+}
+
+fn current_native_save_target<'a>(
+    native_path: Option<&'a Path>,
+    baseline: Option<&'a FdxBaseline>,
+) -> Option<&'a Path> {
+    let (Some(path), Some(baseline)) = (native_path, baseline) else {
+        return None;
+    };
+    (baseline.path() == path).then_some(path)
+}
+
 impl ScriptCraftApp {
     /// Returns Saved only after the FDX storage transaction publishes; picker
     /// cancellation is Cancelled, and all rejected or failed paths are Failed.
     pub(crate) fn save_native(&mut self, ctx: &egui::Context) -> SaveOutcome {
-        let Some(path) = self.native_path.clone() else {
+        let Some(path) =
+            current_native_save_target(self.native_path.as_deref(), self.fdx_baseline.as_ref())
+                .map(Path::to_path_buf)
+        else {
             // Untitled Save must return the actual picker/save result rather
-            // than treating dispatch of Save As as successful publication.
+            // than treating dispatch of Save As as successful publication. A
+            // path without its matching baseline is not a writable Save target.
             return self.save_as_native(ctx);
         };
         self.save_native_at(&path)
@@ -68,11 +86,13 @@ impl ScriptCraftApp {
             return SaveOutcome::Failed;
         }
 
-        let mode = match self.fdx_baseline.as_ref() {
-            Some(baseline) if baseline.path() == path => FdxSaveMode::Save,
-            _ => FdxSaveMode::SaveAs(path.to_owned()),
-        };
-        self.save_fdx_mode_at(path, mode)
+        if current_native_save_target(Some(path), self.fdx_baseline.as_ref()).is_none() {
+            self.show_error(
+                "FDX_SAVE_REQUIRES_BASELINE: use Save As; destination and document unchanged",
+            );
+            return SaveOutcome::Failed;
+        }
+        self.save_fdx_mode_at(path, FdxSaveMode::Save)
     }
 
     pub(crate) fn save_fdx_as_at(
@@ -97,6 +117,12 @@ impl ScriptCraftApp {
     /// Save errors and preflight rejections map to Failed. A completed durable
     /// publication maps to Saved even when temporary cleanup only warns.
     fn save_fdx_mode_at(&mut self, path: &std::path::Path, mode: FdxSaveMode) -> SaveOutcome {
+        if matches!(&mode, FdxSaveMode::Save) && is_fdxt_source_path(path) {
+            self.show_error(
+                "FDXT_SAVE_SOURCE_REJECTED: template source is not writable; destination and document unchanged",
+            );
+            return SaveOutcome::Failed;
+        }
         if matches!(
             &mode,
             FdxSaveMode::SaveAs(_) | FdxSaveMode::SaveAsOverwrite(_)
@@ -261,5 +287,43 @@ impl ScriptCraftApp {
             );
             self.native_title = title;
         }
+    }
+}
+
+#[cfg(test)]
+mod native_save_target_tests {
+    use super::*;
+
+    fn valid<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| panic!("prepared regression input failed: {error:?}"))
+    }
+
+    #[test]
+    fn ordinary_save_requires_a_matching_path_and_verified_baseline() {
+        assert!(current_native_save_target(None, None).is_none());
+
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("dynamic_controls.fdx");
+        let opened = valid(fdx_storage::open_source(&StdFdxStorageFileSystem, &fixture));
+        let baseline = opened.baseline;
+
+        assert!(current_native_save_target(Some(&fixture), None).is_none());
+        assert_eq!(
+            current_native_save_target(Some(&fixture), Some(&baseline)),
+            Some(fixture.as_path())
+        );
+        let other_path = fixture.with_file_name("different.fdx");
+        assert!(current_native_save_target(Some(&other_path), Some(&baseline)).is_none());
+        assert_eq!(native_document_title(None), UNTITLED_DOCUMENT_TITLE);
+    }
+
+    #[test]
+    fn template_source_extension_is_never_an_ordinary_save_target() {
+        assert!(is_fdxt_source_path(Path::new("external.fdxt")));
+        assert!(is_fdxt_source_path(Path::new("external.FDXT")));
+        assert!(!is_fdxt_source_path(Path::new("ordinary.fdx")));
+        assert!(!is_fdxt_source_path(Path::new("external.fdxt.backup")));
     }
 }

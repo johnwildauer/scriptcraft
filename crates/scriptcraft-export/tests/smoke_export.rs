@@ -129,7 +129,10 @@ fn synthetic_layout_environment(project: &Project) -> LayoutEnvironment {
 
 #[test]
 fn export_public_api_smoke() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
         "export-action",
         scriptcraft_model::ElementTypeKey::new("Action").expect("valid fixture label"),
@@ -140,6 +143,7 @@ fn export_public_api_smoke() {
         "Export Title Smoke",
         Default::default(),
     ))];
+    project.preservation = None;
     let original = project.clone();
     let environment = synthetic_layout_environment(&project);
 

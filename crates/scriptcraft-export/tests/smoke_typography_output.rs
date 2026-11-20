@@ -15,8 +15,8 @@ use scriptcraft_model::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-fn valid<T, E>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|_| unreachable!("synthetic PDF policy input is valid"))
+fn valid<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+    result.unwrap_or_else(|error| panic!("synthetic PDF policy input failed: {error:?}"))
 }
 
 fn synthetic_environment(project: &Project) -> LayoutEnvironment {
@@ -136,7 +136,10 @@ fn synthetic_environment(project: &Project) -> LayoutEnvironment {
 
 #[test]
 fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -173,7 +176,8 @@ fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
         .find(|definition| definition.key.as_str() == "Action")
         .cloned()
         .unwrap_or_else(|| unreachable!("required Action definition exists"));
-    summary.key = scriptcraft_model::ElementTypeKey::new("Summary").expect("valid fixture label");
+    summary.key = scriptcraft_model::ElementTypeKey::new("Hidden Summary Fixture")
+        .expect("valid fixture label");
     summary.font.hidden_text = true;
     definitions.push(summary);
     valid(project.replace_element_definitions(definitions));
@@ -200,10 +204,12 @@ fn pdf_fallback_report_is_bounded_privacy_safe_and_non_mutating() {
         ))),
         BodyOwner::shared(valid(ScreenplayElement::new(
             "typography-output-hidden",
-            scriptcraft_model::ElementTypeKey::new("Summary").expect("valid fixture label"),
+            scriptcraft_model::ElementTypeKey::new("Hidden Summary Fixture")
+                .expect("valid fixture label"),
             "PRIVATE HIDDEN FIXTURE CONTENT",
         ))),
     ];
+    project.preservation = None;
     let original = project.clone();
     let environment = synthetic_environment(&project);
     let pdf = export_pdf(&project, &environment)

@@ -15,7 +15,7 @@ use crate::verification::{
     same_non_paragraph_identities, validate_project_output_budgets,
     verify_writer_semantic_projection, IdentitySetDifference, SourceTreeDifference,
 };
-use crate::version::set_preserved_root_version;
+use crate::version::prepare_preserved_root_output;
 use crate::whitespace::{
     collect_inserted_managed_paragraph_ids, format_generated_structure,
     format_inserted_paragraph_whitespace,
@@ -253,22 +253,25 @@ struct WriterFailure {
     identity_difference: Option<IdentitySetDifference>,
 }
 
-/// Serialize the 17 evidenced screenplay roles to UTF-8 Version 6 XML.
+/// Serialize the supplied Project's ordered definitions and content to UTF-8
+/// Version 6 XML.
 ///
 /// For imported documents, managed paragraphs are reconciled into the retained
 /// ordered source tree; unknown and source-owned nodes are re-emitted in place.
-/// For a new document, semantic title/body content and the shared native role
-/// defaults are emitted in a minimal supported FDX structure. ScriptCraft identity, legacy adapter fields,
-/// runtime geometry inputs, and editing policies are not serialized. Output is
-/// structurally re-read through the bounded reader before it is returned. This
-/// does not establish desktop save/reopen guarantees or Final Draft application
-/// interoperability. The reference-compatible UTF-8 standalone declaration is
-/// emitted once for every serialization; imported XML is otherwise retained
-/// semantically, not lexically: entity spelling, quote style and exact attribute
-/// interleaving with namespace declarations are not guaranteed to be
-/// byte-identical. UTF-8 is emitted; supported tree order, expanded names,
-/// attributes, text, comments, processing instructions and opaque children are
-/// checked against the re-read output.
+/// Without preservation state, the supplied current body/title values and
+/// complete ordered definitions are emitted in a minimal supported FDX
+/// structure. This is generic serialization, not a new-document constructor or
+/// template source. ScriptCraft identity, runtime geometry inputs, and editing
+/// policies are not serialized. Output is structurally re-read through the
+/// bounded reader before it is returned. This does not establish desktop
+/// save/reopen guarantees or Final Draft application interoperability. The
+/// reference-compatible UTF-8 standalone declaration is emitted once for every
+/// serialization; imported XML is otherwise retained semantically, not
+/// lexically: entity spelling, quote style and exact attribute interleaving with
+/// namespace declarations are not guaranteed to be byte-identical. UTF-8 is
+/// emitted; supported tree order, expanded names, attributes, text, comments,
+/// processing instructions and opaque children are checked against the re-read
+/// output.
 pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
     write_v6_with_diagnostics(project).map_err(|failure| failure.error)
 }
@@ -376,7 +379,7 @@ fn write_v6_inner(
 
         let mut sections = state.sections.clone();
         let mut effective_identities = state.identities.clone();
-        set_preserved_root_version(&mut sections)?;
+        prepare_preserved_root_output(&mut sections)?;
         if context.operation() != SaveOperation::DirectSerialization {
             effective_identities.extend(reconcile_document_lineage(
                 &mut sections,

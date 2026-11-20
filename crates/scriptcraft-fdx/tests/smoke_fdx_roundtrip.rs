@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
 
-use scriptcraft_fdx::{read_v6, write_v6};
+use scriptcraft_fdx::{read_v6, write_v6, write_v6_for_save, SaveContext, SaveOperation};
 use scriptcraft_model::formatted_text::{parse_style_attribute, RunStyleFlags};
 use scriptcraft_model::preservation::{
     DependencyConfidence, NamespaceBinding, PreservedAttribute, PreservedElement, PreservedNode,
     SourceName, SourceOwnership,
 };
-use scriptcraft_model::{BodyOwner, ElementDefinition, ElementTypeKey, Project};
+use scriptcraft_model::{
+    BodyOwner, ElementDefinition, ElementTypeKey, Project, ScreenplayElement, TitlePageParagraph,
+};
 
 const SMOKE_FDX: &[u8] = include_bytes!("fixtures/smoke_screenplay.fdx");
 const OPEN_SCOPE_FDX: &[u8] = include_bytes!("fixtures/open_element_settings.fdx");
@@ -80,6 +82,23 @@ fn source_root_mut(project: &mut Project) -> Option<&mut PreservedElement> {
             PreservedNode::Element(root) if root.name.local_name == "FinalDraft" => Some(root),
             _ => None,
         })
+}
+
+fn assert_ordinary_root_marker_removed(bytes: &[u8]) -> Project {
+    let reopened = valid(read_v6(bytes)).project;
+    let root = source_root(&reopened)
+        .unwrap_or_else(|| unreachable!("ordinary output retains its FinalDraft root"));
+    assert_eq!(attribute(root, "Template"), None);
+    assert_eq!(attribute(root, "Version"), Some("6"));
+    assert_eq!(
+        reopened
+            .preservation
+            .as_ref()
+            .map(|state| state.source.original_bytes.as_slice()),
+        Some(bytes),
+        "reopen establishes a source snapshot from the marker-free ordinary FDX"
+    );
+    reopened
 }
 
 fn source_element_by_id<'a>(
@@ -436,6 +455,106 @@ fn source_backed_writer_projects_ordered_definitions_and_arbitrary_types() {
 }
 
 #[test]
+fn ordinary_source_and_save_output_remove_only_the_direct_root_template_marker() {
+    let fixture = std::str::from_utf8(OPEN_SCOPE_FDX)
+        .unwrap_or_else(|_| unreachable!("the open-scope fixture is UTF-8"));
+    let marked_source = fixture.replace(
+        "<FinalDraft DocumentType=\"Script\" Version=\"6\">",
+        "<FinalDraft DocumentType=\"Script\" Template=\"Yes\" xmlns:vendor=\"urn:scriptcraft:template-marker\" vendor:Template=\"keep\" CustomRoot=\"preserve\" Version=\"6\">",
+    );
+    assert_ne!(marked_source, fixture);
+    let marked_source = marked_source.replace(
+        "</FinalDraft>",
+        "<Template marker=\"descendant\" /></FinalDraft>",
+    );
+    let original_bytes = marked_source.into_bytes();
+    let project = valid(read_v6(&original_bytes)).project;
+    assert_eq!(
+        project
+            .preservation
+            .as_ref()
+            .map(|state| state.source.original_bytes.as_slice()),
+        Some(original_bytes.as_slice())
+    );
+    let original_root =
+        source_root(&project).unwrap_or_else(|| unreachable!("marked input retains its root"));
+    assert_eq!(attribute(original_root, "Template"), Some("Yes"));
+
+    let direct_output = valid(write_v6(&project));
+    let direct_reopened = assert_ordinary_root_marker_removed(&direct_output);
+    let mut save_context = SaveContext::new(SaveOperation::SaveAs)
+        .with_session_open_timestamp("20251120T123456".to_owned());
+    let save_output = valid(write_v6_for_save(&project, &mut save_context));
+    let save_reopened = assert_ordinary_root_marker_removed(&save_output);
+
+    for reopened in [&direct_reopened, &save_reopened] {
+        let root = source_root(reopened)
+            .unwrap_or_else(|| unreachable!("ordinary output retains its root"));
+        let attributes = root
+            .attributes
+            .iter()
+            .map(|attribute| {
+                (
+                    attribute.name.namespace_uri.as_deref(),
+                    attribute.name.local_name.as_str(),
+                    attribute.value.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attributes,
+            vec![
+                (None, "DocumentType", "Script"),
+                (Some("urn:scriptcraft:template-marker"), "Template", "keep"),
+                (None, "CustomRoot", "preserve"),
+                (None, "Version", "6"),
+            ],
+            "surviving direct-root attributes retain their order and values"
+        );
+        assert_eq!(attribute(root, "Template"), None, "do not add Template=No");
+        assert_eq!(
+            attribute(
+                child_element(root, "Template")
+                    .unwrap_or_else(|| unreachable!("descendant Template remains opaque")),
+                "marker"
+            ),
+            Some("descendant")
+        );
+        for (id, type_label) in [
+            ("open-title-direct", "TitleFirst"),
+            ("open-title-opaque", "OpaqueTitle"),
+            ("open-header-title", "HeaderOnlyTitle"),
+            ("open-footer-title", "FooterOnlyTitle"),
+        ] {
+            assert_eq!(
+                attribute(
+                    source_element_by_id(root, id)
+                        .unwrap_or_else(|| unreachable!("non-Content title source remains opaque")),
+                    "Type"
+                ),
+                Some(type_label)
+            );
+        }
+    }
+    assert_eq!(
+        project
+            .preservation
+            .as_ref()
+            .map(|state| state.source.original_bytes.as_slice()),
+        Some(original_bytes.as_slice()),
+        "direct and transactional output do not mutate the original byte snapshot"
+    );
+    assert_eq!(
+        attribute(
+            source_root(&project).unwrap_or_else(|| unreachable!()),
+            "Template"
+        ),
+        Some("Yes"),
+        "the live pre-save retained source still carries its template marker"
+    );
+}
+
+#[test]
 fn source_backed_writer_keeps_inert_duplicates_and_cannot_resurrect_removed_definitions() {
     let mut project = valid(read_v6(OPEN_SCOPE_FDX)).project;
     let root = source_root_mut(&mut project)
@@ -615,12 +734,9 @@ fn source_backed_writer_keeps_inert_duplicates_and_cannot_resurrect_removed_defi
 
 #[test]
 fn preservation_free_writer_emits_only_current_registry_and_open_types() {
-    let mut project =
-        scriptcraft_fdx::new_project().unwrap_or_else(|_| unreachable!("new project is valid"));
-    let lyrics_key = ElementTypeKey::new("Lyrics").unwrap_or_else(|_| unreachable!());
-    let title_key = ElementTypeKey::new("TitleCustom").unwrap_or_else(|_| unreachable!());
-    let lyrics = derived_definition(&project, "Lyrics");
-    let title_definition = derived_definition(&project, "TitleCustom");
+    let template = valid(scriptcraft_fdx::instantiate_builtin_template(
+        scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+    ));
     let required_base_labels = [
         "General",
         "Scene Heading",
@@ -632,6 +748,36 @@ fn preservation_free_writer_emits_only_current_registry_and_open_types() {
         "Shot",
         "Cast List",
     ];
+    let mut project = valid(Project::empty_projection());
+    let definitions = template
+        .project
+        .element_definitions()
+        .iter()
+        .filter(|definition| required_base_labels.contains(&definition.key.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    valid(project.replace_element_definitions(definitions));
+    project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
+        "synthetic-scene-heading",
+        valid(ElementTypeKey::new("Scene Heading")),
+        "INT. TEST ROOM",
+    )))];
+    project.title_page = vec![
+        valid(TitlePageParagraph::new(
+            "synthetic-title",
+            "Synthetic Title",
+            Default::default(),
+        )),
+        valid(TitlePageParagraph::new(
+            "synthetic-credit",
+            "Synthetic Credit",
+            Default::default(),
+        )),
+    ];
+    let lyrics_key = ElementTypeKey::new("Lyrics").unwrap_or_else(|_| unreachable!());
+    let title_key = ElementTypeKey::new("TitleCustom").unwrap_or_else(|_| unreachable!());
+    let lyrics = derived_definition(&project, "Lyrics");
+    let title_definition = derived_definition(&project, "TitleCustom");
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -663,6 +809,7 @@ fn preservation_free_writer_emits_only_current_registry_and_open_types() {
     assert_eq!(reopened.title_page[0].element_type, Some(title_key));
     let root = source_root(&reopened)
         .unwrap_or_else(|| unreachable!("new-document reread retains its generated root"));
+    assert_eq!(attribute(root, "Template"), None);
     let expected_order = project
         .element_definitions()
         .iter()

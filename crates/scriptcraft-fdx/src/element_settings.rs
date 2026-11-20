@@ -983,9 +983,9 @@ fn make_owned_element_settings(
     Ok(setting)
 }
 
-/// Builds one fully specified settings node from the authoritative owned
+/// Serializes one fully specified settings node from the authoritative owned
 /// definition using the same serializer as source-backed projection.
-pub(crate) fn new_project_element_settings(
+pub(crate) fn serialize_element_settings(
     definition: &ElementDefinition,
     root: &PreservedElement,
 ) -> Result<PreservedElement, FdxError> {
@@ -1041,9 +1041,8 @@ pub(crate) fn normalize_winning_font_colors(
     Ok(())
 }
 
-/// Replaces the transitional static registry with the complete ordered
-/// definitions derived from source settings, first-use paragraph types, and
-/// packaged required bases.
+/// Completes the ordered definitions derived from source settings, first-use
+/// paragraph types, and packaged required bases before import publication.
 pub(crate) fn complete_document_definitions(
     root: &RawElement,
     imported: &ImportedElementSettings,

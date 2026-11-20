@@ -21,7 +21,7 @@ use scriptcraft_commands::DocumentPath;
 // produced one argument, so paths are never split or reparsed here. Ordinary
 // shell associations should pass the selected path as one quoted native path.
 // `--open-handoff=<id>` is internal and only accompanies the custom option.
-pub(crate) const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--menu-platform=auto|macos|windows] [<UTF-8 FDX path> | --document-path=<UTF-8 FDX path> [--open-handoff=<id> (internal)]]";
+pub(crate) const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--menu-platform=auto|macos|windows] [<UTF-8 FDX or FDXT path> | --document-path=<UTF-8 FDX or FDXT path> [--open-handoff=<id> (internal)]]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupDocumentSource {
@@ -360,4 +360,37 @@ pub(crate) fn run() -> eframe::Result {
                 .map_err(|error| error.into())
         }),
     )
+}
+
+#[cfg(test)]
+mod fdxt_startup_argument_tests {
+    use super::*;
+
+    #[test]
+    fn startup_accepts_fdxt_in_existing_positional_and_custom_path_slots() {
+        let positional = parse_startup_args([OsString::from("external.FdXt")])
+            .unwrap_or_else(|error| panic!("FDXT positional path should parse: {error}"));
+        let positional_document = positional
+            .startup_document
+            .unwrap_or_else(|| panic!("positional startup path should be retained"));
+        assert_eq!(positional_document.path, PathBuf::from("external.FdXt"));
+        assert_eq!(
+            positional_document.source,
+            StartupDocumentSource::PositionalArgument
+        );
+        assert!(positional_document.handoff_id.is_none());
+
+        let custom = parse_startup_args([OsString::from("--document-path=external-template.fdxt")])
+            .unwrap_or_else(|error| panic!("FDXT custom path should parse: {error}"));
+        let custom_document = custom
+            .startup_document
+            .unwrap_or_else(|| panic!("custom startup path should be retained"));
+        assert_eq!(
+            custom_document.path,
+            PathBuf::from("external-template.fdxt")
+        );
+        assert_eq!(custom_document.source, StartupDocumentSource::CustomOption);
+        assert!(custom_document.handoff_id.is_none());
+        assert!(STARTUP_USAGE.contains("FDX or FDXT path"));
+    }
 }

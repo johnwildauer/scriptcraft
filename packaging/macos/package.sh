@@ -109,8 +109,29 @@ generate_icon() {
     iconutil -c icns "$ICONSET_DIR" -o "$APP_PATH/Contents/Resources/AppIcon.icns"
 }
 
+assert_document_declaration() {
+    local plist="$1" index="$2" expected_name="$3" expected_role="$4" expected_extension="$5" extension_count
+    /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:$index:CFBundleTypeName" "$plist" 2>/dev/null \
+        | grep -Fxq "$expected_name" || fail "document declaration $index must be named $expected_name"
+    /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:$index:CFBundleTypeRole" "$plist" 2>/dev/null \
+        | grep -Fxq "$expected_role" || fail "document declaration $index must have the $expected_role role"
+    /usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:$index:LSHandlerRank" "$plist" 2>/dev/null \
+        | grep -Fxq 'Alternate' || fail "document declaration $index handler rank must be Alternate"
+    extension_count="$(/usr/libexec/PlistBuddy -c "Print :CFBundleDocumentTypes:$index:CFBundleTypeExtensions" "$plist" 2>/dev/null | awk -v expected="$expected_extension" '
+        NR == 1 { next }
+        /^[[:space:]]*}$/ { next }
+        {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+            count++
+            if ($0 != expected) invalid = 1
+        }
+        END { printf "%d:%d", count + 0, invalid + 0 }
+    ')" || fail "document declaration $index has no extension coverage"
+    [[ "$extension_count" == '1:0' ]] || fail "document declaration $index must contain only the $expected_extension extension"
+}
+
 check_bundle_layout() {
-    local plist document_types document_count extension_count
+    local plist document_types document_count plist_contents
     plist="$APP_PATH/Contents/Info.plist"
     [[ -x "$APP_PATH/$EXECUTABLE_RELATIVE" ]] || fail "assembled app executable is missing or not executable"
     [[ -s "$APP_PATH/Contents/Resources/AppIcon.icns" ]] || fail "assembled app icon resource is missing"
@@ -122,34 +143,20 @@ check_bundle_layout() {
     /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist" 2>/dev/null | grep -Fxq "$BUNDLE_IDENTIFIER" || fail "Info.plist bundle identifier is incorrect"
     /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist" 2>/dev/null | grep -Fxq "$APP_VERSION" || fail "Info.plist marketing version is incorrect"
 
-    document_types="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes' "$plist" 2>/dev/null)" || fail "Info.plist has no FDX document declaration"
+    document_types="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes' "$plist" 2>/dev/null)" || fail "Info.plist has no document declarations"
     document_count="$(printf '%s\n' "$document_types" | awk '$1 == "Dict" && $2 == "{" { count++ } END { print count + 0 }')"
-    [[ "$document_count" == 1 ]] || fail "Info.plist must contain exactly one document declaration"
-    /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:CFBundleTypeName' "$plist" 2>/dev/null | grep -Fxq 'Final Draft document' || fail "FDX document display name must be Final Draft document"
-    /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:CFBundleTypeRole' "$plist" 2>/dev/null | grep -Fxq 'Editor' || fail "FDX document role must be Editor"
-    /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:LSHandlerRank' "$plist" 2>/dev/null | grep -Fxq 'Alternate' || fail "FDX document handler rank must be Alternate"
-    if /usr/libexec/PlistBuddy -c 'Print :UTImportedTypeDeclarations' "$plist" >/dev/null 2>&1; then
-        fail "extension-fallback Info.plist must not declare imported types"
+    [[ "$document_count" == 2 ]] || fail "Info.plist must contain exactly two document declarations"
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:CFBundleTypeName' "$plist" 2>/dev/null \
+        | grep -Fxq 'Final Draft document' || fail "FDX document display name must be Final Draft document"
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:1:CFBundleTypeName' "$plist" 2>/dev/null \
+        | grep -Fxq 'Final Draft template' || fail "FDXT document display name must be Final Draft template"
+    assert_document_declaration "$plist" 0 'Final Draft document' Editor fdx
+    assert_document_declaration "$plist" 1 'Final Draft template' Viewer fdxt
+
+    plist_contents="$(/usr/libexec/PlistBuddy -c 'Print' "$plist" 2>/dev/null)" || fail "could not inspect generated Info.plist"
+    if printf '%s\n' "$plist_contents" | grep -Eq '^[[:space:]]*(LSItemContentTypes|UTImportedTypeDeclarations|UTExportedTypeDeclarations|NSDocumentClass)[[:space:]]*='; then
+        fail "extension-fallback Info.plist must not declare UTI metadata, LSItemContentTypes, or NSDocumentClass"
     fi
-    if /usr/libexec/PlistBuddy -c 'Print :LSItemContentTypes' "$plist" >/dev/null 2>&1 \
-        || /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:LSItemContentTypes' "$plist" >/dev/null 2>&1; then
-        fail "extension-fallback document declaration must not contain LSItemContentTypes"
-    fi
-    if /usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:NSDocumentClass' "$plist" >/dev/null 2>&1 \
-        || /usr/libexec/PlistBuddy -c 'Print :NSDocumentClass' "$plist" >/dev/null 2>&1; then
-        fail "Info.plist must not declare NSDocumentClass"
-    fi
-    extension_count="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDocumentTypes:0:CFBundleTypeExtensions' "$plist" 2>/dev/null | awk '
-        NR == 1 { next }
-        /^[[:space:]]*}$/ { next }
-        {
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
-            count++
-            if ($0 != "fdx") invalid = 1
-        }
-        END { printf "%d:%d", count + 0, invalid + 0 }
-    ')" || fail "FDX document declaration has no extension coverage"
-    [[ "$extension_count" == '1:0' ]] || fail "extension-fallback document declaration must contain only the fdx extension"
 }
 
 check_linkage() {

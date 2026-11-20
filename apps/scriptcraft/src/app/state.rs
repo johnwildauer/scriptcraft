@@ -133,6 +133,7 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) diagnostic_message: Option<DiagnosticMessage>,
     pub(crate) pending_diagnostic_commands: VecDeque<Command>,
     pub(crate) flushing_diagnostic_commands: bool,
+    /// Present only together with the matching FDX storage baseline.
     pub(crate) native_path: Option<PathBuf>,
     pub(crate) native_title: String,
     #[cfg(target_os = "macos")]
@@ -143,6 +144,7 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) windows_print_preparation:
         Option<crate::platform::windows::windows_print::PrintPreparation>,
     pub(crate) native_output_modal_active: bool,
+    /// Paired with `native_path`; absent for fresh template-backed sessions.
     pub(crate) fdx_baseline: Option<FdxBaseline>,
     pub(crate) pending_window_restore: Option<scriptcraft_fdx::WindowState>,
     pub(crate) latest_window_state: Option<scriptcraft_fdx::WindowState>,
@@ -191,8 +193,11 @@ impl ScriptCraftApp {
         startup_document: Option<StartupDocumentInput>,
         development_mode: bool,
     ) -> Result<Self, String> {
-        let project = scriptcraft_fdx::new_project()
-            .map_err(|error| format!("new project failed: {error:?}"))?;
+        let project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map_err(|error| format!("default Screenplay template failed: {error:?}"))?
+        .project;
         let session = EditingSession::with_policy(project, EditPolicy::default())
             .map_err(|error| format!("session failed: {error:?}"))?;
         let (notification_sink, notification_results) =
@@ -253,6 +258,8 @@ impl ScriptCraftApp {
             diagnostic_message: None,
             pending_diagnostic_commands: VecDeque::new(),
             flushing_diagnostic_commands: false,
+            // New startup is semantically clean but has no saved-target pair;
+            // ordinary Save therefore routes through the FDX Save As picker.
             native_path: None,
             native_title: UNTITLED_DOCUMENT_TITLE.to_owned(),
             #[cfg(target_os = "macos")]
@@ -296,6 +303,14 @@ impl ScriptCraftApp {
             responsiveness: responsiveness::ResponsivenessDiagnostics::default(),
             last_layout_identity: None,
         })
+    }
+}
+
+#[cfg(test)]
+impl ScriptCraftApp {
+    /// Shared cold-start constructor for sibling-module staged-open regressions.
+    pub(crate) fn new_for_template_lifecycle_tests() -> Result<Self, String> {
+        Self::new()
     }
 }
 
@@ -502,6 +517,82 @@ mod dynamic_controls_refresh_tests {
         assert_eq!(app.session.project().elements[0].text, original_text);
         assert!(app.ime_active);
         assert_eq!(app.ime_preedit, "compose");
+    }
+}
+
+#[cfg(test)]
+mod default_template_startup_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn valid<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| panic!("prepared regression input failed: {error:?}"))
+    }
+
+    #[test]
+    fn startup_uses_complete_default_screenplay_as_a_fresh_unsaved_session() {
+        let app = valid(ScriptCraftApp::new());
+        let expected = valid(scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        ));
+        let project = app.session.project();
+
+        assert_eq!(project.elements, expected.project.elements);
+        assert_eq!(project.title_page, expected.project.title_page);
+        assert_eq!(
+            project.element_definitions(),
+            expected.project.element_definitions()
+        );
+        assert!(!project.elements.is_empty());
+        assert_eq!(project.title_page.len(), 54);
+        assert!(!Arc::ptr_eq(
+            project.layout_identity(),
+            expected.project.layout_identity()
+        ));
+        assert_eq!(app.session.revision(), 0);
+        assert!(!app.session.dirty());
+        assert!(app.native_path.is_none());
+        assert!(app.fdx_baseline.is_none());
+        assert_eq!(app.native_title, UNTITLED_DOCUMENT_TITLE);
+    }
+
+    #[test]
+    fn fresh_unsaved_activation_clears_an_existing_path_and_baseline() {
+        let mut app = valid(ScriptCraftApp::new());
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("dynamic_controls.fdx");
+        let opened = valid(scriptcraft_session::storage::open_source(
+            &scriptcraft_session::storage::StdFdxStorageFileSystem,
+            &fixture,
+        ));
+        let previous_layout_identity = Arc::clone(app.session.project().layout_identity());
+        app.native_path = Some(opened.baseline.path().to_owned());
+        app.native_title = "dynamic_controls.fdx".to_owned();
+        app.fdx_baseline = Some(opened.baseline);
+
+        let template = valid(scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        ));
+        valid(app.activate_opened_project(
+            template.project,
+            crate::documents::open::ActivationPersistence::FreshUnsaved,
+            None,
+            None,
+            scriptcraft_fdx::TextState::DEFAULT,
+        ));
+        app.sync_native_title(&eframe::egui::Context::default());
+
+        assert!(app.native_path.is_none());
+        assert!(app.fdx_baseline.is_none());
+        assert_eq!(app.native_title, UNTITLED_DOCUMENT_TITLE);
+        assert!(!Arc::ptr_eq(
+            &previous_layout_identity,
+            app.session.project().layout_identity()
+        ));
+        assert_eq!(app.session.revision(), 0);
+        assert!(!app.session.dirty());
     }
 }
 

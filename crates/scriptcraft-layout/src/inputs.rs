@@ -882,8 +882,11 @@ mod dynamic_resolution_tests {
 
     #[test]
     fn resolves_exact_definition_and_matching_direct_overrides_only() -> Result<(), ModelError> {
-        let mut project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let mut project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let action = ElementTypeKey::new("Action")?;
         let id = StableId::new("action-owner")?;
         let mut overrides = SourceParagraphOverrides::default();
@@ -934,8 +937,11 @@ mod dynamic_resolution_tests {
     #[test]
     fn dual_wrapper_uses_current_general_definition_and_its_own_direct_values(
     ) -> Result<(), ModelError> {
-        let mut project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let mut project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let wrapper = StableId::new("dual-wrapper")?;
         let mut direct = SourceParagraphOverrides::default();
         direct.paragraph.left_indent = Some(FixedPoint::from_points(140));
@@ -977,8 +983,11 @@ mod dynamic_resolution_tests {
     #[test]
     fn arbitrary_case_distinct_definition_and_run_overlays_resolve_from_current_values(
     ) -> Result<(), ModelError> {
-        let mut project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let mut project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let mut definitions = project
             .element_definitions()
             .iter()
@@ -1067,8 +1076,11 @@ mod dynamic_resolution_tests {
     #[test]
     fn unavailable_inline_style_prefers_the_element_face_before_family_cascade(
     ) -> Result<(), ModelError> {
-        let mut project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let mut project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let mut definitions = project
             .element_definitions()
             .iter()
@@ -1117,8 +1129,11 @@ mod dynamic_resolution_tests {
     #[test]
     fn typed_and_typeless_titles_use_definition_and_explicit_neutral_style(
     ) -> Result<(), ModelError> {
-        let mut project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let mut project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let mut definitions = project
             .element_definitions()
             .iter()
@@ -1129,7 +1144,7 @@ mod dynamic_resolution_tests {
             .find(|definition| definition.key.as_str() == "Action")
             .cloned()
             .unwrap_or_else(|| unreachable!("packaged Screenplay includes Action"));
-        summary.key = ElementTypeKey::new("Summary")?;
+        summary.key = ElementTypeKey::new("Hidden Summary Fixture")?;
         summary.font.family = "Arial".to_owned();
         summary.font.hidden_text = true;
         summary.paragraph.left_indent = FixedPoint::from_raw(6_336);
@@ -1139,7 +1154,7 @@ mod dynamic_resolution_tests {
         let env = environment()?;
         let typed = TitlePageParagraph::new("typed", "TITLE", Default::default())?;
         let mut typed = typed;
-        typed.element_type = Some(ElementTypeKey::new("Summary")?);
+        typed.element_type = Some(ElementTypeKey::new("Hidden Summary Fixture")?);
         typed.formatting.alignment =
             Some(scriptcraft_model::title_page::TitlePageAlignment::Center);
         typed.formatting.starts_new_page = Some(true);

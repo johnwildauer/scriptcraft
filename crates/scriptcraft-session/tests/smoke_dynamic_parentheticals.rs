@@ -35,7 +35,10 @@ fn ensure_definition(definitions: &mut Vec<scriptcraft_model::ElementDefinition>
 }
 
 fn project_with_element_type(label: &str, text: &str) -> Project {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let mut definitions = project
         .element_definitions()
         .iter()

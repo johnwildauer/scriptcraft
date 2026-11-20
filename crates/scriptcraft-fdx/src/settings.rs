@@ -26,13 +26,12 @@ pub(crate) fn normalize_root_page_layout_colors(root: &mut RawElement, root_ns: 
     }
 }
 
-/// Construct a complete new-document settings node from the Project's owned
-/// definition using the same bounded serializer as retained-source projection.
-pub(crate) fn new_element_settings(
+/// Serialize one current Project definition when no retained settings node exists.
+pub(crate) fn serialize_element_settings(
     definition: &ElementDefinition,
     root: &PreservedElement,
 ) -> Result<PreservedElement, FdxError> {
-    crate::element_settings::new_project_element_settings(definition, root)
+    crate::element_settings::serialize_element_settings(definition, root)
 }
 
 pub(crate) fn parse_bounded_font_size(value: &str) -> Option<u8> {

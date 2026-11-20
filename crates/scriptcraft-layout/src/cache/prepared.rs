@@ -745,8 +745,11 @@ mod typography_cache_identity_tests {
     }
 
     fn test_owner() -> Result<Arc<BodyOwner>, scriptcraft_model::ModelError> {
-        let project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         project
             .elements
             .first()
@@ -786,8 +789,11 @@ mod typography_cache_identity_tests {
     #[test]
     fn incremental_preparation_matches_a_fresh_owner_preparation(
     ) -> Result<(), scriptcraft_model::ModelError> {
-        let project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let layout = ScreenplayLayout::build(&project)
             .map_err(|_| scriptcraft_model::ModelError::InvalidNumber)?;
         let mut old_owner = project

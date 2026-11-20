@@ -150,7 +150,20 @@ fn source_backed_arbitrary_split_join_keeps_owner_identity_and_attachments_left_
 }
 
 fn custom_open_key_project() -> (Project, ElementTypeKey, Vec<TextRun>) {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let template = valid(scriptcraft_fdx::instantiate_builtin_template(
+        scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+    ));
+    let mut project = valid(Project::empty_projection());
+    valid(
+        project.replace_element_definitions(
+            template
+                .project
+                .element_definitions()
+                .iter()
+                .cloned()
+                .collect(),
+        ),
+    );
     let custom_key = valid(ElementTypeKey::new("Custom prose"));
     let mut definitions = project
         .element_definitions()

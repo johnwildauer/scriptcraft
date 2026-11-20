@@ -1532,7 +1532,10 @@ mod element_change_command_tests {
 
     #[test]
     fn focused_type_projection_does_not_invent_a_choice_for_an_invalid_position() {
-        let Ok(project) = scriptcraft_fdx::new_project() else {
+        let Ok(project) = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project) else {
             assert!(false, "test project should be valid");
             return;
         };

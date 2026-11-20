@@ -1,4 +1,4 @@
-//! Preservation-free construction of a new FDX document source tree.
+//! Preservation-free serialization of current Project content to an FDX source tree.
 
 use crate::constants::FDX_VERSION;
 use crate::content::{add_wrapper_direct_attributes, new_paragraph, set_unqualified_attribute};
@@ -13,9 +13,11 @@ use scriptcraft_model::preservation::{ForeignIdDomain, PreservedNode};
 use scriptcraft_model::{BodyOwner, Project, SemanticCapabilities};
 use std::collections::BTreeSet;
 
-/// Construct a complete new-document tree without source-preservation input.
+/// Serialize a complete Project without source-preservation input.
 ///
-/// The declaration and newline convention are handled by the top-level writer.
+/// This generates output from supplied current content; it is not a semantic
+/// document constructor or a source of template defaults. The declaration and
+/// newline convention are handled by the top-level writer.
 pub(crate) fn make_new_document_nodes(
     project: &Project,
     context: &mut SaveContext,
@@ -167,7 +169,7 @@ pub(crate) fn make_new_document_nodes(
             context.text_state(),
         )?));
     for definition in project.element_definitions().iter() {
-        let settings = crate::settings::new_element_settings(definition, &root)?;
+        let settings = crate::settings::serialize_element_settings(definition, &root)?;
         root.children.push(PreservedNode::Element(settings));
     }
 

@@ -11,8 +11,8 @@ use crate::{
     formatting::SourceParagraphOverrides,
     identity::{StableId, StableIdAllocator},
     preservation::PreservationState,
-    title_page::{reference_boilerplate, TitlePageParagraph},
-    ElementDefinition, ElementTypeKey, ModelError, ScreenplayElement,
+    title_page::TitlePageParagraph,
+    ElementTypeKey, ModelError,
 };
 
 #[derive(Debug, Clone)]
@@ -51,39 +51,10 @@ impl PartialEq for Project {
 impl Eq for Project {}
 
 impl Project {
-    /// Creates a new unsaved project using the caller-supplied ordered registry.
-    ///
-    /// Runtime defaults belong to the packaged-template provider, not the model.
-    pub fn with_element_definitions(
-        definitions: Vec<ElementDefinition>,
-    ) -> Result<Self, ModelError> {
-        let element_definitions = DocumentElementDefinitions::new(definitions)?;
-        let scene_heading = ElementTypeKey::new("Scene Heading")?;
-        if element_definitions.get(&scene_heading).is_none() {
-            return Err(ModelError::MissingElementDefinition(scene_heading));
-        }
-        let mut ids = StableIdAllocator::new();
-        let title_page = reference_boilerplate(&mut ids)?;
-        let start = ScreenplayElement::new(
-            ids.allocate("element")?.as_str().to_owned(),
-            scene_heading,
-            "",
-        )?;
-        Ok(Self {
-            title_page,
-            elements: vec![BodyOwner::shared(start)],
-            dual_dialogue_groups: Vec::new(),
-            direct_paragraph_overrides: BTreeMap::new(),
-            dual_dialogue_paragraph_overrides: BTreeMap::new(),
-            preservation: None,
-            element_definitions,
-            layout_identity: Arc::new(()),
-        })
-    }
-
-    /// Creates the empty semantic projection required while importing FDX.
-    /// The common reader installs the complete ordered registry before it
-    /// publishes or validates the imported project.
+    /// Creates an empty semantic projection for common-reader import or
+    /// caller-supplied synthetic values. Import installs its complete ordered
+    /// registry before publishing; callers must populate and validate their own
+    /// content explicitly.
     pub fn empty_projection() -> Result<Self, ModelError> {
         Ok(Self {
             title_page: Vec::new(),
@@ -191,6 +162,7 @@ pub(crate) fn test_project() -> Result<Project, ModelError> {
             ElementBehavior, ElementFontSpec, ElementOutline, ElementParagraphSpec,
         },
         formatting::{FixedPoint, ParagraphAlignment},
+        ElementDefinition,
     };
 
     let definitions = [
@@ -244,7 +216,9 @@ pub(crate) fn test_project() -> Result<Project, ModelError> {
         )
     })
     .collect::<Result<Vec<_>, _>>()?;
-    Project::with_element_definitions(definitions)
+    let mut project = Project::empty_projection()?;
+    project.replace_element_definitions(definitions)?;
+    Ok(project)
 }
 
 #[cfg(test)]

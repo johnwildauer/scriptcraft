@@ -112,7 +112,8 @@ pub(crate) fn prepare_non_v6_source(
     Ok(output.into_bytes())
 }
 
-pub(crate) fn set_preserved_root_version(
+/// Prepare the detached root projection used by ordinary Version 6 output.
+pub(crate) fn prepare_preserved_root_output(
     sections: &mut [PreservedSection],
 ) -> Result<(), FdxError> {
     let mut roots = sections
@@ -134,6 +135,9 @@ pub(crate) fn set_preserved_root_version(
         return Err(FdxError::DuplicateVersion);
     }
     version.value = FDX_VERSION.to_owned();
+    root.attributes.retain(|attribute| {
+        attribute.name.namespace_uri.is_some() || attribute.name.local_name != "Template"
+    });
     Ok(())
 }
 

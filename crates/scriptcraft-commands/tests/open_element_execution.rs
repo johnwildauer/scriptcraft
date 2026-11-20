@@ -16,7 +16,10 @@ fn valid<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
 }
 
 fn definition(label: &str) -> ElementDefinition {
-    let project = valid(scriptcraft_fdx::new_project());
+    let project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let mut definition = project
         .element_definitions()
         .get_by_label("Action")
@@ -27,7 +30,10 @@ fn definition(label: &str) -> ElementDefinition {
 }
 
 fn project_with_arbitrary_types() -> Project {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -134,7 +140,10 @@ fn title_page_supports_typed_type_less_and_arbitrary_type_transitions() {
 
 #[test]
 fn every_version_one_legacy_spelling_decodes_to_its_exact_project_key() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let mut definitions = project
         .element_definitions()
         .iter()
@@ -204,11 +213,14 @@ fn unknown_and_stale_targets_reject_without_changing_session_state() {
     );
     assert_eq!(session, before_unknown);
 
-    let base_definitions = valid(scriptcraft_fdx::new_project())
-        .element_definitions()
-        .iter()
-        .cloned()
-        .collect();
+    let base_definitions = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    )
+    .element_definitions()
+    .iter()
+    .cloned()
+    .collect();
     assert!(session
         .replace_element_definitions_and_remap_types(ElementDefinitionCandidate::new(
             base_definitions,
@@ -230,7 +242,10 @@ fn unknown_and_stale_targets_reject_without_changing_session_state() {
 
 #[test]
 fn invalid_cross_paragraph_selection_is_rejected_atomically() {
-    let mut session = valid(EditingSession::new(valid(scriptcraft_fdx::new_project())));
+    let mut session = valid(EditingSession::new(valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    )));
     assert!(session.enter().is_ok());
     assert!(session
         .set_selection(CoreSelection {

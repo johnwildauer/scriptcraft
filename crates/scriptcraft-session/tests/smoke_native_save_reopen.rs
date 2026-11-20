@@ -58,7 +58,10 @@ fn native_save_reopen_public_api_smoke() {
     let destination = directory.path("smoke-native.fdx");
     assert!(!destination.exists());
 
-    let mut session = valid(EditingSession::new(valid(scriptcraft_fdx::new_project())));
+    let mut session = valid(EditingSession::new(valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    )));
     valid(session.insert(BODY_TEXT));
     assert_eq!(session.project().elements[0].text, BODY_TEXT);
     let expected_body = session

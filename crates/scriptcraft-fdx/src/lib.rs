@@ -5,6 +5,7 @@
 //! view-state mapping.
 
 mod builtin_screenplay;
+mod builtin_templates;
 mod constants;
 mod content;
 mod context;
@@ -27,7 +28,10 @@ mod whitespace;
 mod window_state;
 mod writer;
 
-pub use builtin_screenplay::new_project;
+pub use builtin_templates::{
+    builtin_template_metadata, builtin_templates, instantiate_builtin_template, BuiltinTemplateId,
+    BuiltinTemplateMetadata, DEFAULT_BUILTIN_TEMPLATE_ID,
+};
 pub use context::{current_timestamp, SaveContext, SaveOperation};
 pub use diagnostics::{
     save_diagnostic_at, FdxError, ModelErrorKind, PreservationErrorKind, SaveDiagnosticCode,

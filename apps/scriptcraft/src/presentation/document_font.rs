@@ -1057,7 +1057,10 @@ mod resolved_font_tests {
     use eframe::egui::{Color32, FontId};
 
     fn project_with_family(family: &str) -> Option<Project> {
-        let Ok(mut project) = scriptcraft_fdx::new_project() else {
+        let Ok(mut project) = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project) else {
             return None;
         };
         let mut definitions = project
@@ -1502,7 +1505,10 @@ mod resolved_font_tests {
 
     #[test]
     fn direct_inline_font_run_family_is_prepared_exactly() {
-        let Ok(mut project) = scriptcraft_fdx::new_project() else {
+        let Ok(mut project) = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project) else {
             assert!(false, "default project should be constructible");
             return;
         };
@@ -1841,14 +1847,19 @@ mod resolved_font_tests {
     }
 
     #[test]
-    fn empty_default_project_waits_for_activation_pass_before_galley_paint() {
-        let Ok(project) = scriptcraft_fdx::new_project() else {
-            assert!(false, "default Project should be constructible");
+    fn screenplay_template_waits_for_activation_pass_before_galley_paint() {
+        let Ok(project) = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project) else {
+            assert!(false, "default Screenplay template should be constructible");
             return;
         };
+        assert!(!project.elements.is_empty());
+        assert!(!project.title_page.is_empty());
         let mut store = DocumentFontStore::default();
         let Ok(prepared) = store.prepare_document(&project) else {
-            assert!(false, "default Project font preparation should succeed");
+            assert!(false, "default Screenplay font preparation should succeed");
             return;
         };
         let context = egui::Context::default();
@@ -1864,7 +1875,7 @@ mod resolved_font_tests {
         let Some(courier) = prepared.environment.resolution_for("Courier Prime") else {
             assert!(
                 false,
-                "default project must contain the neutral Courier request"
+                "default Screenplay must contain the neutral Courier request"
             );
             return;
         };
@@ -1874,7 +1885,10 @@ mod resolved_font_tests {
 
     #[test]
     fn prepared_replacement_environments_wait_until_all_new_face_bindings_activate() {
-        let Ok(default_project) = scriptcraft_fdx::new_project() else {
+        let Ok(default_project) = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project) else {
             assert!(false, "default Project should be constructible");
             return;
         };

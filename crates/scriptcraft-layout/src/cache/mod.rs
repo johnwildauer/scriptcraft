@@ -829,8 +829,11 @@ mod typography_cache_identity_tests {
         ascender: i32,
         fingerprint_seed: u64,
     ) -> Result<LayoutEnvironment, ModelError> {
-        let project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let mut families = project
             .element_definitions()
             .iter()
@@ -942,8 +945,11 @@ mod typography_cache_identity_tests {
     #[test]
     fn generic_semantic_signature_covers_ordered_definitions_capabilities_and_direct_values(
     ) -> Result<(), ModelError> {
-        let project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let signature = semantic_project_layout_signature(&project);
 
         let mut changed_definition = project.clone();
@@ -1023,8 +1029,11 @@ mod typography_cache_identity_tests {
             semantic_project_layout_signature(&direct_override)
         );
 
-        let mut title_override = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let mut title_override = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let title = title_override
             .title_page
             .first_mut()
@@ -1035,8 +1044,11 @@ mod typography_cache_identity_tests {
             semantic_project_layout_signature(&title_override)
         );
 
-        let mut wrapper_override = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let mut wrapper_override = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         wrapper_override.dual_dialogue_paragraph_overrides.insert(
             StableId::new("wrapper-cache-test")?,
             SourceParagraphOverrides::default(),
@@ -1046,8 +1058,11 @@ mod typography_cache_identity_tests {
             semantic_project_layout_signature(&wrapper_override)
         );
 
-        let mut dual_source = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let mut dual_source = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let member = dual_source
             .elements
             .first()
@@ -1064,8 +1079,11 @@ mod typography_cache_identity_tests {
 
     #[test]
     fn same_revision_definition_mutation_and_document_replacement_miss() -> Result<(), ModelError> {
-        let project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let inputs = project.session_layout_inputs();
         let mut cache = LayoutCache::default();
         let _ = cache
@@ -1097,8 +1115,11 @@ mod typography_cache_identity_tests {
         .map_err(|_| ModelError::InvalidNumber)?;
         assert_eq!(changed_layout.pages, fresh.pages);
 
-        let replacement = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let replacement = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let (_, replacement_hit) = cache
             .get_or_build_with_inputs_for_purpose(71, &replacement, &inputs, LayoutPurpose::Editor)
             .map_err(|_| ModelError::InvalidNumber)?;
@@ -1108,8 +1129,11 @@ mod typography_cache_identity_tests {
 
     #[test]
     fn environment_change_forces_rebuild_and_matches_fresh_geometry() -> Result<(), ModelError> {
-        let project = scriptcraft_fdx::new_project()
-            .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
+        let project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
         let inputs = project.session_layout_inputs();
         let mut cache = LayoutCache::default();
         let original = synthetic_environment(800, 10)?;

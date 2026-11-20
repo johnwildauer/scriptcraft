@@ -331,7 +331,10 @@ fn source_backed_definition_candidate_remaps_body_and_content_titles_atomically(
 
 #[test]
 fn definition_candidate_rejects_incomplete_and_ambiguous_requests_atomically() {
-    let mut session = valid(EditingSession::new(valid(scriptcraft_fdx::new_project())));
+    let mut session = valid(EditingSession::new(valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    )));
     let baseline = session.clone();
 
     let missing_target = session
@@ -384,7 +387,10 @@ fn definition_candidate_rejects_incomplete_and_ambiguous_requests_atomically() {
 
 #[test]
 fn definition_replacement_deactivates_dual_projection_without_unwrapping() {
-    let mut project = valid(scriptcraft_fdx::new_project());
+    let mut project = valid(
+        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
+            .map(|document| document.project),
+    );
     let cue_left = valid(ScreenplayElement::new(
         "cue-left",
         scriptcraft_model::ElementTypeKey::new("Character").expect("valid fixture label"),

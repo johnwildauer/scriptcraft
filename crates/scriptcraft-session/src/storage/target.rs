@@ -80,7 +80,9 @@ pub struct FdxSaveReceipt {
 }
 
 /// Runtime destination state for the headless transactional save preparation.
-/// It is intentionally not stored in the FDX document model.
+/// It is intentionally not stored in the FDX document model. An unsaved target
+/// has neither a path nor a conflict baseline; Save As installs both only after
+/// verified durable publication.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct FdxSaveTarget {
     pub(super) path: Option<PathBuf>,
@@ -98,6 +100,8 @@ impl fmt::Debug for FdxSaveTarget {
 }
 
 impl FdxSaveTarget {
+    /// Creates a target with no native path and no FDX conflict baseline.
+    /// Ordinary Save requires both values and cannot publish from this state.
     pub fn new_unsaved() -> Self {
         Self::default()
     }
@@ -118,9 +122,11 @@ impl FdxSaveTarget {
     }
 }
 
-/// Save keeps the opened target and its conflict baseline; ordinary Save As is
-/// create-only. Save As with explicit replacement consent may atomically replace
-/// an existing regular file after capturing and rechecking its bounded baseline.
+/// Save requires a target path and its matching conflict baseline. Save As
+/// accepts a separate FDX destination and is create-only. Save As with explicit
+/// replacement consent may atomically replace an existing regular file after
+/// capturing and rechecking its bounded baseline; successful publication sets
+/// the new path and baseline together.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FdxSaveMode {
     Save,

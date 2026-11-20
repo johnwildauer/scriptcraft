@@ -381,8 +381,11 @@ mod tests {
     use scriptcraft_model::{ElementDefinition, ElementTypeKey};
 
     fn project_with_changed_action(change: impl FnOnce(&mut ElementDefinition)) -> Project {
-        let mut project =
-            scriptcraft_fdx::new_project().expect("the default project should be valid");
+        let mut project = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .expect("the default project should be valid");
         let mut definitions = project
             .element_definitions()
             .iter()
@@ -401,7 +404,11 @@ mod tests {
 
     #[test]
     fn save_projection_compares_ordered_complete_definitions() {
-        let original = scriptcraft_fdx::new_project().expect("the default project should be valid");
+        let original = scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+        )
+        .map(|document| document.project)
+        .expect("the default project should be valid");
         assert!(same_save_projection(&original, &original.clone()));
 
         let mut reordered = original.clone();
@@ -456,8 +463,11 @@ mod tests {
     #[test]
     fn source_less_owner_rebase_uses_unique_text_not_type_or_position() {
         fn source_less_project(rows: &[(&str, &str, &str)]) -> Project {
-            let mut project =
-                scriptcraft_fdx::new_project().expect("the default project should be valid");
+            let mut project = scriptcraft_fdx::instantiate_builtin_template(
+                scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+            )
+            .map(|document| document.project)
+            .expect("the default project should be valid");
             project.elements = rows
                 .iter()
                 .map(|(id, label, text)| {

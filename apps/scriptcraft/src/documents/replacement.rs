@@ -316,3 +316,17 @@ impl ScriptCraftApp {
         }
     }
 }
+
+#[cfg(test)]
+mod blank_instance_argument_tests {
+    use super::*;
+
+    #[test]
+    fn blank_instance_launch_has_no_document_argument() {
+        let arguments = child_arguments(false, menu::MenuPlatformChoice::Auto, None)
+            .unwrap_or_else(|_| panic!("blank child arguments should be valid"));
+        assert!(arguments
+            .iter()
+            .all(|argument| { !argument.to_string_lossy().starts_with("--document-path=") }));
+    }
+}

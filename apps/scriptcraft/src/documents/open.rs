@@ -21,6 +21,8 @@ use scriptcraft_session::storage::{
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+const FINAL_DRAFT_OPEN_EXTENSIONS: &[&str] = &["fdx", "fdxt"];
+
 #[cfg(target_os = "macos")]
 use crate::platform::macos::macos_document_open;
 
@@ -47,7 +49,45 @@ fn stage_replacement_open(staged: &mut Option<PathBuf>, path: PathBuf) -> bool {
 pub(crate) struct PendingFdxOpen {
     path: PathBuf,
     source: OpenedFdxSource,
+    disposition: StagedOpenDisposition,
     pub(crate) declared_version: String,
+}
+
+/// The staged source's native-document lifecycle, fixed at the shared path
+/// boundary and carried unchanged through any migration decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StagedOpenDisposition {
+    OrdinaryFdx,
+    FreshUnsaved,
+}
+
+fn staged_open_disposition(path: &Path) -> StagedOpenDisposition {
+    if path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("fdxt"))
+    {
+        StagedOpenDisposition::FreshUnsaved
+    } else {
+        StagedOpenDisposition::OrdinaryFdx
+    }
+}
+
+fn pending_open_disposition(
+    disposition: StagedOpenDisposition,
+    consent: FdxMigrationConsent,
+) -> Option<StagedOpenDisposition> {
+    (consent == FdxMigrationConsent::Continue).then_some(disposition)
+}
+
+/// Persistence assigned when a prepared project becomes the active document.
+/// Fresh template-backed projects are never associated with their source path.
+pub(crate) enum ActivationPersistence {
+    Saved {
+        path: PathBuf,
+        baseline: FdxBaseline,
+    },
+    FreshUnsaved,
 }
 
 /// Finalizes the initial-document slot once, taking a cold path only when no
@@ -307,7 +347,10 @@ impl ScriptCraftApp {
     }
 
     pub(crate) fn open_native(&mut self, ctx: &egui::Context) {
-        let dialog = rfd::FileDialog::new().add_filter("Final Draft document", &["fdx"]);
+        let dialog = rfd::FileDialog::new().add_filter(
+            "Final Draft documents and templates",
+            FINAL_DRAFT_OPEN_EXTENSIONS,
+        );
         dispatch_open_selection(dialog.pick_file(), |path| {
             self.dispatch_document_path_command(path, ctx);
         });
@@ -331,14 +374,20 @@ impl ScriptCraftApp {
         let Some(pending) = self.pending_fdx_open.take() else {
             return pending_resolution_outcome(None, consent, StagedOpenOutcome::Failed);
         };
-        let continue_outcome = if consent == FdxMigrationConsent::Cancel {
-            self.clear_error();
-            StagedOpenOutcome::Failed
-        } else if self.session.dirty() {
-            self.show_error("OPEN_CANCELLED_DIRTY: unsaved project and active document unchanged");
-            StagedOpenOutcome::Failed
-        } else {
-            self.finish_fdx_import(pending.path, pending.source, consent)
+        let continue_outcome = match pending_open_disposition(pending.disposition, consent) {
+            None => {
+                self.clear_error();
+                StagedOpenOutcome::Failed
+            }
+            Some(_) if self.session.dirty() => {
+                self.show_error(
+                    "OPEN_CANCELLED_DIRTY: unsaved project and active document unchanged",
+                );
+                StagedOpenOutcome::Failed
+            }
+            Some(disposition) => {
+                self.finish_fdx_import(pending.path, pending.source, consent, disposition)
+            }
         };
         let outcome = pending_resolution_outcome(Some(()), consent, continue_outcome);
         if let Some(outcome) = outcome {
@@ -349,6 +398,7 @@ impl ScriptCraftApp {
     }
 
     fn open_staged_native_at(&mut self, path: &Path) -> StagedOpenOutcome {
+        let disposition = staged_open_disposition(path);
         if self.pending_fdx_open.is_some() {
             self.show_error(
                 "OPEN_BLOCKED_BY_MIGRATION: resolve pending FDX import; active document unchanged",
@@ -370,13 +420,17 @@ impl ScriptCraftApp {
         // Selected bytes go through the bounded native FDX preflight/import path;
         // this boundary does not sniff or dispatch alternate document formats.
         match fdx::preflight_version(source.bytes()) {
-            Ok(FdxVersionStatus::Version6) => {
-                self.finish_fdx_import(path.to_owned(), source, FdxMigrationConsent::Continue)
-            }
+            Ok(FdxVersionStatus::Version6) => self.finish_fdx_import(
+                path.to_owned(),
+                source,
+                FdxMigrationConsent::Continue,
+                disposition,
+            ),
             Ok(FdxVersionStatus::ExplicitNon6 { declared, .. }) => {
                 self.pending_fdx_open = Some(PendingFdxOpen {
                     path: path.to_owned(),
                     source,
+                    disposition,
                     declared_version: declared,
                 });
                 self.surface_focused = false;
@@ -408,6 +462,7 @@ impl ScriptCraftApp {
         path: PathBuf,
         source: OpenedFdxSource,
         consent: FdxMigrationConsent,
+        disposition: StagedOpenDisposition,
     ) -> StagedOpenOutcome {
         if consent == FdxMigrationConsent::Cancel {
             self.clear_error();
@@ -425,10 +480,18 @@ impl ScriptCraftApp {
                         Some("Opened non-current FDX with best-effort Version 6 import")
                     }
                 };
+                let persistence = match disposition {
+                    StagedOpenDisposition::OrdinaryFdx => ActivationPersistence::Saved {
+                        path,
+                        baseline: source.baseline,
+                    },
+                    // The read baseline belongs only to staging. Dropping it
+                    // here guarantees that an FDXT path cannot become a save target.
+                    StagedOpenDisposition::FreshUnsaved => ActivationPersistence::FreshUnsaved,
+                };
                 staged_open_activation_outcome(self.activate_opened_project(
                     candidate.document.project,
-                    &path,
-                    Some(source.baseline),
+                    persistence,
                     migration_status,
                     candidate.document.window_state,
                     candidate.document.text_state,
@@ -446,15 +509,27 @@ impl ScriptCraftApp {
         }
     }
 
-    fn activate_opened_project(
+    pub(crate) fn activate_opened_project(
         &mut self,
         project: Project,
-        path: &Path,
-        baseline: Option<FdxBaseline>,
+        persistence: ActivationPersistence,
         migration_status: Option<&str>,
         window_state: Option<fdx::WindowState>,
         text_state: fdx::TextState,
     ) -> Result<(), StagedOpenOutcome> {
+        let (native_path, fdx_baseline) = match persistence {
+            ActivationPersistence::Saved { path, baseline } => {
+                if baseline.path() != path.as_path() {
+                    self.reconcile_body_active_group();
+                    self.show_error(
+                        "FDX_SESSION_ACTIVATION_TARGET_MISMATCH: active document unchanged",
+                    );
+                    return Err(StagedOpenOutcome::Failed);
+                }
+                (Some(path), Some(baseline))
+            }
+            ActivationPersistence::FreshUnsaved => (None, None),
+        };
         let mut replacement = match EditingSession::with_policy(project, self.session.policy()) {
             Ok(replacement) => replacement,
             Err(error) => {
@@ -502,8 +577,10 @@ impl ScriptCraftApp {
         );
         self.sync_pinch_zoom_from_controls();
         self.pending_zoom_anchor = None;
-        self.native_path = Some(path.to_owned());
-        self.fdx_baseline = baseline;
+        // Publish a native path and conflict baseline only as one persistence
+        // disposition. In particular, a template activation clears both.
+        self.native_path = native_path;
+        self.fdx_baseline = fdx_baseline;
         self.pending_window_restore = window_state;
         self.pending_fdx_open = None;
         self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
@@ -538,6 +615,304 @@ impl ScriptCraftApp {
         }
         // The replacement session is installed before this sole Activated result.
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod staged_open_disposition_tests {
+    use super::*;
+    use std::fs;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const EXTERNAL_TEMPLATE: &[u8] = include_bytes!("../../tests/fixtures/external_template.fdxt");
+
+    struct TempDirectory(PathBuf);
+
+    impl TempDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "scriptcraft-fdxt-open-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            fs::create_dir(&path)
+                .unwrap_or_else(|_| unreachable!("unique temporary directory can be created"));
+            Self(path)
+        }
+
+        fn source(&self, name: &str, bytes: &[u8]) -> PathBuf {
+            let path = self.0.join(name);
+            fs::write(&path, bytes)
+                .unwrap_or_else(|_| unreachable!("sanitized fixture can be staged in temp"));
+            path
+        }
+    }
+
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn valid<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| panic!("FDXT staged-open input failed: {error:?}"))
+    }
+
+    #[test]
+    fn only_ascii_case_insensitive_fdxt_extensions_open_as_new() {
+        for path in ["external.fdxt", "external.FDXT", "external.FdXt"] {
+            assert_eq!(
+                staged_open_disposition(Path::new(path)),
+                StagedOpenDisposition::FreshUnsaved
+            );
+        }
+        for path in [
+            "ordinary.fdx",
+            "external.fdxtx",
+            "external.fdxt.backup",
+            "external.template",
+            "Template=Yes.fdx",
+        ] {
+            assert_eq!(
+                staged_open_disposition(Path::new(path)),
+                StagedOpenDisposition::OrdinaryFdx
+            );
+        }
+    }
+
+    #[test]
+    fn migration_continue_keeps_the_staged_disposition_and_cancel_stops_activation() {
+        for disposition in [
+            StagedOpenDisposition::OrdinaryFdx,
+            StagedOpenDisposition::FreshUnsaved,
+        ] {
+            assert_eq!(
+                pending_open_disposition(disposition, FdxMigrationConsent::Continue),
+                Some(disposition)
+            );
+            assert_eq!(
+                pending_open_disposition(disposition, FdxMigrationConsent::Cancel),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn open_picker_filter_includes_fdxt_without_changing_the_typed_open_route() {
+        assert_eq!(FINAL_DRAFT_OPEN_EXTENSIONS, &["fdx", "fdxt"]);
+    }
+
+    #[test]
+    fn mixed_case_external_fdxt_activates_editable_content_without_a_writable_source_target() {
+        let directory = TempDirectory::new();
+        let path = directory.source("external.FdXt", EXTERNAL_TEMPLATE);
+        let before =
+            fs::read(&path).unwrap_or_else(|_| unreachable!("staged source remains readable"));
+        let mut app = valid(ScriptCraftApp::new_for_template_lifecycle_tests());
+
+        assert_eq!(
+            app.open_staged_native_at(&path),
+            StagedOpenOutcome::Activated
+        );
+        assert_eq!(app.native_path, None);
+        assert!(app.fdx_baseline.is_none());
+        assert_eq!(app.native_title, UNTITLED_DOCUMENT_TITLE);
+        assert!(app.pending_fdx_open.is_none());
+        assert_eq!(
+            app.session
+                .project()
+                .elements
+                .iter()
+                .map(|paragraph| {
+                    (
+                        paragraph.element_type().as_str().to_owned(),
+                        paragraph.text.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("Notations".to_owned(), "Act I — café".to_owned()),
+                (
+                    "UnlistedBody".to_owned(),
+                    "Unknown type is still editable: λ.".to_owned(),
+                ),
+            ]
+        );
+        assert_eq!(app.session.project().title_page.len(), 3);
+        assert_eq!(
+            app.session.project().title_page[0].text,
+            "Project café — 雪"
+        );
+        assert_eq!(
+            app.session.project().title_page[0]
+                .element_type()
+                .map(|key| key.as_str().to_owned()),
+            Some("Notations".to_owned())
+        );
+        assert_eq!(app.session.project().title_page[1].text, "Type-less credit");
+        assert_eq!(app.session.project().title_page[1].element_type(), None);
+        assert_eq!(
+            app.session.project().title_page[2]
+                .element_type()
+                .map(|key| key.as_str().to_owned()),
+            Some("UnlistedTitle".to_owned())
+        );
+        assert_eq!(
+            app.session
+                .project()
+                .element_definitions()
+                .get_by_label("UnlistedBody")
+                .is_some(),
+            true
+        );
+        assert_eq!(
+            app.session
+                .project()
+                .element_definitions()
+                .get_by_label("UnlistedTitle")
+                .is_some(),
+            true
+        );
+        let retained = app
+            .session
+            .project()
+            .preservation
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("external FDXT retains opaque source"));
+        assert!(retained
+            .source
+            .original_bytes
+            .as_slice()
+            .windows(b"Template=\"Yes\"".len())
+            .any(|window| window == b"Template=\"Yes\""));
+        assert!(retained
+            .source
+            .original_bytes
+            .as_slice()
+            .windows(b"TitlePageOpaque".len())
+            .any(|window| window == b"TitlePageOpaque"));
+        assert_eq!(retained.source.original_bytes.as_slice(), EXTERNAL_TEMPLATE);
+        let ordinary_fdx = valid(scriptcraft_fdx::write_v6(app.session.project()));
+        let ordinary_source = std::str::from_utf8(&ordinary_fdx)
+            .unwrap_or_else(|_| unreachable!("ordinary writer output is UTF-8"));
+        let root_tag = ordinary_source
+            .split_once("<FinalDraft")
+            .and_then(|(_, root)| root.split_once('>'))
+            .map(|(root, _)| root)
+            .unwrap_or_else(|| unreachable!("ordinary output retains a FinalDraft root"));
+        assert!(!root_tag.contains("Template="));
+        for opaque_marker in [
+            "PreviewPayload",
+            "TitleOpaque",
+            "TitlePageOpaque",
+            "BodyOpaque",
+            "RootHeaderPayload",
+            "ScriptNotePayload",
+            "RootOpaque",
+        ] {
+            assert!(
+                ordinary_source.contains(opaque_marker),
+                "opaque source survives: {opaque_marker}"
+            );
+        }
+        let reopened = valid(scriptcraft_fdx::read_v6(&ordinary_fdx));
+        assert_eq!(reopened.project.elements, app.session.project().elements);
+        assert_eq!(
+            reopened.project.title_page,
+            app.session.project().title_page
+        );
+        assert_eq!(
+            reopened.project.element_definitions(),
+            app.session.project().element_definitions()
+        );
+        assert_eq!(
+            app.session
+                .project()
+                .preservation
+                .as_ref()
+                .map(|state| state.source.original_bytes.as_slice()),
+            Some(EXTERNAL_TEMPLATE),
+            "ordinary serialization leaves the active FDXT source snapshot unchanged"
+        );
+        assert_eq!(fs::read(&path).ok().as_deref(), Some(before.as_slice()));
+    }
+
+    #[test]
+    fn fdxt_migration_cancel_preserves_the_live_document_and_continue_keeps_fresh_unsaved_disposition(
+    ) {
+        let directory = TempDirectory::new();
+        let version_five = std::str::from_utf8(EXTERNAL_TEMPLATE)
+            .unwrap_or_else(|_| unreachable!("sanitized fixture is UTF-8"))
+            .replace("Version=\"6\"", "Version=\"5\"")
+            .into_bytes();
+        let path = directory.source("external.FDXT", &version_five);
+        let before =
+            fs::read(&path).unwrap_or_else(|_| unreachable!("staged source remains readable"));
+
+        let mut cancelled_app = valid(ScriptCraftApp::new_for_template_lifecycle_tests());
+        let prior_project = cancelled_app.session.project().clone();
+        let prior_identity = Arc::clone(prior_project.layout_identity());
+        assert_eq!(
+            cancelled_app.open_staged_native_at(&path),
+            StagedOpenOutcome::AwaitingMigration
+        );
+        assert_eq!(
+            cancelled_app
+                .pending_fdx_open
+                .as_ref()
+                .map(|pending| pending.disposition),
+            Some(StagedOpenDisposition::FreshUnsaved)
+        );
+        assert_eq!(
+            cancelled_app.resolve_pending_fdx_import(FdxMigrationConsent::Cancel),
+            Some(StagedOpenOutcome::Cancelled)
+        );
+        assert_eq!(cancelled_app.session.project(), &prior_project);
+        assert!(Arc::ptr_eq(
+            cancelled_app.session.project().layout_identity(),
+            &prior_identity
+        ));
+        assert!(cancelled_app.native_path.is_none());
+        assert!(cancelled_app.fdx_baseline.is_none());
+        assert!(cancelled_app.pending_fdx_open.is_none());
+        assert_eq!(fs::read(&path).ok().as_deref(), Some(before.as_slice()));
+
+        let mut continued_app = valid(ScriptCraftApp::new_for_template_lifecycle_tests());
+        assert_eq!(
+            continued_app.open_staged_native_at(&path),
+            StagedOpenOutcome::AwaitingMigration
+        );
+        assert_eq!(
+            continued_app
+                .pending_fdx_open
+                .as_ref()
+                .map(|pending| pending.disposition),
+            Some(StagedOpenDisposition::FreshUnsaved)
+        );
+        assert_eq!(
+            continued_app.resolve_pending_fdx_import(FdxMigrationConsent::Continue),
+            Some(StagedOpenOutcome::Activated)
+        );
+        assert!(continued_app.pending_fdx_open.is_none());
+        assert!(continued_app.native_path.is_none());
+        assert!(continued_app.fdx_baseline.is_none());
+        assert_eq!(continued_app.native_title, UNTITLED_DOCUMENT_TITLE);
+        assert_eq!(continued_app.session.revision(), 0);
+        assert!(!continued_app.session.dirty());
+        assert!(continued_app
+            .session
+            .project()
+            .elements
+            .iter()
+            .any(|paragraph| {
+                paragraph.element_type().as_str() == "UnlistedBody"
+                    && paragraph.text == "Unknown type is still editable: λ."
+            }));
+        assert_eq!(fs::read(&path).ok().as_deref(), Some(before.as_slice()));
     }
 }
 
