@@ -1,5 +1,6 @@
 use crate::app::ScriptCraftApp;
-use scriptcraft_commands::{CommandId, EditorSurface};
+use crate::widgets::elements::state::TemplateSelectorMode;
+use scriptcraft_commands::{BuiltinTemplateValue, CommandId, EditorSurface};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppCommandAvailability {
@@ -20,6 +21,11 @@ pub(crate) struct AppCommandAvailability {
     pub(crate) dual_dialogue_toggle: bool,
     pub(crate) title_open: bool,
     pub(crate) title_close: bool,
+    pub(crate) element_windows_available: bool,
+    pub(crate) element_inspector_open: bool,
+    pub(crate) template_selector_open: bool,
+    pub(crate) template_apply_ready: bool,
+    pub(crate) template_new_ready: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +47,10 @@ struct AppCommandProjectionKey {
     native_output_active: bool,
     title_page_window_open: bool,
     title_viewport_unsupported: bool,
+    element_inspector_open: bool,
+    template_selector_open: bool,
+    template_apply_ready: bool,
+    template_new_ready: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -81,6 +91,10 @@ impl ScriptCraftApp {
             native_output_active: self.native_output_active(),
             title_page_window_open: self.title_page_window_open,
             title_viewport_unsupported: self.title_viewport_unsupported,
+            element_inspector_open: self.element_windows.elements_open(),
+            template_selector_open: self.element_windows.selector_open(),
+            template_apply_ready: self.element_windows.selector_apply_ready(),
+            template_new_ready: self.element_windows.selector_new_ready(),
         }
     }
 
@@ -142,6 +156,16 @@ impl ScriptCraftApp {
                         && selection.anchor.element == selection.focus.element
                 });
         }
+        if let scriptcraft_commands::Command::FormatTemplateApply { template } = command {
+            availability.template_apply_ready = self
+                .element_windows
+                .selector_apply_matches(builtin_template_id(*template));
+        }
+        if let scriptcraft_commands::Command::FileNewFromTemplate { template } = command {
+            availability.template_new_ready = self
+                .element_windows
+                .selector_new_matches(builtin_template_id(*template));
+        }
         availability
     }
 
@@ -149,6 +173,8 @@ impl ScriptCraftApp {
         let migration_pending = self.pending_fdx_open.is_some();
         let replacement_pending = self.replacement_open_pending();
         let native_output_active = self.native_output_active();
+        let element_inspector_open = self.element_windows.elements_open();
+        let template_selector_open = self.element_windows.selector_open();
         let (selection, text_len, role_is_empty_parenthetical, element_count) =
             match self.active_editor_surface {
                 EditorSurface::Body => {
@@ -212,6 +238,22 @@ impl ScriptCraftApp {
             // Closing the presentation-only child viewport does not destroy
             // the root document and remains available during replacement.
             title_close: !migration_pending && self.title_page_window_open,
+            // The element UI owns input independently of the migration modal.
+            // Its state changes menu/command availability but never changes the
+            // migration reason used by File Import Resolve.
+            element_windows_available: !migration_pending
+                && !replacement_pending
+                && !native_output_active,
+            element_inspector_open,
+            template_selector_open,
+            template_apply_ready: self.element_windows.selector().is_some_and(|selector| {
+                selector.mode() == TemplateSelectorMode::ApplyToCurrent
+                    && selector.selected_template().is_some()
+            }),
+            template_new_ready: self.element_windows.selector().is_some_and(|selector| {
+                selector.mode() == TemplateSelectorMode::NewDocument
+                    && selector.selected_template().is_some()
+            }),
         }
     }
 
@@ -262,6 +304,24 @@ impl AppCommandAvailability {
         if self.modal_blocked {
             return false;
         }
+        if self.template_selector_open || self.element_inspector_open {
+            return match command {
+                // Dialog presentation keeps only its own typed actions, harmless
+                // focus activations, status projection, and root lifecycle.
+                CommandId::UiStatusSet
+                | CommandId::FormatTemplateSelectorOpen
+                | CommandId::ApplicationQuit => true,
+                CommandId::FormatElementsOpen => self.element_inspector_open,
+                CommandId::FormatElementsClose => {
+                    self.element_inspector_open && !self.template_selector_open
+                }
+                CommandId::FormatTemplateSelectorCancel => self.template_selector_open,
+                CommandId::FormatTemplateApply => self.template_apply_ready,
+                CommandId::FileNewFromTemplate => self.template_new_ready,
+                CommandId::FileClose => !self.title_page_only_close,
+                _ => false,
+            };
+        }
         match command {
             CommandId::EditUndo => self.undo,
             CommandId::EditRedo => self.redo,
@@ -274,6 +334,17 @@ impl AppCommandAvailability {
             CommandId::EditorDualDialogueToggle => self.dual_dialogue_toggle,
             CommandId::WindowTitlePageOpen => self.title_open,
             CommandId::WindowTitlePageClose => self.title_close,
+            CommandId::FormatElementsOpen => self.element_windows_available,
+            CommandId::FormatElementsClose => {
+                self.element_windows_available && self.element_inspector_open
+            }
+            CommandId::FormatTemplateSelectorOpen => {
+                self.element_windows_available && self.element_inspector_open
+            }
+            CommandId::FormatTemplateSelectorCancel => self.template_selector_open,
+            CommandId::FormatTemplateApply => self.template_apply_ready,
+            CommandId::FileNewFromTemplateOpen => self.element_windows_available,
+            CommandId::FileNewFromTemplate => self.template_new_ready,
             // The global modal gates above still disable Quit during migration
             // and native-output dialogs; otherwise it is focus-independent.
             CommandId::ApplicationQuit => true,
@@ -296,5 +367,176 @@ impl AppCommandAvailability {
             CommandId::EditorDualDialogueToggle => DesktopUnavailableReason::Selection,
             _ => DesktopUnavailableReason::ModalBlocked,
         }
+    }
+}
+
+const fn builtin_template_id(value: BuiltinTemplateValue) -> scriptcraft_fdx::BuiltinTemplateId {
+    match value {
+        BuiltinTemplateValue::Screenplay => scriptcraft_fdx::BuiltinTemplateId::Screenplay,
+        BuiltinTemplateValue::Stageplay => scriptcraft_fdx::BuiltinTemplateId::Stageplay,
+        BuiltinTemplateValue::DramatistsGuildMusical => {
+            scriptcraft_fdx::BuiltinTemplateId::DramatistsGuildMusical
+        }
+    }
+}
+
+#[cfg(test)]
+mod element_window_availability_tests {
+    use super::*;
+    use crate::widgets::elements::state::TemplateSelectorMode;
+    use scriptcraft_commands::{BuiltinTemplateValue, Command};
+    use scriptcraft_fdx::BuiltinTemplateId;
+
+    fn app() -> ScriptCraftApp {
+        ScriptCraftApp::new_for_template_lifecycle_tests()
+            .unwrap_or_else(|error| panic!("prepared app setup failed: {error}"))
+    }
+
+    #[test]
+    fn inspector_and_selector_state_refresh_the_shared_projection_and_scope_commands() {
+        let mut app = app();
+        let project_elements = app.session.project().elements.clone();
+        let project_types = app
+            .session
+            .project()
+            .element_definitions()
+            .iter()
+            .map(|definition| definition.key.clone())
+            .collect::<Vec<_>>();
+        let revision = app.session.revision();
+        let token = app.session.mutation_token();
+        let dirty = app.session.dirty();
+
+        let closed_key = app.app_command_projection_key();
+        app.element_windows.open_elements(EditorSurface::TitlePage);
+        let inspector = app.app_command_availability();
+        assert_ne!(closed_key, app.app_command_projection_key());
+        assert!(!inspector.modal_blocked);
+        assert!(inspector.is_enabled(CommandId::FormatElementsOpen));
+        assert!(inspector.is_enabled(CommandId::FormatElementsClose));
+        assert!(inspector.is_enabled(CommandId::FormatTemplateSelectorOpen));
+        assert!(!inspector.is_enabled(CommandId::EditUndo));
+        assert!(!inspector.is_enabled(CommandId::FileSave));
+
+        app.element_windows
+            .open_selector(TemplateSelectorMode::ApplyToCurrent);
+        let selector_empty = app.app_command_availability();
+        assert!(selector_empty.template_selector_open);
+        assert!(!selector_empty.template_apply_ready);
+        assert!(selector_empty.is_enabled(CommandId::FormatTemplateSelectorCancel));
+        assert!(selector_empty.is_enabled(CommandId::FormatTemplateSelectorOpen));
+        assert!(!selector_empty.is_enabled(CommandId::FormatTemplateApply));
+        assert!(selector_empty.is_enabled(CommandId::FileClose));
+        assert!(selector_empty.is_enabled(CommandId::ApplicationQuit));
+        assert!(!selector_empty.is_enabled(CommandId::FormatElementsClose));
+        assert!(!selector_empty.is_enabled(CommandId::EditorElementChange));
+        assert!(!selector_empty.is_enabled(CommandId::FileImportResolve));
+
+        app.element_windows
+            .select_template(BuiltinTemplateId::Stageplay);
+        let selected = app.app_command_availability();
+        assert!(selected.template_apply_ready);
+        let matching = app.command_dispatch_availability(&Command::FormatTemplateApply {
+            template: BuiltinTemplateValue::Stageplay,
+        });
+        let stale = app.command_dispatch_availability(&Command::FormatTemplateApply {
+            template: BuiltinTemplateValue::Screenplay,
+        });
+        assert!(matching.is_enabled(CommandId::FormatTemplateApply));
+        assert!(!stale.is_enabled(CommandId::FormatTemplateApply));
+
+        // Transitions above are presentation-only and never construct/publish a
+        // candidate or touch current target/baseline state.
+        assert_eq!(app.session.project().elements, project_elements);
+        assert_eq!(
+            app.session
+                .project()
+                .element_definitions()
+                .iter()
+                .map(|definition| definition.key.clone())
+                .collect::<Vec<_>>(),
+            project_types
+        );
+        assert_eq!(app.session.revision(), revision);
+        assert_eq!(app.session.mutation_token(), token);
+        assert_eq!(app.session.dirty(), dirty);
+        assert!(app.native_path.is_none());
+        assert!(app.fdx_baseline.is_none());
+    }
+
+    #[test]
+    fn selector_mode_and_readiness_are_part_of_the_projection_key() {
+        let mut app = app();
+        app.element_windows.open_elements(EditorSurface::Body);
+        app.element_windows
+            .open_selector(TemplateSelectorMode::ApplyToCurrent);
+        let empty_key = app.app_command_projection_key();
+
+        app.element_windows
+            .select_template(BuiltinTemplateId::Screenplay);
+        let ready_key = app.app_command_projection_key();
+        assert_ne!(empty_key, ready_key);
+
+        app.element_windows.cancel_selector();
+        app.element_windows.close_elements();
+        app.element_windows
+            .open_new_template_selector(EditorSurface::Body);
+        app.element_windows
+            .select_template(BuiltinTemplateId::Screenplay);
+        let new_mode_key = app.app_command_projection_key();
+        assert_ne!(ready_key, new_mode_key);
+        assert!(!app
+            .app_command_availability()
+            .is_enabled(CommandId::FormatTemplateApply));
+        assert!(app
+            .app_command_availability()
+            .is_enabled(CommandId::FileNewFromTemplate));
+    }
+
+    #[test]
+    fn new_template_selector_uses_its_own_mode_selection_and_launch_gate() {
+        let mut app = app();
+        let closed = app.app_command_availability();
+        assert!(closed.is_enabled(CommandId::FileNewFromTemplateOpen));
+        assert!(!closed.is_enabled(CommandId::FileNewFromTemplate));
+
+        app.element_windows
+            .open_new_template_selector(EditorSurface::TitlePage);
+        let empty = app.app_command_availability();
+        assert!(empty.template_selector_open);
+        assert!(!empty.template_new_ready);
+        assert!(!empty.is_enabled(CommandId::FileNewFromTemplate));
+        assert!(!empty.is_enabled(CommandId::FormatTemplateApply));
+        assert!(empty.is_enabled(CommandId::FormatTemplateSelectorCancel));
+        assert!(!empty.is_enabled(CommandId::FileNewFromTemplateOpen));
+        assert!(empty.is_enabled(CommandId::FileClose));
+        assert!(empty.is_enabled(CommandId::ApplicationQuit));
+
+        app.element_windows
+            .select_template(BuiltinTemplateId::Stageplay);
+        let selected = app.app_command_availability();
+        let matching = app.command_dispatch_availability(&Command::FileNewFromTemplate {
+            template: BuiltinTemplateValue::Stageplay,
+        });
+        let stale = app.command_dispatch_availability(&Command::FileNewFromTemplate {
+            template: BuiltinTemplateValue::Screenplay,
+        });
+        assert!(selected.template_new_ready);
+        assert!(matching.is_enabled(CommandId::FileNewFromTemplate));
+        assert!(!stale.is_enabled(CommandId::FileNewFromTemplate));
+    }
+
+    #[test]
+    fn element_dialog_file_close_cannot_close_the_separate_title_viewport() {
+        let mut app = app();
+        app.title_page_window_open = true;
+        app.active_editor_surface = EditorSurface::TitlePage;
+        app.element_windows.open_elements(EditorSurface::TitlePage);
+        app.element_windows
+            .open_selector(TemplateSelectorMode::ApplyToCurrent);
+
+        let availability = app.app_command_availability();
+        assert!(availability.is_enabled(CommandId::ApplicationQuit));
+        assert!(!availability.is_enabled(CommandId::FileClose));
     }
 }

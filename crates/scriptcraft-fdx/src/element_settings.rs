@@ -700,6 +700,43 @@ pub fn replace_project_element_settings(
         validated_nodes.push(node);
     }
 
+    // Replacing an equal retained settings projection would allocate fresh
+    // source anchors and make an otherwise equal session candidate appear
+    // changed. Preserve the existing source graph when current winners match
+    // after projecting definition-owned fields; changed opaque settings and
+    // definition sets still take the normal staged replacement path below.
+    let definition_keys = definitions
+        .iter()
+        .map(|definition| definition.key.clone())
+        .collect::<BTreeSet<_>>();
+    let current_definition_keys = preservation
+        .anchors
+        .iter()
+        .filter_map(|anchor| match &anchor.target {
+            AnchorTarget::ElementDefinition(key) => Some(key.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if current_definition_keys == definition_keys
+        && preservation.validate().is_ok()
+        && ordered_detached_element_settings_winners(preservation, definitions).is_ok_and(
+            |mut current_nodes| {
+                current_nodes
+                    .iter_mut()
+                    .zip(validated_nodes.iter())
+                    .zip(definitions.iter())
+                    .all(|((current, replacement), definition)| {
+                        let namespace = current.name.namespace_uri.clone();
+                        reconcile_owned_element_settings(current, definition, namespace.as_deref())
+                            .is_ok()
+                            && current == replacement
+                    })
+            },
+        )
+    {
+        return Ok(());
+    }
+
     let mut staged = preservation.clone();
     let mut staged_anchors = staged
         .anchors
@@ -711,10 +748,6 @@ pub fn replace_project_element_settings(
         .anchors
         .iter()
         .map(|anchor| anchor.id.clone())
-        .collect::<BTreeSet<_>>();
-    let definition_keys = definitions
-        .iter()
-        .map(|definition| definition.key.clone())
         .collect::<BTreeSet<_>>();
     let mut next_anchor_ordinal = 0usize;
 
@@ -2873,6 +2906,41 @@ mod tests {
                     ))
         )));
         assert!(preservation.validate().is_ok());
+    }
+
+    #[test]
+    fn same_definitions_with_different_opaque_settings_are_replaced() {
+        let Ok(mut document) =
+            crate::instantiate_builtin_template(crate::BuiltinTemplateId::Screenplay)
+        else {
+            assert!(false, "the built-in Screenplay should common-load");
+            return;
+        };
+        let Ok(extraction) = crate::extract_element_template_settings(&document) else {
+            assert!(false, "the built-in settings should extract");
+            return;
+        };
+        let definitions = extraction.definitions().clone();
+        let mut replacement = extraction.retained_settings().to_vec();
+        let Some(first) = replacement.first_mut() else {
+            assert!(false, "the built-in has ordered definitions");
+            return;
+        };
+        assert!(set_unique_unqualified_attribute(first, "vendor-marker", "target").is_ok());
+
+        let Some(preservation) = document.project.preservation.as_mut() else {
+            assert!(false, "the built-in project should retain source");
+            return;
+        };
+        let before = preservation.clone();
+        assert!(replace_project_element_settings(preservation, &definitions, replacement).is_ok());
+        assert_ne!(*preservation, before);
+        assert_eq!(
+            direct_settings(preservation)
+                .first()
+                .and_then(|setting| attr_value(setting, "vendor-marker")),
+            Some("target")
+        );
     }
 
     #[test]

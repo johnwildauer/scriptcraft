@@ -71,16 +71,38 @@ fn version_2_preserves_arbitrary_and_case_distinct_labels_in_round_trips() {
 }
 
 #[test]
-fn command_22_identity_and_descriptor_order_remain_stable() {
+fn command_22_identity_and_final_appended_command_order_remain_stable() {
     assert_eq!(
         CommandId::EditorElementChange.as_str(),
         "editor.element.change"
     );
-    assert_eq!(CommandId::ALL.len(), 52);
     assert_eq!(CommandId::ALL[22], CommandId::EditorElementChange);
-    assert_eq!(COMMAND_DESCRIPTORS.len(), 52);
+    assert_eq!(COMMAND_DESCRIPTORS.len(), CommandId::ALL.len());
+    assert_eq!(
+        COMMAND_DESCRIPTORS
+            .iter()
+            .map(|descriptor| descriptor.id)
+            .collect::<Vec<_>>(),
+        CommandId::ALL.to_vec()
+    );
     assert_eq!(COMMAND_DESCRIPTORS[22].id, CommandId::EditorElementChange);
     assert!(COMMAND_DESCRIPTORS[22].parameters.contains("element_type"));
+
+    // IDs 1–52 retain their established positions; the remaining suffix is
+    // derived from the final landed Elements/selector/New catalog, not a
+    // planned command-count estimate.
+    assert_eq!(
+        &CommandId::ALL[52..],
+        &[
+            CommandId::FormatElementsOpen,
+            CommandId::FormatElementsClose,
+            CommandId::FormatTemplateSelectorOpen,
+            CommandId::FormatTemplateSelectorCancel,
+            CommandId::FormatTemplateApply,
+            CommandId::FileNewFromTemplateOpen,
+            CommandId::FileNewFromTemplate,
+        ]
+    );
 }
 
 #[test]

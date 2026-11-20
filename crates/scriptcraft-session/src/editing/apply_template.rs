@@ -432,4 +432,23 @@ mod tests {
         );
         assert_eq!(session, before);
     }
+
+    #[test]
+    fn applying_same_builtin_to_source_backed_project_is_a_complete_no_op() {
+        let project = valid(instantiate_builtin_template(BuiltinTemplateId::Screenplay)).project;
+        let mut session = valid(EditingSession::new(project));
+        let before = session.clone();
+        let revision = session.revision();
+        let token = session.mutation_token();
+        let history_len = session.history.len();
+
+        assert_eq!(
+            session.apply_builtin_template(BuiltinTemplateId::Screenplay),
+            Ok(ApplyTemplateOutcome::NoOp)
+        );
+        assert_eq!(session, before);
+        assert_eq!(session.revision(), revision);
+        assert_eq!(session.mutation_token(), token);
+        assert_eq!(session.history.len(), history_len);
+    }
 }

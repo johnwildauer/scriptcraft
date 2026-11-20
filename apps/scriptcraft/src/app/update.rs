@@ -13,10 +13,10 @@ use crate::{
         script::{self as script_view, zoom_scroll::page_geometry_input_invalidated, RevealIntent},
         title_page,
     },
-    widgets::sprint_timer,
+    widgets::{elements, sprint_timer},
 };
 use eframe::egui;
-use scriptcraft_commands::{Command, CommandOrigin, EditorSurface, ZoomFactor};
+use scriptcraft_commands::{Command, CommandId, CommandOrigin, EditorSurface, ZoomFactor};
 use std::time::Instant;
 
 fn chrome_frame(palette: theme::ToolbarPalette) -> egui::Frame {
@@ -93,8 +93,10 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         )
     });
     let availability = app.app_command_availability();
+    let element_windows_own_input = app.element_windows.owns_input();
     let body_focused = app.surface_focused
         && app.active_editor_surface() == EditorSurface::Body
+        && !element_windows_own_input
         && !availability.replacement_pending
         && !availability.modal_blocked
         && !availability.native_output_active
@@ -108,7 +110,8 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         &app.session,
         body_focused,
         app.ime_active || ime_event_in_frame,
-        availability.replacement_pending
+        element_windows_own_input
+            || availability.replacement_pending
             || availability.modal_blocked
             || availability.native_output_active,
         modifiers,
@@ -224,7 +227,9 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
             app.theme_palette.script_workspace,
         ))
         .show_inside(ui, |ui| app.live_document_surface(ui, EditorSurface::Body));
-    let timer_commands = if app.timer_popup_surface == EditorSurface::Body {
+    let timer_commands = if app.timer_popup_surface == EditorSurface::Body
+        && !app.element_windows.owns_input()
+    {
         let host_geometry = app.sprint_timer_host_geometry(EditorSurface::Body);
         sprint_timer::show_popup_with_host_geometry(&ctx, &mut app.sprint_timer, now, host_geometry)
     } else {
@@ -286,13 +291,14 @@ impl eframe::App for ScriptCraftApp {
         let viewport_height_points = raw_input
             .screen_rect
             .map_or_else(|| ctx.content_rect().height(), |rect| rect.height());
+        let element_dialog_open = self.element_windows.owns_input();
         let wheel_factors = {
             let adapter = if title_page_viewport {
                 &mut self.title_view.wheel_zoom
             } else {
                 &mut self.wheel_zoom
             };
-            if viewport_close_requested {
+            if viewport_close_requested || element_dialog_open {
                 adapter.reset();
                 Vec::new()
             } else {
@@ -311,24 +317,28 @@ impl eframe::App for ScriptCraftApp {
         }
 
         for event in &raw_input.events {
-            if let egui::Event::Zoom(factor) = event {
-                self.record_native_event("zoom");
-                if let Ok(factor) = ZoomFactor::new(*factor) {
-                    self.dispatch_command(
-                        CommandInvocation::new(
-                            Command::ViewZoomPinch { factor },
-                            CommandOrigin::InternalFollowUp,
-                        ),
-                        ctx,
-                    );
+            if !element_dialog_open {
+                if let egui::Event::Zoom(factor) = event {
+                    self.record_native_event("zoom");
+                    if let Ok(factor) = ZoomFactor::new(*factor) {
+                        self.dispatch_command(
+                            CommandInvocation::new(
+                                Command::ViewZoomPinch { factor },
+                                CommandOrigin::InternalFollowUp,
+                            ),
+                            ctx,
+                        );
+                    }
                 }
             }
         }
         // The app has consumed the event for page zoom. Keep it out of egui's
         // later input-state zoom delta so no other surface can apply it again.
-        raw_input
-            .events
-            .retain(|event| !matches!(event, egui::Event::Zoom(_)));
+        if !element_dialog_open {
+            raw_input
+                .events
+                .retain(|event| !matches!(event, egui::Event::Zoom(_)));
+        }
 
         // The active platform backend owns accelerators: native macOS while the
         // native menu is installed, otherwise the in-window backend on Windows.
@@ -338,15 +348,34 @@ impl eframe::App for ScriptCraftApp {
             .iter()
             .any(|event| matches!(event, egui::Event::Ime(_)));
         if self.menu_policy.in_window_shortcuts_owned()
-            && shortcuts::shortcut_input_allowed(self.ime_active, ime_event_in_frame)
+            && dialog_menu_shortcuts_allowed(
+                self.ime_active,
+                self.title_view.ime_active,
+                ime_event_in_frame,
+            )
         {
+            let inspector_open = self.element_windows.elements_open();
+            let selector_open = self.element_windows.selector_open();
+            let dialog_availability = self.app_command_availability();
+            let root_close_enabled = dialog_availability.is_enabled(CommandId::FileClose);
+            let application_quit_enabled =
+                dialog_availability.is_enabled(CommandId::ApplicationQuit);
             let mut retained_events = Vec::with_capacity(raw_input.events.len());
             for event in std::mem::take(&mut raw_input.events) {
                 let command = menu::command_for_pressed_key_event(
                     &event,
                     shortcuts::ShortcutPlatform::current(),
                 );
-                if let Some(command) = command {
+                if let Some(command) = command.filter(|command| {
+                    !element_dialog_open
+                        || element_dialog_shortcut_allowed(
+                            command.id(),
+                            inspector_open,
+                            selector_open,
+                            root_close_enabled,
+                            application_quit_enabled,
+                        )
+                }) {
                     self.pending_commands
                         .enqueue(CommandInvocation::new(command, CommandOrigin::Shortcut));
                 } else {
@@ -365,6 +394,113 @@ impl eframe::App for ScriptCraftApp {
         #[cfg(target_os = "windows")]
         self.update_windows_print_session(ui, frame);
         ScriptCraftApp::update(self, ui, frame);
+    }
+}
+
+fn element_dialog_shortcut_allowed(
+    command: CommandId,
+    inspector_open: bool,
+    selector_open: bool,
+    root_close_enabled: bool,
+    application_quit_enabled: bool,
+) -> bool {
+    match command {
+        CommandId::FileClose => root_close_enabled,
+        CommandId::ApplicationQuit => application_quit_enabled,
+        // Repeated menu activation may focus the already-open root dialog, but
+        // cannot move ownership back to an underlying editor.
+        CommandId::FormatElementsOpen => inspector_open,
+        CommandId::FormatTemplateSelectorOpen => inspector_open || selector_open,
+        _ => false,
+    }
+}
+
+fn dialog_menu_shortcuts_allowed(
+    body_ime_active: bool,
+    title_ime_active: bool,
+    ime_event_in_frame: bool,
+) -> bool {
+    shortcuts::shortcut_input_allowed(body_ime_active || title_ime_active, ime_event_in_frame)
+}
+
+#[cfg(test)]
+mod element_dialog_input_tests {
+    use super::{dialog_menu_shortcuts_allowed, element_dialog_shortcut_allowed};
+    use scriptcraft_commands::CommandId;
+
+    #[test]
+    fn dialog_shortcut_capture_retains_only_focus_and_root_lifecycle_commands() {
+        assert!(element_dialog_shortcut_allowed(
+            CommandId::FileClose,
+            false,
+            true,
+            true,
+            true
+        ));
+        assert!(element_dialog_shortcut_allowed(
+            CommandId::ApplicationQuit,
+            true,
+            true,
+            false,
+            true
+        ));
+        assert!(element_dialog_shortcut_allowed(
+            CommandId::FormatElementsOpen,
+            true,
+            true,
+            false,
+            false
+        ));
+        assert!(element_dialog_shortcut_allowed(
+            CommandId::FormatTemplateSelectorOpen,
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(!element_dialog_shortcut_allowed(
+            CommandId::FormatElementsOpen,
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(!element_dialog_shortcut_allowed(
+            CommandId::EditPaste,
+            true,
+            false,
+            true,
+            true
+        ));
+        assert!(!element_dialog_shortcut_allowed(
+            CommandId::EditorTextInsert,
+            true,
+            true,
+            true,
+            true
+        ));
+        assert!(!element_dialog_shortcut_allowed(
+            CommandId::EditorParagraphTab,
+            true,
+            true,
+            true,
+            true
+        ));
+        assert!(!element_dialog_shortcut_allowed(
+            CommandId::FileClose,
+            true,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn menu_shortcut_gate_observes_both_surface_compositions_and_same_frame_ime() {
+        assert!(dialog_menu_shortcuts_allowed(false, false, false));
+        assert!(!dialog_menu_shortcuts_allowed(true, false, false));
+        assert!(!dialog_menu_shortcuts_allowed(false, true, false));
+        assert!(!dialog_menu_shortcuts_allowed(false, false, true));
     }
 }
 
@@ -488,6 +624,15 @@ impl ScriptCraftApp {
             measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Chrome, |app| {
                 show_application_panels(app, ui)
             });
+            // Dialogs are root-context surfaces and appear only after ordinary
+            // panels, never over migration or replacement ownership.
+            if !replacement_pending {
+                measure_root_other_bucket(
+                    self,
+                    app::responsiveness::RootOtherBucket::Host,
+                    |app| elements::show_elements_windows(app, &ctx),
+                );
+            }
         }
         if root_close_allowed {
             measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {

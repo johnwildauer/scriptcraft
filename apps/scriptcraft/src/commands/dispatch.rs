@@ -19,6 +19,14 @@ impl CommandInvocation {
     pub(crate) const fn new(command: Command, origin: CommandOrigin) -> Self {
         Self { command, origin }
     }
+
+    pub(crate) const fn command(&self) -> &Command {
+        &self.command
+    }
+
+    pub(crate) const fn origin(&self) -> CommandOrigin {
+        self.origin
+    }
 }
 
 /// Static menu, toolbar, and native application-menu IDs map to parameterless
@@ -26,6 +34,7 @@ impl CommandInvocation {
 pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
     Some(match id {
         CommandId::FileNew => Command::FileNew,
+        CommandId::FileNewFromTemplateOpen => Command::FileNewFromTemplateOpen,
         CommandId::FileOpenRequest => Command::FileOpenRequest,
         CommandId::FileClose => Command::FileClose,
         CommandId::FileSave => Command::FileSave,
@@ -46,6 +55,10 @@ pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::EditorStyleClear => Command::EditorStyleClear {
             surface: EditorSurface::Body,
         },
+        CommandId::FormatElementsOpen => Command::FormatElementsOpen,
+        CommandId::FormatElementsClose => Command::FormatElementsClose,
+        CommandId::FormatTemplateSelectorOpen => Command::FormatTemplateSelectorOpen,
+        CommandId::FormatTemplateSelectorCancel => Command::FormatTemplateSelectorCancel,
         _ => return None,
     })
 }
@@ -184,6 +197,13 @@ impl ScriptCraftApp {
             command @ (Command::WindowTitlePageOpen | Command::WindowTitlePageClose) => {
                 self.dispatch_view_command(command, ctx)
             }
+            command @ (Command::FormatElementsOpen
+            | Command::FormatElementsClose
+            | Command::FormatTemplateSelectorOpen
+            | Command::FormatTemplateSelectorCancel
+            | Command::FormatTemplateApply { .. }
+            | Command::FileNewFromTemplateOpen
+            | Command::FileNewFromTemplate { .. }) => self.dispatch_elements_command(command, ctx),
             command @ (Command::EditorStyleToggle { .. }
             | Command::EditorStyleClear { .. }
             | Command::EditorAlignmentSet { .. }

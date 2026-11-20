@@ -11,8 +11,7 @@ use scriptcraft_session::editing::{
     EditError, EditingSession, ElementDefinitionCandidate, ElementTypeRemapping,
 };
 
-const OPEN_FIXTURE: &[u8] =
-    include_bytes!("../../scriptcraft-fdx/tests/fixtures/open_element_settings.fdx");
+const OPEN_FIXTURE: &[u8] = include_bytes!("fixtures/open_element_settings.fdx");
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("definition candidate smoke input is valid"))

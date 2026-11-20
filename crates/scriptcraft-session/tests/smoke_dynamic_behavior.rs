@@ -7,8 +7,7 @@ use scriptcraft_model::{
 };
 use scriptcraft_session::editing::{EditingSession, ParagraphKeyTarget};
 
-const ACTIVE_DUAL_FIXTURE: &[u8] =
-    include_bytes!("../../scriptcraft-fdx/tests/fixtures/active_dual_dialogue.fdx");
+const ACTIVE_DUAL_FIXTURE: &[u8] = include_bytes!("fixtures/active_dual_dialogue.fdx");
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("dynamic Behavior source uses valid bounded input"))

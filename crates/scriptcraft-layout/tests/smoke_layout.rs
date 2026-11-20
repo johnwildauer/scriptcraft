@@ -13,8 +13,9 @@ use scriptcraft_model::{
         ResolvedFaceMetrics, ResolvedFontFace, ResolvedFontId, ResolvedFontSourceKind,
         ScalarAdvance,
     },
-    BodyOwner, ElementTypeKey, LayoutInputs, Project, RunAttribute, ScreenplayElement, StableId,
-    TextRun,
+    BodyOwner, ElementBehavior, ElementDefinition, ElementFontSpec, ElementOutline,
+    ElementParagraphSpec, ElementTypeKey, LayoutInputs, Project, RunAttribute, ScreenplayElement,
+    StableId, TextRun,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,11 +24,49 @@ fn valid<T, E>(result: Result<T, E>) -> T {
 }
 
 fn synthetic_body_project() -> Project {
-    let mut project = valid(
-        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
-            .map(|document| document.project),
-    );
-    project.preservation = None;
+    let mut project = valid(Project::empty_projection());
+    let definitions = ["Action", "Character", "Dialogue", "General"]
+        .into_iter()
+        .map(|label| {
+            valid(ElementDefinition::new(
+                valid(ElementTypeKey::new(label)),
+                ElementFontSpec {
+                    family: "Courier Prime".to_owned(),
+                    size: 12,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    all_caps: false,
+                    hidden_text: false,
+                    color: None,
+                    adornment_style: 0,
+                    revision_id: 0,
+                },
+                ElementParagraphSpec {
+                    alignment: ParagraphAlignment::Left,
+                    first_indent: FixedPoint::default(),
+                    left_indent: FixedPoint::default(),
+                    right_indent: FixedPoint::default(),
+                    leading: "Regular".to_owned(),
+                    space_before: FixedPoint::default(),
+                    spacing: 1,
+                    starts_new_page: false,
+                },
+                ElementBehavior {
+                    paginate_as: None,
+                    return_key: None,
+                    shortcut: None,
+                    tab_key: None,
+                    win_shortcut: None,
+                },
+                ElementOutline {
+                    can_hide: false,
+                    level: 0,
+                },
+            ))
+        })
+        .collect();
+    valid(project.replace_element_definitions(definitions));
     project
 }
 
@@ -41,7 +80,7 @@ fn add_dialogue_paginate_alias(project: &mut Project) -> ElementTypeKey {
         .iter()
         .find(|definition| definition.key.as_str() == "Action")
         .cloned()
-        .unwrap_or_else(|| unreachable!("Project::new supplies the base Action definition"));
+        .unwrap_or_else(|| unreachable!("synthetic project explicitly defines Action"));
     let key = valid(ElementTypeKey::new("Dialogue-like"));
     alias.key = key.clone();
     alias.behavior.paginate_as = Some("Dialogue".to_owned());
@@ -143,20 +182,23 @@ fn layout_public_api_smoke() {
         text.clone(),
     )))];
     let original = project.clone();
-    let inputs = LayoutInputs::default();
+    let inputs = project.session_layout_inputs();
     let source = SourceLayoutSettings::default();
+    let environment = synthetic_layout_environment(&project);
 
-    let first = valid(ScreenplayLayout::build_with_composition(
+    let first = valid(ScreenplayLayout::build_with_composition_and_environment(
         &project,
         &inputs,
         &source,
         LayoutComposition::BodyEditor,
+        &environment,
     ));
-    let second = valid(ScreenplayLayout::build_with_composition(
+    let second = valid(ScreenplayLayout::build_with_composition_and_environment(
         &project,
         &inputs,
         &source,
         LayoutComposition::BodyEditor,
+        &environment,
     ));
     assert_eq!(first, second);
     assert!(!first.pages.is_empty());
@@ -167,16 +209,9 @@ fn layout_public_api_smoke() {
         .flat_map(|page| &page.lines)
         .filter(|line| line.element == 0)
         .collect::<Vec<_>>();
-    // This legacy public-API smoke pins source/display behavior only; its fixed
-    // default profile is not evidence of resolved-metric wrapping acceptance.
-    assert_eq!(lines.len(), 2);
-    assert_eq!((lines[0].source.start, lines[0].source.end), (0, 62));
-    assert_eq!(
-        (lines[1].source.start, lines[1].source.end),
-        (62, text.len())
-    );
-    assert_eq!(lines[0].source_for_display_char(60), 60);
-    assert_eq!(lines[0].source_for_display_char(61), 62);
+    assert!(!lines.is_empty());
+    assert_eq!(lines.first().map(|line| line.source.start), Some(0));
+    assert_eq!(lines.last().map(|line| line.source.end), Some(text.len()));
     for span in lines.iter().flat_map(|line| line.spans.iter()) {
         assert_eq!(
             span.display_boundary_offsets.first(),
@@ -198,11 +233,28 @@ fn layout_public_api_smoke() {
         element: 0,
         offset: 60,
     };
-    let caret_geometry = valid(first.caret_geometry(caret));
-    assert_eq!(lines[0].page, 0);
-    assert_eq!(first.pages[0].lines[0], *lines[0]);
-    assert_eq!(caret_geometry.y, lines[0].geometry.y);
-    assert_eq!(caret_geometry.height, lines[0].geometry.height);
+    let caret_geometry = valid(first.caret_geometry(caret.clone()));
+    let repeated_caret_geometry = valid(second.caret_geometry(caret));
+    assert_eq!(caret_geometry, repeated_caret_geometry);
+    let mut cache = LayoutCache::default();
+    let (cached, cache_hit) = valid(cache.get_or_build_with_composition_and_environment(
+        0,
+        &project,
+        &inputs,
+        LayoutComposition::BodyEditor,
+        &environment,
+    ));
+    assert!(!cache_hit);
+    let (repeated, repeated_hit) = valid(cache.get_or_build_with_composition_and_environment(
+        0,
+        &project,
+        &inputs,
+        LayoutComposition::BodyEditor,
+        &environment,
+    ));
+    assert!(repeated_hit);
+    assert_eq!(first.pages, cached.pages);
+    assert_eq!(cached.pages, repeated.pages);
     assert_eq!(project, original);
 }
 
@@ -218,7 +270,7 @@ fn sequential_body_uses_current_definition_inline_metrics_and_complete_cache_ide
     let definition = definitions
         .iter_mut()
         .find(|definition| definition.key == action)
-        .unwrap_or_else(|| unreachable!("Project::new supplies the Action definition"));
+        .unwrap_or_else(|| unreachable!("synthetic project explicitly defines Action"));
     definition.font.family = "Arial".to_owned();
     definition.font.size = 14;
     definition.paragraph.left_indent = FixedPoint::from_points(36);

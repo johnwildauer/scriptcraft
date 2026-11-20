@@ -13,8 +13,7 @@ use scriptcraft_session::storage::{
 use std::fs;
 use std::path::PathBuf;
 
-const OPEN_FIXTURE: &[u8] =
-    include_bytes!("../../scriptcraft-fdx/tests/fixtures/open_element_settings.fdx");
+const OPEN_FIXTURE: &[u8] = include_bytes!("fixtures/open_element_settings.fdx");
 const SAVE_CORRECTION_FDX: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 <FinalDraft DocumentType="Script" Version="6">
   <Content>

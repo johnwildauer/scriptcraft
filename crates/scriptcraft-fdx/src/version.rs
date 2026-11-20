@@ -190,15 +190,26 @@ mod tests {
     #[test]
     fn older_preparation_preserves_unknown_and_missing_paragraph_types() {
         let fixture = include_str!("../tests/fixtures/smoke_screenplay.fdx");
-        let source = fixture
+        let mut source = fixture.to_owned();
+        let body_start = source
+            .find("  <Content>\n")
+            .map(|index| index + "  <Content>\n".len())
+            .unwrap_or_else(|| unreachable!("the fixture has a body content section"));
+        let body_end = source[body_start..]
+            .find("  </Content>")
+            .map(|index| body_start + index)
+            .unwrap_or_else(|| unreachable!("the fixture body content section is closed"));
+        source.replace_range(
+            body_start..body_end,
+            concat!(
+                "    <Paragraph Type=\"lyrics\" id=\"older-lowercase-type\"><Text>Lowercase</Text></Paragraph>\n",
+                "    <Paragraph Type=\"Lyrics\" id=\"older-uppercase-type\"><Text>Uppercase</Text></Paragraph>\n",
+                "    <Paragraph id=\"older-missing-type\"><Text>Untyped body</Text></Paragraph>\n",
+            ),
+        );
+        let source = source
             .replace("Version=\"6\"", "Version=\"5\"")
-            .replace("Type=\"Scene Heading\"", "Type=\"lyrics\"")
-            .replace("Type=\"Action\"", "Type=\"Lyrics\"")
-            .replace("Type=\"Title\"", "Type=\"Scene Citation\"")
-            .replace(
-                "  </Content>\n  <TitlePage>",
-                "    <Paragraph id=\"older-missing-type\"><Text>Untyped body</Text></Paragraph>\n  </Content>\n  <TitlePage>",
-            );
+            .replace("Type=\"Title\"", "Type=\"Scene Citation\"");
         assert_ne!(source, fixture);
 
         let prepared = prepare_non_v6_source(source.as_bytes(), FdxVersionDirection::Older)

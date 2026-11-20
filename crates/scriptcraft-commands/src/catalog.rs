@@ -31,7 +31,7 @@ const fn descriptor(
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 52] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 59] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -195,6 +195,33 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 52] = [
         CommandId::ViewScriptViewSet,
         "view",
         "mode: script_view_mode (normal, page, speed)",
+    ),
+    descriptor(CommandId::FormatElementsOpen, "format", "none; host effect"),
+    descriptor(CommandId::FormatElementsClose, "format", "none; host effect"),
+    descriptor(
+        CommandId::FormatTemplateSelectorOpen,
+        "format",
+        "none; host effect",
+    ),
+    descriptor(
+        CommandId::FormatTemplateSelectorCancel,
+        "format",
+        "none; host effect",
+    ),
+    descriptor(
+        CommandId::FormatTemplateApply,
+        "format",
+        "template: builtin_template_value",
+    ),
+    descriptor(
+        CommandId::FileNewFromTemplateOpen,
+        "file",
+        "none; host effect opens New-document selector",
+    ),
+    descriptor(
+        CommandId::FileNewFromTemplate,
+        "file",
+        "template: builtin_template_value; host effect launches independent child",
     ),
 ];
 

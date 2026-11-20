@@ -16,12 +16,13 @@ use crate::platform::macos::{
 };
 
 use scriptcraft_commands::DocumentPath;
+use scriptcraft_fdx::BuiltinTemplateId;
 
 // Native argument boundaries are authoritative: shell quoting has already
 // produced one argument, so paths are never split or reparsed here. Ordinary
 // shell associations should pass the selected path as one quoted native path.
 // `--open-handoff=<id>` is internal and only accompanies the custom option.
-pub(crate) const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--menu-platform=auto|macos|windows] [<UTF-8 FDX or FDXT path> | --document-path=<UTF-8 FDX or FDXT path> [--open-handoff=<id> (internal)]]";
+pub(crate) const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--menu-platform=auto|macos|windows] [--new-template=screenplay|stageplay|dramatists-guild-musical (internal; exclusive of document paths) | <UTF-8 FDX or FDXT path> | --document-path=<UTF-8 FDX or FDXT path> [--open-handoff=<id> (internal)]]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupDocumentSource {
@@ -45,6 +46,7 @@ struct StartupConfig {
     development: bool,
     menu_platform: menu::MenuPlatformChoice,
     startup_document: Option<StartupDocumentInput>,
+    startup_template: Option<BuiltinTemplateId>,
 }
 
 fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<StartupConfig, String> {
@@ -52,10 +54,12 @@ fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<Startu
     let mut seen_menu_platform = false;
     let mut seen_document_path = false;
     let mut seen_open_handoff = false;
+    let mut seen_new_template = false;
     let mut development = false;
     let mut menu_platform = menu::MenuPlatformChoice::Auto;
     let mut document_input: Option<(PathBuf, StartupDocumentSource)> = None;
     let mut handoff_id = None;
+    let mut startup_template = None;
 
     for argument in args {
         let Some(argument) = argument.to_str() else {
@@ -92,6 +96,19 @@ fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<Startu
                     ));
                 }
             };
+        } else if argument == "--new-template" {
+            return Err(format!(
+                "--new-template requires an equals-form value\n{STARTUP_USAGE}"
+            ));
+        } else if let Some(value) = argument.strip_prefix("--new-template=") {
+            if seen_new_template {
+                return Err(format!("duplicate --new-template option\n{STARTUP_USAGE}"));
+            }
+            seen_new_template = true;
+            startup_template = BuiltinTemplateId::from_stable_id(value);
+            if startup_template.is_none() {
+                return Err(format!("invalid --new-template value\n{STARTUP_USAGE}"));
+            }
         } else if argument == "--document-path" {
             if seen_document_path {
                 return Err(format!("duplicate --document-path option\n{STARTUP_USAGE}"));
@@ -103,6 +120,11 @@ fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<Startu
             {
                 return Err(format!(
                     "ambiguous document sources: use one positional path or --document-path, not both\n{STARTUP_USAGE}"
+                ));
+            }
+            if startup_template.is_some() {
+                return Err(format!(
+                    "--new-template cannot be combined with a document path\n{STARTUP_USAGE}"
                 ));
             }
             return Err(format!(
@@ -119,6 +141,11 @@ fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<Startu
             {
                 return Err(format!(
                     "ambiguous document sources: use one positional path or --document-path, not both\n{STARTUP_USAGE}"
+                ));
+            }
+            if startup_template.is_some() {
+                return Err(format!(
+                    "--new-template cannot be combined with a document path\n{STARTUP_USAGE}"
                 ));
             }
             let path = DocumentPath::new(value.to_owned()).map_err(|_| {
@@ -154,6 +181,11 @@ fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<Startu
             if argument.starts_with('-') {
                 return Err(format!("unknown option\n{STARTUP_USAGE}"));
             }
+            if startup_template.is_some() {
+                return Err(format!(
+                    "--new-template cannot be combined with a document path\n{STARTUP_USAGE}"
+                ));
+            }
             match document_input.as_ref().map(|(_, source)| source) {
                 Some(StartupDocumentSource::CustomOption) => {
                     return Err(format!(
@@ -185,6 +217,11 @@ fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<Startu
             "--open-handoff requires --document-path\n{STARTUP_USAGE}"
         ));
     }
+    if startup_template.is_some() && document_input.is_some() {
+        return Err(format!(
+            "--new-template cannot be combined with a document path\n{STARTUP_USAGE}"
+        ));
+    }
 
     Ok(StartupConfig {
         development,
@@ -198,6 +235,7 @@ fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<Startu
                 None
             },
         }),
+        startup_template,
     })
 }
 
@@ -313,6 +351,7 @@ pub(crate) fn run() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let startup_document = startup.startup_document;
+            let startup_template = startup.startup_template;
 
             let document_font_store = document_font::install(&cc.egui_ctx);
             material_font::install(&cc.egui_ctx, &toolbar_items::custom_material_icon_axes());
@@ -320,6 +359,7 @@ pub(crate) fn run() -> eframe::Result {
                 menu_policy,
                 startup.menu_platform,
                 startup_document,
+                startup_template,
                 startup.development,
             )
                 .and_then(|mut app| {
@@ -392,5 +432,46 @@ mod fdxt_startup_argument_tests {
         assert_eq!(custom_document.source, StartupDocumentSource::CustomOption);
         assert!(custom_document.handoff_id.is_none());
         assert!(STARTUP_USAGE.contains("FDX or FDXT path"));
+    }
+
+    #[test]
+    fn new_template_startup_is_closed_typed_and_exclusive_of_document_inputs() {
+        for (stable_id, template_id) in [
+            ("screenplay", BuiltinTemplateId::Screenplay),
+            ("stageplay", BuiltinTemplateId::Stageplay),
+            (
+                "dramatists-guild-musical",
+                BuiltinTemplateId::DramatistsGuildMusical,
+            ),
+        ] {
+            let selected =
+                parse_startup_args([OsString::from(format!("--new-template={stable_id}"))])
+                    .unwrap_or_else(|error| panic!("known built-in ID should parse: {error}"));
+            assert_eq!(selected.startup_template, Some(template_id));
+            assert!(selected.startup_document.is_none());
+        }
+
+        for arguments in [
+            vec![
+                OsString::from("--new-template=stageplay"),
+                OsString::from("--document-path=source.fdx"),
+            ],
+            vec![
+                OsString::from("source.fdxt"),
+                OsString::from("--new-template=stageplay"),
+            ],
+            vec![
+                OsString::from("--new-template=screenplay"),
+                OsString::from("--new-template=stageplay"),
+            ],
+            vec![OsString::from("--new-template=unknown")],
+            vec![OsString::from("--new-template")],
+            vec![
+                OsString::from("--new-template=stageplay"),
+                OsString::from("--open-handoff=1"),
+            ],
+        ] {
+            assert!(parse_startup_args(arguments).is_err());
+        }
     }
 }

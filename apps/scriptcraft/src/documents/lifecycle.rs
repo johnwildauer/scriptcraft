@@ -121,6 +121,13 @@ pub(crate) fn show_native_lifecycle_error(title: &str, message: &str) {
 }
 
 impl ScriptCraftApp {
+    fn reset_element_windows_for_root_close(&mut self, decision: RootCloseDecision) {
+        if root_close_cleanup_allowed(decision) {
+            self.element_windows.reset();
+            self.command_projection_cache = None;
+        }
+    }
+
     /// Observes root Close before normal update work. A dirty unauthorized close
     /// is cancelled before prompting; confirmed choices request a fresh Close
     /// guarded by one authorization consumed at the next root update boundary.
@@ -151,6 +158,9 @@ impl ScriptCraftApp {
 
         match decision {
             RootCloseDecision::Allow | RootCloseDecision::AllowAuthorized => {
+                // Only an actually permitted root close discards transient
+                // dialog state. A canceled dirty close keeps it intact.
+                self.reset_element_windows_for_root_close(decision);
                 root_close_cleanup_allowed(decision)
             }
             RootCloseDecision::CancelAndPrompt => {
@@ -193,5 +203,32 @@ impl ScriptCraftApp {
             );
         }
         lifecycle_outcome
+    }
+}
+
+#[cfg(test)]
+mod element_window_root_close_tests {
+    use super::*;
+    use crate::widgets::elements::state::{ElementWindowState, TemplateSelectorMode};
+    use scriptcraft_commands::EditorSurface;
+
+    fn app() -> ScriptCraftApp {
+        ScriptCraftApp::new_for_template_lifecycle_tests()
+            .unwrap_or_else(|error| panic!("prepared app setup failed: {error}"))
+    }
+
+    #[test]
+    fn canceled_root_close_retains_dialog_but_authorized_close_resets_it() {
+        let mut app = app();
+        app.element_windows.open_elements(EditorSurface::TitlePage);
+        app.element_windows
+            .open_selector(TemplateSelectorMode::ApplyToCurrent);
+        let before = app.element_windows;
+
+        app.reset_element_windows_for_root_close(RootCloseDecision::CancelAndPrompt);
+        assert_eq!(app.element_windows, before);
+
+        app.reset_element_windows_for_root_close(RootCloseDecision::AllowAuthorized);
+        assert_eq!(app.element_windows, ElementWindowState::default());
     }
 }

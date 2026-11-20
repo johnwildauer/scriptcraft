@@ -6,12 +6,14 @@ use scriptcraft_export::{
 };
 use scriptcraft_layout::LayoutEnvironment;
 use scriptcraft_model::{
+    formatting::{FixedPoint, ParagraphAlignment},
     typography::{
         DocumentFontEnvironment, FaceStyle, FontResolutionKind, RequestedFontResolution,
         ResolvedFaceMetrics, ResolvedFontFace, ResolvedFontId, ResolvedFontSourceKind,
         ScalarAdvance,
     },
-    BodyOwner, Project, ScreenplayElement, TitlePageParagraph,
+    BodyOwner, ElementBehavior, ElementDefinition, ElementFontSpec, ElementOutline,
+    ElementParagraphSpec, ElementTypeKey, Project, ScreenplayElement, TitlePageParagraph,
 };
 use std::collections::BTreeSet;
 
@@ -129,9 +131,44 @@ fn synthetic_layout_environment(project: &Project) -> LayoutEnvironment {
 
 #[test]
 fn export_public_api_smoke() {
-    let mut project = valid(
-        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
-            .map(|document| document.project),
+    let mut project = valid(Project::empty_projection());
+    valid(
+        project.replace_element_definitions(vec![valid(ElementDefinition::new(
+            valid(ElementTypeKey::new("Action")),
+            ElementFontSpec {
+                family: "Courier Prime".to_owned(),
+                size: 12,
+                bold: false,
+                italic: false,
+                underline: false,
+                all_caps: false,
+                hidden_text: false,
+                color: None,
+                adornment_style: 0,
+                revision_id: 0,
+            },
+            ElementParagraphSpec {
+                alignment: ParagraphAlignment::Left,
+                first_indent: FixedPoint::default(),
+                left_indent: FixedPoint::default(),
+                right_indent: FixedPoint::default(),
+                leading: "Regular".to_owned(),
+                space_before: FixedPoint::default(),
+                spacing: 1,
+                starts_new_page: false,
+            },
+            ElementBehavior {
+                paginate_as: None,
+                return_key: None,
+                shortcut: None,
+                tab_key: None,
+                win_shortcut: None,
+            },
+            ElementOutline {
+                can_hide: false,
+                level: 0,
+            },
+        ))]),
     );
     project.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
         "export-action",

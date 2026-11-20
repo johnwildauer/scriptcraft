@@ -3,10 +3,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Appearance, DiagnosticMessage, DocumentPath, EditorSurface, ElementTypeValue,
-    HorizontalDirection, ImportResolution, LineEdge, ParagraphAlignmentValue, PdfExportOptions,
-    PointerPhase, Position, ScriptViewMode, Selection, SprintTimerMode, TitleTextStyle,
-    VerticalDirection, ZoomFactor, ZoomPercent,
+    Appearance, BuiltinTemplateValue, DiagnosticMessage, DocumentPath, EditorSurface,
+    ElementTypeValue, HorizontalDirection, ImportResolution, LineEdge, ParagraphAlignmentValue,
+    PdfExportOptions, PointerPhase, Position, ScriptViewMode, Selection, SprintTimerMode,
+    TitleTextStyle, VerticalDirection, ZoomFactor, ZoomPercent,
 };
 
 /// Stable identifier for a command. Identifiers are intentionally independent
@@ -65,11 +65,18 @@ pub enum CommandId {
     EditorStyleClear,
     ApplicationQuit,
     ViewScriptViewSet,
+    FormatElementsOpen,
+    FormatElementsClose,
+    FormatTemplateSelectorOpen,
+    FormatTemplateSelectorCancel,
+    FormatTemplateApply,
+    FileNewFromTemplateOpen,
+    FileNewFromTemplate,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 59] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -122,6 +129,13 @@ impl CommandId {
         Self::EditorStyleClear,
         Self::ApplicationQuit,
         Self::ViewScriptViewSet,
+        Self::FormatElementsOpen,
+        Self::FormatElementsClose,
+        Self::FormatTemplateSelectorOpen,
+        Self::FormatTemplateSelectorCancel,
+        Self::FormatTemplateApply,
+        Self::FileNewFromTemplateOpen,
+        Self::FileNewFromTemplate,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -178,6 +192,13 @@ impl CommandId {
             Self::EditorStyleClear => "editor.style.clear",
             Self::ApplicationQuit => "application.quit",
             Self::ViewScriptViewSet => "view.script-view.set",
+            Self::FormatElementsOpen => "format.elements.open",
+            Self::FormatElementsClose => "format.elements.close",
+            Self::FormatTemplateSelectorOpen => "format.template-selector.open",
+            Self::FormatTemplateSelectorCancel => "format.template-selector.cancel",
+            Self::FormatTemplateApply => "format.template.apply",
+            Self::FileNewFromTemplateOpen => "file.new-from-template.open",
+            Self::FileNewFromTemplate => "file.new-from-template",
         }
     }
 }
@@ -222,6 +243,12 @@ pub enum HostEffectDescription {
     OpenPrintPanel,
     ToggleFocusModeViewport,
     ResolvePdfIncludeTitlePage(PdfExportOptions),
+    OpenElementsWindow,
+    CloseElementsWindow,
+    OpenTemplateSelector,
+    CancelTemplateSelector,
+    OpenNewTemplateSelector,
+    LaunchIndependentTemplateChild(BuiltinTemplateValue),
 }
 
 /// Typed command payload. Adjacent tagging fixes the wire keys to `id` and
@@ -380,6 +407,20 @@ pub enum Command {
     ApplicationQuit,
     #[serde(rename = "view.script-view.set")]
     ViewScriptViewSet { mode: ScriptViewMode },
+    #[serde(rename = "format.elements.open")]
+    FormatElementsOpen,
+    #[serde(rename = "format.elements.close")]
+    FormatElementsClose,
+    #[serde(rename = "format.template-selector.open")]
+    FormatTemplateSelectorOpen,
+    #[serde(rename = "format.template-selector.cancel")]
+    FormatTemplateSelectorCancel,
+    #[serde(rename = "format.template.apply")]
+    FormatTemplateApply { template: BuiltinTemplateValue },
+    #[serde(rename = "file.new-from-template.open")]
+    FileNewFromTemplateOpen,
+    #[serde(rename = "file.new-from-template")]
+    FileNewFromTemplate { template: BuiltinTemplateValue },
 }
 
 impl Command {
@@ -394,6 +435,16 @@ impl Command {
             Self::PdfIncludeTitlePageResolve { options } => {
                 Some(HostEffectDescription::ResolvePdfIncludeTitlePage(*options))
             }
+            Self::FormatElementsOpen => Some(HostEffectDescription::OpenElementsWindow),
+            Self::FormatElementsClose => Some(HostEffectDescription::CloseElementsWindow),
+            Self::FormatTemplateSelectorOpen => Some(HostEffectDescription::OpenTemplateSelector),
+            Self::FormatTemplateSelectorCancel => {
+                Some(HostEffectDescription::CancelTemplateSelector)
+            }
+            Self::FileNewFromTemplateOpen => Some(HostEffectDescription::OpenNewTemplateSelector),
+            Self::FileNewFromTemplate { template } => Some(
+                HostEffectDescription::LaunchIndependentTemplateChild(*template),
+            ),
             _ => None,
         }
     }
@@ -452,6 +503,13 @@ impl Command {
             Self::EditorStyleClear { .. } => CommandId::EditorStyleClear,
             Self::ApplicationQuit => CommandId::ApplicationQuit,
             Self::ViewScriptViewSet { .. } => CommandId::ViewScriptViewSet,
+            Self::FormatElementsOpen => CommandId::FormatElementsOpen,
+            Self::FormatElementsClose => CommandId::FormatElementsClose,
+            Self::FormatTemplateSelectorOpen => CommandId::FormatTemplateSelectorOpen,
+            Self::FormatTemplateSelectorCancel => CommandId::FormatTemplateSelectorCancel,
+            Self::FormatTemplateApply { .. } => CommandId::FormatTemplateApply,
+            Self::FileNewFromTemplateOpen => CommandId::FileNewFromTemplateOpen,
+            Self::FileNewFromTemplate { .. } => CommandId::FileNewFromTemplate,
         }
     }
 }

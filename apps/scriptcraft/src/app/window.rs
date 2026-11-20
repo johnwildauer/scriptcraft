@@ -63,6 +63,7 @@ impl ScriptCraftApp {
         self.set_active_editor_surface(EditorSurface::Body);
         let availability = self.app_command_availability();
         if !self.replacement_open_pending()
+            && !self.element_windows.owns_input()
             && replacement_resume_focus_allowed(
                 availability.modal_blocked,
                 availability.native_output_active,

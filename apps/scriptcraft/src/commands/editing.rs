@@ -153,6 +153,9 @@ impl ScriptCraftApp {
             CommandOutcome::NoOp => {}
             CommandOutcome::Unavailable(_) | CommandOutcome::Rejected(_) => {}
             CommandOutcome::Failed(error) => self.show_edit_error(error.clone()),
+            // Apply Template has its own bounded inline selector error path and
+            // is normally routed by `dispatch_elements_command`.
+            CommandOutcome::ApplyTemplateFailed(_) => {}
         }
         if matches!(&outcome, CommandOutcome::Changed | CommandOutcome::NoOp)
             && !(command.id() == CommandId::EditorDualDialogueToggle

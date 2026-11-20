@@ -146,7 +146,7 @@ fn fdx_roundtrip_public_api_smoke() {
         .preservation
         .as_ref()
         .map(|state| state.source.original_bytes.clone());
-    assert_eq!(imported.elements.len(), 2);
+    assert_eq!(imported.elements.len(), 4);
     let imported_scene = imported.elements[0].as_element();
     let imported_action = imported.elements[1].as_element();
     assert_eq!(imported_scene.id.as_str(), "fdx-element-1");
@@ -184,7 +184,7 @@ fn fdx_roundtrip_public_api_smoke() {
         }
     );
     assert_eq!(imported.title_page.len(), 1);
-    assert_eq!(imported.title_page[0].id.as_str(), "fdx-element-3");
+    assert_eq!(imported.title_page[0].id.as_str(), "fdx-element-5");
     assert_eq!(
         imported.title_page[0]
             .source_provenance
@@ -192,6 +192,10 @@ fn fdx_roundtrip_public_api_smoke() {
             .and_then(|source| source.foreign_id.as_deref()),
         Some("smoke-title")
     );
+    assert_eq!(imported.elements[2].element_type().as_str(), "Lyrics");
+    assert_eq!(imported.elements[2].text, "Sing softly");
+    assert_eq!(imported.elements[3].element_type().as_str(), "lyrics");
+    assert_eq!(imported.elements[3].text, "Lowercase type stays distinct");
     assert_eq!(imported.title_page[0].text, "Smoke Story");
     assert_eq!(
         imported.title_page[0]
@@ -240,7 +244,7 @@ fn fdx_roundtrip_public_api_smoke() {
         imported.element_definitions()
     );
 
-    assert_eq!(reopened.elements.len(), 2);
+    assert_eq!(reopened.elements.len(), 4);
     let reopened_scene = reopened.elements[0].as_element();
     let reopened_action = reopened.elements[1].as_element();
     assert_eq!(reopened_scene.id.as_str(), "fdx-element-1");
@@ -252,8 +256,12 @@ fn fdx_roundtrip_public_api_smoke() {
     assert_eq!(reopened_action.runs.len(), 2);
     assert_eq!(reopened_action.runs[0].text, "Café ");
     assert_eq!(reopened_action.runs[1].text, "lights");
+    assert_eq!(reopened.elements[2].element_type().as_str(), "Lyrics");
+    assert_eq!(reopened.elements[2].text, "Sing softly");
+    assert_eq!(reopened.elements[3].element_type().as_str(), "lyrics");
+    assert_eq!(reopened.elements[3].text, "Lowercase type stays distinct");
     assert_eq!(reopened.title_page.len(), 1);
-    assert_eq!(reopened.title_page[0].id.as_str(), "fdx-element-3");
+    assert_eq!(reopened.title_page[0].id.as_str(), "fdx-element-5");
     assert_eq!(reopened.title_page[0].text, "Smoke Story");
     assert_eq!(
         reopened.title_page[0]
@@ -343,6 +351,17 @@ fn source_backed_writer_projects_ordered_definitions_and_arbitrary_types() {
         .cloned()
         .rev()
         .collect::<Vec<_>>();
+    let existing_lyrics = definitions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, definition)| (definition.key.as_str() == "Lyrics").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        existing_lyrics.len(),
+        1,
+        "the fixture import provides exactly one Lyrics definition to replace"
+    );
+    definitions.remove(existing_lyrics[0]);
     if let Some(action) = definitions
         .iter_mut()
         .find(|definition| definition.key.as_str() == "Action")

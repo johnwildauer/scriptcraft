@@ -3,6 +3,7 @@ mod clipboard;
 mod dispatch;
 mod documents;
 mod editing;
+mod elements;
 mod navigation;
 mod timer;
 mod view;

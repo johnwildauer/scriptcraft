@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 
 use scriptcraft_commands::{
-    execute_editor_command, Command, CommandOutcome, CommandRejection, EditorSurface,
-    ElementTypeValue, Position, Selection, SelectionError,
+    descriptor_for, execute_editor_command, validate_descriptor_catalog, BuiltinTemplateValue,
+    Command, CommandId, CommandOutcome, CommandRejection, EditorSurface, ElementTypeValue,
+    Position, Selection, SelectionError, COMMAND_DESCRIPTORS, COMMAND_WIRE_VERSION,
 };
 use scriptcraft_model::ElementTypeKey;
 use scriptcraft_session::editing::{
@@ -115,4 +116,85 @@ fn command_execution_public_api_smoke() {
         session.project().elements[0].element_type().as_str(),
         "Lyrics"
     );
+}
+
+#[test]
+fn phase_nine_commands_have_stable_ids_catalog_coverage_and_exact_builtin_values() {
+    let ids = [
+        (CommandId::FormatElementsOpen, "format.elements.open"),
+        (CommandId::FormatElementsClose, "format.elements.close"),
+        (
+            CommandId::FormatTemplateSelectorOpen,
+            "format.template-selector.open",
+        ),
+        (
+            CommandId::FormatTemplateSelectorCancel,
+            "format.template-selector.cancel",
+        ),
+        (CommandId::FormatTemplateApply, "format.template.apply"),
+    ];
+    assert_eq!(CommandId::ALL.len(), 59);
+    assert_eq!(COMMAND_DESCRIPTORS.len(), 59);
+    assert_eq!(COMMAND_WIRE_VERSION, 2);
+    assert_eq!(validate_descriptor_catalog(), Ok(()));
+    for (index, (id, stable_id)) in ids.into_iter().enumerate() {
+        let index = index + 52;
+        assert_eq!(id.as_str(), stable_id);
+        assert_eq!(CommandId::ALL[index], id);
+        assert_eq!(COMMAND_DESCRIPTORS[index].id, id);
+        assert_eq!(stable_id.parse::<CommandId>(), Ok(id));
+        assert_eq!(descriptor_for(id).map(|descriptor| descriptor.id), Some(id));
+    }
+
+    let values = [
+        (BuiltinTemplateValue::Screenplay, "screenplay"),
+        (BuiltinTemplateValue::Stageplay, "stageplay"),
+        (
+            BuiltinTemplateValue::DramatistsGuildMusical,
+            "dramatists-guild-musical",
+        ),
+    ];
+    for (value, serialized) in values {
+        assert_eq!(value.as_str(), serialized);
+        assert_eq!(
+            serde_json::to_string(&value)
+                .unwrap_or_else(|_| unreachable!("closed built-in IDs serialize")),
+            format!("\"{serialized}\"")
+        );
+        let command = Command::FormatTemplateApply { template: value };
+        assert_eq!(command.id(), CommandId::FormatTemplateApply);
+        assert_eq!(
+            serde_json::to_value(command)
+                .unwrap_or_else(|_| unreachable!("typed Apply command serializes")),
+            serde_json::json!({
+                "id": "format.template.apply",
+                "params": { "template": serialized }
+            })
+        );
+    }
+    assert!(serde_json::from_str::<BuiltinTemplateValue>("\"not-a-template\"").is_err());
+}
+
+#[test]
+fn element_window_host_commands_are_unsupported_by_the_headless_executor() {
+    let document = valid(scriptcraft_fdx::instantiate_builtin_template(
+        scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+    ));
+    let mut session: EditingSession = valid(EditingSession::new(document.project));
+    let commands = [
+        Command::FormatElementsOpen,
+        Command::FormatElementsClose,
+        Command::FormatTemplateSelectorOpen,
+        Command::FormatTemplateSelectorCancel,
+    ];
+
+    for command in commands {
+        assert!(command.host_effect_description().is_some());
+        let before = session.clone();
+        assert_eq!(
+            execute_editor_command(&mut session, &command),
+            CommandOutcome::Rejected(CommandRejection::UnsupportedCommand(command.id()))
+        );
+        assert_eq!(session, before);
+    }
 }

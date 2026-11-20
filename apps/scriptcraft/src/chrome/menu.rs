@@ -775,4 +775,43 @@ mod dynamic_reservation_tests {
             shift: false,
         }));
     }
+
+    #[test]
+    fn format_elements_primary_shortcut_and_menu_origins_share_one_fifo_command() {
+        use scriptcraft_commands::{Command, CommandOrigin};
+
+        let modifiers = egui::Modifiers {
+            command: true,
+            ..egui::Modifiers::default()
+        };
+        for platform in [ShortcutPlatform::MacOS, ShortcutPlatform::Windows] {
+            assert_eq!(
+                command_for_shortcut_event_on_platform(egui::Key::E, modifiers, platform),
+                Some(Command::FormatElementsOpen)
+            );
+        }
+
+        let menu = crate::commands::command_for_id(CommandId::FormatElementsOpen)
+            .unwrap_or_else(|| unreachable!("Elements has a static typed menu command"));
+        let native = menu.clone();
+        let shortcut = command_for_shortcut_event_on_platform(
+            egui::Key::E,
+            modifiers,
+            ShortcutPlatform::Windows,
+        )
+        .unwrap_or_else(|| unreachable!("primary+E resolves on Windows"));
+
+        let mut pending = PendingDesktopCommands::default();
+        pending.enqueue(CommandInvocation::new(menu, CommandOrigin::Menu));
+        pending.enqueue(CommandInvocation::new(native, CommandOrigin::NativeMenu));
+        pending.enqueue(CommandInvocation::new(shortcut, CommandOrigin::Shortcut));
+        let queued = pending.take_pending().collect::<Vec<_>>();
+        assert_eq!(queued.len(), 3);
+        assert_eq!(queued[0].command(), &Command::FormatElementsOpen);
+        assert_eq!(queued[0].origin(), CommandOrigin::Menu);
+        assert_eq!(queued[1].command(), &Command::FormatElementsOpen);
+        assert_eq!(queued[1].origin(), CommandOrigin::NativeMenu);
+        assert_eq!(queued[2].command(), &Command::FormatElementsOpen);
+        assert_eq!(queued[2].origin(), CommandOrigin::Shortcut);
+    }
 }

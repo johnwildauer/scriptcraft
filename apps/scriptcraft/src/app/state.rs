@@ -21,7 +21,7 @@ use crate::{
         replacement_transport,
     },
     presentation::{document_font, wheel_zoom},
-    widgets::sprint_timer,
+    widgets::{elements::state::ElementWindowState, sprint_timer},
 };
 use eframe::egui;
 use scriptcraft_commands::{Command, DiagnosticMessage, EditorSurface, ScriptViewMode};
@@ -119,6 +119,7 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) active_editor_surface: EditorSurface,
     pub(crate) active_body_dual_dialogue_group: Option<StableId>,
     pub(crate) title_page_window_open: bool,
+    pub(crate) element_windows: ElementWindowState,
     pub(crate) title_page_focus_requested: bool,
     pub(crate) title_viewport_unsupported: bool,
     pub(crate) title_view_reset_pending: bool,
@@ -183,6 +184,7 @@ impl ScriptCraftApp {
             menu::RuntimeMenuPolicy::for_current_target(),
             menu::MenuPlatformChoice::Auto,
             None,
+            None,
             false,
         )
     }
@@ -191,12 +193,13 @@ impl ScriptCraftApp {
         menu_policy: menu::RuntimeMenuPolicy,
         menu_platform_choice: menu::MenuPlatformChoice,
         startup_document: Option<StartupDocumentInput>,
+        startup_template: Option<scriptcraft_fdx::BuiltinTemplateId>,
         development_mode: bool,
     ) -> Result<Self, String> {
         let project = scriptcraft_fdx::instantiate_builtin_template(
-            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
+            startup_template.unwrap_or(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID),
         )
-        .map_err(|error| format!("default Screenplay template failed: {error:?}"))?
+        .map_err(|error| format!("startup built-in template failed: {error:?}"))?
         .project;
         let session = EditingSession::with_policy(project, EditPolicy::default())
             .map_err(|error| format!("session failed: {error:?}"))?;
@@ -244,6 +247,7 @@ impl ScriptCraftApp {
             active_editor_surface: EditorSurface::Body,
             active_body_dual_dialogue_group: None,
             title_page_window_open: false,
+            element_windows: ElementWindowState::default(),
             title_page_focus_requested: false,
             title_viewport_unsupported: false,
             title_view_reset_pending: false,
@@ -274,7 +278,9 @@ impl ScriptCraftApp {
             latest_window_state: None,
             pending_fdx_open: None,
             startup_document,
-            initial_document_slot_finalized: false,
+            // A selected built-in already owns this child process's initial
+            // document slot; later native Open events must not replace it.
+            initial_document_slot_finalized: startup_template.is_some(),
             startup_document_consumed: false,
             native_input_diagnostics: NativeInputDiagnostics::default(),
             editor_surface_id: None,
@@ -557,6 +563,43 @@ mod default_template_startup_tests {
     }
 
     #[test]
+    fn selected_builtin_startup_uses_complete_content_and_fresh_unsaved_state() {
+        let app = valid(ScriptCraftApp::new_with_startup(
+            menu::RuntimeMenuPolicy::for_current_target(),
+            menu::MenuPlatformChoice::Auto,
+            None,
+            Some(scriptcraft_fdx::BuiltinTemplateId::Stageplay),
+            false,
+        ));
+        let expected = valid(scriptcraft_fdx::instantiate_builtin_template(
+            scriptcraft_fdx::BuiltinTemplateId::Stageplay,
+        ));
+
+        assert_eq!(app.session.project().elements, expected.project.elements);
+        assert_eq!(
+            app.session.project().title_page,
+            expected.project.title_page
+        );
+        assert_eq!(
+            app.session.project().element_definitions(),
+            expected.project.element_definitions()
+        );
+        assert!(app.session.project().preservation.is_some());
+        assert!(app.native_path.is_none());
+        assert!(app.fdx_baseline.is_none());
+        assert_eq!(app.native_title, UNTITLED_DOCUMENT_TITLE);
+        assert!(app.initial_document_slot_finalized);
+        assert!(app.startup_document.is_none());
+        assert_eq!(app.session.revision(), 0);
+        assert!(!app.session.dirty());
+        assert!(app.element_windows == ElementWindowState::default());
+        assert!(!Arc::ptr_eq(
+            app.session.project().layout_identity(),
+            expected.project.layout_identity()
+        ));
+    }
+
+    #[test]
     fn fresh_unsaved_activation_clears_an_existing_path_and_baseline() {
         let mut app = valid(ScriptCraftApp::new());
         let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -571,6 +614,11 @@ mod default_template_startup_tests {
         app.native_path = Some(opened.baseline.path().to_owned());
         app.native_title = "dynamic_controls.fdx".to_owned();
         app.fdx_baseline = Some(opened.baseline);
+        app.element_windows.open_elements(EditorSurface::TitlePage);
+        app.element_windows
+            .open_selector(crate::widgets::elements::state::TemplateSelectorMode::ApplyToCurrent);
+        app.element_windows
+            .select_template(scriptcraft_fdx::BuiltinTemplateId::Stageplay);
 
         let template = valid(scriptcraft_fdx::instantiate_builtin_template(
             scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
@@ -586,6 +634,7 @@ mod default_template_startup_tests {
 
         assert!(app.native_path.is_none());
         assert!(app.fdx_baseline.is_none());
+        assert_eq!(app.element_windows, ElementWindowState::default());
         assert_eq!(app.native_title, UNTITLED_DOCUMENT_TITLE);
         assert!(!Arc::ptr_eq(
             &previous_layout_identity,

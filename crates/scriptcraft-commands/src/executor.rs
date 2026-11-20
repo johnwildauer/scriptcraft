@@ -4,7 +4,9 @@
 //! remain host effects; this executor never performs them.
 
 use scriptcraft_model::{Position as CorePosition, Selection as CoreSelection};
-use scriptcraft_session::editing::{EditError, EditingSession};
+use scriptcraft_session::editing::{
+    ApplyTemplateError, ApplyTemplateOutcome, EditError, EditingSession,
+};
 
 use crate::{Command, CommandId, EditorSurface, PointerPhase, PositionError, SelectionError};
 
@@ -16,6 +18,8 @@ pub enum CommandOutcome {
     Unavailable(UnavailableReason),
     Rejected(CommandRejection),
     Failed(EditError),
+    /// A bounded target-stage or current-candidate failure from Apply Template.
+    ApplyTemplateFailed(ApplyTemplateError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +101,14 @@ pub fn execute_editor_command_on_surface(
         if active_surface != EditorSurface::Body {
             return CommandOutcome::Unavailable(UnavailableReason::DualDialogueTarget);
         }
+    }
+
+    if let Command::FormatTemplateApply { template } = command {
+        return match session.apply_builtin_template(crate::builtin_template_id(*template)) {
+            Ok(ApplyTemplateOutcome::Changed) => CommandOutcome::Changed,
+            Ok(ApplyTemplateOutcome::NoOp) => CommandOutcome::NoOp,
+            Err(error) => CommandOutcome::ApplyTemplateFailed(error),
+        };
     }
 
     let before = session.mutation_token();

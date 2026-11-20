@@ -105,6 +105,10 @@ fn model_public_api_smoke() {
     const BODY_TEXT: &str = "Café — opening";
 
     let mut project = test_project();
+    add_custom_type(&mut project, "Lyrics", None);
+    add_custom_type(&mut project, "lyrics", None);
+    let lyrics_key = valid(ElementTypeKey::new("Lyrics"));
+    let lowercase_lyrics_key = valid(ElementTypeKey::new("lyrics"));
     let element = valid(ScreenplayElement::with_runs(
         "smoke-body",
         valid(ElementTypeKey::new("Action")),
@@ -130,6 +134,28 @@ fn model_public_api_smoke() {
         Default::default(),
     ))];
 
+    let definition_order = project
+        .element_definitions()
+        .iter()
+        .map(|definition| definition.key.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        definition_order,
+        vec![
+            "Scene Heading",
+            "Action",
+            "Character",
+            "Dialogue",
+            "Parenthetical",
+            "Transition",
+            "General",
+            "Shot",
+            "Cast List",
+            "Lyrics",
+            "lyrics",
+        ]
+    );
+
     assert_eq!(project.elements.len(), 1);
     assert_eq!(project.title_page.len(), 1);
     let body = project.elements[0].as_element();
@@ -140,6 +166,20 @@ fn model_public_api_smoke() {
     assert_eq!(title.id.as_str(), "smoke-title");
     assert_eq!(title.element_type(), None);
     assert_eq!(title.text, "Smoke Story");
+
+    let body_id = body.id.clone();
+    let body_runs = body.runs.clone();
+    BodyOwner::update(&mut project.elements[0], |element| {
+        element.set_element_type(lyrics_key.clone());
+    });
+    project.title_page[0].set_element_type(Some(lowercase_lyrics_key.clone()));
+    let body = project.elements[0].as_element();
+    let title = &project.title_page[0];
+    assert_eq!(body.element_type(), lyrics_key);
+    assert_eq!(body.id, body_id);
+    assert_eq!(body.runs, body_runs);
+    assert_eq!(title.element_type(), Some(lowercase_lyrics_key));
+    assert_eq!(title.id.as_str(), "smoke-title");
 
     let run_text = body
         .runs
@@ -230,7 +270,7 @@ fn canonical_open_keys_preserve_paragraph_identity_and_direct_formatting() {
         .element_definitions()
         .get(&action_key)
         .cloned()
-        .unwrap_or_else(|| unreachable!("static bootstrap contains Action"));
+        .unwrap_or_else(|| unreachable!("synthetic project explicitly defines Action"));
     lyrics_definition.key = lyrics_key.clone();
     let mut lowercase_lyrics_definition = lyrics_definition.clone();
     lowercase_lyrics_definition.key = lowercase_lyrics_key.clone();

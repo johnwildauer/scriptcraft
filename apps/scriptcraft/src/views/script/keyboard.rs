@@ -290,6 +290,13 @@ impl ScriptCraftApp {
             self.native_input_diagnostics.dispatch_enabled = false;
             return;
         }
+        if self.element_windows.owns_input() {
+            // Do not consume text, paste, navigation, shortcut, or IME events
+            // while a root-context element window owns the keyboard. Leaving the
+            // events in egui lets the topmost dialog handle its own controls.
+            self.native_input_diagnostics.dispatch_enabled = false;
+            return;
+        }
         self.native_input_diagnostics.dispatch_enabled = self.surface_focused;
         if ctx.input(|input| has_nonzero_mouse_wheel(&input.raw.events)) {
             // Explicit user scrolling wins over a not-yet-applied zoom request.
@@ -304,6 +311,7 @@ impl ScriptCraftApp {
             self.surface_focused,
             self.active_editor_surface(),
             surface,
+            self.element_windows.owns_input(),
         ) {
             return;
         }
@@ -330,8 +338,9 @@ fn surface_input_is_dispatchable(
     surface_focused: bool,
     active_surface: EditorSurface,
     requested_surface: EditorSurface,
+    element_windows_own_input: bool,
 ) -> bool {
-    surface_focused && active_surface == requested_surface
+    !element_windows_own_input && surface_focused && active_surface == requested_surface
 }
 
 fn dynamic_shortcut_surface_allowed(
@@ -364,23 +373,30 @@ mod dynamic_input_ownership_tests {
         assert!(surface_input_is_dispatchable(
             true,
             EditorSurface::Body,
-            EditorSurface::Body
+            EditorSurface::Body,
+            false
         ));
         assert!(!surface_input_is_dispatchable(
             false,
             EditorSurface::Body,
-            EditorSurface::Body
+            EditorSurface::Body,
+            false
         ));
         assert!(!surface_input_is_dispatchable(
             true,
             EditorSurface::TitlePage,
-            EditorSurface::Body
+            EditorSurface::Body,
+            false
         ));
         assert!(surface_input_is_dispatchable(
             true,
             EditorSurface::TitlePage,
-            EditorSurface::TitlePage
+            EditorSurface::TitlePage,
+            false
         ));
+        for surface in [EditorSurface::Body, EditorSurface::TitlePage] {
+            assert!(!surface_input_is_dispatchable(true, surface, surface, true));
+        }
     }
 
     #[test]

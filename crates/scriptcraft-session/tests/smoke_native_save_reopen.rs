@@ -58,12 +58,39 @@ fn native_save_reopen_public_api_smoke() {
     let destination = directory.path("smoke-native.fdx");
     assert!(!destination.exists());
 
-    let mut session = valid(EditingSession::new(valid(
+    let mut project = valid(
         scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
             .map(|document| document.project),
-    )));
+    );
+    let mut definitions = project
+        .element_definitions()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut lyrics = definitions
+        .iter()
+        .find(|definition| definition.key.as_str() == "Action")
+        .cloned()
+        .unwrap_or_else(|| unreachable!("built-in Screenplay includes Action"));
+    lyrics.key = valid(ElementTypeKey::new("Lyrics"));
+    let mut lowercase_lyrics = lyrics.clone();
+    lowercase_lyrics.key = valid(ElementTypeKey::new("lyrics"));
+    definitions.extend([lyrics, lowercase_lyrics]);
+    valid(project.replace_element_definitions(definitions));
+    let mut session = valid(EditingSession::new(project));
+    valid(session.change_element_type(valid(ElementTypeKey::new("lyrics"))));
     valid(session.insert(BODY_TEXT));
     assert_eq!(session.project().elements[0].text, BODY_TEXT);
+    assert_eq!(
+        session.project().elements[0].element_type().as_str(),
+        "lyrics"
+    );
+    let expected_definition_order = session
+        .project()
+        .element_definitions()
+        .iter()
+        .map(|definition| definition.key.as_str().to_owned())
+        .collect::<Vec<_>>();
     let expected_body = session
         .project()
         .elements
@@ -141,6 +168,17 @@ fn native_save_reopen_public_api_smoke() {
     assert_eq!(
         reopened_project.element_definitions(),
         saved_project.element_definitions()
+    );
+    assert_eq!(
+        reopened_project
+            .element_definitions()
+            .iter()
+            .map(|definition| definition.key.as_str())
+            .collect::<Vec<_>>(),
+        expected_definition_order
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
     );
 
     let reopened_session = valid(EditingSession::new(reopened_project));

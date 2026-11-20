@@ -1,10 +1,29 @@
 use std::{fmt, path::Path};
 
+use scriptcraft_fdx::BuiltinTemplateId;
 use scriptcraft_model::{Position as CorePosition, Project, Selection as CoreSelection};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{EditorSurface, PointerPhase};
+use super::{BuiltinTemplateValue, EditorSurface, PointerPhase};
+
+/// Converts the closed command-catalog value to its exact Phase 7 catalog ID.
+pub const fn builtin_template_id(value: BuiltinTemplateValue) -> BuiltinTemplateId {
+    match value {
+        BuiltinTemplateValue::Screenplay => BuiltinTemplateId::Screenplay,
+        BuiltinTemplateValue::Stageplay => BuiltinTemplateId::Stageplay,
+        BuiltinTemplateValue::DramatistsGuildMusical => BuiltinTemplateId::DramatistsGuildMusical,
+    }
+}
+
+/// Converts the Phase 7 catalog ID to its exact closed command value.
+pub const fn builtin_template_value(id: BuiltinTemplateId) -> BuiltinTemplateValue {
+    match id {
+        BuiltinTemplateId::Screenplay => BuiltinTemplateValue::Screenplay,
+        BuiltinTemplateId::Stageplay => BuiltinTemplateValue::Stageplay,
+        BuiltinTemplateId::DramatistsGuildMusical => BuiltinTemplateValue::DramatistsGuildMusical,
+    }
+}
 
 /// UTF-8 byte position in the semantic screenplay model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

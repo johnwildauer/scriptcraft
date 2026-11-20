@@ -9,16 +9,17 @@
 
 mod values;
 pub use values::{
-    Appearance, EditorSurface, ElementTypeValue, HorizontalDirection, ImportResolution, LineEdge,
-    ParagraphAlignmentValue, PdfExportOptions, PointerPhase, ScriptViewMode, SprintTimerMode,
-    TitleTextStyle, VerticalDirection,
+    Appearance, BuiltinTemplateValue, EditorSurface, ElementTypeValue, HorizontalDirection,
+    ImportResolution, LineEdge, ParagraphAlignmentValue, PdfExportOptions, PointerPhase,
+    ScriptViewMode, SprintTimerMode, TitleTextStyle, VerticalDirection,
 };
 
 mod conversions;
 pub use conversions::{
-    pointer_selection, DiagnosticMessage, DocumentPath, InvalidDiagnosticMessage,
-    InvalidDocumentPath, InvalidZoomFactor, InvalidZoomPercent, Position, PositionError, Selection,
-    SelectionError, ZoomFactor, ZoomPercent, MAX_DIAGNOSTIC_MESSAGE_BYTES,
+    builtin_template_id, builtin_template_value, pointer_selection, DiagnosticMessage,
+    DocumentPath, InvalidDiagnosticMessage, InvalidDocumentPath, InvalidZoomFactor,
+    InvalidZoomPercent, Position, PositionError, Selection, SelectionError, ZoomFactor,
+    ZoomPercent, MAX_DIAGNOSTIC_MESSAGE_BYTES,
 };
 
 mod command;

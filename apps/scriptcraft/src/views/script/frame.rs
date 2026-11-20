@@ -53,6 +53,7 @@ impl ScriptCraftApp {
     }
 
     fn live_document_surface_inner(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
+        let element_windows_own_input = self.element_windows.owns_input();
         let presentation_mode = resolve_presentation_mode(surface, || self.script_view_mode);
         let layout = match self.layout_for_render(surface) {
             Ok(layout) => layout,
@@ -145,6 +146,9 @@ impl ScriptCraftApp {
                 top: SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING as i8,
                 bottom: SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING as i8,
             });
+        if element_windows_own_input {
+            scroll_area = scroll_area.scroll_source(egui::scroll_area::ScrollSource::NONE);
+        }
         if let Some(offset) = zoom_compensation_offset {
             scroll_area = scroll_area.scroll_offset(offset);
         }
@@ -340,20 +344,30 @@ impl ScriptCraftApp {
         // This is the only interactive response in the painted editor. Pages remain
         // source-mapped geometry, not independent focusable widgets.
         let response = ui
-            .interact(scroll_output.inner_rect, editor_id, Sense::click_and_drag())
+            .interact(
+                scroll_output.inner_rect,
+                editor_id,
+                if element_windows_own_input {
+                    Sense::hover()
+                } else {
+                    Sense::click_and_drag()
+                },
+            )
             .on_hover_cursor(document_cursor_icon());
-        self.handle_pointer_response(
-            ui,
-            editor_id,
-            &response,
-            &layout,
-            &presented_pages,
-            scale,
-            &frame_projections,
-            surface,
-        );
-        self.native_input_diagnostics.focused = self.surface_focused;
-        if self.surface_focused {
+        if !element_windows_own_input {
+            self.handle_pointer_response(
+                ui,
+                editor_id,
+                &response,
+                &layout,
+                &presented_pages,
+                scale,
+                &frame_projections,
+                surface,
+            );
+        }
+        self.native_input_diagnostics.focused = self.surface_focused && !element_windows_own_input;
+        if self.surface_focused && !element_windows_own_input {
             ui.ctx().memory_mut(|memory| {
                 memory.set_focus_lock_filter(
                     editor_id,

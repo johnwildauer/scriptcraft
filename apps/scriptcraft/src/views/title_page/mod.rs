@@ -96,7 +96,10 @@ pub(crate) fn show_if_open(app: &mut ScriptCraftApp, root_ctx: &egui::Context) {
             app.appearance_applications
                 .set(theme::AppearanceContext::TitlePage, applied);
             app.theme_palette = palette;
-            if app.pending_fdx_open.is_none() && !app.replacement_open_pending() {
+            if app.pending_fdx_open.is_none()
+                && !app.replacement_open_pending()
+                && !app.element_windows.owns_input()
+            {
                 app.adapt_title_page_wheel_input(&child_ctx);
                 app.handle_surface_input(&child_ctx, EditorSurface::TitlePage);
             }
@@ -193,7 +196,7 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
         .show_inside(ui, |ui| {
             app.live_document_surface(ui, EditorSurface::TitlePage)
         });
-    if app.timer_popup_surface == EditorSurface::TitlePage {
+    if app.timer_popup_surface == EditorSurface::TitlePage && !app.element_windows.owns_input() {
         let host_geometry = app.sprint_timer_host_geometry(EditorSurface::TitlePage);
         for command in crate::widgets::sprint_timer::show_popup_with_host_geometry(
             ctx,

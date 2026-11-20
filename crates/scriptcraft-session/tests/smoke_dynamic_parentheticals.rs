@@ -7,8 +7,7 @@ use scriptcraft_model::{
 };
 use scriptcraft_session::editing::{EditPolicy, EditingSession};
 
-const OPEN_FIXTURE: &[u8] =
-    include_bytes!("../../scriptcraft-fdx/tests/fixtures/open_element_settings.fdx");
+const OPEN_FIXTURE: &[u8] = include_bytes!("fixtures/open_element_settings.fdx");
 
 fn valid<T, E>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|_| unreachable!("dynamic Parenthetical source uses valid bounded input"))

@@ -9,6 +9,7 @@ use crate::documents::{
 };
 use eframe::egui;
 use scriptcraft_commands::EditorSurface;
+use scriptcraft_fdx::BuiltinTemplateId;
 use scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL;
 use std::ffi::OsString;
 use std::path::Path;
@@ -39,6 +40,19 @@ pub(super) fn child_arguments(
     Ok(arguments)
 }
 
+fn template_child_arguments(
+    development: bool,
+    menu_platform: menu::MenuPlatformChoice,
+    template: BuiltinTemplateId,
+) -> Result<Vec<OsString>, ChildLaunchError> {
+    let mut arguments = child_arguments(development, menu_platform, None)?;
+    arguments.push(OsString::from(format!(
+        "--new-template={}",
+        template.as_str()
+    )));
+    Ok(arguments)
+}
+
 fn launch_child_with(
     executable: &Path,
     arguments: &[OsString],
@@ -61,6 +75,17 @@ fn launch_child_for_app(
     launch_child_with(executable, &arguments, spawn)
 }
 
+fn launch_template_child_for_app(
+    app: &ScriptCraftApp,
+    executable: &Path,
+    template: BuiltinTemplateId,
+    spawn: impl FnOnce(&Path, &[OsString]) -> std::io::Result<()>,
+) -> Result<(), ChildLaunchError> {
+    let arguments =
+        template_child_arguments(app.development_mode, app.menu_platform_choice, template)?;
+    launch_child_with(executable, &arguments, spawn)
+}
+
 fn spawn_current_child(
     app: &ScriptCraftApp,
     document_path: Option<&Path>,
@@ -68,6 +93,20 @@ fn spawn_current_child(
     let executable =
         std::env::current_exe().map_err(|_| ChildLaunchError::ExecutableUnavailable)?;
     launch_child_for_app(app, &executable, document_path, |executable, arguments| {
+        std::process::Command::new(executable)
+            .args(arguments)
+            .spawn()
+            .map(|_child| ())
+    })
+}
+
+fn spawn_current_template_child(
+    app: &ScriptCraftApp,
+    template: BuiltinTemplateId,
+) -> Result<(), ChildLaunchError> {
+    let executable =
+        std::env::current_exe().map_err(|_| ChildLaunchError::ExecutableUnavailable)?;
+    launch_template_child_for_app(app, &executable, template, |executable, arguments| {
         std::process::Command::new(executable)
             .args(arguments)
             .spawn()
@@ -144,6 +183,13 @@ impl ScriptCraftApp {
                 "A separate blank ScriptCraft instance could not be started. The current document is unchanged.",
             );
         }
+    }
+
+    pub(crate) fn launch_template_instance(
+        &self,
+        template: BuiltinTemplateId,
+    ) -> Result<(), ChildLaunchError> {
+        spawn_current_template_child(self, template)
     }
 
     pub(crate) fn process_staged_replacement_open(
@@ -320,6 +366,7 @@ impl ScriptCraftApp {
 #[cfg(test)]
 mod blank_instance_argument_tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn blank_instance_launch_has_no_document_argument() {
@@ -328,5 +375,95 @@ mod blank_instance_argument_tests {
         assert!(arguments
             .iter()
             .all(|argument| { !argument.to_string_lossy().starts_with("--document-path=") }));
+    }
+
+    #[test]
+    fn template_child_arguments_encode_only_the_selected_catalog_id() {
+        for (template, stable_id) in [
+            (BuiltinTemplateId::Screenplay, "screenplay"),
+            (BuiltinTemplateId::Stageplay, "stageplay"),
+            (
+                BuiltinTemplateId::DramatistsGuildMusical,
+                "dramatists-guild-musical",
+            ),
+        ] {
+            let arguments =
+                template_child_arguments(true, menu::MenuPlatformChoice::Windows, template)
+                    .unwrap_or_else(|_| panic!("template child arguments should be valid"));
+            assert!(arguments.iter().any(|argument| {
+                argument == &OsString::from(format!("--new-template={stable_id}"))
+            }));
+            assert!(arguments
+                .iter()
+                .any(|argument| argument == &OsString::from("--dev")));
+            assert!(arguments.iter().all(|argument| {
+                let argument = argument.to_string_lossy();
+                !argument.starts_with("--document-path=")
+                    && !argument.starts_with("--open-handoff=")
+            }));
+        }
+    }
+
+    #[test]
+    fn injected_template_child_launch_spawns_once_without_parent_document_arguments() {
+        let app = ScriptCraftApp::new_for_template_lifecycle_tests()
+            .unwrap_or_else(|error| panic!("prepared app setup failed: {error}"));
+        let before_project = app.session.project().clone();
+        let before_revision = app.session.revision();
+        let before_token = app.session.mutation_token();
+        let spawn_count = Cell::new(0);
+        let result = launch_template_child_for_app(
+            &app,
+            Path::new("scriptcraft-child"),
+            BuiltinTemplateId::Stageplay,
+            |_executable, arguments| {
+                spawn_count.set(spawn_count.get() + 1);
+                assert!(arguments
+                    .iter()
+                    .any(|argument| { argument == &OsString::from("--new-template=stageplay") }));
+                assert!(arguments.iter().all(|argument| {
+                    let argument = argument.to_string_lossy();
+                    !argument.starts_with("--document-path=")
+                        && !argument.starts_with("--open-handoff=")
+                }));
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(spawn_count.get(), 1);
+        assert_eq!(app.session.project(), &before_project);
+        assert_eq!(app.session.revision(), before_revision);
+        assert_eq!(app.session.mutation_token(), before_token);
+        assert!(app.native_path.is_none());
+        assert!(app.fdx_baseline.is_none());
+    }
+
+    #[test]
+    fn template_child_spawn_failure_is_returned_without_parent_mutation() {
+        let app = ScriptCraftApp::new_for_template_lifecycle_tests()
+            .unwrap_or_else(|error| panic!("prepared app setup failed: {error}"));
+        let before_project = app.session.project().clone();
+        let before_revision = app.session.revision();
+        let before_token = app.session.mutation_token();
+        let result = launch_template_child_for_app(
+            &app,
+            Path::new("scriptcraft-child"),
+            BuiltinTemplateId::DramatistsGuildMusical,
+            |_executable, _arguments| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "injected spawn failure",
+                ))
+            },
+        );
+
+        assert_eq!(result, Err(ChildLaunchError::SpawnFailed));
+        assert_eq!(app.session.project(), &before_project);
+        assert_eq!(app.session.revision(), before_revision);
+        assert_eq!(app.session.mutation_token(), before_token);
+        assert!(!app.session.dirty());
+        assert!(app.native_path.is_none());
+        assert!(app.fdx_baseline.is_none());
     }
 }

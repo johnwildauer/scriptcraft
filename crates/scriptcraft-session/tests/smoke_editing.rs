@@ -4,7 +4,10 @@ use scriptcraft_fdx::read_v6;
 use scriptcraft_model::dual_dialogue::DualDialogueGroup;
 use scriptcraft_model::preservation::{PreservedElement, PreservedNode};
 use scriptcraft_model::{
-    BodyOwner, ElementTypeKey, Position, Project, ScreenplayElement, Selection, StableId,
+    formatting::{FixedPoint, ParagraphAlignment},
+    BodyOwner, ElementBehavior, ElementDefinition, ElementFontSpec, ElementOutline,
+    ElementParagraphSpec, ElementTypeKey, Position, Project, ScreenplayElement, Selection,
+    StableId, TitlePageParagraph,
 };
 use scriptcraft_session::editing::{EditingSession, ElementDefinitionCandidate};
 
@@ -63,10 +66,62 @@ fn unqualified_attribute<'a>(element: &'a PreservedElement, name: &str) -> Optio
 fn editing_history_public_api_smoke() {
     const EDIT_TEXT: &str = "Café — répétition";
 
-    let original = valid(
-        scriptcraft_fdx::instantiate_builtin_template(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID)
-            .map(|document| document.project),
-    );
+    let mut original = valid(Project::empty_projection());
+    let action_definition = valid(ElementDefinition::new(
+        valid(ElementTypeKey::new("Action")),
+        ElementFontSpec {
+            family: "Courier Prime".to_owned(),
+            size: 12,
+            bold: false,
+            italic: false,
+            underline: false,
+            all_caps: false,
+            hidden_text: false,
+            color: None,
+            adornment_style: 0,
+            revision_id: 0,
+        },
+        ElementParagraphSpec {
+            alignment: ParagraphAlignment::Left,
+            first_indent: FixedPoint::default(),
+            left_indent: FixedPoint::default(),
+            right_indent: FixedPoint::default(),
+            leading: "Regular".to_owned(),
+            space_before: FixedPoint::default(),
+            spacing: 1,
+            starts_new_page: false,
+        },
+        ElementBehavior {
+            paginate_as: None,
+            return_key: None,
+            shortcut: None,
+            tab_key: None,
+            win_shortcut: None,
+        },
+        ElementOutline {
+            can_hide: false,
+            level: 0,
+        },
+    ));
+    let mut lyrics_definition = action_definition.clone();
+    lyrics_definition.key = valid(ElementTypeKey::new("Lyrics"));
+    let mut lowercase_lyrics_definition = lyrics_definition.clone();
+    lowercase_lyrics_definition.key = valid(ElementTypeKey::new("lyrics"));
+    valid(original.replace_element_definitions(vec![
+        action_definition,
+        lyrics_definition,
+        lowercase_lyrics_definition,
+    ]));
+    original.elements = vec![BodyOwner::shared(valid(ScreenplayElement::new(
+        "editing-smoke-body",
+        valid(ElementTypeKey::new("Action")),
+        "",
+    )))];
+    original.title_page = vec![valid(TitlePageParagraph::new(
+        "editing-smoke-title",
+        "Synthetic Smoke",
+        Default::default(),
+    ))];
     let original_selection = Selection::caret(Position {
         element: 0,
         offset: 0,
@@ -107,6 +162,30 @@ fn editing_history_public_api_smoke() {
     assert!(session.can_undo());
     assert!(!session.can_redo());
     assert_eq!(session.revision(), undone_revision + 1);
+
+    let edited_body = session.project().elements[0].as_element().clone();
+    let lyrics_key = valid(ElementTypeKey::new("lyrics"));
+    let type_change_revision = session.revision();
+    valid(session.change_element_type(lyrics_key.clone()));
+    assert_eq!(session.project().elements[0].element_type(), lyrics_key);
+    assert_eq!(session.project().elements[0].id, edited_body.id);
+    assert_eq!(session.project().elements[0].runs, edited_body.runs);
+    assert_eq!(session.revision(), type_change_revision + 1);
+    assert!(session.dirty());
+
+    let changed_type = session.clone();
+    valid(session.undo());
+    assert_eq!(
+        session.project().elements[0].element_type().as_str(),
+        "Action"
+    );
+    assert_eq!(session.project().elements[0].text, EDIT_TEXT);
+    valid(session.redo());
+    assert_eq!(session.project(), changed_type.project());
+    assert_eq!(
+        session.project().elements[0].element_type().as_str(),
+        "lyrics"
+    );
 }
 
 #[test]

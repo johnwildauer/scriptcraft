@@ -93,6 +93,8 @@ fn fdx_import_public_api_smoke() {
             .map(|definition| definition.key.as_str())
             .collect::<Vec<_>>(),
         vec![
+            "Lyrics",
+            "lyrics",
             "Scene Heading",
             "Action",
             "Title",
@@ -105,6 +107,30 @@ fn fdx_import_public_api_smoke() {
             "Cast List",
         ]
     );
+    assert_eq!(
+        project
+            .element_definitions()
+            .get_by_label("Lyrics")
+            .map(|definition| (
+                definition.font.family.as_str(),
+                definition.font.size,
+                definition
+                    .behavior
+                    .return_key
+                    .as_ref()
+                    .map(|key| key.as_str()),
+                definition.behavior.tab_key.as_ref().map(|key| key.as_str()),
+            )),
+        Some(("Times New Roman", 14, Some("lyrics"), Some("Lyrics")))
+    );
+    assert_eq!(
+        project
+            .element_definitions()
+            .get_by_label("lyrics")
+            .map(|definition| definition.key.as_str()),
+        Some("lyrics"),
+        "type keys are exact and case-sensitive"
+    );
     assert!(project
         .element_definitions()
         .iter()
@@ -115,9 +141,11 @@ fn fdx_import_public_api_smoke() {
         .is_some_and(|definition| definition.capabilities()
             == scriptcraft_model::element_definition::SemanticCapabilities::default()));
 
-    assert_eq!(project.elements.len(), 2);
+    assert_eq!(project.elements.len(), 4);
     let scene = project.elements[0].as_element();
     let action = project.elements[1].as_element();
+    let lyrics = project.elements[2].as_element();
+    let lowercase_lyrics = project.elements[3].as_element();
     assert_eq!(scene.id.as_str(), "fdx-element-1");
     assert_eq!(
         scene
@@ -138,6 +166,10 @@ fn fdx_import_public_api_smoke() {
     );
     assert_eq!(action.element_type().as_str(), "Action");
     assert_eq!(action.text, "Café lights");
+    assert_eq!(lyrics.element_type().as_str(), "Lyrics");
+    assert_eq!(lyrics.text, "Sing softly");
+    assert_eq!(lowercase_lyrics.element_type().as_str(), "lyrics");
+    assert_eq!(lowercase_lyrics.text, "Lowercase type stays distinct");
 
     assert_eq!(action.runs.len(), 2);
     assert_eq!(action.runs[0].text, "Café ");
@@ -171,7 +203,7 @@ fn fdx_import_public_api_smoke() {
 
     assert_eq!(project.title_page.len(), 1);
     let title = &project.title_page[0];
-    assert_eq!(title.id.as_str(), "fdx-element-3");
+    assert_eq!(title.id.as_str(), "fdx-element-5");
     assert_eq!(
         title
             .source_provenance
@@ -273,7 +305,7 @@ fn import_normalizes_only_winning_managed_black_white_font_colors() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(settings.len(), 4);
+    assert_eq!(settings.len(), 6);
 
     let general_font = child_element(&settings[0], "FontSpec")
         .unwrap_or_else(|| unreachable!("winning General retains its FontSpec"));

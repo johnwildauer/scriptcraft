@@ -56,6 +56,28 @@ impl<'de> Deserialize<'de> for ElementTypeValue {
     }
 }
 
+/// Closed identity for the packaged built-in template catalog. This value is
+/// deliberately distinct from open document element-type keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BuiltinTemplateValue {
+    #[serde(rename = "screenplay")]
+    Screenplay,
+    #[serde(rename = "stageplay")]
+    Stageplay,
+    #[serde(rename = "dramatists-guild-musical")]
+    DramatistsGuildMusical,
+}
+
+impl BuiltinTemplateValue {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Screenplay => "screenplay",
+            Self::Stageplay => "stageplay",
+            Self::DramatistsGuildMusical => "dramatists-guild-musical",
+        }
+    }
+}
+
 /// Semantic editing surface. Body is the compatibility default for payloads
 /// written before surface-aware commands were introduced.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]

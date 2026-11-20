@@ -16,12 +16,9 @@ use scriptcraft_session::storage::{
 use std::fs;
 use std::path::PathBuf;
 
-const DYNAMIC_FIXTURE: &[u8] =
-    include_bytes!("../../scriptcraft-fdx/tests/fixtures/dynamic_editing.fdx");
-const ACTIVE_DUAL_FIXTURE: &[u8] =
-    include_bytes!("../../scriptcraft-fdx/tests/fixtures/active_dual_dialogue.fdx");
-const INACTIVE_DUAL_FIXTURE: &[u8] =
-    include_bytes!("../../scriptcraft-fdx/tests/fixtures/inactive_dual_dialogue.fdx");
+const DYNAMIC_FIXTURE: &[u8] = include_bytes!("fixtures/dynamic_editing.fdx");
+const ACTIVE_DUAL_FIXTURE: &[u8] = include_bytes!("fixtures/active_dual_dialogue.fdx");
+const INACTIVE_DUAL_FIXTURE: &[u8] = include_bytes!("fixtures/inactive_dual_dialogue.fdx");
 
 #[track_caller]
 fn valid<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
