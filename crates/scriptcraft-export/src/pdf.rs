@@ -4,7 +4,7 @@ use scriptcraft_model::{
     formatting::{FixedPoint, SourceLayoutSettings},
     layout_inputs::LayoutInputs,
     project::Project,
-    typography::{parse_effective_text_color, EffectiveTextColor, FontResolutionKind},
+    typography::{EffectiveTextColor, FontResolutionKind},
 };
 use std::collections::BTreeMap;
 
@@ -231,13 +231,18 @@ pub fn export_pdf_with_layout_inputs_and_options(
     for page in &layout.pages {
         for line in &page.lines {
             for span in line.spans.iter() {
-                if span.text_style.hidden_text {
+                let style = &span.resolved_text_style;
+                if style.hidden_text {
                     continue;
                 }
                 let requested = environment
                     .fonts
-                    .resolution_for(&span.text_style.declared_family)
+                    .resolution_for(&style.declared_family)
                     .ok_or(ExportError::InvalidTypographyEnvironment)?;
+                environment
+                    .fonts
+                    .require_face(&style.resolved_font_id)
+                    .map_err(|_| ExportError::InvalidTypographyEnvironment)?;
                 let resource_family = match requested.kind {
                     FontResolutionKind::CourierAlias | FontResolutionKind::UnknownFallback => {
                         PdfBase14Family::Courier
@@ -254,15 +259,12 @@ pub fn export_pdf_with_layout_inputs_and_options(
                 used_fonts.insert(
                     (
                         resource_family,
-                        span.text_style.bold,
-                        span.text_style.italic,
+                        style.bold,
+                        style.italic,
                     ),
                     String::new(),
                 );
-                if matches!(
-                    parse_effective_text_color(span.text_style.source_color.as_deref()),
-                    EffectiveTextColor::UnsupportedExplicit
-                ) {
+                if matches!(style.color, EffectiveTextColor::UnsupportedExplicit) {
                     report.record(PdfFallbackKind::UnsupportedExplicitColor);
                 }
             }
@@ -364,7 +366,8 @@ fn page_content(
     let mut output = String::new();
     for line in &page.lines {
         for span in line.spans.iter() {
-            if span.text_style.hidden_text {
+            let style = &span.resolved_text_style;
+            if style.hidden_text {
                 continue;
             }
             let x = span.geometry.x;
@@ -374,8 +377,12 @@ fn page_content(
                 .saturating_sub(span.geometry.height.raw());
             let resolution = environment
                 .fonts
-                .resolution_for(&span.text_style.declared_family)
+                .resolution_for(&style.declared_family)
                 .ok_or(ExportError::InvalidTypographyEnvironment)?;
+            environment
+                .fonts
+                .require_face(&style.resolved_font_id)
+                .map_err(|_| ExportError::InvalidTypographyEnvironment)?;
             let resource_family = match resolution.kind {
                 FontResolutionKind::CourierAlias | FontResolutionKind::UnknownFallback => {
                     PdfBase14Family::Courier
@@ -388,19 +395,18 @@ fn page_content(
             let requested_font = fonts
                 .get(&(
                     resource_family,
-                    span.text_style.bold,
-                    span.text_style.italic,
+                    style.bold,
+                    style.italic,
                 ))
                 .ok_or(ExportError::InvalidTypographyEnvironment)?;
-            let color = parse_effective_text_color(span.text_style.source_color.as_deref());
-            let (red, green, blue) = match color {
+            let (red, green, blue) = match style.color {
                 EffectiveTextColor::ExplicitRgb8 { red, green, blue } => (red, green, blue),
                 EffectiveTextColor::ThemeDefault | EffectiveTextColor::UnsupportedExplicit => {
                     (0, 0, 0)
                 }
             };
             let (red, green, blue) = (pdf_color(red), pdf_color(green), pdf_color(blue));
-            let font_size = span.text_style.size;
+            let font_size = style.size;
             let scalar_count = span.display_text.chars().count();
             if span.display_boundary_offsets.len() != scalar_count.saturating_add(1) {
                 return Err(ExportError::InvalidLayoutGeometry);
@@ -484,90 +490,5 @@ fn pdf_escape_character(character: char) -> String {
     match character {
         '(' | ')' | '\\' => format!("\\{character}"),
         _ => character.to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn base14_family_and_style_selection_is_explicit() {
-        let expected = [
-            (PdfBase14Family::Courier, false, false, "Courier"),
-            (PdfBase14Family::Courier, true, false, "Courier-Bold"),
-            (PdfBase14Family::Courier, false, true, "Courier-Oblique"),
-            (PdfBase14Family::Courier, true, true, "Courier-BoldOblique"),
-            (PdfBase14Family::Helvetica, false, false, "Helvetica"),
-            (PdfBase14Family::Helvetica, true, false, "Helvetica-Bold"),
-            (PdfBase14Family::Helvetica, false, true, "Helvetica-Oblique"),
-            (
-                PdfBase14Family::Helvetica,
-                true,
-                true,
-                "Helvetica-BoldOblique",
-            ),
-            (PdfBase14Family::Times, false, false, "Times-Roman"),
-            (PdfBase14Family::Times, true, false, "Times-Bold"),
-            (PdfBase14Family::Times, false, true, "Times-Italic"),
-            (PdfBase14Family::Times, true, true, "Times-BoldItalic"),
-        ];
-        for (family, bold, italic, name) in expected {
-            assert_eq!(base14_font_name(family, bold, italic), name);
-        }
-    }
-
-    #[test]
-    fn fallback_report_is_bounded_and_contains_no_source_values() {
-        let mut report = PdfTypographyReport::default();
-        for requested in [
-            FontResolutionKind::CourierAlias,
-            FontResolutionKind::ExactHost,
-            FontResolutionKind::NearestSans,
-            FontResolutionKind::NearestSerif,
-            FontResolutionKind::UnknownFallback,
-        ] {
-            for resource in [
-                PdfBase14Family::Courier,
-                PdfBase14Family::Helvetica,
-                PdfBase14Family::Times,
-            ] {
-                report.record(PdfFallbackKind::Base14FontSubstitution {
-                    requested,
-                    resource,
-                });
-            }
-        }
-        report.record(PdfFallbackKind::UnsupportedExplicitColor);
-        assert_eq!(report.entries.len(), MAX_PDF_REPORT_ENTRIES);
-        assert!(report.suppressed_count > 0);
-        let summary = report.summary();
-        assert!(summary.contains("PDF bounded fallback report"));
-        assert!(!summary.contains("synthetic"));
-        assert!(!summary.contains("/Users/"));
-    }
-
-    #[test]
-    fn rgb_conversion_and_pdf_string_escaping_are_bounded() {
-        assert_eq!(pdf_color(0), "0.000");
-        assert_eq!(pdf_color(255), "1.000");
-        assert_eq!(pdf_escape_character('('), "\\(");
-        assert_eq!(pdf_escape_character('\\'), "\\\\");
-        assert_eq!(
-            parse_effective_text_color(None),
-            EffectiveTextColor::ThemeDefault
-        );
-        assert_eq!(
-            parse_effective_text_color(Some("#FFFF00000000")),
-            EffectiveTextColor::ExplicitRgb8 {
-                red: 255,
-                green: 0,
-                blue: 0,
-            }
-        );
-        assert_eq!(
-            parse_effective_text_color(Some("not-a-color")),
-            EffectiveTextColor::UnsupportedExplicit
-        );
     }
 }

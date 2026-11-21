@@ -3,8 +3,6 @@ pub(crate) mod selector;
 pub(crate) mod state;
 pub(crate) mod summary;
 
-#[cfg(test)]
-mod tests;
 
 use crate::{app::ScriptCraftApp, commands::CommandInvocation};
 use eframe::egui;

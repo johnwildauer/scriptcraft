@@ -5,17 +5,15 @@ use super::{
         PreparedBodyEnvironment, PreparedBodyParagraph,
     },
     inputs::{
-        effective_paragraph, resolve_effective_dual_wrapper_paragraph, resolve_effective_paragraph,
+        resolve_effective_dual_wrapper_paragraph, resolve_effective_paragraph,
         resolve_effective_text_style, EffectiveGeometryMode,
     },
 };
 use scriptcraft_model::dual_dialogue::{
     self as model_dual_dialogue, DualDialogueGroup, DualDialogueSide,
 };
-use scriptcraft_model::formatting::{
-    FixedPoint, ParagraphAlignment, SourceLayoutSettings, SourceParagraphOverrides,
-};
-use scriptcraft_model::{ElementDefinition, LayoutInputs, Project, StableId};
+use scriptcraft_model::formatting::{FixedPoint, ParagraphAlignment};
+use scriptcraft_model::{Project, StableId};
 use std::{sync::Arc, time::Instant};
 
 #[allow(clippy::too_many_arguments)]
@@ -23,7 +21,6 @@ pub(super) fn prepare_group(
     layout: &mut ScreenplayLayout,
     project: &Project,
     index: usize,
-    source_settings: &SourceLayoutSettings,
     purpose: LayoutPurpose,
     composition: LayoutComposition,
     prepared_body_cache: &mut Option<&mut PreparedBodyCache>,
@@ -33,7 +30,6 @@ pub(super) fn prepare_group(
     layout.prepare_group(
         project,
         index,
-        source_settings,
         purpose,
         composition,
         prepared_body_cache,
@@ -48,7 +44,6 @@ impl ScreenplayLayout {
         &mut self,
         project: &Project,
         index: usize,
-        source_settings: &SourceLayoutSettings,
         purpose: LayoutPurpose,
         composition: LayoutComposition,
         prepared_body_cache: &mut Option<&mut PreparedBodyCache>,
@@ -69,18 +64,12 @@ impl ScreenplayLayout {
             return Ok(None);
         }
 
-        let resolved_wrapper = self
-            .layout_environment
-            .as_deref()
-            .map(|environment| {
-                resolve_effective_dual_wrapper_paragraph(project, &group.id, environment)
-            })
-            .transpose()?;
-        let (outer_left, outer_right) = if let Some(wrapper) = resolved_wrapper {
-            (wrapper.left, wrapper.right)
-        } else {
-            dual_outer_extent(&self.inputs, source_settings, project, group)?
-        };
+        let resolved_wrapper = resolve_effective_dual_wrapper_paragraph(
+            project,
+            &group.id,
+            &self.layout_environment,
+        )?;
+        let (outer_left, outer_right) = (resolved_wrapper.left, resolved_wrapper.right);
         let gap = FixedPoint::from_points(geometry::DUAL_DIALOGUE_COLUMN_GAP_POINTS);
         let column_width = FixedPoint::from_raw(
             outer_right
@@ -112,8 +101,6 @@ impl ScreenplayLayout {
             project,
             &projection.left,
             left_box,
-            &self.inputs,
-            source_settings,
             purpose,
             composition,
             self,
@@ -125,8 +112,6 @@ impl ScreenplayLayout {
             project,
             &projection.right,
             right_box,
-            &self.inputs,
-            source_settings,
             purpose,
             composition,
             self,
@@ -138,21 +123,8 @@ impl ScreenplayLayout {
         // Print-hidden members remain semantic group members but do not create
         // a visible block or apply wrapper-owned vertical fields.
         if left.line_count > 0 || right.line_count > 0 {
-            let (starts_new_page, space_before) = if let Some(wrapper) = resolved_wrapper {
-                (wrapper.starts_new_page, wrapper.space_before)
-            } else {
-                let wrapper = wrapper_overrides(project, source_settings, &group.id);
-                let general = general_definition(project)?;
-                (
-                    wrapper
-                        .starts_new_page
-                        .unwrap_or(general.paragraph.starts_new_page),
-                    wrapper
-                        .paragraph
-                        .space_before
-                        .unwrap_or(general.paragraph.space_before),
-                )
-            };
+            let (starts_new_page, space_before) =
+                (resolved_wrapper.starts_new_page, resolved_wrapper.space_before);
             let first_visible_space_before = |side: &WrappedDualSide| {
                 side.paragraphs
                     .iter()
@@ -448,19 +420,6 @@ fn spill_side_lines(
     result
 }
 
-fn wrapper_overrides(
-    project: &Project,
-    source: &SourceLayoutSettings,
-    group_id: &StableId,
-) -> SourceParagraphOverrides {
-    project
-        .dual_dialogue_paragraph_overrides
-        .get(group_id)
-        .copied()
-        .or_else(|| source.direct_paragraph_overrides.get(group_id).copied())
-        .unwrap_or_default()
-}
-
 pub(super) fn active_group_boundaries(
     layout: &ScreenplayLayout,
     project: &Project,
@@ -527,64 +486,11 @@ pub(super) fn active_group_boundaries(
     }]
 }
 
-fn dual_outer_extent(
-    inputs: &LayoutInputs,
-    source: &SourceLayoutSettings,
-    project: &Project,
-    group: &DualDialogueGroup,
-) -> Result<(FixedPoint, FixedPoint), LayoutError> {
-    let general = general_definition(project)?;
-    let app_left = FixedPoint::from_points(i64::from(inputs.margin_left));
-    let app_right = FixedPoint::from_points(i64::from(
-        inputs.paper_width.saturating_sub(inputs.margin_right),
-    ));
-    let definition_left = general.paragraph.left_indent;
-    let definition_right = general.paragraph.right_indent;
-    let wrapper = wrapper_overrides(project, source, &group.id).paragraph;
-    let left = wrapper.left_indent.unwrap_or_else(|| {
-        if definition_left.raw() >= 0 {
-            definition_left
-        } else {
-            app_left
-        }
-    });
-    let right = wrapper.right_indent.unwrap_or_else(|| {
-        if definition_right > definition_left {
-            definition_right
-        } else {
-            app_right
-        }
-    });
-    let page_right = FixedPoint::from_points(i64::from(inputs.paper_width));
-    let gap = FixedPoint::from_points(geometry::DUAL_DIALOGUE_COLUMN_GAP_POINTS);
-    if left.raw() < 0
-        || right <= left
-        || right > page_right
-        || right.raw().saturating_sub(left.raw()) <= gap.raw()
-    {
-        return Err(LayoutError {
-            kind: LayoutErrorKind::InvalidProfile,
-        });
-    }
-    Ok((left, right))
-}
-
-fn general_definition(project: &Project) -> Result<&ElementDefinition, LayoutError> {
-    project
-        .element_definitions()
-        .get_by_label("General")
-        .ok_or(LayoutError {
-            kind: LayoutErrorKind::NoGeometry,
-        })
-}
-
 #[allow(clippy::too_many_arguments)]
 fn wrap_dual_side(
     project: &Project,
     side: &DualDialogueSide,
     column: (FixedPoint, FixedPoint),
-    inputs: &LayoutInputs,
-    source: &SourceLayoutSettings,
     purpose: LayoutPurpose,
     composition: LayoutComposition,
     layout: &ScreenplayLayout,
@@ -605,40 +511,17 @@ fn wrap_dual_side(
             continue;
         };
         let prepared_lookup_started = diagnostics.as_ref().map(|_| Instant::now());
-        let (text_style, resolved_text_style, mut paragraph, effective_color) =
-            if let Some(layout_environment) = layout.layout_environment.as_deref() {
-                let element_key = element.element_type();
-                let resolved_text_style =
-                    resolve_effective_text_style(project, &element_key, layout_environment)?;
-                let paragraph = resolve_effective_paragraph(
-                    project,
-                    &element_key,
-                    &element.id,
-                    &element.runs,
-                    layout_environment,
-                )?;
-                (
-                    spans::compatibility_style(&resolved_text_style),
-                    Some(resolved_text_style.clone()),
-                    paragraph,
-                    resolved_text_style.color,
-                )
-            } else {
-                let definition = project
-                    .element_definitions()
-                    .get(&element.element_type())
-                    .ok_or(LayoutError {
-                        kind: LayoutErrorKind::NoGeometry,
-                    })?;
-                let text_style = super::inputs::compatibility_text_style(definition);
-                let paragraph =
-                    effective_paragraph(inputs, source, definition, &element.id, &text_style);
-                let effective_color = scriptcraft_model::typography::parse_effective_text_color(
-                    text_style.source_color.as_deref(),
-                );
-                (text_style, None, paragraph, effective_color)
-            };
-        if purpose == LayoutPurpose::Print && text_style.hidden_text {
+        let element_key = element.element_type();
+        let resolved_text_style =
+            resolve_effective_text_style(project, &element_key, &layout.layout_environment)?;
+        let mut paragraph = resolve_effective_paragraph(
+            project,
+            &element_key,
+            &element.id,
+            &element.runs,
+            &layout.layout_environment,
+        )?;
+        if purpose == LayoutPurpose::Print && resolved_text_style.hidden_text {
             continue;
         }
         paragraph.left = column.0;
@@ -655,12 +538,9 @@ fn wrap_dual_side(
             composition,
             geometry_mode: EffectiveGeometryMode::DualColumn,
             paragraph,
-            text_style,
             resolved_text_style,
-            char_width: paragraph.char_width,
-            element_key: Some(element.element_type()),
+            element_key,
             layout_environment: layout.layout_environment.clone(),
-            effective_color,
         };
         let prepared = prepare_body_for_layout(
             prepared_cache.as_deref_mut(),

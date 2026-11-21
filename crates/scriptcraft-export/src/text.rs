@@ -1,5 +1,6 @@
 use crate::ExportError;
-use scriptcraft_layout::{LayoutLine, LayoutPurpose, ScreenplayLayout};
+use scriptcraft_layout::{LayoutComposition, LayoutEnvironment, LayoutLine, ScreenplayLayout};
+use scriptcraft_model::formatting::SourceLayoutSettings;
 use scriptcraft_model::{layout_inputs::LayoutInputs, project::Project};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,17 +30,36 @@ pub struct TextExport {
 }
 
 /// Produces an intentionally lossy, human-readable text copy and its loss contract.
-pub fn export_text(project: &Project) -> Result<TextExport, ExportError> {
+pub fn export_text(
+    project: &Project,
+    environment: &LayoutEnvironment,
+) -> Result<TextExport, ExportError> {
     let inputs = project.session_layout_inputs();
-    export_text_with_layout_inputs(project, &inputs)
+    export_text_with_layout_inputs(project, &inputs, environment)
 }
 
 pub fn export_text_with_layout_inputs(
     project: &Project,
     inputs: &LayoutInputs,
+    environment: &LayoutEnvironment,
 ) -> Result<TextExport, ExportError> {
-    let layout =
-        ScreenplayLayout::build_with_inputs_for_purpose(project, inputs, LayoutPurpose::Print)?;
+    if inputs.page_only() != environment.page {
+        return Err(ExportError::InvalidTypographyEnvironment);
+    }
+    let source_settings = project
+        .preservation
+        .as_ref()
+        .map(|preservation| preservation.source_layout_settings().clone())
+        .unwrap_or_else(SourceLayoutSettings::default);
+    let layout = ScreenplayLayout::build_with_composition_and_environment(
+        project,
+        inputs,
+        &source_settings,
+        LayoutComposition::Print {
+            include_title_page: true,
+        },
+        environment,
+    )?;
     let loss = LossReport::for_project(project);
     let mut text = String::new();
     text.push_str("# ScriptCraft plain-text export\n# ");

@@ -56,7 +56,7 @@ impl FixedPoint {
         }
     }
 
-    /// One shared deterministic conversion for legacy integer geometry and
+    /// One shared deterministic conversion for integer-point geometry and
     /// integer-only consumers. Half values round away from zero.
     pub fn rounded_points(self) -> i64 {
         if self.0 >= 0 {
@@ -103,26 +103,6 @@ pub struct SourceParagraphSpec {
 pub struct SourceParagraphOverrides {
     pub paragraph: SourceParagraphSpec,
     pub starts_new_page: Option<bool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FontFallback {
-    CourierPrime,
-}
-
-/// Bounded legacy-layout style shape for builders without a prepared font
-/// environment. Definition values are projected by the layout crate.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct EffectiveTextStyle {
-    pub declared_family: String,
-    pub family: FontFallback,
-    pub size: u8,
-    pub bold: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub all_caps: bool,
-    pub hidden_text: bool,
-    pub source_color: Option<String>,
 }
 
 fn parse_decimal_scaled(value: &str, factor: i64) -> Option<i64> {

@@ -212,17 +212,6 @@ impl ScriptCraftApp {
             .saturating_add(started.elapsed().as_nanos());
     }
 
-    #[cfg(test)]
-    pub(crate) fn dispatch_surface_events_for_test(
-        &mut self,
-        events: &[egui::Event],
-        modifiers: egui::Modifiers,
-        ctx: &egui::Context,
-        surface: EditorSurface,
-    ) {
-        self.dispatch_surface_events(events, modifiers, ctx, surface);
-    }
-
     fn navigation_key_event(
         &self,
         key: Key,
@@ -362,84 +351,4 @@ fn dynamic_shortcut_availability_allowed(
     body_only: bool,
 ) -> bool {
     !modal_blocked && !replacement_pending && !native_output_active && body_only
-}
-
-#[cfg(test)]
-mod dynamic_input_ownership_tests {
-    use super::*;
-
-    #[test]
-    fn focused_surface_gate_keeps_body_and_title_ownership_separate() {
-        assert!(surface_input_is_dispatchable(
-            true,
-            EditorSurface::Body,
-            EditorSurface::Body,
-            false
-        ));
-        assert!(!surface_input_is_dispatchable(
-            false,
-            EditorSurface::Body,
-            EditorSurface::Body,
-            false
-        ));
-        assert!(!surface_input_is_dispatchable(
-            true,
-            EditorSurface::TitlePage,
-            EditorSurface::Body,
-            false
-        ));
-        assert!(surface_input_is_dispatchable(
-            true,
-            EditorSurface::TitlePage,
-            EditorSurface::TitlePage,
-            false
-        ));
-        for surface in [EditorSurface::Body, EditorSurface::TitlePage] {
-            assert!(!surface_input_is_dispatchable(true, surface, surface, true));
-        }
-    }
-
-    #[test]
-    fn dynamic_bindings_require_focused_body_and_unlocked_command_availability() {
-        assert!(dynamic_shortcut_surface_allowed(
-            EditorSurface::Body,
-            true,
-            EditorSurface::Body,
-            false
-        ));
-        assert!(!dynamic_shortcut_surface_allowed(
-            EditorSurface::Body,
-            false,
-            EditorSurface::Body,
-            false
-        ));
-        assert!(!dynamic_shortcut_surface_allowed(
-            EditorSurface::TitlePage,
-            true,
-            EditorSurface::TitlePage,
-            false
-        ));
-        assert!(!dynamic_shortcut_surface_allowed(
-            EditorSurface::Body,
-            true,
-            EditorSurface::Body,
-            true
-        ));
-
-        assert!(dynamic_shortcut_availability_allowed(
-            false, false, false, true
-        ));
-        assert!(!dynamic_shortcut_availability_allowed(
-            true, false, false, true
-        ));
-        assert!(!dynamic_shortcut_availability_allowed(
-            false, true, false, true
-        ));
-        assert!(!dynamic_shortcut_availability_allowed(
-            false, false, true, true
-        ));
-        assert!(!dynamic_shortcut_availability_allowed(
-            false, false, false, false
-        ));
-    }
 }

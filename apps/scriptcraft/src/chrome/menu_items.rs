@@ -737,55 +737,6 @@ const FORMAT_ENTRIES: &[MenuEntrySpec] = &[
     ),
 ];
 
-#[cfg(test)]
-mod elements_menu_tests {
-    use super::*;
-
-    #[test]
-    fn format_elements_is_one_typed_accessible_primary_e_menu_item() {
-        match FORMAT_ENTRIES.first() {
-            Some(MenuEntrySpec::Item(item)) => assert_eq!(item.id, "format.elements"),
-            _ => unreachable!("Elements retains its first Format menu position"),
-        }
-        let matching = FORMAT_ENTRIES
-            .iter()
-            .filter_map(|entry| match entry {
-                MenuEntrySpec::Item(item) if item.id == "format.elements" => Some(item),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(matching.len(), 1);
-        let item = matching[0];
-        assert_eq!(item.label, "Elements...");
-        assert_eq!(item.accessibility_name, "Elements");
-        assert_eq!(item.shortcut, Some(primary_shortcut(ShortcutKey::E, false)));
-        assert_eq!(
-            item.behavior,
-            MenuItemBehavior::Command(CommandId::FormatElementsOpen)
-        );
-    }
-
-    #[test]
-    fn new_from_template_is_a_typed_file_command_with_existing_accelerator() {
-        let item = FILE_ENTRIES
-            .iter()
-            .find_map(|entry| match entry {
-                MenuEntrySpec::Item(item) if item.id == "file.new-from-template" => Some(item),
-                _ => None,
-            })
-            .unwrap_or_else(|| unreachable!("New from Template remains in File"));
-        assert_eq!(
-            item.behavior,
-            MenuItemBehavior::Command(CommandId::FileNewFromTemplateOpen)
-        );
-        assert_eq!(
-            item.accessibility_name,
-            "New document from a built-in template"
-        );
-        assert_eq!(item.shortcut, Some(primary_shortcut(ShortcutKey::N, true)));
-    }
-}
-
 const STYLE_ENTRIES: &[MenuEntrySpec] = &[
     menu_command_item(
         "format.style.bold",

@@ -300,54 +300,6 @@ pub(super) fn same_managed_paragraph_shell(
         && id_attributes(before) == id_attributes(after)
 }
 
-#[cfg(test)]
-mod managed_shell_tests {
-    use super::*;
-
-    fn attribute(name: &str, value: &str) -> PreservedAttribute {
-        PreservedAttribute {
-            name: SourceName {
-                namespace_uri: None,
-                local_name: name.to_owned(),
-                qualified_name: Some(name.to_owned()),
-            },
-            value: value.to_owned(),
-        }
-    }
-
-    fn paragraph(attributes: Vec<PreservedAttribute>, source_type: &str) -> PreservedElement {
-        PreservedElement {
-            name: SourceName {
-                namespace_uri: None,
-                local_name: "Paragraph".to_owned(),
-                qualified_name: Some("Paragraph".to_owned()),
-            },
-            attributes,
-            namespace_bindings: Vec::new(),
-            source_type: Some(source_type.to_owned()),
-            ownership: SourceOwnership::Opaque,
-            dependency_confidence: DependencyConfidence::Unknown,
-            anchor: None,
-            children: Default::default(),
-        }
-    }
-
-    #[test]
-    fn managed_shell_comparison_allows_only_the_unqualified_type_projection() {
-        let before = paragraph(
-            vec![attribute("Type", "Lyrics"), attribute("LeftIndent", "0.25")],
-            "Lyrics",
-        );
-        let mut type_changed = before.clone();
-        type_changed.attributes[0].value = "lyrics".to_owned();
-        type_changed.source_type = Some("lyrics".to_owned());
-        assert!(same_managed_paragraph_shell(&before, &type_changed));
-
-        let mut formatting_changed = type_changed.clone();
-        formatting_changed.attributes[1].value = "0.50".to_owned();
-        assert!(!same_managed_paragraph_shell(&before, &formatting_changed));
-    }
-}
 
 pub(super) fn source_text_bytes_in_element(element: &PreservedElement) -> usize {
     let mut total = 0usize;

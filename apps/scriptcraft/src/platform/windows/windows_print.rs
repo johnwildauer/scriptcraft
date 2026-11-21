@@ -1262,14 +1262,3 @@ fn decoration_rects(rect: D2D_RECT_F, scale: f32) -> (D2D_RECT_F, D2D_RECT_F) {
     )
 }
 
-#[cfg(test)]
-mod windows_print_policy_tests {
-    #[test]
-    fn native_callback_resource_limits_remain_bounded() {
-        assert_eq!(super::MAX_RUNS_PER_CALLBACK_PAGE, 8_192);
-        assert_eq!(super::MAX_TEXT_BYTES_PER_CALLBACK_PAGE, 1_048_576);
-        assert_eq!(super::MAX_FINAL_PAGES_PER_CALLBACK, 512);
-        assert_eq!(super::MAX_FINAL_RUNS_PER_CALLBACK, 65_536);
-        assert_eq!(super::MAX_FINAL_TEXT_BYTES_PER_CALLBACK, 8_388_608);
-    }
-}

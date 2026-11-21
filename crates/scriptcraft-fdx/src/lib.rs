@@ -13,6 +13,8 @@ mod context;
 mod diagnostics;
 mod document;
 mod element_settings;
+mod element_settings_import;
+mod element_settings_serialization;
 mod identity;
 mod import;
 mod lineage;

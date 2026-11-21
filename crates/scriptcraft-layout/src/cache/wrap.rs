@@ -5,10 +5,7 @@ use crate::{
     wrap::{self as layout_wrap, WrappedLine},
     LayoutBuildDiagnostics,
 };
-use scriptcraft_model::formatting::{EffectiveTextStyle, FixedPoint};
-use scriptcraft_model::typography::{
-    parse_effective_text_color, EffectiveTextColor, EffectiveTextStyle as ResolvedTextStyle,
-};
+use scriptcraft_model::typography::EffectiveTextStyle as ResolvedTextStyle;
 use scriptcraft_model::{ElementTypeKey, StableId, TextRun};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -29,10 +26,7 @@ struct ElementWrapContext {
     title_page: bool,
     geometry_mode: EffectiveGeometryMode,
     paragraph: EffectiveParagraph,
-    text_style: EffectiveTextStyle,
-    resolved_text_style: Option<ResolvedTextStyle>,
-    effective_color: EffectiveTextColor,
-    char_width: FixedPoint,
+    resolved_text_style: ResolvedTextStyle,
     runs: Arc<[TextRun]>,
     atomic_ranges: Arc<[std::ops::Range<usize>]>,
 }
@@ -46,9 +40,7 @@ struct ElementWrapIdentity<'a> {
     title_page: bool,
     geometry_mode: EffectiveGeometryMode,
     paragraph: EffectiveParagraph,
-    text_style: &'a EffectiveTextStyle,
-    resolved_text_style: Option<&'a ResolvedTextStyle>,
-    char_width: FixedPoint,
+    resolved_text_style: &'a ResolvedTextStyle,
     runs: &'a [TextRun],
     atomic_ranges: &'a [std::ops::Range<usize>],
 }
@@ -63,12 +55,7 @@ impl ElementWrapContext {
             title_page: identity.title_page,
             geometry_mode: identity.geometry_mode,
             paragraph: identity.paragraph,
-            text_style: identity.text_style.clone(),
-            resolved_text_style: identity.resolved_text_style.cloned(),
-            effective_color: parse_effective_text_color(
-                identity.text_style.source_color.as_deref(),
-            ),
-            char_width: identity.char_width,
+            resolved_text_style: identity.resolved_text_style.clone(),
             runs: Arc::from(identity.runs),
             atomic_ranges: Arc::from(identity.atomic_ranges),
         }
@@ -82,11 +69,7 @@ impl ElementWrapContext {
             && self.title_page == identity.title_page
             && self.geometry_mode == identity.geometry_mode
             && self.paragraph == identity.paragraph
-            && &self.text_style == identity.text_style
-            && self.resolved_text_style.as_ref() == identity.resolved_text_style
-            && self.effective_color
-                == parse_effective_text_color(identity.text_style.source_color.as_deref())
-            && self.char_width == identity.char_width
+            && &self.resolved_text_style == identity.resolved_text_style
             && self.runs.as_ref() == identity.runs
             && self.atomic_ranges.as_ref() == identity.atomic_ranges
     }
@@ -99,15 +82,9 @@ impl ElementWrapContext {
                     .as_ref()
                     .map_or(0, |key| key.as_str().len()),
             )
-            .saturating_add(self.text_style.declared_family.len())
-            .saturating_add(self.text_style.source_color.as_ref().map_or(0, String::len))
-            .saturating_add(self.resolved_text_style.as_ref().map_or(0, |style| {
-                style
-                    .declared_family
-                    .len()
-                    .saturating_add(style.source_color.as_ref().map_or(0, String::len))
-                    .saturating_add(style.resolved_font_id.as_str().len())
-            }))
+            .saturating_add(self.resolved_text_style.declared_family.len())
+            .saturating_add(self.resolved_text_style.source_color.as_ref().map_or(0, String::len))
+            .saturating_add(self.resolved_text_style.resolved_font_id.as_str().len())
             .saturating_add(
                 self.atomic_ranges
                     .len()
@@ -199,10 +176,7 @@ impl ElementWrapCache {
         identity.title_page.hash(&mut hasher);
         identity.geometry_mode.hash(&mut hasher);
         identity.paragraph.hash(&mut hasher);
-        identity.text_style.hash(&mut hasher);
         identity.resolved_text_style.hash(&mut hasher);
-        parse_effective_text_color(identity.text_style.source_color.as_deref()).hash(&mut hasher);
-        identity.char_width.hash(&mut hasher);
         identity.runs.len().hash(&mut hasher);
         for run in identity.runs {
             run.text.hash(&mut hasher);
@@ -221,156 +195,6 @@ impl ElementWrapCache {
         hasher.finish()
     }
 
-    // This internal hot path receives validated layout inputs individually to
-    // avoid building temporary state during per-paragraph wrapping.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn wrap(
-        &mut self,
-        element_id: &StableId,
-        element_key: Option<&ElementTypeKey>,
-        text: &str,
-        element: usize,
-        element_type: Option<ElementTypeKey>,
-        paragraph: EffectiveParagraph,
-        text_style: EffectiveTextStyle,
-        char_width: FixedPoint,
-        runs: &[TextRun],
-        atomic_ranges: &[std::ops::Range<usize>],
-        atomic_boundaries: &[std::ops::Range<usize>],
-        purpose: LayoutPurpose,
-        title_page: bool,
-        geometry_mode: EffectiveGeometryMode,
-        diagnostics: Option<&mut LayoutBuildDiagnostics>,
-    ) -> Vec<WrappedLine> {
-        let identity = ElementWrapIdentity {
-            element_id,
-            element_key,
-            element_type: element_type.clone(),
-            purpose,
-            title_page,
-            geometry_mode,
-            paragraph,
-            text_style: &text_style,
-            resolved_text_style: None,
-            char_width,
-            runs,
-            atomic_ranges,
-        };
-        let fingerprint = self.fingerprint(&identity, text);
-        if let Some(entry) = self.buckets.get_mut(&fingerprint).and_then(|bucket| {
-            bucket.iter_mut().find(|entry| {
-                entry.context.matches(&identity) && entry.canonical_text.as_ref() == text
-            })
-        }) {
-            self.usage_order.remove(&(
-                entry.last_used_generation,
-                entry.insertion_order,
-                fingerprint,
-            ));
-            entry.last_used_generation = self.generation;
-            self.usage_order.insert((
-                entry.last_used_generation,
-                entry.insertion_order,
-                fingerprint,
-            ));
-            if let Some(diagnostics) = diagnostics {
-                diagnostics.element_wraps_reused =
-                    diagnostics.element_wraps_reused.saturating_add(1);
-            }
-            return entry
-                .lines
-                .iter()
-                .cloned()
-                .map(|mut line| {
-                    line.element = element;
-                    line
-                })
-                .collect();
-        }
-
-        let started = diagnostics.as_ref().map(|_| Instant::now());
-        let context = ElementWrapContext::from_identity(identity);
-        let lines = layout_wrap::wrap_element(
-            text,
-            element,
-            element_type,
-            paragraph,
-            text_style,
-            char_width,
-            atomic_boundaries,
-            true,
-            0,
-        );
-        if let (Some(diagnostics), Some(started)) = (diagnostics, started) {
-            diagnostics.record_element_wrap(started);
-        }
-        let cached_lines = lines
-            .iter()
-            .cloned()
-            .map(|mut line| {
-                line.element = 0;
-                line
-            })
-            .collect::<Vec<_>>();
-        let byte_cost = context
-            .heap_bytes()
-            .saturating_add(text.len())
-            .saturating_add(cached_lines.iter().fold(0usize, |total, line| {
-                total
-                    .saturating_add(line.text.len())
-                    .saturating_add(line.display_text.len())
-                    .saturating_add(line.text_style.declared_family.len())
-                    .saturating_add(line.text_style.source_color.as_ref().map_or(0, String::len))
-                    .saturating_add(line.resolved_text_style.as_ref().map_or(0, |style| {
-                        style
-                            .declared_family
-                            .len()
-                            .saturating_add(style.source_color.as_ref().map_or(0, String::len))
-                            .saturating_add(style.resolved_font_id.as_str().len())
-                    }))
-                    .saturating_add(line.resolved_scalars.iter().fold(0usize, |bytes, scalar| {
-                        bytes
-                            .saturating_add(
-                                std::mem::size_of::<layout_wrap::ResolvedDisplayScalar>(),
-                            )
-                            .saturating_add(scalar.text_style.declared_family.len())
-                            .saturating_add(
-                                scalar
-                                    .text_style
-                                    .source_color
-                                    .as_ref()
-                                    .map_or(0, String::len),
-                            )
-                            .saturating_add(scalar.text_style.resolved_font_id.as_str().len())
-                    }))
-                    .saturating_add(
-                        line.display_source_map
-                            .len()
-                            .saturating_mul(std::mem::size_of::<DisplaySourceSegment>()),
-                    )
-            }));
-        if byte_cost > MAX_CACHED_ELEMENT_WRAP_BYTES {
-            return lines;
-        }
-        self.next_order = self.next_order.saturating_add(1);
-        self.buckets
-            .entry(fingerprint)
-            .or_default()
-            .push(ElementWrapEntry {
-                context,
-                canonical_text: Arc::from(text),
-                lines: cached_lines.into(),
-                last_used_generation: self.generation,
-                insertion_order: self.next_order,
-                byte_cost,
-            });
-        self.usage_order
-            .insert((self.generation, self.next_order, fingerprint));
-        self.entry_count = self.entry_count.saturating_add(1);
-        self.retained_bytes = self.retained_bytes.saturating_add(byte_cost);
-        lines
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn wrap_resolved(
         &mut self,
@@ -380,7 +204,6 @@ impl ElementWrapCache {
         element: usize,
         element_type: Option<ElementTypeKey>,
         paragraph: EffectiveParagraph,
-        text_style: EffectiveTextStyle,
         resolved_text_style: ResolvedTextStyle,
         runs: &[TextRun],
         purpose: LayoutPurpose,
@@ -396,9 +219,7 @@ impl ElementWrapCache {
             title_page,
             geometry_mode,
             paragraph,
-            text_style: &text_style,
-            resolved_text_style: Some(&resolved_text_style),
-            char_width: FixedPoint::default(),
+            resolved_text_style: &resolved_text_style,
             runs,
             atomic_ranges: &[],
         };
@@ -464,23 +285,22 @@ impl ElementWrapCache {
                 line
             })
             .collect::<Vec<_>>();
-        let byte_cost =
-            context
-                .heap_bytes()
-                .saturating_add(text.len())
-                .saturating_add(cached_lines.iter().fold(0usize, |total, line| {
-                    total
-                        .saturating_add(line.text.len())
-                        .saturating_add(line.display_text.len())
-                        .saturating_add(
-                            line.display_source_map
-                                .len()
-                                .saturating_mul(std::mem::size_of::<DisplaySourceSegment>()),
-                        )
-                        .saturating_add(line.resolved_scalars.len().saturating_mul(
-                            std::mem::size_of::<layout_wrap::ResolvedDisplayScalar>(),
-                        ))
-                }));
+        let byte_cost = context
+            .heap_bytes()
+            .saturating_add(text.len())
+            .saturating_add(cached_lines.iter().fold(0usize, |total, line| {
+                total
+                    .saturating_add(line.text.len())
+                    .saturating_add(line.display_text.len())
+                    .saturating_add(
+                        line.display_source_map
+                            .len()
+                            .saturating_mul(std::mem::size_of::<DisplaySourceSegment>()),
+                    )
+                    .saturating_add(line.resolved_scalars.len().saturating_mul(
+                        std::mem::size_of::<layout_wrap::ResolvedDisplayScalar>(),
+                    ))
+            }));
         if byte_cost > MAX_CACHED_ELEMENT_WRAP_BYTES {
             return Ok(lines);
         }
@@ -567,6 +387,3 @@ fn layout_environment_byte_cost(environment: &LayoutEnvironment) -> usize {
         },
     )
 }
-
-#[cfg(test)]
-mod tests;

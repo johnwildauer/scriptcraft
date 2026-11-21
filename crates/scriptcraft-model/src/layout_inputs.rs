@@ -5,10 +5,9 @@ const fn points_from_eighths_of_an_inch(eighths: u32) -> u32 {
     eighths * (POINTS_PER_INCH / 8)
 }
 
-/// Transitional global inputs for the current layout path. The fixed-cell and
-/// nominal-line fields remain only for existing WO-005.4/5.5 consumers; new
-/// page-only composition uses [`PageLayoutInputs`] and explicit typography
-/// environments rather than treating these fields as canonical typography.
+/// Session layout settings. Page geometry is projected to [`PageLayoutInputs`]
+/// for canonical layout; `font_size` is retained only as the desktop zoom
+/// baseline, while text styles and metrics come from the resolved environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutInputs {
     pub name: String,
@@ -19,13 +18,8 @@ pub struct LayoutInputs {
     pub margin_bottom: u32,
     pub margin_left: u32,
     pub margin_right: u32,
-    pub chars_per_line: u32,
-    pub lines_per_page: u32,
-    pub line_advance: u32,
     pub boundary_gap: u32,
-    pub font_family: String,
     pub font_size: u32,
-    pub char_width: u32,
 }
 
 impl Default for LayoutInputs {
@@ -39,13 +33,8 @@ impl Default for LayoutInputs {
             margin_bottom: points_from_eighths_of_an_inch(8),
             margin_left: points_from_eighths_of_an_inch(12),
             margin_right: points_from_eighths_of_an_inch(8),
-            chars_per_line: 55,
-            lines_per_page: 55,
-            line_advance: 12,
             boundary_gap: 12,
-            font_family: "Courier Prime".into(),
             font_size: 12,
-            char_width: 7,
         }
     }
 }

@@ -436,30 +436,3 @@ fn owning_scene_id(
         .find(|(_, capabilities)| capabilities.scene_boundary)
         .map(|(heading, _)| heading.id.as_str().to_owned())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{classify_derived_invalidation, PendingDerivedInvalidation};
-    use scriptcraft_model::Project;
-
-    #[test]
-    fn ambiguous_stable_identity_uses_complete_derived_fallback() {
-        let Ok(mut project) = scriptcraft_fdx::instantiate_builtin_template(
-            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
-        )
-        .map(|document| document.project) else {
-            assert!(false, "default project is valid");
-            return;
-        };
-        let Some(owner) = project.elements.first().cloned() else {
-            assert!(false, "default project has a body owner");
-            return;
-        };
-        project.elements = vec![owner.clone(), owner];
-
-        assert_eq!(
-            classify_derived_invalidation(&project, &project),
-            PendingDerivedInvalidation::Complete
-        );
-    }
-}

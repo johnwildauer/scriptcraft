@@ -1,10 +1,7 @@
 //! FDX page-layout and settings values mapped onto model values.
 
-use crate::diagnostics::FdxError;
 use crate::reader::{RawElement, RawNode};
-use scriptcraft_model::element_definition::ElementDefinition;
 use scriptcraft_model::formatting::FixedPoint;
-use scriptcraft_model::preservation::PreservedElement;
 
 /// Normalize PageLayout color settings in the retained source graph without
 /// changing the imported byte snapshot. Element FontSpec colors are normalized
@@ -24,14 +21,6 @@ pub(crate) fn normalize_root_page_layout_colors(root: &mut RawElement, root_ns: 
             });
         }
     }
-}
-
-/// Serialize one current Project definition when no retained settings node exists.
-pub(crate) fn serialize_element_settings(
-    definition: &ElementDefinition,
-    root: &PreservedElement,
-) -> Result<PreservedElement, FdxError> {
-    crate::element_settings::serialize_element_settings(definition, root)
 }
 
 pub(crate) fn parse_bounded_font_size(value: &str) -> Option<u8> {

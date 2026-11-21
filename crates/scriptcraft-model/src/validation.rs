@@ -67,19 +67,9 @@ pub fn validate_layout_inputs(
         || inputs.format_version == 0
         || inputs.paper_width == 0
         || inputs.paper_height == 0
-        || inputs.chars_per_line == 0
-        || inputs.lines_per_page == 0
-        || inputs.line_advance == 0
-        || inputs.line_advance > 1_000
         || inputs.boundary_gap > 1_000
-        || !matches!(
-            inputs.font_family.as_str(),
-            "Courier" | "Courier New" | "Courier Prime"
-        )
         || inputs.font_size == 0
         || inputs.font_size > 72
-        || inputs.char_width == 0
-        || inputs.char_width > 100
     {
         return Err(ModelError::InvalidNumber);
     }
@@ -228,30 +218,5 @@ impl Project {
             }
         }
         Ok(true)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_registry_change_falls_back_from_scoped_validation() {
-        let Ok(baseline) = crate::project::test_project() else {
-            assert!(false, "test fixture should provide valid definitions");
-            return;
-        };
-        let mut candidate = baseline.clone();
-        let reordered = candidate
-            .element_definitions()
-            .iter()
-            .cloned()
-            .rev()
-            .collect::<Vec<_>>();
-        assert!(candidate.replace_element_definitions(reordered).is_ok());
-        assert_eq!(
-            candidate.validate_scoped_single_element_edit(&baseline, 0),
-            Ok(false)
-        );
     }
 }

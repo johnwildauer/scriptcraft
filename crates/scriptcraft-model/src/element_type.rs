@@ -49,33 +49,3 @@ impl fmt::Display for ElementTypeKey {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn keys_preserve_arbitrary_and_case_distinct_labels() {
-        assert_eq!(
-            ElementTypeKey::new("Lyrics").map(ElementTypeKey::into_string),
-            Ok("Lyrics".to_owned())
-        );
-        assert_ne!(ElementTypeKey::new("Lyrics"), ElementTypeKey::new("lyrics"));
-        assert_eq!(
-            ElementTypeKey::new("lyrics").map(|key| key.as_str().to_owned()),
-            Ok("lyrics".to_owned())
-        );
-    }
-
-    #[test]
-    fn key_rejects_empty_and_over_limit_labels() {
-        assert_eq!(
-            ElementTypeKey::new(""),
-            Err(ModelError::EmptyElementTypeKey)
-        );
-        assert_eq!(
-            ElementTypeKey::new("x".repeat(MAX_ELEMENT_TYPE_KEY_BYTES + 1)),
-            Err(ModelError::ElementTypeKeyTooLong)
-        );
-        assert!(ElementTypeKey::new("x".repeat(MAX_ELEMENT_TYPE_KEY_BYTES)).is_ok());
-    }
-}

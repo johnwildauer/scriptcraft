@@ -3,13 +3,10 @@ use super::{
     FixedRect,
 };
 use scriptcraft_model::{
-    formatting::{
-        EffectiveTextStyle, FixedPoint, FontFallback, ParagraphAlignment, SourceLayoutSettings,
-    },
+    formatting::{FixedPoint, ParagraphAlignment},
     layout_inputs::PageLayoutInputs,
     typography::{DocumentFontEnvironment, EffectiveTextStyle as ResolvedTextStyle, FaceStyle},
-    ElementDefinition, ElementTypeKey, LayoutInputs, ModelError, Project, StableId, TextRun,
-    TitlePageParagraph,
+    ElementDefinition, ElementTypeKey, ModelError, Project, StableId, TextRun, TitlePageParagraph,
 };
 use std::{
     hash::{Hash, Hasher},
@@ -118,8 +115,7 @@ impl LayoutEnvironment {
     }
 }
 
-/// Selects which document surface is laid out. Print's compatibility builders
-/// include the title page by default; callers can explicitly disable it.
+/// Selects which document surface is laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayoutComposition {
     BodyEditor,
@@ -179,21 +175,7 @@ impl Hash for BodyEditorPresentation {
     }
 }
 
-pub(super) fn validate_profile(inputs: &LayoutInputs) -> Result<(), LayoutError> {
-    if inputs.margin_left.saturating_add(inputs.margin_right) >= inputs.paper_width
-        || inputs.margin_top.saturating_add(inputs.margin_bottom) >= inputs.paper_height
-        || inputs.lines_per_page == 0
-        || inputs.chars_per_line == 0
-        || inputs.line_advance == 0
-    {
-        return Err(LayoutError {
-            kind: LayoutErrorKind::InvalidProfile,
-        });
-    }
-    Ok(())
-}
-
-pub(super) fn validate_page_profile(inputs: &LayoutInputs) -> Result<(), LayoutError> {
+pub(super) fn validate_page_profile(inputs: &PageLayoutInputs) -> Result<(), LayoutError> {
     if inputs.name.len() > 262_144
         || inputs.format_version == 0
         || inputs.paper_width == 0
@@ -207,92 +189,6 @@ pub(super) fn validate_page_profile(inputs: &LayoutInputs) -> Result<(), LayoutE
         });
     }
     Ok(())
-}
-
-pub(super) fn effective_paragraph(
-    inputs: &LayoutInputs,
-    source: &SourceLayoutSettings,
-    definition: &ElementDefinition,
-    element_id: &StableId,
-    text_style: &EffectiveTextStyle,
-) -> EffectiveParagraph {
-    let fallback_left = FixedPoint::from_points(i64::from(inputs.margin_left));
-    let fallback_right = FixedPoint::from_points(i64::from(
-        inputs.paper_width.saturating_sub(inputs.margin_right),
-    ));
-    let mut left = definition.paragraph.left_indent;
-    let mut right = definition.paragraph.right_indent;
-    let direct = source.direct_paragraph_spec(element_id);
-    let page_right = FixedPoint::from_points(i64::from(inputs.paper_width));
-    if left.raw() < 0 || right <= left || right > page_right {
-        left = fallback_left;
-        right = fallback_right;
-    }
-    let direct_left = direct.paragraph.left_indent.unwrap_or(left);
-    let direct_right = direct.paragraph.right_indent.unwrap_or(right);
-    if direct_left.raw() >= 0 && direct_right > direct_left && direct_right <= page_right {
-        left = direct_left;
-        right = direct_right;
-    }
-    let default_indent = definition.paragraph.first_indent;
-    let char_width = i64::from(inputs.char_width.max(1)).saturating_mul(FixedPoint::SCALE);
-    let usable = right.raw().saturating_sub(left.raw());
-    let indent_fits = |indent: FixedPoint| {
-        left.raw().saturating_add(indent.raw()) >= 0
-            && usable.saturating_sub(indent.raw()) >= char_width
-    };
-    let first_indent = direct
-        .paragraph
-        .first_indent
-        .filter(|indent| indent_fits(*indent))
-        .unwrap_or_else(|| {
-            if indent_fits(default_indent) {
-                default_indent
-            } else {
-                FixedPoint::default()
-            }
-        });
-    let alignment = direct
-        .paragraph
-        .alignment
-        .unwrap_or(definition.paragraph.alignment);
-    let space_before = direct
-        .paragraph
-        .space_before
-        .unwrap_or(definition.paragraph.space_before);
-    let scaled_metric = |base: u32| {
-        let numerator = i64::from(base)
-            .saturating_mul(i64::from(text_style.size))
-            .saturating_mul(FixedPoint::SCALE);
-        FixedPoint::from_raw(numerator.saturating_add(6).div_euclid(12).max(1))
-    };
-    EffectiveParagraph {
-        left,
-        right,
-        first_indent,
-        alignment,
-        space_before,
-        line_advance: scaled_metric(inputs.line_advance),
-        char_width: scaled_metric(inputs.char_width),
-        starts_new_page: direct
-            .starts_new_page
-            .unwrap_or(definition.paragraph.starts_new_page),
-        pagination: PaginationPolicy::Ordinary,
-    }
-}
-
-pub(super) fn compatibility_text_style(definition: &ElementDefinition) -> EffectiveTextStyle {
-    EffectiveTextStyle {
-        declared_family: definition.font.family.clone(),
-        family: FontFallback::CourierPrime,
-        size: definition.font.size,
-        bold: definition.font.bold,
-        italic: definition.font.italic,
-        underline: definition.font.underline,
-        all_caps: definition.font.all_caps,
-        hidden_text: definition.font.hidden_text,
-        source_color: definition.font.color.clone(),
-    }
 }
 
 /// Editor-only page geometry for the active group's upper and lower boundary.
@@ -335,7 +231,6 @@ pub struct EffectiveParagraph {
     pub alignment: ParagraphAlignment,
     pub space_before: FixedPoint,
     pub line_advance: FixedPoint,
-    pub char_width: FixedPoint,
     pub starts_new_page: bool,
     pub pagination: PaginationPolicy,
 }
@@ -637,9 +532,6 @@ fn resolve_paragraph_values(
             .space_before
             .unwrap_or(paragraph.space_before),
         line_advance,
-        // Fixed-cell wrap is replaced by WO-005.5; this field is an inert
-        // compatibility projection and never selects a definition/default.
-        char_width: FixedPoint::default(),
         starts_new_page: direct.starts_new_page.unwrap_or(paragraph.starts_new_page),
         pagination,
     })
@@ -712,7 +604,6 @@ fn resolve_page_baseline_paragraph(
             .unwrap_or(ParagraphAlignment::Left),
         space_before: formatting.space_before.unwrap_or_default(),
         line_advance,
-        char_width: FixedPoint::default(),
         starts_new_page: formatting.starts_new_page.unwrap_or(false),
         pagination: PaginationPolicy::Ordinary,
     })
@@ -765,413 +656,3 @@ fn maximum_effective_size(
     Ok(maximum)
 }
 
-#[cfg(test)]
-mod dynamic_resolution_tests {
-    use super::*;
-    use scriptcraft_model::formatting::SourceParagraphOverrides;
-    use scriptcraft_model::typography::{
-        DocumentFontEnvironment, FontResolutionKind, RequestedFontResolution, ResolvedFaceMetrics,
-        ResolvedFontFace, ResolvedFontId, ResolvedFontSourceKind,
-    };
-    use std::collections::BTreeMap;
-
-    fn environment() -> Result<LayoutEnvironment, ModelError> {
-        let mut faces = BTreeMap::new();
-        let mut ids = Vec::new();
-        for (index, style) in FaceStyle::ALL.into_iter().enumerate() {
-            let id = ResolvedFontId::new(format!("test-face-{index}"))?;
-            let face = ResolvedFontFace::new(
-                id.clone(),
-                "Synthetic",
-                format!("Synthetic {style:?}"),
-                style,
-                ResolvedFontSourceKind::Synthetic,
-                100,
-                index as u64 + 1,
-                ResolvedFaceMetrics::new(1_000, 800, -200, 0, BTreeMap::new())?,
-            )?;
-            ids.push(id.clone());
-            faces.insert(id, face);
-        }
-        let resolution = RequestedFontResolution {
-            kind: FontResolutionKind::CourierAlias,
-            regular: ids[0].clone(),
-            bold: ids[1].clone(),
-            italic: ids[2].clone(),
-            bold_italic: ids[3].clone(),
-        };
-        let fonts = DocumentFontEnvironment::new(
-            BTreeMap::from([
-                ("Courier Prime".to_owned(), resolution.clone()),
-                ("Courier Final Draft".to_owned(), resolution.clone()),
-                ("Arial".to_owned(), resolution),
-            ]),
-            faces,
-        )?;
-        Ok(LayoutEnvironment::new(PageLayoutInputs::default(), fonts))
-    }
-
-    fn environment_with_partial_futura() -> Result<LayoutEnvironment, ModelError> {
-        let mut faces = BTreeMap::new();
-        let mut ids = Vec::new();
-        for style in FaceStyle::ALL {
-            let id = ResolvedFontId::new(format!("futura-{style:?}"))?;
-            ids.push(id.clone());
-            if style == FaceStyle::BoldItalic {
-                continue;
-            }
-            faces.insert(
-                id.clone(),
-                ResolvedFontFace::new(
-                    id,
-                    "Futura",
-                    format!("Futura {style:?}"),
-                    style,
-                    ResolvedFontSourceKind::Host,
-                    100,
-                    style as u64 + 1,
-                    ResolvedFaceMetrics::new(1_000, 800, -200, 0, BTreeMap::new())?,
-                )?,
-            );
-        }
-        let courier_ids = FaceStyle::ALL
-            .into_iter()
-            .enumerate()
-            .map(|(index, style)| {
-                let id = ResolvedFontId::new(format!("courier-{style:?}"))?;
-                faces.insert(
-                    id.clone(),
-                    ResolvedFontFace::new(
-                        id.clone(),
-                        "Courier Prime",
-                        format!("Courier Prime {style:?}"),
-                        style,
-                        ResolvedFontSourceKind::Bundled,
-                        100,
-                        index as u64 + 20,
-                        ResolvedFaceMetrics::new(1_000, 800, -200, 0, BTreeMap::new())?,
-                    )?,
-                );
-                Ok::<_, ModelError>(id)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let courier = RequestedFontResolution {
-            kind: FontResolutionKind::CourierAlias,
-            regular: courier_ids[0].clone(),
-            bold: courier_ids[1].clone(),
-            italic: courier_ids[2].clone(),
-            bold_italic: courier_ids[3].clone(),
-        };
-        let futura = RequestedFontResolution {
-            kind: FontResolutionKind::ExactHost,
-            regular: ids[0].clone(),
-            bold: ids[1].clone(),
-            italic: ids[2].clone(),
-            // The document resolver uses Bold Italic → Bold → Italic → Regular.
-            bold_italic: ids[1].clone(),
-        };
-        let fonts = DocumentFontEnvironment::new(
-            BTreeMap::from([
-                ("Courier Prime".to_owned(), courier),
-                ("Futura".to_owned(), futura),
-            ]),
-            faces,
-        )?;
-        Ok(LayoutEnvironment::new(PageLayoutInputs::default(), fonts))
-    }
-
-    #[test]
-    fn resolves_exact_definition_and_matching_direct_overrides_only() -> Result<(), ModelError> {
-        let mut project = scriptcraft_fdx::instantiate_builtin_template(
-            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
-        )
-        .map(|document| document.project)
-        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
-        let action = ElementTypeKey::new("Action")?;
-        let id = StableId::new("action-owner")?;
-        let mut overrides = SourceParagraphOverrides::default();
-        overrides.paragraph.alignment = Some(ParagraphAlignment::Center);
-        overrides.paragraph.first_indent = Some(FixedPoint::from_points(-3));
-        overrides.paragraph.space_before = Some(FixedPoint::from_points(7));
-        overrides.starts_new_page = Some(true);
-        project
-            .direct_paragraph_overrides
-            .insert(id.clone(), overrides);
-        let env = environment()?;
-        let resolved = resolve_effective_paragraph(&project, &action, &id, &[], &env)
-            .map_err(|_| ModelError::InvalidNumber)?;
-        assert_eq!(resolved.alignment, ParagraphAlignment::Center);
-        assert_eq!(resolved.first_indent, FixedPoint::from_points(-3));
-        assert_eq!(resolved.space_before, FixedPoint::from_points(7));
-        assert!(resolved.starts_new_page);
-
-        let different_id = StableId::new("different-owner")?;
-        let unmatched_override =
-            resolve_effective_paragraph(&project, &action, &different_id, &[], &env)
-                .map_err(|_| ModelError::InvalidNumber)?;
-        assert_ne!(unmatched_override.alignment, ParagraphAlignment::Center);
-        assert!(!unmatched_override.starts_new_page);
-
-        let mut invalid_pair = SourceParagraphOverrides::default();
-        invalid_pair.paragraph.left_indent = Some(FixedPoint::from_points(500));
-        invalid_pair.paragraph.right_indent = Some(FixedPoint::from_points(400));
-        invalid_pair.paragraph.first_indent = Some(FixedPoint::from_points(1_000));
-        project
-            .direct_paragraph_overrides
-            .insert(different_id.clone(), invalid_pair);
-        let invalid_pair_result =
-            resolve_effective_paragraph(&project, &action, &different_id, &[], &env)
-                .map_err(|_| ModelError::InvalidNumber)?;
-        assert_eq!(
-            invalid_pair_result.left,
-            FixedPoint::parse_inches("1.50").ok_or(ModelError::InvalidNumber)?
-        );
-        assert_eq!(
-            invalid_pair_result.right,
-            FixedPoint::parse_inches("7.50").ok_or(ModelError::InvalidNumber)?
-        );
-        assert_eq!(invalid_pair_result.first_indent, FixedPoint::default());
-        Ok(())
-    }
-
-    #[test]
-    fn dual_wrapper_uses_current_general_definition_and_its_own_direct_values(
-    ) -> Result<(), ModelError> {
-        let mut project = scriptcraft_fdx::instantiate_builtin_template(
-            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
-        )
-        .map(|document| document.project)
-        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
-        let wrapper = StableId::new("dual-wrapper")?;
-        let mut direct = SourceParagraphOverrides::default();
-        direct.paragraph.left_indent = Some(FixedPoint::from_points(140));
-        direct.paragraph.right_indent = Some(FixedPoint::from_points(112));
-        direct.starts_new_page = Some(true);
-        project
-            .dual_dialogue_paragraph_overrides
-            .insert(wrapper.clone(), direct);
-        let resolved =
-            resolve_effective_dual_wrapper_paragraph(&project, &wrapper, &environment()?)
-                .map_err(|_| ModelError::InvalidNumber)?;
-        assert_eq!(resolved.left, FixedPoint::from_points(140));
-        assert_eq!(resolved.right, FixedPoint::from_points(500));
-        assert!(resolved.starts_new_page);
-        Ok(())
-    }
-
-    #[test]
-    fn paginate_as_is_exact_pagination_policy_not_structural_identity() -> Result<(), ModelError> {
-        for value in ["Scene Heading", "Character", "Parenthetical"] {
-            assert_eq!(
-                PaginationPolicy::from_paginate_as(Some(value)),
-                PaginationPolicy::KeepWithNext
-            );
-        }
-        for value in ["Action", "scene heading", "Shot", "End of Act", "Other"] {
-            assert_eq!(
-                PaginationPolicy::from_paginate_as(Some(value)),
-                PaginationPolicy::Ordinary
-            );
-        }
-        assert_eq!(
-            PaginationPolicy::from_paginate_as(None),
-            PaginationPolicy::Ordinary
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn arbitrary_case_distinct_definition_and_run_overlays_resolve_from_current_values(
-    ) -> Result<(), ModelError> {
-        let mut project = scriptcraft_fdx::instantiate_builtin_template(
-            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
-        )
-        .map(|document| document.project)
-        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
-        let mut definitions = project
-            .element_definitions()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut arbitrary = definitions
-            .iter()
-            .find(|definition| definition.key.as_str() == "Action")
-            .cloned()
-            .ok_or(ModelError::InvalidNumber)?;
-        arbitrary.key = ElementTypeKey::new("action")?;
-        arbitrary.font.family = "Courier Final Draft".to_owned();
-        arbitrary.font.size = 16;
-        arbitrary.font.color = Some("#112233445566".to_owned());
-        arbitrary.behavior.paginate_as = Some("Scene Heading".to_owned());
-        arbitrary.paragraph.alignment = ParagraphAlignment::Right;
-        definitions.push(arbitrary);
-        project.replace_element_definitions(definitions)?;
-
-        let key = ElementTypeKey::new("action")?;
-        let env = environment()?;
-        let style = resolve_effective_text_style(&project, &key, &env)
-            .map_err(|_| ModelError::InvalidNumber)?;
-        assert_eq!(style.declared_family, "Courier Final Draft");
-        assert_eq!(style.size, 16);
-        assert_eq!(
-            style.color,
-            scriptcraft_model::typography::EffectiveTextColor::ExplicitRgb8 {
-                red: 0x11,
-                green: 0x33,
-                blue: 0x55,
-            }
-        );
-        assert!(
-            !project
-                .element_semantics(&key)
-                .ok_or(ModelError::InvalidNumber)?
-                .capabilities()
-                .scene_boundary
-        );
-        let paragraph = resolve_effective_paragraph(
-            &project,
-            &key,
-            &StableId::new("lowercase-action")?,
-            &[],
-            &env,
-        )
-        .map_err(|_| ModelError::InvalidNumber)?;
-        assert_eq!(paragraph.alignment, ParagraphAlignment::Right);
-        assert_eq!(paragraph.pagination, PaginationPolicy::KeepWithNext);
-
-        let direct_run = TextRun {
-            text: "sample".to_owned(),
-            attributes: vec![
-                scriptcraft_model::RunAttribute {
-                    name: "Font".to_owned(),
-                    value: "Arial".to_owned(),
-                },
-                scriptcraft_model::RunAttribute {
-                    name: "Size".to_owned(),
-                    value: "22".to_owned(),
-                },
-                scriptcraft_model::RunAttribute {
-                    name: "Style".to_owned(),
-                    value: "Bold+Italic+Underline".to_owned(),
-                },
-                scriptcraft_model::RunAttribute {
-                    name: "Color".to_owned(),
-                    value: "not-a-color".to_owned(),
-                },
-            ],
-        };
-        let run_style = resolve_effective_run_text_style(&project, &key, &direct_run, &env)
-            .map_err(|_| ModelError::InvalidNumber)?;
-        assert_eq!(run_style.declared_family, "Arial");
-        assert_eq!(run_style.size, 22);
-        assert!(run_style.bold && run_style.italic && run_style.underline);
-        assert_eq!(
-            run_style.color,
-            scriptcraft_model::typography::EffectiveTextColor::UnsupportedExplicit
-        );
-        assert_eq!(run_style.source_color.as_deref(), Some("not-a-color"));
-        Ok(())
-    }
-
-    #[test]
-    fn unavailable_inline_style_prefers_the_element_face_before_family_cascade(
-    ) -> Result<(), ModelError> {
-        let mut project = scriptcraft_fdx::instantiate_builtin_template(
-            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
-        )
-        .map(|document| document.project)
-        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
-        let mut definitions = project
-            .element_definitions()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let action = definitions
-            .iter_mut()
-            .find(|definition| definition.key.as_str() == "Action")
-            .ok_or(ModelError::InvalidNumber)?;
-        action.font.family = "Futura".to_owned();
-        action.font.bold = false;
-        action.font.italic = true;
-        project.replace_element_definitions(definitions)?;
-
-        let environment = environment_with_partial_futura()?;
-        let action_key = ElementTypeKey::new("Action")?;
-        let element_style = resolve_effective_text_style(&project, &action_key, &environment)
-            .map_err(|_| ModelError::InvalidNumber)?;
-        assert_eq!(element_style.resolved_font_id.as_str(), "futura-Italic");
-
-        let bold_italic_override = TextRun {
-            text: "To tell your story".to_owned(),
-            attributes: vec![scriptcraft_model::RunAttribute {
-                name: "Style".to_owned(),
-                value: "Bold+Italic".to_owned(),
-            }],
-        };
-        let effective = resolve_effective_run_text_style(
-            &project,
-            &action_key,
-            &bold_italic_override,
-            &environment,
-        )
-        .map_err(|_| ModelError::InvalidNumber)?;
-        assert!(effective.bold && effective.italic);
-        assert_eq!(effective.resolved_font_id, element_style.resolved_font_id);
-
-        let family_cascade =
-            environment
-                .fonts
-                .resolve_face_id("Futura", FaceStyle::BoldItalic, None)?;
-        assert_eq!(family_cascade.as_str(), "futura-Bold");
-        Ok(())
-    }
-
-    #[test]
-    fn typed_and_typeless_titles_use_definition_and_explicit_neutral_style(
-    ) -> Result<(), ModelError> {
-        let mut project = scriptcraft_fdx::instantiate_builtin_template(
-            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID,
-        )
-        .map(|document| document.project)
-        .unwrap_or_else(|_| unreachable!("packaged Screenplay fixture is valid"));
-        let mut definitions = project
-            .element_definitions()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut summary = definitions
-            .iter()
-            .find(|definition| definition.key.as_str() == "Action")
-            .cloned()
-            .unwrap_or_else(|| unreachable!("packaged Screenplay includes Action"));
-        summary.key = ElementTypeKey::new("Hidden Summary Fixture")?;
-        summary.font.family = "Arial".to_owned();
-        summary.font.hidden_text = true;
-        summary.paragraph.left_indent = FixedPoint::from_raw(6_336);
-        summary.paragraph.right_indent = FixedPoint::from_points(500);
-        definitions.push(summary);
-        project.replace_element_definitions(definitions)?;
-        let env = environment()?;
-        let typed = TitlePageParagraph::new("typed", "TITLE", Default::default())?;
-        let mut typed = typed;
-        typed.element_type = Some(ElementTypeKey::new("Hidden Summary Fixture")?);
-        typed.formatting.alignment =
-            Some(scriptcraft_model::title_page::TitlePageAlignment::Center);
-        typed.formatting.starts_new_page = Some(true);
-        let (typed_paragraph, typed_style) = resolve_effective_title(&project, &typed, &env)
-            .map_err(|_| ModelError::InvalidNumber)?;
-        assert_eq!(typed_style.declared_family, "Arial");
-        assert!(typed_style.hidden_text);
-        assert_eq!(typed_paragraph.left.raw(), 6_336);
-        assert_eq!(typed_paragraph.alignment, ParagraphAlignment::Center);
-        assert!(typed_paragraph.starts_new_page);
-
-        let typeless = TitlePageParagraph::new("plain", "TITLE", Default::default())?;
-        let (plain_paragraph, plain_style) = resolve_effective_title(&project, &typeless, &env)
-            .map_err(|_| ModelError::InvalidNumber)?;
-        assert_eq!(plain_style.declared_family, "Courier Prime");
-        assert!(!plain_style.hidden_text);
-        assert_eq!(plain_paragraph.left, FixedPoint::from_points(108));
-        Ok(())
-    }
-}

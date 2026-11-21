@@ -142,7 +142,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
 
     let root_namespace = root.name.namespace_uri.as_deref();
     let imported_element_settings =
-        crate::element_settings::read_element_settings(root, root_namespace)?;
+        crate::element_settings_import::read_element_settings(root, root_namespace)?;
     let mut content_count = 0usize;
     let mut title_count = 0usize;
     for child in &root.children {
@@ -163,7 +163,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     }
 
     let mut project = Project::empty_projection().map_err(map_model_error)?;
-    crate::element_settings::complete_document_definitions(
+    crate::element_settings_import::complete_document_definitions(
         root,
         &imported_element_settings,
         &mut project,
@@ -177,7 +177,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     let mut next_anchor = 1usize;
     let mut root_owned = RawNode::Element(root.clone());
     if let RawNode::Element(root_owned) = &mut root_owned {
-        crate::element_settings::normalize_winning_font_colors(
+        crate::element_settings_import::normalize_winning_font_colors(
             root_owned,
             root_namespace,
             &imported_element_settings,

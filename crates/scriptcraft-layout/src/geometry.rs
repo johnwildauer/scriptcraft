@@ -4,15 +4,11 @@ use super::{
 };
 use crate::inputs::LayoutEnvironment;
 use scriptcraft_model::{
-    formatting::{EffectiveTextStyle, FixedPoint, ParagraphAlignment, SourceLayoutSettings},
-    typography::EffectiveTextStyle as ResolvedTextStyle,
+    formatting::{FixedPoint, ParagraphAlignment, SourceLayoutSettings},
     ElementTypeKey, LayoutInputs, ModelError, StableId,
 };
 use std::sync::Arc;
 
-pub const FONT_FAMILY: &str = "Courier-family fixed metrics (12 pt target)";
-pub const CHAR_WIDTH: u32 = 7;
-pub const LINE_HEIGHT: u32 = 12;
 pub const POINTS_PER_INCH: u32 = 72;
 pub(super) const DUAL_DIALOGUE_COLUMN_GAP_POINTS: i64 = 18;
 
@@ -24,9 +20,9 @@ pub struct Rect {
     pub height: u32,
 }
 
-/// Precise signed rectangle in hundredths of a point. `Rect` remains as the
-/// integer compatibility projection; all layout and output consumers use this
-/// representation and its single conversion rule.
+/// Precise signed rectangle in hundredths of a point. Layout and output
+/// consumers use this representation and its single conversion rule; `Rect`
+/// is the rounded integer-point projection exposed for page-level geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FixedRect {
     pub x: FixedPoint,
@@ -54,14 +50,9 @@ pub struct LayoutLine {
     /// Source-character to display-character spans, relative to this line's
     /// display text and absolute within the canonical element text.
     pub display_source_map: Arc<[DisplaySourceSegment]>,
-    /// Per-run display and canonical geometry. The resolved style is authoritative
-    /// for metric-driven sequential Body lines; legacy style is compatibility
-    /// metadata for builders not yet migrated.
+    /// Per-run display and canonical geometry derived from resolved typography.
     pub spans: Arc<[PositionedStyledSpan]>,
-    pub text_style: EffectiveTextStyle,
-    pub resolved_text_style: Option<ResolvedTextStyle>,
-    pub char_width: FixedPoint,
-    /// Effective paragraph alignment before fixed-width text alignment is applied.
+    /// Effective paragraph alignment before alignment shifts the line geometry.
     pub alignment: ParagraphAlignment,
     /// Left anchor before alignment shifts the line; includes a first-visual-line indent.
     pub unaligned_line_left: FixedPoint,
@@ -69,7 +60,7 @@ pub struct LayoutLine {
     pub geometry: FixedRect,
     /// Full paragraph bounds, retained separately for hit testing and measure.
     pub paragraph_bounds: FixedRect,
-    /// Rounded integer-point compatibility geometry for older callers.
+    /// Rounded integer-point projection of the canonical fixed-point geometry.
     pub rect: Rect,
     pub keep_with_next: bool,
     pub oversized: bool,
@@ -80,11 +71,8 @@ pub struct PositionedStyledSpan {
     pub display_text: Arc<str>,
     pub source: SourceRange,
     pub display_source_map: Arc<[DisplaySourceSegment]>,
-    pub text_style: EffectiveTextStyle,
-    /// Authoritative resolved typography for metric-driven Body spans. `None`
-    /// is retained only for compatibility builders not owned by WO-005A.2.
-    pub resolved_text_style: Option<ResolvedTextStyle>,
-    pub char_width: FixedPoint,
+    /// The resolved style used for face selection and color policy.
+    pub resolved_text_style: scriptcraft_model::typography::EffectiveTextStyle,
     pub geometry: FixedRect,
     /// Canonical x offsets for every display-character boundary in this span.
     /// The vector starts at zero and ends at the span's laid-out width.
@@ -125,11 +113,8 @@ pub struct LayoutPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenplayLayout {
     pub inputs: LayoutInputs,
-    pub(super) layout_environment: Option<Arc<LayoutEnvironment>>,
+    pub(super) layout_environment: Arc<LayoutEnvironment>,
     pub source_settings: SourceLayoutSettings,
-    pub font_family: String,
-    pub char_width: u32,
-    pub line_height: u32,
     pub purpose: LayoutPurpose,
     pub composition: LayoutComposition,
     /// The identity resolved against this project's current group records.

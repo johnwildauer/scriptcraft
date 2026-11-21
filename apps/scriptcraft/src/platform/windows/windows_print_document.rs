@@ -10,8 +10,7 @@ use scriptcraft_layout::{
 };
 use scriptcraft_model::formatting::FixedPoint;
 use scriptcraft_model::typography::{
-    parse_effective_text_color, EffectiveTextColor, FontResolutionKind, ResolvedFontSourceKind,
-    MAX_SUPPORTED_FONT_SIZE,
+    EffectiveTextColor, FontResolutionKind, ResolvedFontSourceKind, MAX_SUPPORTED_FONT_SIZE,
 };
 use scriptcraft_model::{LayoutInputs, Project};
 use std::sync::Arc;
@@ -123,8 +122,8 @@ fn bounded_font_size(size: u16) -> Option<u16> {
     (size > 0 && size <= MAX_SUPPORTED_FONT_SIZE).then_some(size)
 }
 
-fn print_color(source: Option<&str>) -> ([u8; 3], bool) {
-    match parse_effective_text_color(source) {
+fn print_color(color: EffectiveTextColor) -> ([u8; 3], bool) {
+    match color {
         EffectiveTextColor::ThemeDefault => ([0, 0, 0], false),
         EffectiveTextColor::ExplicitRgb8 { red, green, blue } => ([red, green, blue], false),
         EffectiveTextColor::UnsupportedExplicit => ([0, 0, 0], true),
@@ -330,13 +329,15 @@ fn package_from_layout(
     let mut typography_report = WindowsPrintTypographyReport::default();
 
     for page in &layout.pages {
-        let required_runs = page
-            .lines
-            .iter()
-            .try_fold(0usize, |count, line| count.checked_add(line.spans.len()));
-        let Some(required_runs) = required_runs else {
-            return Err(PackageBuildError::ResourceLimit);
-        };
+        let mut required_runs = 0usize;
+        for span in page.lines.iter().flat_map(|line| line.spans.iter()) {
+            let style = &span.resolved_text_style;
+            if !style.hidden_text {
+                required_runs = required_runs
+                    .checked_add(1)
+                    .ok_or(PackageBuildError::ResourceLimit)?;
+            }
+        }
         run_count = run_count
             .checked_add(required_runs)
             .ok_or(PackageBuildError::ResourceLimit)?;
@@ -349,6 +350,10 @@ fn package_from_layout(
             .map_err(|_| PackageBuildError::Allocation)?;
         for line in &page.lines {
             for span in line.spans.iter() {
+                let style = &span.resolved_text_style;
+                if style.hidden_text {
+                    continue;
+                }
                 text_bytes = text_bytes
                     .checked_add(span.display_text.len())
                     .ok_or(PackageBuildError::ResourceLimit)?;
@@ -364,11 +369,10 @@ fn package_from_layout(
                     return Err(PackageBuildError::InvalidLayoutGeometry);
                 }
                 let request = fonts
-                    .require_resolution_for(&span.text_style.declared_family)
+                    .require_resolution_for(&style.declared_family)
                     .map_err(|_| PackageBuildError::InvalidTypographyEnvironment)?;
-                let font_id = request.face_for_flags(span.text_style.bold, span.text_style.italic);
                 let resolved_face = fonts
-                    .require_face(font_id)
+                    .require_face(&style.resolved_font_id)
                     .map_err(|_| PackageBuildError::InvalidTypographyEnvironment)?;
                 let (family_name, courier_new_substitution) = directwrite_family(
                     request.kind,
@@ -382,13 +386,11 @@ fn package_from_layout(
                         | FontResolutionKind::ExactHost
                 ) && !resolved_face
                     .family_label
-                    .eq_ignore_ascii_case(&span.text_style.declared_family);
-                let size = bounded_font_size(u16::from(span.text_style.size))
+                    .eq_ignore_ascii_case(&style.declared_family);
+                let size = bounded_font_size(style.size)
                     .ok_or(PackageBuildError::InvalidTypographyEnvironment)?;
-                let (color_rgb, unsupported_color) =
-                    print_color(span.text_style.source_color.as_deref());
-                let (bold, italic) =
-                    directwrite_style_flags(span.text_style.bold, span.text_style.italic);
+                let (color_rgb, unsupported_color) = print_color(style.color);
+                let (bold, italic) = directwrite_style_flags(style.bold, style.italic);
                 typography_report.record_run(
                     courier_new_substitution,
                     nearest_family_substitution,
@@ -425,176 +427,4 @@ fn package_from_layout(
         text_bytes,
         typography_report,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn courier_prime_and_unknown_fallback_are_reported_as_windows_substitutions() {
-        assert_eq!(
-            directwrite_family(
-                FontResolutionKind::CourierAlias,
-                ResolvedFontSourceKind::Bundled,
-                "Courier Prime",
-            ),
-            ("Courier New".to_owned(), true),
-        );
-        assert_eq!(
-            directwrite_family(
-                FontResolutionKind::UnknownFallback,
-                ResolvedFontSourceKind::Bundled,
-                "Courier Prime",
-            ),
-            ("Courier New".to_owned(), true),
-        );
-        assert_eq!(
-            directwrite_family(
-                FontResolutionKind::ExactHost,
-                ResolvedFontSourceKind::Bundled,
-                "Courier Prime",
-            ),
-            ("Courier New".to_owned(), true),
-        );
-    }
-
-    #[test]
-    fn nearest_host_family_uses_the_resolved_family_name() {
-        assert_eq!(
-            directwrite_family(
-                FontResolutionKind::NearestSans,
-                ResolvedFontSourceKind::Host,
-                "Liberation Sans",
-            ),
-            ("Liberation Sans".to_owned(), false),
-        );
-        assert_eq!(
-            directwrite_family(
-                FontResolutionKind::NearestSerif,
-                ResolvedFontSourceKind::Host,
-                "Georgia",
-            ),
-            ("Georgia".to_owned(), false),
-        );
-        assert_eq!(
-            directwrite_family(
-                FontResolutionKind::ExactHost,
-                ResolvedFontSourceKind::Host,
-                "Futura",
-            ),
-            ("Futura".to_owned(), false),
-        );
-    }
-
-    #[test]
-    fn reports_are_count_only_and_cap_each_category() {
-        let mut report = WindowsPrintTypographyReport::default();
-        report.record_run(true, true, MAX_REPORT_COUNT as usize + 4, true);
-        let summary = report.summary().expect("fallbacks are present");
-        assert!(summary.contains("Courier New substitutions 1"));
-        assert!(summary.contains("nearest-family substitutions 1"));
-        assert!(summary.contains("glyph coverage unverified for 1000000 scalars"));
-        assert!(summary.contains("canonical layout metric geometry unverified for 1 runs"));
-        assert!(summary.contains("unsupported colors rendered black 1"));
-        assert!(summary.contains("report events capped 4"));
-        assert!(!summary.contains("Courier Prime"));
-        assert!(!summary.contains("Liberation Sans"));
-    }
-
-    #[test]
-    fn scalar_boundaries_must_cover_the_run_and_end_at_its_canonical_width() {
-        let width = FixedPoint::from_raw(250);
-        let valid = [FixedPoint::default(), FixedPoint::from_raw(100), width];
-        assert!(valid_boundaries(&valid, 2, width));
-        assert!(!valid_boundaries(&valid[..2], 2, width));
-        assert!(!valid_boundaries(&valid, 1, width));
-        assert!(!valid_boundaries(&valid, 2, FixedPoint::from_raw(251)));
-    }
-
-    #[test]
-    fn directwrite_style_and_size_policy_keeps_each_face_independent() {
-        assert_eq!(directwrite_style_flags(false, false), (false, false));
-        assert_eq!(directwrite_style_flags(true, false), (true, false));
-        assert_eq!(directwrite_style_flags(false, true), (false, true));
-        assert_eq!(directwrite_style_flags(true, true), (true, true));
-        assert_eq!(bounded_font_size(1), Some(1));
-        assert_eq!(bounded_font_size(72), Some(72));
-        assert_eq!(
-            bounded_font_size(MAX_SUPPORTED_FONT_SIZE),
-            Some(MAX_SUPPORTED_FONT_SIZE)
-        );
-        assert_eq!(bounded_font_size(0), None);
-        assert_eq!(bounded_font_size(MAX_SUPPORTED_FONT_SIZE + 1), None);
-    }
-
-    #[test]
-    fn print_colors_preserve_explicit_rgb_and_bound_fallback_to_black() {
-        assert_eq!(print_color(None), ([0, 0, 0], false));
-        assert_eq!(
-            print_color(Some("#87878F8FE0E0")),
-            ([0x87, 0x8f, 0xe0], false)
-        );
-        assert_eq!(print_color(Some("not-a-color")), ([0, 0, 0], true));
-    }
-
-    #[test]
-    fn package_and_callback_resource_limits_remain_explicit_and_bounded() {
-        assert_eq!(PACKAGE_LIMITS.pages, MAX_PACKAGE_PAGES);
-        assert_eq!(PACKAGE_LIMITS.runs, MAX_PACKAGE_RUNS);
-        assert_eq!(PACKAGE_LIMITS.text_bytes, MAX_PACKAGE_TEXT_BYTES);
-        assert!(MAX_PACKAGE_PAGES <= 512);
-        assert!(MAX_PACKAGE_RUNS <= 262_144);
-        assert!(MAX_PACKAGE_TEXT_BYTES <= 16 * 1024 * 1024);
-    }
-
-    #[test]
-    fn cloned_print_package_remains_an_immutable_request_snapshot() {
-        let text: Arc<str> = Arc::from("x");
-        let run = VectorTextRun {
-            text: Arc::clone(&text),
-            geometry: FixedRect {
-                x: FixedPoint::default(),
-                y: FixedPoint::default(),
-                width: FixedPoint::from_raw(100),
-                height: FixedPoint::from_raw(1200),
-            },
-            display_boundary_offsets: Arc::from(vec![
-                FixedPoint::default(),
-                FixedPoint::from_raw(100),
-            ]),
-            family_name: Arc::from("Arial"),
-            bold: false,
-            italic: false,
-            color_rgb: [0, 0, 0],
-            font_size_pt: 12,
-            underline: false,
-            strikethrough: false,
-        };
-        let package = WindowsPrintPackage {
-            include_title_page: true,
-            pages: vec![VectorPage {
-                number: 1,
-                title_page: false,
-                width: FixedPoint::from_points(612),
-                height: FixedPoint::from_points(792),
-                runs: vec![run],
-            }],
-            run_count: 1,
-            text_bytes: 1,
-            typography_report: WindowsPrintTypographyReport::default(),
-        };
-        let captured = package.clone();
-        assert_eq!(captured, package);
-        assert!(Arc::ptr_eq(
-            &captured.pages[0].runs[0].text,
-            &package.pages[0].runs[0].text,
-        ));
-        assert_eq!(
-            captured.pages()[0].runs()[0]
-                .display_boundary_offsets()
-                .len(),
-            2
-        );
-    }
 }

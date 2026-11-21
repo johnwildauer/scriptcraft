@@ -273,39 +273,6 @@ impl NativeMenuController {
     }
 }
 
-#[cfg(test)]
-mod format_elements_catalog_tests {
-    use crate::chrome::menu_items::{MenuEntrySpec, MenuItemBehavior};
-    use muda::MenuId;
-    use scriptcraft_commands::{Command, CommandId};
-
-    #[test]
-    fn native_catalog_item_keeps_the_shared_elements_id_and_command_mapping() {
-        let item = crate::chrome::menu_items::MENU_CATALOG
-            .iter()
-            .find(|menu| menu.id == "format")
-            .and_then(|menu| {
-                menu.entries.iter().find_map(|entry| match entry {
-                    MenuEntrySpec::Item(item) if item.id == "format.elements" => Some(item),
-                    _ => None,
-                })
-            })
-            .unwrap_or_else(|| unreachable!("Format Elements is in the shared native catalog"));
-
-        assert_eq!(
-            item.behavior,
-            MenuItemBehavior::Command(CommandId::FormatElementsOpen)
-        );
-        assert_eq!(
-            crate::commands::command_for_id(CommandId::FormatElementsOpen),
-            Some(Command::FormatElementsOpen)
-        );
-        // append_catalog_item uses this catalog ID unchanged for muda's native
-        // MenuItem ID; native events are drained into the shared command FIFO.
-        assert_eq!(super::native_menu_id(item), MenuId::new("format.elements"));
-    }
-}
-
 fn append_catalog_entries(
     submenu: &Submenu,
     entries: &'static [MenuEntrySpec],

@@ -169,7 +169,7 @@ pub(crate) fn make_new_document_nodes(
             context.text_state(),
         )?));
     for definition in project.element_definitions().iter() {
-        let settings = crate::settings::serialize_element_settings(definition, &root)?;
+        let settings = crate::element_settings_serialization::serialize_element_settings(definition, &root)?;
         root.children.push(PreservedNode::Element(settings));
     }
 

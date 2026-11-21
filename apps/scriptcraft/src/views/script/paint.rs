@@ -7,10 +7,7 @@ use super::{
         normal_view_page_bottom_rule_visible, page_chrome_visible, page_local_screen_origin,
         NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH,
     },
-    text::{
-        neutral_resolved_font, resolve_legacy_span_paint, resolve_span_paint,
-        resolved_font_for_family,
-    },
+    text::{neutral_resolved_font, resolve_span_paint},
     zoom_scroll::PresentationMetrics,
     ScriptCraftApp,
 };
@@ -196,23 +193,11 @@ impl ScriptCraftApp {
                 .spans
                 .iter()
                 .map(|span| {
-                    span.resolved_text_style.as_ref().map_or_else(
-                        || {
-                            resolve_legacy_span_paint(
-                                &span.text_style,
-                                span.text_style.size as f32 * scale,
-                                palette,
-                                &prepared_fonts,
-                            )
-                        },
-                        |style| {
-                            resolve_span_paint(
-                                style,
-                                style.size as f32 * scale,
-                                palette,
-                                &prepared_fonts,
-                            )
-                        },
+                    resolve_span_paint(
+                        &span.resolved_text_style,
+                        span.resolved_text_style.size as f32 * scale,
+                        palette,
+                        &prepared_fonts,
                     )
                 })
                 .collect::<Option<Vec<_>>>();
@@ -388,39 +373,17 @@ impl ScriptCraftApp {
                     let prepared = self.prepared_document_fonts.as_ref();
                     let ime_font = caret_span
                         .and_then(|span| {
+                            let style = &span.resolved_text_style;
                             prepared.and_then(|prepared| {
-                                span.resolved_text_style.as_ref().map_or_else(
-                                    || {
-                                        resolve_legacy_span_paint(
-                                            &span.text_style,
-                                            span.text_style.size as f32 * scale,
-                                            palette,
-                                            prepared,
-                                        )
-                                    },
-                                    |style| {
-                                        resolve_span_paint(
-                                            style,
-                                            style.size as f32 * scale,
-                                            palette,
-                                            prepared,
-                                        )
-                                    },
-                                )
-                            })
-                        })
-                        .map(|paint| paint.font)
-                        .or_else(|| {
-                            prepared.and_then(|prepared| {
-                                resolved_font_for_family(
-                                    &layout.inputs.font_family,
-                                    false,
-                                    false,
-                                    metrics.font_size * scale,
+                                resolve_span_paint(
+                                    style,
+                                    style.size as f32 * scale,
+                                    palette,
                                     prepared,
                                 )
                             })
                         })
+                        .map(|paint| paint.font)
                         .or_else(|| {
                             prepared.and_then(|prepared| {
                                 neutral_resolved_font(metrics.font_size * scale, prepared)

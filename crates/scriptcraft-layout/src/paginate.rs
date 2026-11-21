@@ -5,107 +5,16 @@ use super::{
         PreparedBodyEnvironment, PreparedBodyParagraph,
     },
     inputs::{
-        effective_paragraph, validate_page_profile, validate_profile, EffectiveGeometryMode,
-        EffectiveParagraph,
+        validate_page_profile, EffectiveGeometryMode, EffectiveParagraph, LayoutEnvironment,
     },
     wrap::WrappedLine,
 };
-use scriptcraft_model::{
-    formatting::{FixedPoint, ParagraphAlignment, SourceLayoutSettings},
-    validate_layout_inputs, LayoutInputs, Project,
-};
+use scriptcraft_model::{formatting::{FixedPoint, ParagraphAlignment, SourceLayoutSettings}, LayoutInputs, Project};
 use std::{sync::Arc, time::Instant};
 
 impl ScreenplayLayout {
-    pub fn build(project: &Project) -> Result<Self, LayoutError> {
-        let inputs = project.session_layout_inputs();
-        Self::build_with_inputs(project, &inputs)
-    }
-
-    pub fn build_with_inputs(
-        project: &Project,
-        inputs: &LayoutInputs,
-    ) -> Result<Self, LayoutError> {
-        Self::build_with_inputs_for_purpose(project, inputs, LayoutPurpose::Editor)
-    }
-
-    pub fn build_with_inputs_for_purpose(
-        project: &Project,
-        inputs: &LayoutInputs,
-        purpose: LayoutPurpose,
-    ) -> Result<Self, LayoutError> {
-        let source_settings = project
-            .preservation
-            .as_ref()
-            .map(|preservation| preservation.source_layout_settings().clone())
-            .unwrap_or_default();
-        Self::build_with_effective_inputs_for_purpose(project, inputs, &source_settings, purpose)
-    }
-
-    pub fn build_with_effective_inputs(
-        project: &Project,
-        inputs: &LayoutInputs,
-        source_settings: &SourceLayoutSettings,
-    ) -> Result<Self, LayoutError> {
-        Self::build_with_effective_inputs_for_purpose(
-            project,
-            inputs,
-            source_settings,
-            LayoutPurpose::Editor,
-        )
-    }
-
-    pub fn build_with_effective_inputs_for_purpose(
-        project: &Project,
-        inputs: &LayoutInputs,
-        source_settings: &SourceLayoutSettings,
-        purpose: LayoutPurpose,
-    ) -> Result<Self, LayoutError> {
-        Self::build_with_effective_inputs_for_purpose_internal(
-            project,
-            inputs,
-            source_settings,
-            purpose,
-            match purpose {
-                LayoutPurpose::Print => LayoutComposition::Print {
-                    include_title_page: true,
-                },
-                LayoutPurpose::Editor => LayoutComposition::BodyEditor,
-            },
-            None,
-            None,
-            None,
-            false,
-            &BodyEditorPresentation::default(),
-            None,
-        )
-    }
-
-    pub fn build_with_composition(
-        project: &Project,
-        inputs: &LayoutInputs,
-        source_settings: &SourceLayoutSettings,
-        composition: LayoutComposition,
-    ) -> Result<Self, LayoutError> {
-        Self::build_with_effective_inputs_for_purpose_internal(
-            project,
-            inputs,
-            source_settings,
-            composition.purpose(),
-            composition,
-            None,
-            None,
-            None,
-            false,
-            &BodyEditorPresentation::default(),
-            None,
-        )
-    }
-
-    /// Builds output composition with the same explicit resolved-font
-    /// environment used by desktop preparation. The legacy geometry pipeline
-    /// is still transitional; callers must not infer metric parity from this
-    /// environment being present.
+    /// Builds composition with the explicit resolved-font environment used by
+    /// desktop preparation. Every line and span uses that environment.
     pub fn build_with_composition_and_environment(
         project: &Project,
         inputs: &LayoutInputs,
@@ -124,64 +33,7 @@ impl ScreenplayLayout {
             None,
             false,
             &BodyEditorPresentation::default(),
-            Some(Arc::new(environment.clone())),
-        )
-    }
-
-    /// Builds Body-editor geometry with one optional, transient active group.
-    pub fn build_with_body_presentation(
-        project: &Project,
-        inputs: &LayoutInputs,
-        source_settings: &SourceLayoutSettings,
-        presentation: &BodyEditorPresentation,
-    ) -> Result<Self, LayoutError> {
-        let mut effective_settings = source_settings.clone();
-        effective_settings
-            .direct_paragraph_overrides
-            .extend(project.direct_paragraph_overrides.clone());
-        Self::build_with_effective_inputs_for_purpose_internal(
-            project,
-            inputs,
-            &effective_settings,
-            LayoutPurpose::Editor,
-            LayoutComposition::BodyEditor,
-            None,
-            None,
-            None,
-            false,
-            presentation,
-            None,
-        )
-    }
-
-    /// Builds the same deterministic layout while returning value-free work
-    /// measurements separately from the layout result.
-    pub fn build_with_effective_inputs_for_purpose_and_diagnostics(
-        project: &Project,
-        inputs: &LayoutInputs,
-        source_settings: &SourceLayoutSettings,
-        purpose: LayoutPurpose,
-        diagnostics: &mut LayoutBuildDiagnostics,
-    ) -> Result<Self, LayoutError> {
-        *diagnostics = LayoutBuildDiagnostics::default();
-        diagnostics.complete_project_validations = 1;
-        Self::build_with_effective_inputs_for_purpose_internal(
-            project,
-            inputs,
-            source_settings,
-            purpose,
-            match purpose {
-                LayoutPurpose::Print => LayoutComposition::Print {
-                    include_title_page: true,
-                },
-                LayoutPurpose::Editor => LayoutComposition::BodyEditor,
-            },
-            Some(diagnostics),
-            None,
-            None,
-            false,
-            &BodyEditorPresentation::default(),
-            None,
+            Arc::new(environment.clone()),
         )
     }
 
@@ -196,23 +48,16 @@ impl ScreenplayLayout {
         mut prepared_body_cache: Option<&mut PreparedBodyCache>,
         validated_session: bool,
         body_presentation: &BodyEditorPresentation,
-        layout_environment: Option<Arc<crate::inputs::LayoutEnvironment>>,
+        layout_environment: Arc<LayoutEnvironment>,
     ) -> Result<Self, LayoutError> {
         if !validated_session {
             project.validate()?;
         }
-        if let Some(environment) = layout_environment.as_deref() {
-            validate_page_profile(inputs)?;
-            if environment.page != inputs.page_only() {
-                return Err(LayoutError {
-                    kind: LayoutErrorKind::InvalidProfile,
-                });
-            }
-        } else {
-            validate_layout_inputs(inputs).map_err(|_| LayoutError {
+        validate_page_profile(&layout_environment.page)?;
+        if layout_environment.page != inputs.page_only() {
+            return Err(LayoutError {
                 kind: LayoutErrorKind::InvalidProfile,
-            })?;
-            validate_profile(inputs)?;
+            });
         }
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             diagnostics.layout_builds = diagnostics.layout_builds.saturating_add(1);
@@ -235,15 +80,10 @@ impl ScreenplayLayout {
         } else {
             None
         };
-        let char_width = inputs.char_width;
-        let font_family = inputs.font_family.clone();
         let mut output = Self {
             inputs: inputs.clone(),
             layout_environment,
             source_settings: source_settings.clone(),
-            font_family,
-            char_width,
-            line_height: inputs.line_advance,
             purpose,
             composition,
             active_group_id,
@@ -265,7 +105,6 @@ impl ScreenplayLayout {
         title_page::compose_title_pages(
             &mut output,
             project,
-            inputs,
             purpose,
             include_title_page,
             include_body,
@@ -280,7 +119,6 @@ impl ScreenplayLayout {
                 &mut output,
                 project,
                 index,
-                source_settings,
                 purpose,
                 composition,
                 &mut prepared_body_cache,
@@ -292,75 +130,31 @@ impl ScreenplayLayout {
             }
 
             let prepared_lookup_started = diagnostics.as_ref().map(|_| Instant::now());
-            let (text_style, resolved_text_style, paragraph) =
-                if let Some(environment) = output.layout_environment.as_deref() {
-                    let element_key = element.element_type();
-                    let resolved_style = super::inputs::resolve_effective_text_style(
-                        project,
-                        &element_key,
-                        environment,
-                    )?;
-                    let paragraph = super::inputs::resolve_effective_paragraph(
-                        project,
-                        &element_key,
-                        &element.id,
-                        &element.runs,
-                        environment,
-                    )?;
-                    (
-                        spans::compatibility_style(&resolved_style),
-                        Some(resolved_style),
-                        paragraph,
-                    )
-                } else {
-                    let definition = project
-                        .element_definitions()
-                        .get(&element.element_type())
-                        .ok_or(LayoutError {
-                            kind: LayoutErrorKind::NoGeometry,
-                        })?;
-                    let text_style = super::inputs::compatibility_text_style(definition);
-                    let paragraph = effective_paragraph(
-                        &output.inputs,
-                        source_settings,
-                        definition,
-                        &element.id,
-                        &text_style,
-                    );
-                    (text_style, None, paragraph)
-                };
-            if purpose == LayoutPurpose::Print && text_style.hidden_text {
+            let element_key = element.element_type();
+            let resolved_text_style = super::inputs::resolve_effective_text_style(
+                project,
+                &element_key,
+                &output.layout_environment,
+            )?;
+            let paragraph = super::inputs::resolve_effective_paragraph(
+                project,
+                &element_key,
+                &element.id,
+                &element.runs,
+                &output.layout_environment,
+            )?;
+            if purpose == LayoutPurpose::Print && resolved_text_style.hidden_text {
                 index = index.saturating_add(1);
                 continue;
             }
-            if resolved_text_style.is_none()
-                && paragraph.starts_new_page
-                && output
-                    .pages
-                    .last()
-                    .is_some_and(|page| !page.title_page && !page.lines.is_empty())
-            {
-                output.pages.push(output.new_page(false));
-            }
-            let effective_color = resolved_text_style.as_ref().map_or_else(
-                || {
-                    scriptcraft_model::typography::parse_effective_text_color(
-                        text_style.source_color.as_deref(),
-                    )
-                },
-                |style| style.color,
-            );
             let environment = PreparedBodyEnvironment {
                 purpose,
                 composition,
                 geometry_mode: EffectiveGeometryMode::Sequential,
                 paragraph,
-                text_style,
-                resolved_text_style: resolved_text_style.clone(),
-                char_width: paragraph.char_width,
-                element_key: Some(element.element_type()),
+                resolved_text_style,
+                element_key,
                 layout_environment: output.layout_environment.clone(),
-                effective_color,
             };
             let prepared = prepare_body_for_layout(
                 prepared_body_cache.as_deref_mut(),
@@ -443,25 +237,23 @@ impl ScreenplayLayout {
             width: FixedPoint::default(),
             height: line.paragraph.line_advance,
         };
-        let mut spans = if line.resolved_text_style.is_some() {
-            spans::resolved_positioned_spans(&line.resolved_scalars, line.element, line_geometry)
-                .into_iter()
-                .map(|span| PositionedStyledSpan {
-                    display_text: span.display_text,
-                    source: span.source,
-                    display_source_map: span.display_source_map,
-                    text_style: spans::compatibility_style(&span.text_style),
-                    resolved_text_style: Some(span.text_style),
-                    char_width: FixedPoint::default(),
-                    geometry: span.geometry,
-                    display_boundary_offsets: span.display_boundary_offsets,
-                    underline: span.underline,
-                    strikethrough: span.strikethrough,
-                })
-                .collect::<Vec<_>>()
-        } else {
-            spans::positioned_spans(&line, line_geometry)
-        };
+        let mut spans = spans::resolved_positioned_spans(
+            &line.resolved_scalars,
+            line.element,
+            line_geometry,
+        )
+        .into_iter()
+        .map(|span| PositionedStyledSpan {
+            display_text: span.display_text,
+            source: span.source,
+            display_source_map: span.display_source_map,
+            resolved_text_style: span.text_style,
+            geometry: span.geometry,
+            display_boundary_offsets: span.display_boundary_offsets,
+            underline: span.underline,
+            strikethrough: span.strikethrough,
+        })
+        .collect::<Vec<_>>();
         let text_width = FixedPoint::from_raw(
             spans
                 .iter()
@@ -570,9 +362,6 @@ impl ScreenplayLayout {
             display_text: line.display_text,
             display_source_map: line.display_source_map,
             spans: spans.into(),
-            text_style: line.text_style,
-            resolved_text_style: line.resolved_text_style,
-            char_width: line.char_width,
             alignment: line.paragraph.alignment,
             unaligned_line_left: line_left,
             geometry,

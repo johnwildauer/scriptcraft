@@ -20,8 +20,7 @@ mod wrap;
 pub use cache::{LayoutBuildDiagnostics, LayoutCache};
 pub use geometry::{
     Caret, DisplaySourceSegment, FixedRect, LayoutError, LayoutErrorKind, LayoutLine, LayoutPage,
-    LocatedLayoutLine, PositionedStyledSpan, Rect, ScreenplayLayout, SourceRange, CHAR_WIDTH,
-    FONT_FAMILY, LINE_HEIGHT, POINTS_PER_INCH,
+    LocatedLayoutLine, PositionedStyledSpan, Rect, ScreenplayLayout, SourceRange, POINTS_PER_INCH,
 };
 pub use inputs::{
     resolve_effective_dual_wrapper_paragraph, resolve_effective_paragraph,

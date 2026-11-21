@@ -13,9 +13,5 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde-value = "=0.7.0"
 unicode-segmentation = "=1.13.3"
 
-[dev-dependencies]
-scriptcraft-fdx = { path = "../scriptcraft-fdx" }
-serde_json = "=1.0.145"
-
 [lints]
 workspace = true
