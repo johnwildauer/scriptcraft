@@ -17,6 +17,20 @@ use std::time::Instant;
 
 pub(crate) const UNTITLED_DOCUMENT_TITLE: &str = "Untitled Screenplay";
 
+pub(crate) fn fresh_document_title_for_template(template_display_name: &str) -> String {
+    if template_display_name.is_empty() {
+        UNTITLED_DOCUMENT_TITLE.to_owned()
+    } else {
+        format!("Untitled {template_display_name}")
+    }
+}
+
+pub(crate) fn fresh_document_title_for_builtin_template(
+    template_id: fdx::BuiltinTemplateId,
+) -> String {
+    fresh_document_title_for_template(fdx::builtin_template_metadata(template_id).display_name)
+}
+
 /// Converts an optional Save As picker result into its typed save result.
 /// Picker cancellation is not a dispatched save and is never reported as Saved.
 fn save_picker_outcome<T>(
@@ -29,16 +43,20 @@ fn save_picker_outcome<T>(
     }
 }
 
-fn native_document_title(path: Option<&Path>) -> String {
+fn native_document_title(path: Option<&Path>, fresh_document_title: &str) -> String {
     path.and_then(Path::file_name)
         .and_then(std::ffi::OsStr::to_str)
         .filter(|file_name| !file_name.is_empty())
-        .unwrap_or(UNTITLED_DOCUMENT_TITLE)
+        .unwrap_or(fresh_document_title)
         .to_owned()
 }
 
-fn changed_native_document_title(current: &str, path: Option<&Path>) -> Option<String> {
-    let next = native_document_title(path);
+fn changed_native_document_title(
+    current: &str,
+    path: Option<&Path>,
+    fresh_document_title: &str,
+) -> Option<String> {
+    let next = native_document_title(path, fresh_document_title);
     (next != current).then_some(next)
 }
 
@@ -278,7 +296,11 @@ impl ScriptCraftApp {
 
     pub(crate) fn sync_native_title(&mut self, ctx: &egui::Context) {
         if let Some(title) =
-            changed_native_document_title(&self.native_title, self.native_path.as_deref())
+            changed_native_document_title(
+                &self.native_title,
+                self.native_path.as_deref(),
+                &self.fresh_document_title,
+            )
         {
             commands::DesktopViewportEffects::title(ctx, title.clone());
             ctx.send_viewport_cmd_to(

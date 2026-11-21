@@ -194,7 +194,14 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
             palette.script_workspace,
         ))
         .show_inside(ui, |ui| {
-            app.live_document_surface(ui, EditorSurface::TitlePage)
+            let editor_scrollbar = palette.script_workspace.editor_scrollbar;
+            crate::views::script::with_editor_surface_scrollbar_presentation(
+                ui,
+                editor_scrollbar,
+                |ui| {
+                    app.live_document_surface(ui, EditorSurface::TitlePage)
+                },
+            )
         });
     if app.timer_popup_surface == EditorSurface::TitlePage && !app.element_windows.owns_input() {
         let host_geometry = app.sprint_timer_host_geometry(EditorSurface::TitlePage);

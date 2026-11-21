@@ -4,7 +4,7 @@ use super::diagnostics::{NativeInputDiagnostics, PerformanceDiagnostics};
 use super::responsiveness;
 use super::startup::StartupDocumentInput;
 use crate::chrome::status_bar::{ViewportCenterAnchor, ViewportPageTracker};
-use crate::documents::save::UNTITLED_DOCUMENT_TITLE;
+use crate::documents::save::fresh_document_title_for_builtin_template;
 #[cfg(target_os = "macos")]
 use crate::platform::macos::{
     macos_lifecycle, macos_menu, macos_open_documents, macos_print_dialog,
@@ -136,6 +136,11 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) flushing_diagnostic_commands: bool,
     /// Present only together with the matching FDX storage baseline.
     pub(crate) native_path: Option<PathBuf>,
+    /// Fallback while no writable native path exists; this is presentation
+    /// identity, not a native path, FDX baseline, or screenplay-content value.
+    pub(crate) fresh_document_title: String,
+    /// Last published native-window title, not a native path, FDX baseline, or
+    /// screenplay-content value.
     pub(crate) native_title: String,
     #[cfg(target_os = "macos")]
     pub(crate) accepted_print_settings: Option<macos_print_dialog::AcceptedPrintSettings>,
@@ -196,8 +201,12 @@ impl ScriptCraftApp {
         startup_template: Option<scriptcraft_fdx::BuiltinTemplateId>,
         development_mode: bool,
     ) -> Result<Self, String> {
+        let effective_template_id = startup_template
+            .unwrap_or(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID);
+        let fresh_document_title =
+            fresh_document_title_for_builtin_template(effective_template_id);
         let project = scriptcraft_fdx::instantiate_builtin_template(
-            startup_template.unwrap_or(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID),
+            effective_template_id,
         )
         .map_err(|error| format!("startup built-in template failed: {error:?}"))?
         .project;
@@ -265,7 +274,8 @@ impl ScriptCraftApp {
             // New startup is semantically clean but has no saved-target pair;
             // ordinary Save therefore routes through the FDX Save As picker.
             native_path: None,
-            native_title: UNTITLED_DOCUMENT_TITLE.to_owned(),
+            fresh_document_title: fresh_document_title.clone(),
+            native_title: fresh_document_title,
             #[cfg(target_os = "macos")]
             accepted_print_settings: None,
             #[cfg(target_os = "windows")]

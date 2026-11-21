@@ -1,6 +1,9 @@
 //! Process startup parsing, presentation, and native launch orchestration.
 
-use crate::documents::{replacement_protocol, save::UNTITLED_DOCUMENT_TITLE};
+use crate::documents::{
+    replacement_protocol,
+    save::fresh_document_title_for_builtin_template,
+};
 use crate::{
     app::ScriptCraftApp,
     chrome::{menu, toolbar_items},
@@ -248,12 +251,12 @@ pub(crate) fn menu_platform_argument(choice: menu::MenuPlatformChoice) -> OsStri
     OsString::from(format!("--menu-platform={value}"))
 }
 
-fn native_options() -> Result<eframe::NativeOptions, String> {
+fn native_options(initial_title: &str) -> Result<eframe::NativeOptions, String> {
     let window_state = scriptcraft_fdx::WindowState::DEFAULT;
     let icon = runtime_icon::egui_icon()?;
     Ok(eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title(UNTITLED_DOCUMENT_TITLE)
+            .with_title(initial_title)
             .with_icon(std::sync::Arc::new(icon))
             .with_inner_size(eframe::egui::vec2(
                 window_state.width as f32,
@@ -309,10 +312,11 @@ fn resolve_startup_menu_policy(
 
 fn startup_presentation(
     requested: menu::MenuPlatformChoice,
+    initial_title: &str,
 ) -> Result<StartupPresentation, String> {
     let menu_policy = resolve_startup_menu_policy(current_menu_host(), requested)?;
     Ok(StartupPresentation {
-        options: native_options()?,
+        options: native_options(initial_title)?,
         menu_policy,
     })
 }
@@ -326,10 +330,15 @@ pub(crate) fn run() -> eframe::Result {
             crate::exit_for_startup_failure(StartupFailureKind::InvalidInvocation, &error);
         }
     };
+    let initial_native_title = fresh_document_title_for_builtin_template(
+        startup
+            .startup_template
+            .unwrap_or(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID),
+    );
     let StartupPresentation {
         options,
         menu_policy,
-    } = match startup_presentation(startup.menu_platform) {
+    } = match startup_presentation(startup.menu_platform, &initial_native_title) {
         Ok(presentation) => presentation,
         Err(error) => {
             crate::exit_for_startup_failure(StartupFailureKind::PresentationUnavailable, &error);
@@ -347,7 +356,7 @@ pub(crate) fn run() -> eframe::Result {
         }
     };
     eframe::run_native(
-        UNTITLED_DOCUMENT_TITLE,
+        &initial_native_title,
         options,
         Box::new(move |cc| {
             let startup_document = startup.startup_document;
@@ -401,4 +410,3 @@ pub(crate) fn run() -> eframe::Result {
         }),
     )
 }
-

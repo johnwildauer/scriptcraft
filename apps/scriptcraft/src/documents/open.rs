@@ -5,7 +5,7 @@ use crate::app::ScriptCraftApp;
 use crate::commands::CommandInvocation;
 use crate::documents::lifecycle::show_native_lifecycle_error;
 use crate::documents::replacement_protocol as replacement_open;
-use crate::documents::save::UNTITLED_DOCUMENT_TITLE;
+use crate::documents::save::fresh_document_title_for_template;
 use crate::documents::unsaved_changes;
 use crate::views::script::RevealIntent;
 use eframe::egui::{self, Vec2};
@@ -71,6 +71,15 @@ fn staged_open_disposition(path: &Path) -> StagedOpenDisposition {
     } else {
         StagedOpenDisposition::OrdinaryFdx
     }
+}
+
+fn fresh_title_from_template_path(path: &Path) -> String {
+    let display_name = path
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("");
+    fresh_document_title_for_template(display_name)
 }
 
 fn pending_open_disposition(
@@ -480,6 +489,12 @@ impl ScriptCraftApp {
                         Some("Opened non-current FDX with best-effort Version 6 import")
                     }
                 };
+                let fresh_document_title = match disposition {
+                    StagedOpenDisposition::OrdinaryFdx => None,
+                    StagedOpenDisposition::FreshUnsaved => {
+                        Some(fresh_title_from_template_path(&path))
+                    }
+                };
                 let persistence = match disposition {
                     StagedOpenDisposition::OrdinaryFdx => ActivationPersistence::Saved {
                         path,
@@ -492,6 +507,7 @@ impl ScriptCraftApp {
                 staged_open_activation_outcome(self.activate_opened_project(
                     candidate.document.project,
                     persistence,
+                    fresh_document_title,
                     migration_status,
                     candidate.document.window_state,
                     candidate.document.text_state,
@@ -513,6 +529,7 @@ impl ScriptCraftApp {
         &mut self,
         project: Project,
         persistence: ActivationPersistence,
+        fresh_document_title: Option<String>,
         migration_status: Option<&str>,
         window_state: Option<fdx::WindowState>,
         text_state: fdx::TextState,
@@ -583,6 +600,9 @@ impl ScriptCraftApp {
         // disposition. In particular, a template activation clears both.
         self.native_path = native_path;
         self.fdx_baseline = fdx_baseline;
+        if let Some(fresh_document_title) = fresh_document_title {
+            self.fresh_document_title = fresh_document_title;
+        }
         self.pending_window_restore = window_state;
         self.pending_fdx_open = None;
         self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;

@@ -191,6 +191,7 @@ fn plan_status_row(
     page_label_width: f32,
     percentage_width: f32,
     icon_widths: [f32; 3],
+    show_focus_mode: bool,
     slider_min: f32,
     slider_max: f32,
 ) -> StatusRowLayout {
@@ -204,14 +205,18 @@ fn plan_status_row(
     let width = nonnegative(available.width());
     let height = nonnegative(available.height());
     let spacing = nonnegative(item_spacing);
-    let icons = icon_widths.map(nonnegative);
+    let mut icons = icon_widths.map(nonnegative);
+    if !show_focus_mode {
+        icons[1] = 0.0;
+    }
     let percentage_width = nonnegative(percentage_width);
     let slider_min = nonnegative(slider_min);
     let slider_max = nonnegative(slider_max).max(slider_min);
     let page_label_width = nonnegative(page_label_width);
 
+    let gap_count = if show_focus_mode { 4.0 } else { 3.0 };
     let fixed_right_width =
-        icons.iter().sum::<f32>() + percentage_width + slider_min + spacing * 4.0;
+        icons.iter().sum::<f32>() + percentage_width + slider_min + spacing * gap_count;
     let compression = if width < fixed_right_width && fixed_right_width > 0.0 {
         width / fixed_right_width
     } else {
@@ -236,7 +241,8 @@ fn plan_status_row(
         slider_width += available_for_growth.min(slider_max - slider_min);
     }
 
-    let right_width = icons.iter().sum::<f32>() + percentage_width + slider_width + spacing * 4.0;
+    let right_width =
+        icons.iter().sum::<f32>() + percentage_width + slider_width + spacing * gap_count;
     let row_min = available.min;
     let row_right = row_min.x + width;
     let make_rect = |left: f32, width: f32| {
@@ -253,8 +259,13 @@ fn plan_status_row(
     right_edge = slider.left() - spacing;
     let appearance = make_rect(right_edge - icons[2], icons[2]);
     right_edge = appearance.left() - spacing;
-    let focus = make_rect(right_edge - icons[1], icons[1]);
-    right_edge = focus.left() - spacing;
+    let focus = if show_focus_mode {
+        let focus = make_rect(right_edge - icons[1], icons[1]);
+        right_edge = focus.left() - spacing;
+        focus
+    } else {
+        make_rect(right_edge, 0.0)
+    };
     let timer = make_rect(right_edge - icons[0], icons[0]);
     let center_width = (width - 2.0 * right_width).max(0.0);
     let center = if center_width > 0.0 {
@@ -1361,8 +1372,8 @@ pub(crate) struct StatusCommandIntents {
     pub(crate) timer_button_rect: Option<Rect>,
 }
 
-/// Surface-specific status projection. False options suppress the corresponding
-/// widget and accessibility node while retaining the existing row geometry.
+/// Surface-specific status projection. False options remove the corresponding
+/// widget, accessibility/input presence, layout slot, and associated gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct StatusSurfaceOptions {
     pub(super) show_center: bool,
@@ -1568,6 +1579,7 @@ fn show_impl_with_appearance(
         page_label_width,
         percentage_width,
         [icon_width; 3],
+        options.show_focus_mode,
         presentation::ZOOM_SLIDER_MIN_WIDTH,
         presentation::ZOOM_SLIDER_MAX_WIDTH,
     );
@@ -1608,11 +1620,11 @@ fn show_impl_with_appearance(
                         },
                     );
 
-                    one_line_region(
-                        right_ui,
-                        Vec2::new(layout.icons[1].width(), row_height),
-                        |icon_ui| {
-                            if options.show_focus_mode {
+                    if options.show_focus_mode {
+                        one_line_region(
+                            right_ui,
+                            Vec2::new(layout.icons[1].width(), row_height),
+                            |icon_ui| {
                                 if let Some(view) = focus_view {
                                     let accessible_name = view.accessible_name();
                                     let rendered = status_icon_control(
@@ -1627,9 +1639,9 @@ fn show_impl_with_appearance(
                                         commands.push(Command::ViewFocusModeToggle);
                                     }
                                 }
-                            }
-                        },
-                    );
+                            },
+                        );
+                    }
 
                     one_line_region(
                         right_ui,

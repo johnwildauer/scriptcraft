@@ -226,7 +226,12 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
             app.script_view_mode,
             app.theme_palette.script_workspace,
         ))
-        .show_inside(ui, |ui| app.live_document_surface(ui, EditorSurface::Body));
+        .show_inside(ui, |ui| {
+            let editor_scrollbar = app.theme_palette.script_workspace.editor_scrollbar;
+            script_view::with_editor_surface_scrollbar_presentation(ui, editor_scrollbar, |ui| {
+                app.live_document_surface(ui, EditorSurface::Body)
+            })
+        });
     let timer_commands = if app.timer_popup_surface == EditorSurface::Body
         && !app.element_windows.owns_input()
     {

@@ -84,6 +84,9 @@ pub(crate) struct PagePalette {
     pub(crate) dual_dialogue_boundary: Color32,
     pub(crate) caret: Color32,
     pub(crate) ime_text: Color32,
+    pub(crate) scrollbar_background: Color32,
+    pub(crate) scrollbar_neutral: Color32, 
+    pub(crate) scrollbar_hovered: Color32
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +107,15 @@ pub(crate) struct ToolbarPalette {
 pub(crate) struct ScriptWorkspacePalette {
     pub(crate) background: Color32,
     pub(crate) page: PagePalette,
+    pub(crate) editor_scrollbar: EditorScrollbarPalette,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EditorScrollbarPalette {
+    pub(crate) track: Color32,
+    pub(crate) resting_handle: Color32,
+    pub(crate) hovered_handle: Color32,
+    pub(crate) dragged_handle: Color32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,8 +202,11 @@ impl ApplicationPalette {
                 selection_text: Color32::WHITE,
                 selection_boundary: Color32::from_rgb(0, 83, 125),
                 dual_dialogue_boundary: Color32::from_rgb(142, 153, 163),
-                caret: Color32::from_rgb(20, 80, 150),
+                caret: Color32::from_rgb(32, 32, 32),
                 ime_text: Color32::from_rgb(76, 42, 122),
+                scrollbar_background: Color32::from_rgb(246, 246, 246),
+                scrollbar_neutral: Color32::from_rgb(175, 175, 175),
+                scrollbar_hovered: Color32::from_rgb(125, 125, 125),
             },
             ResolvedAppearance::Night => PagePalette {
                 paper: Color32::from_rgb(54, 54, 54),
@@ -202,8 +217,11 @@ impl ApplicationPalette {
                 selection_text: Color32::WHITE,
                 selection_boundary: Color32::from_rgb(192, 222, 255),
                 dual_dialogue_boundary: Color32::from_rgb(143, 153, 163),
-                caret: Color32::from_rgb(85, 213, 255),
+                caret: Color32::from_rgb(238, 238, 238),
                 ime_text: Color32::from_rgb(211, 194, 255),
+                scrollbar_background: Color32::from_rgb(33, 33, 33),
+                scrollbar_neutral: Color32::from_rgb(100, 100, 100),
+                scrollbar_hovered: Color32::from_rgb(150, 150, 150),
             },
             ResolvedAppearance::Midnight => PagePalette {
                 paper: Color32::from_rgb(27, 27, 27),
@@ -214,8 +232,11 @@ impl ApplicationPalette {
                 selection_text: Color32::WHITE,
                 selection_boundary: Color32::from_rgb(192, 222, 255),
                 dual_dialogue_boundary: Color32::from_rgb(124, 135, 146),
-                caret: Color32::from_rgb(85, 213, 255),
+                caret: Color32::from_rgb(238, 240, 244),
                 ime_text: Color32::from_rgb(211, 194, 255),
+                scrollbar_background: Color32::from_rgb(33, 33, 33),
+                scrollbar_neutral: Color32::from_rgb(100, 100, 100),
+                scrollbar_hovered: Color32::from_rgb(150, 150, 150),
             },
         };
         let hovered_foreground = widgets.hovered.text_color();
@@ -293,6 +314,12 @@ impl ApplicationPalette {
             script_workspace: ScriptWorkspacePalette {
                 background: workspace_background,
                 page,
+                editor_scrollbar: EditorScrollbarPalette {
+                    track: page.scrollbar_background,
+                    resting_handle: page.scrollbar_neutral,
+                    hovered_handle: page.scrollbar_hovered,
+                    dragged_handle: page.scrollbar_hovered,
+                },
             },
             status: StatusPalette {
                 background: status_background,

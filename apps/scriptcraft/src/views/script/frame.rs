@@ -17,6 +17,9 @@ use super::zoom_scroll::{
 };
 
 const EDITOR_SURFACE_ID: &str = "page-editor-surface";
+const EDITOR_SCROLLBAR_TRACK_WIDTH: f32 = 14.0;
+const EDITOR_SCROLLBAR_HANDLE_THICKNESS: f32 = 8.0;
+const EDITOR_SCROLLBAR_HANDLE_MAX_CORNER_RADIUS: f32 = 4.0;
 
 pub(crate) fn chrome_clear_color(
     mode: ScriptViewMode,
@@ -32,6 +35,137 @@ pub(crate) fn central_panel_frame(
 ) -> egui::Frame {
     // Keep the resolved Script View surface color without a fixed viewport inset.
     egui::Frame::NONE.fill(super::page_policy::script_view_backdrop(mode, palette))
+}
+
+pub(crate) fn with_editor_surface_scrollbar_presentation<R>(
+    ui: &mut egui::Ui,
+    palette: theme::EditorScrollbarPalette,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let previous_scroll = ui.style().spacing.scroll;
+    let previous_visuals = ui.visuals().clone();
+    let mut editor_scroll = previous_scroll;
+    editor_scroll.floating = true;
+    editor_scroll.floating_width = EDITOR_SCROLLBAR_TRACK_WIDTH;
+    editor_scroll.bar_width = EDITOR_SCROLLBAR_TRACK_WIDTH;
+    editor_scroll.floating_allocated_width = 0.0;
+    editor_scroll.foreground_color = true;
+    editor_scroll.dormant_background_opacity = 1.0;
+    editor_scroll.active_background_opacity = 1.0;
+    editor_scroll.interact_background_opacity = 1.0;
+    editor_scroll.dormant_handle_opacity = 0.0;
+    editor_scroll.active_handle_opacity = 0.0;
+    editor_scroll.interact_handle_opacity = 0.0;
+    ui.style_mut().spacing.scroll = editor_scroll;
+
+    let visuals = ui.visuals_mut();
+    visuals.extreme_bg_color = palette.track;
+
+    let result = add_contents(ui);
+    ui.style_mut().spacing.scroll = previous_scroll;
+    *ui.visuals_mut() = previous_visuals;
+    result
+}
+
+fn paint_editor_scrollbar_handle<R>(
+    ui: &egui::Ui,
+    scroll_output: &egui::scroll_area::ScrollAreaOutput<R>,
+    palette: theme::EditorScrollbarPalette,
+) {
+    let inner_rect = scroll_output.inner_rect;
+    let content_size = scroll_output.content_size;
+    let max_offset = content_size - inner_rect.size();
+    let scroll_offset = scroll_output.state.offset;
+    let scroll_style = ui.style().spacing.scroll;
+
+    for axis in 0..2 {
+        let needed = content_size[axis] > inner_rect.size()[axis];
+        let show_factor = ui.ctx().animate_bool_responsive(
+            scroll_output.id.with(if axis == 0 { "h" } else { "v" }),
+            needed,
+        );
+        if !needed || show_factor == 0.0 {
+            continue;
+        }
+
+        // With zero floating allocation, the stock outer rectangle and the
+        // published inner rectangle share these bounds.
+        let outer_margin = show_factor * scroll_style.bar_outer_margin;
+        let mut max_cross = inner_rect.max[1 - axis] - outer_margin;
+        if ui.clip_rect().max[1 - axis] - outer_margin < max_cross {
+            max_cross = ui.clip_rect().max[1 - axis] - outer_margin;
+        }
+
+        let track_thickness = EDITOR_SCROLLBAR_TRACK_WIDTH * show_factor;
+        let track_cross_min = max_cross - track_thickness;
+        let track_rect = if axis == 0 {
+            egui::Rect::from_min_max(
+                egui::pos2(inner_rect.min.x, track_cross_min),
+                egui::pos2(inner_rect.max.x, max_cross),
+            )
+        } else {
+            egui::Rect::from_min_max(
+                egui::pos2(track_cross_min, inner_rect.min.y),
+                egui::pos2(max_cross, inner_rect.max.y),
+            )
+        };
+
+        let handle_cross_thickness = EDITOR_SCROLLBAR_HANDLE_THICKNESS * show_factor;
+        let handle_cross_min =
+            track_cross_min + (track_thickness - handle_cross_thickness) * 0.5;
+        let from_content = |content| {
+            egui::emath::remap_clamp(
+                content,
+                0.0..=content_size[axis],
+                inner_rect.min[axis]..=inner_rect.max[axis],
+            )
+        };
+        let handle_length = (from_content(scroll_offset[axis] + inner_rect.size()[axis])
+            - from_content(scroll_offset[axis]))
+        .max(scroll_style.handle_min_length);
+        let handle_start = egui::emath::remap_clamp(
+            scroll_offset[axis],
+            0.0..=max_offset[axis],
+            inner_rect.min[axis]..=(inner_rect.max[axis] - handle_length),
+        );
+        let handle_rect = if axis == 0 {
+            egui::Rect::from_min_max(
+                egui::pos2(handle_start, handle_cross_min),
+                egui::pos2(handle_start + handle_length, handle_cross_min + handle_cross_thickness),
+            )
+        } else {
+            egui::Rect::from_min_max(
+                egui::pos2(handle_cross_min, handle_start),
+                egui::pos2(handle_cross_min + handle_cross_thickness, handle_start + handle_length),
+            )
+        };
+
+        let response = ui.ctx().read_response(scroll_output.id.with(axis));
+        let pointer_on_handle = response.as_ref().is_some_and(|response| response.hovered())
+            && ui.input(|input| {
+                input
+                    .pointer
+                    .latest_pos()
+                    .is_some_and(|pointer_pos| handle_rect.contains(pointer_pos))
+            });
+        let handle_color = match response.as_ref() {
+            Some(response) if response.is_pointer_button_down_on() || response.dragged() => {
+                palette.dragged_handle
+            }
+            Some(response) if response.hovered() && pointer_on_handle => palette.hovered_handle,
+            _ => palette.resting_handle,
+        };
+
+        if ui.is_rect_visible(track_rect) {
+            let corner_radius = EDITOR_SCROLLBAR_HANDLE_MAX_CORNER_RADIUS
+                .min(handle_rect.width().min(handle_rect.height()) * 0.5);
+            ui.painter().add(egui::epaint::Shape::rect_filled(
+                handle_rect,
+                corner_radius,
+                handle_color,
+            ));
+        }
+    }
 }
 
 impl ScriptCraftApp {
@@ -298,6 +432,8 @@ impl ScriptCraftApp {
                 }
             }
         });
+        let editor_scrollbar_palette = self.theme_palette.script_workspace.editor_scrollbar;
+        paint_editor_scrollbar_handle(ui, &scroll_output, editor_scrollbar_palette);
         if self.development_mode {
             self.responsiveness
                 .note_revision_painted(self.session.revision(), Instant::now());
@@ -343,9 +479,23 @@ impl ScriptCraftApp {
 
         // This is the only interactive response in the painted editor. Pages remain
         // source-mapped geometry, not independent focusable widgets.
+        let mut editor_interaction_rect = scroll_output.inner_rect;
+        if !element_windows_own_input {
+            let scrollbar_width = ui.style().spacing.scroll.bar_width;
+            if scroll_output.content_size.y > scroll_output.inner_rect.height() {
+                editor_interaction_rect.max.x =
+                    (editor_interaction_rect.max.x - scrollbar_width)
+                        .max(editor_interaction_rect.min.x);
+            }
+            if scroll_output.content_size.x > scroll_output.inner_rect.width() {
+                editor_interaction_rect.max.y =
+                    (editor_interaction_rect.max.y - scrollbar_width)
+                        .max(editor_interaction_rect.min.y);
+            }
+        }
         let response = ui
             .interact(
-                scroll_output.inner_rect,
+                editor_interaction_rect,
                 editor_id,
                 if element_windows_own_input {
                     Sense::hover()

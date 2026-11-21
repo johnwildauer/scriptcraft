@@ -213,45 +213,89 @@ mod toolbar_presentation {
     }
 }
 
-/// Desired inner scroll height for all Elements rows, bounded by the usable
-/// egui content viewport after accounting for the popup frame.
-fn elements_popup_max_height(ui: &egui::Ui, choices: &[ElementChoice]) -> f32 {
-    let button_font = toolbar_presentation::elements_option_font_id(ui);
-    let spacing = ui.spacing();
-    let row_height = choices
-        .iter()
-        .map(|choice| {
-            let text_height = ui
-                .painter()
-                .layout_no_wrap(
-                    choice.label().to_owned(),
-                    button_font.clone(),
-                    Color32::TRANSPARENT,
-                )
-                .size()
-                .y;
-            spacing
-                .interact_size
-                .y
-                .max(text_height + spacing.button_padding.y * 2.0)
-        })
-        .sum::<f32>();
-    let row_gaps = spacing.item_spacing.y * choices.len().saturating_sub(1) as f32;
-    let desired_content_height = row_height + row_gaps;
-
-    let popup_margin = egui::Frame::popup(ui.style()).total_margin();
-    let available_content_height =
-        (ui.ctx().content_rect().height() - popup_margin.top - popup_margin.bottom).max(0.0);
-    bounded_elements_popup_height(desired_content_height, available_content_height)
-}
-
-fn bounded_elements_popup_height(
+#[derive(Debug, Clone, Copy)]
+struct ElementsPopupMetrics {
     desired_content_height: f32,
     available_content_height: f32,
-) -> f32 {
-    desired_content_height
-        .max(0.0)
-        .min(available_content_height.max(0.0))
+    maximum_outer_height: f32,
+    minimum_content_width: f32,
+}
+
+fn nonnegative_finite_dimension(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn add_finite_dimensions(left: f32, right: f32) -> f32 {
+    let sum = nonnegative_finite_dimension(left) + nonnegative_finite_dimension(right);
+    if sum.is_finite() {
+        sum
+    } else {
+        f32::MAX
+    }
+}
+
+fn elements_popup_metrics(
+    ui: &egui::Ui,
+    choices: &[ElementChoice],
+    closed_control_width: f32,
+) -> ElementsPopupMetrics {
+    let button_font = toolbar_presentation::elements_option_font_id(ui);
+    let spacing = ui.spacing();
+    let mut desired_content_height = 0.0;
+    let mut widest_label = 0.0_f32;
+    for choice in choices {
+        let measured_size = ui
+            .painter()
+            .layout_no_wrap(
+                choice.label().to_owned(),
+                button_font.clone(),
+                Color32::TRANSPARENT,
+            )
+            .size();
+        let text_height = nonnegative_finite_dimension(measured_size.y);
+        widest_label = widest_label.max(nonnegative_finite_dimension(measured_size.x));
+        let row_text_height = add_finite_dimensions(
+            text_height,
+            add_finite_dimensions(spacing.button_padding.y, spacing.button_padding.y),
+        );
+        let row_height = nonnegative_finite_dimension(spacing.interact_size.y)
+            .max(row_text_height);
+        desired_content_height = add_finite_dimensions(desired_content_height, row_height);
+    }
+    let row_gap = nonnegative_finite_dimension(spacing.item_spacing.y);
+    let row_gaps = (0..choices.len().saturating_sub(1))
+        .fold(0.0, |height, _| add_finite_dimensions(height, row_gap));
+    desired_content_height = add_finite_dimensions(desired_content_height, row_gaps);
+
+    let popup_margin = egui::Frame::popup(ui.style()).total_margin();
+    let vertical_popup_margin = add_finite_dimensions(
+        nonnegative_finite_dimension(popup_margin.top),
+        nonnegative_finite_dimension(popup_margin.bottom),
+    );
+    let available_outer_height = nonnegative_finite_dimension(ui.ctx().content_rect().height());
+    let available_content_height =
+        (available_outer_height - vertical_popup_margin).max(0.0);
+    let maximum_outer_height = add_finite_dimensions(desired_content_height, vertical_popup_margin)
+        .min(available_outer_height);
+    let horizontal_option_padding = nonnegative_finite_dimension(
+        toolbar_presentation::DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING,
+    );
+    let widest_label_with_padding = add_finite_dimensions(
+        widest_label,
+        add_finite_dimensions(horizontal_option_padding, horizontal_option_padding),
+    );
+
+    ElementsPopupMetrics {
+        desired_content_height,
+        available_content_height,
+        maximum_outer_height,
+        minimum_content_width: nonnegative_finite_dimension(closed_control_width)
+            .max(widest_label_with_padding),
+    }
 }
 
 fn element_change_command(key: ElementTypeKey) -> Command {
@@ -1092,7 +1136,7 @@ impl ScriptCraftApp {
                 let group_rect = ui.max_rect();
                 let vertical_item_spacing = ui.spacing().item_spacing.y;
                 let original_interact_height = ui.spacing().interact_size.y;
-                let popup_height = elements_popup_max_height(ui, choices);
+                let popup_metrics = elements_popup_metrics(ui, choices, width);
                 // The closed control is followed by explicitly budgeted caption
                 // allocations, so do not let ComboBox's post-widget spacing push
                 // those allocations beyond this Item group's declared height.
@@ -1101,7 +1145,7 @@ impl ScriptCraftApp {
                     toolbar_presentation::DEFAULT_ELEMENTS_CLOSED_COMBO_HEIGHT;
                 let combo_result = egui::ComboBox::from_id_salt(item.id)
                     .width(width)
-                    .height(popup_height)
+                    .height(popup_metrics.maximum_outer_height)
                     .wrap_mode(TextWrapMode::Truncate)
                     // Keep the stock ComboBox button, popup, ID, and keyboard behavior,
                     // but replace its triangle with the outlined up/down Material glyph.
@@ -1125,6 +1169,8 @@ impl ScriptCraftApp {
                     })
                     .selected_text("")
                     .show_ui(ui, |ui| {
+                        ui.set_min_width(popup_metrics.minimum_content_width);
+                        ui.style_mut().wrap_mode = Some(TextWrapMode::Extend);
                         // Popup type rows retain the normal vertical rhythm even
                         // though the closed control/caption composition does not.
                         // The closed button's local height must not resize popup rows.
@@ -1267,13 +1313,19 @@ impl ScriptCraftApp {
                         ToolbarBehavior::ElementsRoleDropdown => {
                             let selected_key = self.focused_element_type_key();
                             ui.menu_button(item.label, |ui| {
-                                ui.spacing_mut().button_padding.x = toolbar_presentation::
-                                DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING;
-                                let popup_height = elements_popup_max_height(ui, choices);
-                                let option_font = toolbar_presentation::elements_option_font_id(ui);
-                                egui::ScrollArea::vertical().max_height(popup_height).show(
-                                    ui,
-                                    |ui| {
+                                ui.spacing_mut().button_padding.x = toolbar_presentation::DEFAULT_ELEMENTS_ROLE_OPTION_HORIZONTAL_PADDING;
+                                let popup_metrics = elements_popup_metrics(ui, choices, 0.0);
+                                ui.set_min_width(popup_metrics.minimum_content_width);
+                                ui.style_mut().wrap_mode = Some(TextWrapMode::Extend);
+                                let option_font =
+                                    toolbar_presentation::elements_option_font_id(ui);
+                                egui::ScrollArea::vertical()
+                                    .max_height(
+                                        popup_metrics
+                                            .desired_content_height
+                                            .min(popup_metrics.available_content_height),
+                                    )
+                                    .show(ui, |ui| {
                                         for choice in choices {
                                             if ui
                                                 .selectable_label(
@@ -1287,8 +1339,7 @@ impl ScriptCraftApp {
                                                 ui.close();
                                             }
                                         }
-                                    },
-                                );
+                                    });
                             });
                         }
                         ToolbarBehavior::StylesInlineGroup

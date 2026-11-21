@@ -11,7 +11,7 @@ use scriptcraft_layout::{Caret, InteractionQueryDiagnostics, ScreenplayLayout};
 use scriptcraft_session::editing::Selection;
 use std::time::Duration;
 
-pub(super) const CARET_WIDTH: f32 = 1.5;
+pub(super) const CARET_WIDTH: f32 = 1.0;
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy)]
@@ -163,7 +163,7 @@ impl ScriptCraftApp {
     ) -> Option<CaretPresentation> {
         let resolve_caret = caret_page_index.is_some_and(|page_index| {
             reveal_intent == RevealIntent::Conditional
-                || (selection.anchor == selection.focus && !layout.pages[page_index].title_page)
+                || selection.anchor == selection.focus
         });
         if !resolve_caret {
             return None;

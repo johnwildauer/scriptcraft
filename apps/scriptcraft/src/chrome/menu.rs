@@ -362,6 +362,176 @@ impl PendingDesktopCommands {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MenuContentMetrics {
+    required_content_width: f32,
+    desired_content_height: f32,
+}
+
+fn nonnegative_finite_dimension(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn add_finite_dimensions(left: f32, right: f32) -> f32 {
+    let sum = nonnegative_finite_dimension(left) + nonnegative_finite_dimension(right);
+    if sum.is_finite() {
+        sum
+    } else {
+        f32::MAX
+    }
+}
+
+fn menu_font_id(ui: &egui::Ui, size: f32) -> egui::FontId {
+    let mut font_id = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Button)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::proportional(size));
+    font_id.size = size;
+    font_id
+}
+
+fn measured_menu_text_width(ui: &egui::Ui, text: &str, font_id: egui::FontId) -> f32 {
+    let measured = ui
+        .painter()
+        .layout_no_wrap(
+            text.to_owned(),
+            font_id,
+            egui::Color32::TRANSPARENT,
+        )
+        .size()
+        .x;
+    nonnegative_finite_dimension(measured)
+}
+
+fn menu_content_metrics(
+    ui: &egui::Ui,
+    entries: &[MenuEntrySpec],
+    say_undual: bool,
+    metrics: MenuPresentationMetrics,
+) -> MenuContentMetrics {
+    let item_font = menu_font_id(ui, metrics.item_text_size);
+    let shortcut_font = menu_font_id(ui, metrics.shortcut_text_size);
+    let spacing = ui.spacing();
+    let button_padding_x = nonnegative_finite_dimension(spacing.button_padding.x);
+    let row_gap_x = nonnegative_finite_dimension(spacing.item_spacing.x);
+    let mut required_content_width = 0.0_f32;
+    let mut desired_content_height = 0.0_f32;
+
+    for entry in entries {
+        let row_width = match entry {
+            MenuEntrySpec::Item(item) => {
+                let label_width = measured_menu_text_width(
+                    ui,
+                    menu_item_label(item, say_undual),
+                    item_font.clone(),
+                );
+                let shortcut = menu_shortcut_label(item);
+                let shortcut_width = if shortcut.is_empty() {
+                    0.0
+                } else {
+                    measured_menu_text_width(ui, &shortcut, shortcut_font.clone())
+                };
+                let mut width = add_finite_dimensions(
+                    nonnegative_finite_dimension(metrics.icon_slot_width),
+                    row_gap_x,
+                );
+                width = add_finite_dimensions(width, label_width);
+                if !shortcut.is_empty() {
+                    width = add_finite_dimensions(width, row_gap_x);
+                    width = add_finite_dimensions(width, shortcut_width);
+                }
+                add_finite_dimensions(
+                    width,
+                    add_finite_dimensions(button_padding_x, button_padding_x),
+                )
+            }
+            MenuEntrySpec::Submenu(menu) => {
+                let label_width = measured_menu_text_width(ui, menu.label, item_font.clone());
+                let mut width = add_finite_dimensions(label_width, row_gap_x);
+                width = add_finite_dimensions(
+                    width,
+                    nonnegative_finite_dimension(metrics.icon_size),
+                );
+                add_finite_dimensions(
+                    width,
+                    add_finite_dimensions(button_padding_x, button_padding_x),
+                )
+            }
+            MenuEntrySpec::Separator => 0.0,
+        };
+        required_content_width = required_content_width.max(row_width);
+
+        let row_height = match entry {
+            MenuEntrySpec::Item(_) | MenuEntrySpec::Submenu(_) => {
+                nonnegative_finite_dimension(metrics.row_height)
+            }
+            MenuEntrySpec::Separator => {
+                nonnegative_finite_dimension(metrics.separator_spacing)
+            }
+        };
+        desired_content_height = add_finite_dimensions(desired_content_height, row_height);
+    }
+
+    let row_gap_y = nonnegative_finite_dimension(spacing.item_spacing.y);
+    let inter_row_gaps = (0..entries.len().saturating_sub(1))
+        .fold(0.0, |height, _| add_finite_dimensions(height, row_gap_y));
+    desired_content_height = add_finite_dimensions(desired_content_height, inter_row_gaps);
+
+    MenuContentMetrics {
+        required_content_width: nonnegative_finite_dimension(required_content_width),
+        desired_content_height: nonnegative_finite_dimension(desired_content_height),
+    }
+}
+
+fn popup_vertical_padding(ui: &egui::Ui, metrics: MenuPresentationMetrics) -> f32 {
+    let viewport_height = nonnegative_finite_dimension(ui.ctx().content_rect().height());
+    nonnegative_finite_dimension(metrics.popup_padding_y).min((viewport_height / 2.0).max(0.0))
+}
+
+fn available_menu_inner_viewport_height(ui: &egui::Ui, metrics: MenuPresentationMetrics) -> f32 {
+    let viewport_height = nonnegative_finite_dimension(ui.ctx().content_rect().height());
+    let popup_padding_y = popup_vertical_padding(ui, metrics);
+    nonnegative_finite_dimension(viewport_height - 2.0 * popup_padding_y - 2.0)
+}
+
+fn render_menu_popup(
+    ui: &mut egui::Ui,
+    entries: &'static [MenuEntrySpec],
+    availability: AppCommandAvailability,
+    script_view_mode: ScriptViewMode,
+    say_undual: bool,
+    pending: &mut PendingDesktopCommands,
+    metrics: MenuPresentationMetrics,
+    available_inner_viewport_height: f32,
+) {
+    let content = menu_content_metrics(ui, entries, say_undual, metrics);
+    let max_height = content
+        .desired_content_height
+        .min(nonnegative_finite_dimension(available_inner_viewport_height));
+    ui.set_min_width(content.required_content_width);
+    egui::ScrollArea::vertical()
+        .max_height(max_height)
+        .min_scrolled_height(0.0)
+        .auto_shrink([true, true])
+        .show(ui, |ui| {
+            render_menu_entries(
+                ui,
+                entries,
+                availability,
+                script_view_mode,
+                say_undual,
+                pending,
+                metrics,
+            );
+        });
+}
+
 /// Renders the catalog through egui's menu-button popup behavior. Activation is
 /// only enqueued here; application commands are drained at the update boundary.
 pub(crate) fn show_menu_bar(
@@ -372,11 +542,8 @@ pub(crate) fn show_menu_bar(
     pending: &mut PendingDesktopCommands,
 ) {
     let metrics = MENU_PRESENTATION;
-    let viewport_height = ui.ctx().content_rect().height();
-    let popup_padding_y = metrics
-        .popup_padding_y
-        .min((viewport_height / 2.0).max(0.0));
-    let popup_max_height = (viewport_height - 2.0 * popup_padding_y - 2.0).max(0.0);
+    let popup_padding_y = popup_vertical_padding(ui, metrics);
+    let popup_max_height = available_menu_inner_viewport_height(ui, metrics);
     let popup_style = move |style: &mut egui::Style| {
         let separator_color = style.visuals.widgets.noninteractive.bg_stroke.color;
         egui::containers::menu::menu_style(style);
@@ -424,21 +591,16 @@ pub(crate) fn show_menu_bar(
                 let menu_button = ui.menu_button(
                     egui::RichText::new(menu.label).size(metrics.bar_text_size),
                     |ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(popup_max_height)
-                            .min_scrolled_height(0.0)
-                            .auto_shrink([true, true])
-                            .show(ui, |ui| {
-                                render_menu_entries(
-                                    ui,
-                                    menu.entries,
-                                    availability,
-                                    script_view_mode,
-                                    say_undual,
-                                    pending,
-                                    metrics,
-                                );
-                            });
+                        render_menu_popup(
+                            ui,
+                            menu.entries,
+                            availability,
+                            script_view_mode,
+                            say_undual,
+                            pending,
+                            metrics,
+                            popup_max_height,
+                        );
                     },
                 );
                 menu_button.response.widget_info(|| {
@@ -492,10 +654,12 @@ fn render_menu_entries(
                 );
             }
             MenuEntrySpec::Submenu(menu) => {
+                let available_inner_viewport_height =
+                    available_menu_inner_viewport_height(ui, metrics);
                 ui.menu_button(
                     egui::RichText::new(menu.label).size(metrics.item_text_size),
                     |ui| {
-                        render_menu_entries(
+                        render_menu_popup(
                             ui,
                             menu.entries,
                             availability,
@@ -503,6 +667,7 @@ fn render_menu_entries(
                             say_undual,
                             pending,
                             metrics,
+                            available_inner_viewport_height,
                         );
                     },
                 );
@@ -736,4 +901,3 @@ impl crate::app::ScriptCraftApp {
         }
     }
 }
-
