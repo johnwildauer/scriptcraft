@@ -2,7 +2,6 @@
 /target-*
 .DS_Store
 *~
-/.analysis/
-/.reference/
 /.plan/
-/.forge/
+/.reference/
+/*/\[archive]

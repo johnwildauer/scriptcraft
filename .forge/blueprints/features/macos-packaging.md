@@ -1,0 +1,35 @@
+# Feature-Area Blueprint: macOS Packaging
+
+> This feature composes source-owned packaging inputs and a target-specific build driver into a relocatable macOS review artifact without changing application document behavior.
+
+## Scope and requirements
+
+- **Requirements:** [macOS app packaging](../../requirements/features/macos-packaging.md)
+- **Technical context:** [Technical context](../technical-context.md)
+- **Requirements traced:** `REQ-MACOS-PACKAGING-001`–`REQ-MACOS-PACKAGING-006`.
+- **Area summary:** The packaging path assembles a version-derived app bundle and compressed disk image from the desktop executable, source icon, bundled runtime resources, and license records. It is a bounded current artifact choice, not the application's permanent platform support statement.
+
+## Shared composition
+
+- [ScriptCraft Desktop](../containers/scriptcraft-desktop.md) defines the executable runtime boundary; [Desktop adapters](../components/desktop-adapters.md) owns runtime icon/font/resource usage.
+- Packaging inputs live in [`packaging/macos/`](../../../packaging/macos/), shared artwork and resource notes in [`packaging/resources/`](../../../packaging/resources/), and font/license material in [`fonts/`](../../../fonts/). These delivery artifacts do not alter [Document Model](../components/document-model.md) values, [Editing session](../components/editing-session.md) edits/storage, [Command contract](../components/command-contract.md), FDX codec/source behavior, [Layout and pagination](../components/layout-and-pagination.md), or the bounded encoders documented in [Exports and print](exports-and-print.md).
+
+## Capability realization
+
+### Bundle, runtime resources, and artifact delivery
+
+- **Requirements:** `REQ-MACOS-PACKAGING-001`–`REQ-MACOS-PACKAGING-005`.
+- **Composition and flow:** The source-owned packaging driver derives the marketing version from the desktop package and builds only the selected arm64 app target. It assembles the app metadata, executable, generated bundle icon, and required font license/attribution records. It declares exactly two separate extension-fallback document types: Final Draft FDX with Editor role, Alternate rank, and only `fdx`; and Final Draft template FDXT with Viewer role, Alternate rank, and only `fdxt`. Viewer marks the source as non-writable; the newly instantiated document remains editable. No `LSItemContentTypes`, imported/exported UTI, or `NSDocumentClass` key is present anywhere in the property list; bundle assertions independently check both declarations' names, roles, ranks, and extension sets. The executable embeds font resources and the ordered Screenplay, Stageplay, and Dramatists Guild Musical template catalog; New from Template uses those embedded resources to create a fresh independent child, while external FDXT opens as untitled content and is never a writable source. macOS runtime icon setup yields icon ownership to Launch Services and avoids working-directory/repository-relative resource lookup or template-file staging. For Finder/Dock Open Documents, a bare descriptor or sole item in a list is converted by requesting an NSURL through `fileURLValue`; only a resulting local file URL with a valid native path proceeds. The adapter neither requires the descriptor type to equal `typeFileURL` nor uses a custom alias importer or manual alias/bookmark/FSRef coercion. The runtime registers its retained target immediately before eframe startup and reasserts it at `NSApplicationWillFinishLaunchingNotification`, after AppKit setup and before Finder's launch document event. The completed app is ad-hoc signed and inspected before the driver creates the compressed read-only DMG and checksum sidecar within the bounded artifact root.
+- **Boundary:** The bundle contains no Cargo runtime dependency, font-binary or FDXT-file duplication/staging, credentials, minimum OS claim, notarization, or Developer ID assertion. Extension metadata indicates Finder eligibility only, not guaranteed Open With presentation. User-selected FDX/FDXT default-handler state and Dock-drop eligibility are separate behavior; packaging makes no default selection or capture and does not establish Dock acceptance. Association does not validate content. User-owned packaged acceptance separately inspects cold/running Finder and Dock delivery for both extensions, FDXT open-as-new/source-hash/Save-As behavior, and unchanged default state. Windows remains portable/no-registration, and the user-owned Open With choice is not package installation. Rust dependency notice review remains distinct from the local bundle license boundary.
+
+### Build and runtime ownership
+
+- **Requirements:** `REQ-MACOS-PACKAGING-006`.
+- **Composition and flow:** The packaging guide and target-specific driver own prerequisites, build invocation, artifact naming, resource inclusion, output placement, artifact inspection (exactly two FDX Editor/Alternate/`fdx` and FDXT Viewer/Alternate/`fdxt` extension-fallback declarations, with no UTI/`NSDocumentClass`), and recipient-facing runtime constraints. Build inputs remain source-owned; generated app/disk-image/checksum artifacts remain under the packaging artifact root. Runtime resource lookup is independent of the current working directory; built-in templates are compile-time resources and external FDXT paths are never staged as writable targets. User-owned packaged-app acceptance records Finder eligibility and Open With selection/default state separately from Dock-drop behavior, native callback/intake, FDXT open-as-new/nonoverwrite and Save-As-to-FDX routing, source-hash preservation, and content activation; these are distinct from artifact construction and inspection.
+- **Boundary:** Packaging owns delivery assembly and runtime staging only. The desktop executable and adapters own Open Documents behavior; model values, session editing/native storage, FDX codec, layout, export, and commands remain independent of bundle construction. Packaging completion is not Launch Services acceptance, does not guarantee Finder presentation or avoid recipient Gatekeeper warnings, and does not alter application save/export behavior. Existing ad-hoc signing, unnotarized distribution, recipient, icon/font, DMG, cleanup, and validation-ownership limits remain in force.
+- Phase 7 lifecycle contracts and user-owned recipient evidence boundaries are cross-referenced in [`technical-context.md`](../technical-context.md#wo-0078-complete-template-lifecycle-contract-and-user-owned-evidence-boundary) and [`packaging/macos/README.md`](../../../packaging/macos/README.md). Source descriptions do not establish Finder/Dock delivery; any user-selected relocated-bundle observation must not depend on a repository working directory or runtime template-resource directory.
+
+## Decisions
+
+- Treat packaging as an explicit delivery adapter around the runnable desktop target, not as a new runtime container or general platform support matrix.
+- Keep generated outputs under the packaging driver's bounded artifact root and leave unrelated build output intact.

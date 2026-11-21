@@ -1,0 +1,34 @@
+# ScriptCraft — Project Manifest
+
+This parent document provides durable project orientation. Product behavior and technical contracts belong in the linked requirements and blueprints, not in a feature or implementation inventory here.
+
+## Intent and audience
+
+ScriptCraft is a focused, desktop-first screenplay editor for individual writers. Its purpose is to support a dependable writing loop—drafting and revising screenplay content, reviewing page flow, saving and reopening a native project, and producing clearly bounded review exports—without sacrificing the meaning or safety of the writer’s work.
+
+## Product and engineering constraints
+
+- Keep the product focused on screenplay writing for one writer; prioritize preservation and safe handling of the last valid native project over feature breadth.
+- Use Rust. Keep semantic screenplay content and retained native-project data authoritative, separate from transient presentation and editing state.
+- Favor repeatable page layout for the same effective inputs, without promising exact rendering compatibility for every imported document.
+- Keep formatting, import interpretation, and exports bounded and screenplay-specific. Preserve unsupported source data where required rather than implying support for editing it or blanket format compatibility.
+- Native FDX projects are the durable project format. Native saves preserve the valid prior state on failure; PDF and plain-text outputs are noncanonical and have explicit limitations.
+
+## Working preferences and repository policy
+
+Work in a guided, concise, safety-conscious way. Explain consequential defaults, avoid unnecessary scope and checkpoints, and prefer sequential work. Preserve pre-existing user work; do not perform destructive filesystem or Git operations without explicit authorization.
+
+The user owns all review and validation. Agents must not conduct or dispatch design, requirements, blueprint, implementation, or other reviews; dispatch validators; or run tests, builds, checks, lint, formatting, launches, manual verification, or other validation. Do not claim review or validation without user-supplied evidence and an explicit user decision.
+
+This is workflow policy, not permission to weaken or bypass in-product safety checks or safeguards. Applicable external rules and obligations remain in force. If a genuine external requirement conflicts with this policy, surface it as a blocker; do not treat it as waived or substitute an agent result.
+
+## Unresolved product decision
+
+The permanent supported-platform set and future distribution policy—including whether to provide installer/updater flows or signed/notarized releases—remain undecided. Current packaging choices are scoped to their documented artifact and do not establish permanent platform support or future distribution commitments.
+
+## Project documentation map
+
+- Start with the [product overview](requirements/product-overview.md) for product intent, scope, and user-facing constraints.
+- Consult the [technical context](blueprints/technical-context.md) for the technical map and system boundaries.
+- Detailed contracts are distributed across [requirements](requirements/) and [blueprints](blueprints/); the [Forge index](_index.md) is the navigation entry point.
+- The element/template initiative's [final user validation matrix](../.plan/2026-11-18-element-template/final-user-validation-matrix.md) is a user-owned worksheet target, not a record of checks or manual journeys having run.

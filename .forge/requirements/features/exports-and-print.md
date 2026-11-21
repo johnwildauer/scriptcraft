@@ -1,0 +1,41 @@
+# Requirements Area: Exports and Print
+
+> This document specifies desired user-facing behavior for a cohesive area. Describe requirements in established-state voice, even when implementation is future work. Group related capabilities into sections and keep stable IDs so each requirement and acceptance criterion remains independently traceable. Do not add lifecycle status, implementation evidence, progress, or a backlog here.
+
+## Area purpose
+
+Writers can create review copies without confusing them with the editable native screenplay. PDF, plain text, and macOS printing use fixed print layout and make their supported losses and options clear.
+
+## Capability groups
+
+### Review exports
+
+- **REQ-WRITING-LOOP-004: Explicit MVP exports.** The system shall provide a reviewable PDF and a plainly lossy text copy without confusing either export with the native source.
+  - **AC-WRITING-004.1:** PDF export uses the canonical Print composition rather than transient viewport layout and places displayed scalars at its canonical positions without output-side rewrapping or repagination. It uses bounded nonembedded Base-14 Courier, Helvetica, or Times resources selected from the resolved document typography; unsupported non-ASCII display scalars are substituted with `?`. Absent color is black, supported explicit RGB remains literal, and unsupported explicit color falls back to black. A bounded privacy-safe report identifies font-resource substitutions, unsupported scalar substitutions, and unsupported explicit-color fallbacks. These resources do not embed the resolved desktop fonts or establish exact font metrics or visual parity with the editor or Final Draft. Native FDX remains canonical and retains supported source text under its separate preservation requirements.
+  - **AC-WRITING-004.2:** PDF and plain-text export shall not silently replace the native source or mark the native project clean. Ordinary Save As PDF on macOS and Windows presents one integrated native PDF save dialog, defaulting to the active FDX filename with only its final extension replaced by `.pdf`, or `Untitled Screenplay.pdf` when no usable filename exists. Other platforms return a deliberate unsupported-platform result rather than showing an options pre-step. Cancellation or unsupported-platform failure does not generate or write an export; a selected destination is the only PDF output path.
+  - **AC-WRITING-004.3:** Plain-text export communicates that element types, identities, and page layout are not preserved as a lossless round trip.
+  - **AC-WRITING-004.4:** Plain-text export emits display text from each fixed print-layout line, including effective All Caps presentation and Unicode uppercase expansions. Elements without effective All Caps retain canonical casing. Export presentation does not mutate screenplay text or native FDX. Print-layout wrapping and HiddenText omission are retained, and the losses described in AC-WRITING-004.3 remain clear.
+  - **AC-WRITING-004.5:** Every ordinary supported Save As PDF request begins with a fresh, enabled-by-default Include Title Page choice and returns that choice together with the selected destination. macOS and Windows use one integrated native save dialog; other platforms report unsupported operation rather than requiring a separate options-then-picker workflow. Included title pages precede body pages; excluding them exports body pages only. Cancelling before destination acceptance performs no layout or file write. Each new ordinary request resets the choice to included. The choice is not stored in the project, and export does not change path, baseline, dirty state, history, selections, zoom, or open views. PDF limitations in AC-WRITING-004.1 remain. Native dialog appearance, checkbox interaction, overwrite behavior, and output fidelity are not guaranteed beyond these user-facing outcomes.
+
+### macOS Print
+
+- **AC-WRITING-004.6:** On macOS, File > Print and Command+P provide one native Print panel for standard print settings and a fresh, enabled-by-default Include Title Page choice. The panel offers page range, copies, paper size, orientation, and scaling controls to the extent supported by the platform and printer. Cancelling the initial panel is distinguishable and creates no PDF or print operation. On acceptance, printing uses an immutable snapshot of the project, canonical Print composition, selected title-page option, and accepted settings, and submits one native print operation without showing another panel or opening an external viewer. An operation that does not report success is reported as cancelled or failed; it is not claimed to have been delivered. A reported success does not claim completed spooling or physical delivery. Printing does not alter project content, session revision/dirty/history, save path/baseline, selection, zoom, or editor caches. Existing PDF limitations remain.
+- **AC-WRITING-004.7:** On Windows, File > Print and Control+P open the native system Print UI with its standard supported printer options and a fresh, enabled-by-default Title page Include/Omit choice. Preview and final pages use one immutable captured request and canonical Print composition, including resolved run family/style/size/color and canonical scalar positions; host output does not rewrap or repaginate. The bounded privacy-safe report identifies Courier New and nearest-family substitutions, unverified DirectWrite face identity, glyph coverage and metric/shaping policy, canonical layout metric uncertainty, and unsupported explicit-color fallback. Absent color is black, supported explicit RGB remains literal, and unsupported explicit color falls back to black with a report. Cancellation, submission, completion, and failure are distinguished; submission or reported completion does not establish physical delivery. Printing does not mutate project/session state, path/baseline, selection, zoom, or editor caches. Windows output does not promise exact visual parity, universal glyph coverage, or physical-printer delivery.
+
+The following print/export criterion retains its stable ID here; its parent [`REQ-WRITING-LOOP-013`](dual-dialogue.md) is owned by Dual Dialogue.
+
+- **AC-WRITING-013.7:** PDF and plain text use canonical Print composition regardless of which dual-dialogue group is active in the editor and contain no editor-only group boundaries or active-group presentation. A group whose current ordered member types form an active two-sided projection uses two columns; a retained inactive group is laid out sequentially and emits every source member exactly once without being unwrapped. Plain text emits all left-side lines before all right-side lines for each active group, including groups whose columns span pages. Wrappers add no visible line or loss count. Export does not mutate project/session state, FDX, selection, history, dirty state, native path, or editor presentation. Inline alternate dialogue copies and orphaned alternate data do not appear in output, and deleting an owner does not expose alternate payload. PDF limitations remain those in AC-WRITING-004.1.
+
+## Constraints
+
+- PDF and plain-text files are noncanonical copies; they do not replace the native project or make it clean.
+- Canonical Print layout is independent of desktop viewport zoom; PDF, plain text, macOS Print, and Windows Print do not acquire a separate wrapping or pagination authority.
+
+### Implementation ownership
+
+The export crate's `export_text(project, environment)` and `export_text_with_layout_inputs(project, inputs, environment)` APIs require the prepared resolved-font environment for plain-text Print composition. PDF export APIs also receive that environment explicitly and consume canonical resolved span styles. The desktop output coordinator owns preparation through its existing document-font store and passes the same environment to PDF and native-print request snapshots; the Windows print package consumes resolved span styles without host discovery. No desktop production caller currently invokes plain-text export.
+
+## Related documents
+
+- **Product overview:** [`../product-overview.md`](../product-overview.md)
+- **Technical blueprint:** [`../../blueprints/technical-context.md`](../../blueprints/technical-context.md)
