@@ -3,7 +3,7 @@
 use crate::chrome::shortcuts::ShortcutPlatform;
 use scriptcraft_model::formatting::FixedPoint;
 use scriptcraft_model::{
-    BehaviorTargetResolution, ElementDefinition, ParagraphBehaviorKey, Project,
+    BehaviorTargetResolution, ElementDefinition, ElementTypeKey, ParagraphBehaviorKey, Project,
 };
 
 /// Display-ready font values from one complete current definition.
@@ -40,7 +40,7 @@ pub(crate) struct BehaviorSummary {
 /// One frame-local presentation value for an exact current registry entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ElementDefinitionSummary {
-    pub(crate) key: String,
+    pub(crate) key: ElementTypeKey,
     pub(crate) font: FontSummary,
     pub(crate) paragraph: ParagraphSummary,
     pub(crate) behavior: BehaviorSummary,
@@ -70,19 +70,19 @@ fn summarize_definition(
     let font = &definition.font;
     let mut active_flags = Vec::new();
     if font.bold {
-        active_flags.push("bold");
+        active_flags.push("Bold");
     }
     if font.italic {
-        active_flags.push("italic");
+        active_flags.push("Italic");
     }
     if font.underline {
-        active_flags.push("underline");
+        active_flags.push("Underline");
     }
     if font.all_caps {
-        active_flags.push("all caps");
+        active_flags.push("All caps");
     }
     if font.hidden_text {
-        active_flags.push("hidden");
+        active_flags.push("Hidden");
     }
 
     let paragraph = &definition.paragraph;
@@ -107,7 +107,7 @@ fn summarize_definition(
     });
 
     ElementDefinitionSummary {
-        key: definition.key.as_str().to_owned(),
+        key: definition.key.clone(),
         font: FontSummary {
             family: font.family.clone(),
             size: font.size,

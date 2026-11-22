@@ -6,6 +6,7 @@
 
 mod apply_template;
 mod builtin_screenplay;
+mod builtin_template_preview;
 mod builtin_templates;
 mod constants;
 mod content;
@@ -32,6 +33,7 @@ mod window_state;
 mod writer;
 
 pub use apply_template::{extract_element_template_settings, ElementTemplateSettings};
+pub use builtin_template_preview::builtin_template_preview_description;
 pub use builtin_templates::{
     builtin_template_metadata, builtin_templates, instantiate_builtin_template, BuiltinTemplateId,
     BuiltinTemplateMetadata, DEFAULT_BUILTIN_TEMPLATE_ID,

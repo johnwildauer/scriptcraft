@@ -43,7 +43,6 @@ impl BuiltinTemplateId {
 pub struct BuiltinTemplateMetadata {
     pub id: BuiltinTemplateId,
     pub display_name: &'static str,
-    pub description: &'static str,
     pub order: u8,
 }
 
@@ -54,20 +53,16 @@ const BUILTIN_TEMPLATES: [BuiltinTemplateMetadata; 3] = [
     BuiltinTemplateMetadata {
         id: BuiltinTemplateId::Screenplay,
         display_name: "Screenplay",
-        description: "The industry standard.",
         order: 0,
     },
     BuiltinTemplateMetadata {
         id: BuiltinTemplateId::Stageplay,
         display_name: "Stageplay",
-        description:
-            "An alternative for modern plays with looser dialogue margins in Times New Roman.",
         order: 1,
     },
     BuiltinTemplateMetadata {
         id: BuiltinTemplateId::DramatistsGuildMusical,
         display_name: "Dramatists Guild Musical",
-        description: "The Guild's modern format for musicals in Times New Roman.",
         order: 2,
     },
 ];
@@ -98,11 +93,10 @@ pub(crate) const fn screenplay_bytes() -> &'static [u8] {
     SCREENPLAY_BYTES
 }
 
-fn template_bytes(id: BuiltinTemplateId) -> &'static [u8] {
+pub(crate) fn template_bytes(id: BuiltinTemplateId) -> &'static [u8] {
     match id {
         BuiltinTemplateId::Screenplay => SCREENPLAY_BYTES,
         BuiltinTemplateId::Stageplay => STAGEPLAY_BYTES,
         BuiltinTemplateId::DramatistsGuildMusical => DRAMATISTS_GUILD_MUSICAL_BYTES,
     }
 }
-

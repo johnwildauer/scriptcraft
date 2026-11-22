@@ -4,11 +4,16 @@ use super::state::{
     selector_mode_can_apply, selector_mode_can_create_new, TemplateSelectorError,
     TemplateSelectorMode,
 };
+use super::presentation::{
+    detail_frame, listbox_frame, selectable_row, DEFAULT_SELECTOR_SIZE, LIST_COLUMN_MAX_WIDTH,
+    LIST_COLUMN_MIN_WIDTH, PANE_GAP, VIEWPORT_MARGIN,
+};
 use eframe::egui;
-use scriptcraft_fdx::{builtin_templates, BuiltinTemplateId};
+use scriptcraft_fdx::{
+    builtin_template_metadata, builtin_template_preview_description, builtin_templates,
+    BuiltinTemplateId,
+};
 
-const DEFAULT_WINDOW_SIZE: egui::Vec2 = egui::vec2(520.0, 390.0);
-const VIEWPORT_MARGIN: f32 = 32.0;
 const WINDOW_FOOTER_ALLOWANCE: f32 = 112.0;
 const FOOTER_BUTTON_WIDTH: f32 = 88.0;
 const FOOTER_BUTTON_HEIGHT: f32 = 30.0;
@@ -69,37 +74,87 @@ pub(crate) fn show_template_selector(
         .max_size(max_size)
         .show(ctx, |ui| {
             ui.set_max_width((max_size.x - 24.0).max(1.0));
-            let list_height = (max_size.y - WINDOW_FOOTER_ALLOWANCE).max(1.0);
-            egui::ScrollArea::vertical()
-                .id_salt("elements-template-catalog")
-                .max_height(list_height)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for (index, metadata) in builtin_templates().iter().enumerate() {
-                        ui.push_id(metadata.id.as_str(), |ui| {
-                            let response = ui.radio_value(
-                                &mut selected,
-                                Some(metadata.id),
-                                metadata.display_name,
-                            );
-                            response.widget_info(|| {
-                                egui::WidgetInfo::selected(
-                                    egui::WidgetType::RadioButton,
-                                    response.enabled(),
-                                    selected == Some(metadata.id),
-                                    template_row_accessible_name(
-                                        metadata.display_name,
-                                        metadata.description,
-                                    ),
-                                )
+            let body_width = ui.available_width();
+            let body_height = (ui.available_height() - WINDOW_FOOTER_ALLOWANCE).max(1.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(body_width, body_height),
+                egui::Layout::left_to_right(egui::Align::Min),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let pane_width = ui.available_width();
+                    let pane_gap = PANE_GAP.min((pane_width - 2.0).max(0.0));
+                    let list_space = (pane_width - pane_gap - 1.0).max(1.0);
+                    let list_width = list_space
+                        .min(LIST_COLUMN_MAX_WIDTH)
+                        .max(LIST_COLUMN_MIN_WIDTH.min(list_space));
+                    let preview_width = (pane_width - list_width - pane_gap).max(1.0);
+
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(list_width, body_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            listbox_frame(ui).show(ui, |ui| {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("elements-template-catalog")
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        for (index, metadata) in
+                                            builtin_templates().iter().enumerate()
+                                        {
+                                            ui.push_id(metadata.id.as_str(), |ui| {
+                                                let is_selected = selected == Some(metadata.id);
+                                                let response = selectable_row(
+                                                    ui,
+                                                    metadata.display_name,
+                                                    is_selected,
+                                                    index == 0 && focus_requested,
+                                                );
+                                                if response.clicked() {
+                                                    selected = Some(metadata.id);
+                                                }
+                                            });
+                                        }
+                                    });
                             });
-                            if index == 0 && focus_requested {
-                                response.request_focus();
-                            }
-                            ui.label(metadata.description);
-                        });
-                    }
-                });
+                        },
+                    );
+                    ui.add_space(pane_gap);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(preview_width, body_height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            detail_frame(ui).show(ui, |ui| {
+                                if let Some(id) = selected {
+                                    let metadata = builtin_template_metadata(id);
+                                    ui.heading(metadata.display_name);
+
+                                    if let Some(description) =
+                                        builtin_template_preview_description(id)
+                                    {
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("elements-template-preview-description")
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                let response = ui.add(
+                                                    egui::Label::new(description.as_str())
+                                                        .wrap()
+                                                        .selectable(true),
+                                                );
+                                                response.widget_info(|| {
+                                                    egui::WidgetInfo::labeled(
+                                                        egui::WidgetType::Label,
+                                                        response.enabled(),
+                                                        format!("Preview Description: {description}"),
+                                                    )
+                                                });
+                                            });
+                                    }
+                                }
+                            });
+                        },
+                    );
+                },
+            );
 
             if let Some(message) = selector_error_text(error) {
                 ui.add_space(4.0);
@@ -226,8 +281,8 @@ fn window_sizes(viewport: egui::Vec2) -> (egui::Vec2, egui::Vec2) {
         (viewport.y - VIEWPORT_MARGIN).max(1.0),
     );
     let default_size = egui::vec2(
-        DEFAULT_WINDOW_SIZE.x.min(max_size.x),
-        DEFAULT_WINDOW_SIZE.y.min(max_size.y),
+        DEFAULT_SELECTOR_SIZE.x.min(max_size.x),
+        DEFAULT_SELECTOR_SIZE.y.min(max_size.y),
     );
     (default_size, max_size)
 }
@@ -250,8 +305,4 @@ fn footer_button_rects(footer: egui::Rect) -> (egui::Rect, egui::Rect) {
         egui::vec2(button_width, FOOTER_BUTTON_HEIGHT),
     );
     (cancel, primary)
-}
-
-fn template_row_accessible_name(display_name: &str, description: &str) -> String {
-    format!("{display_name} — {description}")
 }

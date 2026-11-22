@@ -5,6 +5,16 @@
 
 use scriptcraft_commands::EditorSurface;
 use scriptcraft_fdx::BuiltinTemplateId;
+use scriptcraft_model::ElementTypeKey;
+
+/// The read-only detail section shown for the selected element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ElementsTab {
+    #[default]
+    Basic,
+    Font,
+    Paragraph,
+}
 
 /// The selector operation currently presented to the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,35 +97,55 @@ pub(crate) const fn selector_mode_can_create_new(
 /// activations do not disturb an in-progress selector or overwrite that return
 /// target. A New-document selector may stand alone; Apply remains nested under
 /// Elements. Both cases are represented here rather than in separate flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ElementWindowState {
     elements_open: bool,
     selector: Option<TemplateSelectorState>,
     focus_return_surface: Option<EditorSurface>,
     elements_focus_requested: bool,
+    selected_element: Option<ElementTypeKey>,
+    active_tab: ElementsTab,
 }
 
 impl ElementWindowState {
-    pub(crate) const fn elements_open(self) -> bool {
+    pub(crate) const fn elements_open(&self) -> bool {
         self.elements_open
     }
 
-    pub(crate) const fn selector_open(self) -> bool {
+    pub(crate) const fn selector_open(&self) -> bool {
         self.selector.is_some()
     }
 
     /// Element windows own keyboard and pointer input while either surface is
     /// visible, independently of the migration/native-modal lock state.
-    pub(crate) const fn owns_input(self) -> bool {
+    pub(crate) const fn owns_input(&self) -> bool {
         self.elements_open || self.selector.is_some()
     }
 
-    pub(crate) const fn selector(self) -> Option<TemplateSelectorState> {
+    pub(crate) const fn selector(&self) -> Option<TemplateSelectorState> {
         self.selector
     }
 
-    pub(crate) const fn focus_return_surface(self) -> Option<EditorSurface> {
+    pub(crate) const fn focus_return_surface(&self) -> Option<EditorSurface> {
         self.focus_return_surface
+    }
+
+    pub(crate) fn selected_element(&self) -> Option<&ElementTypeKey> {
+        self.selected_element.as_ref()
+    }
+
+    pub(crate) const fn active_tab(&self) -> ElementsTab {
+        self.active_tab
+    }
+
+    /// Changes only the transient inspector selection.
+    pub(crate) fn select_element(&mut self, selected_element: Option<ElementTypeKey>) {
+        self.selected_element = selected_element;
+    }
+
+    /// Changes only the transient inspector tab.
+    pub(crate) fn select_tab(&mut self, active_tab: ElementsTab) {
+        self.active_tab = active_tab;
     }
 
     /// Consumed by the root window composition to focus Elements after an open
@@ -133,14 +163,14 @@ impl ElementWindowState {
             .is_some_and(|selector| std::mem::take(&mut selector.focus_requested))
     }
 
-    pub(crate) const fn selector_apply_ready(self) -> bool {
+    pub(crate) const fn selector_apply_ready(&self) -> bool {
         match self.selector {
             Some(selector) => selector.can_apply(),
             None => false,
         }
     }
 
-    pub(crate) const fn selector_new_ready(self) -> bool {
+    pub(crate) const fn selector_new_ready(&self) -> bool {
         match self.selector {
             Some(selector) => {
                 selector_mode_can_create_new(selector.mode(), selector.selected_template())
@@ -252,7 +282,12 @@ impl ElementWindowState {
     /// Closing Elements closes its child selector and clears all return/error
     /// state without touching any project/session authority.
     pub(crate) fn close_elements(&mut self) -> bool {
-        if !self.elements_open && self.selector.is_none() && self.focus_return_surface.is_none() {
+        if !self.elements_open
+            && self.selector.is_none()
+            && self.focus_return_surface.is_none()
+            && self.selected_element.is_none()
+            && self.active_tab == ElementsTab::Basic
+        {
             return false;
         }
         *self = Self::default();

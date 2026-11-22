@@ -2,11 +2,12 @@ pub(crate) mod inspector;
 pub(crate) mod selector;
 pub(crate) mod state;
 pub(crate) mod summary;
-
+mod presentation;
 
 use crate::{app::ScriptCraftApp, commands::CommandInvocation};
 use eframe::egui;
 use scriptcraft_commands::{builtin_template_value, Command, CommandOrigin};
+use state::ElementsTab;
 
 /// Composes the live Elements projection and dispatches one deferred window intent.
 pub(crate) fn show_elements_windows(app: &mut ScriptCraftApp, ctx: &egui::Context) {
@@ -21,9 +22,22 @@ pub(crate) fn show_elements_windows(app: &mut ScriptCraftApp, ctx: &egui::Contex
             app.session.project(),
             crate::chrome::shortcuts::ShortcutPlatform::current(),
         );
+        let selected_key = app
+            .element_windows
+            .selected_element()
+            .filter(|selected| summaries.iter().any(|item| &item.key == *selected))
+            .cloned()
+            .or_else(|| summaries.first().map(|summary| summary.key.clone()));
+        app.element_windows.select_element(selected_key.clone());
+        let selected_summary = selected_key
+            .as_ref()
+            .and_then(|selected| summaries.iter().find(|summary| &summary.key == selected));
         inspector::show_elements_window(
             ctx,
             &summaries,
+            selected_key.as_ref(),
+            selected_summary,
+            app.element_windows.active_tab(),
             selector_was_open,
             elements_focus_requested && !selector_was_open,
         )
@@ -77,6 +91,14 @@ pub(crate) fn show_elements_windows(app: &mut ScriptCraftApp, ctx: &egui::Contex
         // Elements title close is ignored until the selector has returned.
     } else {
         let command = match inspector_intent {
+            Some(inspector::ElementsWindowIntent::SelectElement(key)) => {
+                app.element_windows.select_element(Some(key));
+                None
+            }
+            Some(inspector::ElementsWindowIntent::SelectTab(tab)) => {
+                app.element_windows.select_tab(tab);
+                None
+            }
             Some(inspector::ElementsWindowIntent::OpenTemplateSelector) => {
                 Some(Command::FormatTemplateSelectorOpen)
             }
