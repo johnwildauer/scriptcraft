@@ -6,9 +6,11 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use font_kit::family_name::FamilyName;
 use font_kit::font::Font as FontKitFont;
 use font_kit::handle::Handle;
 use font_kit::loader::Loader;
+use font_kit::properties::{Properties, Stretch, Style as FontStyle, Weight};
 use font_kit::source::{Source, SystemSource};
 
 const MAX_FAMILY_LABEL_BYTES: usize = 256;
@@ -70,6 +72,19 @@ struct BackendQuery {
     overflowed: bool,
 }
 
+// Each entry is one exact byte/index identity. Aliases are retained only to
+// associate font-kit’s later best-match handle with this filtered identity.
+#[derive(Clone, Debug)]
+struct FontKitCandidate {
+    handle_aliases: Vec<Handle>,
+    source_location: FontSourceLocation,
+    collection_index: u32,
+    family_label: String,
+    full_name: Option<String>,
+    postscript_name: Option<String>,
+    bytes: Arc<Vec<u8>>,
+}
+
 trait FontSourceBackend: Send + Sync {
     fn query(&self, family: &str, style: FaceStyle, limits: QueryLimits) -> BackendQuery;
 }
@@ -91,8 +106,12 @@ impl FontSourceBackend for FontKitSystemBackend {
             };
         }
 
-        let mut matching = Vec::new();
+        let mut matching: Vec<FontKitCandidate> = Vec::new();
         let mut candidate_count = 0usize;
+        let mut read_count = 0usize;
+        let mut total_bytes = 0usize;
+        // The same native-property classifier is used by every font-kit source;
+        // only property-matching faces proceed to bounded exact-byte acquisition.
         for handle in family.fonts() {
             candidate_count = candidate_count.saturating_add(1);
             let Some((source_location, collection_index)) = source_location(handle) else {
@@ -110,68 +129,138 @@ impl FontSourceBackend for FontKitSystemBackend {
             {
                 continue;
             }
-            matching.push((
-                handle.clone(),
-                source_location,
-                collection_index,
-                family_label,
-                Some(font.full_name()),
-                font.postscript_name(),
-            ));
+            read_count = read_count.saturating_add(1);
+            if read_count > limits.reads {
+                return bounded_query_miss(candidate_count, read_count);
+            }
+            let Some(bytes) = original_handle_bytes(handle, limits.face_bytes) else {
+                return bounded_query_miss(candidate_count, read_count);
+            };
+            if bytes.is_empty() || bytes.len() > limits.face_bytes {
+                return bounded_query_miss(candidate_count, read_count);
+            }
+            total_bytes = total_bytes.saturating_add(bytes.len());
+            if total_bytes > limits.total_bytes {
+                return bounded_query_miss(candidate_count, read_count);
+            }
+
+            // Full bytes and collection index, not source labels or fingerprints,
+            // define duplicate identity; preserve the first representative.
+            if let Some(existing) = matching.iter_mut().find(|candidate| {
+                candidate.collection_index == collection_index
+                    && candidate.bytes.as_slice() == bytes.as_slice()
+            }) {
+                existing.handle_aliases.push(handle.clone());
+            } else {
+                matching.push(FontKitCandidate {
+                    handle_aliases: vec![handle.clone()],
+                    source_location,
+                    collection_index,
+                    family_label,
+                    full_name: Some(font.full_name()),
+                    postscript_name: font.postscript_name(),
+                    bytes,
+                });
+            }
         }
 
-        // Several exact faces for the same family/style cannot be resolved
-        // deterministically at this stage; refuse to choose one arbitrarily.
-        if matching.len() != 1 || limits.reads == 0 {
-            return BackendQuery {
-                candidate_count,
-                read_count: 0,
-                faces: Vec::new(),
-                overflowed: false,
-            };
-        }
-        let Some((
-            handle,
-            source_location,
-            collection_index,
-            family_label,
-            full_name,
-            postscript_name,
-        )) = matching.pop()
-        else {
-            return BackendQuery::empty();
+        let selected = match matching.as_slice() {
+            [] => return BackendQuery::empty(),
+            [candidate] => candidate,
+            _ => {
+                // Let font-kit resolve distinct candidates, then accept only a
+                // handle that aliases an already filtered, byte-verified face.
+                let requested_properties = requested_properties(style);
+                let family_names = [FamilyName::Title(requested_family.to_owned())];
+                let Ok(selected_handle) = source.select_best_match(&family_names, &requested_properties)
+                else {
+                    return BackendQuery {
+                        candidate_count,
+                        read_count,
+                        faces: Vec::new(),
+                        overflowed: false,
+                    };
+                };
+                let Some(candidate) = matching.iter().find(|candidate| {
+                    candidate
+                        .handle_aliases
+                        .iter()
+                        .any(|alias| handles_identify_same_face(alias, &selected_handle))
+                }) else {
+                    return BackendQuery {
+                        candidate_count,
+                        read_count,
+                        faces: Vec::new(),
+                        overflowed: false,
+                    };
+                };
+                candidate
+            }
         };
-        let Some(bytes) = original_handle_bytes(&handle, limits.face_bytes) else {
-            return BackendQuery {
-                candidate_count,
-                read_count: 1,
-                faces: Vec::new(),
-                overflowed: false,
-            };
-        };
-        if bytes.len() > limits.face_bytes || bytes.len() > limits.total_bytes {
-            return BackendQuery {
-                candidate_count,
-                read_count: 1,
-                faces: Vec::new(),
-                overflowed: false,
-            };
-        }
         BackendQuery {
             candidate_count,
-            read_count: 1,
+            read_count,
             faces: vec![NativeFontFace {
                 requested_family: requested_family.to_owned(),
-                family_label,
-                full_name,
-                postscript_name,
+                family_label: selected.family_label.clone(),
+                full_name: selected.full_name.clone(),
+                postscript_name: selected.postscript_name.clone(),
                 style,
-                source: source_location,
-                bytes: Arc::from(bytes.as_slice()),
-                collection_index,
+                source: selected.source_location.clone(),
+                bytes: Arc::from(selected.bytes.as_slice()),
+                collection_index: selected.collection_index,
             }],
             overflowed: false,
         }
+    }
+}
+
+fn bounded_query_miss(candidate_count: usize, read_count: usize) -> BackendQuery {
+    BackendQuery {
+        candidate_count,
+        read_count,
+        faces: Vec::new(),
+        overflowed: true,
+    }
+}
+
+fn requested_properties(style: FaceStyle) -> Properties {
+    let (native_style, native_weight) = match style {
+        FaceStyle::Regular => (FontStyle::Normal, Weight::NORMAL),
+        FaceStyle::Bold => (FontStyle::Normal, Weight::BOLD),
+        FaceStyle::Italic => (FontStyle::Italic, Weight::NORMAL),
+        FaceStyle::BoldItalic => (FontStyle::Italic, Weight::BOLD),
+    };
+    Properties {
+        style: native_style,
+        weight: native_weight,
+        stretch: Stretch::NORMAL,
+    }
+}
+
+fn handles_identify_same_face(left: &Handle, right: &Handle) -> bool {
+    match (left, right) {
+        (
+            Handle::Path {
+                path: left_path,
+                font_index: left_index,
+            },
+            Handle::Path {
+                path: right_path,
+                font_index: right_index,
+            },
+        ) => left_path == right_path && left_index == right_index,
+        (
+            Handle::Memory {
+                bytes: left_bytes,
+                font_index: left_index,
+            },
+            Handle::Memory {
+                bytes: right_bytes,
+                font_index: right_index,
+            },
+        ) => left_index == right_index && left_bytes.as_ref() == right_bytes.as_ref(),
+        _ => false,
     }
 }
 
@@ -194,6 +283,19 @@ fn source_size_is_bounded(handle: &Handle, limit: usize) -> bool {
 }
 
 fn classify_font_style(font: &FontKitFont) -> Option<FaceStyle> {
+    // Native properties are authoritative; bounded name evidence is consulted
+    // only when native weight cannot be mapped safely to the four style slots.
+    let properties = font.properties();
+    if properties.stretch != Stretch::NORMAL {
+        return None;
+    }
+    let weight = properties.weight.0;
+    if weight.is_finite() && (Weight::THIN.0..=Weight::BLACK.0).contains(&weight) {
+        let bold = weight >= Weight::SEMIBOLD.0;
+        let italic = matches!(properties.style, FontStyle::Italic | FontStyle::Oblique);
+        return Some(face_style(bold, italic));
+    }
+
     let family_label = font.family_name();
     match classify_named_face_style(
         &family_label,
@@ -212,6 +314,15 @@ fn classify_font_style(font: &FontKitFont) -> Option<FaceStyle> {
     }
     let subfamilies = sfnt_subfamily_names(&name_table)?;
     classify_subfamily_names(&subfamilies)
+}
+
+fn face_style(bold: bool, italic: bool) -> FaceStyle {
+    match (bold, italic) {
+        (false, false) => FaceStyle::Regular,
+        (true, false) => FaceStyle::Bold,
+        (false, true) => FaceStyle::Italic,
+        (true, true) => FaceStyle::BoldItalic,
+    }
 }
 
 fn classify_subfamily_names(subfamilies: &[String]) -> Option<FaceStyle> {
@@ -238,23 +349,22 @@ fn classify_named_face_style(
     full_name: &str,
     postscript_name: Option<&str>,
 ) -> NamedStyleEvidence {
+    // Unrecognized suffixes are neutral; only two recognized, contradictory
+    // labels make fallback evidence invalid.
     let full = named_label_style(full_name, family);
-    let postscript = postscript_name
-        .map(|name| named_postscript_label_style(name, family))
-        .unwrap_or(Ok(None));
+    let postscript = postscript_name.and_then(|name| named_postscript_label_style(name, family));
     match (full, postscript) {
-        (Err(()), _) | (_, Err(())) => NamedStyleEvidence::Invalid,
-        (Ok(Some(full)), Ok(Some(postscript))) if full != postscript => NamedStyleEvidence::Invalid,
-        (Ok(Some(style)), _) | (_, Ok(Some(style))) => NamedStyleEvidence::Classified(style),
-        (Ok(None), Ok(None)) => NamedStyleEvidence::Missing,
+        (Some(full), Some(postscript)) if full != postscript => NamedStyleEvidence::Invalid,
+        (Some(style), _) | (_, Some(style)) => NamedStyleEvidence::Classified(style),
+        (None, None) => NamedStyleEvidence::Missing,
     }
 }
 
-fn named_label_style(label: &str, family: &str) -> Result<Option<FaceStyle>, ()> {
+fn named_label_style(label: &str, family: &str) -> Option<FaceStyle> {
     named_label_style_with_suffix_classifier(label, family, classify_subfamily)
 }
 
-fn named_postscript_label_style(label: &str, family: &str) -> Result<Option<FaceStyle>, ()> {
+fn named_postscript_label_style(label: &str, family: &str) -> Option<FaceStyle> {
     named_label_style_with_suffix_classifier(label, family, classify_postscript_suffix)
 }
 
@@ -262,19 +372,19 @@ fn named_label_style_with_suffix_classifier(
     label: &str,
     family: &str,
     classify_suffix: fn(&str) -> Option<FaceStyle>,
-) -> Result<Option<FaceStyle>, ()> {
+) -> Option<FaceStyle> {
     let Some(prefix) = label.get(..family.len()) else {
-        return Ok(None);
+        return None;
     };
     if !prefix.eq_ignore_ascii_case(family) {
-        return Ok(None);
+        return None;
     }
     let suffix = &label[family.len()..];
     let suffix = suffix.trim_start_matches([' ', '-']);
     if suffix.is_empty() {
-        return Ok(None);
+        return None;
     }
-    classify_suffix(suffix).map(Some).ok_or(())
+    classify_suffix(suffix)
 }
 
 fn classify_postscript_suffix(suffix: &str) -> Option<FaceStyle> {

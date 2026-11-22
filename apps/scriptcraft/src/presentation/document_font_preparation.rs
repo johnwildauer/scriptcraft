@@ -159,18 +159,22 @@ impl DocumentFontPreparation {
                         bundled_ids[resolved_style_index(style)].clone();
                 }
             } else {
-                // Resolve each exact family/style independently before generic
-                // matching-family faces. A still-missing style falls back only
-                // to its matching bundled Courier Prime face, never another style.
+                // Resolve each concrete family/style exactly before ordered
+                // candidates. Literal generic requests skip their pseudo-family
+                // query; unresolved styles end at matching-style Courier Prime.
                 for style in ResolvedFaceStyle::ALL {
                     let index = resolved_style_index(style);
-                    let exact = resolve_native_style(
-                        &mut self.native_font_catalog,
-                        family,
-                        style,
-                        &signature.scalars,
-                        &mut bytes_read,
-                    )?;
+                    let exact = if is_literal_generic_family(family) {
+                        None
+                    } else {
+                        resolve_native_style(
+                            &mut self.native_font_catalog,
+                            family,
+                            style,
+                            &signature.scalars,
+                            &mut bytes_read,
+                        )?
+                    };
                     let (candidate, used_generic) = match exact {
                         Some(face) => (Some(face), false),
                         None => match selection {
@@ -317,12 +321,13 @@ fn classify_requested_family(family: &str) -> (FamilyKind, FamilySelection) {
             | "helvetica neue"
             | "helvetica-like"
             | "liberation sans"
+            | "segoe ui"
             | "sans-serif"
     ) {
         (FamilyKind::Sans, FamilySelection::Sans)
     } else if matches!(
         normalized.as_str(),
-        "times new roman" | "times" | "liberation serif" | "serif"
+        "times new roman" | "times" | "liberation serif" | "georgia" | "serif"
     ) {
         (FamilyKind::Serif, FamilySelection::Serif)
     } else {
@@ -457,10 +462,15 @@ struct ParsedHostFace {
 
 fn generic_family_candidates(selection: FamilySelection) -> &'static [&'static str] {
     match selection {
-        FamilySelection::Sans => &["sans-serif", "Arial", "Helvetica", "Liberation Sans"],
-        FamilySelection::Serif => &["serif", "Times New Roman", "Times", "Liberation Serif"],
+        FamilySelection::Sans => &["Arial", "Helvetica", "Liberation Sans", "Segoe UI"],
+        FamilySelection::Serif => &["Times New Roman", "Times", "Liberation Serif", "Georgia"],
         FamilySelection::Courier => &[],
     }
+}
+
+fn is_literal_generic_family(family: &str) -> bool {
+    family.trim().eq_ignore_ascii_case("serif")
+        || family.trim().eq_ignore_ascii_case("sans-serif")
 }
 
 fn native_style(style: ResolvedFaceStyle) -> super::host_font_catalog::FaceStyle {
