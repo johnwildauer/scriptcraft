@@ -362,6 +362,12 @@ pub(crate) fn run() -> eframe::Result {
             let startup_document = startup.startup_document;
             let startup_template = startup.startup_template;
 
+            // ScriptCraft owns page-zoom commands; document Ctrl+Shift+0 must
+            // not also match egui's global Ctrl+0 reset.
+            cc.egui_ctx.options_mut(|options| {
+                options.zoom_with_keyboard = false;
+            });
+
             let document_font_store = document_font::install(&cc.egui_ctx);
             material_font::install(&cc.egui_ctx, &toolbar_items::custom_material_icon_axes());
             ScriptCraftApp::new_with_startup(

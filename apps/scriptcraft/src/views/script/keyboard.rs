@@ -157,7 +157,7 @@ impl ScriptCraftApp {
                         if command.is_none() {
                             let dynamic_enabled = self.dynamic_shortcuts_allowed(surface);
                             let controls = self.refresh_dynamic_controls();
-                            command = editor_command_for_key_event(
+                            let resolved_command = editor_command_for_key_event(
                                 *key,
                                 *physical_key,
                                 *modifiers,
@@ -167,7 +167,8 @@ impl ScriptCraftApp {
                                 } else {
                                     &[]
                                 },
-                            )
+                            );
+                            command = resolved_command
                             .filter(|command| {
                                 surface == EditorSurface::Body
                                     || !matches!(

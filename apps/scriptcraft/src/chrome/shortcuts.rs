@@ -372,11 +372,9 @@ pub(crate) fn editor_command_for_key_event(
         _ => {}
     }
 
-    // Egui's logical key is the requested top-row digit. Requiring the same
-    // physical key avoids treating a keypad-produced logical digit as an alias.
-    if physical_key != Some(key) {
+    let Some(key) = dynamic_element_lookup_key(key, physical_key, modifiers) else {
         return None;
-    }
+    };
     for binding in bindings {
         if key_for_shortcut(binding.chord.key) == Some(key)
             && shortcut_modifiers_match(binding.chord, modifiers, platform)
@@ -388,6 +386,26 @@ pub(crate) fn editor_command_for_key_event(
         }
     }
     None
+}
+
+/// Egui can report US Shift+1 as logical exclamation plus physical Num1.
+/// Normalize only this demonstrated shifted printable-character alias for
+/// document digit bindings; every other dynamic key requires an exact pair.
+fn dynamic_element_lookup_key(
+    key: egui::Key,
+    physical_key: Option<egui::Key>,
+    modifiers: egui::Modifiers,
+) -> Option<egui::Key> {
+    if physical_key == Some(key) {
+        Some(key)
+    } else if modifiers.shift
+        && key == egui::Key::Exclamationmark
+        && physical_key == Some(egui::Key::Num1)
+    {
+        Some(egui::Key::Num1)
+    } else {
+        None
+    }
 }
 
 /// Resolve one supported punctuation Text event before ordinary text insertion.
