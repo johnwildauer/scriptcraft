@@ -38,6 +38,8 @@ impl EditingSession {
         match target {
             dual_dialogue::ToggleTarget::Enable(pattern) => {
                 let candidate_start = pattern.flat_range.start;
+                let source_ordinal =
+                    u32::try_from(candidate_start).map_err(|_| EditError::TooManyElements)?;
                 let group_id = project.allocate_element_id()?;
                 let member_ids = pattern
                     .left
@@ -48,7 +50,12 @@ impl EditingSession {
                 let mut wrapper = dual_dialogue::DualDialogueWrapperProvenance::default();
                 if let Some(preservation) = project.preservation.as_mut() {
                     let (foreign_id, anchor, ordinal) = preservation
-                        .wrap_dual_dialogue_members(&group_id, &member_ids, None)
+                        .wrap_dual_dialogue_members(
+                            &group_id,
+                            &member_ids,
+                            source_ordinal,
+                            None,
+                        )
                         .map_err(EditError::Preservation)?;
                     wrapper.outer_foreign_id = Some(foreign_id.clone());
                     wrapper.source = Some(SourceProvenance {

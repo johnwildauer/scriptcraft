@@ -703,13 +703,6 @@ fn recognize_candidate_unchecked(
     if !has_capability(project, first, |capabilities| capabilities.character_cue) {
         return Ok(None);
     }
-    if (0..start).any(|prior| {
-        project.elements.get(prior).is_some_and(|element| {
-            has_capability(project, element, |capabilities| capabilities.character_cue)
-        }) && candidate_shape_end(project, prior).is_some_and(|end| start < end)
-    }) {
-        return Ok(None);
-    }
     let left_begin = start.checked_add(1).ok_or(ModelError::InvalidNumber)?;
     let Some(left_end) = run_end(project, left_begin) else {
         return Ok(None);
@@ -729,17 +722,12 @@ fn recognize_candidate_unchecked(
     let Some(end) = run_end(project, right_begin) else {
         return Ok(None);
     };
-    if project.elements.get(end).is_some_and(|element| {
-        has_capability(project, element, |capabilities| capabilities.character_cue)
-    }) {
-        return Ok(None);
-    }
     if project.dual_dialogue_groups.iter().any(|group| {
         let first = first_member(project, group);
         let last = last_member(project, group);
         first
             .zip(last)
-            .is_some_and(|(first, last)| start <= last && end >= first)
+            .is_some_and(|(first, last)| start <= last && first < end)
     }) {
         return Ok(None);
     }
@@ -777,28 +765,6 @@ fn run_end(project: &Project, start: usize) -> Option<usize> {
         end = end.checked_add(1)?;
     }
     Some(end)
-}
-
-fn candidate_shape_end(project: &Project, start: usize) -> Option<usize> {
-    if !project.elements.get(start).is_some_and(|element| {
-        has_capability(project, element, |capabilities| capabilities.character_cue)
-    }) {
-        return None;
-    }
-    let left_end = run_end(project, start.checked_add(1)?)?;
-    if !project.elements.get(left_end).is_some_and(|element| {
-        has_capability(project, element, |capabilities| capabilities.character_cue)
-    }) {
-        return None;
-    }
-    let end = run_end(project, left_end.checked_add(1)?)?;
-    project
-        .elements
-        .get(end)
-        .map_or(true, |element| {
-            !has_capability(project, element, |capabilities| capabilities.character_cue)
-        })
-        .then_some(end)
 }
 
 fn element_capabilities(

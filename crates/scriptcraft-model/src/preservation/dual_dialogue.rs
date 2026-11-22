@@ -72,6 +72,7 @@ impl PreservationState {
         &mut self,
         group_id: &StableId,
         member_ids: &[StableId],
+        source_ordinal: u32,
         overrides: Option<crate::formatting::SourceParagraphOverrides>,
     ) -> Result<(String, SourceAnchorId, u32), PreservationError> {
         if self.source.format != SourceFormat::Fdx || member_ids.len() < 2 {
@@ -146,8 +147,6 @@ impl PreservationState {
             .qualified_name
             .as_deref()
             .and_then(|name| name.split_once(':').map(|(prefix, _)| prefix.to_owned()));
-        let source_ordinal =
-            u32::try_from(child_indexes[0]).map_err(|_| PreservationError::TooManyEvents)?;
         let foreign_id = self.fresh_foreign_paragraph_id()?;
         let anchor_id = self.fresh_anchor_id()?;
         let mut outer = source_element("Paragraph", &root_namespace, prefix.as_deref());

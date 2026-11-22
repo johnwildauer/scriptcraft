@@ -187,6 +187,34 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
 }
 
 fn same_save_projection(expected: &Project, actual: &Project) -> bool {
+    fn same_owner_overrides(expected: &Project, actual: &Project) -> bool {
+        let expected_owned_overrides = expected
+            .elements
+            .iter()
+            .filter(|owner| expected.direct_paragraph_overrides.contains_key(&owner.id))
+            .count();
+        let actual_owned_overrides = actual
+            .elements
+            .iter()
+            .filter(|owner| actual.direct_paragraph_overrides.contains_key(&owner.id))
+            .count();
+        expected.elements.len() == actual.elements.len()
+            && expected_owned_overrides == expected.direct_paragraph_overrides.len()
+            && actual_owned_overrides == actual.direct_paragraph_overrides.len()
+            && expected
+                .elements
+                .iter()
+                .zip(&actual.elements)
+                .all(|(expected_owner, actual_owner)| {
+                    expected
+                        .direct_paragraph_overrides
+                        .get(&expected_owner.id)
+                        == actual
+                            .direct_paragraph_overrides
+                            .get(&actual_owner.id)
+                })
+    }
+
     fn same_elements(
         expected: &[std::sync::Arc<BodyOwner>],
         actual: &[std::sync::Arc<BodyOwner>],
@@ -205,7 +233,7 @@ fn same_save_projection(expected: &Project, actual: &Project) -> bool {
 
     expected.element_definitions() == actual.element_definitions()
         && expected.page_layout() == actual.page_layout()
-        && expected.direct_paragraph_overrides == actual.direct_paragraph_overrides
+        && same_owner_overrides(expected, actual)
         && same_title_paragraphs(&expected.title_page, &actual.title_page)
         && same_elements(&expected.elements, &actual.elements)
         && same_dual_dialogue_projection(expected, actual)
@@ -296,11 +324,11 @@ fn map_body_owner_identity<'a>(
                     return Some(owner);
                 }
             }
+            return None;
         }
-        return None;
     }
 
-    // A source-less fallback is deliberately content-unique rather than
+    // A no-foreign-ID fallback is deliberately content-unique rather than
     // positional or Type-dependent. Ambiguous repeated text is not identity.
     let mut old_matches = old_project
         .elements

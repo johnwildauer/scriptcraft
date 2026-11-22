@@ -381,6 +381,20 @@ where
             };
         };
 
+        // Only the exact supported DualDialogue container beneath a direct
+        // General body Paragraph is structural for identity traversal.
+        if depth == 3
+            && is_fdx_element(element, "DualDialogue", root_namespace)
+            && is_fdx_element(parent, "Paragraph", root_namespace)
+            && attribute(parent, "Type") == Some("General")
+            && grandparent.is_some_and(|content_element| {
+                is_fdx_element(content_element, "Content", root_namespace)
+            })
+            && content::is_supported_dual_dialogue_source(parent, root_namespace)
+        {
+            return content::SourceClass::Structural;
+        }
+
         let body_parent = depth == 3
             && is_fdx_element(parent, "Paragraph", root_namespace)
             && matches!(content::paragraph_type_key(parent), Ok(Some(key)) if

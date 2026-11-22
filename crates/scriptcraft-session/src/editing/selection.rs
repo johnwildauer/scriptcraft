@@ -165,12 +165,9 @@ pub(crate) fn map_selection_to_project(
                 *index
             } else {
                 let old_element = old_element?;
-                if old_source.is_some() {
-                    return None;
-                }
-                // Source-less projects acquire FDX identities during Save As.
-                // Keep the existing exact-key/text occurrence fallback only when
-                // stable identity is unavailable.
+                // Owners without a foreign ID (including source-backed FDX
+                // owners) use the existing exact-key/text occurrence fallback
+                // only when stable identity is unavailable.
                 let old_occurrences = old
                     .elements
                     .iter()

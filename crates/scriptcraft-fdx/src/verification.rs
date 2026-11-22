@@ -151,10 +151,10 @@ pub fn same_dual_dialogue_projection(left: &Project, right: &Project) -> bool {
         .iter()
         .zip(&right.dual_dialogue_groups)
     {
+        // Member stable IDs are session-local and may be reallocated on reread; ordered occurrences and foreign source identity are the semantic comparison authorities.
         if left_group.members.len() != right_group.members.len()
             || active_side_positions(left, left_group) != active_side_positions(right, right_group)
             || member_positions(left, left_group) != member_positions(right, right_group)
-            || (left.preservation.is_some() && left_group.members != right_group.members)
         {
             return false;
         }
@@ -163,11 +163,11 @@ pub fn same_dual_dialogue_projection(left: &Project, right: &Project) -> bool {
         {
             return false;
         }
+        // Wrapper ordinals are recomputable provenance coordinates, not durable serialized identity.
         if let Some(expected) = left_group.wrapper.source.as_ref() {
             if !right_group.wrapper.source.as_ref().is_some_and(|actual| {
                 expected.format == actual.format
                     && expected.section == actual.section
-                    && expected.ordinal == actual.ordinal
                     && expected.foreign_id == actual.foreign_id
                     && expected.foreign_role == actual.foreign_role
             }) {
@@ -964,10 +964,14 @@ fn normalize_source_tree(nodes: &[PreservedNode]) -> Vec<PreservedNode> {
     let mut stack = normalized.iter_mut().collect::<Vec<_>>();
     while let Some(node) = stack.pop() {
         if let PreservedNode::Element(element) = node {
-            if matches!(element.ownership, SourceOwnership::Managed(_)) {
-                // Semantic element IDs and source-anchor IDs are session-local;
-                // they are not serialized FDX fields and may be reallocated on
-                // reread. Compare the source XML structure, not these keys.
+            if matches!(
+                element.ownership,
+                SourceOwnership::Managed(_) | SourceOwnership::DualDialogueWrapper(_)
+            ) {
+                // Managed and wrapper ownership IDs and their source-anchor IDs
+                // are session-local; they are not serialized FDX fields and may
+                // be reallocated on reread. Compare the source XML structure,
+                // not these keys.
                 element.ownership = SourceOwnership::Opaque;
                 element.anchor = None;
             } else if element.name.local_name == "ElementSettings" {
