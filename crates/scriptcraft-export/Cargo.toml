@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 scriptcraft-layout = { path = "../scriptcraft-layout" }
 scriptcraft-model = { path = "../scriptcraft-model" }
+ttf-parser = "=0.25.1"
 
 [lints]
 workspace = true

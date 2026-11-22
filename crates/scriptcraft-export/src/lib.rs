@@ -1,12 +1,17 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-//! Explicit, non-canonical plain-text and PDF export adapters.
+//! Explicit output adapters: plain text remains environment-only, while PDF
+//! also requires a transient exact resolved-face byte payload.
 //!
-//! Both adapters consume shared Print layout and only borrow the project, so
-//! exporting cannot change the editing session or its clean state.
+//! Both adapters consume shared Print layout and only borrow project/layout
+//! state, so exporting cannot change the editing session or its clean state.
 
 mod pdf;
+mod pdf_document;
+mod pdf_font;
+mod pdf_font_policy;
+mod pdf_font_payload;
 mod text;
 
 use scriptcraft_layout::LayoutError;
@@ -14,11 +19,17 @@ use scriptcraft_layout::LayoutError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportError {
     Layout(LayoutError),
-    /// The explicit resolved-font/page environment is missing a requested
-    /// family or does not match the supplied page inputs.
+    /// The resolved-font/page environment is missing a request or does not
+    /// match the supplied page inputs.
     InvalidTypographyEnvironment,
     /// A Print span's canonical scalar-boundary topology is inconsistent.
     InvalidLayoutGeometry,
+    /// Exact resolved-face metadata or supplied bytes are missing or incoherent.
+    InvalidPdfFontPayload,
+    /// Required packaged Courier Prime bytes failed provenance validation.
+    RequiredPackagedFontEmbedding,
+    /// A bounded PDF output/resource limit was exceeded.
+    OutputResourceLimitExceeded,
 }
 
 impl From<LayoutError> for ExportError {
@@ -32,4 +43,6 @@ pub use pdf::{
     export_pdf_with_options, PdfBase14Family, PdfExport, PdfExportOptions, PdfFallbackEntry,
     PdfFallbackKind, PdfTypographyReport,
 };
+pub use pdf_font_policy::PdfFontEmbeddingFallbackReason;
+pub use pdf_font_payload::{PdfFontPayload, PdfResolvedFaceBytes};
 pub use text::{export_text, export_text_with_layout_inputs, LossReport, TextExport};

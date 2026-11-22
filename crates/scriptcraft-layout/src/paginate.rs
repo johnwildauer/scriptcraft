@@ -166,7 +166,7 @@ impl ScreenplayLayout {
                 prepared_lookup_started,
             )?;
             let placement_started = diagnostics.as_ref().map(|_| Instant::now());
-            output.place_element(prepared, index, paragraph, &mut diagnostics);
+            output.place_element(prepared, index, paragraph, &mut diagnostics)?;
             if let Some(diagnostics) = diagnostics.as_deref_mut() {
                 add_elapsed_nanos(&mut diagnostics.placement_nanos, placement_started);
             }
@@ -211,7 +211,7 @@ impl ScreenplayLayout {
             },
             lines: Vec::new(),
             occupied_lines: 0,
-            next_line_y: FixedPoint::from_points(i64::from(self.inputs.margin_top)),
+            next_line_top: FixedPoint::from_points(i64::from(self.inputs.margin_top)),
         }
     }
 
@@ -235,7 +235,7 @@ impl ScreenplayLayout {
             x: line_left,
             y,
             width: FixedPoint::default(),
-            height: line.paragraph.line_advance,
+            height: line.vertical_metrics.leading,
         };
         let mut spans = spans::resolved_positioned_spans(
             &line.resolved_scalars,
@@ -302,7 +302,7 @@ impl ScreenplayLayout {
             span.geometry.x =
                 FixedPoint::from_raw(span.geometry.x.raw().saturating_add(alignment_shift));
         }
-        let height = line.paragraph.line_advance;
+        let height = line.vertical_metrics.leading;
         let paragraph_bounds = FixedRect {
             x: line.paragraph.left,
             y,
@@ -366,6 +366,7 @@ impl ScreenplayLayout {
             unaligned_line_left: line_left,
             geometry,
             paragraph_bounds,
+            vertical_metrics: line.vertical_metrics,
             rect: compat_rect(paragraph_bounds),
             keep_with_next: !title_page
                 && line.paragraph.pagination == super::inputs::PaginationPolicy::KeepWithNext,
@@ -379,10 +380,9 @@ impl ScreenplayLayout {
         element: usize,
         paragraph: EffectiveParagraph,
         diagnostics: &mut Option<&mut LayoutBuildDiagnostics>,
-    ) {
+    ) -> Result<(), LayoutError> {
         let lines = &prepared.lines;
         let keep = paragraph.pagination == super::inputs::PaginationPolicy::KeepWithNext;
-        let minimum = if keep { 2 } else { 1 };
         if self.pages.is_empty() {
             self.pages.push(self.new_page(false));
         }
@@ -405,9 +405,22 @@ impl ScreenplayLayout {
                 .paper_height
                 .saturating_sub(self.inputs.margin_bottom),
         ));
-        let minimum_height = paragraph.line_advance.raw().saturating_mul(minimum as i64);
+        let first_leading = lines
+            .first()
+            .map_or(paragraph.base_leading.raw(), |line| line.vertical_metrics.leading.raw());
+        let second_leading = lines
+            .get(1)
+            .map_or(first_leading, |line| line.vertical_metrics.leading.raw());
+        let minimum_height = if keep {
+            first_leading.checked_add(second_leading)
+        } else {
+            Some(first_leading)
+        }
+        .ok_or(LayoutError {
+            kind: LayoutErrorKind::InvalidEffectiveLeading,
+        })?;
         let vertical_fit = self.pages.last().is_some_and(|page| {
-            page.next_line_y
+            page.next_line_top
                 .raw()
                 .saturating_add(extra_gap)
                 .saturating_add(minimum_height)
@@ -423,28 +436,33 @@ impl ScreenplayLayout {
         let applied_gap =
             if has_boundary && self.pages.last().is_some_and(|page| !page.lines.is_empty()) {
                 if let Some(page) = self.pages.last_mut() {
-                    page.next_line_y =
-                        FixedPoint::from_raw(page.next_line_y.raw().saturating_add(extra_gap));
+                    page.next_line_top = FixedPoint::from_raw(
+                        page.next_line_top.raw().saturating_add(extra_gap),
+                    );
                 }
                 extra_gap
             } else {
                 0
             };
-        let total_height = paragraph
-            .line_advance
-            .raw()
-            .saturating_mul(lines.len().min(i64::MAX as usize) as i64)
-            .saturating_add(applied_gap);
+        let line_height = lines.iter().try_fold(0_i64, |sum, line| {
+            sum.checked_add(line.vertical_metrics.leading.raw())
+        }).ok_or(LayoutError {
+            kind: LayoutErrorKind::InvalidEffectiveLeading,
+        })?;
+        let total_height = line_height.checked_add(applied_gap).ok_or(LayoutError {
+            kind: LayoutErrorKind::InvalidEffectiveLeading,
+        })?;
         let content_height =
             content_bottom.raw() - FixedPoint::from_points(i64::from(self.inputs.margin_top)).raw();
         let oversized_element = total_height > content_height;
         for wrapped in lines.iter() {
+            let line_leading = wrapped.vertical_metrics.leading.raw();
             let current_fits = self.pages.last().is_some_and(|page| {
                 page.lines.is_empty()
                     || page
-                        .next_line_y
+                        .next_line_top
                         .raw()
-                        .saturating_add(paragraph.line_advance.raw())
+                        .saturating_add(line_leading)
                         <= content_bottom.raw()
             });
             if !current_fits {
@@ -455,25 +473,26 @@ impl ScreenplayLayout {
                 self.pages[page_index].occupied_lines = 0;
             }
             let page_number = self.pages[page_index].number;
-            let next_line_y = self.pages[page_index].next_line_y;
+            let next_line_top = self.pages[page_index].next_line_top;
             let mut line = rebase_prepared_line(
                 wrapped,
                 element,
                 page_number,
-                next_line_y,
+                next_line_top,
                 diagnostics.as_deref_mut(),
             );
             line.oversized |= oversized_element;
             self.pages[page_index].lines.push(line);
             self.pages[page_index].occupied_lines =
                 self.pages[page_index].occupied_lines.saturating_add(1);
-            self.pages[page_index].next_line_y = FixedPoint::from_raw(
+            self.pages[page_index].next_line_top = FixedPoint::from_raw(
                 self.pages[page_index]
-                    .next_line_y
+                    .next_line_top
                     .raw()
-                    .saturating_add(paragraph.line_advance.raw()),
+                    .saturating_add(line_leading),
             );
         }
+        Ok(())
     }
 }
 

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use ab_glyph::{Font, FontRef};
 use scriptcraft_model::typography::{
     content_fingerprint, DocumentFontEnvironment, FaceStyle as ResolvedFaceStyle,
-    FontResolutionKind, RequestedFontResolution, ResolvedFaceMetrics, ResolvedFontFace,
+    FontResolutionKind, LeadingResolverKind, RequestedFontResolution, ResolvedFaceMetrics, ResolvedFontFace,
     ResolvedFontId, ResolvedFontSourceKind, ScalarAdvance, MAX_FONT_REQUESTS, MAX_RESOLVED_FACES,
     MAX_SCALAR_ADVANCES,
 };
@@ -50,6 +50,33 @@ pub(crate) struct PreparedDocumentFonts {
 impl PreparedDocumentFonts {
     pub(crate) fn face_bytes(&self, id: &ResolvedFontId) -> Option<&Arc<[u8]>> {
         self.face_bytes.get(id)
+    }
+
+    pub(crate) fn resolved_ids(&self) -> impl Iterator<Item = &ResolvedFontId> {
+        self.face_bytes.keys()
+    }
+
+    pub(crate) fn face_index(&self, id: &ResolvedFontId) -> Option<u32> {
+        self.face_indices.get(id).copied()
+    }
+
+    pub(crate) fn is_exact_packaged_courier_prime(&self, id: &ResolvedFontId) -> bool {
+        let Some(face) = self.environment.face(id) else {
+            return false;
+        };
+        let Some(bytes) = self.face_bytes.get(id) else {
+            return false;
+        };
+        let Some(face_index) = self.face_indices.get(id) else {
+            return false;
+        };
+        let expected_style_index = resolved_style_index(face.style);
+        face.source_kind == ResolvedFontSourceKind::Bundled
+            && face.leading_resolver == LeadingResolverKind::Courier
+            && face.family_label == "Courier Prime"
+            && face.face_label == courier_style_name(face.style)
+            && *face_index == 0
+            && bytes.as_ref() == super::bundled_font_startup::courier_prime_faces()[expected_style_index]
     }
 
     pub(crate) fn signature_matches(&self, other: &Self) -> bool {
@@ -114,6 +141,7 @@ impl DocumentFontPreparation {
                 courier_style_name(style),
                 style,
                 ResolvedFontSourceKind::Bundled,
+                LeadingResolverKind::Courier,
                 0,
                 metrics,
             )?;
@@ -183,6 +211,7 @@ impl DocumentFontPreparation {
                             &candidate.face_label,
                             style,
                             ResolvedFontSourceKind::Host,
+                            LeadingResolverKind::Proportional,
                             candidate.face_index,
                             candidate.metrics,
                         )?);
@@ -567,16 +596,26 @@ fn insert_resolved_face(
     face_label: &str,
     style: ResolvedFaceStyle,
     source_kind: ResolvedFontSourceKind,
+    leading_resolver: LeadingResolverKind,
     face_index: u32,
     metrics: ResolvedFaceMetrics,
 ) -> Result<ResolvedFontId, FontPreparationError> {
-    let fingerprint =
-        resolved_identity_fingerprint(bytes, face_index, style, source_kind, &metrics);
-    let id = allocate_resolved_font_id(
+    let fingerprint = resolved_identity_fingerprint(
         bytes,
         face_index,
         style,
         source_kind,
+        leading_resolver,
+        &metrics,
+    );
+    let id = allocate_resolved_font_id(
+        bytes,
+        family_label,
+        face_label,
+        face_index,
+        style,
+        source_kind,
+        leading_resolver,
         &metrics,
         fingerprint,
         bytes_by_id,
@@ -590,6 +629,7 @@ fn insert_resolved_face(
             face_label,
             style,
             source_kind,
+            leading_resolver,
             bytes,
             metrics,
         )
@@ -624,6 +664,7 @@ fn resolved_identity_fingerprint(
     face_index: u32,
     style: ResolvedFaceStyle,
     source_kind: ResolvedFontSourceKind,
+    leading_resolver: LeadingResolverKind,
     metrics: &ResolvedFaceMetrics,
 ) -> u64 {
     let mut hash = content_fingerprint(bytes);
@@ -636,6 +677,7 @@ fn resolved_identity_fingerprint(
     }
     mix(style as u8);
     mix(source_kind as u8);
+    mix(leading_resolver as u8);
     for value in [
         metrics.units_per_em as i64,
         i64::from(metrics.ascender),
@@ -660,15 +702,20 @@ fn resolved_identity_fingerprint(
 
 fn allocate_resolved_font_id(
     bytes: &[u8],
+    family_label: &str,
+    face_label: &str,
     face_index: u32,
     style: ResolvedFaceStyle,
     source_kind: ResolvedFontSourceKind,
+    leading_resolver: LeadingResolverKind,
     metrics: &ResolvedFaceMetrics,
     fingerprint: u64,
     existing: &BTreeMap<ResolvedFontId, Arc<[u8]>>,
     existing_indices: &BTreeMap<ResolvedFontId, u32>,
     existing_faces: &BTreeMap<ResolvedFontId, ResolvedFontFace>,
 ) -> Result<ResolvedFontId, FontPreparationError> {
+    let byte_length =
+        u64::try_from(bytes.len()).map_err(|_| FontPreparationError::bounded("resolved-id-bound"))?;
     let style_suffix = match style {
         ResolvedFaceStyle::Regular => "r",
         ResolvedFaceStyle::Bold => "b",
@@ -688,8 +735,13 @@ fn allocate_resolved_font_id(
                 if existing_bytes.as_ref() == bytes
                     && existing_indices.get(&id) == Some(&face_index)
                     && existing_faces.get(&id).is_some_and(|face| {
-                        face.style == style
+                        face.family_label == family_label
+                            && face.face_label == face_label
+                            && face.byte_length == byte_length
+                            && face.content_fingerprint == content_fingerprint(bytes)
+                            && face.style == style
                             && face.source_kind == source_kind
+                            && face.leading_resolver == leading_resolver
                             && face.metrics == *metrics
                     }) =>
             {

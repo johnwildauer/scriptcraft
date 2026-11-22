@@ -17,6 +17,9 @@ pub(crate) fn safe_layout_error_category(error: &scriptcraft_layout::LayoutError
         LayoutErrorKind::InvalidProfile => "invalid layout profile",
         LayoutErrorKind::InvalidPosition => "invalid layout position",
         LayoutErrorKind::NoGeometry => "layout geometry unavailable",
+        LayoutErrorKind::UnsupportedDocumentLeading => "unsupported document leading",
+        LayoutErrorKind::InvalidEffectiveLeading => "invalid effective leading",
+        LayoutErrorKind::InvalidSpaceBefore => "invalid SpaceBefore derivation",
     }
 }
 
@@ -43,8 +46,10 @@ pub(crate) struct PerformanceMeasurements {
     pub(crate) pages_culled: u64,
     pub(crate) lines_submitted: u64,
     pub(crate) selection_spans_submitted: u64,
-    /// ScriptCraft's fresh fixed-cell/natural galley transformations. This does
-    /// not report hits in egui's internal atlas-aware layout cache.
+    pub(crate) metric_culled_lines: u64,
+    pub(crate) natural_extent_exceeds_line_box: u64,
+    /// Fresh ScriptCraft presentation galleys built from canonical line geometry.
+    /// This excludes hits in egui's internal atlas-aware layout cache.
     pub(crate) galleys_built: u64,
     /// Reuses of ScriptCraft-transformed UV-bearing galleys within a pass.
     /// Currently zero by policy: without an atlas identity we rebuild variants.
@@ -111,6 +116,12 @@ impl PerformanceMeasurements {
             selection_spans_submitted: self
                 .selection_spans_submitted
                 .saturating_sub(baseline.selection_spans_submitted),
+            metric_culled_lines: self
+                .metric_culled_lines
+                .saturating_sub(baseline.metric_culled_lines),
+            natural_extent_exceeds_line_box: self
+                .natural_extent_exceeds_line_box
+                .saturating_sub(baseline.natural_extent_exceeds_line_box),
             galleys_built: self.galleys_built.saturating_sub(baseline.galleys_built),
             galleys_reused: self.galleys_reused.saturating_sub(baseline.galleys_reused),
             element_wraps_built: self
@@ -285,7 +296,7 @@ impl PerformanceDiagnostics {
         let totals = self.totals;
         let benchmark = self.benchmark_delta();
         format!(
-            "profile={build_profile} operation={} frames={} events={} layouts={} cache-hits={} layout-identity-changes={} pages-considered={} pages-culled={} pages-painted={} lines={} selection-spans={} galleys-built={} galleys-reused={} wraps-built={} wraps-reused={} caret-lookups={} interaction-indexed={} interaction-linear={} interaction-index-entries={} derived-attempted={} derived-completed={} derived-skipped={} derived-irrelevant-skips={} derived-changed={} derived-unchanged={} derived-deferred={} derived-failed={} derived-scenes-requested={} derived-scenes-attempted={} derived-scenes-changed={} derived-scenes-unchanged={} derived-scenes-deferred={} derived-project-candidates={} derived-scene-candidates={} derived-redundant-preservation-clones={} zoom-anchor-capture-success={} zoom-anchor-capture-miss={} zoom-scroll-canceled={} zoom-compensation-queued={} zoom-geometry-published={} zoom-anchor-consumed={} frame-ns={} event-ns={} layout-lookup-ns={} element-wrap-ns={} page-paint-ns={} caret-lookup-ns={} derived-refresh-ns={} benchmark-frames={} benchmark-layouts={} benchmark-pages-painted={} benchmark-wraps-built={} benchmark-linear-queries={} benchmark-indexed-queries={} benchmark-index-entries={}",
+            "profile={build_profile} operation={} frames={} events={} layouts={} cache-hits={} layout-identity-changes={} pages-considered={} pages-culled={} pages-painted={} lines={} selection-spans={} metric-culled-lines={} natural-metric-outside-line-box={} galleys-built={} galleys-reused={} wraps-built={} wraps-reused={} caret-lookups={} interaction-indexed={} interaction-linear={} interaction-index-entries={} derived-attempted={} derived-completed={} derived-skipped={} derived-irrelevant-skips={} derived-changed={} derived-unchanged={} derived-deferred={} derived-failed={} derived-scenes-requested={} derived-scenes-attempted={} derived-scenes-changed={} derived-scenes-unchanged={} derived-scenes-deferred={} derived-project-candidates={} derived-scene-candidates={} derived-redundant-preservation-clones={} zoom-anchor-capture-success={} zoom-anchor-capture-miss={} zoom-scroll-canceled={} zoom-compensation-queued={} zoom-geometry-published={} zoom-anchor-consumed={} frame-ns={} event-ns={} layout-lookup-ns={} element-wrap-ns={} page-paint-ns={} caret-lookup-ns={} derived-refresh-ns={} benchmark-frames={} benchmark-layouts={} benchmark-pages-painted={} benchmark-wraps-built={} benchmark-linear-queries={} benchmark-indexed-queries={} benchmark-index-entries={}",
             self.benchmark_operation.label(),
             totals.frames,
             totals.events,
@@ -297,6 +308,8 @@ impl PerformanceDiagnostics {
             totals.painted_pages,
             totals.lines_submitted,
             totals.selection_spans_submitted,
+            totals.metric_culled_lines,
+            totals.natural_extent_exceeds_line_box,
             totals.galleys_built,
             totals.galleys_reused,
             totals.element_wraps_built,

@@ -228,7 +228,8 @@ pub(crate) fn same_semantic_title_paragraphs(
 }
 
 pub(crate) fn same_writer_semantic_projection(left: &Project, right: &Project) -> bool {
-    same_semantic_element_definitions(left, right)
+    left.page_layout() == right.page_layout()
+        && same_semantic_element_definitions(left, right)
         && same_semantic_title_paragraphs(&left.title_page, &right.title_page)
         && same_semantic_elements(&left.elements, &right.elements)
         && same_dual_dialogue_projection(left, right)

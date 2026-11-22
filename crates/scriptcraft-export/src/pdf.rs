@@ -1,14 +1,30 @@
-use crate::ExportError;
-use scriptcraft_layout::{LayoutComposition, LayoutEnvironment, LayoutPage, ScreenplayLayout};
+use crate::{
+    pdf_document::{PdfDocumentWriter, PdfObjectId, MAX_PDF_OUTPUT_BYTES},
+    pdf_font::{
+        encode_complete_face, encode_packaged_courier_prime, write_font_objects,
+        CompleteFontPlan, MAX_PDF_FONT_RESOURCES,
+    },
+    pdf_font_policy::{
+        assess_host_face, HostFaceDecision, PdfFontByteBudget,
+        PdfFontEmbeddingFallbackReason,
+    },
+    ExportError, PdfFontPayload,
+};
+use scriptcraft_layout::{
+    LayoutComposition, LayoutEnvironment, LayoutLine, LayoutPage, PositionedStyledSpan,
+    ScreenplayLayout,
+};
 use scriptcraft_model::{
     formatting::{FixedPoint, SourceLayoutSettings},
     layout_inputs::LayoutInputs,
     project::Project,
-    typography::{EffectiveTextColor, FontResolutionKind},
+    typography::{
+        EffectiveTextColor, FontResolutionKind, ResolvedFontId, ResolvedFontSourceKind,
+    },
 };
 use std::collections::BTreeMap;
 
-const MAX_PDF_REPORT_ENTRIES: usize = 8;
+const MAX_PDF_REPORT_ENTRIES: usize = 16;
 
 /// Transient PDF composition options. These values are consumed by export only
 /// and are never written into the Project or native FDX document.
@@ -29,11 +45,15 @@ pub enum PdfBase14Family {
 /// Entries never contain document text, host paths, or arbitrary family labels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PdfFallbackKind {
+    HostFontEmbeddingFallback {
+        reason: PdfFontEmbeddingFallbackReason,
+    },
     Base14FontSubstitution {
         requested: FontResolutionKind,
         resource: PdfBase14Family,
     },
     UnsupportedScalarSubstitution,
+    MissingGlyph,
     UnsupportedExplicitColor,
 }
 
@@ -82,6 +102,38 @@ impl PdfTypographyReport {
         let mut parts = Vec::with_capacity(self.entries.len().saturating_add(1));
         for entry in &self.entries {
             let label = match entry.kind {
+                PdfFallbackKind::HostFontEmbeddingFallback { reason } => match reason {
+                    PdfFontEmbeddingFallbackReason::RestrictedLicense => {
+                        "host font restricted by embedding license"
+                    }
+                    PdfFontEmbeddingFallbackReason::PermissionUnavailable => {
+                        "host font embedding permission unavailable"
+                    }
+                    PdfFontEmbeddingFallbackReason::OutlineEmbeddingRestricted => {
+                        "host font outline embedding restricted"
+                    }
+                    PdfFontEmbeddingFallbackReason::UnsupportedContainer => {
+                        "host font container unsupported"
+                    }
+                    PdfFontEmbeddingFallbackReason::UnsupportedOutline => {
+                        "host font outline format unsupported"
+                    }
+                    PdfFontEmbeddingFallbackReason::UnsupportedVariableFont => {
+                        "host variable font unsupported"
+                    }
+                    PdfFontEmbeddingFallbackReason::UnsupportedSource => {
+                        "font source not eligible for host embedding"
+                    }
+                    PdfFontEmbeddingFallbackReason::InvalidFont => {
+                        "host font metadata or name invalid"
+                    }
+                    PdfFontEmbeddingFallbackReason::FaceByteLimit => {
+                        "host font exceeds per-face byte limit"
+                    }
+                    PdfFontEmbeddingFallbackReason::AggregateByteBudget => {
+                        "host fonts exceed aggregate byte budget"
+                    }
+                },
                 PdfFallbackKind::Base14FontSubstitution {
                     requested,
                     resource,
@@ -133,6 +185,7 @@ impl PdfTypographyReport {
                     }
                 },
                 PdfFallbackKind::UnsupportedScalarSubstitution => "non-ASCII scalar substitution",
+                PdfFallbackKind::MissingGlyph => "embedded missing glyph",
                 PdfFallbackKind::UnsupportedExplicitColor => "unsupported color fallback",
             };
             parts.push(format!("{label}: {}", entry.count));
@@ -154,6 +207,18 @@ pub struct PdfExport {
     pub typography: PdfTypographyReport,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum PdfFontKey {
+    Embedded(ResolvedFontId),
+    Base14(PdfBase14Family, bool, bool),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PdfFontResource {
+    name_index: usize,
+    object_id: PdfObjectId,
+}
+
 impl Default for PdfExportOptions {
     fn default() -> Self {
         Self {
@@ -162,18 +227,20 @@ impl Default for PdfExportOptions {
     }
 }
 
-/// Produces a deterministic PDF from Print layout using an explicit resolved
-/// typography environment. The PDF remains noncanonical and reports its
-/// bounded Base-14 and character/color substitution limitations.
+/// Produces a deterministic PDF from Print layout and the matching exact-face
+/// payload. Packaged Courier Prime is mandatory; host/synthetic faces use full
+/// embedding only when the explicit permission, format, metric, and byte policy allows it.
 pub fn export_pdf(
     project: &Project,
     environment: &LayoutEnvironment,
+    font_payload: &PdfFontPayload,
 ) -> Result<PdfExport, ExportError> {
     let inputs = project.session_layout_inputs();
     export_pdf_with_layout_inputs_and_options(
         project,
         &inputs,
         environment,
+        font_payload,
         PdfExportOptions::default(),
     )
 }
@@ -182,11 +249,13 @@ pub fn export_pdf_with_layout_inputs(
     project: &Project,
     inputs: &LayoutInputs,
     environment: &LayoutEnvironment,
+    font_payload: &PdfFontPayload,
 ) -> Result<PdfExport, ExportError> {
     export_pdf_with_layout_inputs_and_options(
         project,
         inputs,
         environment,
+        font_payload,
         PdfExportOptions::default(),
     )
 }
@@ -196,16 +265,24 @@ pub fn export_pdf_with_layout_inputs(
 pub fn export_pdf_with_options(
     project: &Project,
     environment: &LayoutEnvironment,
+    font_payload: &PdfFontPayload,
     options: PdfExportOptions,
 ) -> Result<PdfExport, ExportError> {
     let inputs = project.session_layout_inputs();
-    export_pdf_with_layout_inputs_and_options(project, &inputs, environment, options)
+    export_pdf_with_layout_inputs_and_options(
+        project,
+        &inputs,
+        environment,
+        font_payload,
+        options,
+    )
 }
 
 pub fn export_pdf_with_layout_inputs_and_options(
     project: &Project,
     inputs: &LayoutInputs,
     environment: &LayoutEnvironment,
+    font_payload: &PdfFontPayload,
     options: PdfExportOptions,
 ) -> Result<PdfExport, ExportError> {
     if inputs.page_only() != environment.page {
@@ -226,44 +303,52 @@ pub fn export_pdf_with_layout_inputs_and_options(
         environment,
     )?;
     let mut report = PdfTypographyReport::default();
-
-    let mut used_fonts = BTreeMap::<(PdfBase14Family, bool, bool), String>::new();
+    let mut packaged_scalars = BTreeMap::<ResolvedFontId, std::collections::BTreeSet<char>>::new();
+    let mut host_scalars = BTreeMap::<ResolvedFontId, std::collections::BTreeSet<char>>::new();
+    let mut host_fallback_candidates = BTreeMap::<
+        ResolvedFontId,
+        Vec<(FontResolutionKind, PdfBase14Family, bool, bool)>,
+    >::new();
     for page in &layout.pages {
         for line in &page.lines {
             for span in line.spans.iter() {
                 let style = &span.resolved_text_style;
-                if style.hidden_text {
+                if style.hidden_text || span.display_text.is_empty() {
                     continue;
                 }
-                let requested = environment
-                    .fonts
-                    .resolution_for(&style.declared_family)
-                    .ok_or(ExportError::InvalidTypographyEnvironment)?;
-                environment
+                let face = environment
                     .fonts
                     .require_face(&style.resolved_font_id)
                     .map_err(|_| ExportError::InvalidTypographyEnvironment)?;
-                let resource_family = match requested.kind {
-                    FontResolutionKind::CourierAlias | FontResolutionKind::UnknownFallback => {
-                        PdfBase14Family::Courier
-                    }
-                    FontResolutionKind::NearestSans | FontResolutionKind::ExactHost => {
-                        PdfBase14Family::Helvetica
-                    }
-                    FontResolutionKind::NearestSerif => PdfBase14Family::Times,
-                };
-                report.record(PdfFallbackKind::Base14FontSubstitution {
-                    requested: requested.kind,
-                    resource: resource_family,
-                });
-                used_fonts.insert(
-                    (
-                        resource_family,
-                        style.bold,
-                        style.italic,
-                    ),
-                    String::new(),
-                );
+                font_payload.require_coherent_face(&style.resolved_font_id, face)?;
+                if face.source_kind == ResolvedFontSourceKind::Bundled {
+                    packaged_scalars
+                        .entry(style.resolved_font_id.clone())
+                        .or_default()
+                        .extend(span.display_text.chars());
+                } else {
+                    let requested = environment
+                        .fonts
+                        .resolution_for(&style.declared_family)
+                        .ok_or(ExportError::InvalidTypographyEnvironment)?;
+                    let resource_family = match requested.kind {
+                        FontResolutionKind::CourierAlias | FontResolutionKind::UnknownFallback => {
+                            PdfBase14Family::Courier
+                        }
+                        FontResolutionKind::NearestSans | FontResolutionKind::ExactHost => {
+                            PdfBase14Family::Helvetica
+                        }
+                        FontResolutionKind::NearestSerif => PdfBase14Family::Times,
+                    };
+                    host_scalars
+                        .entry(style.resolved_font_id.clone())
+                        .or_default()
+                        .extend(span.display_text.chars());
+                    host_fallback_candidates
+                        .entry(style.resolved_font_id.clone())
+                        .or_default()
+                        .push((requested.kind, resource_family, style.bold, style.italic));
+                }
                 if matches!(style.color, EffectiveTextColor::UnsupportedExplicit) {
                     report.record(PdfFallbackKind::UnsupportedExplicitColor);
                 }
@@ -271,85 +356,160 @@ pub fn export_pdf_with_layout_inputs_and_options(
         }
     }
 
-    let mut font_object_ids = BTreeMap::new();
-    let mut next_object_id = 3usize;
-    for (index, (font_key, resource_name)) in used_fonts.iter_mut().enumerate() {
-        *resource_name = format!("F{}", index.saturating_add(1));
-        font_object_ids.insert(*font_key, next_object_id);
-        next_object_id = next_object_id.saturating_add(1);
+    let mut byte_budget = PdfFontByteBudget::default();
+    for id in packaged_scalars.keys() {
+        let entry = font_payload
+            .face(id)
+            .ok_or(ExportError::InvalidPdfFontPayload)?;
+        byte_budget.reserve_packaged(entry.bytes.len())?;
     }
-    let mut objects = Vec::<Vec<u8>>::new();
-    objects.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
-    let page_count = layout.pages.len();
-    let mut kids = String::new();
-    for index in 0..page_count {
-        if !kids.is_empty() {
-            kids.push(' ');
+    let mut plans = BTreeMap::<ResolvedFontId, CompleteFontPlan>::new();
+    for (id, scalars) in &packaged_scalars {
+        let entry = font_payload
+            .face(id)
+            .ok_or(ExportError::InvalidPdfFontPayload)?;
+        plans.insert(id.clone(), encode_packaged_courier_prime(entry, scalars)?);
+    }
+    let mut host_embedded_ids = std::collections::BTreeSet::new();
+    let mut host_fallback_ids = std::collections::BTreeSet::new();
+    for (id, scalars) in &host_scalars {
+        let entry = font_payload
+            .face(id)
+            .ok_or(ExportError::InvalidPdfFontPayload)?;
+        let decision = assess_host_face(entry, scalars)?;
+        let (face, postscript_name) = match decision {
+            HostFaceDecision::Fallback(reason) => {
+                report.record(PdfFallbackKind::HostFontEmbeddingFallback { reason });
+                host_fallback_ids.insert(id.clone());
+                continue;
+            }
+            HostFaceDecision::Embed {
+                face,
+                postscript_name,
+            } => (face, postscript_name),
+        };
+        if let Some(reason) = byte_budget.reserve_host(entry.bytes.len())? {
+            report.record(PdfFallbackKind::HostFontEmbeddingFallback { reason });
+            host_fallback_ids.insert(id.clone());
+            continue;
         }
-        kids.push_str(&(next_object_id + index * 2).to_string());
-        kids.push_str(" 0 R");
+        let plan = encode_complete_face(
+            &face,
+            &postscript_name,
+            &entry.face.metrics,
+            &entry.bytes,
+            scalars,
+        )?;
+        plans.insert(id.clone(), plan);
+        host_embedded_ids.insert(id.clone());
     }
-    objects.push(format!("<< /Type /Pages /Kids [{kids}] /Count {page_count} >>").into_bytes());
-    for (font_key, _) in &used_fonts {
-        let font_name = base14_font_name(font_key.0, font_key.1, font_key.2);
-        objects
-            .push(format!("<< /Type /Font /Subtype /Type1 /BaseFont /{font_name} >>").into_bytes());
+
+    let mut fallback_fonts = BTreeMap::<(PdfBase14Family, bool, bool), ()>::new();
+    for id in &host_fallback_ids {
+        if let Some(candidates) = host_fallback_candidates.get(id) {
+            for (_, family, bold, italic) in candidates {
+                fallback_fonts.insert((*family, *bold, *italic), ());
+            }
+        }
     }
+    let font_resource_count = plans
+        .len()
+        .checked_add(fallback_fonts.len())
+        .ok_or(ExportError::OutputResourceLimitExceeded)?;
+    if font_resource_count > MAX_PDF_FONT_RESOURCES {
+        return Err(ExportError::OutputResourceLimitExceeded);
+    }
+
+    // Stable allocation order: catalog/pages; packaged faces by resolved ID;
+    // eligible hosts by resolved ID; actual Base-14 family/style keys; pages.
+    let mut writer = PdfDocumentWriter::default();
+    let catalog_id = writer.reserve_object()?;
+    let pages_id = writer.reserve_object()?;
+    let mut resources = BTreeMap::<PdfFontKey, PdfFontResource>::new();
+    let mut name_index = 1usize;
+    for id in packaged_scalars.keys() {
+        let plan = plans.get(id).ok_or(ExportError::InvalidPdfFontPayload)?;
+        let object_id = write_font_objects(&mut writer, plan)?;
+        resources.insert(
+            PdfFontKey::Embedded(id.clone()),
+            PdfFontResource { name_index, object_id },
+        );
+        name_index = name_index
+            .checked_add(1)
+            .ok_or(ExportError::OutputResourceLimitExceeded)?;
+    }
+    for id in &host_embedded_ids {
+        let plan = plans.get(id).ok_or(ExportError::InvalidPdfFontPayload)?;
+        let object_id = write_font_objects(&mut writer, plan)?;
+        resources.insert(
+            PdfFontKey::Embedded(id.clone()),
+            PdfFontResource { name_index, object_id },
+        );
+        name_index = name_index
+            .checked_add(1)
+            .ok_or(ExportError::OutputResourceLimitExceeded)?;
+    }
+    for (family, bold, italic) in fallback_fonts.keys().copied() {
+        let object_id = writer.reserve_object()?;
+        let font_name = base14_font_name(family, bold, italic);
+        writer.write_object(
+            object_id,
+            format!("<< /Type /Font /Subtype /Type1 /BaseFont /{font_name} /Encoding /WinAnsiEncoding >>")
+                .into_bytes(),
+            Vec::new(),
+        )?;
+        resources.insert(
+            PdfFontKey::Base14(family, bold, italic),
+            PdfFontResource { name_index, object_id },
+        );
+        name_index = name_index
+            .checked_add(1)
+            .ok_or(ExportError::OutputResourceLimitExceeded)?;
+    }
+
+    let mut page_ids = Vec::with_capacity(layout.pages.len());
+    let mut content_ids = Vec::with_capacity(layout.pages.len());
+    for _ in &layout.pages {
+        page_ids.push(writer.reserve_object()?);
+        content_ids.push(writer.reserve_object()?);
+    }
+
+    let catalog = format!("<< /Type /Catalog /Pages {} >>", ref_text(pages_id)).into_bytes();
+    writer.write_object(catalog_id, catalog, vec![pages_id])?;
+    let kids = page_ids.iter().map(|id| ref_text(*id)).collect::<Vec<_>>().join(" ");
+    let pages = format!("<< /Type /Pages /Kids [{kids}] /Count {} >>", page_ids.len())
+        .into_bytes();
+    writer.write_object(pages_id, pages, page_ids.clone())?;
+
     for (page_index, page) in layout.pages.iter().enumerate() {
         let content = page_content(
             page,
             layout.inputs.paper_height,
-            &used_fonts,
+            &resources,
+            &plans,
             environment,
+            font_payload,
             &mut report,
         )?;
-        let length = content.len();
-        let page_object_id = next_object_id + page_index * 2;
         let mut font_dictionary = String::new();
-        for (font_key, resource_name) in &used_fonts {
-            if let Some(object_id) = font_object_ids.get(font_key) {
-                font_dictionary.push_str(&format!(" /{resource_name} {object_id} 0 R"));
-            }
+        let mut page_references = vec![pages_id, content_ids[page_index]];
+        for resource in resources.values() {
+            let name = resource_name(resource.name_index);
+            font_dictionary.push_str(&format!(" /{name} {}", ref_text(resource.object_id)));
+            page_references.push(resource.object_id);
         }
-        objects.push(
-            format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /Font <<{font_dictionary} >> >> /Contents {} 0 R >>",
-                layout.inputs.paper_width,
-                layout.inputs.paper_height,
-                page_object_id + 1
-            )
-            .into_bytes(),
-        );
-        objects.push(
-            format!(
-                "<< /Length {length} >>\nstream\n{}\nendstream",
-                String::from_utf8_lossy(&content)
-            )
-            .into_bytes(),
-        );
-    }
-    let mut pdf = b"%PDF-1.4\n%ScriptCraft\n".to_vec();
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (index, object) in objects.iter().enumerate() {
-        offsets.push(pdf.len());
-        pdf.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
-        pdf.extend_from_slice(object);
-        pdf.extend_from_slice(b"\nendobj\n");
-    }
-    let xref = pdf.len();
-    pdf.extend_from_slice(
-        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
-    );
-    for offset in offsets {
-        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    pdf.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-            objects.len() + 1
+        let page_body = format!(
+            "<< /Type /Page /Parent {} /MediaBox [0 0 {} {}] /Resources << /Font <<{font_dictionary} >> >> /Contents {} >>",
+            ref_text(pages_id),
+            layout.inputs.paper_width,
+            layout.inputs.paper_height,
+            ref_text(content_ids[page_index]),
         )
-        .as_bytes(),
-    );
+        .into_bytes();
+        writer.write_object(page_ids[page_index], page_body, page_references)?;
+        writer.write_stream(content_ids[page_index], Vec::new(), content, Vec::new())?;
+    }
+    let pdf = writer.finish(catalog_id)?;
     Ok(PdfExport {
         bytes: pdf,
         typography: report,
@@ -359,46 +519,58 @@ pub fn export_pdf_with_layout_inputs_and_options(
 fn page_content(
     page: &LayoutPage,
     paper_height: u32,
-    fonts: &BTreeMap<(PdfBase14Family, bool, bool), String>,
+    fonts: &BTreeMap<PdfFontKey, PdfFontResource>,
+    plans: &BTreeMap<ResolvedFontId, CompleteFontPlan>,
     environment: &LayoutEnvironment,
+    font_payload: &PdfFontPayload,
     report: &mut PdfTypographyReport,
 ) -> Result<Vec<u8>, ExportError> {
     let mut output = String::new();
     for line in &page.lines {
+        let baseline_pdf_y = pdf_baseline_y(paper_height, line)?;
         for span in line.spans.iter() {
             let style = &span.resolved_text_style;
             if style.hidden_text {
                 continue;
             }
+            validate_span_geometry(line, span)?;
+            validate_scalar_boundaries(span)?;
+            if span.display_text.is_empty() {
+                continue;
+            }
             let x = span.geometry.x;
-            let y = FixedPoint::from_points(i64::from(paper_height))
-                .raw()
-                .saturating_sub(span.geometry.y.raw())
-                .saturating_sub(span.geometry.height.raw());
-            let resolution = environment
-                .fonts
-                .resolution_for(&style.declared_family)
-                .ok_or(ExportError::InvalidTypographyEnvironment)?;
-            environment
+            let y = baseline_pdf_y;
+            let face = environment
                 .fonts
                 .require_face(&style.resolved_font_id)
                 .map_err(|_| ExportError::InvalidTypographyEnvironment)?;
-            let resource_family = match resolution.kind {
-                FontResolutionKind::CourierAlias | FontResolutionKind::UnknownFallback => {
-                    PdfBase14Family::Courier
-                }
-                FontResolutionKind::NearestSans | FontResolutionKind::ExactHost => {
-                    PdfBase14Family::Helvetica
-                }
-                FontResolutionKind::NearestSerif => PdfBase14Family::Times,
+            font_payload.require_coherent_face(&style.resolved_font_id, face)?;
+            let font_key = if plans.contains_key(&style.resolved_font_id) {
+                PdfFontKey::Embedded(style.resolved_font_id.clone())
+            } else {
+                let resolution = environment
+                    .fonts
+                    .resolution_for(&style.declared_family)
+                    .ok_or(ExportError::InvalidTypographyEnvironment)?;
+                let resource_family = match resolution.kind {
+                    FontResolutionKind::CourierAlias | FontResolutionKind::UnknownFallback => {
+                        PdfBase14Family::Courier
+                    }
+                    FontResolutionKind::NearestSans | FontResolutionKind::ExactHost => {
+                        PdfBase14Family::Helvetica
+                    }
+                    FontResolutionKind::NearestSerif => PdfBase14Family::Times,
+                };
+                report.record(PdfFallbackKind::Base14FontSubstitution {
+                    requested: resolution.kind,
+                    resource: resource_family,
+                });
+                PdfFontKey::Base14(resource_family, style.bold, style.italic)
             };
-            let requested_font = fonts
-                .get(&(
-                    resource_family,
-                    style.bold,
-                    style.italic,
-                ))
+            let resource = fonts
+                .get(&font_key)
                 .ok_or(ExportError::InvalidTypographyEnvironment)?;
+            let resource_name = resource_name(resource.name_index);
             let (red, green, blue) = match style.color {
                 EffectiveTextColor::ExplicitRgb8 { red, green, blue } => (red, green, blue),
                 EffectiveTextColor::ThemeDefault | EffectiveTextColor::UnsupportedExplicit => {
@@ -407,61 +579,193 @@ fn page_content(
             };
             let (red, green, blue) = (pdf_color(red), pdf_color(green), pdf_color(blue));
             let font_size = style.size;
-            let scalar_count = span.display_text.chars().count();
-            if span.display_boundary_offsets.len() != scalar_count.saturating_add(1) {
-                return Err(ExportError::InvalidLayoutGeometry);
-            }
             for (index, character) in span.display_text.chars().enumerate() {
                 let boundary = span
                     .display_boundary_offsets
                     .get(index)
                     .ok_or(ExportError::InvalidLayoutGeometry)?;
-                let glyph_x = FixedPoint::from_raw(x.raw().saturating_add(boundary.raw()));
-                let pdf_character = if character.is_ascii() && !character.is_ascii_control() {
-                    character
+                let glyph_x = FixedPoint::from_raw(
+                    x.raw()
+                        .checked_add(boundary.raw())
+                        .ok_or(ExportError::InvalidLayoutGeometry)?,
+                );
+                if let PdfFontKey::Embedded(id) = &font_key {
+                    let plan = plans.get(id).ok_or(ExportError::InvalidPdfFontPayload)?;
+                    let cid = plan
+                        .cids
+                        .get(&character)
+                        .ok_or(ExportError::InvalidPdfFontPayload)?;
+                    if plan.missing_scalars.contains(&character) {
+                        report.record(PdfFallbackKind::MissingGlyph);
+                    }
+                    append_content(&mut output, &format!(
+                        "BT {red} {green} {blue} rg /{resource_name} {font_size} Tf 1 0 0 1 {} {} Tm <{cid:04X}> Tj ET\n",
+                        glyph_x.decimal_string(),
+                        y.decimal_string(),
+                    ))?;
                 } else {
-                    report.record(PdfFallbackKind::UnsupportedScalarSubstitution);
-                    '?'
-                };
-                output.push_str(&format!(
-                    "BT {red} {green} {blue} rg /{requested_font} {font_size} Tf 1 0 0 1 {} {} Tm ({}) Tj ET\n",
-                    glyph_x.decimal_string(),
-                    FixedPoint::from_raw(y).decimal_string(),
-                    pdf_escape_character(pdf_character),
-                ));
+                    let pdf_character = if character.is_ascii() && !character.is_ascii_control() {
+                        character
+                    } else {
+                        report.record(PdfFallbackKind::UnsupportedScalarSubstitution);
+                        '?'
+                    };
+                    append_content(&mut output, &format!(
+                        "BT {red} {green} {blue} rg /{resource_name} {font_size} Tf 1 0 0 1 {} {} Tm ({}) Tj ET\n",
+                        glyph_x.decimal_string(),
+                        y.decimal_string(),
+                        pdf_escape_character(pdf_character),
+                    ))?;
+                }
             }
 
-            if span.geometry.width.raw() <= 0 {
+            if span.geometry.width.raw() == 0 {
                 continue;
             }
-            let right = FixedPoint::from_raw(x.raw().saturating_add(span.geometry.width.raw()));
+            let right = FixedPoint::from_raw(
+                x.raw()
+                    .checked_add(span.geometry.width.raw())
+                    .ok_or(ExportError::InvalidLayoutGeometry)?,
+            );
+            let leading = line.vertical_metrics.leading;
             if span.underline {
-                let underline_y = FixedPoint::from_raw(
-                    y.saturating_add((i64::from(font_size) * 12).div_euclid(100)),
-                );
-                output.push_str(&format!(
+                let underline_y = y
+                    .raw()
+                    .checked_add(ratio_raw(leading, 12)?)
+                    .map(FixedPoint::from_raw)
+                    .ok_or(ExportError::InvalidLayoutGeometry)?;
+                append_content(&mut output, &format!(
                     "q {red} {green} {blue} RG 0.6 w {} {} m {} {} l S Q\n",
                     x.decimal_string(),
                     underline_y.decimal_string(),
                     right.decimal_string(),
                     underline_y.decimal_string()
-                ));
+                ))?;
             }
             if span.strikethrough {
-                let strike_y = FixedPoint::from_raw(
-                    y.saturating_add((i64::from(font_size) * 48).div_euclid(100)),
-                );
-                output.push_str(&format!(
+                let strike_y = y
+                    .raw()
+                    .checked_add(ratio_raw(leading, 48)?)
+                    .map(FixedPoint::from_raw)
+                    .ok_or(ExportError::InvalidLayoutGeometry)?;
+                append_content(&mut output, &format!(
                     "q {red} {green} {blue} RG 0.6 w {} {} m {} {} l S Q\n",
                     x.decimal_string(),
                     strike_y.decimal_string(),
                     right.decimal_string(),
                     strike_y.decimal_string()
-                ));
+                ))?;
             }
         }
     }
     Ok(output.into_bytes())
+}
+
+fn append_content(output: &mut String, text: &str) -> Result<(), ExportError> {
+    let new_len = output
+        .len()
+        .checked_add(text.len())
+        .ok_or(ExportError::OutputResourceLimitExceeded)?;
+    if new_len > MAX_PDF_OUTPUT_BYTES {
+        return Err(ExportError::OutputResourceLimitExceeded);
+    }
+    output.push_str(text);
+    Ok(())
+}
+
+fn ref_text(id: PdfObjectId) -> String {
+    format!("{} 0 R", id.0)
+}
+
+fn resource_name(index: usize) -> String {
+    format!("F{index}")
+}
+
+/// Converts the canonical top-down line-box-bottom baseline to PDF's
+/// bottom-up coordinate system without consulting font metrics or glyph ink.
+fn pdf_baseline_y(paper_height: u32, line: &LayoutLine) -> Result<FixedPoint, ExportError> {
+    let baseline = line.baseline_y();
+    let checked_bottom = line
+        .geometry
+        .y
+        .raw()
+        .checked_add(line.geometry.height.raw())
+        .ok_or(ExportError::InvalidLayoutGeometry)?;
+    if line.vertical_metrics.leading.raw() <= 0
+        || line.geometry.height != line.vertical_metrics.leading
+        || line.paragraph_bounds.y != line.geometry.y
+        || line.paragraph_bounds.height != line.geometry.height
+        || checked_bottom != baseline.raw()
+    {
+        return Err(ExportError::InvalidLayoutGeometry);
+    }
+    let paper_height_raw = i64::from(paper_height)
+        .checked_mul(FixedPoint::SCALE)
+        .ok_or(ExportError::InvalidLayoutGeometry)?;
+    paper_height_raw
+        .checked_sub(baseline.raw())
+        .map(FixedPoint::from_raw)
+        .ok_or(ExportError::InvalidLayoutGeometry)
+}
+
+fn validate_span_geometry(
+    line: &LayoutLine,
+    span: &PositionedStyledSpan,
+) -> Result<(), ExportError> {
+    let bottom = span
+        .geometry
+        .y
+        .raw()
+        .checked_add(span.geometry.height.raw())
+        .ok_or(ExportError::InvalidLayoutGeometry)?;
+    if span.geometry.y != line.geometry.y
+        || span.geometry.height != line.vertical_metrics.leading
+        || span.geometry.height != line.geometry.height
+        || bottom != line.baseline_y().raw()
+        || span.geometry.width.raw() < 0
+    {
+        return Err(ExportError::InvalidLayoutGeometry);
+    }
+    Ok(())
+}
+
+/// Checks the canonical scalar-origin vector without consulting font widths.
+fn validate_scalar_boundaries(span: &PositionedStyledSpan) -> Result<(), ExportError> {
+    let scalar_count = span.display_text.chars().count();
+    let expected_len = scalar_count
+        .checked_add(1)
+        .ok_or(ExportError::InvalidLayoutGeometry)?;
+    if span.display_boundary_offsets.len() != expected_len
+        || span
+            .display_boundary_offsets
+            .first()
+            .map_or(true, |offset| offset.raw() != 0)
+        || span
+            .display_boundary_offsets
+            .last()
+            .map_or(true, |offset| offset.raw() != span.geometry.width.raw())
+        || span
+            .display_boundary_offsets
+            .windows(2)
+            .any(|pair| pair[0].raw() > pair[1].raw())
+    {
+        return Err(ExportError::InvalidLayoutGeometry);
+    }
+    Ok(())
+}
+
+/// Rounds a positive percentage of a leading value to the nearest raw
+/// hundredth, with ties rounded upward, using checked integer arithmetic.
+fn ratio_raw(leading: FixedPoint, numerator: i64) -> Result<i64, ExportError> {
+    if leading.raw() <= 0 {
+        return Err(ExportError::InvalidLayoutGeometry);
+    }
+    let scaled = i128::from(leading.raw())
+        .checked_mul(i128::from(numerator))
+        .and_then(|value| value.checked_add(50))
+        .ok_or(ExportError::InvalidLayoutGeometry)?
+        / 100;
+    i64::try_from(scaled).map_err(|_| ExportError::InvalidLayoutGeometry)
 }
 
 fn base14_font_name(family: PdfBase14Family, bold: bool, italic: bool) -> &'static str {

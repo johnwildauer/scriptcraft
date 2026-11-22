@@ -31,6 +31,21 @@ pub struct FixedRect {
     pub height: FixedPoint,
 }
 
+impl FixedRect {
+    pub fn bottom(self) -> FixedPoint {
+        FixedPoint::from_raw(self.y.raw().saturating_add(self.height.raw()))
+    }
+}
+
+/// The selected baseline advance/line-box height and natural font-table
+/// extents. Natural ascent/descent do not control pagination or clipping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LineVerticalMetrics {
+    pub leading: FixedPoint,
+    pub natural_ascent: FixedPoint,
+    pub natural_descent: FixedPoint,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceRange {
     pub element: usize,
@@ -56,14 +71,25 @@ pub struct LayoutLine {
     pub alignment: ParagraphAlignment,
     /// Left anchor before alignment shifts the line; includes a first-visual-line indent.
     pub unaligned_line_left: FixedPoint,
-    /// Text extent after first-line indent and alignment.
+    /// Text extent after first-line indent and alignment. The rectangle shares
+    /// the paragraph/span y and leading-sized height; its bottom is baseline.
     pub geometry: FixedRect,
     /// Full paragraph bounds, retained separately for hit testing and measure.
+    /// It shares the line's y and height, so its bottom is the baseline too.
     pub paragraph_bounds: FixedRect,
+    /// Per-visual-line selected leading and natural metric extent.
+    pub vertical_metrics: LineVerticalMetrics,
     /// Rounded integer-point projection of the canonical fixed-point geometry.
     pub rect: Rect,
     pub keep_with_next: bool,
     pub oversized: bool,
+}
+
+impl LayoutLine {
+    /// The canonical baseline is the line-box bottom, independent of font ink.
+    pub fn baseline_y(&self) -> FixedPoint {
+        self.geometry.bottom()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +133,9 @@ pub struct LayoutPage {
     pub content_bounds: Rect,
     pub lines: Vec<LayoutLine>,
     pub occupied_lines: u32,
-    pub(super) next_line_y: FixedPoint,
+    /// The top of the next line box. On a fresh page this is TopMargin; after
+    /// placement it advances by the preceding line's effective leading.
+    pub(super) next_line_top: FixedPoint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +176,9 @@ pub enum LayoutErrorKind {
     InvalidProfile,
     InvalidPosition,
     NoGeometry,
+    UnsupportedDocumentLeading,
+    InvalidEffectiveLeading,
+    InvalidSpaceBefore,
 }
 
 impl From<ModelError> for LayoutError {

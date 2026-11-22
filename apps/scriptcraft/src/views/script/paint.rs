@@ -182,6 +182,55 @@ impl ScriptCraftApp {
         'paint_lines: for (line_index, line) in layout.pages[page_index].lines.iter().enumerate() {
             let selection =
                 self.selection_range(line.source.start, line.source.end, line.element, surface);
+            let Some(projection) = projections.get(line_index).and_then(Option::as_ref) else {
+                match presentation_geometry::project_line(line, scale) {
+                    Err(presentation_geometry::PresentationProjectionError::InvalidVerticalGeometry) => {
+                        self.post_typography_diagnostic_once(
+                            "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID:",
+                            "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID: canonical vertical projection unavailable",
+                        );
+                    }
+                    _ => self.post_typography_diagnostic_once(
+                        "TYPOGRAPHY_PROJECTION_UNAVAILABLE:",
+                        "TYPOGRAPHY_PROJECTION_UNAVAILABLE: canonical line projection failed",
+                    ),
+                }
+                continue 'paint_lines;
+            };
+            debug_assert!(std::ptr::eq(projection.core, line));
+            if projection.natural_extent_exceeds_line_box {
+                add_performance_counter(
+                    &mut self.performance.natural_extent_exceeds_line_box,
+                    1,
+                );
+                self.post_typography_diagnostic_once(
+                    "TYPOGRAPHY_NATURAL_EXTENT_EXCEEDS_LINE_BOX:",
+                    "TYPOGRAPHY_NATURAL_EXTENT_EXCEEDS_LINE_BOX: resolved natural metrics exceed a line box; canonical geometry is preserved",
+                );
+            }
+            let page_origin = page_local_screen_origin(presented_page, scale);
+            let metric_cull_bounds = projection
+                .metric_cull_bounds
+                .translate(page_origin.to_vec2());
+            if !metric_cull_bounds.intersects(painter.clip_rect()) {
+                add_performance_counter(&mut self.performance.metric_culled_lines, 1);
+                continue 'paint_lines;
+            }
+            let glyph_clip = egui::Rect::from_min_max(
+                egui::pos2(
+                    page_origin.x + projection.horizontal_clip_x[0],
+                    page_rect.top(),
+                ),
+                egui::pos2(
+                    page_origin.x + projection.horizontal_clip_x[1],
+                    page_rect.bottom(),
+                ),
+            )
+            .intersect(painter.clip_rect());
+            let line_painter = painter.with_clip_rect(glyph_clip);
+            let line_top_screen = page_origin.y + projection.line_box_top;
+            let line_box_height = projection.line_box_height;
+            let baseline_screen = page_origin.y + projection.baseline_y;
             let Some(prepared_fonts) = self.prepared_document_fonts.clone() else {
                 self.post_typography_diagnostic_once(
                     "TYPOGRAPHY_FACE_UNAVAILABLE:",
@@ -217,26 +266,10 @@ impl ScriptCraftApp {
                     "TYPOGRAPHY_COLOR_FALLBACK: unsupported explicit color uses the theme text palette",
                 );
             }
-            let Some(projection) = projections.get(line_index).and_then(Option::as_ref) else {
-                self.post_typography_diagnostic_once(
-                    "TYPOGRAPHY_PROJECTION_UNAVAILABLE:",
-                    "TYPOGRAPHY_PROJECTION_UNAVAILABLE: canonical line projection failed",
-                );
-                continue 'paint_lines;
-            };
-            debug_assert!(std::ptr::eq(projection.core, line));
-            let page_origin = page_local_screen_origin(presented_page, scale);
-            let line_clip = projection
-                .clip_bounds
-                .translate(page_origin.to_vec2())
-                .intersect(page_rect);
-            let line_painter = painter.with_clip_rect(line_clip);
             for (projected, resolved) in projection.spans.iter().zip(&resolved_paints) {
                 let span = projected.core;
-                let span_y =
-                    document_y_to_screen(presented_page, span.geometry.y.to_points_f32(), scale);
-                let span_height = span.geometry.height.to_points_f32() * scale;
-                let span_origin = egui::pos2(page_rect.left() + projected.origin_x, span_y);
+                let span_origin =
+                    egui::pos2(page_rect.left() + projected.origin_x, line_top_screen);
                 let selected_display = Self::selected_display_range(span, selection);
                 if let Some((from, to)) = selected_display {
                     add_performance_counter(&mut self.performance.selection_spans_submitted, 1);
@@ -244,8 +277,11 @@ impl ScriptCraftApp {
                     let start = from.min(boundaries.len().saturating_sub(1));
                     let end = to.min(boundaries.len().saturating_sub(1));
                     let selected_rect = egui::Rect::from_min_max(
-                        egui::pos2(span_origin.x + boundaries[start], span_y),
-                        egui::pos2(span_origin.x + boundaries[end], span_y + span_height),
+                        egui::pos2(span_origin.x + boundaries[start], line_top_screen),
+                        egui::pos2(
+                            span_origin.x + boundaries[end],
+                            baseline_screen,
+                        ),
                     );
                     if selected_rect.width() > 0.0 {
                         line_painter.rect_filled(selected_rect, 0.0, palette.selection);
@@ -264,12 +300,21 @@ impl ScriptCraftApp {
                     &resolved.font,
                     &projected.display_boundary_offsets,
                     resolved.color,
+                    line_box_height,
+                    projection.baseline_y - projection.line_box_top,
                 ) {
                     Ok(galley) => galley,
+                    Err(presentation_geometry::CanonicalGalleyError::InvalidVerticalGeometry) => {
+                        self.post_typography_diagnostic_once(
+                            "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID:",
+                            "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID: canonical galley vertical geometry was not painted",
+                        );
+                        continue;
+                    }
                     Err(_) => {
                         self.post_typography_diagnostic_once(
                             "TYPOGRAPHY_GLYPH_TOPOLOGY_UNSUPPORTED:",
-                            "TYPOGRAPHY_GLYPH_TOPOLOGY_UNSUPPORTED: canonical span was not painted",
+                            "TYPOGRAPHY_GLYPH_TOPOLOGY_UNSUPPORTED: canonical span topology was not painted",
                         );
                         continue;
                     }
@@ -281,10 +326,14 @@ impl ScriptCraftApp {
                     let start = from.min(boundaries.len().saturating_sub(1));
                     let end = to.min(boundaries.len().saturating_sub(1));
                     let selected_rect = egui::Rect::from_min_max(
-                        egui::pos2(span_origin.x + boundaries[start], span_y),
-                        egui::pos2(span_origin.x + boundaries[end], span_y + span_height),
+                        egui::pos2(span_origin.x + boundaries[start], line_top_screen),
+                        egui::pos2(span_origin.x + boundaries[end], line_top_screen + line_box_height),
                     );
-                    let selected_clip = line_clip.intersect(selected_rect);
+                    let selected_x_clip = egui::Rect::from_min_max(
+                        egui::pos2(selected_rect.left(), glyph_clip.top()),
+                        egui::pos2(selected_rect.right(), glyph_clip.bottom()),
+                    );
+                    let selected_clip = glyph_clip.intersect(selected_x_clip);
                     if selected_rect.width() > 0.0
                         && selected_clip.width() > 0.0
                         && selected_clip.height() > 0.0
@@ -301,7 +350,7 @@ impl ScriptCraftApp {
 
                 if span.underline || span.strikethrough {
                     if span.underline {
-                        let underline_y = span_y + span_height * 0.88;
+                        let underline_y = baseline_screen - 0.12 * line_box_height;
                         line_painter.line_segment(
                             [
                                 egui::pos2(span_origin.x, underline_y),
@@ -311,7 +360,7 @@ impl ScriptCraftApp {
                         );
                     }
                     if span.strikethrough {
-                        let strike_y = span_y + span_height * 0.52;
+                        let strike_y = baseline_screen - 0.48 * line_box_height;
                         line_painter.line_segment(
                             [
                                 egui::pos2(span_origin.x, strike_y),
@@ -392,13 +441,34 @@ impl ScriptCraftApp {
                     if let Some(ime_font) = ime_font {
                         let ime_painter = caret_clip
                             .map_or_else(|| painter.clone(), |clip| painter.with_clip_rect(clip));
-                        ime_painter.text(
-                            caret_rect.min,
-                            egui::Align2::LEFT_TOP,
+                        match presentation_geometry::ime_singleline_galley(
+                            &ime_painter,
                             &self.ime_preedit,
-                            ime_font,
+                            &ime_font,
                             palette.ime_text,
-                        );
+                            caret_rect.height(),
+                            caret_rect.height(),
+                        ) {
+                            Ok(galley) => {
+                                self.performance.galleys_built =
+                                    self.performance.galleys_built.saturating_add(1);
+                                ime_painter.galley(
+                                    caret_rect.min,
+                                    galley,
+                                    palette.ime_text,
+                                );
+                            }
+                            Err(presentation_geometry::CanonicalGalleyError::InvalidVerticalGeometry) => {
+                                self.post_typography_diagnostic_once(
+                                    "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID:",
+                                    "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID: IME galley vertical geometry was not painted",
+                                );
+                            }
+                            Err(_) => self.post_typography_diagnostic_once(
+                                "TYPOGRAPHY_IME_TOPOLOGY_UNSUPPORTED:",
+                                "TYPOGRAPHY_IME_TOPOLOGY_UNSUPPORTED: preedit topology was not painted",
+                            ),
+                        }
                     } else {
                         self.post_typography_diagnostic_once(
                             "TYPOGRAPHY_IME_FACE_UNAVAILABLE:",

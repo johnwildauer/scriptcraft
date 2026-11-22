@@ -77,7 +77,6 @@ impl EditingSession {
     pub(crate) fn with_policy_layout_and_session_timestamp(
         mut project: Project,
         policy: EditPolicy,
-        layout_inputs: LayoutInputs,
         session_open_timestamp: String,
         history_limit: usize,
     ) -> Result<Self, EditError> {
@@ -85,6 +84,7 @@ impl EditingSession {
         if let Some(preservation) = project.preservation.as_mut() {
             preservation.rebuild_indexes();
         }
+        let layout_inputs = project.session_layout_inputs();
         validate_layout_inputs(&layout_inputs)?;
         let selection = Selection::caret(Position {
             element: 0,
@@ -163,18 +163,14 @@ impl EditingSession {
         self.policy
     }
 
-    /// Effective geometry inputs are session-scoped and intentionally excluded
-    /// from project snapshots, dirty tracking and native serialization.
+    /// Read-only Project-derived geometry snapshot for existing layout/output
+    /// consumers. The Project remains the sole document page-layout authority.
     pub fn layout_inputs(&self) -> &LayoutInputs {
         &self.layout_inputs
     }
 
-    /// Changes effective layout inputs without changing document data or dirty
-    /// state. Callers must supply a complete validated input set.
-    pub fn set_layout_inputs(&mut self, inputs: LayoutInputs) -> Result<(), EditError> {
-        validate_layout_inputs(&inputs)?;
-        self.layout_inputs = inputs;
-        Ok(())
+    pub(crate) fn refresh_layout_inputs_from_project(&mut self) {
+        self.layout_inputs = self.project.session_layout_inputs();
     }
 
     /// Changes runtime policy without altering document contents, revision,
@@ -252,11 +248,9 @@ impl EditingSession {
     }
 
     pub fn replace_with_saved(&mut self, project: Project) -> Result<(), EditError> {
-        let layout_inputs = project.session_layout_inputs();
         let mut replacement = Self::with_policy_layout_and_session_timestamp(
             project,
             self.policy,
-            layout_inputs,
             self.session_open_timestamp.clone(),
             100,
         )?;

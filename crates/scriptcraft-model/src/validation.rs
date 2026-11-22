@@ -76,8 +76,32 @@ pub fn validate_layout_inputs(
     Ok(())
 }
 
+pub(crate) fn validate_document_page_layout(
+    page_layout: &crate::layout_inputs::DocumentPageLayout,
+) -> Result<(), ModelError> {
+    let fallback_inputs = crate::layout_inputs::LayoutInputs::default();
+    let fallback_horizontal_margins = u64::from(fallback_inputs.margin_left)
+        .saturating_add(u64::from(fallback_inputs.margin_right));
+    if page_layout.paper_width == 0
+        || page_layout.paper_height == 0
+        || fallback_horizontal_margins >= u64::from(page_layout.paper_width)
+        || u64::from(page_layout.margin_top).saturating_add(u64::from(page_layout.margin_bottom))
+            >= u64::from(page_layout.paper_height)
+        || page_layout
+            .header_margin
+            .is_some_and(|margin| margin.raw() < 0)
+        || page_layout
+            .footer_margin
+            .is_some_and(|margin| margin.raw() < 0)
+    {
+        return Err(ModelError::InvalidNumber);
+    }
+    Ok(())
+}
+
 impl Project {
     pub fn validate(&self) -> Result<(), ModelError> {
+        validate_document_page_layout(self.page_layout())?;
         if self.elements.len() > MAX_ELEMENTS || self.title_page.len() > MAX_ELEMENTS {
             return Err(ModelError::TooManyElements);
         }
@@ -167,6 +191,7 @@ impl Project {
             || self.dual_dialogue_paragraph_overrides != baseline.dual_dialogue_paragraph_overrides
             || self.direct_paragraph_overrides != baseline.direct_paragraph_overrides
             || self.element_definitions() != baseline.element_definitions()
+            || self.page_layout() != baseline.page_layout()
             || !Arc::ptr_eq(&self.layout_identity, &baseline.layout_identity)
         {
             return Ok(false);

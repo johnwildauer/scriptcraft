@@ -69,6 +69,7 @@ fn compose_resolved_title_pages(
                 purpose,
                 true,
                 EffectiveGeometryMode::Sequential,
+                environment,
                 diagnostics.as_deref_mut(),
             )?
         } else {
@@ -79,7 +80,7 @@ fn compose_resolved_title_pages(
                 element_type,
                 paragraph,
                 &resolved_style,
-                &environment.fonts,
+                environment,
                 &title.runs,
                 true,
                 0,
@@ -91,15 +92,15 @@ fn compose_resolved_title_pages(
             lines
         };
         if !page.lines.is_empty() {
-            page.next_line_y = FixedPoint::from_raw(
-                page.next_line_y
+            page.next_line_top = FixedPoint::from_raw(
+                page.next_line_top
                     .raw()
                     .saturating_add(paragraph.space_before.raw().max(0)),
             );
         }
         let placement_started = diagnostics.as_ref().map(|_| Instant::now());
         for line in lines {
-            let line_advance = line.paragraph.line_advance.raw();
+            let line_leading = line.vertical_metrics.leading.raw();
             let content_bottom = FixedPoint::from_points(i64::from(
                 layout
                     .inputs
@@ -107,16 +108,18 @@ fn compose_resolved_title_pages(
                     .saturating_sub(layout.inputs.margin_bottom),
             ));
             if !page.lines.is_empty()
-                && page.next_line_y.raw().saturating_add(line_advance) > content_bottom.raw()
+                && page.next_line_top.raw().saturating_add(line_leading) > content_bottom.raw()
             {
                 layout.pages.push(page);
                 page = layout.new_page(true);
             }
-            let laid_out = layout.make_line(page.number, line, true, page.next_line_y);
+            let laid_out = layout.make_line(page.number, line, true, page.next_line_top);
+            let line_leading = laid_out.vertical_metrics.leading.raw();
+            let mut laid_out = laid_out;
+            laid_out.oversized |= laid_out.geometry.bottom() > content_bottom;
             page.lines.push(laid_out);
             page.occupied_lines = page.occupied_lines.saturating_add(1);
-            page.next_line_y =
-                FixedPoint::from_raw(page.next_line_y.raw().saturating_add(line_advance));
+            page.next_line_top = FixedPoint::from_raw(page.next_line_top.raw().saturating_add(line_leading));
         }
         if let Some(diagnostics) = diagnostics.as_deref_mut() {
             add_elapsed_nanos(&mut diagnostics.placement_nanos, placement_started);

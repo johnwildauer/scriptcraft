@@ -22,8 +22,16 @@ pub(crate) struct PresentationLine<'a> {
     pub core: &'a LayoutLine,
     pub line_origin_x: f32,
     pub total_advance: f32,
-    /// Page-local screen-space paragraph/column clip bounds.
-    pub clip_bounds: egui::Rect,
+    /// Page-local screen-space line-box interval; the bottom is the baseline.
+    pub line_box_top: f32,
+    pub line_box_height: f32,
+    pub baseline_y: f32,
+    /// Paragraph/column x clip, deliberately independent of line-box y.
+    pub horizontal_clip_x: [f32; 2],
+    /// Paint-only broad phase; never used as a clip or interaction bound.
+    pub metric_cull_bounds: egui::Rect,
+    /// Natural font-table metrics exceed the interaction line box.
+    pub natural_extent_exceeds_line_box: bool,
     pub spans: Vec<PresentationSpan<'a>>,
 }
 
@@ -32,6 +40,7 @@ pub(crate) enum PresentationProjectionError {
     InvalidScale,
     DisplayTopologyMismatch,
     InvalidCanonicalBoundaries,
+    InvalidVerticalGeometry,
 }
 
 /// Projects one line without querying egui font advances. Every horizontal
@@ -84,15 +93,44 @@ pub(crate) fn project_line<'a>(
     )
     .to_points_f32()
         * scale;
-    let paragraph_y = line.paragraph_bounds.y.to_points_f32() * scale;
-    let paragraph_height = line.paragraph_bounds.height.to_points_f32() * scale;
-    let clip_bounds = egui::Rect::from_min_size(
-        egui::pos2(paragraph_left, paragraph_y),
-        egui::vec2(
-            (paragraph_right - paragraph_left).max(0.0),
-            paragraph_height.max(0.0),
-        ),
+    let line_box_top = line.geometry.y.to_points_f32() * scale;
+    let line_box_height = line.geometry.height.to_points_f32() * scale;
+    let baseline_y = line.baseline_y().to_points_f32() * scale;
+    let canonical_bottom_raw = line
+        .geometry
+        .y
+        .raw()
+        .checked_add(line.geometry.height.raw());
+    let natural_ascent = line.vertical_metrics.natural_ascent.to_points_f32() * scale;
+    let natural_descent = line.vertical_metrics.natural_descent.to_points_f32() * scale;
+    let natural_top = baseline_y - natural_ascent;
+    let natural_bottom = baseline_y - natural_descent;
+    if !line_box_top.is_finite()
+        || !line_box_height.is_finite()
+        || line_box_height <= 0.0
+        || !baseline_y.is_finite()
+        || baseline_y <= line_box_top
+        || canonical_bottom_raw != Some(line.baseline_y().raw())
+        || !natural_ascent.is_finite()
+        || natural_ascent < 0.0
+        || !natural_descent.is_finite()
+        || natural_descent > 0.0
+        || !natural_top.is_finite()
+        || !natural_bottom.is_finite()
+        || natural_top > natural_bottom
+        || !paragraph_left.is_finite()
+        || !paragraph_right.is_finite()
+        || paragraph_left > paragraph_right
+    {
+        return Err(PresentationProjectionError::InvalidVerticalGeometry);
+    }
+    let horizontal_clip_x = [paragraph_left, paragraph_right];
+    let metric_cull_bounds = egui::Rect::from_min_max(
+        egui::pos2(paragraph_left, line_box_top.min(natural_top)),
+        egui::pos2(paragraph_right, baseline_y.max(natural_bottom)),
     );
+    let natural_extent_exceeds_line_box =
+        natural_top < line_box_top || natural_bottom > baseline_y;
     let spans = line
         .spans
         .iter()
@@ -112,7 +150,12 @@ pub(crate) fn project_line<'a>(
         core: line,
         line_origin_x,
         total_advance,
-        clip_bounds,
+        line_box_top,
+        line_box_height,
+        baseline_y,
+        horizontal_clip_x,
+        metric_cull_bounds,
+        natural_extent_exceeds_line_box,
         spans,
     })
 }
@@ -219,8 +262,8 @@ pub(super) fn span_for_display_boundary(
 pub(crate) struct ProjectedCaretRect {
     /// Page-local screen logical points, matching the projected paint geometry.
     pub rect: egui::Rect,
-    /// Page-local screen logical points; intersect with the page at viewport use.
-    pub clip_bounds: egui::Rect,
+    /// Paragraph/column x clip only; viewport use supplies the page y interval.
+    pub horizontal_clip_x: [f32; 2],
 }
 
 pub(crate) fn projected_caret_rect(
@@ -234,11 +277,11 @@ pub(crate) fn projected_caret_rect(
     }
     let display_boundary = line.core.display_char_for_source(source_offset, false);
     let x = x_for_display_boundary(line, display_boundary)?;
-    let y = line.core.geometry.y.to_points_f32() * scale;
-    let height = line.core.geometry.height.to_points_f32() * scale;
+    let y = line.line_box_top;
+    let height = line.line_box_height;
     Some(ProjectedCaretRect {
         rect: egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(caret_width, height.max(0.0))),
-        clip_bounds: line.clip_bounds,
+        horizontal_clip_x: line.horizontal_clip_x,
     })
 }
 
@@ -276,7 +319,7 @@ pub(crate) fn projected_target_boundary(
         .then(|| display_boundary_for_x(projection, screen_x))
 }
 
-/// Makes a color-only variant for the clipped selected-foreground pass.
+/// Makes a color-only variant for the selected-foreground pass.
 /// Glyph positions, advances, row sizes, and mesh positions remain identical.
 pub(crate) fn recolor_galley(galley: &Arc<Galley>, color: Color32) -> Arc<Galley> {
     let mut galley = (**galley).clone();
@@ -299,26 +342,79 @@ pub(crate) enum CanonicalGalleyError {
     GlyphCharacter,
     InvalidBoundaries,
     InvalidMeshTopology,
+    InvalidVerticalGeometry,
 }
 
-/// Builds a single-line galley and places each glyph origin at the matching
-/// canonical display boundary. Font shaping supplies glyph UVs only; it never
-/// supplies line advances or interaction coordinates.
+/// Builds a canonical single-line galley with canonical x boundaries and a
+/// line-box-bottom baseline. Font shaping supplies glyph UVs only; it never
+/// supplies line advances, vertical placement, or interaction coordinates.
 pub(crate) fn canonical_singleline_galley(
     painter: &egui::Painter,
     text: &str,
     font: &FontId,
     display_boundary_offsets: &[f32],
     ordinary_color: Color32,
+    line_box_height: f32,
+    baseline_offset: f32,
+) -> Result<Arc<Galley>, CanonicalGalleyError> {
+    singleline_galley(
+        painter,
+        text,
+        font,
+        ordinary_color,
+        line_box_height,
+        baseline_offset,
+        Some(display_boundary_offsets),
+    )
+}
+
+/// Builds transient IME preedit with natural horizontal shaping but the same
+/// canonical line-box height and baseline as the caret's containing line.
+pub(crate) fn ime_singleline_galley(
+    painter: &egui::Painter,
+    text: &str,
+    font: &FontId,
+    color: Color32,
+    line_box_height: f32,
+    baseline_offset: f32,
+) -> Result<Arc<Galley>, CanonicalGalleyError> {
+    singleline_galley(
+        painter,
+        text,
+        font,
+        color,
+        line_box_height,
+        baseline_offset,
+        None,
+    )
+}
+
+fn singleline_galley(
+    painter: &egui::Painter,
+    text: &str,
+    font: &FontId,
+    ordinary_color: Color32,
+    line_box_height: f32,
+    baseline_offset: f32,
+    display_boundary_offsets: Option<&[f32]>,
 ) -> Result<Arc<Galley>, CanonicalGalleyError> {
     let count = text.chars().count();
-    if display_boundary_offsets.len() != count.saturating_add(1)
-        || display_boundary_offsets.first().copied() != Some(0.0)
-        || !display_boundary_offsets
-            .windows(2)
-            .all(|pair| pair[0].is_finite() && pair[0] <= pair[1])
+    if let Some(offsets) = display_boundary_offsets {
+        if offsets.len() != count.saturating_add(1)
+            || offsets.first().copied() != Some(0.0)
+            || !offsets
+                .windows(2)
+                .all(|pair| pair[0].is_finite() && pair[0] <= pair[1])
+        {
+            return Err(CanonicalGalleyError::InvalidBoundaries);
+        }
+    }
+    if !line_box_height.is_finite()
+        || line_box_height <= 0.0
+        || !baseline_offset.is_finite()
+        || baseline_offset <= 0.0
     {
-        return Err(CanonicalGalleyError::InvalidBoundaries);
+        return Err(CanonicalGalleyError::InvalidVerticalGeometry);
     }
 
     let job = LayoutJob::simple_singleline(text.to_owned(), font.clone(), ordinary_color);
@@ -352,6 +448,13 @@ pub(crate) fn canonical_singleline_galley(
     }
     let placed_row = &mut galley.rows[0];
     let row = Arc::make_mut(&mut placed_row.row);
+    if !row.size.x.is_finite()
+        || !row.size.y.is_finite()
+        || !placed_row.pos.x.is_finite()
+        || !placed_row.pos.y.is_finite()
+    {
+        return fail(CanonicalGalleyError::InvalidVerticalGeometry);
+    }
     let expected_vertex_count = row
         .glyphs
         .iter()
@@ -366,11 +469,24 @@ pub(crate) fn canonical_singleline_galley(
     let mut vertex_index = row.visuals.glyph_vertex_range.start;
     let vertex_end = row.visuals.glyph_vertex_range.end;
     for (index, glyph) in row.glyphs.iter_mut().enumerate() {
-        let left_boundary = display_boundary_offsets[index];
-        let right_boundary = display_boundary_offsets[index + 1];
-        let advance = right_boundary - left_boundary;
+        let (left_boundary, advance) = if let Some(offsets) = display_boundary_offsets {
+            let left_boundary = offsets[index];
+            let right_boundary = offsets[index + 1];
+            (left_boundary, right_boundary - left_boundary)
+        } else {
+            (glyph.pos.x, glyph.advance_width)
+        };
         if !left_boundary.is_finite() || !advance.is_finite() || advance < 0.0 {
-            return fail(CanonicalGalleyError::InvalidBoundaries);
+            return fail(if display_boundary_offsets.is_some() {
+                CanonicalGalleyError::InvalidBoundaries
+            } else {
+                CanonicalGalleyError::InvalidVerticalGeometry
+            });
+        }
+        let original_baseline = glyph.pos.y;
+        let baseline_delta = baseline_offset - original_baseline;
+        if !original_baseline.is_finite() || !baseline_delta.is_finite() {
+            return fail(CanonicalGalleyError::InvalidVerticalGeometry);
         }
         if !glyph.uv_rect.is_nothing() {
             let Some(vertices) = row
@@ -384,25 +500,46 @@ pub(crate) fn canonical_singleline_galley(
             let round_to_pixel = |value: f32| (value * pixels_per_point).round() / pixels_per_point;
             let left = left_boundary + round_to_pixel(glyph.uv_rect.offset.x);
             let right = left + glyph.uv_rect.size.x;
+            if !left.is_finite() || !right.is_finite() {
+                return fail(CanonicalGalleyError::InvalidVerticalGeometry);
+            }
             vertices[0].pos.x = left;
             vertices[1].pos.x = right;
             vertices[2].pos.x = left;
             vertices[3].pos.x = right;
+            for vertex in vertices.iter_mut() {
+                let y = vertex.pos.y + baseline_delta;
+                if !vertex.pos.y.is_finite() || !y.is_finite() {
+                    return fail(CanonicalGalleyError::InvalidVerticalGeometry);
+                }
+                vertex.pos.y = y;
+            }
             vertex_index = vertex_index.saturating_add(4);
         }
-        glyph.pos.x = left_boundary;
+        if display_boundary_offsets.is_some() {
+            glyph.pos.x = left_boundary;
+        }
+        glyph.pos.y = baseline_offset;
         glyph.advance_width = advance;
+        glyph.line_height = line_box_height;
     }
     if vertex_index != vertex_end {
         return fail(CanonicalGalleyError::InvalidMeshTopology);
     }
 
-    let width = *display_boundary_offsets.last().unwrap_or(&0.0);
-    placed_row.pos.x = 0.0;
-    row.size.x = width;
+    let width = display_boundary_offsets
+        .and_then(|offsets| offsets.last().copied())
+        .unwrap_or(row.size.x);
+    if !width.is_finite() || width < 0.0 {
+        return fail(CanonicalGalleyError::InvalidVerticalGeometry);
+    }
+    placed_row.pos = egui::pos2(0.0, 0.0);
+    row.size = egui::vec2(width, line_box_height);
     row.visuals.mesh_bounds = row.visuals.mesh.calc_bounds();
     galley.rect.min.x = 0.0;
     galley.rect.max.x = width;
+    galley.rect.min.y = 0.0;
+    galley.rect.max.y = line_box_height;
     galley.mesh_bounds = galley.rows.iter().fold(egui::Rect::NOTHING, |bounds, row| {
         bounds.union(row.visuals.mesh_bounds)
     });

@@ -171,7 +171,7 @@ impl ScreenplayLayout {
                 );
             }
             for wrapped in paragraph.prepared.lines.iter() {
-                let advance = paragraph.prepared.paragraph.line_advance;
+                let advance = wrapped.vertical_metrics.leading;
                 let mut line = paginate::rebase_prepared_line(
                     wrapped,
                     paragraph.element,
@@ -223,7 +223,7 @@ impl ScreenplayLayout {
         };
         let block_top = FixedPoint::from_raw(
             self.pages[current_page]
-                .next_line_y
+                .next_line_top
                 .raw()
                 .saturating_add(applied_gap),
         );
@@ -254,7 +254,7 @@ impl ScreenplayLayout {
         };
         let block_top = FixedPoint::from_raw(
             self.pages[page_index]
-                .next_line_y
+                .next_line_top
                 .raw()
                 .saturating_add(applied_gap),
         );
@@ -266,7 +266,7 @@ impl ScreenplayLayout {
         self.pages[page_index].occupied_lines = self.pages[page_index]
             .occupied_lines
             .saturating_add(left.line_count.max(right.line_count).min(u32::MAX as usize) as u32);
-        self.pages[page_index].next_line_y =
+        self.pages[page_index].next_line_top =
             FixedPoint::from_raw(block_top.raw().saturating_add(block_height));
     }
 
@@ -327,7 +327,7 @@ impl ScreenplayLayout {
             page.occupied_lines = page
                 .occupied_lines
                 .saturating_add(occupied[page_offset].min(u32::MAX as usize) as u32);
-            page.next_line_y = FixedPoint::from_raw(bottoms[page_offset]);
+            page.next_line_top = FixedPoint::from_raw(bottoms[page_offset]);
         }
     }
 }
@@ -374,7 +374,7 @@ fn spill_side_lines(
     for (paragraph_index, paragraph) in side.paragraphs.iter().enumerate() {
         let mut gap_pending = paragraph_index > 0;
         for wrapped in paragraph.prepared.lines.iter() {
-            let advance = paragraph.prepared.paragraph.line_advance.raw().max(0);
+            let advance = wrapped.vertical_metrics.leading.raw();
             let current_count = result.lines_per_page[page_offset];
             let gap = if gap_pending && current_count > 0 {
                 paragraph.prepared.paragraph.space_before.raw().max(0)
@@ -552,14 +552,13 @@ fn wrap_dual_side(
             prepared_lookup_started,
         )?;
         if !paragraphs.is_empty() {
-            height = height.saturating_add(paragraph.space_before.raw().max(0));
+            height = height
+                .checked_add(paragraph.space_before.raw().max(0))
+                .ok_or(LayoutError { kind: super::geometry::LayoutErrorKind::InvalidEffectiveLeading })?;
         }
-        height = height.saturating_add(
-            paragraph
-                .line_advance
-                .raw()
-                .saturating_mul(prepared.lines.len().min(i64::MAX as usize) as i64),
-        );
+        height = prepared.lines.iter().try_fold(height, |sum, line| {
+            sum.checked_add(line.vertical_metrics.leading.raw())
+        }).ok_or(LayoutError { kind: super::geometry::LayoutErrorKind::InvalidEffectiveLeading })?;
         line_count = line_count.saturating_add(prepared.lines.len());
         paragraphs.push(PreparedDualParagraph {
             element: index,

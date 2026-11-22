@@ -74,6 +74,8 @@ pub(crate) struct PreparedBodyCache {
     next_order: u64,
     entry_count: usize,
     retained_bytes: usize,
+    layout_environment: Option<Arc<crate::inputs::LayoutEnvironment>>,
+    environment_byte_cost: usize,
 }
 
 impl PreparedBodyCache {
@@ -100,6 +102,24 @@ impl PreparedBodyCache {
         self.next_order = 0;
         self.entry_count = 0;
         self.retained_bytes = 0;
+        self.layout_environment = None;
+        self.environment_byte_cost = 0;
+    }
+
+    /// The entries share one immutable environment Arc. Charge its heap payload
+    /// once per cache, not once for every owner-local prepared paragraph.
+    pub(super) fn set_layout_environment(
+        &mut self,
+        environment: Option<Arc<crate::inputs::LayoutEnvironment>>,
+    ) {
+        if self.layout_environment.as_deref() != environment.as_deref() {
+            self.clear();
+            self.environment_byte_cost = environment
+                .as_deref()
+                .map_or(0, layout_environment_heap_bytes);
+            self.retained_bytes = self.environment_byte_cost;
+            self.layout_environment = environment;
+        }
     }
 
     fn fingerprint(owner: &Arc<BodyOwner>, environment: &PreparedBodyEnvironment) -> u64 {
@@ -263,8 +283,7 @@ fn prepared_body_entry_byte_cost(
         .saturating_add(element.id.as_str().len())
         .saturating_add(element.text.len())
         .saturating_add(resolved_text_style_heap_bytes(&environment.resolved_text_style))
-        .saturating_add(environment.element_key.as_str().len())
-        .saturating_add(layout_environment_heap_bytes(&environment.layout_environment));
+        .saturating_add(environment.element_key.as_str().len());
     for run in &element.runs {
         total = total
             .saturating_add(std::mem::size_of::<TextRun>())
@@ -352,6 +371,7 @@ pub(crate) fn prepare_body_for_layout(
             environment.purpose,
             false,
             environment.geometry_mode,
+            &environment.layout_environment,
             diagnostics.as_deref_mut(),
         )?
     } else {
@@ -361,7 +381,7 @@ pub(crate) fn prepare_body_for_layout(
             element_type,
             paragraph,
             &environment.resolved_text_style,
-            &environment.layout_environment.fonts,
+            &environment.layout_environment,
             &element.runs,
             true,
             0,

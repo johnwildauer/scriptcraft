@@ -27,6 +27,7 @@ struct ElementWrapContext {
     geometry_mode: EffectiveGeometryMode,
     paragraph: EffectiveParagraph,
     resolved_text_style: ResolvedTextStyle,
+    layout_environment: LayoutEnvironment,
     runs: Arc<[TextRun]>,
     atomic_ranges: Arc<[std::ops::Range<usize>]>,
 }
@@ -41,6 +42,7 @@ struct ElementWrapIdentity<'a> {
     geometry_mode: EffectiveGeometryMode,
     paragraph: EffectiveParagraph,
     resolved_text_style: &'a ResolvedTextStyle,
+    layout_environment: &'a LayoutEnvironment,
     runs: &'a [TextRun],
     atomic_ranges: &'a [std::ops::Range<usize>],
 }
@@ -56,6 +58,7 @@ impl ElementWrapContext {
             geometry_mode: identity.geometry_mode,
             paragraph: identity.paragraph,
             resolved_text_style: identity.resolved_text_style.clone(),
+            layout_environment: identity.layout_environment.clone(),
             runs: Arc::from(identity.runs),
             atomic_ranges: Arc::from(identity.atomic_ranges),
         }
@@ -70,6 +73,7 @@ impl ElementWrapContext {
             && self.geometry_mode == identity.geometry_mode
             && self.paragraph == identity.paragraph
             && &self.resolved_text_style == identity.resolved_text_style
+            && self.layout_environment == *identity.layout_environment
             && self.runs.as_ref() == identity.runs
             && self.atomic_ranges.as_ref() == identity.atomic_ranges
     }
@@ -85,6 +89,14 @@ impl ElementWrapContext {
             .saturating_add(self.resolved_text_style.declared_family.len())
             .saturating_add(self.resolved_text_style.source_color.as_ref().map_or(0, String::len))
             .saturating_add(self.resolved_text_style.resolved_font_id.as_str().len())
+            .saturating_add(self.layout_environment.page.name.len())
+            .saturating_add(
+                self.layout_environment
+                    .neutral_title_style
+                    .source_color
+                    .as_ref()
+                    .map_or(0, String::len),
+            )
             .saturating_add(
                 self.atomic_ranges
                     .len()
@@ -177,6 +189,7 @@ impl ElementWrapCache {
         identity.geometry_mode.hash(&mut hasher);
         identity.paragraph.hash(&mut hasher);
         identity.resolved_text_style.hash(&mut hasher);
+        identity.layout_environment.cache_fingerprint().hash(&mut hasher);
         identity.runs.len().hash(&mut hasher);
         for run in identity.runs {
             run.text.hash(&mut hasher);
@@ -209,8 +222,14 @@ impl ElementWrapCache {
         purpose: LayoutPurpose,
         title_page: bool,
         geometry_mode: EffectiveGeometryMode,
+        layout_environment: &LayoutEnvironment,
         diagnostics: Option<&mut LayoutBuildDiagnostics>,
     ) -> Result<Vec<WrappedLine>, crate::geometry::LayoutError> {
+        if self.layout_environment.as_deref() != Some(layout_environment) {
+            return Err(crate::geometry::LayoutError {
+                kind: crate::geometry::LayoutErrorKind::InvalidProfile,
+            });
+        }
         let identity = ElementWrapIdentity {
             element_id,
             element_key,
@@ -220,6 +239,7 @@ impl ElementWrapCache {
             geometry_mode,
             paragraph,
             resolved_text_style: &resolved_text_style,
+            layout_environment,
             runs,
             atomic_ranges: &[],
         };
@@ -254,12 +274,6 @@ impl ElementWrapCache {
                 })
                 .collect());
         }
-        let environment =
-            self.layout_environment
-                .as_deref()
-                .ok_or(crate::geometry::LayoutError {
-                    kind: crate::geometry::LayoutErrorKind::InvalidProfile,
-                })?;
         let started = diagnostics.as_ref().map(|_| Instant::now());
         let context = ElementWrapContext::from_identity(identity);
         let lines = layout_wrap::wrap_resolved_for_layout(
@@ -268,7 +282,7 @@ impl ElementWrapCache {
             element_type,
             paragraph,
             &resolved_text_style,
-            &environment.fonts,
+            layout_environment,
             runs,
             true,
             0,

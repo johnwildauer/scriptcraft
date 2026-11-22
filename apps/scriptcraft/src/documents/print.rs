@@ -4,7 +4,7 @@
 //! printer APIs are intentionally owned by later macOS/Windows adapters.
 
 use scriptcraft_commands::PdfExportOptions;
-use scriptcraft_export::{self as exports, ExportError};
+use scriptcraft_export::{self as exports, ExportError, PdfFontPayload};
 use scriptcraft_layout::LayoutEnvironment;
 use scriptcraft_model::{LayoutInputs, Project};
 use std::ffi::OsStr;
@@ -22,14 +22,15 @@ pub(crate) struct PrintRequest {
     typography_report: exports::PdfTypographyReport,
 }
 
-/// Owned semantic/fixed-layout snapshot captured before the native panel opens.
-/// The native settings result can retain it through acceptance without building
-/// PDF bytes until the later delivery step.
+/// Owned semantic/layout snapshot, including Arc-backed exact font bytes,
+/// captured before the native panel opens. It remains immutable through
+/// acceptance; PDF bytes are built only at the later delivery step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrintCompositionSnapshot {
     project: Project,
     layout_inputs: LayoutInputs,
     layout_environment: LayoutEnvironment,
+    font_payload: PdfFontPayload,
     native_path: Option<std::path::PathBuf>,
 }
 
@@ -38,12 +39,14 @@ impl PrintCompositionSnapshot {
         project: &Project,
         layout_inputs: &LayoutInputs,
         layout_environment: &LayoutEnvironment,
+        font_payload: PdfFontPayload,
         native_path: Option<&Path>,
     ) -> Self {
         Self {
             project: project.clone(),
             layout_inputs: layout_inputs.clone(),
             layout_environment: layout_environment.clone(),
+            font_payload,
             native_path: native_path.map(Path::to_path_buf),
         }
     }
@@ -56,6 +59,7 @@ impl PrintCompositionSnapshot {
             &self.project,
             &self.layout_inputs,
             &self.layout_environment,
+            &self.font_payload,
             options,
             self.native_path.as_deref(),
         )
@@ -82,12 +86,14 @@ pub(super) fn build_pdf_bytes(
     project: &Project,
     layout_inputs: &LayoutInputs,
     layout_environment: &LayoutEnvironment,
+    font_payload: &PdfFontPayload,
     options: PdfExportOptions,
 ) -> Result<exports::PdfExport, ExportError> {
     exports::export_pdf_with_layout_inputs_and_options(
         project,
         layout_inputs,
         layout_environment,
+        font_payload,
         exports::PdfExportOptions {
             include_title_page: options.include_title_page,
         },
@@ -96,15 +102,24 @@ pub(super) fn build_pdf_bytes(
 
 /// Builds one complete request from borrowed semantic/layout inputs and
 /// returns owned PDF bytes, a bounded job title, and the bounded typography
-/// fallback report needed by PDF-backed print feedback.
+/// typography report (including host embedding and actual fallback occurrences)
+/// needed by PDF-backed print feedback. The accepted snapshot still owns the
+/// exact payload until this complete request has been built.
 pub(super) fn build_print_request(
     project: &Project,
     layout_inputs: &LayoutInputs,
     layout_environment: &LayoutEnvironment,
+    font_payload: &PdfFontPayload,
     options: PdfExportOptions,
     native_path: Option<&Path>,
 ) -> Result<PrintRequest, ExportError> {
-    let export = build_pdf_bytes(project, layout_inputs, layout_environment, options)?;
+    let export = build_pdf_bytes(
+        project,
+        layout_inputs,
+        layout_environment,
+        font_payload,
+        options,
+    )?;
     Ok(PrintRequest {
         pdf_data: export.bytes,
         job_title: print_job_title(native_path),

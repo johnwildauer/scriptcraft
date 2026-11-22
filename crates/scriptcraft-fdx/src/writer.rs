@@ -380,6 +380,7 @@ fn write_v6_inner(
         let mut sections = state.sections.clone();
         let mut effective_identities = state.identities.clone();
         prepare_preserved_root_output(&mut sections)?;
+        crate::settings::reconcile_root_page_layout(&mut sections, project.page_layout())?;
         if context.operation() != SaveOperation::DirectSerialization {
             effective_identities.extend(reconcile_document_lineage(
                 &mut sections,

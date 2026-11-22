@@ -157,6 +157,9 @@ pub(crate) fn make_new_document_nodes(
         index = index.checked_add(1).ok_or(FdxError::ResourceLimit)?;
     }
     root.children.push(PreservedNode::Element(content));
+    let page_layout = crate::settings::page_layout_element(&root.name, project.page_layout())?;
+    root.children
+        .push(PreservedNode::Element(page_layout));
     root.children
         .push(PreservedNode::Element(window_state_element(
             &root.name,

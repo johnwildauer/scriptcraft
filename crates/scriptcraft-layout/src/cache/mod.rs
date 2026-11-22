@@ -13,7 +13,7 @@ use scriptcraft_model::typography::EffectiveTextStyle as ResolvedTextStyle;
 use scriptcraft_model::{
     dual_dialogue::DualDialogueGroup, element::body_owners_equal,
     formatting::SourceParagraphOverrides, ElementDefinition, ElementTypeKey, LayoutInputs,
-    Project, StableId, TextRun, TitlePageParagraph,
+    PageLayoutInputs, Project, StableId, TextRun, TitlePageParagraph,
 };
 use scriptcraft_session::editing::EditingSession;
 use std::{
@@ -104,6 +104,7 @@ impl ElementWrapCache {
         purpose: LayoutPurpose,
         title_page: bool,
         geometry_mode: EffectiveGeometryMode,
+        layout_environment: &LayoutEnvironment,
         diagnostics: Option<&mut LayoutBuildDiagnostics>,
     ) -> Result<Vec<crate::wrap::WrappedLine>, LayoutError> {
         self.inner.wrap_resolved(
@@ -118,6 +119,7 @@ impl ElementWrapCache {
             purpose,
             title_page,
             geometry_mode,
+            layout_environment,
             diagnostics,
         )
     }
@@ -153,13 +155,14 @@ pub(super) fn add_elapsed_nanos(total: &mut u128, started: Option<Instant>) {
 }
 
 /// Session-owned immutable layout cache shared by desktop adapters and
-/// headless measurements. Revision, semantic project state, effective layout
-/// settings, resolved typography, and composition are identity inputs;
-/// viewport presentation state is excluded.
+/// headless measurements. Revision, semantic project state, effective page
+/// inputs, resolved typography, and composition are identity inputs. The
+/// desktop zoom baseline is refreshed on a hit but is not canonical identity.
+/// Viewport and paint/presentation state are excluded.
 #[derive(Debug, Default)]
 pub struct LayoutCache {
     revision: Option<u64>,
-    inputs: Option<LayoutInputs>,
+    inputs: Option<PageLayoutInputs>,
     source_settings: Option<SourceLayoutSettings>,
     layout_environment: Option<Arc<LayoutEnvironment>>,
     purpose: Option<LayoutPurpose>,
@@ -392,9 +395,6 @@ impl LayoutCache {
             self.prepared_body.clear();
         }
         let environment_matches = self.layout_environment.as_deref() == Some(layout_environment);
-        if !environment_matches {
-            self.prepared_body.clear();
-        }
         let layout_environment = if environment_matches {
             self.layout_environment
                 .clone()
@@ -402,14 +402,17 @@ impl LayoutCache {
         } else {
             Arc::new(layout_environment.clone())
         };
+        self.prepared_body
+            .set_layout_environment(Some(layout_environment.clone()));
         self.element_wraps
             .set_layout_environment(Some(layout_environment.clone()));
         let source_settings_match = self
             .source_settings
             .as_ref()
             .is_some_and(|cached| cached == &source_settings);
+        let page_inputs = inputs.page_only();
         let cache_keys_match = self.revision == Some(revision)
-            && self.inputs.as_ref() == Some(inputs)
+            && self.inputs.as_ref() == Some(&page_inputs)
             && source_settings_match
             && environment_matches
             && definition_registry_matches
@@ -426,7 +429,7 @@ impl LayoutCache {
                     .ok_or(LayoutError {
                         kind: LayoutErrorKind::NoGeometry,
                     })
-                    .map(|layout| (layout, true));
+                    .map(|layout| (layout_with_current_font_size(layout, inputs), true));
             }
             if let Some(diagnostics) = diagnostics.as_deref_mut() {
                 diagnostics.semantic_signature_constructions = diagnostics
@@ -446,7 +449,7 @@ impl LayoutCache {
                     .ok_or(LayoutError {
                         kind: LayoutErrorKind::NoGeometry,
                     })
-                    .map(|layout| (layout, true));
+                    .map(|layout| (layout_with_current_font_size(layout, inputs), true));
             }
             project_layout_signature = Some(signature);
         }
@@ -460,8 +463,7 @@ impl LayoutCache {
         }
         self.element_wraps.start_generation();
         self.prepared_body.start_generation();
-        let layout = Arc::new(
-            ScreenplayLayout::build_with_effective_inputs_for_purpose_internal(
+        let layout = match ScreenplayLayout::build_with_effective_inputs_for_purpose_internal(
                 project,
                 inputs,
                 &source_settings,
@@ -473,12 +475,20 @@ impl LayoutCache {
                 true,
                 &body_presentation,
                 layout_environment.clone(),
-            )?,
-        );
+            ) {
+            Ok(layout) => Arc::new(layout),
+            Err(error) => {
+                // Do not retain partial lower-level products from a failed
+                // complete-layout construction.
+                self.element_wraps.clear();
+                self.prepared_body.clear();
+                return Err(error);
+            }
+        };
         self.element_wraps.evict_if_needed();
         self.prepared_body.evict_if_needed();
         self.revision = Some(revision);
-        self.inputs = Some(inputs.clone());
+        self.inputs = Some(page_inputs);
         self.source_settings = Some(source_settings);
         self.layout_environment = Some(layout_environment);
         self.purpose = Some(purpose);
@@ -494,6 +504,20 @@ impl LayoutCache {
         }
         Ok((layout, false))
     }
+}
+
+fn layout_with_current_font_size(
+    layout: Arc<ScreenplayLayout>,
+    inputs: &LayoutInputs,
+) -> Arc<ScreenplayLayout> {
+    if layout.inputs.font_size == inputs.font_size {
+        return layout;
+    }
+    // The desktop zoom baseline is presented through LayoutInputs but is not a
+    // canonical geometry determinant. Refresh only that projection on a hit.
+    let mut projected = layout.as_ref().clone();
+    projected.inputs.font_size = inputs.font_size;
+    Arc::new(projected)
 }
 
 fn semantic_project_layout_signature(project: &Project) -> u64 {

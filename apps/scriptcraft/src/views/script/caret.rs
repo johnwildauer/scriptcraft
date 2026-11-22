@@ -29,8 +29,14 @@ pub(super) fn viewport_caret_rect(
             let page_origin = page_local_screen_origin(page, scale);
             let viewport_rect = projected.rect.translate(page_origin.to_vec2());
             let viewport_clip = egui::Rect::from_min_max(
-                page_origin + projected.clip_bounds.min.to_vec2(),
-                page_origin + projected.clip_bounds.max.to_vec2(),
+                egui::pos2(
+                    page_origin.x + projected.horizontal_clip_x[0],
+                    page.rect.top(),
+                ),
+                egui::pos2(
+                    page_origin.x + projected.horizontal_clip_x[1],
+                    page.rect.bottom(),
+                ),
             )
             .intersect(page.rect);
             (viewport_rect, Some(viewport_clip))

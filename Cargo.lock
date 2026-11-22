@@ -3165,6 +3165,7 @@ dependencies = [
  "windows",
  "windows-core",
  "windows-future",
+ "windows-numerics",
 ]
 
 [[package]]
@@ -3185,6 +3186,7 @@ version = "0.1.0"
 dependencies = [
  "scriptcraft-layout",
  "scriptcraft-model",
+ "ttf-parser",
 ]
 
 [[package]]

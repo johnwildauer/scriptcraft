@@ -1,10 +1,9 @@
 use crate::text_state::TextState;
 use scriptcraft_model::Project;
 
-/// A Version 6 reader result. `project` is an editing projection only; runtime
-/// layout uses deterministic application defaults where the FDX samples do not
-/// establish reversible geometry mappings. The source-owned preservation state
-/// retains the actual FDX settings and values independently.
+/// A Version 6 reader result. `project` owns the effective document page layout;
+/// its preservation state independently retains the original FDX source graph
+/// and bytes, including unprojected settings and unsupported spellings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FdxDocument {
     pub project: Project,

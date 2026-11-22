@@ -4,7 +4,9 @@ use super::{pdf, print};
 use crate::app::ScriptCraftApp;
 use eframe::egui;
 use scriptcraft_export as exports;
+use crate::presentation::document_font::PreparedDocumentFonts;
 use scriptcraft_layout::LayoutEnvironment;
+use scriptcraft_model::typography::ResolvedFontSourceKind;
 use scriptcraft_session::persistence::{FileSystem, StdFileSystem};
 use std::path::{Path, PathBuf};
 
@@ -165,9 +167,24 @@ impl ScriptCraftApp {
             ),
             Err(PdfExportAdapterError::Export(exports::ExportError::InvalidLayoutGeometry)) => {
                 self.show_error(
-                    "PDF_EXPORT_GEOMETRY_INVALID: canonical display boundaries were inconsistent; screenplay unchanged; no complete export produced",
+                    "PDF_EXPORT_GEOMETRY_INVALID: canonical layout geometry was inconsistent; screenplay unchanged; no complete export produced",
                 );
             }
+            Err(PdfExportAdapterError::Export(exports::ExportError::InvalidPdfFontPayload)) => {
+                self.show_error(
+                    "PDF_EXPORT_FONT_PAYLOAD_INVALID: exact resolved font data was incomplete or inconsistent; screenplay unchanged; no complete export produced",
+                );
+            }
+            Err(PdfExportAdapterError::Export(
+                exports::ExportError::RequiredPackagedFontEmbedding,
+            )) => self.show_error(
+                "PDF_EXPORT_PACKAGED_FONT_UNAVAILABLE: required packaged font data could not be embedded under the bounded policy; screenplay unchanged; no complete export produced",
+            ),
+            Err(PdfExportAdapterError::Export(
+                exports::ExportError::OutputResourceLimitExceeded,
+            )) => self.show_error(
+                "PDF_EXPORT_RESOURCE_LIMIT: bounded PDF output resources were exceeded; screenplay unchanged; no complete export produced",
+            ),
         }
     }
 
@@ -175,33 +192,92 @@ impl ScriptCraftApp {
         &mut self,
         options: scriptcraft_commands::PdfExportOptions,
     ) -> Result<exports::PdfExport, exports::ExportError> {
-        let environment = self.output_layout_environment()?;
+        let (environment, font_payload) = self.output_pdf_inputs()?;
         print::build_pdf_bytes(
             self.session.project(),
             self.session.layout_inputs(),
             &environment,
+            &font_payload,
             options,
         )
     }
 
     fn output_layout_environment(&mut self) -> Result<LayoutEnvironment, exports::ExportError> {
+        let prepared = self.output_prepared_document_fonts()?;
+        Ok(self.layout_environment_from_prepared(&prepared))
+    }
+
+    /// Couples PDF-only exact bytes with the environment from one prepared
+    /// snapshot. Windows receives environment only, and plain text remains
+    /// intentionally lossy and environment-only.
+    fn output_pdf_inputs(
+        &mut self,
+    ) -> Result<(LayoutEnvironment, exports::PdfFontPayload), exports::ExportError> {
+        let prepared = self.output_prepared_document_fonts()?;
+        let environment = self.layout_environment_from_prepared(&prepared);
+        let payload = Self::pdf_font_payload_from_prepared(&prepared)?;
+        Ok((environment, payload))
+    }
+
+    fn output_prepared_document_fonts(
+        &mut self,
+    ) -> Result<PreparedDocumentFonts, exports::ExportError> {
         let prepared = self
             .document_font_store
             .prepare_document(self.session.project())
             .map_err(|_| exports::ExportError::InvalidTypographyEnvironment)?;
         self.prepared_document_fonts = Some(prepared.clone());
-        Ok(LayoutEnvironment::new(
+        Ok(prepared)
+    }
+
+    fn layout_environment_from_prepared(
+        &self,
+        prepared: &PreparedDocumentFonts,
+    ) -> LayoutEnvironment {
+        LayoutEnvironment::new(
             self.session.layout_inputs().page_only(),
-            prepared.environment,
-        ))
+            prepared.environment.clone(),
+        )
+    }
+
+    fn pdf_font_payload_from_prepared(
+        prepared: &PreparedDocumentFonts,
+    ) -> Result<exports::PdfFontPayload, exports::ExportError> {
+        let mut entries = Vec::new();
+        for id in prepared.resolved_ids() {
+            let face = prepared
+                .environment
+                .require_face(id)
+                .map_err(|_| exports::ExportError::InvalidPdfFontPayload)?;
+            if face.source_kind == ResolvedFontSourceKind::Bundled
+                && !prepared.is_exact_packaged_courier_prime(id)
+            {
+                return Err(exports::ExportError::RequiredPackagedFontEmbedding);
+            }
+            let bytes = prepared
+                .face_bytes(id)
+                .ok_or(exports::ExportError::InvalidPdfFontPayload)?;
+            let face_index = prepared
+                .face_index(id)
+                .ok_or(exports::ExportError::InvalidPdfFontPayload)?;
+            entries.push((
+                id.clone(),
+                exports::PdfResolvedFaceBytes {
+                    face: face.clone(),
+                    bytes: bytes.clone(),
+                    face_index,
+                },
+            ));
+        }
+        exports::PdfFontPayload::new(entries)
     }
 
     pub(crate) fn open_print_panel(&mut self) {
         #[cfg(target_os = "macos")]
         {
             self.accepted_print_settings = None;
-            let environment = match self.output_layout_environment() {
-                Ok(environment) => environment,
+            let (environment, font_payload) = match self.output_pdf_inputs() {
+                Ok(inputs) => inputs,
                 Err(_) => {
                     self.show_error(
                         "PRINT_TYPOGRAPHY_UNAVAILABLE: resolved typography environment could not be prepared; no print panel opened",
@@ -213,6 +289,7 @@ impl ScriptCraftApp {
                 self.session.project(),
                 self.session.layout_inputs(),
                 &environment,
+                font_payload,
                 self.native_path.as_deref(),
             );
             let panel_result =
@@ -265,7 +342,7 @@ impl ScriptCraftApp {
                 Err(_) => {
                     self.native_output_modal_active = false;
                     self.show_error(
-                        "WINDOWS_PRINT_TYPOGRAPHY_UNAVAILABLE: resolved typography environment could not be prepared; no system print UI was opened",
+                        "WINDOWS_PRINT_TYPOGRAPHY_UNAVAILABLE: resolved typography environment could not be prepared or did not match Project-derived page inputs; no system print UI was opened; screenplay unchanged",
                     );
                     return;
                 }
@@ -281,9 +358,9 @@ impl ScriptCraftApp {
                     self.windows_print_preparation = Some(preparation);
                     self.show_error("WINDOWS_PRINT_PREPARING: immutable Print layouts are being prepared off the UI thread");
                 }
-                Err(_) => {
+                Err(failure) => {
                     self.native_output_modal_active = false;
-                    self.show_error("WINDOWS_PRINT_FAILED: bounded immutable print preparation could not start; no system UI was opened");
+                    self.report_windows_print_start_failure(failure);
                 }
             }
         }
@@ -302,10 +379,15 @@ struct WindowsPrintRequestSnapshot {
 #[cfg(target_os = "windows")]
 impl WindowsPrintRequestSnapshot {
     fn capture(app: &mut ScriptCraftApp) -> Result<Self, exports::ExportError> {
+        let project = app.session.project().clone();
+        let layout_inputs = project.session_layout_inputs();
         let layout_environment = app.output_layout_environment()?;
+        if layout_inputs.page_only() != layout_environment.page {
+            return Err(exports::ExportError::InvalidTypographyEnvironment);
+        }
         Ok(Self {
-            project: app.session.project().clone(),
-            layout_inputs: app.session.layout_inputs().clone(),
+            project,
+            layout_inputs,
             layout_environment,
             revision: app.session.revision(),
             job_title: print::print_job_title(app.native_path.as_deref()),
@@ -416,7 +498,19 @@ impl ScriptCraftApp {
                 "WINDOWS_PRINT_FAILED: modern system print UI could not be opened"
             }
             crate::platform::windows::windows_print::StartFailure::PreparationFailed => {
-                "WINDOWS_PRINT_FAILED: immutable screenplay package preparation failed"
+                "WINDOWS_PRINT_FAILED: immutable screenplay package preparation failed; no system UI opened; screenplay unchanged"
+            }
+            crate::platform::windows::windows_print::StartFailure::LayoutFailure => {
+                "WINDOWS_PRINT_LAYOUT_FAILED: canonical Print composition failed; no system UI opened; screenplay unchanged"
+            }
+            crate::platform::windows::windows_print::StartFailure::InvalidTypographyEnvironment => {
+                "WINDOWS_PRINT_TYPOGRAPHY_UNAVAILABLE: prepared typography or Project-derived page inputs were incomplete or mismatched; no system UI opened; screenplay unchanged"
+            }
+            crate::platform::windows::windows_print::StartFailure::InvalidCanonicalGeometry => {
+                "WINDOWS_PRINT_GEOMETRY_INVALID: canonical line or span geometry was inconsistent; no system UI opened; screenplay unchanged"
+            }
+            crate::platform::windows::windows_print::StartFailure::ResourceFailure => {
+                "WINDOWS_PRINT_RESOURCE_LIMIT: immutable Print package resource or allocation bound was exceeded; no system UI opened; screenplay unchanged"
             }
         };
         self.show_error(message);

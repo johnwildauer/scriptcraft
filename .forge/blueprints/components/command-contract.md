@@ -24,70 +24,71 @@ responsibilities:
 
 - **Stable identities and introduction order:** Dotted IDs below are explicit wire names, independent of Rust variant spelling. The existing 52-ID compatibility sequence is fixed; IDs 53–59 are additive, and IDs and payload meanings are never renumbered, reused, or silently reshaped. Entries 48–51 remain `editor.dual-dialogue.toggle`, `file.print`, `editor.style.clear`, and `application.quit` in that introduction order; entry 52 adds `view.script-view.set`. IDs 53–57 add Elements and Apply selector/activation commands; IDs 58–59 add the landed New-from-Template selector and activation commands. The discovery descriptor catalog contains exactly 59 enabled command identities and excludes disabled menu placeholders; catalog order and identity introduction order are separately explicit compatibility data.
 
-  | # | Stable ID | Typed parameters and defaults |
-  |---:|---|---|
-  | 1 | `file.new` | none |
-  | 2 | `file.open.request` | none; host picker request |
-  | 3 | `file.open` | `path: DocumentPath`; validated nonempty UTF-8 path |
-  | 4 | `file.close` | none |
-  | 5 | `file.save` | none |
-  | 6 | `file.save-as.request` | none; host picker request |
-  | 7 | `file.save-as` | `path: DocumentPath`, `overwrite: bool` default `false` |
-  | 8 | `file.save-as-pdf` | none; native destination/options request |
-  | 9 | `file.import.resolve` | `resolution: ImportResolution` (`Continue` or `Cancel`) |
-  | 10 | `edit.undo` | none |
-  | 11 | `edit.redo` | none |
-  | 12 | `edit.cut` | none |
-  | 13 | `edit.copy` | none |
-  | 14 | `edit.paste` | none |
-  | 15 | `edit.delete` | none |
-  | 16 | `edit.select-all` | none |
-  | 17 | `editor.text.insert` | owned UTF-8 `text`; `surface: EditorSurface` default `Body` |
-  | 18 | `editor.text.paste` | owned UTF-8 `text`; `surface` default `Body` |
-  | 19 | `editor.delete.backward` | none; host active surface |
-  | 20 | `editor.paragraph.enter` | none; host active surface |
-  | 21 | `editor.paragraph.tab` | none; host active surface |
-  | 22 | `editor.element.change` | exact open `ElementTypeValue`; `surface` default `Body` |
-  | 23 | `editor.selection.set` | checked UTF-8-byte `Selection`; `surface` default `Body` |
-  | 24 | `editor.selection.pointer` | semantic `Position`, typed `PointerPhase`; `surface` default `Body` |
-  | 25 | `editor.navigation.horizontal` | typed direction, `extend: bool`; `surface` default `Body` |
-  | 26 | `editor.navigation.vertical` | typed direction, `extend: bool`; `surface` default `Body` |
-  | 27 | `editor.navigation.line-edge` | typed edge, `extend: bool`; `surface` default `Body` |
-  | 28 | `editor.focus` | none; host focus effect |
-  | 29 | `window.title-page.open` | none; host viewport effect |
-  | 30 | `window.title-page.close` | none; host viewport effect |
-  | 31 | `editor.style.toggle` | explicit `EditorSurface`, bounded typed text style |
-  | 32 | `editor.alignment.set` | explicit `EditorSurface`, bounded typed alignment |
-  | 33 | `pdf.include-title-page.resolve` | `PdfExportOptions { include_title_page: bool }` |
-  | 34 | `view.zoom.set` | bounded `ZoomPercent` in 75–300 inclusive |
-  | 35 | `view.zoom.pinch` | finite positive `ZoomFactor` |
-  | 36 | `view.appearance.set` | typed `Appearance` (`System`, `Day`, `Night`, `Midnight`) |
-  | 37 | `view.focus-mode.toggle` | none; host viewport effect |
-  | 38 | `tools.sprint-timer.toggle-popup` | none |
-  | 39 | `tools.sprint-timer.close-popup` | none |
-  | 40 | `tools.sprint-timer.set-mode` | typed `SprintTimerMode` (`Countdown` or `Stopwatch`) |
-  | 41 | `tools.sprint-timer.set-minutes` | owned UTF-8 `text`, validated by timer policy |
-  | 42 | `tools.sprint-timer.start` | none |
-  | 43 | `tools.sprint-timer.pause` | none |
-  | 44 | `tools.sprint-timer.resume` | none |
-  | 45 | `tools.sprint-timer.reset` | none |
-  | 46 | `tools.sprint-timer.end` | none |
-  | 47 | `ui.status.set` | optional bounded one-line `DiagnosticMessage` (512 UTF-8 bytes); absent/null clears |
-  | 48 | `editor.dual-dialogue.toggle` | none; Body-only semantic toggle |
-  | 49 | `file.print` | none; macOS native Print host effect |
-  | 50 | `editor.style.clear` | explicit `EditorSurface` |
-  | 51 | `application.quit` | none; root-host-effect request for guarded root Close |
-  | 52 | `view.script-view.set` | `mode: ScriptViewMode` (`Normal`, `Page`, or `Speed`); transient Body presentation |
-  | 53 | `format.elements.open` | none; host effect to show/focus Elements |
-  | 54 | `format.elements.close` | none; host effect to close Elements and its selector |
-  | 55 | `format.template-selector.open` | none; host effect to show/focus the Apply selector |
-  | 56 | `format.template-selector.cancel` | none; host effect to cancel/close only the selector |
-  | 57 | `format.template.apply` | `template: BuiltinTemplateValue`; one closed built-in catalog ID |
-  | 58 | `file.new-from-template.open` | none; host effect to show/focus the New-from-Template selector |
-  | 59 | `file.new-from-template` | `template: BuiltinTemplateValue`; host effect launches one independent child |
+  |   # | Stable ID                         | Typed parameters and defaults                                                       |
+  | --: | --------------------------------- | ----------------------------------------------------------------------------------- |
+  |   1 | `file.new`                        | none                                                                                |
+  |   2 | `file.open.request`               | none; host picker request                                                           |
+  |   3 | `file.open`                       | `path: DocumentPath`; validated nonempty UTF-8 path                                 |
+  |   4 | `file.close`                      | none                                                                                |
+  |   5 | `file.save`                       | none                                                                                |
+  |   6 | `file.save-as.request`            | none; host picker request                                                           |
+  |   7 | `file.save-as`                    | `path: DocumentPath`, `overwrite: bool` default `false`                             |
+  |   8 | `file.save-as-pdf`                | none; native destination/options request                                            |
+  |   9 | `file.import.resolve`             | `resolution: ImportResolution` (`Continue` or `Cancel`)                             |
+  |  10 | `edit.undo`                       | none                                                                                |
+  |  11 | `edit.redo`                       | none                                                                                |
+  |  12 | `edit.cut`                        | none                                                                                |
+  |  13 | `edit.copy`                       | none                                                                                |
+  |  14 | `edit.paste`                      | none                                                                                |
+  |  15 | `edit.delete`                     | none                                                                                |
+  |  16 | `edit.select-all`                 | none                                                                                |
+  |  17 | `editor.text.insert`              | owned UTF-8 `text`; `surface: EditorSurface` default `Body`                         |
+  |  18 | `editor.text.paste`               | owned UTF-8 `text`; `surface` default `Body`                                        |
+  |  19 | `editor.delete.backward`          | none; host active surface                                                           |
+  |  20 | `editor.paragraph.enter`          | none; host active surface                                                           |
+  |  21 | `editor.paragraph.tab`            | none; host active surface                                                           |
+  |  22 | `editor.element.change`           | exact open `ElementTypeValue`; `surface` default `Body`                             |
+  |  23 | `editor.selection.set`            | checked UTF-8-byte `Selection`; `surface` default `Body`                            |
+  |  24 | `editor.selection.pointer`        | semantic `Position`, typed `PointerPhase`; `surface` default `Body`                 |
+  |  25 | `editor.navigation.horizontal`    | typed direction, `extend: bool`; `surface` default `Body`                           |
+  |  26 | `editor.navigation.vertical`      | typed direction, `extend: bool`; `surface` default `Body`                           |
+  |  27 | `editor.navigation.line-edge`     | typed edge, `extend: bool`; `surface` default `Body`                                |
+  |  28 | `editor.focus`                    | none; host focus effect                                                             |
+  |  29 | `window.title-page.open`          | none; host viewport effect                                                          |
+  |  30 | `window.title-page.close`         | none; host viewport effect                                                          |
+  |  31 | `editor.style.toggle`             | explicit `EditorSurface`, bounded typed text style                                  |
+  |  32 | `editor.alignment.set`            | explicit `EditorSurface`, bounded typed alignment                                   |
+  |  33 | `pdf.include-title-page.resolve`  | `PdfExportOptions { include_title_page: bool }`                                     |
+  |  34 | `view.zoom.set`                   | bounded `ZoomPercent` in 75–300 inclusive                                           |
+  |  35 | `view.zoom.pinch`                 | finite positive `ZoomFactor`                                                        |
+  |  36 | `view.appearance.set`             | typed `Appearance` (`System`, `Day`, `Night`, `Midnight`)                           |
+  |  37 | `view.focus-mode.toggle`          | none; host viewport effect                                                          |
+  |  38 | `tools.sprint-timer.toggle-popup` | none                                                                                |
+  |  39 | `tools.sprint-timer.close-popup`  | none                                                                                |
+  |  40 | `tools.sprint-timer.set-mode`     | typed `SprintTimerMode` (`Countdown` or `Stopwatch`)                                |
+  |  41 | `tools.sprint-timer.set-minutes`  | owned UTF-8 `text`, validated by timer policy                                       |
+  |  42 | `tools.sprint-timer.start`        | none                                                                                |
+  |  43 | `tools.sprint-timer.pause`        | none                                                                                |
+  |  44 | `tools.sprint-timer.resume`       | none                                                                                |
+  |  45 | `tools.sprint-timer.reset`        | none                                                                                |
+  |  46 | `tools.sprint-timer.end`          | none                                                                                |
+  |  47 | `ui.status.set`                   | optional bounded one-line `DiagnosticMessage` (512 UTF-8 bytes); absent/null clears |
+  |  48 | `editor.dual-dialogue.toggle`     | none; Body-only semantic toggle                                                     |
+  |  49 | `file.print`                      | none; macOS native Print host effect                                                |
+  |  50 | `editor.style.clear`              | explicit `EditorSurface`                                                            |
+  |  51 | `application.quit`                | none; root-host-effect request for guarded root Close                               |
+  |  52 | `view.script-view.set`            | `mode: ScriptViewMode` (`Normal`, `Page`, or `Speed`); transient Body presentation  |
+  |  53 | `format.elements.open`            | none; host effect to show/focus Elements                                            |
+  |  54 | `format.elements.close`           | none; host effect to close Elements and its selector                                |
+  |  55 | `format.template-selector.open`   | none; host effect to show/focus the Apply selector                                  |
+  |  56 | `format.template-selector.cancel` | none; host effect to cancel/close only the selector                                 |
+  |  57 | `format.template.apply`           | `template: BuiltinTemplateValue`; one closed built-in catalog ID                    |
+  |  58 | `file.new-from-template.open`     | none; host effect to show/focus the New-from-Template selector                      |
+  |  59 | `file.new-from-template`          | `template: BuiltinTemplateValue`; host effect launches one independent child        |
 
 - **Envelope and origin:** `CommandEnvelope` carries `version`, `origin`, and `command`; current command wire version 2 is independent of FDX. Serde keys are `id` and `params`; unknown IDs/fields and unsupported envelope versions are rejected. `CommandEnvelope::new()` and current command producers emit version 2. At the versioned command-envelope boundary only, version 1 accepts command 22's legacy `role` payload and converts its 17 exact historical snake-case spellings (`scene_heading`, `action`, `character`, `dialogue`, `parenthetical`, `transition`, `note`, `new_act`, `end_of_act`, `cast_list`, `general`, `shot`, `sequence`, `outline_1`, `outline_2`, `outline_3`, `summary`) to their exact FDX labels. Version 2 uses `element_type` only. The element-change payload rejects a missing, duplicated, mixed, or version-inappropriate representation; unknown fields and all versions other than 1 and 2 fail before execution. The adapter never maps an unknown v1 spelling to Action/General and is unrelated to removed legacy document JSON. Origins are `Menu`, `Toolbar`, `NativeMenu`, `Shortcut`, `Keyboard`, `Pointer`, `ImeCommit`, `InternalFollowUp`, `Cli`, `Mcp`, `Test`, and `NativeOs` (serialized as `native_os`); they are routing/diagnostic metadata only and never change semantics. macOS Dock Quit is dispatched with `native_os` origin. Commands, origins, keymaps, and view state are not screenplay persistence.
 - **Typed boundaries and compatibility defaults:** Text is owned UTF-8; paths use validated `DocumentPath`; element types are bounded owned exact strings backed by model `ElementTypeKey`, while surface, style, alignment, movement, timer, pointer, and import decisions use explicit domain types; selections/positions are checked UTF-8 byte offsets on the selected surface. Element labels are never trimmed, case-folded, parsed through a closed Role, or assigned a fallback. Legacy surface-less editor payloads default to Body where declared; explicit surface values are authoritative. Payloads exclude GUI/native handles, pointer coordinates, and rectangles. `PdfExportOptions` is a typed, transient, `deny_unknown_fields` value whose `include_title_page` defaults to `true`; `pdf.include-title-page.resolve` keeps its serialized ID/payload and command-wire compatibility, and directly supplied options continue through the shared continuation and legacy destination-picker path without reopening an egui options modal. Ordinary PDF activation obtains destination and a fresh default-on choice together from the native dialog; cancellation performs no output work.
+- **PageLayout command boundary:** This initiative adds no PageLayout command, stable ID, typed payload, or command-envelope version change. A future page-layout mutation must be separately specified as an additive typed command/patch and routed through one atomic session/FDX candidate that publishes Project effective values, retained source projection, derived layout inputs, history/revision/token, dirty state, and output identity together. Raw XML, attribute names, free-form leading text, and header/footer values smuggled through unrelated payloads are excluded; stable IDs and existing command payload meanings remain unchanged.
 - **Headless execution:** The reusable executor operates on the real `EditingSession` without desktop context. It applies supported edit, selection, exact element-type, navigation-commit, formatting, history, dual-dialogue, and typed built-in Apply semantics; it distinguishes `Changed`, `NoOp`, `Unavailable`, `Rejected`, ordinary edit failure, and bounded Apply-template failure. Apply maps each closed `BuiltinTemplateValue` exhaustively to its exact catalog ID and calls `EditingSession.apply_builtin_template()` once; Changed/NoOp and target-load/extraction versus current-planning/candidate errors are returned without a second edit. The desktop selector guard is not required for direct headless callers. Both envelope project validation and direct executor entry freshly require exact membership of command 22's target in the current ordered project registry; rejection details do not disclose the supplied key or document content. Body commands use the generic exact-key operation, and explicit Body or Title Page commands route through their corresponding session operation. A Title Page command assigns a typed key; the generic optional-key session API also retains typed-to-type-less behavior, which command 22's non-optional wire value does not encode. Same-key assignment is a no-op; unknown/stale targets, invalid selections/surfaces, and failed candidates publish no semantic, source, selection, history/redo, dirty, revision, or mutation-token change. Host-only or presentation-only commands are not emulated as semantic operations: `ui.status.set`, `application.quit`, and `view.script-view.set` are rejected by the headless executor. File pickers/storage, PDF/Print panels, clipboard, focus/window/viewport effects, Script View mode, timer clocks and notifications remain adapter-owned. `application.quit` is a root-host-effect request; the desktop routes it to guarded root Close rather than treating it as a semantic document operation. `view.script-view.set` is executed by the desktop dispatcher against transient per-window Body presentation state and does not mutate the editing session. Layout/pointer adapters may calculate semantic positions but commit them through the same executor.
 - **Authoritative executor outcome boundary:** For a supported operation, the executor compares only the session-owned ephemeral mutation token immediately before and after execution. The owning session advances that token for every executor-reachable semantic publication, including content, history/redo, element-type, alignment, dual-dialogue, and range-style changes, and for Body/Title selection or typing-style changes that do not advance document revision. A successful operation with an unchanged token is `NoOp`; a changed token is `Changed`; an edit error remains `Failed` with its original error. Existing early `Rejected` and `Unavailable` returns do not execute an operation. The executor does not clone or value-compare the session, live or clean project, or history/redo snapshots, and does not infer outcomes from revision or dirty state. Session candidate validation, dirty comparison, derived invalidation, rollback, and document revision behavior remain owned by the session and are unchanged by this observation boundary.
 - **Desktop dispatch and effects:** One desktop dispatcher rechecks current availability and exact current-project element membership at activation/dispatch, then routes semantic commands through the headless executor. Toolbar and generated keyboard activation construct the same open-key command; origin remains diagnostic metadata and never changes semantic policy. Menu/native/owned-accelerator events retain FIFO ordering; focused text, IME, paragraph keys, deletion, navigation, element-type changes, and pointer commits remain synchronous in source event order. `EffectDispatched` asserts routing only, not successful dialog/file/print/window/notification behavior. A picker obtains input and then dispatches a distinct direct-path command; cancellation dispatches none. Cut deletes only after clipboard write succeeds; Paste inserts only after a successful nonempty clipboard read. Direct-path Open/Save As remain callable without GUI context and preserve staged import and transactional storage rules. The typed [`EditError::IncompatibleParagraphJoin`](../../../crates/scriptcraft-session/src/editing/mod.rs) remains a failed semantic outcome; only the desktop adapter routes that specific failure to best-effort native rejection feedback, while successful no-ops and unrelated errors remain silent. Sound does not replace the bounded diagnostic or alter command success.

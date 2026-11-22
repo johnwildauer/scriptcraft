@@ -38,7 +38,7 @@ pub use element_semantics::{BehaviorTargetResolution, ElementSemantics, Paragrap
 pub use element_type::{ElementTypeKey, MAX_ELEMENT_TYPE_KEY_BYTES};
 pub use error::ModelError;
 pub use identity::{StableId, StableIdAllocator};
-pub use layout_inputs::{LayoutInputs, PageLayoutInputs};
+pub use layout_inputs::{DocumentLeading, DocumentPageLayout, LayoutInputs, PageLayoutInputs};
 pub use position::{Position, Selection};
 pub use project::Project;
 pub use title_page::{TitlePageAlignment, TitlePageParagraph, TitlePageParagraphFormatting};

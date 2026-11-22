@@ -20,6 +20,7 @@ pub(super) struct LineLocation {
 pub(super) struct BodyLineIndexEntry {
     location: LineLocation,
     absolute_y: i64,
+    absolute_bottom_y: i64,
     element: usize,
     source: SourceRange,
 }
@@ -207,6 +208,17 @@ impl ScreenplayLayout {
         diagnostics: &mut InteractionQueryDiagnostics,
     ) -> Option<LocatedLayoutLine<'_>> {
         diagnostics.query();
+        let horizontal_distance = |line: &LayoutLine| {
+            let left = line.paragraph_bounds.x.raw();
+            let right = left.saturating_add(line.paragraph_bounds.width.raw());
+            if x.raw() < left {
+                left.saturating_sub(x.raw())
+            } else if x.raw() > right {
+                x.raw().saturating_sub(right)
+            } else {
+                0
+            }
+        };
         if self.pages.get(page)?.title_page {
             if self.composition != LayoutComposition::TitlePageEditor {
                 return None;
@@ -220,9 +232,19 @@ impl ScreenplayLayout {
                 .title_line_index
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, entry)| {
+                .min_by_key(|(index, entry)| {
                     diagnostics.examined();
-                    pointer_y.saturating_sub(entry.absolute_y).saturating_abs()
+                    (
+                        interval_distance(
+                            pointer_y,
+                            entry.absolute_y,
+                            entry.absolute_bottom_y,
+                        ),
+                        horizontal_distance(
+                            &self.pages[entry.location.page].lines[entry.location.line],
+                        ),
+                        *index,
+                    )
                 })?
                 .1;
             let line = &self.pages[entry.location.page].lines[entry.location.line];
@@ -244,38 +266,10 @@ impl ScreenplayLayout {
             insertion.checked_sub(1),
             (insertion < self.body_line_y_order.len()).then_some(insertion),
         ];
-        let mut nearest_y_distance = i64::MAX;
-        let mut candidate_ys = [None, None];
-        let mut candidate_y_count = 0usize;
+        let mut best: Option<(i64, i64, usize)> = None;
         for coordinate_index in neighbor_coordinates.into_iter().flatten() {
             diagnostics.examined();
             let y = self.body_line_index[self.body_line_y_order[coordinate_index]].absolute_y;
-            let distance = pointer_y.saturating_sub(y).saturating_abs();
-            if distance < nearest_y_distance {
-                nearest_y_distance = distance;
-                candidate_ys = [Some(y), None];
-                candidate_y_count = 1;
-            } else if distance == nearest_y_distance
-                && !candidate_ys[..candidate_y_count].contains(&Some(y))
-                && candidate_y_count < candidate_ys.len()
-            {
-                candidate_ys[candidate_y_count] = Some(y);
-                candidate_y_count += 1;
-            }
-        }
-        let horizontal_distance = |line: &LayoutLine| {
-            let left = line.paragraph_bounds.x.raw();
-            let right = left.saturating_add(line.paragraph_bounds.width.raw());
-            if x.raw() < left {
-                left.saturating_sub(x.raw())
-            } else if x.raw() > right {
-                x.raw().saturating_sub(right)
-            } else {
-                0
-            }
-        };
-        let mut best: Option<(i64, usize)> = None;
-        for y in candidate_ys[..candidate_y_count].iter().flatten().copied() {
             let start = self.body_line_y_order.partition_point(|index| {
                 diagnostics.examined();
                 self.body_line_index[*index].absolute_y < y
@@ -289,13 +283,17 @@ impl ScreenplayLayout {
                 diagnostics.equal_y_candidate();
                 let entry = self.body_line_index[index];
                 let line = &self.pages[entry.location.page].lines[entry.location.line];
-                let candidate = (horizontal_distance(line), index);
+                let candidate = (
+                    interval_distance(pointer_y, entry.absolute_y, entry.absolute_bottom_y),
+                    horizontal_distance(line),
+                    index,
+                );
                 if best.is_none_or(|current| candidate < current) {
                     best = Some(candidate);
                 }
             }
         }
-        let (_, best_index) = best?;
+        let (_, _, best_index) = best?;
         let entry = self.body_line_index[best_index];
         Some(LocatedLayoutLine {
             page_index: entry.location.page,
@@ -501,14 +499,16 @@ impl ScreenplayLayout {
                     element_lines.push(location);
                 }
                 if page.title_page {
-                    let absolute_y = i64::try_from(page_index)
+                    let page_offset = i64::try_from(page_index)
                         .unwrap_or(i64::MAX)
-                        .saturating_mul(page_height)
-                        .saturating_add(line.geometry.y.raw());
+                        .saturating_mul(page_height);
+                    let absolute_y = page_offset.saturating_add(line.geometry.y.raw());
+                    let absolute_bottom_y = page_offset.saturating_add(line.baseline_y().raw());
                     let index = self.title_line_index.len();
                     self.title_line_index.push(BodyLineIndexEntry {
                         location,
                         absolute_y,
+                        absolute_bottom_y,
                         element: line.element,
                         source: line.source,
                     });
@@ -517,14 +517,16 @@ impl ScreenplayLayout {
                     }
                     continue;
                 }
-                let absolute_y = i64::try_from(page_index)
+                let page_offset = i64::try_from(page_index)
                     .unwrap_or(i64::MAX)
-                    .saturating_mul(page_height)
-                    .saturating_add(line.geometry.y.raw());
+                    .saturating_mul(page_height);
+                let absolute_y = page_offset.saturating_add(line.geometry.y.raw());
+                let absolute_bottom_y = page_offset.saturating_add(line.baseline_y().raw());
                 let index = self.body_line_index.len();
                 self.body_line_index.push(BodyLineIndexEntry {
                     location,
                     absolute_y,
+                    absolute_bottom_y,
                     element: line.element,
                     source: line.source,
                 });
@@ -543,6 +545,16 @@ impl ScreenplayLayout {
             add_elapsed_nanos(&mut diagnostics.body_y_sort_nanos, sort_started);
             add_elapsed_nanos(&mut diagnostics.interaction_index_nanos, started);
         }
+    }
+}
+
+fn interval_distance(pointer: i64, top: i64, bottom: i64) -> i64 {
+    if pointer < top {
+        top.saturating_sub(pointer)
+    } else if pointer > bottom {
+        pointer.saturating_sub(bottom)
+    } else {
+        0
     }
 }
 

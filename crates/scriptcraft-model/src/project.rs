@@ -10,8 +10,10 @@ use crate::{
     element_semantics::{BehaviorTargetResolution, ElementSemantics, ParagraphBehaviorKey},
     formatting::SourceParagraphOverrides,
     identity::{StableId, StableIdAllocator},
+    layout_inputs::DocumentPageLayout,
     preservation::PreservationState,
     title_page::TitlePageParagraph,
+    validation::validate_document_page_layout,
     ElementTypeKey, ModelError,
 };
 
@@ -31,6 +33,9 @@ pub struct Project {
     /// Ordered document-owned element settings. The backing registry is private
     /// and changes only through validated whole-registry replacement.
     element_definitions: DocumentElementDefinitions,
+    /// Effective page layout is document data; retained FDX remains its source
+    /// projection rather than a second runtime authority.
+    page_layout: DocumentPageLayout,
     /// Clone-stable identity for cache invalidation across document replacement.
     /// It is intentionally excluded from semantic equality and serialization.
     pub(crate) layout_identity: Arc<()>,
@@ -45,17 +50,26 @@ impl PartialEq for Project {
             && self.dual_dialogue_paragraph_overrides == other.dual_dialogue_paragraph_overrides
             && self.preservation == other.preservation
             && self.element_definitions == other.element_definitions
+            && self.page_layout == other.page_layout
     }
 }
 
 impl Eq for Project {}
 
 impl Project {
-    /// Creates an empty semantic projection for common-reader import or
-    /// caller-supplied synthetic values. Import installs its complete ordered
-    /// registry before publishing; callers must populate and validate their own
-    /// content explicitly.
+    /// Creates an empty semantic projection with the standard effective page
+    /// layout. Import installs its complete ordered registry before publishing;
+    /// callers must populate and validate their own content explicitly.
     pub fn empty_projection() -> Result<Self, ModelError> {
+        Self::empty_projection_with_page_layout(DocumentPageLayout::default())
+    }
+
+    /// Creates a fresh semantic projection with a validated effective page
+    /// layout. This is a construction boundary, not an existing-document setter.
+    pub fn empty_projection_with_page_layout(
+        page_layout: DocumentPageLayout,
+    ) -> Result<Self, ModelError> {
+        validate_document_page_layout(&page_layout)?;
         Ok(Self {
             title_page: Vec::new(),
             elements: Vec::new(),
@@ -64,8 +78,14 @@ impl Project {
             dual_dialogue_paragraph_overrides: BTreeMap::new(),
             preservation: None,
             element_definitions: DocumentElementDefinitions::default(),
+            page_layout,
             layout_identity: Arc::new(()),
         })
+    }
+
+    /// Returns the immutable effective document page layout.
+    pub fn page_layout(&self) -> &DocumentPageLayout {
+        &self.page_layout
     }
 
     /// Returns the project's ordered definition registry.
@@ -144,9 +164,9 @@ impl Project {
         }
     }
 
-    /// Runtime layout inputs use deterministic application defaults.
+    /// Runtime layout inputs are derived from this Project's effective page data.
     pub fn session_layout_inputs(&self) -> crate::layout_inputs::LayoutInputs {
-        crate::layout_inputs::LayoutInputs::default()
+        self.page_layout.session_layout_inputs()
     }
 
     /// Clone-stable identity for cache invalidation across document replacement.

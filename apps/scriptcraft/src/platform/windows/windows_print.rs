@@ -3,7 +3,9 @@
 //! The FilePrint source follows Microsoft's Win2D `CanvasPrintDocument` pattern:
 //! one immutable Print-layout package is selected for preview and final pages,
 //! preview is drawn to the supplied DXGI target, and final pages use Direct2D
-//! print control.
+//! print control. Both paths share measured-baseline DirectWrite placement:
+//! per-scalar no-wrap layouts are translated to the captured canonical baseline,
+//! canonical x boundaries are retained, and line-box y is never a text clip.
 
 #[path = "windows_print_document.rs"]
 mod document;
@@ -47,7 +49,7 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_LINE_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory, IWICImagingFactory};
@@ -167,6 +169,9 @@ pub(crate) struct PrintPreparation {
 }
 
 impl PrintPreparation {
+    /// Build Include/Omit title variants from one accepted request snapshot.
+    /// Each worker package performs one fresh canonical Print composition and
+    /// reports bounded preparation categories without exposing document values.
     pub(crate) fn start(
         project: scriptcraft_model::Project,
         inputs: scriptcraft_model::LayoutInputs,
@@ -174,6 +179,9 @@ impl PrintPreparation {
         request_revision: u64,
         job_title: String,
     ) -> Result<Self, StartFailure> {
+        if inputs.page_only() != layout_environment.page {
+            return Err(StartFailure::InvalidTypographyEnvironment);
+        }
         let request_id = next_request_id().ok_or(StartFailure::PreparationFailed)?;
         let (sender, result) = mpsc::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -182,7 +190,7 @@ impl PrintPreparation {
             .name("scriptcraft-print-package".to_owned())
             .spawn(move || {
                 let include = document::build_package(&project, &inputs, &layout_environment, true)
-                    .map_err(|_| StartFailure::PreparationFailed);
+                    .map_err(start_failure_from_package);
                 let prepared = match include {
                     Ok(include) if !worker_cancelled.load(Ordering::Acquire) => {
                         document::build_package(&project, &inputs, &layout_environment, false)
@@ -193,7 +201,7 @@ impl PrintPreparation {
                                 include: Arc::new(include),
                                 omit: Arc::new(omit),
                             })
-                            .map_err(|_| StartFailure::PreparationFailed)
+                            .map_err(start_failure_from_package)
                     }
                     Ok(_) => return,
                     Err(error) => Err(error),
@@ -235,7 +243,28 @@ pub(crate) enum StartFailure {
     ManagerUnavailable,
     RegistrationFailed,
     UiUnavailable,
+    LayoutFailure,
+    InvalidTypographyEnvironment,
+    InvalidCanonicalGeometry,
+    ResourceFailure,
     PreparationFailed,
+}
+
+fn start_failure_from_package(error: document::PackageBuildError) -> StartFailure {
+    match error {
+        document::PackageBuildError::Layout | document::PackageBuildError::EmptyLayout => {
+            StartFailure::LayoutFailure
+        }
+        document::PackageBuildError::InvalidTypographyEnvironment => {
+            StartFailure::InvalidTypographyEnvironment
+        }
+        document::PackageBuildError::InvalidLayoutGeometry => {
+            StartFailure::InvalidCanonicalGeometry
+        }
+        document::PackageBuildError::ResourceLimit | document::PackageBuildError::Allocation => {
+            StartFailure::ResourceFailure
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1077,6 +1106,10 @@ fn preview_bitmap_dimensions(width: f32, height: f32) -> Option<(u32, u32)> {
 }
 
 #[allow(unsafe_code)]
+/// Draw either preview or final page from the selected immutable package. The
+/// measured DirectWrite baseline only cancels DirectWrite's natural row offset;
+/// its row height/metrics never replace canonical leading, and no line-box y
+/// clip is installed. Natural extents are package-time font-table observations.
 fn draw_vector_page(
     context: &ID2D1DeviceContext,
     page: &document::VectorPage,
@@ -1095,7 +1128,7 @@ fn draw_vector_page(
         if text_bytes > MAX_TEXT_BYTES_PER_CALLBACK_PAGE {
             return Err(callback_error());
         }
-        total_runs += 1;
+        total_runs = total_runs.checked_add(1).ok_or_else(callback_error)?;
     }
 
     let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }?;
@@ -1109,17 +1142,29 @@ fn draw_vector_page(
         if run.text().is_empty() {
             continue;
         }
-        let geometry = run.geometry();
-        let rect = scaled_run_rect(geometry, transform).ok_or_else(callback_error)?;
-        if ![rect.left, rect.top, rect.right, rect.bottom]
+        let geometry = scaled_run_geometry(run, transform).ok_or_else(callback_error)?;
+        if ![
+            geometry.left,
+            geometry.right,
+            geometry.top,
+            geometry.baseline,
+            geometry.leading,
+        ]
             .into_iter()
             .all(f32::is_finite)
-            || rect.right <= rect.left
-            || rect.bottom <= rect.top
+            || geometry.right < geometry.left
+            || geometry.leading <= 0.0
         {
             return Err(callback_error());
         }
         let face = HSTRING::from(run.family_name());
+        let font_size_dip = f64::from(run.font_size_pt())
+            * (96.0_f64 / 72.0_f64)
+            * f64::from(transform.scale);
+        let font_size_dip = finite_native_value(font_size_dip).ok_or_else(callback_error)?;
+        if font_size_dip <= 0.0 || font_size_dip > MAX_PREVIEW_EDGE_DIP {
+            return Err(callback_error());
+        }
         let format = unsafe {
             factory.CreateTextFormat(
                 windows::core::PCWSTR(face.as_ptr()),
@@ -1135,7 +1180,7 @@ fn draw_vector_page(
                     DWRITE_FONT_STYLE_NORMAL
                 },
                 DWRITE_FONT_STRETCH_NORMAL,
-                f32::from(run.font_size_pt()) * (96.0 / 72.0) * transform.scale,
+                font_size_dip,
                 windows::core::PCWSTR(locale.as_ptr()),
             )
         }?;
@@ -1153,57 +1198,63 @@ fn draw_vector_page(
         // bounded by the existing per-page run limit and released with a run.
         let brush = unsafe { context.CreateSolidColorBrush(&ink, None) }?;
         let offsets = run.display_boundary_offsets();
-        for (scalar_index, (scalar, pair)) in run.text().chars().zip(offsets.windows(2)).enumerate()
-        {
+        for (scalar_index, scalar) in run.text().chars().enumerate() {
             if scalar_index.is_multiple_of(256) && callback_deadline_expired(started) {
                 return Err(callback_error());
             }
-            let left_offset = pair[0].to_points_f32() * (96.0 / 72.0) * transform.scale;
-            let right_offset = pair[1].to_points_f32() * (96.0 / 72.0) * transform.scale;
-            if !left_offset.is_finite() || !right_offset.is_finite() || right_offset <= left_offset
-            {
-                return Err(callback_error());
-            }
-            let scalar_rect = D2D_RECT_F {
-                left: rect.left + left_offset,
-                top: rect.top,
-                right: rect.left + right_offset,
-                bottom: rect.bottom,
-            };
-            if ![
-                scalar_rect.left,
-                scalar_rect.top,
-                scalar_rect.right,
-                scalar_rect.bottom,
-            ]
-            .into_iter()
-            .all(f32::is_finite)
-                || scalar_rect.right <= scalar_rect.left
-            {
-                return Err(callback_error());
-            }
+            let boundary = offsets.get(scalar_index).ok_or_else(callback_error)?;
+            let scalar_x = scaled_scalar_x(run.geometry().x, *boundary, transform)
+                .ok_or_else(callback_error)?;
             let mut utf16 = [0u16; 2];
             let scalar_text = scalar.encode_utf16(&mut utf16);
-            unsafe {
-                context.DrawText(
+            let utf16_length = u32::try_from(scalar_text.len()).map_err(|_| callback_error())?;
+            let text_layout = unsafe {
+                factory.CreateTextLayout(
                     scalar_text,
                     &format,
-                    &scalar_rect,
+                    MAX_PREVIEW_EDGE_DIP,
+                    MAX_PREVIEW_EDGE_DIP,
+                )
+            }?;
+            let mut line_metrics = [DWRITE_LINE_METRICS::default()];
+            let mut line_count = 0u32;
+            unsafe {
+                text_layout.GetLineMetrics(Some(&mut line_metrics[..]), &mut line_count)
+            }?;
+            let measured = &line_metrics[0];
+            if line_count != 1
+                || measured.length != utf16_length
+                || measured.newlineLength != 0
+                || measured.isTrimmed.as_bool()
+                || !measured.baseline.is_finite()
+            {
+                return Err(callback_error());
+            }
+            let draw_y = finite_native_value(
+                f64::from(geometry.baseline) - f64::from(measured.baseline),
+            )
+            .ok_or_else(callback_error)?;
+            let origin = windows_numerics::Vector2 {
+                X: scalar_x,
+                Y: draw_y,
+            };
+            unsafe {
+                context.DrawTextLayout(
+                    origin,
+                    &text_layout,
                     &brush,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
                 )
             };
-            drawn_scalars = drawn_scalars.saturating_add(1);
+            drawn_scalars = drawn_scalars.checked_add(1).ok_or_else(callback_error)?;
         }
 
-        let (underline, strikethrough) = decoration_rects(rect, transform.scale);
-        if run.underline() {
-            let line = underline;
+        let (underline, strikethrough) = decoration_rects(run, geometry, transform.scale)
+            .ok_or_else(callback_error)?;
+        if let Some(line) = underline {
             unsafe { context.FillRectangle(&line, &brush) };
         }
-        if run.strikethrough() {
-            let line = strikethrough;
+        if let Some(line) = strikethrough {
             unsafe { context.FillRectangle(&line, &brush) };
         }
     }
@@ -1216,49 +1267,130 @@ fn draw_vector_page(
     Ok(())
 }
 
-fn scaled_run_rect(
-    geometry: scriptcraft_layout::FixedRect,
-    transform: PageTransform,
-) -> Option<D2D_RECT_F> {
-    let point_to_dip = 96.0 / 72.0;
-    let rect = D2D_RECT_F {
-        left: transform.offset_x + geometry.x.to_points_f32() * point_to_dip * transform.scale,
-        top: transform.offset_y + geometry.y.to_points_f32() * point_to_dip * transform.scale,
-        right: transform.offset_x
-            + (geometry.x.to_points_f32() + geometry.width.to_points_f32())
-                * point_to_dip
-                * transform.scale,
-        bottom: transform.offset_y
-            + (geometry.y.to_points_f32() + geometry.height.to_points_f32())
-                * point_to_dip
-                * transform.scale,
-    };
-    ([rect.left, rect.top, rect.right, rect.bottom]
-        .into_iter()
-        .all(f32::is_finite)
-        && rect.right > rect.left
-        && rect.bottom > rect.top)
-        .then_some(rect)
+#[derive(Debug, Clone, Copy)]
+struct ScaledRunGeometry {
+    left: f32,
+    right: f32,
+    top: f32,
+    baseline: f32,
+    leading: f32,
 }
 
-fn decoration_rects(rect: D2D_RECT_F, scale: f32) -> (D2D_RECT_F, D2D_RECT_F) {
-    let height = (0.7 * scale).max(0.25);
-    let width = rect.right - rect.left;
-    let underline_top = rect.bottom - height;
-    let strike_top = rect.top + (rect.bottom - rect.top) * 0.52;
-    (
-        D2D_RECT_F {
-            left: rect.left,
-            top: underline_top,
-            right: rect.left + width,
-            bottom: underline_top + height,
-        },
-        D2D_RECT_F {
-            left: rect.left,
-            top: strike_top,
-            right: rect.left + width,
-            bottom: strike_top + height,
-        },
-    )
+fn finite_native_value(value: f64) -> Option<f32> {
+    if !value.is_finite() || value < f64::from(f32::MIN) || value > f64::from(f32::MAX) {
+        return None;
+    }
+    let value = value as f32;
+    value.is_finite().then_some(value)
+}
+
+fn scaled_document_coordinate(raw: i64, offset: f32, scale: f32) -> Option<f32> {
+    finite_native_value(scaled_document_coordinate_f64(raw, offset, scale)?)
+}
+
+fn scaled_document_coordinate_f64(raw: i64, offset: f32, scale: f32) -> Option<f64> {
+    if !offset.is_finite() || !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let value = f64::from(offset)
+        + (raw as f64 / scriptcraft_model::formatting::FixedPoint::SCALE as f64)
+            * (96.0_f64 / 72.0_f64)
+            * f64::from(scale);
+    value.is_finite().then_some(value)
+}
+
+fn scaled_document_length(raw: i64, scale: f32) -> Option<f64> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let value = (raw as f64 / scriptcraft_model::formatting::FixedPoint::SCALE as f64)
+        * (96.0_f64 / 72.0_f64)
+        * f64::from(scale);
+    value.is_finite().then_some(value)
+}
+
+fn scaled_run_geometry(
+    run: &document::VectorTextRun,
+    transform: PageTransform,
+) -> Option<ScaledRunGeometry> {
+    let source = run.geometry();
+    let right_raw = source.x.raw().checked_add(source.width.raw())?;
+    let bottom_raw = source.y.raw().checked_add(source.height.raw())?;
+    if run.baseline_y().raw() != bottom_raw || run.line_leading() != source.height {
+        return None;
+    }
+    // Retained natural font-table extents are observations only; they cannot
+    // substitute for the line-box baseline or affect native placement.
+    let _natural_top = run
+        .baseline_y()
+        .raw()
+        .checked_sub(run.natural_ascent().raw())?;
+    let _natural_bottom = run
+        .baseline_y()
+        .raw()
+        .checked_sub(run.natural_descent().raw())?;
+    let geometry = ScaledRunGeometry {
+        left: scaled_document_coordinate(source.x.raw(), transform.offset_x, transform.scale)?,
+        right: scaled_document_coordinate(right_raw, transform.offset_x, transform.scale)?,
+        top: scaled_document_coordinate(source.y.raw(), transform.offset_y, transform.scale)?,
+        baseline: scaled_document_coordinate(
+            run.baseline_y().raw(),
+            transform.offset_y,
+            transform.scale,
+        )?,
+        leading: finite_native_value(
+            scaled_document_length(run.line_leading().raw(), transform.scale)?,
+        )?,
+    };
+    (geometry.right >= geometry.left && geometry.leading > 0.0).then_some(geometry)
+}
+
+fn scaled_scalar_x(
+    run_left: scriptcraft_model::formatting::FixedPoint,
+    boundary: scriptcraft_model::formatting::FixedPoint,
+    transform: PageTransform,
+) -> Option<f32> {
+    let scaled_run_left = scaled_document_coordinate_f64(
+        run_left.raw(),
+        transform.offset_x,
+        transform.scale,
+    )?;
+    finite_native_value(scaled_run_left + scaled_document_length(boundary.raw(), transform.scale)?)
+}
+
+fn decoration_rects(
+    run: &document::VectorTextRun,
+    geometry: ScaledRunGeometry,
+    scale: f32,
+) -> Option<(Option<D2D_RECT_F>, Option<D2D_RECT_F>)> {
+    if run.text().is_empty() || geometry.right == geometry.left {
+        return Some((None, None));
+    }
+    let thickness = (0.7_f64 * f64::from(scale)).max(0.25);
+    if !thickness.is_finite() || thickness <= 0.0 {
+        return None;
+    }
+    let make_decoration = |ratio: f64| -> Option<D2D_RECT_F> {
+        let center = f64::from(geometry.baseline) - ratio * f64::from(geometry.leading);
+        let top = center - thickness / 2.0;
+        let bottom = center + thickness / 2.0;
+        Some(D2D_RECT_F {
+            left: geometry.left,
+            top: finite_native_value(top)?,
+            right: geometry.right,
+            bottom: finite_native_value(bottom)?,
+        })
+    };
+    let underline = if run.underline() {
+        Some(make_decoration(0.12)?)
+    } else {
+        None
+    };
+    let strikethrough = if run.strikethrough() {
+        Some(make_decoration(0.48)?)
+    } else {
+        None
+    };
+    Some((underline, strikethrough))
 }
 

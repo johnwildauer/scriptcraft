@@ -50,6 +50,7 @@ impl EditingSession {
         self.history.pop();
         self.redo.push(current);
         self.project = snapshot.project;
+        self.refresh_layout_inputs_from_project();
         self.selection = snapshot.selection;
         self.title_selection = snapshot.title_selection;
         self.title_typing_style = snapshot.title_typing_style;
@@ -85,6 +86,7 @@ impl EditingSession {
         self.redo.pop();
         self.push_history(current);
         self.project = snapshot.project;
+        self.refresh_layout_inputs_from_project();
         self.selection = snapshot.selection;
         self.title_selection = snapshot.title_selection;
         self.title_typing_style = snapshot.title_typing_style;

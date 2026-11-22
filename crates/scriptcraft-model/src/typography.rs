@@ -1,4 +1,5 @@
-//! Backend-neutral, transient resolved typography inputs.
+//! Backend-neutral, transient resolved typography inputs. Line-box bottoms are
+//! canonical baselines; font-table metrics are retained as natural extents.
 //!
 //! This module deliberately owns no font discovery, byte loading, parsing, or
 //! platform rendering. A desktop resolver supplies bounded face identities
@@ -83,8 +84,8 @@ pub struct ScalarAdvance {
 }
 
 /// Vertical font-unit metrics and the bounded scalar repertoire claimed by a
-/// resolved face. Metrics are integral font units, so scaling has one defined
-/// rounding step and cannot produce NaN or negative geometry.
+/// resolved face. Metrics are integral font units and scale with one defined
+/// integer rounding step; descent remains signed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedFaceMetrics {
     pub units_per_em: u32,
@@ -145,17 +146,18 @@ impl ResolvedFaceMetrics {
         scale_font_units(advance.advance_units, self.units_per_em, size_points)
     }
 
-    /// Scale ascent, descent, and line gap together into hundredths of a point.
-    pub fn scale_regular_line_advance(&self, size_points: u16) -> Result<FixedPoint, ModelError> {
+    /// Scale the natural font-table ascent into signed hundredths of a point.
+    pub fn scale_ascent(&self, size_points: u16) -> Result<FixedPoint, ModelError> {
         self.validate()?;
         validate_font_size(size_points)?;
-        let units = self
-            .ascender
-            .checked_sub(self.descender)
-            .and_then(|height| height.checked_add(self.line_gap))
-            .filter(|height| *height > 0)
-            .ok_or(ModelError::InvalidFontMetrics)?;
-        scale_font_units(units as u32, self.units_per_em, size_points)
+        scale_signed_font_units(self.ascender, self.units_per_em, size_points)
+    }
+
+    /// Scale the signed natural font-table descent into hundredths of a point.
+    pub fn scale_descent(&self, size_points: u16) -> Result<FixedPoint, ModelError> {
+        self.validate()?;
+        validate_font_size(size_points)?;
+        scale_signed_font_units(self.descender, self.units_per_em, size_points)
     }
 }
 
@@ -185,6 +187,30 @@ fn scale_font_units(
     Ok(FixedPoint::from_raw(raw))
 }
 
+fn scale_signed_font_units(
+    units: i32,
+    units_per_em: u32,
+    size_points: u16,
+) -> Result<FixedPoint, ModelError> {
+    let numerator = i128::from(units)
+        .checked_mul(i128::from(size_points))
+        .and_then(|value| value.checked_mul(i128::from(FixedPoint::SCALE)))
+        .ok_or(ModelError::InvalidFontMetrics)?;
+    let denominator = i128::from(units_per_em);
+    let magnitude = numerator
+        .checked_abs()
+        .and_then(|value| value.checked_add(denominator / 2))
+        .ok_or(ModelError::InvalidFontMetrics)?
+        / denominator;
+    let signed = if numerator < 0 {
+        magnitude.checked_neg().ok_or(ModelError::InvalidFontMetrics)?
+    } else {
+        magnitude
+    };
+    let raw = i64::try_from(signed).map_err(|_| ModelError::InvalidFontMetrics)?;
+    Ok(FixedPoint::from_raw(raw))
+}
+
 /// Metadata and metrics for the exact face selected by the transient resolver.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedFontFace {
@@ -193,6 +219,7 @@ pub struct ResolvedFontFace {
     pub face_label: String,
     pub style: FaceStyle,
     pub source_kind: ResolvedFontSourceKind,
+    pub leading_resolver: LeadingResolverKind,
     pub byte_length: u64,
     pub content_fingerprint: u64,
     pub metrics: ResolvedFaceMetrics,
@@ -206,6 +233,7 @@ impl ResolvedFontFace {
         face_label: impl Into<String>,
         style: FaceStyle,
         source_kind: ResolvedFontSourceKind,
+        leading_resolver: LeadingResolverKind,
         byte_length: u64,
         content_fingerprint: u64,
         metrics: ResolvedFaceMetrics,
@@ -226,6 +254,7 @@ impl ResolvedFontFace {
             face_label,
             style,
             source_kind,
+            leading_resolver,
             byte_length,
             content_fingerprint,
             metrics,
@@ -241,6 +270,7 @@ impl ResolvedFontFace {
         face_label: impl Into<String>,
         style: FaceStyle,
         source_kind: ResolvedFontSourceKind,
+        leading_resolver: LeadingResolverKind,
         bytes: &[u8],
         metrics: ResolvedFaceMetrics,
     ) -> Result<Self, ModelError> {
@@ -252,6 +282,7 @@ impl ResolvedFontFace {
             face_label,
             style,
             source_kind,
+            leading_resolver,
             byte_length,
             content_fingerprint(bytes),
             metrics,
@@ -284,6 +315,14 @@ pub enum FontResolutionKind {
     NearestSans,
     NearestSerif,
     UnknownFallback,
+}
+
+/// Explicit per-face baseline-leading category. Request/fallback metadata does
+/// not select the layout resolver; this category on the selected face does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LeadingResolverKind {
+    Courier,
+    Proportional,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -469,6 +508,7 @@ fn environment_fingerprint(
         hash.string(&face.face_label);
         hash.byte(face.style as u8);
         hash.byte(face.source_kind as u8);
+        hash.byte(face.leading_resolver as u8);
         hash.u64(face.byte_length);
         hash.u64(face.content_fingerprint);
         hash.u32(face.metrics.units_per_em);

@@ -3,9 +3,12 @@
 
 //! Deterministic, backend-neutral screenplay layout.
 //!
-//! Layout uses explicit effective inputs and fixed integer metrics rather than
-//! a platform font or viewport. The deterministic defaults therefore have stable structure on every host: one
-//! character cell is seven units wide and one line is twelve units high.
+//! Layout uses explicit effective inputs and fixed-point geometry rather than a
+//! platform font or viewport. Courier leading is 1.0× effective style size and
+//! Proportional leading is 1.2× size, selected by exact resolved-face category;
+//! DocumentLeading adjusts candidates before each wrapped line's style maximum.
+//! Line-box bottoms are canonical baselines; natural font-table metrics are extent
+//! metadata only and do not determine fit or clip glyphs to the line box.
 
 mod cache;
 mod dual_dialogue;
@@ -20,7 +23,8 @@ mod wrap;
 pub use cache::{LayoutBuildDiagnostics, LayoutCache};
 pub use geometry::{
     Caret, DisplaySourceSegment, FixedRect, LayoutError, LayoutErrorKind, LayoutLine, LayoutPage,
-    LocatedLayoutLine, PositionedStyledSpan, Rect, ScreenplayLayout, SourceRange, POINTS_PER_INCH,
+    LineVerticalMetrics, LocatedLayoutLine, PositionedStyledSpan, Rect, ScreenplayLayout,
+    SourceRange, POINTS_PER_INCH,
 };
 pub use inputs::{
     resolve_effective_dual_wrapper_paragraph, resolve_effective_paragraph,
@@ -28,4 +32,5 @@ pub use inputs::{
     BodyEditorPresentation, EditorGroupBoundary, EffectiveParagraph, LayoutComposition,
     LayoutEnvironment, LayoutPurpose, NeutralTitleStyle, PaginationPolicy,
 };
+pub use scriptcraft_model::layout_inputs::DocumentLeading;
 pub use interaction::InteractionQueryDiagnostics;

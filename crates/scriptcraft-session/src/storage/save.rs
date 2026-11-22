@@ -204,6 +204,7 @@ fn same_save_projection(expected: &Project, actual: &Project) -> bool {
     }
 
     expected.element_definitions() == actual.element_definitions()
+        && expected.page_layout() == actual.page_layout()
         && expected.direct_paragraph_overrides == actual.direct_paragraph_overrides
         && same_title_paragraphs(&expected.title_page, &actual.title_page)
         && same_elements(&expected.elements, &actual.elements)
@@ -361,6 +362,7 @@ impl EditingSession {
             .collect();
 
         rebased.project = project.clone();
+        rebased.refresh_layout_inputs_from_project();
         rebased.clean_project = project;
         rebased.selection = selection;
         rebased.title_selection = title_selection;

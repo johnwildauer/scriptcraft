@@ -1,6 +1,6 @@
 use super::{
     geometry::{DisplaySourceSegment, LayoutError, LayoutErrorKind},
-    inputs::EffectiveParagraph,
+    inputs::{self, EffectiveParagraph, LayoutEnvironment},
 };
 use scriptcraft_model::{
     formatted_text::parse_style_attribute,
@@ -235,13 +235,19 @@ pub(super) fn wrap_resolved_for_layout(
     element_type: Option<ElementTypeKey>,
     paragraph: EffectiveParagraph,
     base_style: &ResolvedTextStyle,
-    fonts: &DocumentFontEnvironment,
+    environment: &LayoutEnvironment,
     runs: &[TextRun],
     first_visual_line: bool,
     line_offset: usize,
     empty_source_offset: usize,
 ) -> Result<Vec<WrappedLine>, LayoutError> {
-    let scalars = project_resolved_display_scalars(text, 0..text.len(), runs, base_style, fonts)?;
+    let scalars = project_resolved_display_scalars(
+        text,
+        0..text.len(),
+        runs,
+        base_style,
+        &environment.fonts,
+    )?;
     let ranges = wrap_resolved_display_scalars(
         &scalars,
         paragraph,
@@ -249,10 +255,12 @@ pub(super) fn wrap_resolved_for_layout(
         line_offset,
         empty_source_offset,
     );
-    Ok(ranges
+    ranges
         .into_iter()
-        .map(|range| {
+        .map(|range| -> Result<WrappedLine, LayoutError> {
             let selected = &scalars[range.scalar_range.clone()];
+            let vertical_metrics =
+                inputs::resolve_line_vertical_metrics(base_style, selected, environment)?;
             let mut display_text = String::new();
             let mut display_source_map: Vec<DisplaySourceSegment> = Vec::new();
             for (display_index, scalar) in selected.iter().enumerate() {
@@ -273,7 +281,7 @@ pub(super) fn wrap_resolved_for_layout(
                 });
             }
             let source = range.source_range;
-            WrappedLine {
+            Ok(WrappedLine {
                 element,
                 element_type: element_type.clone(),
                 start: source.start,
@@ -286,13 +294,14 @@ pub(super) fn wrap_resolved_for_layout(
                 first_visual_line: range.first_visual_line,
                 final_visual_line: range.final_visual_line,
                 paragraph,
+                vertical_metrics,
                 oversized: range.oversized,
-            }
+            })
         })
-        .collect())
+        .collect()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WrappedLine {
     pub(super) element: usize,
     pub(super) element_type: Option<ElementTypeKey>,
@@ -306,6 +315,7 @@ pub(super) struct WrappedLine {
     pub(super) first_visual_line: bool,
     pub(super) final_visual_line: bool,
     pub(super) paragraph: EffectiveParagraph,
+    pub(super) vertical_metrics: super::geometry::LineVerticalMetrics,
     pub(super) oversized: bool,
 }
 

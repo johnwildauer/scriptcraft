@@ -9,7 +9,7 @@ use crate::identity::{
     collect_identities, validate_image_payload_budgets, validate_user_paragraph_data_locations,
 };
 use crate::lineage::raw_document_ref_datetime;
-use crate::settings::normalize_root_page_layout_colors;
+use crate::settings::{normalize_root_page_layout_colors, raw_root_page_layout};
 use crate::text_state::raw_root_text_state;
 use crate::title_page::make_title_page_paragraph;
 use crate::tree::{preserve_misc_node, preserve_opaque_element};
@@ -162,7 +162,9 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         return Err(FdxError::DuplicateSection);
     }
 
-    let mut project = Project::empty_projection().map_err(map_model_error)?;
+    let page_layout = raw_root_page_layout(root);
+    let mut project = Project::empty_projection_with_page_layout(page_layout)
+        .map_err(map_model_error)?;
     crate::element_settings_import::complete_document_definitions(
         root,
         &imported_element_settings,

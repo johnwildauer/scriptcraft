@@ -1,9 +1,12 @@
 //! Immutable vector-page package derived from the canonical Print layout.
 //!
 //! The page model deliberately contains no editor/egui state and keeps geometry
-//! in the core's exact hundredths-of-a-point units. The completed Windows Print
-//! adapter turns these records into Direct2D command lists and submits them
-//! through `ID2D1PrintControl::AddPage` without rebuilding the screenplay layout.
+//! in the core's exact hundredths-of-a-point units. Each visible run copies the
+//! placed line-box-bottom baseline, effective leading, natural table extents,
+//! and canonical scalar boundaries; only the DirectWrite adapter measures its
+//! own line baseline to translate drawing onto this captured baseline. Include
+//! and omit title packages are fresh Print compositions from the same immutable
+//! request inputs, never from editor caches or printer dimensions.
 
 use scriptcraft_layout::{
     FixedRect, LayoutComposition, LayoutEnvironment, LayoutError, ScreenplayLayout,
@@ -29,8 +32,9 @@ pub(super) struct WindowsPrintTypographyReport {
     nearest_family_substitutions: u32,
     face_identity_unverified_runs: u32,
     metric_policy_unverified_runs: u32,
-    canonical_geometry_unverified_runs: u32,
     glyph_coverage_unverified_scalars: u32,
+    resolved_face_missing_glyph_scalars: u32,
+    natural_extent_exceeds_line_box_lines: u32,
     unsupported_color_fallbacks: u32,
     suppressed_events: u32,
 }
@@ -49,13 +53,14 @@ impl WindowsPrintTypographyReport {
             return None;
         }
         Some(format!(
-            "Windows typography fallback report: Courier New substitutions {}; nearest-family substitutions {}; DirectWrite face identity unverified for {} runs; DirectWrite metric/shaping policy unverified for {} runs; canonical layout metric geometry unverified for {} runs; glyph coverage unverified for {} scalars; unsupported colors rendered black {}; report events capped {}",
+            "Windows typography report: Courier New substitutions {}; nearest-family substitutions {}; DirectWrite face identity unverified for {} runs; DirectWrite metric/shaping policy unverified for {} runs; glyph coverage unverified for {} scalars; resolved-face missing glyph markers {}; natural font-table extent exceeds line box for {} lines; unsupported colors rendered black {}; report events capped {}",
             self.courier_new_substitutions,
             self.nearest_family_substitutions,
             self.face_identity_unverified_runs,
             self.metric_policy_unverified_runs,
-            self.canonical_geometry_unverified_runs,
             self.glyph_coverage_unverified_scalars,
+            self.resolved_face_missing_glyph_scalars,
+            self.natural_extent_exceeds_line_box_lines,
             self.unsupported_color_fallbacks,
             self.suppressed_events,
         ))
@@ -66,6 +71,7 @@ impl WindowsPrintTypographyReport {
         courier_new_substitution: bool,
         nearest_family_substitution: bool,
         scalar_count: usize,
+        missing_glyph_count: usize,
         unsupported_color: bool,
     ) {
         let suppressed = &mut self.suppressed_events;
@@ -77,30 +83,32 @@ impl WindowsPrintTypographyReport {
         }
         Self::add(&mut self.face_identity_unverified_runs, 1, suppressed);
         Self::add(&mut self.metric_policy_unverified_runs, 1, suppressed);
-        Self::add(&mut self.canonical_geometry_unverified_runs, 1, suppressed);
         Self::add(
             &mut self.glyph_coverage_unverified_scalars,
             scalar_count,
+            suppressed,
+        );
+        Self::add(
+            &mut self.resolved_face_missing_glyph_scalars,
+            missing_glyph_count,
             suppressed,
         );
         if unsupported_color {
             Self::add(&mut self.unsupported_color_fallbacks, 1, suppressed);
         }
     }
+
+    fn record_natural_extent_exceeds_line_box(&mut self) {
+        Self::add(
+            &mut self.natural_extent_exceeds_line_box_lines,
+            1,
+            &mut self.suppressed_events,
+        );
+    }
 }
 
-fn directwrite_family(
-    kind: FontResolutionKind,
-    source_kind: ResolvedFontSourceKind,
-    family_label: &str,
-) -> (String, bool) {
-    if matches!(
-        kind,
-        FontResolutionKind::CourierAlias
-            | FontResolutionKind::UnknownFallback
-            | FontResolutionKind::ExactHost
-    ) && source_kind == ResolvedFontSourceKind::Bundled
-    {
+fn directwrite_family(source_kind: ResolvedFontSourceKind, family_label: &str) -> (String, bool) {
+    if source_kind == ResolvedFontSourceKind::Bundled {
         ("Courier New".to_owned(), true)
     } else {
         (family_label.to_owned(), false)
@@ -108,7 +116,7 @@ fn directwrite_family(
 }
 
 fn valid_boundaries(offsets: &[FixedPoint], scalar_count: usize, width: FixedPoint) -> bool {
-    offsets.len() == scalar_count.saturating_add(1)
+    scalar_count.checked_add(1) == Some(offsets.len())
         && offsets.first().is_some_and(|offset| offset.raw() == 0)
         && offsets.last() == Some(&width)
         && offsets.windows(2).all(|pair| pair[1] >= pair[0])
@@ -159,12 +167,19 @@ impl VectorPage {
 }
 
 /// One positioned DirectWrite text span and its independently represented
-/// vector decorations. The source/display string is retained without a PDF-like
-/// ASCII conversion; it is valid UTF-8 and can be encoded losslessly as UTF-16.
+/// baseline-relative decorations. The source/display string is retained without
+/// a PDF-like ASCII conversion; it is valid UTF-8 and encoded scalar-by-scalar
+/// as one or two UTF-16 code units. Canonical x boundaries and captured line
+/// metrics remain immutable; resolved family names do not establish face-byte,
+/// shaping, or coverage identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct VectorTextRun {
     text: Arc<str>,
     geometry: FixedRect,
+    baseline_y: FixedPoint,
+    line_leading: FixedPoint,
+    natural_ascent: FixedPoint,
+    natural_descent: FixedPoint,
     display_boundary_offsets: Arc<[FixedPoint]>,
     family_name: Arc<str>,
     bold: bool,
@@ -182,6 +197,22 @@ impl VectorTextRun {
 
     pub(super) fn geometry(&self) -> FixedRect {
         self.geometry
+    }
+
+    pub(super) fn baseline_y(&self) -> FixedPoint {
+        self.baseline_y
+    }
+
+    pub(super) fn line_leading(&self) -> FixedPoint {
+        self.line_leading
+    }
+
+    pub(super) fn natural_ascent(&self) -> FixedPoint {
+        self.natural_ascent
+    }
+
+    pub(super) fn natural_descent(&self) -> FixedPoint {
+        self.natural_descent
     }
 
     pub(super) fn display_boundary_offsets(&self) -> &[FixedPoint] {
@@ -266,6 +297,35 @@ impl From<LayoutError> for PackageBuildError {
     }
 }
 
+fn validate_line_geometry(
+    line: &scriptcraft_layout::LayoutLine,
+) -> Result<FixedPoint, PackageBuildError> {
+    let metrics = line.vertical_metrics;
+    if metrics.leading.raw() <= 0
+        || line.geometry.height != metrics.leading
+        || line.paragraph_bounds.y != line.geometry.y
+        || line.paragraph_bounds.height != metrics.leading
+    {
+        return Err(PackageBuildError::InvalidLayoutGeometry);
+    }
+    let baseline_raw = line
+        .geometry
+        .y
+        .raw()
+        .checked_add(line.geometry.height.raw())
+        .ok_or(PackageBuildError::InvalidLayoutGeometry)?;
+    let paragraph_bottom = line
+        .paragraph_bounds
+        .y
+        .raw()
+        .checked_add(line.paragraph_bounds.height.raw())
+        .ok_or(PackageBuildError::InvalidLayoutGeometry)?;
+    if baseline_raw != paragraph_bottom {
+        return Err(PackageBuildError::InvalidLayoutGeometry);
+    }
+    Ok(FixedPoint::from_raw(baseline_raw))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PackageLimits {
     pages: usize,
@@ -279,14 +339,18 @@ const PACKAGE_LIMITS: PackageLimits = PackageLimits {
     text_bytes: MAX_PACKAGE_TEXT_BYTES,
 };
 
-/// Build a fresh Print composition; this does not consult the editor layout
-/// cache or accept viewport/presentation state.
+/// Build one fresh Print composition; page-only inputs must equal the captured
+/// environment. This does not consult the editor layout cache or accept
+/// viewport, printer, DirectWrite, or presentation layout authority.
 pub(super) fn build_package(
     project: &Project,
     inputs: &LayoutInputs,
     environment: &LayoutEnvironment,
     include_title_page: bool,
 ) -> Result<WindowsPrintPackage, PackageBuildError> {
+    if inputs.page_only() != environment.page {
+        return Err(PackageBuildError::InvalidTypographyEnvironment);
+    }
     let source_settings = project
         .preservation
         .as_ref()
@@ -332,7 +396,7 @@ fn package_from_layout(
         let mut required_runs = 0usize;
         for span in page.lines.iter().flat_map(|line| line.spans.iter()) {
             let style = &span.resolved_text_style;
-            if !style.hidden_text {
+            if !style.hidden_text && !span.display_text.is_empty() {
                 required_runs = required_runs
                     .checked_add(1)
                     .ok_or(PackageBuildError::ResourceLimit)?;
@@ -349,23 +413,40 @@ fn package_from_layout(
         runs.try_reserve_exact(required_runs)
             .map_err(|_| PackageBuildError::Allocation)?;
         for line in &page.lines {
+            let baseline_y = validate_line_geometry(line)?;
+            let natural_top_raw = baseline_y
+                .raw()
+                .checked_sub(line.vertical_metrics.natural_ascent.raw())
+                .ok_or(PackageBuildError::InvalidLayoutGeometry)?;
+            let natural_bottom_raw = baseline_y
+                .raw()
+                .checked_sub(line.vertical_metrics.natural_descent.raw())
+                .ok_or(PackageBuildError::InvalidLayoutGeometry)?;
+            if natural_top_raw > natural_bottom_raw {
+                return Err(PackageBuildError::InvalidLayoutGeometry);
+            }
+            let mut line_has_visible_text = false;
             for span in line.spans.iter() {
                 let style = &span.resolved_text_style;
                 if style.hidden_text {
                     continue;
                 }
-                text_bytes = text_bytes
-                    .checked_add(span.display_text.len())
-                    .ok_or(PackageBuildError::ResourceLimit)?;
-                if text_bytes > limits.text_bytes {
-                    return Err(PackageBuildError::ResourceLimit);
-                }
                 let scalar_count = span.display_text.chars().count();
-                if !valid_boundaries(
-                    &span.display_boundary_offsets,
-                    scalar_count,
-                    span.geometry.width,
-                ) {
+                if span.geometry.width.raw() < 0
+                    || span.geometry.y != line.geometry.y
+                    || span.geometry.height != line.vertical_metrics.leading
+                    || span
+                        .geometry
+                        .y
+                        .raw()
+                        .checked_add(span.geometry.height.raw())
+                        != Some(baseline_y.raw())
+                    || !valid_boundaries(
+                        &span.display_boundary_offsets,
+                        scalar_count,
+                        span.geometry.width,
+                    )
+                {
                     return Err(PackageBuildError::InvalidLayoutGeometry);
                 }
                 let request = fonts
@@ -374,32 +455,57 @@ fn package_from_layout(
                 let resolved_face = fonts
                     .require_face(&style.resolved_font_id)
                     .map_err(|_| PackageBuildError::InvalidTypographyEnvironment)?;
-                let (family_name, courier_new_substitution) = directwrite_family(
-                    request.kind,
-                    resolved_face.source_kind,
-                    &resolved_face.family_label,
-                );
+                if span.display_text.is_empty() {
+                    continue;
+                }
+                line_has_visible_text = true;
+                text_bytes = text_bytes
+                    .checked_add(span.display_text.len())
+                    .ok_or(PackageBuildError::ResourceLimit)?;
+                if text_bytes > limits.text_bytes {
+                    return Err(PackageBuildError::ResourceLimit);
+                }
+                let (family_name, courier_new_substitution) =
+                    directwrite_family(resolved_face.source_kind, &resolved_face.family_label);
                 let nearest_family_substitution = matches!(
                     request.kind,
                     FontResolutionKind::NearestSans
                         | FontResolutionKind::NearestSerif
                         | FontResolutionKind::ExactHost
-                ) && !resolved_face
+                ) && resolved_face.source_kind != ResolvedFontSourceKind::Bundled
+                    && !resolved_face
                     .family_label
                     .eq_ignore_ascii_case(&style.declared_family);
                 let size = bounded_font_size(style.size)
                     .ok_or(PackageBuildError::InvalidTypographyEnvironment)?;
                 let (color_rgb, unsupported_color) = print_color(style.color);
                 let (bold, italic) = directwrite_style_flags(style.bold, style.italic);
+                let missing_glyph_count = span
+                    .display_text
+                    .chars()
+                    .try_fold(0usize, |count, scalar| {
+                        let metric = resolved_face
+                            .metrics
+                            .advance_for(scalar)
+                            .ok_or(PackageBuildError::InvalidTypographyEnvironment)?;
+                        count
+                            .checked_add(usize::from(metric.missing_glyph))
+                            .ok_or(PackageBuildError::ResourceLimit)
+                    })?;
                 typography_report.record_run(
                     courier_new_substitution,
                     nearest_family_substitution,
                     scalar_count,
+                    missing_glyph_count,
                     unsupported_color,
                 );
                 runs.push(VectorTextRun {
                     text: Arc::clone(&span.display_text),
                     geometry: span.geometry,
+                    baseline_y,
+                    line_leading: line.vertical_metrics.leading,
+                    natural_ascent: line.vertical_metrics.natural_ascent,
+                    natural_descent: line.vertical_metrics.natural_descent,
                     display_boundary_offsets: Arc::clone(&span.display_boundary_offsets),
                     family_name: Arc::from(family_name),
                     bold,
@@ -409,6 +515,12 @@ fn package_from_layout(
                     underline: span.underline,
                     strikethrough: span.strikethrough,
                 });
+            }
+            if line_has_visible_text
+                && (natural_top_raw < line.geometry.y.raw()
+                    || natural_bottom_raw > baseline_y.raw())
+            {
+                typography_report.record_natural_extent_exceeds_line_box();
             }
         }
         pages.push(VectorPage {
