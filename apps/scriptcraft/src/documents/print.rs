@@ -35,6 +35,15 @@ pub(crate) struct PrintCompositionSnapshot {
 }
 
 impl PrintCompositionSnapshot {
+    /// Returns the effective paper dimensions from the captured layout inputs,
+    /// in document points, for native adapters that need paper defaults.
+    pub(crate) fn paper_size_points(&self) -> (f64, f64) {
+        (
+            f64::from(self.layout_inputs.paper_width),
+            f64::from(self.layout_inputs.paper_height),
+        )
+    }
+
     pub(crate) fn capture(
         project: &Project,
         layout_inputs: &LayoutInputs,

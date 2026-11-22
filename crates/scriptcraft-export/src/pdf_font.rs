@@ -30,6 +30,7 @@ pub(crate) struct CompleteFontPlan {
     cid_to_gid: Vec<u8>,
     to_unicode: Vec<u8>,
     widths: Vec<u16>,
+    // FontDescriptor metrics are normalized to 1000ths of this face's em.
     bbox: [i32; 4],
     ascent: i32,
     descent: i32,
@@ -80,7 +81,7 @@ pub(crate) fn encode_packaged_courier_prime(
 
 /// Generic seam for WO-004C: eligibility is decided by the caller, while this
 /// encoder independently verifies parser/scalar metrics and creates all PDF
-/// CID/GID, width, Unicode, descriptor, and complete-program data.
+/// CID/GID, width, Unicode, normalized descriptor, and complete-program data.
 pub(crate) fn encode_complete_face(
     face: &Face<'_>,
     postscript_name: &str,
@@ -153,6 +154,16 @@ pub(crate) fn encode_complete_face(
         .capital_height()
         .map(i32::from)
         .unwrap_or_else(|| i32::from(face.ascender()));
+    let units_per_em = metrics.units_per_em;
+    let bbox = [
+        scale_signed_metric_to_1000(i32::from(head.global_bbox.x_min), units_per_em)?,
+        scale_signed_metric_to_1000(i32::from(head.global_bbox.y_min), units_per_em)?,
+        scale_signed_metric_to_1000(i32::from(head.global_bbox.x_max), units_per_em)?,
+        scale_signed_metric_to_1000(i32::from(head.global_bbox.y_max), units_per_em)?,
+    ];
+    let ascent = scale_signed_metric_to_1000(i32::from(face.ascender()), units_per_em)?;
+    let descent = scale_signed_metric_to_1000(i32::from(face.descender()), units_per_em)?;
+    let cap_height = scale_signed_metric_to_1000(cap_height, units_per_em)?;
 
     Ok(CompleteFontPlan {
         postscript_name: postscript_name.to_owned(),
@@ -162,14 +173,9 @@ pub(crate) fn encode_complete_face(
         cid_to_gid,
         to_unicode,
         widths,
-        bbox: [
-            i32::from(head.global_bbox.x_min),
-            i32::from(head.global_bbox.y_min),
-            i32::from(head.global_bbox.x_max),
-            i32::from(head.global_bbox.y_max),
-        ],
-        ascent: i32::from(face.ascender()),
-        descent: i32::from(face.descender()),
+        bbox,
+        ascent,
+        descent,
         cap_height,
         italic_angle: if post.italic_angle.is_finite() {
             post.italic_angle
@@ -328,6 +334,32 @@ fn scale_width(advance: u16, units_per_em: u32) -> Result<u16, ExportError> {
         .ok_or(ExportError::InvalidPdfFontPayload)?;
     let width = numerator / u64::from(units_per_em);
     u16::try_from(width).map_err(|_| ExportError::InvalidPdfFontPayload)
+}
+
+/// Converts a signed font-space metric to PDF's 1000ths-of-an-em descriptor
+/// space, rounding exact halves away from zero.
+fn scale_signed_metric_to_1000(metric: i32, units_per_em: u32) -> Result<i32, ExportError> {
+    if units_per_em == 0 {
+        return Err(ExportError::InvalidPdfFontPayload);
+    }
+    let denominator = i64::from(units_per_em);
+    let numerator = i64::from(metric)
+        .checked_mul(1000)
+        .ok_or(ExportError::InvalidPdfFontPayload)?;
+    let quotient = numerator / denominator;
+    let remainder = numerator % denominator;
+    let twice_remainder = remainder
+        .checked_abs()
+        .and_then(|value| value.checked_mul(2))
+        .ok_or(ExportError::InvalidPdfFontPayload)?;
+    let rounded = if twice_remainder >= denominator {
+        quotient
+            .checked_add(if numerator < 0 { -1 } else { 1 })
+            .ok_or(ExportError::InvalidPdfFontPayload)?
+    } else {
+        quotient
+    };
+    i32::try_from(rounded).map_err(|_| ExportError::InvalidPdfFontPayload)
 }
 
 fn encode_cid_to_gid(glyphs: &[u16]) -> Result<Vec<u8>, ExportError> {

@@ -203,10 +203,6 @@ impl ScriptCraftApp {
                     &mut self.performance.natural_extent_exceeds_line_box,
                     1,
                 );
-                self.post_typography_diagnostic_once(
-                    "TYPOGRAPHY_NATURAL_EXTENT_EXCEEDS_LINE_BOX:",
-                    "TYPOGRAPHY_NATURAL_EXTENT_EXCEEDS_LINE_BOX: resolved natural metrics exceed a line box; canonical geometry is preserved",
-                );
             }
             let page_origin = page_local_screen_origin(presented_page, scale);
             let metric_cull_bounds = projection
@@ -379,8 +375,10 @@ impl ScriptCraftApp {
         };
         if caret_page_index == Some(page_index) && selection.anchor == selection.focus {
             if let Some(caret_geometry) = caret_geometry {
-                let (caret_rect, caret_clip) =
+                let viewport_geometry =
                     viewport_caret_rect(caret_geometry, presented_page, scale);
+                let caret_rect = viewport_geometry.visual_rect;
+                let canonical_line_rect = viewport_geometry.canonical_line_rect;
                 let caret = Caret {
                     element: selection.focus.element,
                     offset: selection.focus.offset,
@@ -399,7 +397,7 @@ impl ScriptCraftApp {
                     true,
                     self.caret_blink_reset_time,
                 ) {
-                    if let Some(clip) = caret_clip {
+                    if let Some(clip) = viewport_geometry.clip {
                         painter
                             .with_clip_rect(clip)
                             .rect_filled(caret_rect, 0.0, palette.caret);
@@ -439,21 +437,21 @@ impl ScriptCraftApp {
                             })
                         });
                     if let Some(ime_font) = ime_font {
-                        let ime_painter = caret_clip
+                        let ime_painter = viewport_geometry.clip
                             .map_or_else(|| painter.clone(), |clip| painter.with_clip_rect(clip));
                         match presentation_geometry::ime_singleline_galley(
                             &ime_painter,
                             &self.ime_preedit,
                             &ime_font,
                             palette.ime_text,
-                            caret_rect.height(),
-                            caret_rect.height(),
+                            canonical_line_rect.height(),
+                            canonical_line_rect.height(),
                         ) {
                             Ok(galley) => {
                                 self.performance.galleys_built =
                                     self.performance.galleys_built.saturating_add(1);
                                 ime_painter.galley(
-                                    caret_rect.min,
+                                    canonical_line_rect.min,
                                     galley,
                                     palette.ime_text,
                                 );

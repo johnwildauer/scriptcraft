@@ -19,15 +19,24 @@ pub(super) enum CaretPresentation {
     Projected(presentation_geometry::ProjectedCaretRect),
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ViewportCaretGeometry {
+    pub visual_rect: egui::Rect,
+    pub canonical_line_rect: egui::Rect,
+    pub clip: Option<egui::Rect>,
+}
+
 pub(super) fn viewport_caret_rect(
     presentation: CaretPresentation,
     page: PresentedPage,
     scale: f32,
-) -> (egui::Rect, Option<egui::Rect>) {
+) -> ViewportCaretGeometry {
     match presentation {
         CaretPresentation::Projected(projected) => {
             let page_origin = page_local_screen_origin(page, scale);
             let viewport_rect = projected.rect.translate(page_origin.to_vec2());
+            let canonical_line_rect =
+                projected.canonical_line_rect.translate(page_origin.to_vec2());
             let viewport_clip = egui::Rect::from_min_max(
                 egui::pos2(
                     page_origin.x + projected.horizontal_clip_x[0],
@@ -39,7 +48,11 @@ pub(super) fn viewport_caret_rect(
                 ),
             )
             .intersect(page.rect);
-            (viewport_rect, Some(viewport_clip))
+            ViewportCaretGeometry {
+                visual_rect: viewport_rect,
+                canonical_line_rect,
+                clip: Some(viewport_clip),
+            }
         }
     }
 }

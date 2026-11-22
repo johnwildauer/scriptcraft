@@ -24,7 +24,7 @@ const ACCESSORY_WIDTH: f64 = 300.0;
 const ACCESSORY_HEIGHT: f64 = 28.0;
 const PRINT_OPERATION_SHOWS_PANEL: bool = false;
 const PDF_PRINT_AUTO_ROTATE: bool = true;
-const PDF_PRINT_SCALING_MODE: PDFPrintScalingMode = PDFPrintScalingMode::PageScaleDownToFit;
+const PDF_PRINT_SCALING_MODE: PDFPrintScalingMode = PDFPrintScalingMode::PageScaleNone;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PanelResponse {
@@ -229,6 +229,13 @@ pub(crate) fn show_print_panel(snapshot: PrintCompositionSnapshot) -> PrintPanel
     let include_title_page = include_title_page_checkbox(main_thread);
     let accessory = TitlePageAccessoryController::new(include_title_page.clone(), main_thread);
     let print_info = NSPrintInfo::new();
+    let (paper_width, paper_height) = snapshot.paper_size_points();
+    print_info.setPaperSize(NSSize::new(paper_width as _, paper_height as _));
+    print_info.setLeftMargin(0.0);
+    print_info.setRightMargin(0.0);
+    print_info.setTopMargin(0.0);
+    print_info.setBottomMargin(0.0);
+    print_info.setScalingFactor(1.0);
     let panel = NSPrintPanel::printPanel(main_thread);
     let options = NSPrintPanelOptions::ShowsCopies
         | NSPrintPanelOptions::ShowsPageRange

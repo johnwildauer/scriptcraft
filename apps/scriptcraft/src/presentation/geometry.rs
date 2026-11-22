@@ -26,7 +26,8 @@ pub(crate) struct PresentationLine<'a> {
     pub line_box_top: f32,
     pub line_box_height: f32,
     pub baseline_y: f32,
-    /// Paragraph/column x clip, deliberately independent of line-box y.
+    /// Paragraph/column x clip expanded to the canonical indented line left,
+    /// deliberately independent of line-box y.
     pub horizontal_clip_x: [f32; 2],
     /// Paint-only broad phase; never used as a clip or interaction bound.
     pub metric_cull_bounds: egui::Rect,
@@ -85,6 +86,7 @@ pub(crate) fn project_line<'a>(
     let total_advance = line.geometry.width.to_points_f32() * scale;
     let line_origin_x = line.geometry.x.to_points_f32() * scale;
     let paragraph_left = line.paragraph_bounds.x.to_points_f32() * scale;
+    let indented_line_left = line.unaligned_line_left.to_points_f32() * scale;
     let paragraph_right = FixedPoint::from_raw(
         line.paragraph_bounds
             .x
@@ -93,6 +95,7 @@ pub(crate) fn project_line<'a>(
     )
     .to_points_f32()
         * scale;
+    let clip_left = paragraph_left.min(indented_line_left);
     let line_box_top = line.geometry.y.to_points_f32() * scale;
     let line_box_height = line.geometry.height.to_points_f32() * scale;
     let baseline_y = line.baseline_y().to_points_f32() * scale;
@@ -121,12 +124,15 @@ pub(crate) fn project_line<'a>(
         || !paragraph_left.is_finite()
         || !paragraph_right.is_finite()
         || paragraph_left > paragraph_right
+        || !indented_line_left.is_finite()
+        || !clip_left.is_finite()
+        || clip_left > paragraph_right
     {
         return Err(PresentationProjectionError::InvalidVerticalGeometry);
     }
-    let horizontal_clip_x = [paragraph_left, paragraph_right];
+    let horizontal_clip_x = [clip_left, paragraph_right];
     let metric_cull_bounds = egui::Rect::from_min_max(
-        egui::pos2(paragraph_left, line_box_top.min(natural_top)),
+        egui::pos2(clip_left, line_box_top.min(natural_top)),
         egui::pos2(paragraph_right, baseline_y.max(natural_bottom)),
     );
     let natural_extent_exceeds_line_box =
@@ -260,11 +266,15 @@ pub(super) fn span_for_display_boundary(
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ProjectedCaretRect {
-    /// Page-local screen logical points, matching the projected paint geometry.
+    /// Page-local visual caret rectangle in screen logical points.
     pub rect: egui::Rect,
+    /// Page-local canonical line box, retained as the IME baseline anchor.
+    pub canonical_line_rect: egui::Rect,
     /// Paragraph/column x clip only; viewport use supplies the page y interval.
     pub horizontal_clip_x: [f32; 2],
 }
+
+pub(crate) const CARET_VERTICAL_SHIFT_LEADING_RATIO: f32 = 0.15;
 
 pub(crate) fn projected_caret_rect(
     line: &PresentationLine<'_>,
@@ -277,10 +287,17 @@ pub(crate) fn projected_caret_rect(
     }
     let display_boundary = line.core.display_char_for_source(source_offset, false);
     let x = x_for_display_boundary(line, display_boundary)?;
-    let y = line.line_box_top;
-    let height = line.line_box_height;
+    let canonical_rect = egui::Rect::from_min_size(
+        egui::pos2(x, line.line_box_top),
+        egui::vec2(caret_width, line.line_box_height.max(0.0)),
+    );
+    let visual_rect = canonical_rect.translate(egui::vec2(
+        0.0,
+        line.line_box_height * CARET_VERTICAL_SHIFT_LEADING_RATIO,
+    ));
     Some(ProjectedCaretRect {
-        rect: egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(caret_width, height.max(0.0))),
+        rect: visual_rect,
+        canonical_line_rect: canonical_rect,
         horizontal_clip_x: line.horizontal_clip_x,
     })
 }

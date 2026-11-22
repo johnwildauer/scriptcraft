@@ -30,12 +30,13 @@ pub(super) fn reveal_caret_if_needed(
     if reveal_intent == RevealIntent::Conditional && !zoom_compensation_queued {
         if let (Some(page_index), Some(caret)) = (caret_page_index, caret_geometry) {
             let presented_page = presented_pages[page_index];
-            let (caret_rect, caret_clip) = viewport_caret_rect(caret, presented_page, scale);
-            let caret_is_clipped_out = caret_clip.is_some_and(|clip| !clip.intersects(caret_rect));
-            if !caret_is_clipped_out && caret_needs_reveal(caret_rect, editor_clip) {
+            let geometry = viewport_caret_rect(caret, presented_page, scale);
+            let caret_is_clipped_out =
+                geometry.clip.is_some_and(|clip| !clip.intersects(geometry.visual_rect));
+            if !caret_is_clipped_out && caret_needs_reveal(geometry.visual_rect, editor_clip) {
                 // `None` asks egui for nearest/minimal scrolling;
                 // centering would override the writer's viewport.
-                ui.scroll_to_rect(caret_rect, None);
+                ui.scroll_to_rect(geometry.visual_rect, None);
             }
         }
     }
