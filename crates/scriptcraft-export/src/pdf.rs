@@ -681,21 +681,21 @@ fn resource_name(index: usize) -> String {
     format!("F{index}")
 }
 
-/// Converts the canonical top-down line-box-bottom baseline to PDF's
-/// bottom-up coordinate system without consulting font metrics or glyph ink.
+/// Converts the canonical top-down baseline to PDF's bottom-up coordinate
+/// system after validating its retained per-line offset and shared line geometry.
 fn pdf_baseline_y(paper_height: u32, line: &LayoutLine) -> Result<FixedPoint, ExportError> {
     let baseline = line.baseline_y();
-    let checked_bottom = line
+    let checked_baseline = line
         .geometry
         .y
         .raw()
-        .checked_add(line.geometry.height.raw())
+        .checked_add(line.vertical_metrics.baseline_offset.raw())
         .ok_or(ExportError::InvalidLayoutGeometry)?;
     if line.vertical_metrics.leading.raw() <= 0
         || line.geometry.height != line.vertical_metrics.leading
         || line.paragraph_bounds.y != line.geometry.y
         || line.paragraph_bounds.height != line.geometry.height
-        || checked_bottom != baseline.raw()
+        || checked_baseline != baseline.raw()
     {
         return Err(ExportError::InvalidLayoutGeometry);
     }
@@ -712,16 +712,9 @@ fn validate_span_geometry(
     line: &LayoutLine,
     span: &PositionedStyledSpan,
 ) -> Result<(), ExportError> {
-    let bottom = span
-        .geometry
-        .y
-        .raw()
-        .checked_add(span.geometry.height.raw())
-        .ok_or(ExportError::InvalidLayoutGeometry)?;
     if span.geometry.y != line.geometry.y
         || span.geometry.height != line.vertical_metrics.leading
         || span.geometry.height != line.geometry.height
-        || bottom != line.baseline_y().raw()
         || span.geometry.width.raw() < 0
     {
         return Err(ExportError::InvalidLayoutGeometry);

@@ -22,7 +22,8 @@ pub(crate) struct PresentationLine<'a> {
     pub core: &'a LayoutLine,
     pub line_origin_x: f32,
     pub total_advance: f32,
-    /// Page-local screen-space line-box interval; the bottom is the baseline.
+    /// Page-local screen-space line-box interval; the canonical baseline may
+    /// lie above its bottom and is retained separately below.
     pub line_box_top: f32,
     pub line_box_height: f32,
     pub baseline_y: f32,
@@ -99,11 +100,12 @@ pub(crate) fn project_line<'a>(
     let line_box_top = line.geometry.y.to_points_f32() * scale;
     let line_box_height = line.geometry.height.to_points_f32() * scale;
     let baseline_y = line.baseline_y().to_points_f32() * scale;
-    let canonical_bottom_raw = line
+    let canonical_baseline_raw = line
         .geometry
         .y
         .raw()
-        .checked_add(line.geometry.height.raw());
+        .checked_add(line.vertical_metrics.baseline_offset.raw());
+    let line_box_bottom = line_box_top + line_box_height;
     let natural_ascent = line.vertical_metrics.natural_ascent.to_points_f32() * scale;
     let natural_descent = line.vertical_metrics.natural_descent.to_points_f32() * scale;
     let natural_top = baseline_y - natural_ascent;
@@ -111,9 +113,10 @@ pub(crate) fn project_line<'a>(
     if !line_box_top.is_finite()
         || !line_box_height.is_finite()
         || line_box_height <= 0.0
+        || !line_box_bottom.is_finite()
         || !baseline_y.is_finite()
         || baseline_y <= line_box_top
-        || canonical_bottom_raw != Some(line.baseline_y().raw())
+        || canonical_baseline_raw != Some(line.baseline_y().raw())
         || !natural_ascent.is_finite()
         || natural_ascent < 0.0
         || !natural_descent.is_finite()
@@ -133,10 +136,13 @@ pub(crate) fn project_line<'a>(
     let horizontal_clip_x = [clip_left, paragraph_right];
     let metric_cull_bounds = egui::Rect::from_min_max(
         egui::pos2(clip_left, line_box_top.min(natural_top)),
-        egui::pos2(paragraph_right, baseline_y.max(natural_bottom)),
+        egui::pos2(
+            paragraph_right,
+            line_box_bottom.max(baseline_y).max(natural_bottom),
+        ),
     );
     let natural_extent_exceeds_line_box =
-        natural_top < line_box_top || natural_bottom > baseline_y;
+        natural_top < line_box_top || natural_bottom > line_box_bottom;
     let spans = line
         .spans
         .iter()
@@ -274,7 +280,7 @@ pub(crate) struct ProjectedCaretRect {
     pub horizontal_clip_x: [f32; 2],
 }
 
-pub(crate) const CARET_VERTICAL_SHIFT_LEADING_RATIO: f32 = 0.15;
+pub(crate) const CARET_VERTICAL_SHIFT_LEADING_RATIO: f32 = -0.07;
 
 pub(crate) fn projected_caret_rect(
     line: &PresentationLine<'_>,
@@ -363,7 +369,7 @@ pub(crate) enum CanonicalGalleyError {
 }
 
 /// Builds a canonical single-line galley with canonical x boundaries and a
-/// line-box-bottom baseline. Font shaping supplies glyph UVs only; it never
+/// supplied canonical baseline offset. Font shaping supplies glyph UVs only; it never
 /// supplies line advances, vertical placement, or interaction coordinates.
 pub(crate) fn canonical_singleline_galley(
     painter: &egui::Painter,

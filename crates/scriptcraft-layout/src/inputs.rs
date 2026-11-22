@@ -622,7 +622,18 @@ pub(super) fn resolve_style_leading(
     let base = i64::from(style.size)
         .checked_mul(ratio)
         .ok_or(LayoutError { kind: LayoutErrorKind::InvalidEffectiveLeading })?;
-    let adjustment = match environment.page.document_leading {
+    let adjustment = resolve_document_leading_adjustment(environment)?.raw();
+    let raw = base
+        .checked_add(adjustment)
+        .filter(|value| *value > 0)
+        .ok_or(LayoutError { kind: LayoutErrorKind::InvalidEffectiveLeading })?;
+    Ok(FixedPoint::from_raw(raw))
+}
+
+fn resolve_document_leading_adjustment(
+    environment: &LayoutEnvironment,
+) -> Result<FixedPoint, LayoutError> {
+    let raw = match environment.page.document_leading {
         DocumentLeading::Normal => 0,
         DocumentLeading::Loose => FixedPoint::SCALE,
         DocumentLeading::Tight => -FixedPoint::SCALE,
@@ -631,10 +642,6 @@ pub(super) fn resolve_style_leading(
             return Err(LayoutError { kind: LayoutErrorKind::UnsupportedDocumentLeading })
         }
     };
-    let raw = base
-        .checked_add(adjustment)
-        .filter(|value| *value > 0)
-        .ok_or(LayoutError { kind: LayoutErrorKind::InvalidEffectiveLeading })?;
     Ok(FixedPoint::from_raw(raw))
 }
 
@@ -665,6 +672,7 @@ pub(super) fn resolve_line_vertical_metrics(
     environment: &LayoutEnvironment,
 ) -> Result<LineVerticalMetrics, LayoutError> {
     let mut leading = resolve_style_leading(base, environment)?;
+    let document_leading_adjustment = resolve_document_leading_adjustment(environment)?;
     let mut natural_ascent = FixedPoint::from_raw(i64::MIN);
     let mut natural_descent = FixedPoint::from_raw(i64::MAX);
     let mut participants: Vec<&ResolvedTextStyle> = Vec::new();
@@ -683,6 +691,11 @@ pub(super) fn resolve_line_vertical_metrics(
         natural_ascent = natural_ascent.max(face.metrics.scale_ascent(style.size)?);
         natural_descent = natural_descent.min(face.metrics.scale_descent(style.size)?);
     }
-    Ok(LineVerticalMetrics { leading, natural_ascent, natural_descent })
+    let baseline_offset = natural_ascent
+        .raw()
+        .checked_add(document_leading_adjustment.raw())
+        .map(FixedPoint::from_raw)
+        .ok_or(LayoutError { kind: LayoutErrorKind::InvalidEffectiveLeading })?;
+    Ok(LineVerticalMetrics { leading, natural_ascent, natural_descent, baseline_offset })
 }
 

@@ -274,10 +274,7 @@ impl ScriptCraftApp {
                     let end = to.min(boundaries.len().saturating_sub(1));
                     let selected_rect = egui::Rect::from_min_max(
                         egui::pos2(span_origin.x + boundaries[start], line_top_screen),
-                        egui::pos2(
-                            span_origin.x + boundaries[end],
-                            baseline_screen,
-                        ),
+                        egui::pos2(span_origin.x + boundaries[end], line_top_screen + line_box_height),
                     );
                     if selected_rect.width() > 0.0 {
                         line_painter.rect_filled(selected_rect, 0.0, palette.selection);
@@ -415,6 +412,12 @@ impl ScriptCraftApp {
                             && caret.offset >= line.source.start
                             && caret.offset <= line.source.end
                     });
+                    let ime_baseline_offset = caret_line
+                        .map(|line| {
+                            line.baseline_y().to_points_f32() * scale
+                                - line.geometry.y.to_points_f32() * scale
+                        })
+                        .filter(|offset| offset.is_finite());
                     let caret_span =
                         caret_line.and_then(|line| Self::span_for_caret(line, caret.offset));
                     let prepared = self.prepared_document_fonts.as_ref();
@@ -437,35 +440,44 @@ impl ScriptCraftApp {
                             })
                         });
                     if let Some(ime_font) = ime_font {
-                        let ime_painter = viewport_geometry.clip
-                            .map_or_else(|| painter.clone(), |clip| painter.with_clip_rect(clip));
-                        match presentation_geometry::ime_singleline_galley(
-                            &ime_painter,
-                            &self.ime_preedit,
-                            &ime_font,
-                            palette.ime_text,
-                            canonical_line_rect.height(),
-                            canonical_line_rect.height(),
-                        ) {
-                            Ok(galley) => {
-                                self.performance.galleys_built =
-                                    self.performance.galleys_built.saturating_add(1);
-                                ime_painter.galley(
-                                    canonical_line_rect.min,
-                                    galley,
-                                    palette.ime_text,
-                                );
+                        if let Some(ime_baseline_offset) = ime_baseline_offset {
+                            let ime_painter = viewport_geometry.clip.map_or_else(
+                                || painter.clone(),
+                                |clip| painter.with_clip_rect(clip),
+                            );
+                            match presentation_geometry::ime_singleline_galley(
+                                &ime_painter,
+                                &self.ime_preedit,
+                                &ime_font,
+                                palette.ime_text,
+                                canonical_line_rect.height(),
+                                ime_baseline_offset,
+                            ) {
+                                Ok(galley) => {
+                                    self.performance.galleys_built =
+                                        self.performance.galleys_built.saturating_add(1);
+                                    ime_painter.galley(
+                                        canonical_line_rect.min,
+                                        galley,
+                                        palette.ime_text,
+                                    );
+                                }
+                                Err(presentation_geometry::CanonicalGalleyError::InvalidVerticalGeometry) => {
+                                    self.post_typography_diagnostic_once(
+                                        "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID:",
+                                        "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID: IME galley vertical geometry was not painted",
+                                    );
+                                }
+                                Err(_) => self.post_typography_diagnostic_once(
+                                    "TYPOGRAPHY_IME_TOPOLOGY_UNSUPPORTED:",
+                                    "TYPOGRAPHY_IME_TOPOLOGY_UNSUPPORTED: preedit topology was not painted",
+                                ),
                             }
-                            Err(presentation_geometry::CanonicalGalleyError::InvalidVerticalGeometry) => {
-                                self.post_typography_diagnostic_once(
-                                    "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID:",
-                                    "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID: IME galley vertical geometry was not painted",
-                                );
-                            }
-                            Err(_) => self.post_typography_diagnostic_once(
-                                "TYPOGRAPHY_IME_TOPOLOGY_UNSUPPORTED:",
-                                "TYPOGRAPHY_IME_TOPOLOGY_UNSUPPORTED: preedit topology was not painted",
-                            ),
+                        } else {
+                            self.post_typography_diagnostic_once(
+                                "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID:",
+                                "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID: IME baseline geometry was unavailable",
+                            );
                         }
                     } else {
                         self.post_typography_diagnostic_once(

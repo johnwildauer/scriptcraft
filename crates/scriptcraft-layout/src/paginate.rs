@@ -405,26 +405,27 @@ impl ScreenplayLayout {
                 .paper_height
                 .saturating_sub(self.inputs.margin_bottom),
         ));
-        let first_leading = lines
-            .first()
-            .map_or(paragraph.base_leading.raw(), |line| line.vertical_metrics.leading.raw());
-        let second_leading = lines
-            .get(1)
-            .map_or(first_leading, |line| line.vertical_metrics.leading.raw());
-        let minimum_height = if keep {
-            first_leading.checked_add(second_leading)
-        } else {
-            Some(first_leading)
-        }
-        .ok_or(LayoutError {
-            kind: LayoutErrorKind::InvalidEffectiveLeading,
-        })?;
         let vertical_fit = self.pages.last().is_some_and(|page| {
-            page.next_line_top
-                .raw()
-                .saturating_add(extra_gap)
-                .saturating_add(minimum_height)
-                <= content_bottom.raw()
+            let candidate = if keep {
+                lines.get(1).or_else(|| lines.first())
+            } else {
+                lines.first()
+            };
+            candidate.map_or(true, |line| {
+                let prior_advance = if keep {
+                    lines[0].vertical_metrics.leading.raw()
+                } else {
+                    0
+                };
+                let candidate_top = FixedPoint::from_raw(
+                    page.next_line_top
+                        .raw()
+                        .saturating_add(extra_gap)
+                        .saturating_add(prior_advance),
+                );
+                super::geometry::natural_bottom(candidate_top, line.vertical_metrics).raw()
+                    <= content_bottom.raw()
+            })
         });
         if !lines.is_empty()
             && !self.pages.last().is_some_and(|page| page.title_page)
@@ -449,20 +450,36 @@ impl ScreenplayLayout {
         }).ok_or(LayoutError {
             kind: LayoutErrorKind::InvalidEffectiveLeading,
         })?;
-        let total_height = line_height.checked_add(applied_gap).ok_or(LayoutError {
+        let _total_height = line_height.checked_add(applied_gap).ok_or(LayoutError {
             kind: LayoutErrorKind::InvalidEffectiveLeading,
         })?;
-        let content_height =
-            content_bottom.raw() - FixedPoint::from_points(i64::from(self.inputs.margin_top)).raw();
-        let oversized_element = total_height > content_height;
+        let fresh_page_top = FixedPoint::from_raw(
+            FixedPoint::from_points(i64::from(self.inputs.margin_top))
+                .raw()
+                .saturating_add(applied_gap),
+        );
+        let final_line_top = lines
+            .iter()
+            .take(lines.len().saturating_sub(1))
+            .fold(fresh_page_top, |top, line| {
+                FixedPoint::from_raw(
+                    top.raw()
+                        .saturating_add(line.vertical_metrics.leading.raw()),
+                )
+            });
+        let oversized_element = lines.last().is_some_and(|line| {
+            super::geometry::natural_bottom(final_line_top, line.vertical_metrics).raw()
+                > content_bottom.raw()
+        });
         for wrapped in lines.iter() {
             let line_leading = wrapped.vertical_metrics.leading.raw();
             let current_fits = self.pages.last().is_some_and(|page| {
                 page.lines.is_empty()
-                    || page
-                        .next_line_top
-                        .raw()
-                        .saturating_add(line_leading)
+                    || super::geometry::natural_bottom(
+                        page.next_line_top,
+                        wrapped.vertical_metrics,
+                    )
+                    .raw()
                         <= content_bottom.raw()
             });
             if !current_fits {

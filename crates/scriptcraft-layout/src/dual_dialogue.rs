@@ -210,9 +210,20 @@ impl ScreenplayLayout {
         let page_top = FixedPoint::from_points(i64::from(self.inputs.margin_top));
         let content_height = content_bottom.raw().saturating_sub(page_top.raw());
         let block_height = left.height.raw().max(right.height.raw()).max(0);
+        let left_fit_extent = if left.line_count == 0 {
+            left.height.raw()
+        } else {
+            left.fit_extent.raw()
+        };
+        let right_fit_extent = if right.line_count == 0 {
+            right.height.raw()
+        } else {
+            right.fit_extent.raw()
+        };
+        let fit_extent = left_fit_extent.max(right_fit_extent).max(0);
         // A saturated sum remains larger than any validated printable extent,
         // so overflow cannot be mistaken for a fitting block.
-        let fits_empty_page = block_height <= content_height;
+        let fits_empty_page = fit_extent <= content_height;
 
         let current_page = self.pages.len() - 1;
         let has_boundary = !self.pages[current_page].lines.is_empty();
@@ -227,7 +238,7 @@ impl ScreenplayLayout {
                 .raw()
                 .saturating_add(applied_gap),
         );
-        let vertical_end = block_top.raw().saturating_add(block_height);
+        let vertical_end = block_top.raw().saturating_add(fit_extent);
         let fits_remaining = vertical_end <= content_bottom.raw();
 
         if !fits_empty_page {
@@ -340,6 +351,8 @@ struct PreparedDualParagraph {
 struct WrappedDualSide {
     paragraphs: Vec<PreparedDualParagraph>,
     height: FixedPoint,
+    /// Relative final natural-bottom extent, separate from leading advancement.
+    fit_extent: FixedPoint,
     line_count: usize,
 }
 
@@ -382,8 +395,9 @@ fn spill_side_lines(
                 0
             };
             let proposed_y = FixedPoint::from_raw(y.raw().saturating_add(gap));
-            let proposed_end = proposed_y.raw().saturating_add(advance);
-            let fits_page = proposed_end <= content_bottom.raw();
+            let fits_page = super::geometry::natural_bottom(proposed_y, wrapped.vertical_metrics)
+                .raw()
+                <= content_bottom.raw();
 
             if !fits_page && current_count > 0 {
                 page_offset = page_offset.saturating_add(1);
@@ -500,6 +514,8 @@ fn wrap_dual_side(
 ) -> Result<WrappedDualSide, LayoutError> {
     let mut paragraphs = Vec::new();
     let mut height = 0i64;
+    let mut fit_top = 0i64;
+    let mut fit_extent = 0i64;
     let mut line_count = 0usize;
     for id in side.member_ids() {
         let Some((index, element)) = project
@@ -551,6 +567,17 @@ fn wrap_dual_side(
             environment,
             prepared_lookup_started,
         )?;
+        if !paragraphs.is_empty() && !prepared.lines.is_empty() {
+            fit_top = fit_top.saturating_add(paragraph.space_before.raw().max(0));
+        }
+        for line in prepared.lines.iter() {
+            fit_extent = super::geometry::natural_bottom(
+                FixedPoint::from_raw(fit_top),
+                line.vertical_metrics,
+            )
+            .raw();
+            fit_top = fit_top.saturating_add(line.vertical_metrics.leading.raw());
+        }
         if !paragraphs.is_empty() {
             height = height
                 .checked_add(paragraph.space_before.raw().max(0))
@@ -568,6 +595,7 @@ fn wrap_dual_side(
     Ok(WrappedDualSide {
         paragraphs,
         height: FixedPoint::from_raw(height),
+        fit_extent: FixedPoint::from_raw(fit_extent),
         line_count,
     })
 }

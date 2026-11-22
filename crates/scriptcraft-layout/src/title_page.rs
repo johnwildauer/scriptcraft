@@ -108,7 +108,9 @@ fn compose_resolved_title_pages(
                     .saturating_sub(layout.inputs.margin_bottom),
             ));
             if !page.lines.is_empty()
-                && page.next_line_top.raw().saturating_add(line_leading) > content_bottom.raw()
+                && super::geometry::natural_bottom(page.next_line_top, line.vertical_metrics)
+                    .raw()
+                    > content_bottom.raw()
             {
                 layout.pages.push(page);
                 page = layout.new_page(true);
@@ -116,7 +118,12 @@ fn compose_resolved_title_pages(
             let laid_out = layout.make_line(page.number, line, true, page.next_line_top);
             let line_leading = laid_out.vertical_metrics.leading.raw();
             let mut laid_out = laid_out;
-            laid_out.oversized |= laid_out.geometry.bottom() > content_bottom;
+            laid_out.oversized |= super::geometry::natural_bottom(
+                laid_out.geometry.y,
+                laid_out.vertical_metrics,
+            )
+            .raw()
+                > content_bottom.raw();
             page.lines.push(laid_out);
             page.occupied_lines = page.occupied_lines.saturating_add(1);
             page.next_line_top = FixedPoint::from_raw(page.next_line_top.raw().saturating_add(line_leading));

@@ -236,6 +236,8 @@ pub(crate) fn show_print_panel(snapshot: PrintCompositionSnapshot) -> PrintPanel
     print_info.setTopMargin(0.0);
     print_info.setBottomMargin(0.0);
     print_info.setScalingFactor(1.0);
+    print_info.setHorizontallyCentered(false);
+    print_info.setVerticallyCentered(false);
     let panel = NSPrintPanel::printPanel(main_thread);
     let options = NSPrintPanelOptions::ShowsCopies
         | NSPrintPanelOptions::ShowsPageRange

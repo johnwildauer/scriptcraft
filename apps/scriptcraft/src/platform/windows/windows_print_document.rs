@@ -2,7 +2,7 @@
 //!
 //! The page model deliberately contains no editor/egui state and keeps geometry
 //! in the core's exact hundredths-of-a-point units. Each visible run copies the
-//! placed line-box-bottom baseline, effective leading, natural table extents,
+//! placed canonical baseline and its offset, effective leading, natural table extents,
 //! and canonical scalar boundaries; only the DirectWrite adapter measures its
 //! own line baseline to translate drawing onto this captured baseline. Include
 //! and omit title packages are fresh Print compositions from the same immutable
@@ -177,6 +177,7 @@ pub(super) struct VectorTextRun {
     text: Arc<str>,
     geometry: FixedRect,
     baseline_y: FixedPoint,
+    baseline_offset: FixedPoint,
     line_leading: FixedPoint,
     natural_ascent: FixedPoint,
     natural_descent: FixedPoint,
@@ -201,6 +202,10 @@ impl VectorTextRun {
 
     pub(super) fn baseline_y(&self) -> FixedPoint {
         self.baseline_y
+    }
+
+    pub(super) fn baseline_offset(&self) -> FixedPoint {
+        self.baseline_offset
     }
 
     pub(super) fn line_leading(&self) -> FixedPoint {
@@ -312,6 +317,12 @@ fn validate_line_geometry(
         .geometry
         .y
         .raw()
+        .checked_add(metrics.baseline_offset.raw())
+        .ok_or(PackageBuildError::InvalidLayoutGeometry)?;
+    let line_box_bottom = line
+        .geometry
+        .y
+        .raw()
         .checked_add(line.geometry.height.raw())
         .ok_or(PackageBuildError::InvalidLayoutGeometry)?;
     let paragraph_bottom = line
@@ -320,10 +331,10 @@ fn validate_line_geometry(
         .raw()
         .checked_add(line.paragraph_bounds.height.raw())
         .ok_or(PackageBuildError::InvalidLayoutGeometry)?;
-    if baseline_raw != paragraph_bottom {
+    if baseline_raw != line.baseline_y().raw() || line_box_bottom != paragraph_bottom {
         return Err(PackageBuildError::InvalidLayoutGeometry);
     }
-    Ok(FixedPoint::from_raw(baseline_raw))
+    Ok(line.baseline_y())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -422,6 +433,12 @@ fn package_from_layout(
                 .raw()
                 .checked_sub(line.vertical_metrics.natural_descent.raw())
                 .ok_or(PackageBuildError::InvalidLayoutGeometry)?;
+            let line_box_bottom_raw = line
+                .geometry
+                .y
+                .raw()
+                .checked_add(line.geometry.height.raw())
+                .ok_or(PackageBuildError::InvalidLayoutGeometry)?;
             if natural_top_raw > natural_bottom_raw {
                 return Err(PackageBuildError::InvalidLayoutGeometry);
             }
@@ -435,12 +452,6 @@ fn package_from_layout(
                 if span.geometry.width.raw() < 0
                     || span.geometry.y != line.geometry.y
                     || span.geometry.height != line.vertical_metrics.leading
-                    || span
-                        .geometry
-                        .y
-                        .raw()
-                        .checked_add(span.geometry.height.raw())
-                        != Some(baseline_y.raw())
                     || !valid_boundaries(
                         &span.display_boundary_offsets,
                         scalar_count,
@@ -503,6 +514,7 @@ fn package_from_layout(
                     text: Arc::clone(&span.display_text),
                     geometry: span.geometry,
                     baseline_y,
+                    baseline_offset: line.vertical_metrics.baseline_offset,
                     line_leading: line.vertical_metrics.leading,
                     natural_ascent: line.vertical_metrics.natural_ascent,
                     natural_descent: line.vertical_metrics.natural_descent,
@@ -518,7 +530,7 @@ fn package_from_layout(
             }
             if line_has_visible_text
                 && (natural_top_raw < line.geometry.y.raw()
-                    || natural_bottom_raw > baseline_y.raw())
+                    || natural_bottom_raw > line_box_bottom_raw)
             {
                 typography_report.record_natural_extent_exceeds_line_box();
             }

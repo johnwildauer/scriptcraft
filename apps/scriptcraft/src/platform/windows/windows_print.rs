@@ -1315,12 +1315,13 @@ fn scaled_run_geometry(
 ) -> Option<ScaledRunGeometry> {
     let source = run.geometry();
     let right_raw = source.x.raw().checked_add(source.width.raw())?;
-    let bottom_raw = source.y.raw().checked_add(source.height.raw())?;
-    if run.baseline_y().raw() != bottom_raw || run.line_leading() != source.height {
+    let baseline_raw = source.y.raw().checked_add(run.baseline_offset().raw())?;
+    let _line_box_bottom_raw = source.y.raw().checked_add(source.height.raw())?;
+    if run.baseline_y().raw() != baseline_raw || run.line_leading() != source.height {
         return None;
     }
     // Retained natural font-table extents are observations only; they cannot
-    // substitute for the line-box baseline or affect native placement.
+    // substitute for the canonical baseline or affect native placement.
     let _natural_top = run
         .baseline_y()
         .raw()

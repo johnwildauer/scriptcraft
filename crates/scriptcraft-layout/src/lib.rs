@@ -7,8 +7,11 @@
 //! platform font or viewport. Courier leading is 1.0× effective style size and
 //! Proportional leading is 1.2× size, selected by exact resolved-face category;
 //! DocumentLeading adjusts candidates before each wrapped line's style maximum.
-//! Line-box bottoms are canonical baselines; natural font-table metrics are extent
-//! metadata only and do not determine fit or clip glyphs to the line box.
+//! Each canonical baseline is its line-box top plus that line's natural ascent
+//! and document-leading adjustment; line tops advance by full effective leading.
+//! Candidate fit uses the final line's baseline minus signed natural descent;
+//! full effective leading remains the line-top advance. Natural extents do not
+//! clip glyphs to line boxes, and oversized forward progress remains bounded.
 
 mod cache;
 mod dual_dialogue;

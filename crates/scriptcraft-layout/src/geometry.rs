@@ -37,13 +37,31 @@ impl FixedRect {
     }
 }
 
-/// The selected baseline advance/line-box height and natural font-table
-/// extents. Natural ascent/descent do not control pagination or clipping.
+/// The selected leading advance/line-box height, canonical baseline offset,
+/// and natural font-table extents. Leading advances line tops; the baseline is
+/// the line-box top plus its resolved offset, and the natural bottom is used
+/// only for pagination fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LineVerticalMetrics {
     pub leading: FixedPoint,
     pub natural_ascent: FixedPoint,
     pub natural_descent: FixedPoint,
+    pub baseline_offset: FixedPoint,
+}
+
+/// Return the metric-based bottom extent for a candidate line at `line_box_top`.
+/// Signed descent is subtracted from the canonical baseline; for the usual
+/// negative descent this extends the fit boundary below the baseline.
+pub(super) fn natural_bottom(
+    line_box_top: FixedPoint,
+    metrics: LineVerticalMetrics,
+) -> FixedPoint {
+    FixedPoint::from_raw(
+        line_box_top
+            .raw()
+            .saturating_add(metrics.baseline_offset.raw())
+            .saturating_sub(metrics.natural_descent.raw()),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,10 +90,10 @@ pub struct LayoutLine {
     /// Left anchor before alignment shifts the line; includes a first-visual-line indent.
     pub unaligned_line_left: FixedPoint,
     /// Text extent after first-line indent and alignment. The rectangle shares
-    /// the paragraph/span y and leading-sized height; its bottom is baseline.
+    /// paragraph/span y and leading-sized height; baseline is top + offset.
     pub geometry: FixedRect,
     /// Full paragraph bounds, retained separately for hit testing and measure.
-    /// It shares the line's y and height, so its bottom is the baseline too.
+    /// It shares the line's y and leading-sized height.
     pub paragraph_bounds: FixedRect,
     /// Per-visual-line selected leading and natural metric extent.
     pub vertical_metrics: LineVerticalMetrics,
@@ -86,9 +104,12 @@ pub struct LayoutLine {
 }
 
 impl LayoutLine {
-    /// The canonical baseline is the line-box bottom, independent of font ink.
+    /// The canonical baseline uses this line's resolved vertical offset from
+    /// its line-box top; subsequent line tops still advance by full leading.
     pub fn baseline_y(&self) -> FixedPoint {
-        self.geometry.bottom()
+        FixedPoint::from_raw(
+            self.geometry.y.raw().saturating_add(self.vertical_metrics.baseline_offset.raw()),
+        )
     }
 }
 
