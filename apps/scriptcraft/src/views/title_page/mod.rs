@@ -160,6 +160,7 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
                 app.page_geometry.clip(),
             ),
     );
+    let mut timer_button_rect = None;
     let status_panel = egui::Panel::bottom("title-page-status")
         .frame(status_bar::status_panel_frame(ctx, palette.status))
         .default_size(status_bar::default_panel_height())
@@ -172,16 +173,17 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
                 app.zoom_percent,
                 app.appearance_mode,
             );
-            let timer_button_rect = intents.timer_button_rect;
+            timer_button_rect = intents.timer_button_rect;
             for command in intents.commands {
                 let opening_timer = matches!(command, Command::ToolsSprintTimerTogglePopup)
                     && !app.sprint_timer.popup_open;
                 app.dispatch_command(CommandInvocation::new(command, CommandOrigin::Pointer), ctx);
                 if opening_timer {
-                    app.sprint_timer.popup_anchor =
-                        timer_button_rect.unwrap_or(egui::Rect::NOTHING);
-                    app.timer_popup_surface = EditorSurface::TitlePage;
-                    app.capture_sprint_timer_host_geometry(EditorSurface::TitlePage, ctx);
+                    app.attach_sprint_timer_popup_to_surface(
+                        timer_button_rect.unwrap_or(egui::Rect::NOTHING),
+                        EditorSurface::TitlePage,
+                        ctx,
+                    );
                 }
             }
         });
@@ -203,6 +205,16 @@ fn show_child_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui, ctx: &egui::Co
                 },
             )
         });
+    if app.pending_fdx_open.is_none()
+        && !app.replacement_open_pending()
+        && !app.element_windows.owns_input()
+    {
+        app.open_pending_sprint_timer_completion(
+            EditorSurface::TitlePage,
+            timer_button_rect,
+            ctx,
+        );
+    }
     if app.timer_popup_surface == EditorSurface::TitlePage && !app.element_windows.owns_input() {
         let host_geometry = app.sprint_timer_host_geometry(EditorSurface::TitlePage);
         for command in crate::widgets::sprint_timer::show_popup_with_host_geometry(

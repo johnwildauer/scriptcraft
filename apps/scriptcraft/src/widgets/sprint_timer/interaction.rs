@@ -11,10 +11,11 @@ use super::geometry::{
 };
 use super::paint::{
     apply_popup_content_style, mode_focus_stroke, paint_mode_switch,
-    paint_noninteractive_active_display_panel, paint_noninteractive_stage_label,
-    paint_popup_feedback, popup_display_background, popup_display_text, popup_feedback_text,
-    SprintTimerPopupRenderSnapshot, POPUP_COUNTDOWN_EDITOR_FONT_SIZE,
-    POPUP_MODE_FOCUS_CORNER_RADIUS, POPUP_MODE_LABEL_FONT_SIZE,
+    paint_completion_message, paint_noninteractive_active_display_panel,
+    paint_noninteractive_stage_label, paint_popup_feedback, popup_display_background,
+    popup_display_text, popup_feedback_text, SprintTimerPopupRenderSnapshot,
+    POPUP_COUNTDOWN_EDITOR_FONT_SIZE, POPUP_MODE_FOCUS_CORNER_RADIUS,
+    POPUP_MODE_LABEL_FONT_SIZE,
 };
 use super::state::TimerMode;
 use super::SprintTimer;
@@ -293,8 +294,14 @@ pub(super) fn show_popup_contents(
         ..PopupGeometryLedger::default()
     };
 
-    let selector = show_mode_selector(ui, toggle, timer.mode, timer.mode_switch_enabled());
-    commands.extend(mode_activation_commands(selector.activation));
+    let completion_message = timer.completed_message();
+    let selector = if completion_message.is_some() {
+        ModeSelectorRender::default()
+    } else {
+        let selector = show_mode_selector(ui, toggle, timer.mode, timer.mode_switch_enabled());
+        commands.extend(mode_activation_commands(selector.activation));
+        selector
+    };
 
     let display_text;
     let display_accessible_name;
@@ -303,7 +310,16 @@ pub(super) fn show_popup_contents(
     let mut duration_accessible_name = None;
     let mut duration_caption_rect = None;
     let mut active_display_panel_rect = None;
-    match timer.mode {
+    if let Some(message) = completion_message.as_deref() {
+        let completion_region = egui::Rect::from_min_max(
+            toggle.left_top(),
+            feedback.right_bottom(),
+        );
+        paint_completion_message(ui, completion_region, message);
+        display_text = message.to_owned();
+        display_accessible_name = message.to_owned();
+    } else {
+      match timer.mode {
         TimerMode::Countdown if timer.is_idle() => {
             let edit_rect = egui::Rect::from_center_size(
                 egui::pos2(display.center().x, display.top() + 20.0),
@@ -396,11 +412,16 @@ pub(super) fn show_popup_contents(
                 "stopwatch-readout",
             ));
         }
+      }
     }
 
     geometry.after_display = PopupGeometryCheckpoint::capture(ui);
 
-    let feedback_text = popup_feedback_text(timer);
+    let feedback_text = if completion_message.is_some() {
+        String::new()
+    } else {
+        popup_feedback_text(timer)
+    };
     if !feedback_text.is_empty() {
         paint_popup_feedback(ui, feedback, timer, &feedback_text);
     }

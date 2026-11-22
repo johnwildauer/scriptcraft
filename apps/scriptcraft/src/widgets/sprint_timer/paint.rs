@@ -7,7 +7,6 @@ use super::geometry::{
     POPUP_COUNTDOWN_EDITOR_HEIGHT, POPUP_COUNTDOWN_EDITOR_WIDTH, POPUP_MODE_SWITCH_KNOB_DIAMETER,
 };
 use super::interaction::ModeSelectorAccessibility;
-use super::state::NotificationFeedback;
 use super::SprintTimer;
 
 pub(super) const POPUP_MODE_LABEL_FONT_SIZE: f32 = 13.0;
@@ -20,6 +19,7 @@ const POPUP_MODE_SWITCH_TRACK_RADIUS: u8 = 11;
 pub(super) const POPUP_COUNTDOWN_EDITOR_FONT_SIZE: f32 = 23.0;
 const POPUP_DISPLAY_CORNER_RADIUS: u8 = 2;
 const POPUP_RUNNING_READOUT_FONT_SIZE: f32 = 30.0;
+pub(super) const POPUP_COMPLETION_FONT_SIZE: f32 = 18.0;
 
 fn resolve_popup_focus_color(
     visuals: &egui::Visuals,
@@ -106,30 +106,32 @@ pub(super) fn paint_mode_switch(
 }
 
 pub(super) fn popup_feedback_text(timer: &SprintTimer) -> String {
-    let mut messages = Vec::new();
-    if let Some(completed) = timer.completed_message() {
-        messages.push(completed);
+    if timer.is_completed() {
+        String::new()
+    } else {
+        timer.validation_error.clone().unwrap_or_default()
     }
-    if let Some(error) = timer.validation_error.as_ref() {
-        messages.push(error.clone());
-    }
-    if let Some(feedback) = timer.notification_feedback.as_ref() {
-        messages.push(
-            match feedback {
-                NotificationFeedback::Pending => {
-                    "OS notification request pending; delivery is not confirmed."
-                }
-                NotificationFeedback::Accepted => {
-                    "OS accepted the notification request; delivery is not confirmed."
-                }
-                NotificationFeedback::Unavailable => {
-                    "OS notification unavailable; the in-app completion remains available."
-                }
-            }
-            .to_owned(),
-        );
-    }
-    messages.join(" · ")
+}
+
+pub(super) fn paint_completion_message(ui: &egui::Ui, region: egui::Rect, text: &str) {
+    let color = ui.visuals().text_color();
+    let galley = ui.painter().layout(
+        text.to_owned(),
+        egui::FontId::proportional(POPUP_COMPLETION_FONT_SIZE),
+        color,
+        region.width(),
+    );
+    let position = region.center() - galley.size() / 2.0;
+    ui.painter()
+        .with_clip_rect(region)
+        .galley(position, galley, color);
+
+    let accessibility_id = ui.make_persistent_id("sprint-timer-completion-message");
+    ui.ctx().accesskit_node_builder(accessibility_id, |node| {
+        node.set_role(egui::accesskit::Role::Label);
+        node.set_label(text.to_owned());
+        node.set_bounds(accesskit_bounds(region));
+    });
 }
 
 pub(super) fn paint_popup_feedback(

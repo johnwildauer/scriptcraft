@@ -45,6 +45,9 @@ enum TimerState {
     StopwatchPaused {
         elapsed: Duration,
     },
+    StopwatchCompleted {
+        elapsed: Duration,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +65,7 @@ pub(crate) struct SprintTimer {
     pub(crate) validation_error: Option<String>,
     pub(crate) notification_feedback: Option<NotificationFeedback>,
     next_generation: u64,
+    completion_popup_open_requested: bool,
     pub(crate) popup_open: bool,
     pub(crate) popup_rect: egui::Rect,
     pub(crate) popup_anchor: egui::Rect,
@@ -81,6 +85,7 @@ impl Default for SprintTimer {
             validation_error: None,
             notification_feedback: None,
             next_generation: 0,
+            completion_popup_open_requested: false,
             popup_open: false,
             popup_rect: egui::Rect::NOTHING,
             popup_anchor: egui::Rect::NOTHING,
@@ -109,7 +114,18 @@ impl SprintTimer {
     }
 
     pub(crate) fn is_completed(&self) -> bool {
-        matches!(self.state, TimerState::CountdownCompleted { .. })
+        matches!(
+            self.state,
+            TimerState::CountdownCompleted { .. } | TimerState::StopwatchCompleted { .. }
+        )
+    }
+
+    pub(crate) fn has_completion_popup_open_request(&self) -> bool {
+        self.completion_popup_open_requested
+    }
+
+    pub(crate) fn take_completion_popup_open_request(&mut self) -> bool {
+        std::mem::take(&mut self.completion_popup_open_requested)
     }
 
     pub(crate) fn mode_switch_enabled(&self) -> bool {
@@ -138,6 +154,7 @@ impl SprintTimer {
                 accumulated,
             } => Some(accumulated.saturating_add(now.saturating_sub(started_at))),
             TimerState::StopwatchPaused { elapsed } => Some(elapsed),
+            TimerState::StopwatchCompleted { elapsed } => Some(elapsed),
             _ => None,
         }
     }
@@ -159,22 +176,20 @@ impl SprintTimer {
     }
 
     pub(crate) fn stopwatch_display(&self, now: Duration) -> String {
-        let seconds = self.elapsed(now).unwrap_or(Duration::ZERO).as_secs();
-        format!(
-            "{:02}:{:02}:{:02}",
-            seconds / 3_600,
-            seconds / 60 % 60,
-            seconds % 60
-        )
+        format_stopwatch_duration(self.elapsed(now).unwrap_or(Duration::ZERO))
     }
 
     pub(crate) fn completed_message(&self) -> Option<String> {
         match self.state {
             TimerState::CountdownCompleted { minutes: 1, .. } => {
-                Some("Great Work! You completed a 1 Minute Sprint".to_owned())
+                Some("Great Work! You completed a 1 Minute Sprint.".to_owned())
             }
             TimerState::CountdownCompleted { minutes, .. } => Some(format!(
-                "Great Work! You completed a {minutes} Minutes Sprint"
+                "Great Work! You completed a {minutes} Minutes Sprint."
+            )),
+            TimerState::StopwatchCompleted { elapsed } => Some(format!(
+                "Great Work! You completed a {} writing sprint.",
+                format_stopwatch_duration(elapsed)
             )),
             _ => None,
         }
@@ -192,7 +207,9 @@ impl SprintTimer {
             },
             TimerState::CountdownRunning { .. } | TimerState::StopwatchRunning { .. } => "Pause",
             TimerState::CountdownPaused { .. } | TimerState::StopwatchPaused { .. } => "Resume",
-            TimerState::CountdownCompleted { .. } => "Reset",
+            TimerState::CountdownCompleted { .. } | TimerState::StopwatchCompleted { .. } => {
+                "Reset"
+            }
         }
     }
 
@@ -208,7 +225,9 @@ impl SprintTimer {
             TimerState::CountdownPaused { .. } | TimerState::StopwatchPaused { .. } => {
                 Command::ToolsSprintTimerResume
             }
-            TimerState::CountdownCompleted { .. } => Command::ToolsSprintTimerReset,
+            TimerState::CountdownCompleted { .. } | TimerState::StopwatchCompleted { .. } => {
+                Command::ToolsSprintTimerReset
+            }
         }
     }
 
@@ -228,6 +247,7 @@ impl SprintTimer {
                 generation,
                 notification_attempted: true,
             };
+            self.completion_popup_open_requested = true;
             CompletionNotification {
                 generation,
                 minutes,
@@ -264,6 +284,7 @@ impl SprintTimer {
         }
         self.mode = mode;
         self.state = TimerState::Idle;
+        self.completion_popup_open_requested = false;
         self.minutes_input = DEFAULT_MINUTES.to_owned();
         self.validation_error = None;
         self.notification_feedback = None;
@@ -296,6 +317,7 @@ impl SprintTimer {
             return notification;
         };
         self.next_generation = generation;
+        self.completion_popup_open_requested = false;
         self.validation_error = None;
         self.notification_feedback = None;
         self.state = TimerState::CountdownRunning {
@@ -310,6 +332,7 @@ impl SprintTimer {
     pub(crate) fn start_stopwatch(&mut self, now: Duration) -> Option<CompletionNotification> {
         let notification = self.reconcile(now);
         if self.mode == TimerMode::Stopwatch && self.is_idle() {
+            self.completion_popup_open_requested = false;
             self.state = TimerState::StopwatchRunning {
                 started_at: now,
                 accumulated: Duration::ZERO,
@@ -386,11 +409,16 @@ impl SprintTimer {
             TimerState::CountdownRunning { input, .. }
             | TimerState::CountdownPaused { input, .. } => {
                 self.minutes_input = input;
+                self.completion_popup_open_requested = false;
                 TimerState::Idle
             }
-            TimerState::StopwatchRunning { .. } | TimerState::StopwatchPaused { .. } => {
-                TimerState::Idle
-            }
+            TimerState::StopwatchRunning {
+                started_at,
+                accumulated,
+            } => TimerState::StopwatchCompleted {
+                elapsed: accumulated.saturating_add(now.saturating_sub(started_at)),
+            },
+            TimerState::StopwatchPaused { elapsed } => TimerState::StopwatchCompleted { elapsed },
             state => state,
         };
         self.validation_error = None;
@@ -398,8 +426,8 @@ impl SprintTimer {
     }
 
     pub(crate) fn reset(&mut self) {
+        self.completion_popup_open_requested = false;
         if self.is_completed() {
-            self.mode = TimerMode::Countdown;
             self.state = TimerState::Idle;
             self.minutes_input = DEFAULT_MINUTES.to_owned();
             self.validation_error = None;
@@ -413,9 +441,9 @@ impl SprintTimer {
             | TimerState::CountdownPaused { .. }
             | TimerState::StopwatchRunning { .. }
             | TimerState::StopwatchPaused { .. } => {}
-            TimerState::CountdownCompleted { .. } => {
-                self.mode = TimerMode::Countdown;
+            TimerState::CountdownCompleted { .. } | TimerState::StopwatchCompleted { .. } => {
                 self.state = TimerState::Idle;
+                self.completion_popup_open_requested = false;
                 self.minutes_input = DEFAULT_MINUTES.to_owned();
                 self.notification_feedback = None;
                 self.validation_error = None;
@@ -459,4 +487,14 @@ fn ceil_seconds(duration: Duration) -> u64 {
     duration
         .as_secs()
         .saturating_add(u64::from(duration.subsec_nanos() > 0))
+}
+
+fn format_stopwatch_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    format!(
+        "{:02}:{:02}:{:02}",
+        seconds / 3_600,
+        seconds / 60 % 60,
+        seconds % 60
+    )
 }

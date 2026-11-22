@@ -56,6 +56,7 @@ impl ScriptCraftApp {
         self.timer_title_host_geometry = None;
         if self.timer_popup_surface == EditorSurface::TitlePage {
             self.finalize_sprint_timer_popup(ctx);
+            self.timer_popup_surface = EditorSurface::Body;
         }
         self.set_title_page_window_open(false);
         self.title_page_focus_requested = false;

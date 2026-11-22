@@ -182,6 +182,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         }),
         _ => None,
     };
+    let mut timer_button_rect = None;
     let status_panel = egui::Panel::bottom("status")
         .frame(status_bar::status_panel_frame(
             &ctx,
@@ -203,7 +204,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                 app.appearance_mode,
                 &focus_view,
             );
-            let timer_button_rect = status_intents.timer_button_rect;
+            timer_button_rect = status_intents.timer_button_rect;
             for command in status_intents.commands {
                 let opening_timer = matches!(&command, Command::ToolsSprintTimerTogglePopup)
                     && !app.sprint_timer.popup_open;
@@ -212,10 +213,11 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                     &ctx,
                 );
                 if opening_timer {
-                    app.sprint_timer.popup_anchor =
-                        timer_button_rect.unwrap_or(egui::Rect::NOTHING);
-                    app.timer_popup_surface = EditorSurface::Body;
-                    app.capture_sprint_timer_host_geometry(EditorSurface::Body, &ctx);
+                    app.attach_sprint_timer_popup_to_surface(
+                        timer_button_rect.unwrap_or(egui::Rect::NOTHING),
+                        EditorSurface::Body,
+                        &ctx,
+                    );
                 }
             }
         });
@@ -232,6 +234,19 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                 app.live_document_surface(ui, EditorSurface::Body)
             })
         });
+    if app.timer_popup_surface == EditorSurface::TitlePage
+        && (!app.title_page_window_open || app.title_viewport_unsupported)
+    {
+        app.timer_popup_surface = EditorSurface::Body;
+        app.timer_title_host_geometry = None;
+    }
+    if !app.element_windows.owns_input() {
+        app.open_pending_sprint_timer_completion(
+            EditorSurface::Body,
+            timer_button_rect,
+            &ctx,
+        );
+    }
     let timer_commands = if app.timer_popup_surface == EditorSurface::Body
         && !app.element_windows.owns_input()
     {

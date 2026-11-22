@@ -1,7 +1,7 @@
 use crate::app::ScriptCraftApp;
 use crate::widgets::sprint_timer::notifications::NotificationSink;
 use eframe::egui;
-use scriptcraft_commands::{Command, CommandRejection, SprintTimerMode};
+use scriptcraft_commands::{Command, CommandRejection, EditorSurface, SprintTimerMode};
 
 use super::DesktopCommandOutcome;
 
@@ -14,7 +14,59 @@ fn close_sprint_timer_popup_once(timer: &mut crate::widgets::sprint_timer::Sprin
     true
 }
 
+fn open_sprint_timer_popup(app: &mut ScriptCraftApp, ctx: &egui::Context) -> bool {
+    if app.sprint_timer.popup_open && !app.sprint_timer.is_closing() {
+        return false;
+    }
+    app.sprint_timer.clear_popup_transition(ctx);
+    app.clear_sprint_timer_popup_geometry();
+    app.sprint_timer.popup_open = true;
+    app.sprint_timer.just_opened = true;
+    app.sprint_timer
+        .start_popup_opening(ctx.input(|input| input.time));
+    true
+}
+
 impl ScriptCraftApp {
+    pub(crate) fn attach_sprint_timer_popup_to_surface(
+        &mut self,
+        anchor: egui::Rect,
+        surface: EditorSurface,
+        ctx: &egui::Context,
+    ) {
+        self.sprint_timer.popup_anchor = anchor;
+        self.timer_popup_surface = surface;
+        self.capture_sprint_timer_host_geometry(surface, ctx);
+    }
+
+    pub(crate) fn open_pending_sprint_timer_completion(
+        &mut self,
+        surface: EditorSurface,
+        anchor: Option<egui::Rect>,
+        ctx: &egui::Context,
+    ) -> bool {
+        if self.timer_popup_surface != surface
+            || !self.sprint_timer.has_completion_popup_open_request()
+        {
+            return false;
+        }
+
+        if self.sprint_timer.popup_open && !self.sprint_timer.is_closing() {
+            self.sprint_timer.take_completion_popup_open_request();
+            ctx.request_repaint();
+            return true;
+        }
+
+        let Some(anchor) = anchor.filter(|rect| rect.is_positive()) else {
+            return false;
+        };
+        open_sprint_timer_popup(self, ctx);
+        self.attach_sprint_timer_popup_to_surface(anchor, surface, ctx);
+        self.sprint_timer.take_completion_popup_open_request();
+        ctx.request_repaint();
+        true
+    }
+
     pub(super) fn dispatch_timer_command(
         &mut self,
         command: Command,
@@ -26,12 +78,7 @@ impl ScriptCraftApp {
                     self.sprint_timer
                         .request_popup_close(ctx.input(|input| input.time), ctx.content_rect());
                 } else {
-                    self.sprint_timer.clear_popup_transition(ctx);
-                    self.clear_sprint_timer_popup_geometry();
-                    self.sprint_timer.popup_open = true;
-                    self.sprint_timer.just_opened = true;
-                    self.sprint_timer
-                        .start_popup_opening(ctx.input(|input| input.time));
+                    open_sprint_timer_popup(self, ctx);
                 }
                 ctx.request_repaint();
                 DesktopCommandOutcome::EffectDispatched
