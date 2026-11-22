@@ -13,7 +13,8 @@ use scriptcraft_layout::{
 };
 use scriptcraft_model::formatting::FixedPoint;
 use scriptcraft_model::typography::{
-    EffectiveTextColor, FontResolutionKind, ResolvedFontSourceKind, MAX_SUPPORTED_FONT_SIZE,
+    EffectiveTextColor, FontResolutionKind, ResolvedFontSourceKind, ScaledDecorationGeometry,
+    MAX_SUPPORTED_FONT_SIZE,
 };
 use scriptcraft_model::{LayoutInputs, Project};
 use std::sync::Arc;
@@ -189,6 +190,8 @@ pub(super) struct VectorTextRun {
     font_size_pt: u16,
     underline: bool,
     strikethrough: bool,
+    underline_geometry: Option<ScaledDecorationGeometry>,
+    strikethrough_geometry: Option<ScaledDecorationGeometry>,
 }
 
 impl VectorTextRun {
@@ -250,6 +253,14 @@ impl VectorTextRun {
 
     pub(super) fn strikethrough(&self) -> bool {
         self.strikethrough
+    }
+
+    pub(super) fn underline_geometry(&self) -> Option<ScaledDecorationGeometry> {
+        self.underline_geometry
+    }
+
+    pub(super) fn strikethrough_geometry(&self) -> Option<ScaledDecorationGeometry> {
+        self.strikethrough_geometry
     }
 }
 
@@ -452,6 +463,34 @@ fn package_from_layout(
                 if span.geometry.width.raw() < 0
                     || span.geometry.y != line.geometry.y
                     || span.geometry.height != line.vertical_metrics.leading
+                    || span.underline != span.underline_geometry.is_some()
+                    || span.strikethrough != span.strikethrough_geometry.is_some()
+                    || span
+                        .underline_geometry
+                        .is_some_and(|geometry| {
+                            geometry.font_top <= geometry.font_bottom
+                                || baseline_y
+                                    .raw()
+                                    .checked_sub(geometry.font_top.raw())
+                                    .is_none()
+                                || baseline_y
+                                    .raw()
+                                    .checked_sub(geometry.font_bottom.raw())
+                                    .is_none()
+                        })
+                    || span
+                        .strikethrough_geometry
+                        .is_some_and(|geometry| {
+                            geometry.font_top <= geometry.font_bottom
+                                || baseline_y
+                                    .raw()
+                                    .checked_sub(geometry.font_top.raw())
+                                    .is_none()
+                                || baseline_y
+                                    .raw()
+                                    .checked_sub(geometry.font_bottom.raw())
+                                    .is_none()
+                        })
                     || !valid_boundaries(
                         &span.display_boundary_offsets,
                         scalar_count,
@@ -526,6 +565,8 @@ fn package_from_layout(
                     font_size_pt: size,
                     underline: span.underline,
                     strikethrough: span.strikethrough,
+                    underline_geometry: span.underline_geometry,
+                    strikethrough_geometry: span.strikethrough_geometry,
                 });
             }
             if line_has_visible_text

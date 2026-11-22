@@ -4,7 +4,8 @@
 
 use crate::{pdf_document::{PdfDocumentWriter, PdfObjectId}, ExportError, PdfResolvedFaceBytes};
 use scriptcraft_model::typography::{
-    FaceStyle, LeadingResolverKind, ResolvedFaceMetrics, ResolvedFontSourceKind,
+    FaceStyle, LeadingResolverKind, ResolvedDecorationMetrics, ResolvedFaceMetrics,
+    ResolvedFontSourceKind, MAX_METRIC_UNITS,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use ttf_parser::{Face, GlyphId};
@@ -98,6 +99,19 @@ pub(crate) fn encode_complete_face(
     {
         return Err(ExportError::InvalidPdfFontPayload);
     }
+    let underline = face
+        .underline_metrics()
+        .ok_or(ExportError::InvalidPdfFontPayload)?;
+    let underline = parsed_decoration_metrics(underline.position, underline.thickness)?;
+    let strikethrough = face
+        .strikeout_metrics()
+        .ok_or(ExportError::InvalidPdfFontPayload)?;
+    let strikethrough =
+        parsed_decoration_metrics(strikethrough.position, strikethrough.thickness)?;
+    if underline != metrics.underline || strikethrough != metrics.strikethrough {
+        return Err(ExportError::InvalidPdfFontPayload);
+    }
+
     let glyph_zero = face
         .glyph_hor_advance(GlyphId(0))
         .ok_or(ExportError::InvalidPdfFontPayload)?;
@@ -183,6 +197,28 @@ pub(crate) fn encode_complete_face(
             return Err(ExportError::InvalidPdfFontPayload);
         },
         fixed_pitch: post.is_monospaced,
+    })
+}
+
+/// Converts parser decoration fields to the bounded raw representation used
+/// by resolved-face metrics, rejecting unusable thickness and subtraction.
+fn parsed_decoration_metrics(
+    position: i16,
+    thickness: i16,
+) -> Result<ResolvedDecorationMetrics, ExportError> {
+    let position = i32::from(position);
+    let thickness = u32::try_from(thickness).map_err(|_| ExportError::InvalidPdfFontPayload)?;
+    let thickness_i32 = i32::try_from(thickness).map_err(|_| ExportError::InvalidPdfFontPayload)?;
+    if position.unsigned_abs() > MAX_METRIC_UNITS as u32
+        || thickness == 0
+        || thickness > MAX_METRIC_UNITS as u32
+        || position.checked_sub(thickness_i32).is_none()
+    {
+        return Err(ExportError::InvalidPdfFontPayload);
+    }
+    Ok(ResolvedDecorationMetrics {
+        position,
+        thickness,
     })
 }
 

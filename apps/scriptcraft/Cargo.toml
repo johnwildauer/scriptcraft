@@ -19,6 +19,7 @@ scriptcraft-fdx = { path = "../../crates/scriptcraft-fdx" }
 scriptcraft-layout = { path = "../../crates/scriptcraft-layout" }
 scriptcraft-model = { path = "../../crates/scriptcraft-model" }
 scriptcraft-session = { path = "../../crates/scriptcraft-session" }
+ttf-parser = "=0.25.1"
 
 [build-dependencies]
 embed-resource = "3.0"

@@ -190,6 +190,12 @@ impl ScriptCraftApp {
                             "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID: canonical vertical projection unavailable",
                         );
                     }
+                    Err(presentation_geometry::PresentationProjectionError::InvalidDecorationGeometry) => {
+                        self.post_typography_diagnostic_once(
+                            "TYPOGRAPHY_DECORATION_GEOMETRY_INVALID:",
+                            "TYPOGRAPHY_DECORATION_GEOMETRY_INVALID: canonical decoration projection unavailable",
+                        );
+                    }
                     _ => self.post_typography_diagnostic_once(
                         "TYPOGRAPHY_PROJECTION_UNAVAILABLE:",
                         "TYPOGRAPHY_PROJECTION_UNAVAILABLE: canonical line projection failed",
@@ -226,7 +232,50 @@ impl ScriptCraftApp {
             let line_painter = painter.with_clip_rect(glyph_clip);
             let line_top_screen = page_origin.y + projection.line_box_top;
             let line_box_height = projection.line_box_height;
-            let baseline_screen = page_origin.y + projection.baseline_y;
+            let projected_decorations = projection
+                .spans
+                .iter()
+                .map(|projected| {
+                    let span = projected.core;
+                    if span.underline != span.underline_geometry.is_some()
+                        || span.strikethrough != span.strikethrough_geometry.is_some()
+                    {
+                        return Err(
+                            presentation_geometry::PresentationProjectionError::InvalidDecorationGeometry,
+                        );
+                    }
+                    let underline = span
+                        .underline_geometry
+                        .map(|geometry| {
+                            presentation_geometry::project_decoration_rect(
+                                projected,
+                                geometry,
+                                projection.baseline_y,
+                                scale,
+                            )
+                        })
+                        .transpose()?;
+                    let strikethrough = span
+                        .strikethrough_geometry
+                        .map(|geometry| {
+                            presentation_geometry::project_decoration_rect(
+                                projected,
+                                geometry,
+                                projection.baseline_y,
+                                scale,
+                            )
+                        })
+                        .transpose()?;
+                    Ok((underline, strikethrough))
+                })
+                .collect::<Result<Vec<_>, _>>();
+            let Ok(projected_decorations) = projected_decorations else {
+                self.post_typography_diagnostic_once(
+                    "TYPOGRAPHY_DECORATION_GEOMETRY_INVALID:",
+                    "TYPOGRAPHY_DECORATION_GEOMETRY_INVALID: canonical decoration projection unavailable",
+                );
+                continue 'paint_lines;
+            };
             let Some(prepared_fonts) = self.prepared_document_fonts.clone() else {
                 self.post_typography_diagnostic_once(
                     "TYPOGRAPHY_FACE_UNAVAILABLE:",
@@ -262,7 +311,12 @@ impl ScriptCraftApp {
                     "TYPOGRAPHY_COLOR_FALLBACK: unsupported explicit color uses the theme text palette",
                 );
             }
-            for (projected, resolved) in projection.spans.iter().zip(&resolved_paints) {
+            for ((projected, resolved), (underline_rect, strikethrough_rect)) in projection
+                .spans
+                .iter()
+                .zip(&resolved_paints)
+                .zip(&projected_decorations)
+            {
                 let span = projected.core;
                 let span_origin =
                     egui::pos2(page_rect.left() + projected.origin_x, line_top_screen);
@@ -341,25 +395,12 @@ impl ScriptCraftApp {
                     }
                 }
 
-                if span.underline || span.strikethrough {
-                    if span.underline {
-                        let underline_y = baseline_screen - 0.12 * line_box_height;
-                        line_painter.line_segment(
-                            [
-                                egui::pos2(span_origin.x, underline_y),
-                                egui::pos2(span_origin.x + projected.advance, underline_y),
-                            ],
-                            Stroke::new(1.0_f32, resolved.color),
-                        );
-                    }
-                    if span.strikethrough {
-                        let strike_y = baseline_screen - 0.48 * line_box_height;
-                        line_painter.line_segment(
-                            [
-                                egui::pos2(span_origin.x, strike_y),
-                                egui::pos2(span_origin.x + projected.advance, strike_y),
-                            ],
-                            Stroke::new(1.0_f32, resolved.color),
+                for rect in [*underline_rect, *strikethrough_rect].into_iter().flatten() {
+                    if rect.width() > 0.0 && rect.height() > 0.0 {
+                        line_painter.rect_filled(
+                            rect.translate(page_origin.to_vec2()),
+                            0.0,
+                            resolved.color,
                         );
                     }
                 }

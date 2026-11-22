@@ -5,6 +5,7 @@ use super::{
 use crate::inputs::LayoutEnvironment;
 use scriptcraft_model::{
     formatting::{FixedPoint, ParagraphAlignment, SourceLayoutSettings},
+    typography::ScaledDecorationGeometry,
     ElementTypeKey, LayoutInputs, ModelError, StableId,
 };
 use std::sync::Arc;
@@ -126,6 +127,8 @@ pub struct PositionedStyledSpan {
     pub display_boundary_offsets: Arc<[FixedPoint]>,
     pub underline: bool,
     pub strikethrough: bool,
+    pub underline_geometry: Option<ScaledDecorationGeometry>,
+    pub strikethrough_geometry: Option<ScaledDecorationGeometry>,
 }
 
 /// A borrowed core line selected by an immutable location query.

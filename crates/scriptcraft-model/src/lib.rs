@@ -44,8 +44,8 @@ pub use project::Project;
 pub use title_page::{TitlePageAlignment, TitlePageParagraph, TitlePageParagraphFormatting};
 pub use typography::{
     DocumentFontEnvironment, EffectiveTextColor, EffectiveTextStyle, FaceStyle, FontResolutionKind,
-    RequestedFontResolution, ResolvedFaceMetrics, ResolvedFontFace, ResolvedFontId,
-    ResolvedFontSourceKind, ScalarAdvance,
+    RequestedFontResolution, ResolvedDecorationMetrics, ResolvedFaceMetrics, ResolvedFontFace,
+    ResolvedFontId, ResolvedFontSourceKind, ScalarAdvance, ScaledDecorationGeometry,
 };
 pub use validation::{validate_layout_inputs, MAX_ELEMENTS};
 

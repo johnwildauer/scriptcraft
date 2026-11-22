@@ -29,6 +29,8 @@ Writers can move between continuous screenplay editing and a predictable fixed-p
 
 Definition-registry replacement, including Apply Template, invalidates every derived layout/control input affected by the new ordered definitions even when some or all paragraph keys are retained. Layout and cache reuse resolve the current complete definitions, Behavior/capabilities, direct overrides, and effective environment; reused output equals fresh layout. Inactive dual groups follow AC-WRITING-013.4 sequential composition and emit each retained member exactly once. Apply itself does not invoke content correction to make layout fit or a dual pattern active.
 
+Underline and strikethrough presentation on Body and managed TitlePage Content shall derive position and thickness from the exact resolved face's OpenType metrics at the effective style size. Each metric position identifies the top of its stroke and thickness extends downward. Repeated layout/cache reuse shall retain the resulting optional span geometry with complete resolved-environment identity; decorations shall not change text advances, wrapping, line-box advancement, baseline, pagination, page fit, or interaction geometry.
+
 ### Page visibility, zoom, and appearance
 
 These visible-page and view criteria retain their stable `AC-WRITING-006.*` IDs here; their parent [`REQ-WRITING-LOOP-006`](desktop-workspace.md) is owned by Desktop Workspace.

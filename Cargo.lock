@@ -3162,6 +3162,7 @@ dependencies = [
  "scriptcraft-layout",
  "scriptcraft-model",
  "scriptcraft-session",
+ "ttf-parser",
  "windows",
  "windows-core",
  "windows-future",

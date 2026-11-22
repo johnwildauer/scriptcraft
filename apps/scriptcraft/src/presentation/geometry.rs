@@ -3,7 +3,10 @@
 use eframe::egui::{self, Color32, FontId};
 use egui::epaint::text::{Galley, LayoutJob};
 use scriptcraft_layout::{Caret, LayoutLine, PositionedStyledSpan};
-use scriptcraft_model::formatting::FixedPoint;
+use scriptcraft_model::{
+    formatting::FixedPoint,
+    typography::ScaledDecorationGeometry,
+};
 use std::sync::Arc;
 
 /// One ephemeral span in the canonical desktop line projection. `origin_x`,
@@ -43,6 +46,42 @@ pub(crate) enum PresentationProjectionError {
     DisplayTopologyMismatch,
     InvalidCanonicalBoundaries,
     InvalidVerticalGeometry,
+    InvalidDecorationGeometry,
+}
+
+/// Projects canonical font-relative decoration edges into a page-local
+/// screen-space rectangle without consulting line-box or glyph metrics.
+pub(crate) fn project_decoration_rect(
+    span: &PresentationSpan<'_>,
+    geometry: ScaledDecorationGeometry,
+    baseline_y: f32,
+    scale: f32,
+) -> Result<egui::Rect, PresentationProjectionError> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(PresentationProjectionError::InvalidDecorationGeometry);
+    }
+    let font_top = geometry.font_top.to_points_f32() * scale;
+    let font_bottom = geometry.font_bottom.to_points_f32() * scale;
+    let top = baseline_y - font_top;
+    let bottom = baseline_y - font_bottom;
+    let right = span.origin_x + span.advance;
+    if !baseline_y.is_finite()
+        || !span.origin_x.is_finite()
+        || !span.advance.is_finite()
+        || span.advance < 0.0
+        || !font_top.is_finite()
+        || !font_bottom.is_finite()
+        || !top.is_finite()
+        || !bottom.is_finite()
+        || bottom < top
+        || !right.is_finite()
+    {
+        return Err(PresentationProjectionError::InvalidDecorationGeometry);
+    }
+    Ok(egui::Rect::from_min_max(
+        egui::pos2(span.origin_x, top),
+        egui::pos2(right, bottom),
+    ))
 }
 
 /// Projects one line without querying egui font advances. Every horizontal
@@ -134,7 +173,7 @@ pub(crate) fn project_line<'a>(
         return Err(PresentationProjectionError::InvalidVerticalGeometry);
     }
     let horizontal_clip_x = [clip_left, paragraph_right];
-    let metric_cull_bounds = egui::Rect::from_min_max(
+    let mut metric_cull_bounds = egui::Rect::from_min_max(
         egui::pos2(clip_left, line_box_top.min(natural_top)),
         egui::pos2(
             paragraph_right,
@@ -143,7 +182,7 @@ pub(crate) fn project_line<'a>(
     );
     let natural_extent_exceeds_line_box =
         natural_top < line_box_top || natural_bottom > line_box_bottom;
-    let spans = line
+    let spans: Vec<PresentationSpan<'a>> = line
         .spans
         .iter()
         .map(|core| PresentationSpan {
@@ -158,6 +197,25 @@ pub(crate) fn project_line<'a>(
             ),
         })
         .collect();
+    for span in &spans {
+        if span.core.underline != span.core.underline_geometry.is_some()
+            || span.core.strikethrough != span.core.strikethrough_geometry.is_some()
+        {
+            return Err(PresentationProjectionError::InvalidDecorationGeometry);
+        }
+        for geometry in [
+            span.core.underline_geometry,
+            span.core.strikethrough_geometry,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let rect = project_decoration_rect(span, geometry, baseline_y, scale)?;
+            if rect.width() > 0.0 && rect.height() > 0.0 {
+                metric_cull_bounds = metric_cull_bounds.union(rect);
+            }
+        }
+    }
     Ok(PresentationLine {
         core: line,
         line_origin_x,

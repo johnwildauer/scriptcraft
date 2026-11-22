@@ -267,6 +267,10 @@ Permanent tests and test-only fixtures have been removed under the user's zero-t
 
 Every Forge product and safety contract remains authoritative, including editing transaction guarantees and native-save failure behavior. No test source was retained as ignored, feature-gated, relocated, or replacement suite. Validation and acceptance remain user-owned.
 
+### WO-005 canonical font-decoration contract
+
+The desktop app pins `ttf-parser = "=0.25.1"`, matching the export parser pin recorded in the package map. Exact selected font bytes and face index supply required `post` underline and `OS/2` strikethrough metrics; `ab_glyph` remains authoritative for existing advance and vertical metrics. Both positions identify the top of the stroke and positive thickness extends downward. Checked fixed-point scaling produces optional top/bottom span geometry. Raw metric pairs participate in complete environment equality/fingerprints and desktop face identity; exact PDF payload preparation compares both pairs against the same parsed face. Missing/invalid host metrics reject that host candidate and continue existing per-style fallback, while bundled Courier Prime defects fail preparation. Prepared/layout caches retain geometry; decorations do not affect wrapping, horizontal advances, leading, baseline derivation, pagination, fit, or interaction. Desktop paints canonical filled rectangles and includes them only in broad-phase culling, retaining page/horizontal clipping. PDF uses checked rectangles; macOS PDF-backed Print inherits the shared bytes and immutable environment/payload snapshot. Windows vector runs retain the same geometry and shared preview/final Direct2D drawing uses canonical rectangles; DirectWrite remains limited to glyph row-offset cancellation. This source disposition is not rendered, native, host-font, or acceptance evidence.
+
 ## Supporting locations
 
 - Historical removal detail is summarized in the initiative's [coverage ledger](../../.plan/2026-11-20-template-typography-pruning/coverage-ledger.md); this active map does not reproduce obsolete test/fixture maps.

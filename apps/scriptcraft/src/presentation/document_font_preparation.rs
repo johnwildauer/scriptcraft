@@ -5,8 +5,8 @@ use ab_glyph::{Font, FontRef};
 use scriptcraft_model::typography::{
     content_fingerprint, DocumentFontEnvironment, FaceStyle as ResolvedFaceStyle,
     FontResolutionKind, LeadingResolverKind, RequestedFontResolution, ResolvedFaceMetrics, ResolvedFontFace,
-    ResolvedFontId, ResolvedFontSourceKind, ScalarAdvance, MAX_FONT_REQUESTS, MAX_RESOLVED_FACES,
-    MAX_SCALAR_ADVANCES,
+    ResolvedDecorationMetrics, ResolvedFontId, ResolvedFontSourceKind, ScalarAdvance,
+    MAX_FONT_REQUESTS, MAX_METRIC_UNITS, MAX_RESOLVED_FACES, MAX_SCALAR_ADVANCES,
 };
 use scriptcraft_model::{Project, TextRun};
 
@@ -548,6 +548,20 @@ fn metrics_for_bytes_and_index(
     if !upem.is_finite() || upem < 1.0 || upem > 65_536.0 {
         return Err(FontPreparationError::bounded("invalid-font-units"));
     }
+    let parsed_face = ttf_parser::Face::from_slice(bytes, face_index)
+        .map_err(|_| FontPreparationError::bounded("malformed-font"))?;
+    let resolved_units_per_em = upem.round() as u32;
+    if u32::from(parsed_face.units_per_em()) != resolved_units_per_em {
+        return Err(FontPreparationError::bounded("invalid-font-units"));
+    }
+    let underline = parsed_face
+        .underline_metrics()
+        .ok_or_else(|| FontPreparationError::bounded("invalid-decoration-metrics"))?;
+    let underline = decoration_metrics(underline.position, underline.thickness)?;
+    let strikethrough = parsed_face
+        .strikeout_metrics()
+        .ok_or_else(|| FontPreparationError::bounded("invalid-decoration-metrics"))?;
+    let strikethrough = decoration_metrics(strikethrough.position, strikethrough.thickness)?;
     let ascender = finite_metric(font.ascent_unscaled())?;
     let descender = finite_metric(font.descent_unscaled())?;
     let line_gap = finite_metric(font.line_gap_unscaled())?;
@@ -568,9 +582,35 @@ fn metrics_for_bytes_and_index(
         ascender,
         descender,
         line_gap.max(0),
+        underline,
+        strikethrough,
         advances,
     )
     .map_err(|_| FontPreparationError::bounded("invalid-font-metrics"))
+}
+
+fn decoration_metrics(
+    position: i16,
+    thickness: i16,
+) -> Result<ResolvedDecorationMetrics, FontPreparationError> {
+    let position = i32::from(position);
+    let thickness = u32::try_from(thickness)
+        .map_err(|_| FontPreparationError::bounded("invalid-decoration-metrics"))?;
+    if position.unsigned_abs() > MAX_METRIC_UNITS as u32
+        || thickness == 0
+        || thickness > MAX_METRIC_UNITS as u32
+        || position
+            .checked_sub(i32::try_from(thickness).map_err(|_| {
+                FontPreparationError::bounded("invalid-decoration-metrics")
+            })?)
+            .is_none()
+    {
+        return Err(FontPreparationError::bounded("invalid-decoration-metrics"));
+    }
+    Ok(ResolvedDecorationMetrics {
+        position,
+        thickness,
+    })
 }
 
 fn has_collection_face(bytes: &[u8], face_index: u32) -> bool {
@@ -693,6 +733,10 @@ fn resolved_identity_fingerprint(
         i64::from(metrics.ascender),
         i64::from(metrics.descender),
         i64::from(metrics.line_gap),
+        i64::from(metrics.underline.position),
+        i64::from(metrics.underline.thickness),
+        i64::from(metrics.strikethrough.position),
+        i64::from(metrics.strikethrough.thickness),
     ] {
         for byte in value.to_le_bytes() {
             mix(byte);

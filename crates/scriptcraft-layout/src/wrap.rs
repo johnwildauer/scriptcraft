@@ -5,7 +5,10 @@ use super::{
 use scriptcraft_model::{
     formatted_text::parse_style_attribute,
     formatting::FixedPoint,
-    typography::{DocumentFontEnvironment, EffectiveTextStyle as ResolvedTextStyle},
+    typography::{
+        DocumentFontEnvironment, EffectiveTextStyle as ResolvedTextStyle,
+        ScaledDecorationGeometry,
+    },
     ElementTypeKey, TextRun,
 };
 use std::{ops::Range, sync::Arc};
@@ -20,7 +23,10 @@ pub(super) struct ResolvedDisplayScalar {
     pub(super) character: char,
     pub(super) source_range: Range<usize>,
     pub(super) text_style: ResolvedTextStyle,
+    pub(super) underline: bool,
     pub(super) strikethrough: bool,
+    pub(super) underline_geometry: Option<ScaledDecorationGeometry>,
+    pub(super) strikethrough_geometry: Option<ScaledDecorationGeometry>,
     pub(super) advance: FixedPoint,
 }
 
@@ -76,13 +82,33 @@ pub(super) fn project_resolved_display_scalars(
         } else {
             source_character.to_string()
         };
-        let face = if matches!(source_character, '\n' | '\r') {
+        let is_newline = matches!(source_character, '\n' | '\r');
+        let needs_decoration = style.underline || strikethrough;
+        let face = if is_newline && !needs_decoration {
             None
         } else {
             Some(fonts.require_face(&style.resolved_font_id)?)
         };
+        let underline_geometry = if style.underline {
+            Some(
+                face.expect("decorated scalar has a resolved face")
+                    .metrics
+                    .scale_underline(style.size)?,
+            )
+        } else {
+            None
+        };
+        let strikethrough_geometry = if strikethrough {
+            Some(
+                face.expect("decorated scalar has a resolved face")
+                    .metrics
+                    .scale_strikethrough(style.size)?,
+            )
+        } else {
+            None
+        };
         for character in displayed.chars() {
-            let advance = if matches!(source_character, '\n' | '\r') {
+            let advance = if is_newline {
                 FixedPoint::default()
             } else {
                 face.expect("non-newline scalar has a resolved face")
@@ -93,7 +119,10 @@ pub(super) fn project_resolved_display_scalars(
                 character,
                 source_range: absolute_start..absolute_end,
                 text_style: style.clone(),
+                underline: style.underline,
                 strikethrough,
+                underline_geometry,
+                strikethrough_geometry,
                 advance,
             });
         }

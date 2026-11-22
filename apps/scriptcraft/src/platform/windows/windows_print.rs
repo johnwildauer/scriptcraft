@@ -1367,31 +1367,52 @@ fn decoration_rects(
     if run.text().is_empty() || geometry.right == geometry.left {
         return Some((None, None));
     }
-    let thickness = (0.7_f64 * f64::from(scale)).max(0.25);
-    if !thickness.is_finite() || thickness <= 0.0 {
+    if ![
+        geometry.left,
+        geometry.right,
+        geometry.baseline,
+        scale,
+    ]
+    .into_iter()
+    .all(f32::is_finite)
+        || geometry.right < geometry.left
+        || scale <= 0.0
+    {
         return None;
     }
-    let make_decoration = |ratio: f64| -> Option<D2D_RECT_F> {
-        let center = f64::from(geometry.baseline) - ratio * f64::from(geometry.leading);
-        let top = center - thickness / 2.0;
-        let bottom = center + thickness / 2.0;
-        Some(D2D_RECT_F {
-            left: geometry.left,
-            top: finite_native_value(top)?,
-            right: geometry.right,
-            bottom: finite_native_value(bottom)?,
-        })
+    let make_decoration = |enabled: bool,
+                           canonical: Option<scriptcraft_model::typography::ScaledDecorationGeometry>|
+     -> Option<Option<D2D_RECT_F>> {
+        match (enabled, canonical) {
+            (false, None) => Some(None),
+            (true, Some(canonical)) => {
+                if canonical.font_top <= canonical.font_bottom {
+                    return None;
+                }
+                let top = f64::from(geometry.baseline)
+                    - scaled_document_length(canonical.font_top.raw(), scale)?;
+                let bottom = f64::from(geometry.baseline)
+                    - scaled_document_length(canonical.font_bottom.raw(), scale)?;
+                let rectangle = D2D_RECT_F {
+                    left: geometry.left,
+                    top: finite_native_value(top)?,
+                    right: geometry.right,
+                    bottom: finite_native_value(bottom)?,
+                };
+                ([rectangle.left, rectangle.top, rectangle.right, rectangle.bottom]
+                    .into_iter()
+                    .all(f32::is_finite)
+                    && rectangle.right >= rectangle.left
+                    && rectangle.bottom >= rectangle.top)
+                    .then_some(Some(rectangle))
+            }
+            // Package construction rejects incoherent flags and geometry; keep
+            // callback drawing defensive rather than dropping a requested line.
+            _ => None,
+        }
     };
-    let underline = if run.underline() {
-        Some(make_decoration(0.12)?)
-    } else {
-        None
-    };
-    let strikethrough = if run.strikethrough() {
-        Some(make_decoration(0.48)?)
-    } else {
-        None
-    };
+    let underline = make_decoration(run.underline(), run.underline_geometry())?;
+    let strikethrough = make_decoration(run.strikethrough(), run.strikethrough_geometry())?;
     Some((underline, strikethrough))
 }
 

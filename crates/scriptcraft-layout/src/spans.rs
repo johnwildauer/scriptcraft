@@ -2,7 +2,12 @@ use super::{
     geometry::{DisplaySourceSegment, FixedRect, SourceRange},
     wrap::ResolvedDisplayScalar,
 };
-use scriptcraft_model::{formatting::FixedPoint, typography::EffectiveTextStyle as ResolvedTextStyle};
+use scriptcraft_model::{
+    formatting::FixedPoint,
+    typography::{
+        EffectiveTextStyle as ResolvedTextStyle, ScaledDecorationGeometry,
+    },
+};
 use std::sync::Arc;
 
 /// Backend-neutral span payload carrying resolved typography and metric geometry.
@@ -16,6 +21,8 @@ pub(super) struct ResolvedPositionedSpan {
     pub(super) display_boundary_offsets: Arc<[FixedPoint]>,
     pub(super) underline: bool,
     pub(super) strikethrough: bool,
+    pub(super) underline_geometry: Option<ScaledDecorationGeometry>,
+    pub(super) strikethrough_geometry: Option<ScaledDecorationGeometry>,
 }
 
 /// Position already-resolved scalars using their measured advances. Each
@@ -31,7 +38,10 @@ pub(super) fn resolved_positioned_spans(
     for scalar in scalars {
         let can_coalesce = output.last().is_some_and(|span| {
             span.text_style == scalar.text_style
+                && span.underline == scalar.underline
                 && span.strikethrough == scalar.strikethrough
+                && span.underline_geometry == scalar.underline_geometry
+                && span.strikethrough_geometry == scalar.strikethrough_geometry
                 && span.display_source_map.last().is_some_and(|previous| {
                     previous.source_end == scalar.source_range.start
                         || (previous.source_start == scalar.source_range.start
@@ -65,6 +75,8 @@ struct ResolvedPositionedSpanBuilder {
     display_boundary_offsets: Vec<FixedPoint>,
     underline: bool,
     strikethrough: bool,
+    underline_geometry: Option<ScaledDecorationGeometry>,
+    strikethrough_geometry: Option<ScaledDecorationGeometry>,
 }
 
 impl ResolvedPositionedSpanBuilder {
@@ -98,8 +110,10 @@ impl ResolvedPositionedSpanBuilder {
                 FixedPoint::default(),
                 FixedPoint::from_raw(scalar.advance.raw().max(0)),
             ],
-            underline: scalar.text_style.underline,
+            underline: scalar.underline,
             strikethrough: scalar.strikethrough,
+            underline_geometry: scalar.underline_geometry,
+            strikethrough_geometry: scalar.strikethrough_geometry,
         }
     }
 
@@ -129,6 +143,8 @@ impl ResolvedPositionedSpanBuilder {
             display_boundary_offsets: self.display_boundary_offsets.into(),
             underline: self.underline,
             strikethrough: self.strikethrough,
+            underline_geometry: self.underline_geometry,
+            strikethrough_geometry: self.strikethrough_geometry,
         }
     }
 }

@@ -83,6 +83,22 @@ pub struct ScalarAdvance {
     pub missing_glyph: bool,
 }
 
+/// Raw OpenType decoration metrics. Position is the top of the stroke relative
+/// to the baseline; positive thickness extends downward in font coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResolvedDecorationMetrics {
+    pub position: i32,
+    pub thickness: u32,
+}
+
+/// Scaled decoration edges relative to the baseline in font-coordinate
+/// orientation (positive above the baseline).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ScaledDecorationGeometry {
+    pub font_top: FixedPoint,
+    pub font_bottom: FixedPoint,
+}
+
 /// Vertical font-unit metrics and the bounded scalar repertoire claimed by a
 /// resolved face. Metrics are integral font units and scale with one defined
 /// integer rounding step; descent remains signed.
@@ -92,6 +108,8 @@ pub struct ResolvedFaceMetrics {
     pub ascender: i32,
     pub descender: i32,
     pub line_gap: i32,
+    pub underline: ResolvedDecorationMetrics,
+    pub strikethrough: ResolvedDecorationMetrics,
     pub scalar_advances: BTreeMap<char, ScalarAdvance>,
 }
 
@@ -101,6 +119,8 @@ impl ResolvedFaceMetrics {
         ascender: i32,
         descender: i32,
         line_gap: i32,
+        underline: ResolvedDecorationMetrics,
+        strikethrough: ResolvedDecorationMetrics,
         scalar_advances: BTreeMap<char, ScalarAdvance>,
     ) -> Result<Self, ModelError> {
         let metrics = Self {
@@ -108,6 +128,8 @@ impl ResolvedFaceMetrics {
             ascender,
             descender,
             line_gap,
+            underline,
+            strikethrough,
             scalar_advances,
         };
         metrics.validate()?;
@@ -120,6 +142,8 @@ impl ResolvedFaceMetrics {
             || self.ascender.unsigned_abs() > MAX_METRIC_UNITS as u32
             || self.descender.unsigned_abs() > MAX_METRIC_UNITS as u32
             || self.line_gap.unsigned_abs() > MAX_METRIC_UNITS as u32
+            || !valid_decoration_metrics(self.underline)
+            || !valid_decoration_metrics(self.strikethrough)
             || self.ascender <= self.descender
             || self.line_gap < 0
             || self.scalar_advances.len() > MAX_SCALAR_ADVANCES
@@ -159,6 +183,66 @@ impl ResolvedFaceMetrics {
         validate_font_size(size_points)?;
         scale_signed_font_units(self.descender, self.units_per_em, size_points)
     }
+
+    /// Scale the exact face's OpenType underline metrics into canonical
+    /// baseline-relative top and bottom edges.
+    pub fn scale_underline(
+        &self,
+        size_points: u16,
+    ) -> Result<ScaledDecorationGeometry, ModelError> {
+        self.scale_decoration(self.underline, size_points)
+    }
+
+    /// Scale the exact face's OpenType strikeout metrics into canonical
+    /// baseline-relative top and bottom edges.
+    pub fn scale_strikethrough(
+        &self,
+        size_points: u16,
+    ) -> Result<ScaledDecorationGeometry, ModelError> {
+        self.scale_decoration(self.strikethrough, size_points)
+    }
+
+    fn scale_decoration(
+        &self,
+        metrics: ResolvedDecorationMetrics,
+        size_points: u16,
+    ) -> Result<ScaledDecorationGeometry, ModelError> {
+        self.validate()?;
+        validate_font_size(size_points)?;
+        let bottom = decoration_bottom(metrics)?;
+        let font_top = scale_signed_font_units(metrics.position, self.units_per_em, size_points)?;
+        let mut font_bottom = scale_signed_font_units(bottom, self.units_per_em, size_points)?;
+        if font_top == font_bottom {
+            font_bottom = FixedPoint::from_raw(
+                font_bottom
+                    .raw()
+                    .checked_sub(1)
+                    .ok_or(ModelError::InvalidFontMetrics)?,
+            );
+        }
+        if font_top <= font_bottom {
+            return Err(ModelError::InvalidFontMetrics);
+        }
+        Ok(ScaledDecorationGeometry {
+            font_top,
+            font_bottom,
+        })
+    }
+}
+
+fn valid_decoration_metrics(metrics: ResolvedDecorationMetrics) -> bool {
+    metrics.position.unsigned_abs() <= MAX_METRIC_UNITS as u32
+        && metrics.thickness > 0
+        && metrics.thickness <= MAX_METRIC_UNITS as u32
+        && decoration_bottom(metrics).is_ok()
+}
+
+fn decoration_bottom(metrics: ResolvedDecorationMetrics) -> Result<i32, ModelError> {
+    let thickness = i32::try_from(metrics.thickness).map_err(|_| ModelError::InvalidFontMetrics)?;
+    metrics
+        .position
+        .checked_sub(thickness)
+        .ok_or(ModelError::InvalidFontMetrics)
 }
 
 fn validate_font_size(size_points: u16) -> Result<(), ModelError> {
@@ -515,6 +599,10 @@ fn environment_fingerprint(
         hash.i32(face.metrics.ascender);
         hash.i32(face.metrics.descender);
         hash.i32(face.metrics.line_gap);
+        hash.i32(face.metrics.underline.position);
+        hash.u32(face.metrics.underline.thickness);
+        hash.i32(face.metrics.strikethrough.position);
+        hash.u32(face.metrics.strikethrough.thickness);
         hash.usize(face.metrics.scalar_advances.len());
         for (scalar, advance) in &face.metrics.scalar_advances {
             hash.u32(*scalar as u32);

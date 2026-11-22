@@ -252,6 +252,8 @@ impl ScreenplayLayout {
             display_boundary_offsets: span.display_boundary_offsets,
             underline: span.underline,
             strikethrough: span.strikethrough,
+            underline_geometry: span.underline_geometry,
+            strikethrough_geometry: span.strikethrough_geometry,
         })
         .collect::<Vec<_>>();
         let text_width = FixedPoint::from_raw(

@@ -20,6 +20,7 @@ use scriptcraft_model::{
     project::Project,
     typography::{
         EffectiveTextColor, FontResolutionKind, ResolvedFontId, ResolvedFontSourceKind,
+        ScaledDecorationGeometry,
     },
 };
 use std::collections::BTreeMap;
@@ -627,34 +628,29 @@ fn page_content(
                     .checked_add(span.geometry.width.raw())
                     .ok_or(ExportError::InvalidLayoutGeometry)?,
             );
-            let leading = line.vertical_metrics.leading;
-            if span.underline {
-                let underline_y = y
-                    .raw()
-                    .checked_add(ratio_raw(leading, 12)?)
-                    .map(FixedPoint::from_raw)
-                    .ok_or(ExportError::InvalidLayoutGeometry)?;
-                append_content(&mut output, &format!(
-                    "q {red} {green} {blue} RG 0.6 w {} {} m {} {} l S Q\n",
-                    x.decimal_string(),
-                    underline_y.decimal_string(),
-                    right.decimal_string(),
-                    underline_y.decimal_string()
-                ))?;
+            if let Some(geometry) = span.underline_geometry {
+                append_decoration_rect(
+                    &mut output,
+                    x,
+                    right,
+                    y,
+                    geometry,
+                    &red,
+                    &green,
+                    &blue,
+                )?;
             }
-            if span.strikethrough {
-                let strike_y = y
-                    .raw()
-                    .checked_add(ratio_raw(leading, 48)?)
-                    .map(FixedPoint::from_raw)
-                    .ok_or(ExportError::InvalidLayoutGeometry)?;
-                append_content(&mut output, &format!(
-                    "q {red} {green} {blue} RG 0.6 w {} {} m {} {} l S Q\n",
-                    x.decimal_string(),
-                    strike_y.decimal_string(),
-                    right.decimal_string(),
-                    strike_y.decimal_string()
-                ))?;
+            if let Some(geometry) = span.strikethrough_geometry {
+                append_decoration_rect(
+                    &mut output,
+                    x,
+                    right,
+                    y,
+                    geometry,
+                    &red,
+                    &green,
+                    &blue,
+                )?;
             }
         }
     }
@@ -671,6 +667,50 @@ fn append_content(output: &mut String, text: &str) -> Result<(), ExportError> {
     }
     output.push_str(text);
     Ok(())
+}
+
+/// Emits one canonical baseline-relative decoration as a filled PDF rectangle.
+fn append_decoration_rect(
+    output: &mut String,
+    x: FixedPoint,
+    right: FixedPoint,
+    baseline: FixedPoint,
+    geometry: ScaledDecorationGeometry,
+    red: &str,
+    green: &str,
+    blue: &str,
+) -> Result<(), ExportError> {
+    let pdf_top = baseline
+        .raw()
+        .checked_add(geometry.font_top.raw())
+        .ok_or(ExportError::InvalidLayoutGeometry)?;
+    let pdf_bottom = baseline
+        .raw()
+        .checked_add(geometry.font_bottom.raw())
+        .ok_or(ExportError::InvalidLayoutGeometry)?;
+    let height = pdf_top
+        .checked_sub(pdf_bottom)
+        .ok_or(ExportError::InvalidLayoutGeometry)?;
+    let width = right
+        .raw()
+        .checked_sub(x.raw())
+        .ok_or(ExportError::InvalidLayoutGeometry)?;
+    if height <= 0 || width < 0 {
+        return Err(ExportError::InvalidLayoutGeometry);
+    }
+    if width == 0 {
+        return Ok(());
+    }
+    append_content(
+        output,
+        &format!(
+            "q {red} {green} {blue} rg {} {} {} {} re f Q\n",
+            x.decimal_string(),
+            FixedPoint::from_raw(pdf_bottom).decimal_string(),
+            FixedPoint::from_raw(width).decimal_string(),
+            FixedPoint::from_raw(height).decimal_string(),
+        ),
+    )
 }
 
 fn ref_text(id: PdfObjectId) -> String {
@@ -716,6 +756,14 @@ fn validate_span_geometry(
         || span.geometry.height != line.vertical_metrics.leading
         || span.geometry.height != line.geometry.height
         || span.geometry.width.raw() < 0
+        || span.underline != span.underline_geometry.is_some()
+        || span.strikethrough != span.strikethrough_geometry.is_some()
+        || span
+            .underline_geometry
+            .map_or(false, |geometry| geometry.font_top.raw() <= geometry.font_bottom.raw())
+        || span.strikethrough_geometry.map_or(false, |geometry| {
+            geometry.font_top.raw() <= geometry.font_bottom.raw()
+        })
     {
         return Err(ExportError::InvalidLayoutGeometry);
     }
@@ -745,20 +793,6 @@ fn validate_scalar_boundaries(span: &PositionedStyledSpan) -> Result<(), ExportE
         return Err(ExportError::InvalidLayoutGeometry);
     }
     Ok(())
-}
-
-/// Rounds a positive percentage of a leading value to the nearest raw
-/// hundredth, with ties rounded upward, using checked integer arithmetic.
-fn ratio_raw(leading: FixedPoint, numerator: i64) -> Result<i64, ExportError> {
-    if leading.raw() <= 0 {
-        return Err(ExportError::InvalidLayoutGeometry);
-    }
-    let scaled = i128::from(leading.raw())
-        .checked_mul(i128::from(numerator))
-        .and_then(|value| value.checked_add(50))
-        .ok_or(ExportError::InvalidLayoutGeometry)?
-        / 100;
-    i64::try_from(scaled).map_err(|_| ExportError::InvalidLayoutGeometry)
 }
 
 fn base14_font_name(family: PdfBase14Family, bold: bool, italic: bool) -> &'static str {
