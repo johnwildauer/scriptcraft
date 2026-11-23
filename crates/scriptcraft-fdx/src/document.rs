@@ -18,8 +18,39 @@ pub struct FdxDocument {
     pub window_state: Option<WindowState>,
     /// Direct-root disposable zoom and body-editor selection, with safe defaults.
     pub text_state: TextState,
+    /// Disposable FDX ScriptPanel display mode; never screenplay semantics.
+    pub display_mode: ScriptPanelDisplayMode,
     /// Independent disposable visibility and marker color for the editor surfaces.
     pub invisibles: InvisiblesState,
+}
+
+/// Disposable FDX ScriptPanel presentation mode for the document body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScriptPanelDisplayMode {
+    Normal,
+    #[default]
+    Page,
+    Speed,
+}
+
+impl ScriptPanelDisplayMode {
+    /// Return the exact FDX spelling for this display mode.
+    pub const fn as_fdx_str(self) -> &'static str {
+        match self {
+            Self::Page => "Page",
+            Self::Normal => "Normal",
+            Self::Speed => "Speed",
+        }
+    }
+
+    pub(crate) fn from_fdx_str(value: &str) -> Option<Self> {
+        match value {
+            "Page" => Some(Self::Page),
+            "Normal" => Some(Self::Normal),
+            "Speed" => Some(Self::Speed),
+            _ => None,
+        }
+    }
 }
 
 /// RGB8 marker color projected from the root PageLayout InvisiblesColor setting.

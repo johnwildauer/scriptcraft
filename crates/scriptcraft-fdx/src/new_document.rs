@@ -172,6 +172,11 @@ pub(crate) fn make_new_document_nodes(
             context.text_state(),
             context.invisibles_state().show_body,
         )?));
+    root.children
+        .push(PreservedNode::Element(crate::split_state::script_panel_element(
+            &root.name,
+            context.display_mode(),
+        )));
     for definition in project.element_definitions().iter() {
         let settings = crate::element_settings_serialization::serialize_element_settings(definition, &root)?;
         root.children.push(PreservedNode::Element(settings));

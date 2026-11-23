@@ -179,6 +179,7 @@ impl ScriptCraftApp {
                 .unwrap_or(fdx::WindowState::DEFAULT),
             text_state,
             self.invisibles,
+            Self::fdx_display_mode_from_script_view_mode(self.script_view_mode),
         ) {
             Ok(outcome) => {
                 self.native_path = target.path().map(PathBuf::from);

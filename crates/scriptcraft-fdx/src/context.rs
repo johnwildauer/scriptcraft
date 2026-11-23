@@ -1,6 +1,6 @@
 use crate::{
     diagnostics::{FdxError, SaveDiagnosticCode},
-    document::{InvisiblesState, WindowState},
+    document::{InvisiblesState, ScriptPanelDisplayMode, WindowState},
     text_state::TextState,
 };
 use std::collections::BTreeSet;
@@ -22,6 +22,7 @@ pub struct SaveContext {
     session_open_timestamp: Option<String>,
     window_state: WindowState,
     text_state: TextState,
+    display_mode: ScriptPanelDisplayMode,
     invisibles_state: InvisiblesState,
 }
 
@@ -33,6 +34,7 @@ impl SaveContext {
             session_open_timestamp: None,
             window_state: WindowState::DEFAULT,
             text_state: TextState::DEFAULT,
+            display_mode: ScriptPanelDisplayMode::Page,
             invisibles_state: InvisiblesState::default(),
         }
     }
@@ -49,6 +51,11 @@ impl SaveContext {
 
     pub fn with_text_state(mut self, text_state: TextState) -> Self {
         self.text_state = text_state;
+        self
+    }
+
+    pub fn with_display_mode(mut self, display_mode: ScriptPanelDisplayMode) -> Self {
+        self.display_mode = display_mode;
         self
     }
 
@@ -75,6 +82,10 @@ impl SaveContext {
 
     pub(crate) const fn text_state(&self) -> TextState {
         self.text_state
+    }
+
+    pub(crate) const fn display_mode(&self) -> ScriptPanelDisplayMode {
+        self.display_mode
     }
 
     pub(crate) const fn invisibles_state(&self) -> InvisiblesState {

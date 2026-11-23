@@ -1,11 +1,31 @@
 use crate::app::ScriptCraftApp;
 use crate::settings::ThemeChoice;
 use eframe::egui;
-use scriptcraft_commands::{Appearance, Command, CommandRejection, EditorSurface};
+use scriptcraft_commands::{Appearance, Command, CommandRejection, EditorSurface, ScriptViewMode};
 
 use super::DesktopCommandOutcome;
 
 impl ScriptCraftApp {
+    pub(crate) fn script_view_mode_from_fdx(
+        mode: scriptcraft_fdx::ScriptPanelDisplayMode,
+    ) -> ScriptViewMode {
+        match mode {
+            scriptcraft_fdx::ScriptPanelDisplayMode::Normal => ScriptViewMode::Normal,
+            scriptcraft_fdx::ScriptPanelDisplayMode::Page => ScriptViewMode::Page,
+            scriptcraft_fdx::ScriptPanelDisplayMode::Speed => ScriptViewMode::Speed,
+        }
+    }
+
+    pub(crate) fn fdx_display_mode_from_script_view_mode(
+        mode: ScriptViewMode,
+    ) -> scriptcraft_fdx::ScriptPanelDisplayMode {
+        match mode {
+            ScriptViewMode::Normal => scriptcraft_fdx::ScriptPanelDisplayMode::Normal,
+            ScriptViewMode::Page => scriptcraft_fdx::ScriptPanelDisplayMode::Page,
+            ScriptViewMode::Speed => scriptcraft_fdx::ScriptPanelDisplayMode::Speed,
+        }
+    }
+
     pub(super) fn dispatch_view_command(
         &mut self,
         command: Command,

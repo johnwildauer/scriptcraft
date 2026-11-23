@@ -31,6 +31,8 @@ Definition-registry replacement, including Apply Template, invalidates every der
 
 Underline and strikethrough presentation on Body and managed TitlePage Content shall derive position and thickness from the exact resolved face's OpenType metrics at the effective style size. Each metric position identifies the top of its stroke and thickness extends downward. Repeated layout/cache reuse shall retain the resulting optional span geometry with complete resolved-environment identity; decorations shall not change text advances, wrapping, line-box advancement, baseline, pagination, page fit, or interaction geometry.
 
+The disposable Body mode persistence clarification below supersedes only AC-WRITING-002.15's statement that mode is not persisted to FDX. The exact bounded `SplitState/ScriptPanel/@DisplayMode` import and fallback, successful document activation, and detached Save/Save As projection are specified in AC-WRITING-003.13. Body mode remains outside screenplay/session semantics and does not alter geometry, zoom, dirty/undo state, Title Page Page mode, or output.
+
 ### Page visibility, zoom, and appearance
 
 These visible-page and view criteria retain their stable `AC-WRITING-006.*` IDs here; their parent [`REQ-WRITING-LOOP-006`](desktop-workspace.md) is owned by Desktop Workspace.

@@ -33,6 +33,7 @@ pub fn save_session<F: FdxStorageFileSystem>(
         fdx::WindowState::DEFAULT,
         text_state,
         fdx::InvisiblesState::default(),
+        fdx::ScriptPanelDisplayMode::Page,
     )
 }
 
@@ -57,6 +58,7 @@ pub fn save_session_with_window_state<F: FdxStorageFileSystem>(
         window_state,
         text_state,
         fdx::InvisiblesState::default(),
+        fdx::ScriptPanelDisplayMode::Page,
     )
 }
 
@@ -70,6 +72,7 @@ pub fn save_session_with_view_state<F: FdxStorageFileSystem>(
     window_state: fdx::WindowState,
     text_state: fdx::TextState,
     invisibles_state: fdx::InvisiblesState,
+    display_mode: fdx::ScriptPanelDisplayMode,
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
     save_session_with_codec_and_view_state(
         fs,
@@ -80,6 +83,7 @@ pub fn save_session_with_view_state<F: FdxStorageFileSystem>(
         window_state,
         text_state,
         invisibles_state,
+        display_mode,
     )
 }
 
@@ -127,6 +131,7 @@ fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandid
     window_state: fdx::WindowState,
     text_state: fdx::TextState,
     invisibles_state: fdx::InvisiblesState,
+    display_mode: fdx::ScriptPanelDisplayMode,
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
     let operation = match &mode {
         FdxSaveMode::Save => fdx::SaveOperation::Save,
@@ -136,7 +141,8 @@ fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandid
         .with_session_open_timestamp(session.session_open_timestamp().to_owned())
         .with_window_state(window_state)
         .with_text_state(text_state)
-        .with_invisibles_state(invisibles_state);
+        .with_invisibles_state(invisibles_state)
+        .with_display_mode(display_mode);
     save_session_with_context(fs, session, target, mode, context, codec)
 }
 

@@ -505,6 +505,7 @@ impl ScriptCraftApp {
                     StagedOpenDisposition::FreshUnsaved => ActivationPersistence::FreshUnsaved,
                 };
                 let document = candidate.document;
+                let display_mode = document.display_mode;
                 staged_open_activation_outcome(self.activate_opened_project(
                     document.project,
                     persistence,
@@ -513,6 +514,7 @@ impl ScriptCraftApp {
                     document.window_state,
                     document.text_state,
                     document.invisibles,
+                    display_mode,
                 ))
             }
             Ok(FdxImportOutcome::Cancelled { .. }) => {
@@ -536,6 +538,7 @@ impl ScriptCraftApp {
         window_state: Option<fdx::WindowState>,
         text_state: fdx::TextState,
         invisibles: fdx::InvisiblesState,
+        display_mode: fdx::ScriptPanelDisplayMode,
     ) -> Result<(), StagedOpenOutcome> {
         let (native_path, fdx_baseline) = match persistence {
             ActivationPersistence::Saved { path, baseline } => {
@@ -587,9 +590,11 @@ impl ScriptCraftApp {
                 );
             }
         }
+        let script_view_mode = Self::script_view_mode_from_fdx(display_mode);
         self.active_body_dual_dialogue_group = None;
         self.surface_focused = false;
         self.session = replacement;
+        self.script_view_mode = script_view_mode;
         self.invisibles = invisibles;
         self.appearance_applications
             .clear(crate::chrome::theme::AppearanceContext::Elements);

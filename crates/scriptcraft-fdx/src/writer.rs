@@ -9,6 +9,7 @@ use crate::document::WindowState;
 use crate::lineage::reconcile_document_lineage;
 use crate::reader::{read_v6, validate_xml_chars};
 use crate::reconcile::reconcile_project_elements;
+use crate::split_state::reconcile_root_display_mode;
 use crate::text_state::{reconcile_root_text_state, reconcile_title_page_invisibles};
 use crate::verification::{
     first_identity_set_difference, first_source_tree_difference, identity_set, normalize_sections,
@@ -388,6 +389,7 @@ fn write_v6_inner(
                 context,
             )?);
             reconcile_root_window_state(&mut sections, context.window_state())?;
+            reconcile_root_display_mode(&mut sections, context.display_mode())?;
             reconcile_root_text_state(
                 &mut sections,
                 project,

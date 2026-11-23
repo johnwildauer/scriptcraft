@@ -219,6 +219,8 @@ impl ScriptCraftApp {
             effective_template_id,
         )
         .map_err(|error| format!("startup built-in template failed: {error:?}"))?;
+        let script_view_mode =
+            Self::script_view_mode_from_fdx(builtin_document.display_mode);
         let invisibles = builtin_document.invisibles;
         let project = builtin_document.project;
         let session = EditingSession::with_policy(project, EditPolicy::default())
@@ -317,7 +319,7 @@ impl ScriptCraftApp {
             effective_pixels_per_point: None,
             zoom_percent: 100,
             pinch_zoom_percent: 100.0,
-            script_view_mode: ScriptViewMode::Page,
+            script_view_mode,
             appearance_mode,
             appearance_applications: theme::AppearanceApplications::default(),
             theme_palette: theme::ApplicationPalette::from_visuals(

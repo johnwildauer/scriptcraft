@@ -121,7 +121,6 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
             _ => None,
         })
         .ok_or(FdxError::InvalidRoot)?;
-    let root_for_text_state = root.clone();
     if parsed
         .iter()
         .enumerate()
@@ -139,8 +138,19 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         FdxVersionStatus::Malformed => return Err(FdxError::InvalidVersion),
         FdxVersionStatus::Duplicate => return Err(FdxError::DuplicateVersion),
     }
+
+    let mut root_for_projection = root.clone();
+    let root_namespace = root_for_projection.name.namespace_uri.clone();
+    root_for_projection.children.retain(|child| {
+        !matches!(child, RawNode::Element(element)
+            if element.name.local_name == "Preview"
+                && element.name.namespace_uri == root_namespace)
+    });
+    let root = &root_for_projection;
+
     let document_ref_datetime = raw_document_ref_datetime(root);
     let window_state = raw_root_window_state(root);
+    let display_mode = crate::split_state::raw_root_display_mode(root);
 
     let root_namespace = root.name.namespace_uri.as_deref();
     let imported_element_settings =
@@ -269,11 +279,11 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     )?;
     preservation.rebuild_indexes();
     project.validate().map_err(map_model_error)?;
-    let text_state = raw_root_text_state(&root_for_text_state, &project);
+    let text_state = raw_root_text_state(root, &project);
     let invisibles = InvisiblesState {
-        show_body: raw_root_show_invisibles(&root_for_text_state),
-        show_title_page: raw_title_page_show_invisibles(&root_for_text_state),
-        color: crate::settings::raw_root_invisibles_color(&root_for_text_state),
+        show_body: raw_root_show_invisibles(root),
+        show_title_page: raw_title_page_show_invisibles(root),
+        color: crate::settings::raw_root_invisibles_color(root),
     };
     Ok(FdxDocument {
         project,
@@ -281,6 +291,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         document_ref_datetime,
         window_state,
         text_state,
+        display_mode,
         invisibles,
     })
 }
