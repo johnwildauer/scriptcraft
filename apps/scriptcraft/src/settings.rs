@@ -18,6 +18,46 @@ const SAVE_DEBOUNCE: Duration = Duration::from_millis(350);
 const BACKUP_CANDIDATES: u32 = 1_000;
 const TEMP_FILE_CANDIDATES: u32 = 1_000;
 
+const DEFAULT_TOOLBAR_IDS: &[&str] = &[
+    "flexible-space",
+    "new",
+    "open",
+    "save",
+    "save-as",
+    "flexible-space",
+    "title-page",
+    "elements",
+    "flexible-space",
+    "show-hide",
+    "export-text",
+    "export-pdf",
+    "flexible-space",
+    "overflow",
+];
+
+const DEFAULT_TITLE_PAGE_TOOLBAR_IDS: &[&str] = &[
+    "flexible-space",
+    "styles",
+    "alignment",
+    "flexible-space",
+    "close-title-page",
+    "overflow",
+];
+
+fn default_toolbar_ids() -> Vec<String> {
+    DEFAULT_TOOLBAR_IDS
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect()
+}
+
+fn default_title_page_toolbar_ids() -> Vec<String> {
+    DEFAULT_TITLE_PAGE_TOOLBAR_IDS
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect()
+}
+
 /// Durable global preferences. Missing fields inherit the version-1 defaults;
 /// unknown fields are intentionally tolerated during alpha.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -27,6 +67,8 @@ pub(crate) struct Settings {
     pub(crate) theme: ThemeChoice,
     pub(crate) template: String,
     pub(crate) show_ruler: bool,
+    pub(crate) toolbar: Vec<String>,
+    pub(crate) title_page_toolbar: Vec<String>,
 }
 
 impl Default for Settings {
@@ -36,6 +78,8 @@ impl Default for Settings {
             theme: ThemeChoice::System,
             template: DEFAULT_BUILTIN_TEMPLATE_ID.as_str().to_owned(),
             show_ruler: true,
+            toolbar: default_toolbar_ids(),
+            title_page_toolbar: default_title_page_toolbar_ids(),
         }
     }
 }

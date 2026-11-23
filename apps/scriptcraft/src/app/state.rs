@@ -14,7 +14,7 @@ use crate::views::script::{RevealIntent, RulerState};
 use crate::{
     chrome::{
         dynamic_controls::{DynamicElementControls, DynamicIssueSummary},
-        focus_mode, menu, theme,
+        focus_mode, menu, theme, toolbar_items::ConfiguredToolbars,
     },
     commands::CachedAppCommandProjection,
     documents::{
@@ -93,6 +93,7 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) menu_policy: menu::RuntimeMenuPolicy,
     pub(crate) menu_platform_choice: menu::MenuPlatformChoice,
     pub(crate) development_mode: bool,
+    pub(crate) configured_toolbars: ConfiguredToolbars,
     pub(crate) settings_store: SettingsStore,
     #[cfg(target_os = "macos")]
     pub(crate) native_menu: Option<macos_menu::NativeMenuController>,
@@ -214,6 +215,7 @@ impl ScriptCraftApp {
         settings_store: SettingsStore,
         development_mode: bool,
     ) -> Result<Self, String> {
+        let configured_toolbars = ConfiguredToolbars::resolve(settings_store.settings());
         let fresh_document_title = fresh_document_title_for_builtin_template(effective_template_id);
         let builtin_document = scriptcraft_fdx::instantiate_builtin_template(effective_template_id)
             .map_err(|error| format!("startup built-in template failed: {error:?}"))?;
@@ -241,6 +243,7 @@ impl ScriptCraftApp {
             menu_policy,
             menu_platform_choice,
             development_mode,
+            configured_toolbars,
             settings_store,
             #[cfg(target_os = "macos")]
             native_menu: None,

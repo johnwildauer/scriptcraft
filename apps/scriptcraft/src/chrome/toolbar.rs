@@ -1,7 +1,6 @@
 use super::toolbar_items::{
     EnablementPolicy, IconSpec, ToolbarBehavior, ToolbarGraphic, ToolbarIconVariant,
-    ToolbarItemSpec, ToolbarLayoutPolicy, OVERFLOW_ITEM_SPEC, TEMPORARY_TOOLBAR_ITEMS,
-    TITLE_PAGE_TOOLBAR_ITEMS,
+    ToolbarItemSpec, ToolbarLayoutPolicy,
 };
 use crate::app::ScriptCraftApp;
 use crate::chrome::element_choices::ElementChoice;
@@ -311,14 +310,11 @@ fn focused_body_element_type_key(project: &Project, focus: Position) -> Option<E
         .map(|definition| definition.key.clone())
 }
 
-pub(super) fn toolbar_items_for(availability: AppCommandAvailability) -> [ToolbarItemSpec; 14] {
-    let mut items = TEMPORARY_TOOLBAR_ITEMS;
-    apply_toolbar_enablement(&mut items, availability);
-    items
-}
-
-fn title_page_toolbar_items_for(availability: AppCommandAvailability) -> [ToolbarItemSpec; 6] {
-    let mut items = TITLE_PAGE_TOOLBAR_ITEMS;
+fn toolbar_items_for(
+    configured_items: &[ToolbarItemSpec],
+    availability: AppCommandAvailability,
+) -> Vec<ToolbarItemSpec> {
+    let mut items = configured_items.to_vec();
     apply_toolbar_enablement(&mut items, availability);
     items
 }
@@ -375,6 +371,7 @@ impl ShowHideAction {
 pub(super) struct ToolbarAllocation {
     pub(super) visible: Vec<(ToolbarItemSpec, f32)>,
     pub(super) overflow: Vec<ToolbarItemSpec>,
+    pub(super) overflow_indicator: Option<ToolbarItemSpec>,
     pub(super) overflow_width: f32,
     pub(super) row_width: f32,
 }
@@ -524,9 +521,11 @@ where
         .copied()
         .filter(|item| item.behavior != ToolbarBehavior::OverflowMenu)
         .collect();
-    let overflow_width = catalog_items
+    let overflow_indicator = catalog_items
         .iter()
         .find(|item| item.behavior == ToolbarBehavior::OverflowMenu)
+        .copied();
+    let overflow_width = overflow_indicator
         .and_then(|item| match item.layout {
             ToolbarLayoutPolicy::FixedWidth(width) => Some(width),
             _ => None,
@@ -564,6 +563,7 @@ where
                 })
                 .collect(),
             overflow: Vec::new(),
+            overflow_indicator,
             overflow_width: 0.0,
             row_width: available_width,
         };
@@ -610,6 +610,7 @@ where
     ToolbarAllocation {
         visible,
         overflow,
+        overflow_indicator,
         overflow_width,
         row_width,
     }
@@ -1599,11 +1600,12 @@ impl ScriptCraftApp {
         let available_width =
             toolbar_actual_available_width(content_rect, ui.clip_rect(), row_left);
         let availability = self.app_command_availability();
-        let toolbar_items = if title_page_toolbar {
-            title_page_toolbar_items_for(availability).to_vec()
+        let configured_items = if title_page_toolbar {
+            self.configured_toolbars.title_page_items()
         } else {
-            toolbar_items_for(availability).to_vec()
+            self.configured_toolbars.main_items()
         };
+        let toolbar_items = toolbar_items_for(configured_items, availability);
         let element_choices = self.refresh_dynamic_controls().choices.clone();
         let allocation = allocate_toolbar(
             &toolbar_items,
@@ -1633,12 +1635,12 @@ impl ScriptCraftApp {
                     ui.spacing_mut().item_spacing.y = vertical_item_spacing;
                     ui.add_space(TOOLBAR_ROW_PADDING);
                     let mut first = true;
-                    for (item, width) in allocation.visible.iter().copied() {
+                    for (index, (item, width)) in allocation.visible.iter().copied().enumerate() {
                         if !first {
                             ui.add_space(TOOLBAR_ITEM_GAP);
                         }
                         first = false;
-                        ui.push_id(item.id, |ui| match item.behavior {
+                        ui.push_id((index, item.id), |ui| match item.behavior {
                             ToolbarBehavior::Action(_) => {
                                 self.toolbar_action_button(ui, item, width, presentation)
                             }
@@ -1674,7 +1676,9 @@ impl ScriptCraftApp {
                             }
                         });
                     }
-                    if !allocation.overflow.is_empty() {
+                    if !allocation.overflow.is_empty()
+                        && allocation.overflow_indicator.is_some()
+                    {
                         if !first {
                             ui.add_space(TOOLBAR_ITEM_GAP);
                         }
@@ -1684,7 +1688,9 @@ impl ScriptCraftApp {
                             |ui| {
                                 self.toolbar_overflow_menu(
                                     ui,
-                                    OVERFLOW_ITEM_SPEC,
+                                    allocation
+                                        .overflow_indicator
+                                        .expect("configured overflow indicator checked above"),
                                     &allocation.overflow,
                                     surface,
                                     &element_choices,

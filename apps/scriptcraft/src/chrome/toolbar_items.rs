@@ -10,6 +10,7 @@ use egui_material_icons::{
     MaterialIcon,
 };
 use scriptcraft_commands::CommandId;
+use crate::settings::Settings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToolbarIconVariant {
@@ -56,11 +57,11 @@ impl IconSpec {
     }
 }
 
-/// Returns non-default optical-size/grade combinations explicitly used by the
-/// current icon catalog so startup registers only the faces the catalog needs.
+/// Returns non-default optical-size/grade combinations used by every built-in
+/// toolbar item, independent of the user's configured toolbar membership.
 pub(crate) fn custom_material_icon_axes() -> Vec<MaterialIconAxes> {
     let mut axes = Vec::new();
-    for item in TEMPORARY_TOOLBAR_ITEMS {
+    for item in BUILTIN_TOOLBAR_ITEM_CATALOG.iter().copied() {
         match item.graphic {
             ToolbarGraphic::Icon(icon) => add_custom_axes(icon, &mut axes),
             ToolbarGraphic::Icons(icons) => {
@@ -77,9 +78,6 @@ pub(crate) fn custom_material_icon_axes() -> Vec<MaterialIconAxes> {
             }
             ToolbarGraphic::None | ToolbarGraphic::TextDropdown => {}
         }
-    }
-    if let ToolbarGraphic::Icon(icon) = OVERFLOW_ITEM_SPEC.graphic {
-        add_custom_axes(icon, &mut axes);
     }
     axes
 }
@@ -166,6 +164,74 @@ pub(super) struct ToolbarItemSpec {
     pub(super) presentation: ItemPresentationOverrides,
 }
 
+/// Immutable effective toolbar composition resolved from the raw settings snapshot.
+pub(crate) struct ConfiguredToolbars {
+    main: Vec<ToolbarItemSpec>,
+    title_page: Vec<ToolbarItemSpec>,
+}
+
+impl ConfiguredToolbars {
+    /// Resolves both surfaces once, retaining only owned built-in specifications.
+    pub(crate) fn resolve(settings: &Settings) -> Self {
+        let defaults = Settings::default();
+        Self {
+            main: resolve_toolbar_list(&settings.toolbar, &defaults.toolbar, "main"),
+            title_page: resolve_toolbar_list(
+                &settings.title_page_toolbar,
+                &defaults.title_page_toolbar,
+                "Title Page",
+            ),
+        }
+    }
+
+    pub(super) fn main_items(&self) -> &[ToolbarItemSpec] {
+        &self.main
+    }
+
+    pub(super) fn title_page_items(&self) -> &[ToolbarItemSpec] {
+        &self.title_page
+    }
+}
+
+fn resolve_toolbar_list(
+    configured_ids: &[String],
+    default_ids: &[String],
+    surface: &str,
+) -> Vec<ToolbarItemSpec> {
+    let ids = if configured_ids.is_empty() {
+        default_ids
+    } else {
+        configured_ids
+    };
+    let mut resolved = Vec::with_capacity(ids.len());
+    let mut omitted = 0;
+    for id in ids {
+        if let Some(item) = builtin_item(id) {
+            resolved.push(item);
+        } else {
+            omitted += 1;
+        }
+    }
+    if omitted != 0 {
+        eprintln!("Warning: {surface} toolbar omitted {omitted} unknown item ID(s)");
+    }
+    if resolved.is_empty() {
+        default_ids
+            .iter()
+            .filter_map(|id| builtin_item(id))
+            .collect()
+    } else {
+        resolved
+    }
+}
+
+fn builtin_item(id: &str) -> Option<ToolbarItemSpec> {
+    BUILTIN_TOOLBAR_ITEM_CATALOG
+        .iter()
+        .find(|item| item.id == id)
+        .copied()
+}
+
 const fn action(
     id: &'static str,
     label: &'static str,
@@ -224,8 +290,8 @@ const ALIGNMENT_INLINE_GROUP_ITEM: ToolbarItemSpec = ToolbarItemSpec {
     presentation: ItemPresentationOverrides::NONE,
 };
 
-const FLEXIBLE_CHILD_SPACE: ToolbarItemSpec = ToolbarItemSpec {
-    id: "title-page-flexible-space",
+const FLEXIBLE_SPACE_ITEM: ToolbarItemSpec = ToolbarItemSpec {
+    id: "flexible-space",
     label: "Flexible Space",
     accessibility_name: "Flexible Space",
     caption_visible: false,
@@ -248,114 +314,76 @@ const CLOSE_TITLE_PAGE_ITEM: ToolbarItemSpec = ToolbarItemSpec {
     presentation: ItemPresentationOverrides::NONE,
 };
 
-pub(super) const TITLE_PAGE_TOOLBAR_ITEMS: [ToolbarItemSpec; 6] = [
-    FLEXIBLE_CHILD_SPACE,
+const NEW_ITEM: ToolbarItemSpec = action("new", "New", ICON_DRAFT, CommandId::FileNew);
+const OPEN_ITEM: ToolbarItemSpec = action("open", "Open", ICON_FILE_OPEN, CommandId::FileOpenRequest);
+const SAVE_ITEM: ToolbarItemSpec = action("save", "Save", ICON_SAVE, CommandId::FileSave);
+const SAVE_AS_ITEM: ToolbarItemSpec = action(
+    "save-as",
+    "Save As",
+    ICON_SAVE_AS,
+    CommandId::FileSaveAsRequest,
+);
+const TITLE_PAGE_ITEM: ToolbarItemSpec = action(
+    "title-page",
+    "Title Page",
+    ICON_BOOK_5,
+    CommandId::WindowTitlePageOpen,
+);
+const ELEMENTS_ITEM: ToolbarItemSpec = ToolbarItemSpec {
+    id: "elements",
+    label: "Elements",
+    accessibility_name: "Elements",
+    caption_visible: true,
+    graphic: ToolbarGraphic::TextDropdown,
+    behavior: ToolbarBehavior::ElementsRoleDropdown,
+    enablement: EnablementPolicy::Enabled,
+    layout: ToolbarLayoutPolicy::FixedWidth(128.0),
+    presentation: ItemPresentationOverrides::NONE,
+};
+const SHOW_HIDE_ITEM: ToolbarItemSpec = ToolbarItemSpec {
+    id: "show-hide",
+    label: "Show/Hide",
+    accessibility_name: "Show/Hide",
+    caption_visible: true,
+    graphic: SHOW_HIDE_GRAPHIC,
+    behavior: ToolbarBehavior::ShowHideDropdown,
+    enablement: EnablementPolicy::Enabled,
+    layout: ToolbarLayoutPolicy::Measured,
+    presentation: ItemPresentationOverrides::NONE,
+};
+const EXPORT_TEXT_ITEM: ToolbarItemSpec = ToolbarItemSpec {
+    id: "export-text",
+    label: "Export Text",
+    accessibility_name: "Export Text",
+    caption_visible: true,
+    graphic: ToolbarGraphic::Icon(IconSpec::new(ICON_UPLOAD_FILE)),
+    behavior: ToolbarBehavior::None,
+    enablement: EnablementPolicy::Disabled,
+    layout: ToolbarLayoutPolicy::Measured,
+    presentation: ItemPresentationOverrides::NONE,
+};
+const EXPORT_PDF_ITEM: ToolbarItemSpec = action(
+    "export-pdf",
+    "Export PDF",
+    ICON_PICTURE_AS_PDF,
+    CommandId::FileSaveAsPdf,
+);
+
+const BUILTIN_TOOLBAR_ITEM_CATALOG: [ToolbarItemSpec; 15] = [
+    FLEXIBLE_SPACE_ITEM,
+    SPACE_ITEM_SPEC,
+    NEW_ITEM,
+    OPEN_ITEM,
+    SAVE_ITEM,
+    SAVE_AS_ITEM,
+    TITLE_PAGE_ITEM,
+    ELEMENTS_ITEM,
+    SHOW_HIDE_ITEM,
+    EXPORT_TEXT_ITEM,
+    EXPORT_PDF_ITEM,
     STYLE_INLINE_GROUP_ITEM,
     ALIGNMENT_INLINE_GROUP_ITEM,
-    FLEXIBLE_CHILD_SPACE,
     CLOSE_TITLE_PAGE_ITEM,
-    OVERFLOW_ITEM_SPEC,
-];
-
-pub(super) const TEMPORARY_TOOLBAR_ITEMS: [ToolbarItemSpec; 14] = [
-    ToolbarItemSpec {
-        id: "flexible-space-leading",
-        label: "Flexible Space",
-        accessibility_name: "Flexible Space",
-        caption_visible: false,
-        graphic: ToolbarGraphic::None,
-        behavior: ToolbarBehavior::None,
-        enablement: EnablementPolicy::Enabled,
-        layout: ToolbarLayoutPolicy::FlexibleSpace,
-        presentation: ItemPresentationOverrides::NONE,
-    },
-    action("new", "New", ICON_DRAFT, CommandId::FileNew),
-    action("open", "Open", ICON_FILE_OPEN, CommandId::FileOpenRequest),
-    action("save", "Save", ICON_SAVE, CommandId::FileSave),
-    action(
-        "save-as",
-        "Save As",
-        ICON_SAVE_AS,
-        CommandId::FileSaveAsRequest,
-    ),
-    ToolbarItemSpec {
-        id: "flexible-space-pre-elements",
-        label: "Flexible Space",
-        accessibility_name: "Flexible Space",
-        caption_visible: false,
-        graphic: ToolbarGraphic::None,
-        behavior: ToolbarBehavior::None,
-        enablement: EnablementPolicy::Enabled,
-        layout: ToolbarLayoutPolicy::FlexibleSpace,
-        presentation: ItemPresentationOverrides::NONE,
-    },
-    action(
-        "title-page",
-        "Title Page",
-        ICON_BOOK_5,
-        CommandId::WindowTitlePageOpen,
-    ),
-    ToolbarItemSpec {
-        id: "elements",
-        label: "Elements",
-        accessibility_name: "Elements",
-        caption_visible: true,
-        graphic: ToolbarGraphic::TextDropdown,
-        behavior: ToolbarBehavior::ElementsRoleDropdown,
-        enablement: EnablementPolicy::Enabled,
-        layout: ToolbarLayoutPolicy::FixedWidth(128.0),
-        presentation: ItemPresentationOverrides::NONE,
-    },
-    ToolbarItemSpec {
-        id: "flexible-space-post-elements",
-        label: "Flexible Space",
-        accessibility_name: "Flexible Space",
-        caption_visible: false,
-        graphic: ToolbarGraphic::None,
-        behavior: ToolbarBehavior::None,
-        enablement: EnablementPolicy::Enabled,
-        layout: ToolbarLayoutPolicy::FlexibleSpace,
-        presentation: ItemPresentationOverrides::NONE,
-    },
-    ToolbarItemSpec {
-        id: "show-hide",
-        label: "Show/Hide",
-        accessibility_name: "Show/Hide",
-        caption_visible: true,
-        graphic: SHOW_HIDE_GRAPHIC,
-        behavior: ToolbarBehavior::ShowHideDropdown,
-        enablement: EnablementPolicy::Enabled,
-        layout: ToolbarLayoutPolicy::Measured,
-        presentation: ItemPresentationOverrides::NONE,
-    },
-    ToolbarItemSpec {
-        id: "export-text",
-        label: "Export Text",
-        accessibility_name: "Export Text",
-        caption_visible: true,
-        graphic: ToolbarGraphic::Icon(IconSpec::new(ICON_UPLOAD_FILE)),
-        behavior: ToolbarBehavior::None,
-        enablement: EnablementPolicy::Disabled,
-        layout: ToolbarLayoutPolicy::Measured,
-        presentation: ItemPresentationOverrides::NONE,
-    },
-    action(
-        "export-pdf",
-        "Export PDF",
-        ICON_PICTURE_AS_PDF,
-        CommandId::FileSaveAsPdf,
-    ),
-    ToolbarItemSpec {
-        id: "flexible-space-trailing",
-        label: "Flexible Space",
-        accessibility_name: "Flexible Space",
-        caption_visible: false,
-        graphic: ToolbarGraphic::None,
-        behavior: ToolbarBehavior::None,
-        enablement: EnablementPolicy::Enabled,
-        layout: ToolbarLayoutPolicy::FlexibleSpace,
-        presentation: ItemPresentationOverrides::NONE,
-    },
     OVERFLOW_ITEM_SPEC,
 ];
 

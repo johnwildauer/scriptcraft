@@ -6,7 +6,7 @@ ScriptCraft is a focused desktop writing tool for individual screenwriters. Writ
 
 ## What a writer can expect
 
-The desktop workspace also retains a writer's global appearance choice, default built-in template, and ruler-visibility preferences across launches. These preferences do not become part of a screenplay or change the content or definitions of an opened document; see [User settings](features/user-settings.md).
+The desktop workspace also retains a writer's global appearance choice, default built-in template, ruler-visibility preference, and separate ordered main/Title Page toolbar compositions across launches. Toolbar compositions select and order built-in items without changing their commands or presentation. These preferences do not become part of a screenplay or change the content or definitions of an opened document; see [User settings](features/user-settings.md).
 
 A writer can create and edit screenplay scenes using the element types and editing behavior defined by the current document. Unfamiliar element types remain editable rather than being silently converted to a default type. Writers can navigate and revise the draft and undo or redo changes. The editor presents a readable screenplay page view so writers can work with both text and page flow. Formatting stays focused on screenplay writing rather than attempting to be a general word processor.
 
@@ -36,7 +36,7 @@ Writers can create a new document from the Screenplay, Stageplay, or Dramatists 
 - [Title-page editing](features/title-page-editing.md) — work with the document's title page.
 - [Exports and print](features/exports-and-print.md) — create PDF and plain-text copies and print.
 - [Desktop workspace](features/desktop-workspace.md) — the desktop environment for working with a screenplay.
-- [User settings](features/user-settings.md) — persistent global appearance, default-template, and ruler-visibility preferences.
+- [User settings](features/user-settings.md) — persistent global appearance, default-template, ruler-visibility, and main/Title Page toolbar-composition preferences.
 - [Dual dialogue](features/dual-dialogue.md) — write and present paired dialogue.
 - [Fountain conversion](features/fountain-conversion.md) — bring Fountain screenplay text into ScriptCraft.
 - [macOS packaging](features/macos-packaging.md) — macOS app distribution.

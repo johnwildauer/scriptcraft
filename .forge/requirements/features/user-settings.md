@@ -8,10 +8,10 @@ User settings retain a writer's small set of app-wide preferences across launche
 
 ## Global preference scope and schema
 
-- **REQ-WRITING-LOOP-013: Persistent global user settings.** ScriptCraft shall retain the user's supported global appearance, default new-document template, and ruler-visibility choices while keeping them separate from screenplay documents and editing state.
-  - **AC-WRITING-013.1:** Schema version 1 contains exactly the `schema_version`, `theme`, `template`, and `show_ruler` fields, defaulting to System, `screenplay`, and shown (`true`). Missing fields use those version-1 defaults, including when an older settings file lacks `show_ruler`. Additional future global preferences are additive and defaulted; removing or renaming a field, theme variant, or template ID requires an explicit migration note and step.
+- **REQ-WRITING-LOOP-013: Persistent global user settings.** ScriptCraft shall retain the user's supported global appearance, default new-document template, ruler-visibility, and main/Title Page toolbar-composition choices while keeping them separate from screenplay documents and editing state.
+  - **AC-WRITING-013.1:** Schema version 1 contains exactly the `schema_version`, `theme`, `template`, `show_ruler`, `toolbar`, and `title_page_toolbar` fields, defaulting to System, `screenplay`, shown (`true`), and the exact current-layout toolbar ID arrays specified below. Missing fields use those version-1 defaults, including when an older settings file lacks `show_ruler` or either toolbar array. Removing or renaming a field, theme variant, template ID, or built-in toolbar item ID requires an explicit migration note and step.
   - **AC-WRITING-013.2:** The persisted theme choice is exactly one of System, Day, Night, or Midnight, encoded as the lowercase values `system`, `day`, `night`, or `midnight`. Only the choice is stored. System resolves to Day or Night from egui's supplied OS theme and follows live changes where egui supplies them; it never resolves to Midnight. Midnight is selected explicitly.
-  - **AC-WRITING-013.3:** The persisted default template is a stable ID from the packaged FDX built-in catalog, not a display name, path, or template contents. The FDX catalog remains the sole registry and validator. Other application globals are outside the version-1 schema.
+  - **AC-WRITING-013.3:** The persisted default template is a stable ID from the packaged FDX built-in catalog, not a display name, path, or template contents. The FDX catalog remains the sole registry and validator. The two toolbar arrays are global presentation preferences and do not define new commands or item presentation.
 
 ## Startup and launch precedence
 
@@ -23,14 +23,47 @@ User settings retain a writer's small set of app-wide preferences across launche
 
 ## Recovery, reset, and process limits
 
-- **AC-WRITING-013.6:** Missing files load defaults without creating a file merely because the app launched; partial files use defaults for missing fields; unknown keys are tolerated. An unknown theme resolves to System while retaining other valid values. An unknown template remains raw in memory and is not sanitized by an unrelated save. Malformed, unreadable, or unsupported-version files are backed up before defaults are used. Backup names are non-destructive (`settings.toml.bak`, then available bounded numeric suffixes); if preservation fails, ordinary persistence is disabled for that process. Missing schema version means version 1; only version 1 is emitted. Ordinary load and fallback do not themselves save.
-  - **AC-WRITING-013.6a:** `--reset-settings` restores System, Screenplay, and shown ruler visibility and queues a defaults write without a manual save. Reset is not a document operation and displays no success dialog.
+  - **AC-WRITING-013.6:** Missing files load defaults without creating a file merely because the app launched; partial files use defaults for missing fields; unknown keys are tolerated. An unknown theme resolves to System while retaining other valid values. Unknown template and toolbar IDs remain raw in memory and are not sanitized by an unrelated save. Toolbar resolution omits unknown IDs from the effective ordered list, preserves known order and repetitions, and emits at most one bounded startup warning per affected toolbar containing only the omitted count and surface (never raw IDs); if omission leaves no entries, the corresponding default list is used. Missing or explicitly empty toolbar arrays also use their corresponding current-layout default. Wrong toolbar field types and non-string array members are ordinary malformed-TOML inputs and follow whole-file backup/default recovery without coercion. Malformed, unreadable, or unsupported-version files are backed up before defaults are used. Backup names are non-destructive (`settings.toml.bak`, then available bounded numeric suffixes); if preservation fails, ordinary persistence is disabled for that process. Missing schema version means version 1; only version 1 is emitted. Ordinary load, filtering, and fallback do not themselves save; a later unrelated complete-snapshot write retains the raw toolbar arrays held in settings.
+  - **AC-WRITING-013.6a:** `--reset-settings` restores System, Screenplay, shown ruler visibility, and both exact default toolbar arrays specified below, and queues a defaults write without a manual save. Reset is not a document operation and displays no success dialog.
   - **AC-WRITING-013.6b:** No shutdown flush is promised; a change made inside the debounce interval may be lost on exit. Independent processes neither watch nor merge the file, and the last completed atomic save wins. A child launched during debounce may read older on-disk globals, while its explicit template argument remains authoritative.
   - **AC-WRITING-013.7:** The `show_ruler` preference is global and defaults to shown. The View and toolbar Show/Hide Ruler actions change it through the same real toggle; `--reset-settings` also restores shown visibility as specified in AC-WRITING-013.6a. Loading an older or partial file without the field yields shown visibility; merely loading settings or rendering the ruler does not write settings. A real toggle uses the existing no-op-aware settings update and complete-snapshot writer, without adding a write path. Ruler preference changes do not alter a document, session history, layout identity, or exports; the existing recovery and process limits in AC-WRITING-013.6–.6b remain unchanged.
 
 ## Schema changelog
 
-- **Version 1:** Schema containing `schema_version`, `theme`, `template`, and `show_ruler`; theme choices are System, Day, Night, and Midnight, template is a stable built-in FDX catalog ID, and `show_ruler` defaults to `true`. Missing fields use their version-1 defaults. Field, variant, or template-ID removal/renaming requires an explicit migration note and step. During alpha, unknown keys are tolerated on read but are not promised to survive a later rewrite.
+- **Version 1:** Schema containing exactly `schema_version`, `theme`, `template`, `show_ruler`, `toolbar`, and `title_page_toolbar`; theme choices are System, Day, Night, and Midnight, template is a stable built-in FDX catalog ID, and `show_ruler` defaults to `true`. The ordered toolbar arrays contain stable built-in item IDs and default to the exact current layouts below. Missing fields use their version-1 defaults. Toolbar unknown IDs are omitted only from the nonmutating effective projection; raw values survive unrelated complete-snapshot writes, while wrong types/non-string members follow existing whole-file recovery. Field, variant, template-ID, or toolbar-item-ID removal/renaming requires an explicit migration note and step. During alpha, unrelated unknown keys are tolerated on read but are not promised to survive a later rewrite.
+
+## Toolbar composition preference
+
+The `toolbar` and `title_page_toolbar` arrays are independent, process-global ordered selections of built-in toolbar item IDs. They control item membership and order only. Captions, accessibility names, graphics, commands, special dropdown/group behavior, initial disabled placeholders, measurements, and presentation overrides remain built in. Flexible space is an ordinary list entry; repeated known entries and their order are retained, and no flexible spacing is injected outside the arrays. The current defaults are:
+
+```toml
+toolbar = [
+  "flexible-space",
+  "new",
+  "open",
+  "save",
+  "save-as",
+  "flexible-space",
+  "title-page",
+  "elements",
+  "flexible-space",
+  "show-hide",
+  "export-text",
+  "export-pdf",
+  "flexible-space",
+  "overflow",
+]
+title_page_toolbar = [
+  "flexible-space",
+  "styles",
+  "alignment",
+  "flexible-space",
+  "close-title-page",
+  "overflow",
+]
+```
+
+The arrays are global preferences, not Project, EditingSession, FDX, command-wire, layout, export, dirty/history, or native-save state. Resolution is nonmutating and occurs once during app construction; the existing toolbar continues to project live availability and dispatch behavior. Overflow is itself a built-in item ID: when a custom list omits it, nonfitting items have no overflow affordance and no static indicator is synthesized; other menus and command entry points remain unchanged. Repeated rendered entries use ordered position as well as item ID for widget identity. No toolbar editor, drag/drop customization, live reload, or user-defined item presentation is included.
 
 ## Related documents
 
