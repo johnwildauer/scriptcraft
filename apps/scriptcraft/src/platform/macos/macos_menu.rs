@@ -5,8 +5,8 @@
 //! requests guarded root Close through the typed application command.
 
 use crate::chrome::menu_items::{
-    command_for_action, menu_item_is_checked, MenuAction, MenuEntrySpec, MenuItemBehavior,
-    MenuItemSpec, PlaceholderKind, MENU_CATALOG,
+    command_for_action, menu_item_is_checked, menu_item_label, MenuAction, MenuEntrySpec,
+    MenuItemBehavior, MenuItemSpec, PlaceholderKind, MENU_CATALOG,
 };
 use crate::chrome::shortcuts::{LogicalShortcut, ShortcutKey};
 use crate::commands::AppCommandAvailability;
@@ -58,6 +58,7 @@ struct NativeMenuProjection {
     availability: AppCommandAvailability,
     script_view_mode: ScriptViewMode,
     say_undual: bool,
+    invisibles_visible: bool,
 }
 
 #[derive(Debug, Default)]
@@ -171,6 +172,7 @@ impl NativeMenuController {
                 menu_spec.entries,
                 availability,
                 script_view_mode,
+                availability.invisibles_visible,
                 &mut command_items,
                 &mut retained_submenus,
                 &mut retained_predefined_items,
@@ -247,6 +249,7 @@ impl NativeMenuController {
             availability,
             script_view_mode,
             say_undual,
+            invisibles_visible: availability.invisibles_visible,
         };
         if !self.synchronization.should_synchronize(projection) {
             return;
@@ -267,6 +270,7 @@ impl NativeMenuController {
                 availability,
                 script_view_mode,
                 say_undual,
+                availability.invisibles_visible,
                 &self.command_items,
             );
         }
@@ -278,6 +282,7 @@ fn append_catalog_entries(
     entries: &'static [MenuEntrySpec],
     availability: AppCommandAvailability,
     script_view_mode: ScriptViewMode,
+    invisibles_visible: bool,
     command_items: &mut HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
     retained_submenus: &mut Vec<Submenu>,
     retained_predefined_items: &mut Vec<PredefinedMenuItem>,
@@ -298,6 +303,7 @@ fn append_catalog_entries(
                     spec.entries,
                     availability,
                     script_view_mode,
+                    invisibles_visible,
                     command_items,
                     retained_submenus,
                     retained_predefined_items,
@@ -314,6 +320,7 @@ fn append_catalog_entries(
                 item,
                 availability,
                 script_view_mode,
+                invisibles_visible,
                 command_items,
                 retained_submenus,
                 placeholder_items,
@@ -341,6 +348,7 @@ fn append_catalog_item(
     spec: &MenuItemSpec,
     availability: AppCommandAvailability,
     script_view_mode: ScriptViewMode,
+    invisibles_visible: bool,
     command_items: &mut HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
     retained_submenus: &mut Vec<Submenu>,
     placeholder_items: &mut Vec<MenuItem>,
@@ -351,7 +359,7 @@ fn append_catalog_item(
         MenuItemBehavior::Command(command) => {
             let item = MenuItem::with_id(
                 spec.id,
-                spec.label,
+                menu_item_label(spec, false, invisibles_visible),
                 availability.is_enabled(command),
                 accelerator,
             );
@@ -371,7 +379,7 @@ fn append_catalog_item(
             let item = if requires_checked_native_item(spec) {
                 let item = CheckMenuItem::with_id(
                     spec.id,
-                    spec.label,
+                    menu_item_label(spec, false, invisibles_visible),
                     availability.is_enabled(command.id()),
                     menu_item_is_checked(spec, script_view_mode),
                     accelerator,
@@ -383,7 +391,7 @@ fn append_catalog_item(
             } else {
                 let item = MenuItem::with_id(
                     spec.id,
-                    spec.label,
+                    menu_item_label(spec, false, invisibles_visible),
                     availability.is_enabled(command.id()),
                     accelerator,
                 );
@@ -430,6 +438,7 @@ fn synchronize_entries(
     availability: AppCommandAvailability,
     script_view_mode: ScriptViewMode,
     say_undual: bool,
+    invisibles_visible: bool,
     command_items: &HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
 ) {
     for entry in entries {
@@ -440,18 +449,14 @@ fn synchronize_entries(
                     availability,
                     script_view_mode,
                     say_undual,
+                    invisibles_visible,
                     command_items,
                 );
             }
             MenuEntrySpec::Item(spec) => {
                 let id = native_menu_id(spec);
                 if let Some((command, item)) = command_items.get(&id) {
-                    let label = if command.id() == CommandId::EditorDualDialogueToggle && say_undual
-                    {
-                        "Undual Dialogue"
-                    } else {
-                        spec.label
-                    };
+                    let label = menu_item_label(spec, say_undual, invisibles_visible);
                     item.set_text(label);
                     item.set_enabled(availability.is_enabled(command.id()));
                     item.set_checked(menu_item_is_checked(spec, script_view_mode));

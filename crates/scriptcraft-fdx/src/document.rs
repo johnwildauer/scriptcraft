@@ -18,6 +18,44 @@ pub struct FdxDocument {
     pub window_state: Option<WindowState>,
     /// Direct-root disposable zoom and body-editor selection, with safe defaults.
     pub text_state: TextState,
+    /// Independent disposable visibility and marker color for the editor surfaces.
+    pub invisibles: InvisiblesState,
+}
+
+/// RGB8 marker color projected from the root PageLayout InvisiblesColor setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvisiblesColor {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+impl Default for InvisiblesColor {
+    fn default() -> Self {
+        Self {
+            red: 128,
+            green: 128,
+            blue: 128,
+        }
+    }
+}
+
+/// Disposable, per-document editor view state; never screenplay semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvisiblesState {
+    pub show_body: bool,
+    pub show_title_page: bool,
+    pub color: InvisiblesColor,
+}
+
+impl Default for InvisiblesState {
+    fn default() -> Self {
+        Self {
+            show_body: false,
+            show_title_page: false,
+            color: InvisiblesColor::default(),
+        }
+    }
 }
 
 /// A privacy-safe import diagnostic. Settings ordinals identify source position

@@ -4,6 +4,7 @@ use crate::reader::{attribute, RawElement, RawNode};
 use crate::tree::new_lineage_element;
 use crate::FdxError;
 use crate::constants::FDX_ROOT;
+use crate::document::InvisiblesColor;
 use scriptcraft_model::formatting::FixedPoint;
 use scriptcraft_model::layout_inputs::{DocumentLeading, DocumentPageLayout};
 use scriptcraft_model::preservation::{PreservedElement, PreservedNode, PreservedSection, SourceName};
@@ -102,6 +103,54 @@ pub(crate) fn raw_root_page_layout(root: &RawElement) -> DocumentPageLayout {
     projection
 }
 
+/// Project the one supported direct-root PageLayout InvisiblesColor spelling.
+/// Ambiguous blocks/attributes and malformed colors use the standard gray.
+pub(crate) fn raw_root_invisibles_color(root: &RawElement) -> InvisiblesColor {
+    let namespace = root.name.namespace_uri.as_deref();
+    let mut layouts = root.children.iter().filter_map(|node| match node {
+        RawNode::Element(element) if is_fdx_element(element, "PageLayout", namespace) => {
+            Some(element)
+        }
+        _ => None,
+    });
+    let Some(layout) = layouts.next() else {
+        return InvisiblesColor::default();
+    };
+    if layouts.next().is_some() {
+        return InvisiblesColor::default();
+    }
+    let mut values = layout.attributes.iter().filter_map(|attribute| {
+        (attribute.name.namespace_uri.is_none()
+            && attribute.name.local_name == "InvisiblesColor")
+            .then_some(attribute.value.as_str())
+    });
+    let Some(value) = values.next() else {
+        return InvisiblesColor::default();
+    };
+    if values.next().is_some() {
+        return InvisiblesColor::default();
+    }
+    let Some(hex) = value.strip_prefix('#').filter(|hex| hex.len() == 12) else {
+        return InvisiblesColor::default();
+    };
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return InvisiblesColor::default();
+    }
+    let channel = |digits: &str| {
+        u16::from_str_radix(digits, 16)
+            .ok()
+            .map(|value| (value >> 8) as u8)
+    };
+    let (Some(red), Some(green), Some(blue)) = (
+        channel(&hex[0..4]),
+        channel(&hex[4..8]),
+        channel(&hex[8..12]),
+    ) else {
+        return InvisiblesColor::default();
+    };
+    InvisiblesColor { red, green, blue }
+}
+
 fn rounded_page_value(value: Option<&str>, inches: bool, allow_zero: bool) -> Option<u32> {
     let fixed = if inches {
         FixedPoint::parse_inches(value?)?
@@ -138,6 +187,7 @@ pub(crate) fn page_layout_element(
     let mut attributes = vec![
         ("BottomMargin".to_owned(), page_layout.margin_bottom.to_string()),
         ("DocumentLeading".to_owned(), document_leading.to_owned()),
+        ("InvisiblesColor".to_owned(), "#808080808080".to_owned()),
     ];
     if let Some(margin) = page_layout.footer_margin {
         if margin.raw() < 0 {

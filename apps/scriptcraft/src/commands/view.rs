@@ -11,6 +11,10 @@ impl ScriptCraftApp {
         ctx: &egui::Context,
     ) -> DesktopCommandOutcome {
         match command {
+            Command::ViewInvisiblesToggle => {
+                self.toggle_active_surface_invisibles(ctx);
+                DesktopCommandOutcome::EffectDispatched
+            }
             Command::WindowTitlePageOpen => {
                 self.open_title_page_window(ctx);
                 DesktopCommandOutcome::EffectDispatched

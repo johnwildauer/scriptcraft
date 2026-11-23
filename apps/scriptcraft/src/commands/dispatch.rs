@@ -40,6 +40,7 @@ pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::FileSave => Command::FileSave,
         CommandId::FileSaveAsRequest => Command::FileSaveAsRequest,
         CommandId::FileSaveAsPdf => Command::FileSaveAsPdf,
+        CommandId::ViewInvisiblesToggle => Command::ViewInvisiblesToggle,
         CommandId::FilePrint => Command::FilePrint,
         CommandId::ApplicationQuit => Command::ApplicationQuit,
         CommandId::EditUndo => Command::EditUndo,
@@ -194,7 +195,9 @@ impl ScriptCraftApp {
                 resolve_pdf_options,
                 open_print_panel,
             ),
-            command @ (Command::WindowTitlePageOpen | Command::WindowTitlePageClose) => {
+            command @ (Command::WindowTitlePageOpen
+            | Command::WindowTitlePageClose
+            | Command::ViewInvisiblesToggle) => {
                 self.dispatch_view_command(command, ctx)
             }
             command @ (Command::FormatElementsOpen

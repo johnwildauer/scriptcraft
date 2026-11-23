@@ -1,6 +1,6 @@
 use crate::{
     diagnostics::{FdxError, SaveDiagnosticCode},
-    document::WindowState,
+    document::{InvisiblesState, WindowState},
     text_state::TextState,
 };
 use std::collections::BTreeSet;
@@ -22,6 +22,7 @@ pub struct SaveContext {
     session_open_timestamp: Option<String>,
     window_state: WindowState,
     text_state: TextState,
+    invisibles_state: InvisiblesState,
 }
 
 impl SaveContext {
@@ -32,6 +33,7 @@ impl SaveContext {
             session_open_timestamp: None,
             window_state: WindowState::DEFAULT,
             text_state: TextState::DEFAULT,
+            invisibles_state: InvisiblesState::default(),
         }
     }
 
@@ -47,6 +49,11 @@ impl SaveContext {
 
     pub fn with_text_state(mut self, text_state: TextState) -> Self {
         self.text_state = text_state;
+        self
+    }
+
+    pub fn with_invisibles_state(mut self, invisibles_state: InvisiblesState) -> Self {
+        self.invisibles_state = invisibles_state;
         self
     }
 
@@ -68,6 +75,10 @@ impl SaveContext {
 
     pub(crate) const fn text_state(&self) -> TextState {
         self.text_state
+    }
+
+    pub(crate) const fn invisibles_state(&self) -> InvisiblesState {
+        self.invisibles_state
     }
 
     pub(crate) fn allocate_lineage_id(

@@ -32,6 +32,12 @@ Return/Tab execution and read-only guidance share current-document exact-key Beh
 - **Composition and flow:** Script View converts hit-test geometry into semantic document positions and sends selection/navigation commands through the headless executor. Keyboard shortcuts are accepted only by the focused editor adapter under the supported modifier/input-method gates. Copy serializes selected canonical body text; Cut writes that text to the host clipboard before dispatching deletion; Paste reads only on activation and dispatches nonempty text only after a successful read. All committed edits and selection changes share session validity and history rules.
 - **Boundary:** Clipboard objects, pointer coordinates, focus, IME preedit, and physical key details remain in the desktop adapter. Only typed text, semantic positions, directions, and selection endpoints cross the command boundary.
 
+### Editor invisibles overlay
+
+- **Requirements:** `AC-WRITING-001.6`; [Native Document Lifecycle](../../requirements/features/native-document-lifecycle.md) owns FDX view-state import and transactional output; [Exports and Print](exports-and-print.md) owns output exclusion.
+- **Composition and flow:** Desktop Script View paints a small dot at each projected U+0020 boundary and a pilcrow at paragraph endings and imported CR/LF line endings; an imported CRLF pair receives one line-break marker. Marks use canonical presentation positions, the document's resolved invisibles color, zoom-scaled sizing, and the existing per-line text clip. The independent Body flag gates all Body modes; the independent Title Page flag gates its editor-purpose Page presentation through the shared painter.
+- **Boundary:** Marks are paint-only, noninteractive, and absent from Print-purpose layouts. They do not change canonical text/advances, wrapping, pagination, layout/cache identity, selection/caret/pointer/IME geometry, clipboard, undo/redo, or dirty state, and no PDF, plain-text, or native-print path consumes the overlay.
+
 ## Decisions
 
 - Route every enabled editing action through the shared command and session path; do not let widgets mutate project state directly.

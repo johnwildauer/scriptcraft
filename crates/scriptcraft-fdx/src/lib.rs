@@ -44,8 +44,8 @@ pub use diagnostics::{
 };
 pub use document::{
     FdxDocument, FdxImportCandidate, FdxImportDiagnostic, FdxImportDiagnostics, FdxImportOutcome,
-    FdxMigrationConsent, FdxMigrationKind, FdxVersionDirection, FdxVersionStatus, WindowState,
-    MAX_FDX_IMPORT_DIAGNOSTICS,
+    FdxMigrationConsent, FdxMigrationKind, FdxVersionDirection, FdxVersionStatus, InvisiblesColor,
+    InvisiblesState, WindowState, MAX_FDX_IMPORT_DIAGNOSTICS,
 };
 pub use element_settings::{reconcile_project_element_settings, replace_project_element_settings};
 pub use import::import_fdx;

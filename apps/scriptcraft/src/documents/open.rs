@@ -504,13 +504,15 @@ impl ScriptCraftApp {
                     // here guarantees that an FDXT path cannot become a save target.
                     StagedOpenDisposition::FreshUnsaved => ActivationPersistence::FreshUnsaved,
                 };
+                let document = candidate.document;
                 staged_open_activation_outcome(self.activate_opened_project(
-                    candidate.document.project,
+                    document.project,
                     persistence,
                     fresh_document_title,
                     migration_status,
-                    candidate.document.window_state,
-                    candidate.document.text_state,
+                    document.window_state,
+                    document.text_state,
+                    document.invisibles,
                 ))
             }
             Ok(FdxImportOutcome::Cancelled { .. }) => {
@@ -533,6 +535,7 @@ impl ScriptCraftApp {
         migration_status: Option<&str>,
         window_state: Option<fdx::WindowState>,
         text_state: fdx::TextState,
+        invisibles: fdx::InvisiblesState,
     ) -> Result<(), StagedOpenOutcome> {
         let (native_path, fdx_baseline) = match persistence {
             ActivationPersistence::Saved { path, baseline } => {
@@ -587,6 +590,7 @@ impl ScriptCraftApp {
         self.active_body_dual_dialogue_group = None;
         self.surface_focused = false;
         self.session = replacement;
+        self.invisibles = invisibles;
         self.appearance_applications
             .clear(crate::chrome::theme::AppearanceContext::Elements);
         self.appearance_applications

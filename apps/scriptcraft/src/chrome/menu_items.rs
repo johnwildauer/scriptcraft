@@ -61,6 +61,23 @@ pub(crate) fn menu_item_is_checked(item: &MenuItemSpec, script_view_mode: Script
     }
 }
 
+pub(crate) fn menu_item_label(
+    item: &MenuItemSpec,
+    say_undual: bool,
+    invisibles_visible: bool,
+) -> &'static str {
+    match item.behavior {
+        MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle) if say_undual => {
+            "Undual Dialogue"
+        }
+        MenuItemBehavior::Command(CommandId::ViewInvisiblesToggle) if invisibles_visible => {
+            "Hide Invisibles"
+        }
+        MenuItemBehavior::Command(CommandId::ViewInvisiblesToggle) => "Show Invisibles",
+        _ => item.label,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlaceholderKind {
     Item,
@@ -528,13 +545,7 @@ const VIEW_ENTRIES: &[MenuEntrySpec] = &[
         None,
     ),
     SEP,
-    placeholder(
-        "view.document",
-        "Document",
-        "Document submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
+    MenuEntrySpec::Submenu(&VIEW_DOCUMENT_MENU),
     SEP,
     placeholder(
         "view.zoom",
@@ -618,6 +629,23 @@ const VIEW_ENTRIES: &[MenuEntrySpec] = &[
         None,
     ),
 ];
+
+const VIEW_DOCUMENT_ENTRIES: &[MenuEntrySpec] = &[command_item(
+    "view.document.invisibles",
+    "Show Invisibles",
+    "Show Invisibles",
+    None,
+    Some(primary_shortcut(ShortcutKey::J, false)),
+    None,
+    CommandId::ViewInvisiblesToggle,
+)];
+
+const VIEW_DOCUMENT_MENU: MenuSpec = MenuSpec {
+    id: "view.document",
+    label: "Document",
+    accessibility_name: "Document",
+    entries: VIEW_DOCUMENT_ENTRIES,
+};
 
 const FORMAT_ENTRIES: &[MenuEntrySpec] = &[
     command_item(

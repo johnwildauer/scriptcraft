@@ -32,6 +32,7 @@ pub fn save_session<F: FdxStorageFileSystem>(
         mode,
         fdx::WindowState::DEFAULT,
         text_state,
+        fdx::InvisiblesState::default(),
     )
 }
 
@@ -48,7 +49,15 @@ pub fn save_session_with_window_state<F: FdxStorageFileSystem>(
         scaling: 100,
         selection: session.selection(),
     };
-    save_session_with_view_state(fs, session, target, mode, window_state, text_state)
+    save_session_with_view_state(
+        fs,
+        session,
+        target,
+        mode,
+        window_state,
+        text_state,
+        fdx::InvisiblesState::default(),
+    )
 }
 
 /// Save with the editor selection and persisted whole-percent page zoom. Both
@@ -60,6 +69,7 @@ pub fn save_session_with_view_state<F: FdxStorageFileSystem>(
     mode: FdxSaveMode,
     window_state: fdx::WindowState,
     text_state: fdx::TextState,
+    invisibles_state: fdx::InvisiblesState,
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
     save_session_with_codec_and_view_state(
         fs,
@@ -69,6 +79,7 @@ pub fn save_session_with_view_state<F: FdxStorageFileSystem>(
         &NativeSaveCandidateCodec,
         window_state,
         text_state,
+        invisibles_state,
     )
 }
 
@@ -115,6 +126,7 @@ fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandid
     codec: &C,
     window_state: fdx::WindowState,
     text_state: fdx::TextState,
+    invisibles_state: fdx::InvisiblesState,
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
     let operation = match &mode {
         FdxSaveMode::Save => fdx::SaveOperation::Save,
@@ -123,7 +135,8 @@ fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandid
     let context = fdx::SaveContext::new(operation)
         .with_session_open_timestamp(session.session_open_timestamp().to_owned())
         .with_window_state(window_state)
-        .with_text_state(text_state);
+        .with_text_state(text_state)
+        .with_invisibles_state(invisibles_state);
     save_session_with_context(fs, session, target, mode, context, codec)
 }
 

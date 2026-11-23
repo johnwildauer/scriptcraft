@@ -342,6 +342,13 @@ fn apply_toolbar_enablement(items: &mut [ToolbarItemSpec], availability: AppComm
                     EnablementPolicy::Enabled
                 }
             }
+            ToolbarBehavior::InvisiblesDropdown => {
+                if availability.is_enabled(scriptcraft_commands::CommandId::ViewInvisiblesToggle) {
+                    EnablementPolicy::Enabled
+                } else {
+                    EnablementPolicy::Disabled
+                }
+            }
             ToolbarBehavior::None
             | ToolbarBehavior::ElementsRoleDropdown
             | ToolbarBehavior::OverflowMenu => item.enablement,
@@ -788,6 +795,101 @@ impl ScriptCraftApp {
                     ui.ctx(),
                 );
             }
+        }
+    }
+
+    fn invisibles_toolbar_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        item: ToolbarItemSpec,
+        width: f32,
+        presentation: ToolbarPresentationMetrics,
+    ) {
+        let palette = self.theme_palette.toolbar;
+        let group_height = toolbar_item_group_height(ui.style());
+        let (id, rect) = ui.allocate_space(Vec2::new(width, group_height));
+        let icon_control_size = Vec2::splat(presentation.icon_control_size);
+        let icon_control_rect = toolbar_icon_control_rect(rect, icon_control_size);
+        let icon_rect = toolbar_icon_hover_rect(icon_control_rect, TOOLBAR_ICON_HOVER_PADDING);
+        let enabled = item.enablement == EnablementPolicy::Enabled;
+        let response = ui
+            .interact(
+                icon_rect,
+                id.with("invisibles-dropdown"),
+                toolbar_action_sense(enabled),
+            )
+            .on_hover_cursor(toolbar_cursor_icon());
+        let accessible_name = format!("{}: {}", item.accessibility_name, self.invisibles_action_label());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                enabled,
+                accessible_name.clone(),
+            )
+        });
+        let fill = if enabled {
+            toolbar_action_fill(ui.style(), enabled, response.hovered())
+        } else {
+            Color32::TRANSPARENT
+        };
+        if fill != Color32::TRANSPARENT {
+            ui.painter().rect_filled(icon_rect, 2.0, fill);
+        }
+        paint_toolbar_graphic(ui, icon_control_rect.center(), item.graphic, item, palette);
+        if item.caption_visible {
+            let label_color = if enabled {
+                toolbar_presentation::enabled_foreground(ui, item, None)
+            } else {
+                toolbar_presentation::disabled_caption_foreground(item, palette)
+            };
+            let label_galley = ui.painter().layout_no_wrap(
+                item.label.to_owned(),
+                presentation.font_id(),
+                label_color,
+            );
+            let caption_rect = toolbar_caption_rect(
+                rect,
+                icon_control_rect.height(),
+                TOOLBAR_CONTROL_CAPTION_GAP,
+            );
+            let label_center = egui::pos2(caption_rect.center().x, caption_rect.center().y);
+            paint_toolbar_galley_with_color(
+                ui,
+                label_center - label_galley.size() / 2.0,
+                label_galley,
+                label_color,
+            );
+        }
+
+        let keyboard_activated = response.has_focus()
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+            });
+        let activated = enabled && (response.clicked() || keyboard_activated);
+        let mut chosen = false;
+        egui::Popup::menu(&response)
+            .open_memory(activated.then_some(egui::SetOpenCommand::Toggle))
+            .show(|ui| {
+                let action_label = self.invisibles_action_label();
+                let row = ui.add_enabled(enabled, egui::Button::new(action_label));
+                row.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        enabled,
+                        action_label,
+                    )
+                });
+                if row.clicked() && enabled {
+                    chosen = true;
+                    ui.close();
+                }
+            });
+
+        if chosen {
+            self.dispatch_command(
+                CommandInvocation::new(Command::ViewInvisiblesToggle, CommandOrigin::Toolbar),
+                ui.ctx(),
+            );
         }
     }
 
@@ -1283,6 +1385,7 @@ impl ScriptCraftApp {
     ) {
         let mut chosen_action = None;
         let mut chosen_element_type = None;
+        let mut chosen_invisibles_toggle = false;
         let icon = match indicator.graphic {
             ToolbarGraphic::Icon(icon) => icon,
             _ => unreachable!("overflow indicator must use a single Material icon"),
@@ -1342,6 +1445,41 @@ impl ScriptCraftApp {
                                     });
                             });
                         }
+                        ToolbarBehavior::InvisiblesDropdown => {
+                            let enabled = item.enablement == EnablementPolicy::Enabled;
+                            let accessible_name = format!(
+                                "{}: {}",
+                                item.accessibility_name,
+                                self.invisibles_action_label()
+                            );
+                            ui.add_enabled_ui(enabled, |ui| {
+                                let submenu = ui.menu_button(item.label, |ui| {
+                                    let action_label = self.invisibles_action_label();
+                                    let row = ui.add_enabled(
+                                        enabled,
+                                        egui::Button::new(action_label),
+                                    );
+                                    row.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::Button,
+                                            enabled,
+                                            action_label,
+                                        )
+                                    });
+                                    if row.clicked() && enabled {
+                                        chosen_invisibles_toggle = true;
+                                        ui.close();
+                                    }
+                                });
+                                submenu.response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        enabled,
+                                        accessible_name.clone(),
+                                    )
+                                });
+                            });
+                        }
                         ToolbarBehavior::StylesInlineGroup
                         | ToolbarBehavior::AlignmentInlineGroup => {
                             if item.enablement == EnablementPolicy::Enabled {
@@ -1382,6 +1520,12 @@ impl ScriptCraftApp {
                     ui.ctx(),
                 );
             }
+        }
+        if chosen_invisibles_toggle {
+            self.dispatch_command(
+                CommandInvocation::new(Command::ViewInvisiblesToggle, CommandOrigin::Toolbar),
+                ui.ctx(),
+            );
         }
         if let Some(key) = chosen_element_type {
             self.change_element_type_from_toolbar(key, ui.ctx());
@@ -1466,6 +1610,9 @@ impl ScriptCraftApp {
                                 presentation,
                                 &element_choices,
                             ),
+                            ToolbarBehavior::InvisiblesDropdown => {
+                                self.invisibles_toolbar_item(ui, item, width, presentation)
+                            }
                             ToolbarBehavior::StylesInlineGroup
                             | ToolbarBehavior::AlignmentInlineGroup => self
                                 .formatting_inline_group_button(

@@ -170,6 +170,7 @@ pub(crate) fn make_new_document_nodes(
             &root.name,
             project,
             context.text_state(),
+            context.invisibles_state().show_body,
         )?));
     for definition in project.element_definitions().iter() {
         let settings = crate::element_settings_serialization::serialize_element_settings(definition, &root)?;
@@ -198,7 +199,14 @@ pub(crate) fn make_new_document_nodes(
             vec![
                 ("Scaling", "100"),
                 ("Selection", "0,0"),
-                ("ShowInvisibles", "No"),
+                (
+                    "ShowInvisibles",
+                    if context.invisibles_state().show_title_page {
+                        "Yes"
+                    } else {
+                        "No"
+                    },
+                ),
             ],
         )));
     root.children.push(PreservedNode::Element(title_page));

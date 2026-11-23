@@ -1,12 +1,13 @@
 //! Reversible ScriptCraft mapping for disposable FDX TextState offsets.
 
 use crate::constants::FDX_ROOT;
+use crate::document::InvisiblesState;
 use crate::reader::{RawElement, RawNode};
 use crate::tree::new_lineage_element;
 use crate::FdxError;
 use scriptcraft_model::{
     position::{Position, Selection},
-    preservation::{PreservedNode, PreservedSection, SourceName},
+    preservation::{PreservedAttribute, PreservedNode, PreservedSection, SourceName},
     Project,
 };
 
@@ -125,7 +126,7 @@ pub fn parse_flat_selection(project: &Project, value: &str) -> Option<Selection>
 }
 
 /// Project a unique direct-root TextState into bounded root zoom/selection
-/// values. Nested title-page TextState remains opaque.
+/// values. Title Page TextState remains opaque except for its visibility flag.
 pub(crate) fn raw_root_text_state(root: &RawElement, project: &Project) -> TextState {
     let namespace = root.name.namespace_uri.as_deref();
     let mut blocks = root.children.iter().filter_map(|node| match node {
@@ -179,12 +180,72 @@ pub(crate) fn raw_root_text_state(root: &RawElement, project: &Project) -> TextS
     }
 }
 
+/// Project visibility only from a unique direct-root TextState and a unique
+/// unqualified ShowInvisibles attribute. Ambiguity safely resolves to hidden.
+pub(crate) fn raw_root_show_invisibles(root: &RawElement) -> bool {
+    let namespace = root.name.namespace_uri.as_deref();
+    let mut blocks = root.children.iter().filter_map(|node| match node {
+        RawNode::Element(element) if is_fdx_element(element, "TextState", namespace) => {
+            Some(element)
+        }
+        _ => None,
+    });
+    let Some(block) = blocks.next() else {
+        return false;
+    };
+    if blocks.next().is_some() {
+        return false;
+    }
+    unique_unqualified_attribute(block, "ShowInvisibles") == Some("Yes")
+}
+
+/// Project Title Page visibility only from a unique direct-root TitlePage and
+/// its unique direct TextState child in the root namespace.
+pub(crate) fn raw_title_page_show_invisibles(root: &RawElement) -> bool {
+    let namespace = root.name.namespace_uri.as_deref();
+    let mut pages = root.children.iter().filter_map(|node| match node {
+        RawNode::Element(element) if is_fdx_element(element, "TitlePage", namespace) => {
+            Some(element)
+        }
+        _ => None,
+    });
+    let Some(page) = pages.next() else {
+        return false;
+    };
+    if pages.next().is_some() {
+        return false;
+    }
+    let mut blocks = page.children.iter().filter_map(|node| match node {
+        RawNode::Element(element) if is_fdx_element(element, "TextState", namespace) => {
+            Some(element)
+        }
+        _ => None,
+    });
+    let Some(block) = blocks.next() else {
+        return false;
+    };
+    if blocks.next().is_some() {
+        return false;
+    }
+    unique_unqualified_attribute(block, "ShowInvisibles") == Some("Yes")
+}
+
+fn unique_unqualified_attribute<'a>(element: &'a RawElement, name: &str) -> Option<&'a str> {
+    let mut values = element.attributes.iter().filter_map(|attribute| {
+        (attribute.name.namespace_uri.is_none() && attribute.name.local_name == name)
+            .then_some(attribute.value.as_str())
+    });
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
 /// Generate the canonical root TextState projection with deterministic
 /// attribute order.
 pub(crate) fn text_state_element(
     parent: &SourceName,
     project: &Project,
     state: TextState,
+    show_body: bool,
 ) -> Result<scriptcraft_model::preservation::PreservedElement, FdxError> {
     let (start, end) =
         selection_to_flat_offsets(project, state.selection).ok_or(FdxError::InvalidValue)?;
@@ -200,7 +261,14 @@ pub(crate) fn text_state_element(
                     .to_string(),
             ),
             ("Selection".to_owned(), format!("{start},{end}")),
-            ("ShowInvisibles".to_owned(), "No".to_owned()),
+            (
+                "ShowInvisibles".to_owned(),
+                if show_body {
+                    "Yes".to_owned()
+                } else {
+                    "No".to_owned()
+                },
+            ),
         ],
     ))
 }
@@ -212,6 +280,7 @@ pub(crate) fn reconcile_root_text_state(
     sections: &mut [PreservedSection],
     project: &Project,
     state: TextState,
+    show_body: bool,
 ) -> Result<(), FdxError> {
     let mut roots = sections
         .iter_mut()
@@ -238,7 +307,7 @@ pub(crate) fn reconcile_root_text_state(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let canonical = text_state_element(&root.name, project, state)?;
+    let canonical = text_state_element(&root.name, project, state, show_body)?;
     if let Some(first) = indices.first().copied() {
         root.children[first] = PreservedNode::Element(canonical);
         for index in indices.into_iter().skip(1).rev() {
@@ -297,6 +366,139 @@ pub(crate) fn reconcile_root_text_state(
         || matches!(root.children.get(after), Some(PreservedNode::Element(_)))
     {
         root.children
+            .insert(after, PreservedNode::Text("\n\n  ".into()));
+    }
+    Ok(())
+}
+
+/// Reconcile only the direct Title Page TextState visibility projection on the
+/// detached transactional-save candidate, preserving all other source content.
+pub(crate) fn reconcile_title_page_invisibles(
+    sections: &mut [PreservedSection],
+    state: InvisiblesState,
+) -> Result<(), FdxError> {
+    let mut roots = sections
+        .iter_mut()
+        .flat_map(|section| &mut section.children)
+        .filter_map(|node| match node {
+            PreservedNode::Element(element) if element.name.local_name == FDX_ROOT => Some(element),
+            _ => None,
+        });
+    let root = roots.next().ok_or(FdxError::InvalidRoot)?;
+    if roots.next().is_some() {
+        return Err(FdxError::InvalidRoot);
+    }
+    let root_namespace = root.name.namespace_uri.clone();
+    let pages = root
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| match node {
+            PreservedNode::Element(element)
+                if element.name.local_name == "TitlePage"
+                    && element.name.namespace_uri == root_namespace =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(page_index) = pages.first().copied() else {
+        return Ok(());
+    };
+    if pages.len() != 1 {
+        return Err(FdxError::InvalidRoot);
+    }
+    let PreservedNode::Element(page) = &mut root.children[page_index] else {
+        return Err(FdxError::InvalidRoot);
+    };
+    let block_indices = page
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| match node {
+            PreservedNode::Element(element)
+                if element.name.local_name == "TextState"
+                    && element.name.namespace_uri == root_namespace =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let value = if state.show_title_page { "Yes" } else { "No" };
+    if let Some(first) = block_indices.first().copied() {
+        let PreservedNode::Element(block) = &mut page.children[first] else {
+            return Err(FdxError::InvalidRoot);
+        };
+        let mut retained = false;
+        block.attributes.retain_mut(|attribute| {
+            if attribute.name.namespace_uri.is_none()
+                && attribute.name.local_name == "ShowInvisibles"
+            {
+                if retained {
+                    return false;
+                }
+                retained = true;
+                attribute.value = value.to_owned();
+            }
+            true
+        });
+        if !retained {
+            block.attributes.push(PreservedAttribute {
+                name: SourceName {
+                    namespace_uri: None,
+                    local_name: "ShowInvisibles".to_owned(),
+                    qualified_name: Some("ShowInvisibles".to_owned()),
+                },
+                value: value.to_owned(),
+            });
+        }
+        for index in block_indices.into_iter().skip(1).rev() {
+            page.children.remove(index);
+        }
+        return Ok(());
+    }
+
+    let canonical = new_lineage_element(
+        &page.name,
+        "TextState",
+        vec![
+            ("Scaling".to_owned(), "100".to_owned()),
+            ("Selection".to_owned(), "0,0".to_owned()),
+            ("ShowInvisibles".to_owned(), value.to_owned()),
+        ],
+    );
+    let mut insertion = page
+        .children
+        .iter()
+        .position(|node| matches!(node,
+            PreservedNode::Element(element)
+                if element.name.local_name == "Content"
+                    && element.name.namespace_uri == root_namespace))
+        .map_or(page.children.len(), |index| index + 1);
+    while insertion < page.children.len()
+        && matches!(page.children.get(insertion), Some(PreservedNode::Text(text)) if text.trim().is_empty())
+    {
+        insertion += 1;
+    }
+    let needs_leading_space = insertion == 0
+        || matches!(
+            insertion.checked_sub(1).and_then(|index| page.children.get(index)),
+            Some(PreservedNode::Element(_))
+        );
+    if needs_leading_space {
+        page.children
+            .insert(insertion, PreservedNode::Text("\n\n  ".into()));
+        insertion += 1;
+    }
+    page.children
+        .insert(insertion, PreservedNode::Element(canonical));
+    let after = insertion + 1;
+    if after == page.children.len()
+        || matches!(page.children.get(after), Some(PreservedNode::Element(_)))
+    {
+        page.children
             .insert(after, PreservedNode::Text("\n\n  ".into()));
     }
     Ok(())

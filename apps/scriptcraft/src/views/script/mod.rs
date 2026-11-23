@@ -1,5 +1,6 @@
 mod caret;
 mod frame;
+mod invisibles;
 mod keyboard;
 mod navigation;
 mod page_policy;

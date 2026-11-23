@@ -7,6 +7,7 @@ use super::{
         normal_view_page_bottom_rule_visible, page_chrome_visible, page_local_screen_origin,
         NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH,
     },
+    invisibles::{paint_overlay as paint_invisibles_overlay, OverlayPaintError},
     text::{neutral_resolved_font, resolve_span_paint},
     zoom_scroll::PresentationMetrics,
     ScriptCraftApp,
@@ -131,6 +132,9 @@ impl ScriptCraftApp {
         );
         let painter = ui.painter_at(page_rect);
         let palette = self.theme_palette.script_workspace.page;
+        let show_invisibles = layout.purpose == scriptcraft_layout::LayoutPurpose::Editor
+            && self.invisibles_visible_for(surface);
+        let invisibles_color = show_invisibles.then(|| self.invisibles_color());
         if page_chrome_visible(presentation_mode) {
             painter.rect_filled(page_rect, 2.0, palette.paper);
             painter.rect_stroke(
@@ -403,6 +407,55 @@ impl ScriptCraftApp {
                             resolved.color,
                         );
                     }
+                }
+            }
+
+            if let Some(color) = invisibles_color {
+                let paragraph_text = match surface {
+                    EditorSurface::Body => self
+                        .session
+                        .project()
+                        .elements
+                        .get(line.element)
+                        .map(|element| element.text.as_str()),
+                    EditorSurface::TitlePage => self
+                        .session
+                        .project()
+                        .title_page
+                        .get(line.element)
+                        .map(|paragraph| paragraph.text.as_str()),
+                };
+                match paint_invisibles_overlay(
+                    &line_painter,
+                    page_rect.left(),
+                    line_top_screen,
+                    projection,
+                    paragraph_text,
+                    scale,
+                    metrics,
+                    color,
+                    &prepared_fonts,
+                ) {
+                    Ok(true) => {
+                        self.performance.galleys_built =
+                            self.performance.galleys_built.saturating_add(1);
+                    }
+                    Ok(false) => {}
+                    Err(OverlayPaintError::MissingNeutralFont) => self
+                        .post_typography_diagnostic_once(
+                            "TYPOGRAPHY_FACE_UNAVAILABLE:",
+                            "TYPOGRAPHY_FACE_UNAVAILABLE: prepared neutral face missing for invisibles",
+                        ),
+                    Err(OverlayPaintError::InvalidVerticalGeometry) => self
+                        .post_typography_diagnostic_once(
+                            "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID:",
+                            "TYPOGRAPHY_VERTICAL_GEOMETRY_INVALID: invisibles baseline projection unavailable",
+                        ),
+                    Err(OverlayPaintError::UnsupportedGlyphTopology) => self
+                        .post_typography_diagnostic_once(
+                            "TYPOGRAPHY_GLYPH_TOPOLOGY_UNSUPPORTED:",
+                            "TYPOGRAPHY_GLYPH_TOPOLOGY_UNSUPPORTED: invisibles glyph was not painted",
+                        ),
                 }
             }
         }

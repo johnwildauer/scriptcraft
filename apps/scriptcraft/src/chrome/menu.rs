@@ -2,8 +2,8 @@
 
 use super::element_shortcuts::ReservedElementChords;
 use super::menu_items::{
-    command_for_action, LogicalShortcut, MenuAction, MenuEntrySpec, MenuItemBehavior, MenuItemSpec,
-    PlaceholderKind, SemanticIcon, ShortcutKey, MENU_CATALOG,
+    command_for_action, menu_item_label, LogicalShortcut, MenuAction, MenuEntrySpec,
+    MenuItemBehavior, MenuItemSpec, PlaceholderKind, SemanticIcon, ShortcutKey, MENU_CATALOG,
 };
 use super::shortcuts::{shortcut_matches, ShortcutPlatform};
 use crate::commands::{command_for_id, AppCommandAvailability, CommandInvocation};
@@ -413,6 +413,7 @@ fn menu_content_metrics(
     ui: &egui::Ui,
     entries: &[MenuEntrySpec],
     say_undual: bool,
+    invisibles_visible: bool,
     metrics: MenuPresentationMetrics,
 ) -> MenuContentMetrics {
     let item_font = menu_font_id(ui, metrics.item_text_size);
@@ -428,7 +429,7 @@ fn menu_content_metrics(
             MenuEntrySpec::Item(item) => {
                 let label_width = measured_menu_text_width(
                     ui,
-                    menu_item_label(item, say_undual),
+                    menu_item_label(item, say_undual, invisibles_visible),
                     item_font.clone(),
                 );
                 let shortcut = menu_shortcut_label(item);
@@ -506,11 +507,12 @@ fn render_menu_popup(
     availability: AppCommandAvailability,
     script_view_mode: ScriptViewMode,
     say_undual: bool,
+    invisibles_visible: bool,
     pending: &mut PendingDesktopCommands,
     metrics: MenuPresentationMetrics,
     available_inner_viewport_height: f32,
 ) {
-    let content = menu_content_metrics(ui, entries, say_undual, metrics);
+    let content = menu_content_metrics(ui, entries, say_undual, invisibles_visible, metrics);
     let max_height = content
         .desired_content_height
         .min(nonnegative_finite_dimension(available_inner_viewport_height));
@@ -526,6 +528,7 @@ fn render_menu_popup(
                 availability,
                 script_view_mode,
                 say_undual,
+                invisibles_visible,
                 pending,
                 metrics,
             );
@@ -539,6 +542,7 @@ pub(crate) fn show_menu_bar(
     availability: AppCommandAvailability,
     script_view_mode: ScriptViewMode,
     say_undual: bool,
+    invisibles_visible: bool,
     pending: &mut PendingDesktopCommands,
 ) {
     let metrics = MENU_PRESENTATION;
@@ -597,6 +601,7 @@ pub(crate) fn show_menu_bar(
                             availability,
                             script_view_mode,
                             say_undual,
+                            invisibles_visible,
                             pending,
                             metrics,
                             popup_max_height,
@@ -641,6 +646,7 @@ fn render_menu_entries(
     availability: AppCommandAvailability,
     script_view_mode: ScriptViewMode,
     say_undual: bool,
+    invisibles_visible: bool,
     pending: &mut PendingDesktopCommands,
     metrics: MenuPresentationMetrics,
 ) {
@@ -665,6 +671,7 @@ fn render_menu_entries(
                             availability,
                             script_view_mode,
                             say_undual,
+                            invisibles_visible,
                             pending,
                             metrics,
                             available_inner_viewport_height,
@@ -681,7 +688,7 @@ fn render_menu_entries(
                         .is_some_and(|command| command_enabled(command.id(), availability)),
                     MenuItemBehavior::DisabledPlaceholder(_) => false,
                 };
-                let label = menu_item_label(item, say_undual);
+                let label = menu_item_label(item, say_undual, invisibles_visible);
                 let shortcut = menu_shortcut_label(item);
                 let icon_atom = menu_icon_atom(item, script_view_mode, metrics);
                 let mut label_atom =
@@ -724,15 +731,6 @@ fn menu_item_command(item: &MenuItemSpec) -> Option<Command> {
             scriptcraft_commands::EditorSurface::Body,
         )),
         MenuItemBehavior::DisabledPlaceholder(_) => None,
-    }
-}
-
-fn menu_item_label<'a>(item: &'a MenuItemSpec, say_undual: bool) -> &'a str {
-    if item.behavior == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle) && say_undual
-    {
-        "Undual Dialogue"
-    } else {
-        item.label
     }
 }
 

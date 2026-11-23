@@ -81,6 +81,7 @@ impl Default for TitlePageViewState {
 
 pub(crate) struct ScriptCraftApp {
     pub(crate) session: EditingSession,
+    pub(crate) invisibles: scriptcraft_fdx::InvisiblesState,
     pub(crate) root_close_lifecycle: RootCloseLifecycle,
     pub(crate) document_font_store: document_font::DocumentFontStore,
     pub(crate) prepared_document_fonts: Option<document_font::PreparedDocumentFonts>,
@@ -205,11 +206,12 @@ impl ScriptCraftApp {
             .unwrap_or(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID);
         let fresh_document_title =
             fresh_document_title_for_builtin_template(effective_template_id);
-        let project = scriptcraft_fdx::instantiate_builtin_template(
+        let builtin_document = scriptcraft_fdx::instantiate_builtin_template(
             effective_template_id,
         )
-        .map_err(|error| format!("startup built-in template failed: {error:?}"))?
-        .project;
+        .map_err(|error| format!("startup built-in template failed: {error:?}"))?;
+        let invisibles = builtin_document.invisibles;
+        let project = builtin_document.project;
         let session = EditingSession::with_policy(project, EditPolicy::default())
             .map_err(|error| format!("session failed: {error:?}"))?;
         let (notification_sink, notification_results) =
@@ -220,6 +222,7 @@ impl ScriptCraftApp {
             replacement_transport::event_channel();
         Ok(Self {
             session,
+            invisibles,
             root_close_lifecycle: RootCloseLifecycle::default(),
             document_font_store: document_font::DocumentFontStore::default(),
             prepared_document_fonts: None,

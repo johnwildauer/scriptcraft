@@ -4,13 +4,15 @@ use crate::constants::FDX_ROOT;
 use crate::constants::UTF8_BOM;
 use crate::content::{self, ImportedSemanticParagraph};
 use crate::diagnostics::{map_model_error, FdxError};
-use crate::document::{FdxDocument, FdxVersionStatus};
+use crate::document::{FdxDocument, FdxVersionStatus, InvisiblesState};
 use crate::identity::{
     collect_identities, validate_image_payload_budgets, validate_user_paragraph_data_locations,
 };
 use crate::lineage::raw_document_ref_datetime;
 use crate::settings::{normalize_root_page_layout_colors, raw_root_page_layout};
-use crate::text_state::raw_root_text_state;
+use crate::text_state::{
+    raw_root_show_invisibles, raw_root_text_state, raw_title_page_show_invisibles,
+};
 use crate::title_page::make_title_page_paragraph;
 use crate::tree::{preserve_misc_node, preserve_opaque_element};
 use crate::window_state::raw_root_window_state;
@@ -268,12 +270,18 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     preservation.rebuild_indexes();
     project.validate().map_err(map_model_error)?;
     let text_state = raw_root_text_state(&root_for_text_state, &project);
+    let invisibles = InvisiblesState {
+        show_body: raw_root_show_invisibles(&root_for_text_state),
+        show_title_page: raw_title_page_show_invisibles(&root_for_text_state),
+        color: crate::settings::raw_root_invisibles_color(&root_for_text_state),
+    };
     Ok(FdxDocument {
         project,
         import_diagnostics: imported_element_settings.diagnostics,
         document_ref_datetime,
         window_state,
         text_state,
+        invisibles,
     })
 }
 
@@ -646,8 +654,11 @@ fn make_element<R: std::io::BufRead>(
             return Err(FdxError::ResourceLimit);
         }
         let raw_name = utf8(attribute.key.as_ref())?.to_owned();
+        let best_effort_view_attribute =
+            matches!(raw_name.as_str(), "ShowInvisibles" | "InvisiblesColor");
         if !seen_raw_attributes.insert(raw_name.clone())
             && (!document_root || raw_name != "Version")
+            && !best_effort_view_attribute
         {
             return Err(FdxError::MalformedXml);
         }
@@ -665,8 +676,11 @@ fn make_element<R: std::io::BufRead>(
                 namespace_uri: value.into_owned(),
             });
         } else {
+            let best_effort_view_attribute = attribute_namespace.is_none()
+                && matches!(local_name.as_str(), "ShowInvisibles" | "InvisiblesColor");
             if !seen_expanded_attributes.insert((attribute_namespace.clone(), local_name.clone()))
                 && (!document_root || attribute_namespace.is_some() || local_name != "Version")
+                && !best_effort_view_attribute
             {
                 return Err(FdxError::MalformedXml);
             }

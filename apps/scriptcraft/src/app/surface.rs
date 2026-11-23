@@ -63,6 +63,43 @@ impl ScriptCraftApp {
         self.active_editor_surface
     }
 
+    pub(crate) fn invisibles_visible_for(&self, surface: EditorSurface) -> bool {
+        match surface {
+            EditorSurface::Body => self.invisibles.show_body,
+            EditorSurface::TitlePage => self.invisibles.show_title_page,
+        }
+    }
+
+    pub(crate) fn active_surface_invisibles_visible(&self) -> bool {
+        self.invisibles_visible_for(self.active_editor_surface)
+    }
+
+    pub(crate) fn invisibles_action_label(&self) -> &'static str {
+        if self.active_surface_invisibles_visible() {
+            "Hide Invisibles"
+        } else {
+            "Show Invisibles"
+        }
+    }
+
+    pub(crate) fn invisibles_color(&self) -> egui::Color32 {
+        let color = self.invisibles.color;
+        egui::Color32::from_rgb(color.red, color.green, color.blue)
+    }
+
+    pub(crate) fn toggle_active_surface_invisibles(&mut self, ctx: &egui::Context) {
+        match self.active_editor_surface {
+            EditorSurface::Body => self.invisibles.show_body = !self.invisibles.show_body,
+            EditorSurface::TitlePage => {
+                self.invisibles.show_title_page = !self.invisibles.show_title_page
+            }
+        }
+        ctx.request_repaint();
+        if self.title_page_window_open {
+            ctx.request_repaint_of(crate::views::title_page::viewport_id());
+        }
+    }
+
     pub(crate) fn swap_title_view_state(&mut self) {
         std::mem::swap(
             &mut self.surface_focused,

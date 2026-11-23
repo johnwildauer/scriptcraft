@@ -45,7 +45,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     app.theme_palette = theme_palette;
 
     if app.menu_policy.renders_in_window() {
-        let availability = app.app_command_availability();
+        let projection = app.app_command_projection();
         let menu_panel = egui::Panel::top("application-menu")
             .frame(chrome_frame(app.theme_palette.toolbar))
             .show_separator_line(false)
@@ -53,9 +53,10 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
             .show_inside(ui, |ui| {
                 menu::show_menu_bar(
                     ui,
-                    availability,
+                    projection.availability,
                     app.script_view_mode,
-                    app.dual_dialogue_menu_should_say_undual(),
+                    projection.say_undual,
+                    projection.invisibles_visible,
                     &mut app.pending_commands,
                 );
             });

@@ -178,6 +178,7 @@ impl ScriptCraftApp {
             self.latest_window_state
                 .unwrap_or(fdx::WindowState::DEFAULT),
             text_state,
+            self.invisibles,
         ) {
             Ok(outcome) => {
                 self.native_path = target.path().map(PathBuf::from);

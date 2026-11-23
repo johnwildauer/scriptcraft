@@ -31,7 +31,7 @@ const fn descriptor(
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 59] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 60] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -222,6 +222,11 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 59] = [
         CommandId::FileNewFromTemplate,
         "file",
         "template: builtin_template_value; host effect launches independent child",
+    ),
+    descriptor(
+        CommandId::ViewInvisiblesToggle,
+        "view",
+        "none; toggle active editor-surface presentation",
     ),
 ];
 

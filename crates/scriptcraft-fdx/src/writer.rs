@@ -9,7 +9,7 @@ use crate::document::WindowState;
 use crate::lineage::reconcile_document_lineage;
 use crate::reader::{read_v6, validate_xml_chars};
 use crate::reconcile::reconcile_project_elements;
-use crate::text_state::reconcile_root_text_state;
+use crate::text_state::{reconcile_root_text_state, reconcile_title_page_invisibles};
 use crate::verification::{
     first_identity_set_difference, first_source_tree_difference, identity_set, normalize_sections,
     same_non_paragraph_identities, validate_project_output_budgets,
@@ -388,7 +388,13 @@ fn write_v6_inner(
                 context,
             )?);
             reconcile_root_window_state(&mut sections, context.window_state())?;
-            reconcile_root_text_state(&mut sections, project, context.text_state())?;
+            reconcile_root_text_state(
+                &mut sections,
+                project,
+                context.text_state(),
+                context.invisibles_state().show_body,
+            )?;
+            reconcile_title_page_invisibles(&mut sections, context.invisibles_state())?;
         }
         *stage = WriterStage::ManagedSourceReconciliation;
         let mut definition_projection = state.clone();
