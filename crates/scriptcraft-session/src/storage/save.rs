@@ -9,6 +9,7 @@ use crate::editing::{
     map_selection_to_project, map_title_selection_to_project, EditError, EditingSession,
 };
 use scriptcraft_fdx::{self as fdx, same_dual_dialogue_projection, write_v6_for_save, FdxError};
+use scriptcraft_model::formatted_text::{normalize_project_runs, FormattedTextError};
 use scriptcraft_model::{
     cast_list, BodyOwner, ElementTypeKey, Project, StableId, TitlePageParagraph,
 };
@@ -174,11 +175,13 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
     let corrected = session
         .prepare_cast_list_save_candidate()
         .map_err(TransactionalSaveError::Session)?;
-    let prepared = codec.serialize(&corrected, &mut context)?;
+    let normalized = normalize_project_runs(&corrected)
+        .map_err(|error| TransactionalSaveError::Codec(map_normalization_error(error)))?;
+    let prepared = codec.serialize(&normalized, &mut context)?;
     let rebased_project = codec
         .reread(&prepared.bytes)
         .map_err(TransactionalSaveError::Codec)?;
-    if !same_save_projection(&corrected, &rebased_project) {
+    if !same_save_projection(&normalized, &rebased_project) {
         return Err(TransactionalSaveError::Codec(
             fdx::SaveDiagnosticCode::StorageSemanticProjectionMismatch.error(),
         ));
@@ -203,6 +206,16 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
     target.baseline = Some(receipt.baseline);
     *session = publishable_session;
     Ok(outcome)
+}
+
+fn map_normalization_error(error: FormattedTextError) -> FdxError {
+    match error {
+        FormattedTextError::TextTooLong
+        | FormattedTextError::TooManyRuns
+        | FormattedTextError::TooManyRunAttributes
+        | FormattedTextError::RunAttributeTooLarge => FdxError::ResourceLimit,
+        _ => FdxError::InvalidValue,
+    }
 }
 
 fn same_save_projection(expected: &Project, actual: &Project) -> bool {
@@ -343,12 +356,15 @@ fn map_body_owner_identity<'a>(
                     return Some(owner);
                 }
             }
-            return None;
+            // A repeated foreign ID is not an owner key. Continue only to the
+            // established exact-content-unique fallback below; repeated text
+            // remains ambiguous and returns None there.
         }
     }
 
-    // A no-foreign-ID fallback is deliberately content-unique rather than
-    // positional or Type-dependent. Ambiguous repeated text is not identity.
+    // The final fallback is deliberately content-unique rather than positional
+    // or Type-dependent. It can disambiguate changed/repeated foreign IDs only
+    // when the exact authored content is unique on both sides.
     let mut old_matches = old_project
         .elements
         .iter()

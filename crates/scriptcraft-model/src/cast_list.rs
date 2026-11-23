@@ -426,5 +426,24 @@ fn replace_cast_list_text(
             });
         }
     });
+    let normalized = crate::formatted_text::normalize_runs(
+        &project.elements[element_index].text,
+        &project.elements[element_index].runs,
+    )
+    .map_err(|_| CastListError::UnsupportedFormattedCastList)?;
+    BodyOwner::update(&mut project.elements[element_index], |element| {
+        element.runs = normalized;
+    });
+    if has_source_mapping {
+        let element = &project.elements[element_index];
+        project
+            .preservation
+            .as_mut()
+            .ok_or(CastListError::Preservation(
+                PreservationError::ManagedAnchorMissing,
+            ))?
+            .sync_managed_text_runs(&id, &element.text, &element.runs)
+            .map_err(CastListError::Preservation)?;
+    }
     Ok(())
 }

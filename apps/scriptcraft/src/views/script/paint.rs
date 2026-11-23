@@ -293,7 +293,7 @@ impl ScriptCraftApp {
                 .map(|span| {
                     resolve_span_paint(
                         &span.resolved_text_style,
-                        span.resolved_text_style.size as f32 * scale,
+                        span.resolved_text_style.size.to_points_f32() * scale,
                         palette,
                         &prepared_fonts,
                     )
@@ -521,7 +521,7 @@ impl ScriptCraftApp {
                             prepared.and_then(|prepared| {
                                 resolve_span_paint(
                                     style,
-                                    style.size as f32 * scale,
+                                    style.size.to_points_f32() * scale,
                                     palette,
                                     prepared,
                                 )

@@ -14,7 +14,6 @@ use scriptcraft_layout::{
 use scriptcraft_model::formatting::FixedPoint;
 use scriptcraft_model::typography::{
     EffectiveTextColor, FontResolutionKind, ResolvedFontSourceKind, ScaledDecorationGeometry,
-    MAX_SUPPORTED_FONT_SIZE,
 };
 use scriptcraft_model::{LayoutInputs, Project};
 use std::sync::Arc;
@@ -127,8 +126,10 @@ fn directwrite_style_flags(bold: bool, italic: bool) -> (bool, bool) {
     (bold, italic)
 }
 
-fn bounded_font_size(size: u16) -> Option<u16> {
-    (size > 0 && size <= MAX_SUPPORTED_FONT_SIZE).then_some(size)
+fn bounded_font_size(size: FixedPoint) -> Option<FixedPoint> {
+    (FixedPoint::SCALE..=1_000 * FixedPoint::SCALE)
+        .contains(&size.raw())
+        .then_some(size)
 }
 
 fn print_color(color: EffectiveTextColor) -> ([u8; 3], bool) {
@@ -187,7 +188,7 @@ pub(super) struct VectorTextRun {
     bold: bool,
     italic: bool,
     color_rgb: [u8; 3],
-    font_size_pt: u16,
+    font_size_pt: FixedPoint,
     underline: bool,
     strikethrough: bool,
     underline_geometry: Option<ScaledDecorationGeometry>,
@@ -243,7 +244,7 @@ impl VectorTextRun {
         self.color_rgb
     }
 
-    pub(super) fn font_size_pt(&self) -> u16 {
+    pub(super) fn font_size_pt(&self) -> FixedPoint {
         self.font_size_pt
     }
 

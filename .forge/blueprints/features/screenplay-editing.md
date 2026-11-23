@@ -38,6 +38,10 @@ Return/Tab execution and read-only guidance share current-document exact-key Beh
 - **Composition and flow:** Desktop Script View paints a small dot at each projected U+0020 boundary and a pilcrow at paragraph endings and imported CR/LF line endings; an imported CRLF pair receives one line-break marker. Marks use canonical presentation positions, the document's resolved invisibles color, zoom-scaled sizing, and the existing per-line text clip. The independent Body flag gates all Body modes; the independent Title Page flag gates its editor-purpose Page presentation through the shared painter.
 - **Boundary:** Marks are paint-only, noninteractive, and absent from Print-purpose layouts. They do not change canonical text/advances, wrapping, pagination, layout/cache identity, selection/caret/pointer/IME geometry, clipboard, undo/redo, or dirty state, and no PDF, plain-text, or native-print path consumes the overlay.
 
+### Canonical inline-run contract
+
+The model supplies the shared owned run normalizer and semantic equivalence rule used after mutations to touched Body and Title Page paragraphs and for detached save candidates. Exact text and valid UTF-8 boundaries remain unchanged; empty fragments disappear, empty paragraphs retain the no-run convention, and adjacent semantically equivalent runs merge. Style output is Bold, Italic, Underline, Strikeout, AllCaps, then alphabetized unknown tokens (including preserved duplicates); accepted Strikethrough/StrikeThrough spellings canonicalize to Strikeout. Empty Style is omitted, unknown attributes retain their names/values/order, and AllCaps remains display-only. Valid Size source spelling is retained while semantic comparison uses bounded fixed-point values; inherited and invalid source states remain distinct. Selected Font/Size/Color insertion and source repartitioning use the same normalized projection, with unsafe opaque topology remaining a transactional stop.
+
 ## Decisions
 
 ### Landed inline, paragraph, and pointer editing contracts

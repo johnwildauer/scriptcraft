@@ -68,6 +68,7 @@ pub(crate) enum MenuAction {
     SetScriptView(ScriptViewMode),
     SetInlineFont(InlineFontValue),
     SetInlineSize(InlineSizeValue),
+    ClearInlineSize,
     SetInlineColor(InlineColorValue),
     SetParagraphSpacing(ParagraphSpacingValue),
     SetSpaceBefore(SpaceBeforeLines),
@@ -129,6 +130,10 @@ pub(crate) fn command_for_action(action: MenuAction, surface: EditorSurface) -> 
         MenuAction::SetInlineSize(size) => Command::EditorRunFormattingSet {
             surface,
             patch: RunFormattingPatchValue { size: Some(size), ..RunFormattingPatchValue::default() },
+        },
+        MenuAction::ClearInlineSize => Command::EditorRunFormattingSet {
+            surface,
+            patch: RunFormattingPatchValue { clear_size: true, ..RunFormattingPatchValue::default() },
         },
         MenuAction::SetInlineColor(color) => Command::EditorRunFormattingSet {
             surface,
@@ -967,6 +972,7 @@ const FONT_ENTRIES: &[MenuEntrySpec] = &[
 ];
 
 const SIZE_ENTRIES: &[MenuEntrySpec] = &[
+    menu_command_item("format.size.default", "Element Default", None, MenuAction::ClearInlineSize),
     menu_command_item("format.size.7", "7", None, MenuAction::SetInlineSize(InlineSizeValue::Seven)),
     menu_command_item("format.size.8", "8", None, MenuAction::SetInlineSize(InlineSizeValue::Eight)),
     menu_command_item("format.size.9", "9", None, MenuAction::SetInlineSize(InlineSizeValue::Nine)),

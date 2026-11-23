@@ -3,8 +3,8 @@
 use super::navigation::find_managed_element_counted;
 use super::reconciliation::plain_source_name;
 use super::title::is_title_content_location;
-use super::title::source_attribute_matches_run;
 use super::*;
+use crate::formatted_text::normalize_runs;
 use crate::formatting::ParagraphAlignment;
 use crate::{
     element::{RunAttribute, ScreenplayElement, TextRun},
@@ -247,16 +247,20 @@ impl PreservationState {
         Ok(())
     }
 
-    /// Replaces the ordered source Text-node projection with an exact semantic
-    /// run projection while retaining each node's expanded names, namespace
-    /// bindings, and all run attributes. A non-Text child or source-text
-    /// mismatch is a safe-stop; callers stage this against a detached project.
+    /// Replaces the ordered source Text-node projection from the shared
+    /// normalized run sequence. Reuses compatible templates, retains required
+    /// expanded names and namespace bindings, and leaves non-Text siblings in
+    /// place. Opaque inline payload, an unbound namespaced attribute, or a
+    /// source-text mismatch remains a safe-stop; callers stage this against a
+    /// detached project.
     pub fn sync_managed_text_runs(
         &mut self,
         id: &StableId,
         expected_text: &str,
         runs: &[TextRun],
     ) -> Result<(), PreservationError> {
+        let normalized_runs = normalize_runs(expected_text, runs)
+            .map_err(|_| PreservationError::UnsupportedTextMapping)?;
         self.ensure_managed_paragraph_index();
         let title_source = self
             .indexed_location(id)?
@@ -265,7 +269,7 @@ impl PreservationState {
         if title_source && !is_plain_managed_paragraph(paragraph) {
             return Err(PreservationError::StructuralAttachmentConflict);
         }
-        if expected_text.is_empty() && runs.is_empty() {
+        if expected_text.is_empty() && normalized_runs.is_empty() {
             let mut remove = BTreeSet::new();
             let paragraph_name = paragraph.name.clone();
             for (index, node) in paragraph.children.iter_mut().enumerate() {
@@ -318,17 +322,7 @@ impl PreservationState {
         if source_text != expected_text {
             return Err(PreservationError::UnsupportedTextMapping);
         }
-        if text_elements.is_empty() {
-            return Err(PreservationError::UnsupportedTextMapping);
-        }
-        let effective = if runs.is_empty() {
-            vec![TextRun {
-                text: expected_text.to_owned(),
-                attributes: Vec::new(),
-            }]
-        } else {
-            runs.to_vec()
-        };
+        let effective = normalized_runs;
         if effective
             .iter()
             .map(|run| run.text.as_str())
@@ -337,67 +331,151 @@ impl PreservationState {
         {
             return Err(PreservationError::UnsupportedTextMapping);
         }
-        let mut replacements = BTreeMap::<usize, Vec<PreservedNode>>::new();
-        let mut text_offset = 0usize;
-        for (index, template) in &text_elements {
-            let segment_text = template
-                .children
+        if has_conflicting_expanded_run_attributes(
+            &text_elements
                 .iter()
-                .filter_map(|node| match node {
-                    PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>();
-            let end = text_offset.saturating_add(segment_text.len());
-            let mut segment_runs = slice_text_runs(&effective, text_offset..end)?;
-            if segment_runs.is_empty() && !segment_text.is_empty() {
-                return Err(PreservationError::UnsupportedTextMapping);
-            }
-            let mut replacement = Vec::with_capacity(segment_runs.len());
-            let has_opaque_descendants = template
-                .children
-                .iter()
-                .any(|node| !matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_)));
-            if has_opaque_descendants {
-                let unchanged_run = match segment_runs.as_slice() {
-                    [run] => {
-                        run.text == segment_text
-                            && template.attributes.iter().all(|source| {
-                                run.attributes.iter().any(|attribute| {
-                                    source_attribute_matches_run(source, attribute)
-                                })
-                            })
-                            && run.attributes.len() == template.attributes.len()
-                    }
-                    [] => segment_text.is_empty(),
-                    _ => false,
-                };
-                if !unchanged_run {
-                    return Err(PreservationError::UnsupportedRunTopology);
-                }
-                replacement.push(PreservedNode::Element((*template).clone()));
-            } else {
-                for run in segment_runs.drain(..) {
-                    replacement.push(PreservedNode::Element(sync_text_element_attributes(
-                        template, &run,
-                    )?));
-                }
-            }
-            replacements.insert(*index, replacement);
-            text_offset = end;
-        }
-        if text_offset != expected_text.len() {
+                .map(|(_, template)| *template)
+                .collect::<Vec<_>>(),
+        ) {
             return Err(PreservationError::UnsupportedTextMapping);
         }
-        let mut rebuilt =
-            Vec::with_capacity(paragraph.children.len().saturating_add(effective.len()));
-        for (index, child) in paragraph.children.iter().enumerate() {
-            if let Some(replacement) = replacements.remove(&index) {
-                rebuilt.extend(replacement);
-            } else {
-                rebuilt.push(child.clone());
+        let mut source_offset = 0usize;
+        for (slot, (index, template)) in text_elements.iter().enumerate() {
+            source_offset = source_offset.saturating_add(template_text(template).len());
+            let Some((next_index, _)) = text_elements.get(slot + 1) else {
+                continue;
+            };
+            let opaque_gap = paragraph.children[index + 1..*next_index]
+                .iter()
+                .any(|node| match node {
+                    PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                        !text.trim().is_empty()
+                    }
+                    _ => true,
+                });
+            if opaque_gap
+                && effective
+                    .iter()
+                    .scan(0usize, |offset, run| {
+                        *offset = offset.saturating_add(run.text.len());
+                        Some(*offset)
+                    })
+                    .all(|run_end| run_end != source_offset)
+            {
+                return Err(PreservationError::UnsupportedRunTopology);
             }
         }
+        let mut used_templates = BTreeSet::new();
+        let mut projected_slots = BTreeMap::<usize, PreservedNode>::new();
+        let mut generated_before_slot = BTreeMap::<usize, Vec<PreservedNode>>::new();
+        let mut next_template_slot = 0usize;
+        for run in &effective {
+            let matching = text_elements.iter().enumerate().find_map(|(slot, (_, template))| {
+                (slot >= next_template_slot
+                    && !used_templates.contains(&slot)
+                    && text_element_matches_run(template, run)
+                    && template_text(template) == run.text)
+                    .then_some(slot)
+            });
+            let namespace_compatible = text_elements.iter().enumerate().find_map(
+                |(slot, (_, template))| {
+                    (slot >= next_template_slot
+                        && !used_templates.contains(&slot)
+                        && !has_opaque_text_children(template)
+                        && text_element_can_represent_run(template, run))
+                    .then_some(slot)
+                },
+            );
+            let positional = text_elements
+                .iter()
+                .enumerate()
+                .find_map(|(slot, (_, template))| {
+                    (slot >= next_template_slot
+                        && !used_templates.contains(&slot)
+                        && !has_opaque_text_children(template)
+                        && !template_text(template).is_empty())
+                        .then_some(slot)
+                });
+            let selected = matching.or(namespace_compatible).or(positional);
+            let element = if let Some(slot) = selected {
+                used_templates.insert(slot);
+                let template = text_elements[slot].1;
+                if has_opaque_text_children(template) {
+                    if template_text(template) != run.text
+                        || !text_element_matches_run(template, run)
+                    {
+                        return Err(PreservationError::UnsupportedRunTopology);
+                    }
+                    template.clone()
+                } else {
+                    sync_text_element_attributes(template, run)?
+                }
+            } else {
+                new_plain_text_element(paragraph, run)?
+            };
+            let node = PreservedNode::Element(element);
+            if let Some(slot) = selected {
+                next_template_slot = slot.saturating_add(1);
+                projected_slots.insert(slot, node);
+            } else {
+                generated_before_slot
+                    .entry(next_template_slot)
+                    .or_default()
+                    .push(node);
+            }
+        }
+
+        let mut rebuilt = Vec::with_capacity(paragraph.children.len() + effective.len());
+        if text_elements.is_empty() {
+            let mut generated = generated_before_slot.remove(&0).unwrap_or_default();
+            generated.extend(projected_slots.into_values());
+            let insertion_index = paragraph
+                .children
+                .iter()
+                .position(|node| !matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_)))
+                .unwrap_or(paragraph.children.len());
+            for (index, child) in paragraph.children.iter().enumerate() {
+                if index == insertion_index {
+                    rebuilt.extend(generated.iter().cloned());
+                }
+                rebuilt.push(child.clone());
+            }
+            if insertion_index == paragraph.children.len() {
+                rebuilt.extend(generated);
+            }
+            paragraph.children = rebuilt.into();
+            return Ok(());
+        }
+        for (index, child) in paragraph.children.iter().enumerate() {
+            let Some(slot) = text_elements.iter().position(|(text_index, _)| *text_index == index)
+            else {
+                rebuilt.push(child.clone());
+                continue;
+            };
+            rebuilt.extend(generated_before_slot.remove(&slot).unwrap_or_default());
+            if let Some(projected) = projected_slots.remove(&slot) {
+                rebuilt.push(projected);
+            } else if !used_templates.contains(&slot) {
+                let PreservedNode::Element(template) = child else {
+                    continue;
+                };
+                if has_opaque_text_children(template) && !template_text(template).is_empty() {
+                    return Err(PreservationError::UnsupportedRunTopology);
+                }
+                let has_retained_source_data = !template.namespace_bindings.is_empty()
+                    || has_opaque_text_children(template)
+                    || (template_text(template).is_empty() && !template.attributes.is_empty());
+                if has_retained_source_data {
+                    let mut retained = template.clone();
+                    if !has_opaque_text_children(template) {
+                        retained.children = vec![PreservedNode::Text(String::new().into())].into();
+                    }
+                    rebuilt.push(PreservedNode::Element(retained));
+                }
+            }
+            rebuilt.extend(generated_before_slot.remove(&slot.saturating_add(1)).unwrap_or_default());
+        }
+        rebuilt.extend(generated_before_slot.into_values().flatten());
         paragraph.children = rebuilt.into();
         Ok(())
     }
@@ -580,7 +658,11 @@ impl PreservationState {
                 ManagedTextMismatchSite::TextReplacement,
             ));
         }
-        if expected_runs.is_some_and(|runs| runs != source_segments.as_slice()) {
+        if expected_runs.is_some_and(|runs| {
+            runs.iter()
+                .filter(|run| !run.is_empty())
+                .ne(source_segments.iter().filter(|run| !run.is_empty()))
+        }) {
             return Err(PreservationError::UnsupportedTextMapping);
         }
         let mut boundary = 0usize;
@@ -1234,6 +1316,108 @@ pub(super) fn text_element_matches_run(element: &PreservedElement, run: &TextRun
             })
 }
 
+pub(super) fn text_element_can_represent_run(element: &PreservedElement, run: &TextRun) -> bool {
+    let has_source_binding = |name: &str| {
+        element.attributes.iter().any(|source| {
+            source
+                .name
+                .qualified_name
+                .as_deref()
+                .unwrap_or(source.name.local_name.as_str())
+                == name
+        })
+    };
+    element.attributes.iter().all(|source| {
+        let name = source
+            .name
+            .qualified_name
+            .as_deref()
+            .unwrap_or(source.name.local_name.as_str());
+        let namespaced = source
+            .name
+            .namespace_uri
+            .as_deref()
+            .is_some_and(|uri| !uri.is_empty())
+            || name.contains(':');
+        !namespaced || run.attributes.iter().any(|attribute| attribute.name == name)
+    }) && run
+        .attributes
+        .iter()
+        .all(|attribute| !attribute.name.contains(':') || has_source_binding(&attribute.name))
+}
+
+pub(super) fn has_conflicting_expanded_run_attributes(
+    templates: &[&PreservedElement],
+) -> bool {
+    let mut expanded_names = BTreeMap::<(String, String), Option<String>>::new();
+    for attribute in templates
+        .iter()
+        .filter(|template| !template_text(template).is_empty())
+        .flat_map(|template| &template.attributes)
+    {
+        let name = attribute
+            .name
+            .qualified_name
+            .clone()
+            .unwrap_or_else(|| attribute.name.local_name.clone());
+        let key = (name, attribute.value.clone());
+        let namespace = attribute.name.namespace_uri.clone();
+        if expanded_names
+            .insert(key, namespace.clone())
+            .is_some_and(|previous| previous != namespace)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn template_text(element: &PreservedElement) -> String {
+    element
+        .children
+        .iter()
+        .filter_map(|node| match node {
+            PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_opaque_text_children(element: &PreservedElement) -> bool {
+    element
+        .children
+        .iter()
+        .any(|node| !matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_)))
+}
+
+pub(super) fn new_plain_text_element(
+    paragraph: &PreservedElement,
+    run: &TextRun,
+) -> Result<PreservedElement, PreservationError> {
+    let (name, namespace_bindings) = paragraph_text_name(paragraph);
+    let mut element = PreservedElement {
+        name,
+        attributes: Vec::new(),
+        namespace_bindings,
+        source_type: None,
+        ownership: SourceOwnership::Opaque,
+        dependency_confidence: DependencyConfidence::Unknown,
+        anchor: None,
+        children: SharedVec::default(),
+    };
+    for attribute in &run.attributes {
+        if !is_valid_unqualified_attribute_name(&attribute.name) {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        element.attributes.push(PreservedAttribute {
+            name: plain_source_name(&attribute.name),
+            value: attribute.value.clone(),
+        });
+    }
+    element.children = vec![PreservedNode::Text(run.text.clone().into())].into();
+    Ok(element)
+}
+
 fn slice_text_runs(
     runs: &[TextRun],
     range: std::ops::Range<usize>,
@@ -1293,12 +1477,13 @@ pub(super) fn text_element_for_run(template: &PreservedElement, run: &TextRun) -
     element
 }
 
-fn sync_text_element_attributes(
+pub(super) fn sync_text_element_attributes(
     template: &PreservedElement,
     run: &TextRun,
 ) -> Result<PreservedElement, PreservationError> {
     let mut element = template.clone();
-    for source in &mut element.attributes {
+    let mut retained_attributes = Vec::with_capacity(element.attributes.len() + run.attributes.len());
+    for mut source in element.attributes.drain(..) {
         let source_name = source
             .name
             .qualified_name
@@ -1309,12 +1494,18 @@ fn sync_text_element_attributes(
             .iter()
             .find(|attribute| attribute.name == source_name)
         else {
-            return Err(PreservationError::UnsupportedTextMapping);
+            if source.name.namespace_uri.as_deref().is_some_and(|uri| !uri.is_empty())
+                || source_name.contains(':')
+            {
+                return Err(PreservationError::UnsupportedTextMapping);
+            }
+            continue;
         };
         source.value.clone_from(&attribute.value);
+        retained_attributes.push(source);
     }
     for attribute in &run.attributes {
-        let found = element.attributes.iter().any(|source| {
+        let found = retained_attributes.iter().any(|source| {
             source
                 .name
                 .qualified_name
@@ -1323,17 +1514,33 @@ fn sync_text_element_attributes(
                 == attribute.name
         });
         if !found {
-            if attribute.name != "Style" {
+            if !is_valid_unqualified_attribute_name(&attribute.name) {
                 return Err(PreservationError::UnsupportedTextMapping);
             }
-            element.attributes.push(PreservedAttribute {
-                name: plain_source_name("Style"),
+            retained_attributes.push(PreservedAttribute {
+                name: plain_source_name(&attribute.name),
                 value: attribute.value.clone(),
             });
         }
     }
+    element.attributes = retained_attributes;
     element.children = vec![PreservedNode::Text(run.text.clone().into())].into();
     Ok(element)
+}
+
+fn is_valid_unqualified_attribute_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.contains(':')
+        || name.starts_with("xmlns")
+        || name.chars().any(|character| {
+            !(character.is_alphanumeric() || matches!(character, '_' | '-' | '.'))
+        })
+    {
+        return false;
+    }
+    name.chars().next().is_some_and(|character| {
+        character.is_alphabetic() || character == '_'
+    })
 }
 
 fn replace_text_element_children(
@@ -1418,7 +1625,11 @@ fn replace_text_element_children(
     if source_segments.concat() != old_text {
         return Err(PreservationError::ManagedTextMismatch);
     }
-    if expected_runs.is_some_and(|runs| runs != source_segments.as_slice()) {
+    if expected_runs.is_some_and(|runs| {
+        runs.iter()
+            .filter(|run| !run.is_empty())
+            .ne(source_segments.iter().filter(|run| !run.is_empty()))
+    }) {
         return Err(PreservationError::UnsupportedTextMapping);
     }
     let mut boundary = 0usize;

@@ -184,9 +184,25 @@ fn startup_open_failure_copy(outcome: StagedOpenOutcome) -> Option<(&'static str
     (outcome == StagedOpenOutcome::Failed).then_some(child_startup_open_failure_copy())
 }
 
-pub(crate) fn show_startup_open_failure(outcome: StagedOpenOutcome) {
-    if let Some((title, message)) = startup_open_failure_copy(outcome) {
-        show_native_lifecycle_error(title, message);
+pub(crate) fn show_startup_open_failure(
+    outcome: StagedOpenOutcome,
+    acknowledged_replacement_child: bool,
+) {
+    if !acknowledged_replacement_child {
+        if let Some((title, message)) = startup_open_failure_copy(outcome) {
+            show_native_lifecycle_error(title, message);
+        }
+    }
+}
+
+impl ScriptCraftApp {
+    /// True only while this process still owns the identity for an acknowledged
+    /// in-app replacement request. Independent custom-option children remain
+    /// child-owned because they have no handoff identity.
+    pub(crate) fn acknowledged_replacement_startup(&self) -> bool {
+        self.startup_document.as_ref().is_some_and(|startup| {
+            startup.source == StartupDocumentSource::CustomOption && startup.handoff_id.is_some()
+        })
     }
 }
 
@@ -400,8 +416,9 @@ impl ScriptCraftApp {
         };
         let outcome = pending_resolution_outcome(Some(()), consent, continue_outcome);
         if let Some(outcome) = outcome {
+            let acknowledged_replacement_child = self.acknowledged_replacement_startup();
             self.emit_startup_handoff_result(outcome);
-            show_startup_open_failure(outcome);
+            show_startup_open_failure(outcome, acknowledged_replacement_child);
         }
         outcome
     }

@@ -161,57 +161,57 @@ impl ResolvedFaceMetrics {
         self.scalar_advances.get(&scalar).copied()
     }
 
-    pub fn scale_advance(&self, scalar: char, size_points: u16) -> Result<FixedPoint, ModelError> {
+    pub fn scale_advance(&self, scalar: char, size: FixedPoint) -> Result<FixedPoint, ModelError> {
         self.validate()?;
-        validate_font_size(size_points)?;
+        validate_font_size(size)?;
         let advance = self
             .advance_for(scalar)
             .ok_or(ModelError::MissingScalarMetrics)?;
-        scale_font_units(advance.advance_units, self.units_per_em, size_points)
+        scale_font_units(advance.advance_units, self.units_per_em, size)
     }
 
     /// Scale the natural font-table ascent into signed hundredths of a point.
-    pub fn scale_ascent(&self, size_points: u16) -> Result<FixedPoint, ModelError> {
+    pub fn scale_ascent(&self, size: FixedPoint) -> Result<FixedPoint, ModelError> {
         self.validate()?;
-        validate_font_size(size_points)?;
-        scale_signed_font_units(self.ascender, self.units_per_em, size_points)
+        validate_font_size(size)?;
+        scale_signed_font_units(self.ascender, self.units_per_em, size)
     }
 
     /// Scale the signed natural font-table descent into hundredths of a point.
-    pub fn scale_descent(&self, size_points: u16) -> Result<FixedPoint, ModelError> {
+    pub fn scale_descent(&self, size: FixedPoint) -> Result<FixedPoint, ModelError> {
         self.validate()?;
-        validate_font_size(size_points)?;
-        scale_signed_font_units(self.descender, self.units_per_em, size_points)
+        validate_font_size(size)?;
+        scale_signed_font_units(self.descender, self.units_per_em, size)
     }
 
     /// Scale the exact face's OpenType underline metrics into canonical
     /// baseline-relative top and bottom edges.
     pub fn scale_underline(
         &self,
-        size_points: u16,
+        size: FixedPoint,
     ) -> Result<ScaledDecorationGeometry, ModelError> {
-        self.scale_decoration(self.underline, size_points)
+        self.scale_decoration(self.underline, size)
     }
 
     /// Scale the exact face's OpenType strikeout metrics into canonical
     /// baseline-relative top and bottom edges.
     pub fn scale_strikethrough(
         &self,
-        size_points: u16,
+        size: FixedPoint,
     ) -> Result<ScaledDecorationGeometry, ModelError> {
-        self.scale_decoration(self.strikethrough, size_points)
+        self.scale_decoration(self.strikethrough, size)
     }
 
     fn scale_decoration(
         &self,
         metrics: ResolvedDecorationMetrics,
-        size_points: u16,
+        size: FixedPoint,
     ) -> Result<ScaledDecorationGeometry, ModelError> {
         self.validate()?;
-        validate_font_size(size_points)?;
+        validate_font_size(size)?;
         let bottom = decoration_bottom(metrics)?;
-        let font_top = scale_signed_font_units(metrics.position, self.units_per_em, size_points)?;
-        let mut font_bottom = scale_signed_font_units(bottom, self.units_per_em, size_points)?;
+        let font_top = scale_signed_font_units(metrics.position, self.units_per_em, size)?;
+        let mut font_bottom = scale_signed_font_units(bottom, self.units_per_em, size)?;
         if font_top == font_bottom {
             font_bottom = FixedPoint::from_raw(
                 font_bottom
@@ -245,8 +245,10 @@ fn decoration_bottom(metrics: ResolvedDecorationMetrics) -> Result<i32, ModelErr
         .ok_or(ModelError::InvalidFontMetrics)
 }
 
-fn validate_font_size(size_points: u16) -> Result<(), ModelError> {
-    if size_points == 0 || size_points > MAX_SUPPORTED_FONT_SIZE {
+fn validate_font_size(size: FixedPoint) -> Result<(), ModelError> {
+    if !(FixedPoint::SCALE..=i64::from(MAX_SUPPORTED_FONT_SIZE) * FixedPoint::SCALE)
+        .contains(&size.raw())
+    {
         Err(ModelError::InvalidFontSize)
     } else {
         Ok(())
@@ -256,11 +258,11 @@ fn validate_font_size(size_points: u16) -> Result<(), ModelError> {
 fn scale_font_units(
     units: u32,
     units_per_em: u32,
-    size_points: u16,
+    size: FixedPoint,
 ) -> Result<FixedPoint, ModelError> {
+    let size_raw = u128::try_from(size.raw()).map_err(|_| ModelError::InvalidFontSize)?;
     let numerator = u128::from(units)
-        .checked_mul(u128::from(size_points))
-        .and_then(|value| value.checked_mul(FixedPoint::SCALE as u128))
+        .checked_mul(size_raw)
         .ok_or(ModelError::InvalidFontMetrics)?;
     let denominator = u128::from(units_per_em);
     let rounded = numerator
@@ -274,11 +276,10 @@ fn scale_font_units(
 fn scale_signed_font_units(
     units: i32,
     units_per_em: u32,
-    size_points: u16,
+    size: FixedPoint,
 ) -> Result<FixedPoint, ModelError> {
     let numerator = i128::from(units)
-        .checked_mul(i128::from(size_points))
-        .and_then(|value| value.checked_mul(i128::from(FixedPoint::SCALE)))
+        .checked_mul(i128::from(size.raw()))
         .ok_or(ModelError::InvalidFontMetrics)?;
     let denominator = i128::from(units_per_em);
     let magnitude = numerator
@@ -697,7 +698,7 @@ pub struct EffectiveTextStyle {
     pub declared_family: String,
     pub source_color: Option<String>,
     pub resolved_font_id: ResolvedFontId,
-    pub size: u16,
+    pub size: FixedPoint,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
@@ -712,7 +713,7 @@ impl EffectiveTextStyle {
         declared_family: impl Into<String>,
         source_color: Option<String>,
         resolved_font_id: ResolvedFontId,
-        size: u16,
+        size: FixedPoint,
         bold: bool,
         italic: bool,
         underline: bool,
@@ -743,4 +744,3 @@ impl EffectiveTextStyle {
         })
     }
 }
-

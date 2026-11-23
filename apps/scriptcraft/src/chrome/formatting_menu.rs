@@ -11,7 +11,8 @@ use scriptcraft_commands::{
     TitleTextStyle,
 };
 use scriptcraft_model::element::{RunAttribute, TextRun};
-use scriptcraft_model::formatted_text::{parse_style_attribute, RunStyle, RunStyleFlags};
+use scriptcraft_model::formatted_text::{parse_style_attribute, InlineSizeProjection, RunStyle, RunStyleFlags};
+use scriptcraft_model::formatting::FixedPoint;
 use scriptcraft_model::formatting::{ParagraphAlignment, ParagraphLeading, ParagraphSpacing};
 use scriptcraft_model::{ElementFontSpec, Project};
 use scriptcraft_session::editing::{EditingSession, Position, Selection};
@@ -32,7 +33,8 @@ struct RunValues {
     font: String,
     base_font: String,
     font_direct: bool,
-    size: u16,
+    size: Option<FixedPoint>,
+    size_direct: bool,
     color: Option<String>,
     base_color: Option<String>,
     color_direct: bool,
@@ -61,7 +63,10 @@ pub(crate) fn project(session: &EditingSession, surface: EditorSurface) -> Forma
     }
 
     if surface == EditorSurface::Body {
-      if let Some(values) = uniform_field(&runs, |value| Some(value.size)) {
+      if uniform_field(&runs, |value| Some(value.size_direct)) == Some(false) {
+          projection.checked_actions.push(MenuAction::ClearInlineSize);
+      }
+      if let Some(values) = uniform_field(&runs, |value| value.size.filter(|_| value.size_direct)) {
         for size in [
             InlineSizeValue::Seven,
             InlineSizeValue::Eight,
@@ -72,7 +77,7 @@ pub(crate) fn project(session: &EditingSession, surface: EditorSurface) -> Forma
             InlineSizeValue::Eighteen,
             InlineSizeValue::TwentyFour,
         ] {
-            if u16::from(size.as_core().points()) == values {
+            if FixedPoint::from_points(i64::from(size.as_core().points())) == values {
                 projection.checked_actions.push(MenuAction::SetInlineSize(size));
             }
         }
@@ -343,15 +348,21 @@ fn unique_attribute<'a>(attributes: &'a [RunAttribute], name: &str) -> Result<Op
 
 fn run_values(attributes: &[RunAttribute], base: &ElementFontSpec) -> Option<RunValues> {
     let font = unique_attribute(attributes, "Font").ok()?;
-    let size = unique_attribute(attributes, "Size").ok()?;
     let color = unique_attribute(attributes, "Color").ok()?;
     let _style = unique_attribute(attributes, "Style").ok()?;
     let styles = parse_style_attribute(attributes).ok()?.flags;
+    let size_projection = InlineSizeProjection::parse(attributes).ok()?;
+    let (size, size_direct) = match size_projection {
+        InlineSizeProjection::Inherited => (None, false),
+        InlineSizeProjection::Valid { points, .. } => (Some(points), true),
+        InlineSizeProjection::Invalid { .. } => (None, true),
+    };
     Some(RunValues {
         font: font.filter(|value| !value.is_empty()).unwrap_or(&base.family).to_owned(),
         base_font: base.family.clone(),
         font_direct: font.is_some(),
-        size: size.and_then(|value| value.parse::<u16>().ok()).filter(|value| (1..=scriptcraft_model::typography::MAX_SUPPORTED_FONT_SIZE).contains(value)).unwrap_or(u16::from(base.size)),
+        size,
+        size_direct,
         color: color.map(str::to_owned).or_else(|| base.color.clone()),
         base_color: base.color.clone(),
         color_direct: color.is_some(),
@@ -372,7 +383,18 @@ fn apply_typing_patch(values: &mut RunValues, patch: scriptcraft_model::formatte
             .unwrap_or_else(|| values.base_font.clone());
         values.font_direct = font.is_some();
     }
-    if let Some(size) = patch.size { values.size = u16::from(size.points()); }
+    if let Some(size) = patch.size {
+        match size {
+            Some(size) => {
+                values.size = Some(FixedPoint::from_points(i64::from(size.points())));
+                values.size_direct = true;
+            }
+            None => {
+                values.size = None;
+                values.size_direct = false;
+            }
+        }
+    }
     if let Some(color) = patch.color {
         values.color = color
             .map(|color| color.fdx_value().to_owned())

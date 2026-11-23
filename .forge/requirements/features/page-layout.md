@@ -55,6 +55,10 @@ The ruler contract above is clarified as follows: the allocated strip uses the S
 
 The first-line marker is a downward pentagon, the right marker an upward pentagon without a foot, and the left marker an upward polygon whose vertical sides extend through its integrated foot; each is drawn by one filled polygon. `RULER_FIRST_LINE_CENTER_OFFSET` and `RULER_BOTTOM_MARKER_CENTER_OFFSET` remain the respective 10-point sources of the first-line top and left bottom. Stems remain snapped 2-point filled rectangles behind the marker shapes.
 
+### Inline Size parsing
+
+Direct run Size is interpreted through the shared bounded fixed-point point parser, with hundredth-point precision and a supported range of 1 through 1000 points. Valid integer and decimal values affect effective typography without whole-point truncation; absent Size inherits the current definition. Invalid, zero, negative, malformed, or over-limit source values remain source-owned and use the bounded fallback rather than being silently rewritten. Layout, paint, PDF, and native-print consumers share that projection, and host floating-point conversion occurs only at final presentation/API boundaries.
+
 ## Constraints
 
 - Project owns the effective DocumentPageLayout; absent direct-root PageLayout uses the complete standard default (612×792 points, 72-point top/bottom margins, Normal leading, retained 36-point header/footer margins). Missing/malformed fields and unusable combined geometry use the documented field-local/combined fallbacks; duplicate PageLayout/PageSize and unsupported DocumentLeading retain their bounded ambiguity/unsupported behavior. Existing source nodes/original bytes remain unchanged. Preservation-free output emits effective PageLayout; source-backed output synthesizes only when absent on a detached candidate. The session snapshot is derived/read-only, Apply Template does not change PageLayout, and no ad hoc mutation API/command is added.

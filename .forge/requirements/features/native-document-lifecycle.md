@@ -87,6 +87,14 @@ Generated-Parenthetical bookkeeping referenced by AC-WRITING-003.6 is transient 
 
 [User Settings](user-settings.md) defines the persistent global default separately from document-owned state. A supplied FDX or FDXT startup path takes precedence over that default: the preference never replaces opened content or definitions, and never changes the source, native path, storage baseline, or activation disposition. A template-backed fresh session remains untitled, has no native path or FDX storage baseline, and has no source-template save target. A saved default is not an explicit `--new-template` argument and does not consume/finalize the macOS cold-open initial slot; the existing staged-open and first-cold-request behavior remain unchanged. For an already-known startup document, its content is staged and activated through the existing lifecycle rather than being initialized from the saved default.
 
+### Inline-run and paragraph-identity round-trip
+
+FDX Open accepts repeated foreign IDs on supported managed Body, dual-member/wrapper, and TitlePage Content Paragraph occurrences without rewriting those IDs or conflating their session-local stable identities. Registration remains unique by identity value while source occurrences are retained and paragraph identity-use bookkeeping accounts for each occurrence. A foreign paragraph ID alone is not a unique owner-selection or rebase key when repeated. This exception is limited to supported managed paragraphs; all other identity-domain duplicate, reference, and malformed-source checks remain strict.
+
+Before direct serialization or native Save/Save As, the detached output candidate is normalized with the shared model run rule for every managed Body and TitlePage Content paragraph. Writer and storage semantic comparisons use that same normalized candidate; existing reread, identity, normalized-source, conflict, nonoverwrite, and atomic-publication gates remain authoritative. Exact canonical text and whitespace, valid source Size spelling, unknown run attributes, and unrelated retained source remain preserved within the established normalized structural—not byte-identical—round-trip boundary.
+
+For acknowledged in-app replacement Open, the parent process is the sole user-facing native-dialog owner for a failed child Open. The child retains its bounded terminal handoff and development diagnostic but suppresses its native dialog for that acknowledged path. Direct cold-start and independent-child failures retain child-local reporting. Migration Continue/Cancel and existing failure-safe activation behavior remain unchanged.
+
 ## Constraints
 
 - Native FDX remains the semantic source of truth; transient view and history state do not replace it.

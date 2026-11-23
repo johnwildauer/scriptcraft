@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
+use scriptcraft_model::formatting::FixedPoint;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::core as windows_core;
 use windows::core::{
@@ -1158,7 +1159,8 @@ fn draw_vector_page(
             return Err(callback_error());
         }
         let face = HSTRING::from(run.family_name());
-        let font_size_dip = f64::from(run.font_size_pt())
+        let font_size_pt = run.font_size_pt();
+        let font_size_dip = (font_size_pt.raw() as f64 / FixedPoint::SCALE as f64)
             * (96.0_f64 / 72.0_f64)
             * f64::from(transform.scale);
         let font_size_dip = finite_native_value(font_size_dip).ok_or_else(callback_error)?;
@@ -1415,4 +1417,3 @@ fn decoration_rects(
     let strikethrough = make_decoration(run.strikethrough(), run.strikethrough_geometry())?;
     Some((underline, strikethrough))
 }
-

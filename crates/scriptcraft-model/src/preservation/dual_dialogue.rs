@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 use super::navigation::element_at_path_mut;
 use super::reconciliation::{
     clear_stale_anchor_bindings, managed_child_index, paragraph_foreign_id,
-    paragraph_id_attribute_count, paragraph_reference_touches, paragraph_template,
-    plain_source_name, ManagedParagraphTemplate,
+    paragraph_id_attribute_count, paragraph_template, plain_source_name,
+    ManagedParagraphTemplate,
 };
 use super::text::{semantic_text_runs, source_name_from_qname};
 
@@ -405,7 +405,6 @@ impl PreservationState {
             })
             .collect::<Vec<_>>();
         let mut member_identities = Vec::new();
-        let mut member_identity_values = BTreeSet::new();
         for node in &member_nodes {
             let PreservedNode::Element(member) = node else {
                 continue;
@@ -417,16 +416,15 @@ impl PreservationState {
                 continue;
             };
             let identity = ForeignIdentity::new(ForeignIdDomain::Paragraph, foreign_id)?;
-            if wrapper_identity.as_ref() == Some(&identity)
-                || !member_identity_values.insert(identity.clone())
-            {
-                return Err(PreservationError::DuplicateIdentity);
-            }
             member_identities.push(identity);
         }
+        let mut new_member_identity_values = BTreeSet::new();
         let new_member_identities = member_identities
             .into_iter()
-            .filter(|identity| !self.identities.contains(identity))
+            .filter(|identity| {
+                !self.identities.contains(identity)
+                    && new_member_identity_values.insert(identity.clone())
+            })
             .collect::<Vec<_>>();
 
         let wrapper_identity_set = wrapper_identity.iter().cloned().collect::<BTreeSet<_>>();
@@ -446,15 +444,10 @@ impl PreservationState {
                 anchor.id == *wrapper_anchor
                     || matches!(&anchor.target,
                         AnchorTarget::DualDialogueWrapper(target) if target == group_id)
-                    || wrapper_identity.as_ref().is_some_and(|identity| {
-                        matches!(&anchor.target, AnchorTarget::Foreign(target) if target == identity)
-                    })
             })
             .map(|anchor| anchor.id.clone())
             .collect::<BTreeSet<_>>();
-        if let Some(identity) = &wrapper_identity {
-            collect_attached_anchor_ids(&self.sections, identity, &mut stale_anchors);
-        }
+        collect_subtree_anchor_ids(outer, &mut stale_anchors);
         let section = self
             .sections
             .get_mut(*section_index)
@@ -478,66 +471,41 @@ impl PreservationState {
             content.children.insert(*outer_index + offset, member);
         }
         self.identities.extend(new_member_identities);
-        if let Some(identity) = wrapper_identity.as_ref() {
-            let removed_foreign_ids = BTreeSet::from([identity.value.clone()]);
-            for section in &mut self.sections {
-                clear_stale_anchor_bindings(
-                    &mut section.children,
-                    &stale_anchors,
-                    &removed_foreign_ids,
-                );
-            }
-            self.references
-                .retain(|reference| !paragraph_reference_touches(reference, &removed_foreign_ids));
-            self.board_graph
-                .references
-                .retain(|reference| !paragraph_reference_touches(reference, &removed_foreign_ids));
-            self.identities.retain(|registered| registered != identity);
-        } else {
-            for section in &mut self.sections {
-                clear_stale_anchor_bindings(
-                    &mut section.children,
-                    &stale_anchors,
-                    &BTreeSet::new(),
-                );
-            }
+        for section in &mut self.sections {
+            clear_stale_anchor_bindings(
+                &mut section.children,
+                &stale_anchors,
+                &BTreeSet::new(),
+            );
         }
         self.anchors
             .retain(|anchor| !stale_anchors.contains(&anchor.id));
+        self.invalidate_source_identity_use_index();
+        if let Some(identity) = wrapper_identity {
+            self.prune_orphaned_paragraph_identities(&BTreeSet::from([identity.value]));
+        }
         self.source_layout_settings
             .direct_paragraph_overrides
             .remove(group_id);
-        self.invalidate_source_identity_use_index();
         self.rebuild_managed_paragraph_index();
         Ok(())
     }
 }
 
-fn collect_attached_anchor_ids(
-    sections: &[PreservedSection],
-    identity: &ForeignIdentity,
+fn collect_subtree_anchor_ids(
+    element: &PreservedElement,
     anchors: &mut BTreeSet<SourceAnchorId>,
 ) {
-    fn collect_nodes(
-        nodes: &[PreservedNode],
-        identity: &ForeignIdentity,
-        anchors: &mut BTreeSet<SourceAnchorId>,
-    ) {
-        for node in nodes {
-            let PreservedNode::Element(element) = node else {
-                continue;
-            };
-            if matches!(&element.ownership, SourceOwnership::Attached(attached) if attached == identity)
-            {
-                if let Some(anchor) = &element.anchor {
-                    anchors.insert(anchor.clone());
-                }
-            }
-            collect_nodes(&element.children, identity, anchors);
-        }
+    if matches!(&element.ownership, SourceOwnership::Managed(_)) {
+        return;
     }
-    for section in sections {
-        collect_nodes(&section.children, identity, anchors);
+    if let Some(anchor) = &element.anchor {
+        anchors.insert(anchor.clone());
+    }
+    for child in &element.children {
+        if let PreservedNode::Element(child) = child {
+            collect_subtree_anchor_ids(child, anchors);
+        }
     }
 }
 

@@ -3,7 +3,7 @@ use super::{
     inputs::{self, EffectiveParagraph, LayoutEnvironment},
 };
 use scriptcraft_model::{
-    formatted_text::parse_style_attribute,
+    formatted_text::{parse_style_attribute, InlineSizeProjection},
     formatting::FixedPoint,
     typography::{
         DocumentFontEnvironment, EffectiveTextStyle as ResolvedTextStyle,
@@ -141,20 +141,16 @@ fn resolve_display_run_style(
     let element_style =
         scriptcraft_model::typography::FaceStyle::from_flags(base.bold, base.italic);
     let mut family = base.declared_family.clone();
-    let mut size = base.size;
+    let size = match InlineSizeProjection::parse(&run.attributes)
+        .map_err(|_| scriptcraft_model::ModelError::InvalidRunProjection)?
+    {
+        InlineSizeProjection::Valid { points, .. } => points,
+        InlineSizeProjection::Inherited | InlineSizeProjection::Invalid { .. } => base.size,
+    };
     let mut color = base.source_color.clone();
     for attribute in &run.attributes {
         match attribute.name.as_str() {
             "Font" if !attribute.value.is_empty() => family.clone_from(&attribute.value),
-            "Size" => {
-                if let Ok(parsed) = attribute.value.parse::<u16>() {
-                    if (1..=scriptcraft_model::typography::MAX_SUPPORTED_FONT_SIZE)
-                        .contains(&parsed)
-                    {
-                        size = parsed;
-                    }
-                }
-            }
             "Color" => color = Some(attribute.value.clone()),
             _ => {}
         }

@@ -1,11 +1,12 @@
 //! Canonical run-style primitives and UTF-8 range projections.
 
 use crate::{
-    element::{BodyOwner, RunAttribute, TextRun, MAX_RUNS_PER_ELEMENT},
+    element::{BodyOwner, RunAttribute, TextRun},
     error::ModelError,
     preservation::PreservationError,
     project::Project,
 };
+use super::normalize::{canonical_style_value, canonicalize_run_attributes, insert_run_attribute, normalize_runs};
 use super::paragraphs::ParagraphTarget;
 use std::ops::Range;
 
@@ -31,12 +32,14 @@ impl RunStyle {
             Self::Italics => "Italic",
             Self::Underline => "Underline",
             Self::AllCaps => "AllCaps",
-            Self::Strikethrough => "Strikethrough",
+            Self::Strikethrough => "Strikeout",
         }
     }
 
     fn matches_token(self, token: &str) -> bool {
-        token == self.canonical_token() || (self == Self::Strikethrough && token == "StrikeThrough")
+        token == self.canonical_token()
+            || (self == Self::Strikethrough
+                && matches!(token, "Strikethrough" | "StrikeThrough"))
     }
 }
 
@@ -79,7 +82,7 @@ impl RunStyleFlags {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunStyleProjection {
     pub flags: RunStyleFlags,
-    /// Unrecognized tokens retain their exact spelling and relative order.
+    /// Unrecognized tokens retain exact source spelling/order until canonical emission.
     pub unknown_tokens: Vec<String>,
 }
 
@@ -94,6 +97,9 @@ pub enum FormattedTextError {
     DuplicateParagraphTarget,
     AmbiguousDirectAttribute,
     AmbiguousInlineAttribute,
+    TooManyRunAttributes,
+    RunAttributeTooLarge,
+    TextTooLong,
     Preservation(PreservationError),
     Model(ModelError),
 }
@@ -195,12 +201,12 @@ impl InlineColor {
     }
 }
 
-/// `None` means unchanged; `Some(None)` removes an inherited Font/Color, and
-/// `Some(Some(value))` writes a bounded explicit value. Size has no removal row.
+/// `None` means unchanged; `Some(None)` clears Font, Size, or Color to inherit,
+/// and `Some(Some(value))` writes a bounded explicit value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InlineRunFormattingPatch {
     pub font: Option<Option<InlineFont>>,
-    pub size: Option<InlineSize>,
+    pub size: Option<Option<InlineSize>>,
     pub color: Option<Option<InlineColor>>,
 }
 
@@ -234,6 +240,9 @@ pub fn parse_style_attribute(
         return Ok(projection);
     }
     for token in style_attribute.value.split('+') {
+        if token.is_empty() {
+            continue;
+        }
         if let Some(style) = supported_style(token) {
             projection.flags.set(style, true);
         } else {
@@ -261,45 +270,20 @@ fn update_run_style(
     enabled: bool,
 ) -> Result<Vec<RunAttribute>, FormattedTextError> {
     let mut result = attributes.to_vec();
-    let style_index = result
-        .iter()
-        .position(|attribute| attribute.name == "Style");
-    if result
-        .iter()
-        .filter(|attribute| attribute.name == "Style")
-        .count()
-        > 1
-    {
-        return Err(FormattedTextError::AmbiguousStyleAttribute);
+    let mut projection = parse_style_attribute(&result)?;
+    projection.flags.set(style, enabled);
+    let canonical = canonical_style_value(&projection);
+    let style_index = result.iter().position(|attribute| attribute.name == "Style");
+    match (style_index, canonical) {
+        (Some(index), Some(value)) => result[index].value = value,
+        (Some(index), None) => { result.remove(index); }
+        (None, Some(value)) => insert_run_attribute(
+            &mut result,
+            RunAttribute { name: "Style".to_owned(), value },
+        )?,
+        (None, None) => {}
     }
-
-    let original = style_index
-        .map(|index| result[index].value.as_str())
-        .unwrap_or("");
-    let mut tokens = if original.is_empty() {
-        Vec::new()
-    } else {
-        original.split('+').map(str::to_owned).collect::<Vec<_>>()
-    };
-    let had_style = tokens.iter().any(|token| style.matches_token(token));
-    tokens.retain(|token| !style.matches_token(token));
-    if enabled {
-        // Preserve existing token order; append only the intentionally changed
-        // style, using the bounded canonical FDX spelling.
-        tokens.push(style.canonical_token().to_owned());
-    } else if !had_style && style_index.is_none() {
-        return Ok(result);
-    }
-    let value = tokens.join("+");
-    if let Some(index) = style_index {
-        result[index].value = value;
-    } else {
-        result.push(RunAttribute {
-            name: "Style".to_owned(),
-            value,
-        });
-    }
-    Ok(result)
+    canonicalize_run_attributes(&result)
 }
 
 pub(super) fn effective_runs(
@@ -322,15 +306,9 @@ pub(super) fn effective_runs(
     Ok(runs.to_vec())
 }
 
-fn push_run_coalescing(runs: &mut Vec<TextRun>, text: &str, attributes: &[RunAttribute]) {
+fn push_run_fragment(runs: &mut Vec<TextRun>, text: &str, attributes: &[RunAttribute]) {
     if text.is_empty() {
         return;
-    }
-    if let Some(previous) = runs.last_mut() {
-        if previous.attributes == attributes {
-            previous.text.push_str(text);
-            return;
-        }
     }
     runs.push(TextRun {
         text: text.to_owned(),
@@ -376,8 +354,8 @@ fn any_or_all_selected_style(
 /// Apply the uniform toggle policy over a canonical UTF-8 byte range. A
 /// collapsed range changes only transient active typing style. For a selection,
 /// the style is removed iff every selected character has it; otherwise it is
-/// added. Adjacent output runs merge only when their complete ordered attribute
-/// vectors match.
+/// added. Adjacent output runs merge only when the shared semantic normalizer
+/// considers their canonical Style, Size, and retained attributes equivalent.
 pub fn toggle_style_for_range(
     canonical_text: &str,
     runs: &[TextRun],
@@ -439,9 +417,9 @@ fn transform_style_range(
         let local_start = range.start.max(global_start).min(global_end) - global_start;
         let local_end = range.end.max(global_start).min(global_end) - global_start;
         if local_start == local_end {
-            push_run_coalescing(&mut transformed, &run.text, &run.attributes);
+            push_run_fragment(&mut transformed, &run.text, &run.attributes);
         } else {
-            push_run_coalescing(&mut transformed, &run.text[..local_start], &run.attributes);
+            push_run_fragment(&mut transformed, &run.text[..local_start], &run.attributes);
             let current_has_style = parse_style_attribute(&run.attributes)?
                 .flags
                 .contains(style);
@@ -450,18 +428,16 @@ fn transform_style_range(
             } else {
                 update_run_style(&run.attributes, style, enabled)?
             };
-            push_run_coalescing(
+            push_run_fragment(
                 &mut transformed,
                 &run.text[local_start..local_end],
                 &updated,
             );
-            push_run_coalescing(&mut transformed, &run.text[local_end..], &run.attributes);
+            push_run_fragment(&mut transformed, &run.text[local_end..], &run.attributes);
         }
         global_start = global_end;
     }
-    if transformed.len() > MAX_RUNS_PER_ELEMENT {
-        return Err(FormattedTextError::TooManyRuns);
-    }
+    transformed = normalize_runs(canonical_text, &transformed)?;
     Ok(RunStyleEdit {
         runs: transformed,
         active_style,
@@ -527,8 +503,8 @@ pub fn toggle_style_over_ranges(
 
 /// Apply a typed inline attribute patch to exact UTF-8 ranges as one candidate.
 /// Every affected source range is checked before run publication; attribute
-/// slots stay in place, and only adjacent runs with identical ordered vectors
-/// are coalesced.
+/// slots stay in place, and the shared whole-paragraph normalizer determines
+/// whether adjacent output runs are equivalent.
 pub fn set_paragraph_run_formatting(
     project: &mut Project,
     selections: &[(ParagraphTarget, Range<usize>)],
@@ -582,18 +558,16 @@ pub fn set_paragraph_run_formatting(
             let local_start = range.start.max(global_start).min(global_end) - global_start;
             let local_end = range.end.max(global_start).min(global_end) - global_start;
             if local_start == local_end {
-                push_run_coalescing(&mut transformed, &run.text, &run.attributes);
+                push_run_fragment(&mut transformed, &run.text, &run.attributes);
             } else {
-                push_run_coalescing(&mut transformed, &run.text[..local_start], &run.attributes);
+                push_run_fragment(&mut transformed, &run.text[..local_start], &run.attributes);
                 let attributes = patch_inline_attributes(&run.attributes, patch)?;
-                push_run_coalescing(&mut transformed, &run.text[local_start..local_end], &attributes);
-                push_run_coalescing(&mut transformed, &run.text[local_end..], &run.attributes);
+                push_run_fragment(&mut transformed, &run.text[local_start..local_end], &attributes);
+                push_run_fragment(&mut transformed, &run.text[local_end..], &run.attributes);
             }
             global_start = global_end;
         }
-        if transformed.len() > MAX_RUNS_PER_ELEMENT {
-            return Err(FormattedTextError::TooManyRuns);
-        }
+        transformed = normalize_runs(&text, &transformed)?;
         if transformed == source_runs {
             continue;
         }
@@ -641,24 +615,27 @@ fn patch_inline_attributes(
         match (index, value) {
             (Some(index), Some(value)) => result[index].value = value.to_owned(),
             (Some(index), None) => { result.remove(index); }
-            (None, Some(value)) => result.push(RunAttribute { name: name.to_owned(), value: value.to_owned() }),
+            (None, Some(value)) => insert_run_attribute(&mut result, RunAttribute { name: name.to_owned(), value: value.to_owned() })?,
             (None, None) => {}
         }
     }
-    if let Some(size) = patch.size {
-        let value = size.points().to_string();
+    if let Some(requested) = patch.size {
         let mut matches = result.iter().enumerate().filter(|(_, attribute)| attribute.name == "Size");
         let index = matches.next().map(|(index, _)| index);
         if matches.next().is_some() {
             return Err(FormattedTextError::AmbiguousInlineAttribute);
         }
-        if let Some(index) = index {
-            result[index].value = value;
-        } else {
-            result.push(RunAttribute { name: "Size".to_owned(), value });
+        match (index, requested) {
+            (Some(index), Some(size)) => result[index].value = size.points().to_string(),
+            (Some(index), None) => { result.remove(index); }
+            (None, Some(size)) => insert_run_attribute(
+                &mut result,
+                RunAttribute { name: "Size".to_owned(), value: size.points().to_string() },
+            )?,
+            (None, None) => {}
         }
     }
-    Ok(result)
+    canonicalize_run_attributes(&result)
 }
 
 /// Removes only the five supported run styles from one canonical UTF-8 range.
@@ -685,9 +662,9 @@ pub fn clear_supported_styles_for_range(
         let local_start = range.start.max(global_start).min(global_end) - global_start;
         let local_end = range.end.max(global_start).min(global_end) - global_start;
         if local_start == local_end {
-            push_run_coalescing(&mut transformed, &run.text, &run.attributes);
+            push_run_fragment(&mut transformed, &run.text, &run.attributes);
         } else {
-            push_run_coalescing(&mut transformed, &run.text[..local_start], &run.attributes);
+            push_run_fragment(&mut transformed, &run.text[..local_start], &run.attributes);
             let mut attributes = run.attributes.clone();
             for style in [
                 RunStyle::Bold,
@@ -698,18 +675,16 @@ pub fn clear_supported_styles_for_range(
             ] {
                 attributes = update_run_style(&attributes, style, false)?;
             }
-            push_run_coalescing(
+            push_run_fragment(
                 &mut transformed,
                 &run.text[local_start..local_end],
                 &attributes,
             );
-            push_run_coalescing(&mut transformed, &run.text[local_end..], &run.attributes);
+            push_run_fragment(&mut transformed, &run.text[local_end..], &run.attributes);
         }
         global_start = global_end;
     }
-    if transformed.len() > MAX_RUNS_PER_ELEMENT {
-        return Err(FormattedTextError::TooManyRuns);
-    }
+    transformed = normalize_runs(canonical_text, &transformed)?;
     let changed = transformed != source_runs;
     Ok(RunStyleEdit {
         runs: transformed,

@@ -579,7 +579,7 @@ fn page_content(
                 }
             };
             let (red, green, blue) = (pdf_color(red), pdf_color(green), pdf_color(blue));
-            let font_size = style.size;
+            let font_size = style.size.decimal_string();
             for (index, character) in span.display_text.chars().enumerate() {
                 let boundary = span
                     .display_boundary_offsets

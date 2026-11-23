@@ -113,6 +113,10 @@ The layout package retains no Apply-specific test source. The production contrac
 
 After a Changed Apply, Body and any open Title Page layout observe the current Project registry and use the established session revision, full definition/environment cache identity, and document-font preparation path. Active dual sides are re-derived from current capabilities; retained inactive groups continue through sequential layout exactly once per member. Existing current-control refresh uses the session mutation token. Elements/selector windows own no alternate layout environment, resolved-font cache, control snapshot, layout cache, template-specific pagination rule, or eager cache-clear policy; a NoOp or failure is not treated as a changed layout input. The next ordinary Body/Title layout lookup remains responsible for preparation, while the desktop requests repaint and invalidates only the existing surface projections required by a Changed result.
 
+### Decimal inline Size integration
+
+Inline run Size uses the shared Model projection based on `FixedPoint::parse_points()`, with inherited, valid bounded 1–1000-point fixed-point, and source-owned invalid/unsupported states. Valid source spelling is retained; new numeric values use deterministic decimal spelling without floating-point noise. Effective transient text style and every metric/layout/paint/PDF/native-print consumer carry checked hundredth-point precision, with host floating-point conversion only at final presentation/API boundaries. This supersedes only whole-point parsing/fallback language for inline run Size; definition-owned base sizes and unrelated paragraph formulas remain unchanged.
+
 ## Decisions
 
 ### Landed direct paragraph formatting layout formula

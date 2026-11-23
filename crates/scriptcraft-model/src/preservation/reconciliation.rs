@@ -416,10 +416,7 @@ impl PreservationState {
                         AnchorTarget::ProjectElement(target) => {
                             removed_project_ids.contains(target)
                         }
-                        AnchorTarget::Foreign(identity) => {
-                            identity.domain == ForeignIdDomain::Paragraph
-                                && removed_foreign_ids.contains(&identity.value)
-                        }
+                        AnchorTarget::Foreign(_) => false,
                         AnchorTarget::DualDialogueWrapper(target) => {
                             removed_project_ids.contains(target)
                         }
@@ -433,19 +430,10 @@ impl PreservationState {
                 clear_stale_anchor_bindings(
                     &mut section.children,
                     &stale_anchors,
-                    &removed_foreign_ids,
+                    &BTreeSet::new(),
                 );
             }
         }
-        self.identities.retain(|identity| {
-            !(identity.domain == ForeignIdDomain::Paragraph
-                && removed_foreign_ids.contains(&identity.value))
-        });
-        self.references
-            .retain(|reference| !paragraph_reference_touches(reference, &removed_foreign_ids));
-        self.board_graph
-            .references
-            .retain(|reference| !paragraph_reference_touches(reference, &removed_foreign_ids));
         for removed_id in removed_project_ids {
             self.source_layout_settings
                 .direct_paragraph_overrides
@@ -455,7 +443,51 @@ impl PreservationState {
             .retain(|anchor| !stale_anchors.contains(&anchor.id));
         self.invalidate_source_identity_use_index();
         self.rebuild_managed_paragraph_index();
+        self.prune_orphaned_paragraph_identities(&removed_foreign_ids);
         Ok(())
+    }
+
+    /// Removes a paragraph registration only after its final retained source
+    /// occurrence is gone. Per-owner anchors are removed by the structural
+    /// operation; foreign-target attachments and references are cleared only
+    /// when no occurrence can still own them.
+    pub(super) fn prune_orphaned_paragraph_identities(&mut self, values: &BTreeSet<String>) {
+        for value in values {
+            if self.paragraph_source_identity_occurrences(value) != 0 {
+                continue;
+            }
+            let stale_anchors = self
+                .anchors
+                .iter()
+                .filter(|anchor| {
+                    matches!(&anchor.target,
+                        AnchorTarget::Foreign(identity)
+                            if identity.domain == ForeignIdDomain::Paragraph
+                                && identity.value == *value)
+                })
+                .map(|anchor| anchor.id.clone())
+                .collect::<BTreeSet<_>>();
+            let removed_values = BTreeSet::from([value.clone()]);
+            for section in &mut self.sections {
+                clear_stale_anchor_bindings(
+                    &mut section.children,
+                    &stale_anchors,
+                    &removed_values,
+                );
+            }
+            self.anchors
+                .retain(|anchor| !stale_anchors.contains(&anchor.id));
+            self.identities.retain(|identity| {
+                !(identity.domain == ForeignIdDomain::Paragraph && identity.value == *value)
+            });
+            self.references
+                .retain(|reference| !paragraph_reference_touches(reference, &removed_values));
+            self.board_graph
+                .references
+                .retain(|reference| !paragraph_reference_touches(reference, &removed_values));
+            self.invalidate_source_identity_use_index();
+        }
+        self.rebuild_managed_paragraph_index();
     }
 
     pub(super) fn fresh_foreign_paragraph_id(&mut self) -> Result<String, PreservationError> {

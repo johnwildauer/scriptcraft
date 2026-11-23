@@ -12,6 +12,9 @@ use scriptcraft_model::preservation::{
     PreservedNode, PreservedSection, SectionKind, SharedVec, SourceName, SourceOwnership,
 };
 use scriptcraft_model::title_page::TitlePageParagraph;
+use scriptcraft_model::formatted_text::{
+    run_attributes_equivalent, run_attributes_preserve_unknown_data,
+};
 use scriptcraft_model::{Project, RunAttribute, ScreenplayElement, StableId, TextRun};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -518,6 +521,41 @@ fn reconcile_managed_text_runs(
         return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
     }
 
+    let empty_text_indexes = paragraph
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, child)| match child {
+            PreservedNode::Element(element)
+                if element.name.local_name == "Text"
+                    && element.name.namespace_uri == paragraph.name.namespace_uri
+                    && !has_managed_text_content(element) =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if empty_text_indexes.iter().any(|index| {
+        let PreservedNode::Element(element) = &paragraph.children[*index] else {
+            return true;
+        };
+        !element.namespace_bindings.is_empty()
+            || has_opaque_text_children(element)
+            || !element.attributes.is_empty()
+    }) {
+        return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
+    }
+    if !empty_text_indexes.is_empty() {
+        let remove = empty_text_indexes.into_iter().collect::<BTreeSet<_>>();
+        paragraph.children = std::mem::take(&mut paragraph.children)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, child)| (!remove.contains(&index)).then_some(child))
+            .collect::<Vec<_>>()
+            .into();
+    }
+
     let source_indexes = paragraph
         .children
         .iter()
@@ -540,32 +578,58 @@ fn reconcile_managed_text_runs(
         };
         templates.push(element.clone());
     }
-    if templates.len() > runs.len()
-        && templates.iter().skip(runs.len()).any(|element| {
-            !element.attributes.is_empty()
-                || !element.namespace_bindings.is_empty()
-                || element
-                    .children
-                    .iter()
-                    .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
-        })
-    {
-        // A removed semantic run cannot authorize dropping an opaque Text
-        // attribute or inline/mixed-content slot with it.
-        return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
-    }
-
+    let mut used_templates = BTreeSet::new();
+    let mut next_template_slot = 0usize;
     let mut reconciled = Vec::with_capacity(runs.len());
-    for (index, run) in runs.iter().enumerate() {
+    for run in &runs {
         validate_xml_chars(&run.text)?;
-        let template = templates
-            .get(index)
-            .or_else(|| templates.last())
-            .cloned()
-            .unwrap_or_else(|| new_text_element_for_paragraph(paragraph));
+        let exact = templates.iter().enumerate().find_map(|(slot, template)| {
+            (slot >= next_template_slot
+                && !used_templates.contains(&slot)
+                && template_text(template) == run.text
+                && source_template_attributes_match(template, &run.attributes))
+            .then_some(slot)
+        });
+        let compatible = templates.iter().enumerate().find_map(|(slot, template)| {
+            (slot >= next_template_slot
+                && !used_templates.contains(&slot)
+                && !has_opaque_text_children(template)
+                && text_element_can_represent_run(template, run))
+            .then_some(slot)
+        });
+        let positional = templates.iter().enumerate().find_map(|(slot, template)| {
+            (slot >= next_template_slot
+                && !used_templates.contains(&slot)
+                && !has_opaque_text_children(template)
+                && !template_text(template).is_empty())
+            .then_some(slot)
+        });
+        let selected = exact.or(compatible).or(positional);
+        let template = if let Some(slot) = selected {
+            used_templates.insert(slot);
+            next_template_slot = slot.saturating_add(1);
+            templates[slot].clone()
+        } else {
+            new_text_element_for_paragraph(paragraph)
+        };
+        if !has_opaque_text_children(&template)
+            && !source_template_unknown_data_matches(&template, &run.attributes)
+        {
+            return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
+        }
         reconciled.push(PreservedNode::Element(reconcile_text_element(
             template, run,
         )?));
+    }
+
+    if templates.iter().enumerate().any(|(slot, template)| {
+        !used_templates.contains(&slot)
+            && (!template.namespace_bindings.is_empty()
+                || has_opaque_text_children(template)
+                || (!template.attributes.is_empty()
+                    && !text_attributes_represented_by_runs(template, &runs)))
+    }) {
+        return Err(SaveDiagnosticCode::ReconcileParagraphRunProjectionMismatch.error());
     }
 
     if source_indexes.is_empty() {
@@ -600,6 +664,66 @@ fn reconcile_managed_text_runs(
     }
     paragraph.children = children.into();
     Ok(())
+}
+
+fn template_text(element: &PreservedElement) -> String {
+    preserved_text_projection(element)
+}
+
+fn source_template_attributes_match(element: &PreservedElement, attributes: &[RunAttribute]) -> bool {
+    let source_attributes = source_template_attributes(element);
+    run_attributes_equivalent(&source_attributes, attributes).unwrap_or(false)
+}
+
+fn source_template_attributes(element: &PreservedElement) -> Vec<RunAttribute> {
+    element
+        .attributes
+        .iter()
+        .map(|attribute| RunAttribute {
+            name: attribute
+                .name
+                .qualified_name
+                .clone()
+                .unwrap_or_else(|| attribute.name.local_name.clone()),
+            value: attribute.value.clone(),
+        })
+        .collect()
+}
+
+fn text_attributes_represented_by_runs(element: &PreservedElement, runs: &[TextRun]) -> bool {
+    let source_attributes = source_template_attributes(element);
+    runs.iter().any(|run| {
+        run_attributes_preserve_unknown_data(&source_attributes, &run.attributes).unwrap_or(false)
+    })
+}
+
+fn source_template_unknown_data_matches(
+    element: &PreservedElement,
+    attributes: &[RunAttribute],
+) -> bool {
+    let source_attributes = source_template_attributes(element);
+    run_attributes_preserve_unknown_data(&source_attributes, attributes).unwrap_or(false)
+}
+
+fn text_element_can_represent_run(element: &PreservedElement, run: &TextRun) -> bool {
+    run.attributes.iter().all(|attribute| {
+        !attribute.name.contains(':')
+            || element.attributes.iter().any(|existing| {
+                existing
+                    .name
+                    .qualified_name
+                    .as_deref()
+                    .unwrap_or(existing.name.local_name.as_str())
+                    == attribute.name
+            })
+    })
+}
+
+fn has_opaque_text_children(element: &PreservedElement) -> bool {
+    element
+        .children
+        .iter()
+        .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
 }
 
 fn reconcile_text_element(

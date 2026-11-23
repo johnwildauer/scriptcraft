@@ -303,9 +303,17 @@ impl SourceIdentityUseIndex {
 
     fn paragraph_is_safely_removable(&self, id: &str) -> bool {
         self.paragraph_identity_counts.get(id) == Some(&1)
+            && self.paragraph_source_occurrences(id) <= 1
             && !self.referenced_paragraph_ids.contains(id)
             && !self.anchored_paragraph_ids.contains(id)
             && !self.externally_used_paragraph_ids.contains(id)
+    }
+
+    fn paragraph_source_occurrences(&self, id: &str) -> usize {
+        self.paragraph_source_identity_counts
+            .get(id)
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -425,6 +433,17 @@ impl PreservationState {
             .as_ref()
             .expect("identity-use ensure installs a current index")
             .paragraph_is_safely_removable(id)
+    }
+
+    /// Counts retained paragraph source occurrences independently from the
+    /// unique identity registry. This is used after an owner-local structural
+    /// removal to decide whether a shared foreign-ID registration still exists.
+    pub(super) fn paragraph_source_identity_occurrences(&mut self, id: &str) -> usize {
+        self.ensure_source_identity_use_index();
+        self.source_identity_use_index
+            .as_ref()
+            .expect("identity-use ensure installs a current index")
+            .paragraph_source_occurrences(id)
     }
 
     /// Returns raw source IDs only after refreshing collision-reservation state.

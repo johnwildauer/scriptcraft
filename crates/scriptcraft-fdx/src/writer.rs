@@ -26,6 +26,7 @@ use crate::{MAX_SOURCE_BYTES, MAX_SOURCE_DEPTH, MAX_SOURCE_NAME_OR_VALUE_BYTES};
 use scriptcraft_model::preservation::{
     ForeignIdDomain, PreservedElement, PreservedNode, SourceEncoding,
 };
+use scriptcraft_model::formatted_text::{normalize_project_runs, FormattedTextError};
 use scriptcraft_model::{Project, SourceFormat};
 use std::collections::BTreeSet;
 
@@ -322,12 +323,19 @@ fn write_v6_inner(
     structural_difference: &mut Option<SourceTreeDifference>,
     identity_difference: &mut Option<IdentitySetDifference>,
 ) -> Result<Vec<u8>, FdxError> {
+    // Serialization owns a defensive detached normalization boundary. Every
+    // subsequent validation, reconciliation, budget, and reread comparison
+    // consumes this same candidate rather than mutating the caller's Project.
+    let normalized_project =
+        normalize_project_runs(project).map_err(map_inline_normalization_error)?;
+    let project = &normalized_project;
+
     // Project validation requires every retained definition anchor to resolve
     // against the current registry. Reconcile a detached validation copy first
     // so removing a definition (including its inert duplicate family) can be
     // verified instead of being rejected before the writer gets to project it.
-    // The actual output path below still starts from the caller's unchanged
-    // preservation snapshot and performs the same projection for comparison.
+    // The output path below starts from the normalized detached preservation
+    // snapshot and performs the corresponding projection for comparison.
     let mut validation_project = project.clone();
     if validation_project.preservation.is_some() {
         crate::element_settings::reconcile_project_element_settings(&mut validation_project)?;
@@ -483,4 +491,16 @@ fn write_v6_inner(
         }
     }
     Ok(bytes)
+}
+
+fn map_inline_normalization_error(error: FormattedTextError) -> FdxError {
+    match error {
+        FormattedTextError::Model(error) => map_model_error(error),
+        FormattedTextError::Preservation(error) => map_preservation_error(error),
+        FormattedTextError::TextTooLong
+        | FormattedTextError::TooManyRuns
+        | FormattedTextError::TooManyRunAttributes
+        | FormattedTextError::RunAttributeTooLarge => FdxError::ResourceLimit,
+        _ => FdxError::InvalidValue,
+    }
 }

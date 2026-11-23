@@ -161,6 +161,12 @@ Preference writes are narrow, no-op-aware, debounced snapshots to the component'
 
 The earlier WO-009.1/WO-009.9 selector wording that both modes start at Screenplay is superseded: Apply-to-current starts at Screenplay, while New-document mode starts at the effective saved default. This correction records current mode-specific behavior and does not claim manual acceptance.
 
+### Clear Size and replacement Open error ownership
+
+The in-window and native menu projections expose one typed Element Default Size action before the unchanged integer Size choices. It dispatches the same command-62 clear-to-inherit semantics as other inline-formatting paths and uses current selection/availability; it does not toggle or alter Font, Color, Style, or text. This supersedes the preceding integrated-menu “no Default row” Size clause only. The Body Size menu only is in scope; no Title Page formatting menu is added.
+
+For an acknowledged replacement Open failure, the child continues sending its existing terminal handoff and bounded development diagnostic while suppressing the child-native failure dialog. The parent remains the sole user-facing dialog owner. Direct cold-start and independent-child Open failures retain child-local native reporting. Migration, dirty-document, and activation rules remain unchanged.
+
 ## Decisions
 
 ### Landed shared menu and Body context projections

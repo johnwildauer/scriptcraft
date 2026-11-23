@@ -13,7 +13,7 @@ use super::{
     invalidate_changed_generated_parentheticals, validate_full_candidate, validate_selection,
     EditError, EditMutationDiagnostics, EditPolicy, EditingSession, Selection,
 };
-use scriptcraft_model::{dual_dialogue, Project, StableId};
+use scriptcraft_model::{dual_dialogue, BodyOwner, Project, StableId};
 use std::collections::BTreeSet;
 use std::time::Instant;
 
@@ -327,6 +327,7 @@ impl EditingSession {
                             )
                             .map_err(EditError::Preservation)?;
                     }
+                    normalize_reconciled_body_run_candidates(&self.project, &mut project)?;
                     Ok(())
                 })();
                 add_diagnostic_duration(&mut diagnostics.preservation_nanos, preservation_started);
@@ -436,4 +437,41 @@ impl EditingSession {
         }
         result
     }
+}
+
+fn normalize_reconciled_body_run_candidates(
+    baseline: &Project,
+    candidate: &mut Project,
+) -> Result<(), EditError> {
+    for index in 0..candidate.elements.len() {
+        let id = candidate.elements[index].id.clone();
+        let text = candidate.elements[index].text.clone();
+        let runs = candidate.elements[index].runs.clone();
+        let unchanged = baseline
+            .elements
+            .iter()
+            .find(|element| element.id == id)
+            .is_some_and(|element| element.text == text && element.runs == runs);
+        if unchanged {
+            continue;
+        }
+        let normalized = scriptcraft_model::formatted_text::normalize_runs(&text, &runs)
+            .map_err(EditError::FormattedText)?;
+        let has_provenance = candidate.elements[index].source_provenance.is_some();
+        BodyOwner::update(&mut candidate.elements[index], |element| {
+            element.runs = normalized.clone();
+        });
+        if let Some(preservation) = candidate.preservation.as_mut() {
+            if preservation.has_managed_element(&id) {
+                preservation
+                    .sync_managed_text_runs(&id, &text, &normalized)
+                    .map_err(EditError::Preservation)?;
+            } else if has_provenance {
+                return Err(EditError::Preservation(
+                    scriptcraft_model::preservation::PreservationError::ManagedAnchorMissing,
+                ));
+            }
+        }
+    }
+    Ok(())
 }

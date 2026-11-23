@@ -158,6 +158,12 @@ The single session candidate is the publication boundary. Apply neither changes 
 
 The Elements inspector is a live desktop presentation of the Project's ordered definitions, not an FDX settings editor. Selector visibility, selected built-in ID, mode, focus-return state, and bounded inline-error category are transient app state and are never serialized or attached to retained source. The landed selector supports settings-only Apply to the current session and independent-child New from Template through the shared three-entry catalog. Explicit Apply alone enters the session Apply service; New uses the common loader for a fresh full-content child and leaves the parent session untouched. Opening, selection changes, cancellation, close, and Escape do not load a built-in, extract settings, allocate a candidate, or touch the current source tree. The desktop does not own an FDX parser, retained settings copy, template catalog, target source graph, or second replacement/transaction path. Current-document direct-root `ElementSettings` replacement and preserved-source atomicity remain FDX/session responsibilities.
 
+### Inline-run normalization, reconciliation, and identity
+
+FDX edit-time source synchronization and writer-time reconciliation accept canonical repartitioning of normalized runs whenever their source-owned data remains representable. Ordinary unqualified Font, Size, Color, Style, and unknown run attributes may be projected even when absent from a reused Text template. Old Text partitions are not editing permissions. Opaque inline descendants, required namespace bindings, unsafe topology, and actual loss of retained data remain bounded safe-stops. The same Model normalizer governs Style and Size semantics; no codec-specific parser, merger, or comparison policy is added.
+
+Writer and native storage serialize and compare the same detached normalized Project candidate. Existing semantic reread, identity-set, normalized source-tree, unrelated root/board, destination conflict, flush/sync, and atomic-publication gates remain strict and consume that candidate. Repeated managed paragraph IDs are retained per occurrence without rewriting; unique session-local IDs remain distinct, and any foreign-ID-only mapping that is ambiguous fails at the operation/rebase boundary rather than rejecting Open. Duplicate tolerance does not extend to non-paragraph identity domains.
+
 ## Decisions
 
 - Preserve the source tree alongside narrowly managed semantic projections; unsupported data remains opaque rather than being guessed at or discarded.

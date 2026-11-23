@@ -2,8 +2,9 @@ use super::selection::{validate_position, validate_title_position};
 use super::structure::remove_body_owner;
 use super::{EditError, Position};
 use scriptcraft_model::formatted_text::{
-    project_style_at_caret, toggle_paragraph_run_styles, ParagraphTarget, RunBoundaryAffinity,
-    RunStyle, RunStyleFlags,
+    canonical_style_value, canonicalize_run_attributes, insert_run_attribute, normalize_runs,
+    parse_style_attribute, project_style_at_caret, toggle_paragraph_run_styles, ParagraphTarget,
+    RunBoundaryAffinity, RunStyle, RunStyleFlags,
 };
 use scriptcraft_model::preservation::PreservationError;
 use scriptcraft_model::{
@@ -45,52 +46,40 @@ pub(super) fn title_run_attributes_at(
 pub(super) fn apply_typing_styles(
     mut attributes: Vec<RunAttribute>,
     typing: RunStyleFlags,
-) -> Vec<RunAttribute> {
-    let mut tokens = attributes
-        .iter()
-        .find(|attribute| attribute.name == "Style")
-        .map(|attribute| {
-            attribute
-                .value
-                .split('+')
-                .filter(|token| {
-                    !matches!(
-                        *token,
-                        "Bold"
-                            | "Italic"
-                            | "Underline"
-                            | "AllCaps"
-                            | "Strikethrough"
-                            | "StrikeThrough"
-                    )
-                })
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    for (enabled, token) in [
-        (typing.bold, "Bold"),
-        (typing.italics, "Italic"),
-        (typing.underline, "Underline"),
-        (typing.all_caps, "AllCaps"),
-        (typing.strikethrough, "Strikethrough"),
+) -> Result<Vec<RunAttribute>, EditError> {
+    let mut projection = parse_style_attribute(&attributes).map_err(EditError::FormattedText)?;
+    for style in [
+        RunStyle::Bold,
+        RunStyle::Italics,
+        RunStyle::Underline,
+        RunStyle::Strikethrough,
+        RunStyle::AllCaps,
     ] {
-        if enabled {
-            tokens.push(token.to_owned());
-        }
+        projection.flags.set(style, typing.contains(style));
     }
-    if let Some(attribute) = attributes
-        .iter_mut()
-        .find(|attribute| attribute.name == "Style")
-    {
-        attribute.value = tokens.join("+");
-    } else if !tokens.is_empty() {
-        attributes.push(RunAttribute {
-            name: "Style".into(),
-            value: tokens.join("+"),
-        });
+    let canonical = canonical_style_value(&projection);
+    let index = attributes
+        .iter()
+        .position(|attribute| attribute.name == "Style");
+    match (index, canonical) {
+        (Some(index), Some(value)) => attributes[index].value = value,
+        (Some(index), None) => { attributes.remove(index); }
+        (None, Some(value)) => insert_run_attribute(
+            &mut attributes,
+            RunAttribute { name: "Style".to_owned(), value },
+        )
+        .map_err(EditError::FormattedText)?,
+        (None, None) => {}
     }
-    attributes
+    canonicalize_run_attributes(&attributes).map_err(EditError::FormattedText)
+}
+
+pub(super) fn normalize_run_sequence(
+    text: &str,
+    runs: &mut Vec<TextRun>,
+) -> Result<(), EditError> {
+    *runs = normalize_runs(text, runs).map_err(EditError::FormattedText)?;
+    Ok(())
 }
 
 pub(super) fn synchronize_body_typing_style(
@@ -146,6 +135,9 @@ pub(super) fn replace_range(
     }
     if inserted.len() > MAX_TEXT_BYTES {
         return Err(EditError::TextTooLong);
+    }
+    if start == end && inserted.is_empty() {
+        return Ok(());
     }
     if start.element == end.element {
         replace_element_text(project, start.element, start.offset, end.offset, inserted)?;
@@ -233,6 +225,15 @@ pub(super) fn replace_element_text(
             }
         }
     });
+    let normalized_text = project.elements[element_index].text.clone();
+    let normalized_runs = normalize_runs(
+        &normalized_text,
+        &project.elements[element_index].runs,
+    )
+    .map_err(EditError::FormattedText)?;
+    BodyOwner::update(&mut project.elements[element_index], |item| {
+        item.runs = normalized_runs;
+    });
     if has_source_mapping {
         project
             .preservation
@@ -301,9 +302,6 @@ fn replace_cross_element_runs(
 ) -> Result<Vec<TextRun>, EditError> {
     let left = &project.elements[start.element];
     let right = &project.elements[end.element];
-    if left.runs.is_empty() && right.runs.is_empty() {
-        return Ok(Vec::new());
-    }
     let left_runs = effective_runs(left);
     let right_runs = effective_runs(right);
     let mut result = slice_runs(&left_runs, 0, start.offset);
@@ -315,7 +313,7 @@ fn replace_cross_element_runs(
         slice_runs(&right_runs, end.offset, right.text.len())
     };
     result.extend(suffix_runs);
-    coalesce_runs(&mut result);
+    normalize_run_sequence(combined, &mut result)?;
     let actual = result
         .iter()
         .map(|run| run.text.as_str())
@@ -382,18 +380,8 @@ pub(super) fn push_run(runs: &mut Vec<TextRun>, text: &str, attributes: Vec<RunA
     });
 }
 
-pub(super) fn coalesce_runs(runs: &mut Vec<TextRun>) {
-    let mut coalesced: Vec<TextRun> = Vec::with_capacity(runs.len());
-    for run in runs.drain(..) {
-        if let Some(previous) = coalesced.last_mut() {
-            if previous.attributes == run.attributes {
-                previous.text.push_str(&run.text);
-                continue;
-            }
-        }
-        coalesced.push(run);
-    }
-    *runs = coalesced;
+pub(super) fn coalesce_runs(runs: &mut Vec<TextRun>, text: &str) -> Result<(), EditError> {
+    normalize_run_sequence(text, runs)
 }
 
 pub(super) fn previous_boundary(text: &str, offset: usize) -> usize {

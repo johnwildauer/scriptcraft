@@ -3,8 +3,8 @@
 use super::history::Snapshot;
 use super::selection::{validate_title_position, validate_title_selection, SelectionOrdering};
 use super::text::{
-    apply_typing_styles, coalesce_runs, effective_title_runs, next_boundary, previous_boundary,
-    push_run, slice_runs, title_run_attributes_at,
+    apply_typing_styles, coalesce_runs, effective_title_runs, next_boundary, normalize_run_sequence,
+    previous_boundary, push_run, slice_runs, title_run_attributes_at,
 };
 use super::{validate_full_candidate, EditError, EditingSession, Position, Selection};
 use scriptcraft_model::formatted_text::{
@@ -248,6 +248,8 @@ impl EditingSession {
             right.text = right.text[start.offset..].to_owned();
             left.runs = slice_runs(&source_runs, 0, start.offset);
             right.runs = slice_runs(&source_runs, start.offset, original_len);
+            normalize_run_sequence(&left.text, &mut left.runs)?;
+            normalize_run_sequence(&right.text, &mut right.runs)?;
             right.source_provenance = None;
             project.title_page[start.element] = left;
             project.title_page.insert(start.element + 1, right);
@@ -322,6 +324,7 @@ impl EditingSession {
                 ));
             }
         }
+        normalize_reconciled_title_run_candidates(&before_title, &mut project)?;
         if let Some(preservation) = project.preservation.as_mut() {
             preservation.ensure_source_identity_use_index();
         }
@@ -359,6 +362,40 @@ impl EditingSession {
     }
 }
 
+fn normalize_reconciled_title_run_candidates(
+    baseline: &[TitlePageParagraph],
+    candidate: &mut Project,
+) -> Result<(), EditError> {
+    for index in 0..candidate.title_page.len() {
+        let id = candidate.title_page[index].id.clone();
+        let text = candidate.title_page[index].text.clone();
+        let runs = candidate.title_page[index].runs.clone();
+        let unchanged = baseline
+            .iter()
+            .find(|paragraph| paragraph.id == id)
+            .is_some_and(|paragraph| paragraph.text == text && paragraph.runs == runs);
+        if unchanged {
+            continue;
+        }
+        let normalized = scriptcraft_model::formatted_text::normalize_runs(&text, &runs)
+            .map_err(EditError::FormattedText)?;
+        let has_provenance = candidate.title_page[index].source_provenance.is_some();
+        candidate.title_page[index].runs = normalized.clone();
+        if let Some(preservation) = candidate.preservation.as_mut() {
+            if preservation.has_managed_element(&id) {
+                preservation
+                    .sync_managed_text_runs(&id, &text, &normalized)
+                    .map_err(EditError::Preservation)?;
+            } else if has_provenance {
+                return Err(EditError::Preservation(
+                    PreservationError::ManagedAnchorMissing,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn unsupported_title_structure() -> EditError {
     EditError::Preservation(PreservationError::UnsupportedTextMapping)
 }
@@ -381,12 +418,8 @@ fn join_title_at(project: &mut Project, left_index: usize) -> Result<(), EditErr
     let mut runs = effective_title_runs(&left);
     runs.extend(effective_title_runs(&right));
     left.text.push_str(&right.text);
-    coalesce_runs(&mut runs);
-    left.runs = if left.text.is_empty() {
-        Vec::new()
-    } else {
-        runs
-    };
+    coalesce_runs(&mut runs, &left.text)?;
+    left.runs = runs;
     project.title_page[left_index] = left;
     project.title_page.remove(right_index);
     Ok(())
@@ -407,6 +440,9 @@ fn replace_title_range(
     if inserted.len() > MAX_TEXT_BYTES {
         return Err(EditError::TextTooLong);
     }
+    if !project.title_page.is_empty() && start == end && inserted.is_empty() {
+        return Ok(());
+    }
     if project.title_page.is_empty() {
         if start != end || project.preservation.is_some() {
             return Err(unsupported_title_structure());
@@ -420,9 +456,10 @@ fn replace_title_range(
         if !inserted.is_empty() && typing != RunStyleFlags::default() {
             paragraph.runs.push(TextRun {
                 text: inserted.to_owned(),
-                attributes: apply_typing_styles(Vec::new(), typing),
+                attributes: apply_typing_styles(Vec::new(), typing)?,
             });
         }
+        normalize_run_sequence(&paragraph.text, &mut paragraph.runs)?;
         project.title_page.push(paragraph);
         return Ok(());
     }
@@ -482,10 +519,9 @@ fn replace_title_range(
             let effective = effective_title_runs(&updated);
             let mut runs = slice_runs(&effective, 0, start.offset);
             let inherited = title_run_attributes_at(&effective, start.offset, updated.text.len());
-            push_run(&mut runs, inserted, apply_typing_styles(inherited, typing));
+            push_run(&mut runs, inserted, apply_typing_styles(inherited, typing)?);
             runs.extend(slice_runs(&effective, end.offset, updated.text.len()));
-            coalesce_runs(&mut runs);
-            updated.runs = if text.is_empty() { Vec::new() } else { runs };
+            updated.runs = runs;
         } else if !inserted.is_empty() && typing != RunStyleFlags::default() {
             let effective = effective_title_runs(&updated);
             let mut runs = slice_runs(&effective, 0, start.offset);
@@ -495,13 +531,13 @@ fn replace_title_range(
                 apply_typing_styles(
                     title_run_attributes_at(&effective, start.offset, updated.text.len()),
                     typing,
-                ),
+                )?,
             );
             runs.extend(slice_runs(&effective, end.offset, updated.text.len()));
-            coalesce_runs(&mut runs);
             updated.runs = runs;
         }
         updated.text = text;
+        normalize_run_sequence(&updated.text, &mut updated.runs)?;
         if has_source_mapping {
             let sync_text = updated.text.clone();
             let sync_runs = updated.runs.clone();
@@ -536,17 +572,17 @@ fn replace_title_range(
     push_run(
         &mut runs,
         inserted,
-        apply_typing_styles(insertion_attributes, typing),
+        apply_typing_styles(insertion_attributes, typing)?,
     );
     runs.extend(slice_runs(
         &effective_title_runs(&right),
         end.offset,
         right.text.len(),
     ));
-    coalesce_runs(&mut runs);
     let mut replacement = left;
     replacement.text = text;
     replacement.runs = runs;
+    normalize_run_sequence(&replacement.text, &mut replacement.runs)?;
     project.title_page[start.element] = replacement;
     project.title_page.drain(start.element + 1..=end.element);
     Ok(())

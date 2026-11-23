@@ -495,6 +495,7 @@ impl ScriptCraftApp {
         });
         let startup_outcome =
             measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+                let acknowledged_replacement_child = app.acknowledged_replacement_startup();
                 let outcome = app.consume_startup_document_handoff();
                 if let Some(outcome) = outcome {
                     app.emit_startup_handoff_result(outcome);
@@ -502,7 +503,10 @@ impl ScriptCraftApp {
                 #[cfg(target_os = "macos")]
                 app.drain_native_open_documents();
                 if outcome == Some(StagedOpenOutcome::Failed) {
-                    show_startup_open_failure(StagedOpenOutcome::Failed);
+                    show_startup_open_failure(
+                        StagedOpenOutcome::Failed,
+                        acknowledged_replacement_child,
+                    );
                 }
                 outcome
             });

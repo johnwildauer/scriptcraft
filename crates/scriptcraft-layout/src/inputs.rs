@@ -3,6 +3,7 @@ use super::{
     FixedRect,
 };
 use scriptcraft_model::{
+    formatted_text::InlineSizeProjection,
     formatting::{FixedPoint, ParagraphAlignment, ParagraphLeading, ParagraphSpacing},
     layout_inputs::{DocumentLeading, PageLayoutInputs},
     typography::{
@@ -108,7 +109,7 @@ impl LayoutEnvironment {
             scriptcraft_model::typography::NEUTRAL_COURIER_PRIME_FAMILY,
             self.neutral_title_style.source_color.clone(),
             id,
-            self.neutral_title_style.size,
+            FixedPoint::from_points(i64::from(self.neutral_title_style.size)),
             self.neutral_title_style.bold,
             self.neutral_title_style.italic,
             self.neutral_title_style.underline,
@@ -400,7 +401,7 @@ fn effective_definition_style(
         font.family.clone(),
         font.color.clone(),
         id,
-        u16::from(font.size),
+        FixedPoint::from_points(i64::from(font.size)),
         font.bold,
         font.italic,
         font.underline,
@@ -416,25 +417,21 @@ fn resolve_one_run_style(
 ) -> Result<ResolvedTextStyle, LayoutError> {
     let element_style = FaceStyle::from_flags(base.bold, base.italic);
     let mut family = base.declared_family.clone();
-    let mut size = base.size;
     let mut bold = base.bold;
     let mut italic = base.italic;
     let mut underline = base.underline;
     let mut all_caps = base.all_caps;
     let mut hidden = base.hidden_text;
     let mut color = base.source_color.clone();
+    let size = match InlineSizeProjection::parse(&run.attributes)
+        .map_err(|_| ModelError::InvalidRunProjection)?
+    {
+        InlineSizeProjection::Valid { points, .. } => points,
+        InlineSizeProjection::Inherited | InlineSizeProjection::Invalid { .. } => base.size,
+    };
     for attribute in &run.attributes {
         match attribute.name.as_str() {
             "Font" if !attribute.value.is_empty() => family = attribute.value.clone(),
-            "Size" => {
-                if let Ok(parsed) = attribute.value.parse::<u16>() {
-                    if (1..=scriptcraft_model::typography::MAX_SUPPORTED_FONT_SIZE)
-                        .contains(&parsed)
-                    {
-                        size = parsed;
-                    }
-                }
-            }
             "Color" => color = Some(attribute.value.clone()),
             "Style" => {
                 for token in attribute.value.split('+') {
@@ -631,11 +628,13 @@ fn resolve_style_ordinary_leading(
         LeadingResolverKind::Courier => 100_i64,
         LeadingResolverKind::Proportional => 120_i64,
     };
-    let base = i64::from(style.size)
+    let raw = style.size.raw()
         .checked_mul(ratio)
+        .and_then(|value| value.checked_add(50))
+        .and_then(|value| value.checked_div(100))
         .ok_or(LayoutError { kind: LayoutErrorKind::InvalidEffectiveLeading })?;
-    let raw = (base > 0)
-        .then_some(base)
+    let raw = (raw > 0)
+        .then_some(raw)
         .ok_or(LayoutError { kind: LayoutErrorKind::InvalidEffectiveLeading })?;
     Ok(FixedPoint::from_raw(raw))
 }
@@ -676,13 +675,13 @@ fn resolve_document_leading_adjustment(
 
 fn derive_space_before(
     value: FixedPoint,
-    base_size: u16,
+    base_size: FixedPoint,
     base_leading: FixedPoint,
 ) -> Result<(u32, FixedPoint), LayoutError> {
-    let size_raw = i64::from(base_size)
-        .checked_mul(FixedPoint::SCALE)
-        .filter(|size| *size > 0)
-        .ok_or(LayoutError { kind: LayoutErrorKind::InvalidSpaceBefore })?;
+    let size_raw = base_size.raw();
+    if size_raw <= 0 {
+        return Err(LayoutError { kind: LayoutErrorKind::InvalidSpaceBefore });
+    }
     let source_raw = value.raw();
     if !(0..=79_200).contains(&source_raw) || source_raw % size_raw != 0 {
         return Err(LayoutError { kind: LayoutErrorKind::InvalidSpaceBefore });

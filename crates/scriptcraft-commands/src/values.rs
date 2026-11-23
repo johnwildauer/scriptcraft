@@ -286,19 +286,49 @@ impl InlineColorValue {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunFormattingPatchValue {
     #[serde(default)] pub font: Option<InlineFontValue>,
     #[serde(default)] pub size: Option<InlineSizeValue>,
     #[serde(default)] pub color: Option<InlineColorValue>,
+    #[serde(default, skip_serializing_if = "is_false")] pub clear_size: bool,
 }
+
+impl<'de> Deserialize<'de> for RunFormattingPatchValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            #[serde(default)] font: Option<InlineFontValue>,
+            #[serde(default)] size: Option<InlineSizeValue>,
+            #[serde(default)] color: Option<InlineColorValue>,
+            #[serde(default)] clear_size: bool,
+        }
+
+        let fields = Fields::deserialize(deserializer)?;
+        if fields.size.is_some() && fields.clear_size {
+            return Err(de::Error::custom("size and clear_size are mutually exclusive"));
+        }
+        Ok(Self {
+            font: fields.font,
+            size: fields.size,
+            color: fields.color,
+            clear_size: fields.clear_size,
+        })
+    }
+}
+
+const fn is_false(value: &bool) -> bool { !*value }
 
 impl RunFormattingPatchValue {
     pub const fn as_core(self) -> scriptcraft_model::formatted_text::InlineRunFormattingPatch {
         scriptcraft_model::formatted_text::InlineRunFormattingPatch {
             font: match self.font { Some(value) => Some(value.as_core()), None => None },
-            size: match self.size { Some(value) => Some(value.as_core()), None => None },
+            size: if self.clear_size { Some(None) } else { match self.size { Some(value) => Some(Some(value.as_core())), None => None } },
             color: match self.color { Some(value) => Some(value.as_core()), None => None },
         }
     }

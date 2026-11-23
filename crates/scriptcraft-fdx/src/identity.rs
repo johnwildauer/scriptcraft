@@ -164,15 +164,14 @@ pub(crate) fn collect_identities(
 ) -> Result<(Vec<ForeignIdentity>, BoardGraph), FdxError> {
     let mut identities = Vec::new();
     let mut board_graph = BoardGraph::default();
-    let mut seen = BTreeSet::new();
-    let mut scoped_title_page_paragraphs = BTreeMap::new();
     let mut definitions = Vec::new();
     walk_elements(root, &mut |element,
-                              nearest_board,
-                              in_title_page,
-                              in_title_content,
-                              depth,
-                              is_alternate_copy| {
+                               nearest_board,
+                               _,
+                               _,
+                               _,
+                               is_alternate_copy,
+                               source_class| {
         if raw_identity_attribute_count(element) > 1 {
             return Err(FdxError::AmbiguousIdentity);
         }
@@ -204,55 +203,38 @@ pub(crate) fn collect_identities(
         let domain = identity_domain(&element.name.local_name);
         let identity =
             ForeignIdentity::new(domain, value.to_owned()).map_err(map_preservation_error)?;
-        let scoped_title_page_paragraph = in_title_page
-            && in_title_content
-            && element.name.local_name == "Paragraph"
-            && depth == 3;
-        if scoped_title_page_paragraph {
-            *scoped_title_page_paragraphs
-                .entry(identity.clone())
-                .or_insert(0usize) += 1;
-            definitions.push((
-                element.name.local_name.clone(),
-                identity,
-                element.attributes.clone(),
-                true,
-            ));
-            return Ok(());
-        }
-        if !seen.insert(identity.clone()) {
-            return Err(FdxError::AmbiguousIdentity);
-        }
+        let managed_paragraph = element.name.local_name == "Paragraph"
+            && source_class == content::SourceClass::Managed;
         definitions.push((
             element.name.local_name.clone(),
             identity,
             element.attributes.clone(),
-            false,
+            managed_paragraph,
         ));
         Ok(())
     })?;
 
-    // A single scoped title identity enters source-use accounting without
-    // shadowing global definitions; repeated scoped occurrences coalesce.
-    for (identity, count) in &scoped_title_page_paragraphs {
-        if seen.contains(identity) {
-            return Err(FdxError::AmbiguousIdentity);
-        }
-        if *count == 1 {
-            seen.insert(identity.clone());
-        }
+    // Only repeated identities whose every typed occurrence is a supported
+    // managed paragraph are coalesced. Duplicate checks for all other typed
+    // identity contexts remain strict; opaque ancestry is not promoted here.
+    let mut occurrence_kinds = BTreeMap::<ForeignIdentity, (usize, bool)>::new();
+    for (_, identity, _, managed_paragraph) in &definitions {
+        let entry = occurrence_kinds
+            .entry(identity.clone())
+            .or_insert((0, true));
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 &= *managed_paragraph;
     }
-
+    if occurrence_kinds
+        .values()
+        .any(|(count, only_managed)| *count > 1 && !only_managed)
+    {
+        return Err(FdxError::AmbiguousIdentity);
+    }
     let mut source_order = 0u32;
-    let mut registered_repeated_title_identities = BTreeSet::new();
-    for (name, identity, attributes, scoped_title_page) in &definitions {
-        let repeated_scoped_title_page = *scoped_title_page
-            && scoped_title_page_paragraphs
-                .get(identity)
-                .is_some_and(|count| *count > 1);
-        if repeated_scoped_title_page
-            && !registered_repeated_title_identities.insert(identity.clone())
-        {
+    let mut registered_identities = BTreeSet::new();
+    for (name, identity, attributes, _) in &definitions {
+        if !registered_identities.insert(identity.clone()) {
             continue;
         }
         let kind = match name.as_str() {
@@ -291,16 +273,10 @@ pub(crate) fn collect_identities(
 
     let defined = definitions
         .iter()
-        .filter(|(_, identity, _, scoped_title_page)| {
-            !(*scoped_title_page
-                && scoped_title_page_paragraphs
-                    .get(identity)
-                    .is_some_and(|count| *count > 1))
-        })
         .map(|(_, identity, _, _)| identity.clone())
         .collect::<BTreeSet<_>>();
     let mut references = Vec::new();
-    walk_elements(root, &mut |element, nearest_board, _, _, _, _| {
+    walk_elements(root, &mut |element, nearest_board, _, _, _, _, _| {
         let board = if element.name.local_name == "DisplayBoard" {
             raw_identity_attribute(element)
                 .map(|value| ForeignIdentity::new(ForeignIdDomain::Board, value.to_owned()))
@@ -345,6 +321,7 @@ where
         bool,
         usize,
         bool,
+        content::SourceClass,
     ) -> Result<(), FdxError>,
 {
     fn classify(
@@ -541,6 +518,7 @@ where
             bool,
             usize,
             bool,
+            content::SourceClass,
         ) -> Result<(), FdxError>,
     {
         let class = classify(
@@ -590,6 +568,7 @@ where
                 in_title_content,
                 depth,
                 exact_alternate_copy,
+                class,
             )?;
         }
 
@@ -667,7 +646,7 @@ pub(crate) fn validate_image_payload_budgets(
     }
 
     let mut total_image_text = 0usize;
-    walk_elements(root, &mut |element, _, _, _, _, _| {
+    walk_elements(root, &mut |element, _, _, _, _, _, _| {
         if !is_fdx_element(element, "Image", root_namespace) {
             return Ok(());
         }

@@ -62,7 +62,11 @@ The default/template-backed lifecycle clause below is superseded only where it s
 - **Legacy persistence boundary:** Native FDX is the durable document format. No legacy JSON codec, state, schema, migration, recovery, writer, or special detection path exists; unsupported JSON receives ordinary bounded unsupported-input handling. The private version-1 adapter for historical command-22 role spellings is command-wire compatibility only and does not restore a document Role model or JSON persistence.
 - **Platform delivery:** Platform packaging is an adapter/distribution concern, described by [macOS packaging](../features/macos-packaging.md). The application runtime does not require Cargo or repository-relative resource paths.
 
-## Decisions
+### Inline round-trip and command restriction
+
+The desktop remains an adapter: it owns the clear-to-inherit menu action and single-owner native Open feedback, while Model owns normalized run semantics, Session owns edit transactions, FDX owns source interpretation/emission, and Layout/Export consume shared effective typography. A failed acknowledged replacement is reported to the user only by the parent; direct cold-start and independent-child failures retain child reporting. Element Default clears the direct Size override for the selected Body range or updates the collapsed-caret typing patch without changing other formatting. Command 62 carries the additive optional clear-size field; no new package edge or command ID is introduced.
+
+For the inline-style round-trip initiative only, no build/check/lint/format command, test, launch, GUI/native/manual validation, screenshot, filesystem experiment, or other runtime command is authorized before WO-006. WO-006 alone permits its specifically stated workspace build and repair reruns. This narrows the general manifest allowlist and creates no review or acceptance assignment.
 
 ### Landed menu, context, and formatting ownership
 

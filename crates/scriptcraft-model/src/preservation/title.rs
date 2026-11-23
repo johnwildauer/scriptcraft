@@ -64,43 +64,56 @@ pub(super) fn validate_title_text_shape(
     if source_text != semantic.text {
         return Err(PreservationError::UnsupportedTextMapping);
     }
-    let runs = title_effective_runs(semantic);
-    if runs.iter().map(|run| run.text.as_str()).collect::<String>() != semantic.text {
+    let semantic_runs = crate::formatted_text::normalize_runs(
+        &semantic.text,
+        &title_effective_runs(semantic),
+    )
+    .map_err(|_| PreservationError::UnsupportedTextMapping)?;
+    let source_runs = templates
+        .iter()
+        .filter_map(|template| {
+            let text = template
+                .children
+                .iter()
+                .filter_map(|child| match child {
+                    PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            (!text.is_empty()).then(|| TextRun {
+                text,
+                attributes: template
+                    .attributes
+                    .iter()
+                    .map(|attribute| crate::RunAttribute {
+                        name: attribute
+                            .name
+                            .qualified_name
+                            .clone()
+                            .unwrap_or_else(|| attribute.name.local_name.clone()),
+                        value: attribute.value.clone(),
+                    })
+                    .collect(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let normalized_source = crate::formatted_text::normalize_runs(&semantic.text, &source_runs)
+        .map_err(|_| PreservationError::UnsupportedTextMapping)?;
+    if normalized_source != semantic_runs {
         return Err(PreservationError::UnsupportedTextMapping);
     }
-    if semantic.text.is_empty() {
-        if !runs.is_empty() {
-            return Err(PreservationError::UnsupportedTextMapping);
-        }
-        if !templates.is_empty() {
-            // Empty source Text elements can carry authored run attributes or
-            // namespace state with no semantic run slot to transfer safely.
-            return Err(PreservationError::UnsupportedRunTopology);
-        }
-        return Ok(());
-    }
-    if templates.len() != runs.len() {
+    if semantic.text.is_empty()
+        && templates.iter().any(|template| {
+            !template.attributes.is_empty()
+                || !template.namespace_bindings.is_empty()
+                || template.children.iter().any(|child| {
+                    !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_))
+                })
+        })
+    {
+        // Retained source-only payload in an empty Text slot cannot be
+        // repartitioned into a semantic run without changing its ownership.
         return Err(PreservationError::UnsupportedRunTopology);
-    }
-    for (template, run) in templates.iter().zip(&runs) {
-        let text = template
-            .children
-            .iter()
-            .filter_map(|child| match child {
-                PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        if text != run.text
-            || template.attributes.len() != run.attributes.len()
-            || !template
-                .attributes
-                .iter()
-                .zip(&run.attributes)
-                .all(|(source, semantic)| source_attribute_matches_run(source, semantic))
-        {
-            return Err(PreservationError::UnsupportedTextMapping);
-        }
     }
     Ok(())
 }
@@ -293,133 +306,144 @@ fn split_title_text_element(
 pub(super) fn title_text_children_from_templates(
     recipient_source: &PreservedElement,
     templates: &[PreservedElement],
+    recipient_template_count: usize,
     semantic: &TitlePageParagraph,
 ) -> Result<Vec<PreservedNode>, PreservationError> {
-    let runs = title_effective_runs(semantic);
-    let mut rebuilt =
-        Vec::with_capacity(recipient_source.children.len().saturating_add(runs.len()));
+    let runs = crate::formatted_text::normalize_runs(
+        &semantic.text,
+        &title_effective_runs(semantic),
+    )
+    .map_err(|_| PreservationError::UnsupportedTextMapping)?;
+    if super::text::has_conflicting_expanded_run_attributes(
+        &templates.iter().collect::<Vec<_>>(),
+    ) {
+        return Err(PreservationError::UnsupportedTextMapping);
+    }
+    let mut used = BTreeSet::new();
+    let mut projected = Vec::with_capacity(runs.len());
+    for run in &runs {
+        let exact = templates.iter().enumerate().find_map(|(index, template)| {
+            (!used.contains(&index)
+                && (index < recipient_template_count
+                    || !template
+                        .children
+                        .iter()
+                        .any(|node| !matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_))))
+                && super::text::text_element_matches_run(template, run)
+                && template
+                    .children
+                    .iter()
+                    .filter_map(|node| match node {
+                        PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<String>()
+                    == run.text)
+                .then_some(index)
+        });
+        let namespace_compatible = templates.iter().enumerate().find_map(|(index, template)| {
+            (!used.contains(&index)
+                && template
+                    .children
+                    .iter()
+                    .all(|node| matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_)))
+                && super::text::text_element_can_represent_run(template, run))
+            .then_some(index)
+        });
+        let positional = templates.iter().enumerate().find_map(|(index, template)| {
+            (!used.contains(&index)
+                && template
+                    .children
+                    .iter()
+                    .all(|node| matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_)))
+                && template.children.iter().any(|node| match node {
+                    PreservedNode::Text(text) | PreservedNode::CData(text) => !text.is_empty(),
+                    _ => false,
+                }))
+                .then_some(index)
+        });
+        let element = if let Some(index) = exact.or(namespace_compatible).or(positional) {
+            used.insert(index);
+            let template = &templates[index];
+            let has_opaque = template
+                .children
+                .iter()
+                .any(|node| !matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_)));
+            if has_opaque {
+                let text = template
+                    .children
+                    .iter()
+                    .filter_map(|node| match node {
+                        PreservedNode::Text(text) | PreservedNode::CData(text) => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect::<String>();
+                if text != run.text || !super::text::text_element_matches_run(template, run) {
+                    return Err(PreservationError::UnsupportedRunTopology);
+                }
+                template.clone()
+            } else {
+                super::text::sync_text_element_attributes(template, run)?
+            }
+        } else {
+            super::text::new_plain_text_element(recipient_source, run)?
+        };
+        projected.push(PreservedNode::Element(element));
+    }
+    for (index, template) in templates.iter().enumerate() {
+        if used.contains(&index) {
+            continue;
+        }
+        let text = template
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        let has_opaque = template
+            .children
+            .iter()
+            .any(|node| !matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_)));
+        if has_opaque && !text.is_empty() {
+            return Err(PreservationError::UnsupportedRunTopology);
+        }
+        if !template.namespace_bindings.is_empty()
+            || has_opaque
+            || (text.is_empty() && !template.attributes.is_empty())
+        {
+            let mut retained = template.clone();
+            if !has_opaque {
+                retained.children = vec![PreservedNode::Text(String::new().into())].into();
+            }
+            projected.push(PreservedNode::Element(retained));
+        }
+    }
+
+    let mut rebuilt = Vec::with_capacity(recipient_source.children.len() + projected.len());
     let mut inserted = false;
     for child in &recipient_source.children {
         match child {
             PreservedNode::Element(element) if is_text_element(element, recipient_source) => {
                 if !inserted {
-                    for run in &runs {
-                        let template = templates
-                            .iter()
-                            .find(|template| {
-                                template.attributes.len() == run.attributes.len()
-                                    && template.attributes.iter().zip(&run.attributes).all(
-                                        |(source, semantic)| {
-                                            source_attribute_matches_run(source, semantic)
-                                        },
-                                    )
-                            })
-                            .ok_or(PreservationError::UnsupportedTextMapping)?;
-                        let mut text_element = template.clone();
-                        let source_text = text_element
-                            .children
-                            .iter()
-                            .filter_map(|node| match node {
-                                PreservedNode::Text(text) | PreservedNode::CData(text) => {
-                                    Some(text.as_str())
-                                }
-                                _ => None,
-                            })
-                            .collect::<String>();
-                        if source_text != run.text {
-                            if text_element.children.iter().any(|node| {
-                                !matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_))
-                            }) {
-                                return Err(PreservationError::UnsupportedRunTopology);
-                            }
-                            if let Some(first) = text_element.children.first_mut() {
-                                match first {
-                                    PreservedNode::Text(text) | PreservedNode::CData(text) => {
-                                        **text = run.text.clone();
-                                    }
-                                    _ => unreachable!(),
-                                }
-                                for child in text_element.children.iter_mut().skip(1) {
-                                    match child {
-                                        PreservedNode::Text(text) | PreservedNode::CData(text) => {
-                                            text.clear()
-                                        }
-                                        _ => unreachable!(),
-                                    }
-                                }
-                            } else {
-                                text_element
-                                    .children
-                                    .push(PreservedNode::Text(run.text.clone().into()));
-                            }
-                        }
-                        rebuilt.push(PreservedNode::Element(text_element));
-                    }
+                    rebuilt.extend(projected.iter().cloned());
                     inserted = true;
                 }
             }
-            PreservedNode::Element(element) if !is_text_element(element, recipient_source) => {
-                rebuilt.push(child.clone());
-            }
+            PreservedNode::Element(_) | PreservedNode::Comment(_)
+            | PreservedNode::ProcessingInstruction { .. } => rebuilt.push(child.clone()),
             PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty() => {
-                rebuilt.push(child.clone());
-            }
-            PreservedNode::Comment(_) | PreservedNode::ProcessingInstruction { .. } => {
                 rebuilt.push(child.clone());
             }
             _ => return Err(PreservationError::StructuralAttachmentConflict),
         }
     }
     if !inserted {
-        let mut generated = Vec::with_capacity(runs.len());
-        for run in &runs {
-            let template = templates
-                .iter()
-                .find(|template| {
-                    template.attributes.len() == run.attributes.len()
-                        && template.attributes.iter().zip(&run.attributes).all(
-                            |(source, semantic)| source_attribute_matches_run(source, semantic),
-                        )
-                })
-                .ok_or(PreservationError::UnsupportedTextMapping)?;
-            let mut text_element = template.clone();
-            let source_text = text_element
-                .children
-                .iter()
-                .filter_map(|node| match node {
-                    PreservedNode::Text(text) | PreservedNode::CData(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>();
-            if source_text != run.text {
-                if text_element
-                    .children
-                    .iter()
-                    .any(|node| !matches!(node, PreservedNode::Text(_) | PreservedNode::CData(_)))
-                {
-                    return Err(PreservationError::UnsupportedRunTopology);
-                }
-                if let Some(first) = text_element.children.first_mut() {
-                    match first {
-                        PreservedNode::Text(text) | PreservedNode::CData(text) => {
-                            **text = run.text.clone();
-                        }
-                        _ => unreachable!(),
-                    }
-                    for child in text_element.children.iter_mut().skip(1) {
-                        match child {
-                            PreservedNode::Text(text) | PreservedNode::CData(text) => text.clear(),
-                            _ => unreachable!(),
-                        }
-                    }
-                } else {
-                    text_element
-                        .children
-                        .push(PreservedNode::Text(run.text.clone().into()));
-                }
-            }
-            generated.push(PreservedNode::Element(text_element));
-        }
         let insert_at = rebuilt
             .iter()
             .position(|node| {
@@ -428,7 +452,7 @@ pub(super) fn title_text_children_from_templates(
                 )
             })
             .unwrap_or(rebuilt.len());
-        rebuilt.splice(insert_at..insert_at, generated);
+        rebuilt.splice(insert_at..insert_at, projected);
     }
     if runs.iter().map(|run| run.text.as_str()).collect::<String>() != semantic.text {
         return Err(PreservationError::UnsupportedTextMapping);
@@ -607,6 +631,7 @@ impl PreservationState {
             let mut source_templates = Vec::new();
             let recipient_source = self.validate_title_source(recipient)?;
             source_templates.extend(title_text_templates(&recipient_source)?);
+            let recipient_template_count = source_templates.len();
             for id in &removed {
                 let semantic = before
                     .iter()
@@ -625,6 +650,7 @@ impl PreservationState {
             let replacement_children = title_text_children_from_templates(
                 &recipient_source,
                 &source_templates,
+                recipient_template_count,
                 updated_recipient,
             )?;
             {
@@ -821,4 +847,3 @@ fn title_content_parent_mut<'a>(
     element_at_path_mut(&mut section.children, parent_path)
         .ok_or(PreservationError::ManagedAnchorMissing)
 }
-

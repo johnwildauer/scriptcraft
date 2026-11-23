@@ -140,6 +140,10 @@ Command version 1 keeps its 17 exact legacy `role` spellings only in private com
 
 The former desktop dynamic-controls fixture and app-local workflow test sources were removed under the zero-permanent-test policy; no permanent desktop command/control test source or test-only fixture remains. The former command-package wire and project-aware execution sources were removed by WO-007.1; command wire and execution contracts remain as specified above, with no permanent test equivalent. Phase 4 dynamic-editing and Phase 5 typography/layout/output behavior remains owned by product contracts. The zero-test policy does not establish execution or native/application behavior; user evidence boundaries remain distinct and user-selected.
 
+### Clear Size command payload
+
+Command 62 accepts the additive optional `clear_size: bool` field, defaulting to false, to represent clear-to-inherit separately from an omitted unchanged Size. A true clear and an explicit Size value are contradictory and are rejected before mutation. The command ID, envelope version 2, existing numeric Size choices, and 63-entry descriptor/ID catalog remain unchanged; no raw XML attribute or unbounded value is introduced. The typed desktop action dispatches this same command for Element Default Size.
+
 ## Decisions
 
 - Keep the vocabulary UI-independent and typed, with a headless executor for reusable semantic actions and one desktop dispatcher for all app activation.

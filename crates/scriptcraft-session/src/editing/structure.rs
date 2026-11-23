@@ -3,7 +3,7 @@
 use super::candidate::MutationValidationScope;
 use super::policy::{resolve_enter, resolve_tab, EnterAction, TabAction};
 use super::selection::SelectionOrdering;
-use super::text::{coalesce_runs, effective_runs, replace_range, slice_runs};
+use super::text::{effective_runs, normalize_run_sequence, replace_range, slice_runs};
 use super::{
     EditError, EditingSession, ParagraphKeyTarget, ParagraphKeyTargets, Position, Selection,
 };
@@ -529,8 +529,10 @@ fn split_at(
     let left = item.text[..position.offset].to_owned();
     let right = item.text[position.offset..].to_owned();
     let old_runs = effective_runs(&item);
-    let left_runs = slice_runs(&old_runs, 0, position.offset);
-    let right_runs = slice_runs(&old_runs, position.offset, item.text.len());
+    let mut left_runs = slice_runs(&old_runs, 0, position.offset);
+    let mut right_runs = slice_runs(&old_runs, position.offset, item.text.len());
+    normalize_run_sequence(&left, &mut left_runs)?;
+    normalize_run_sequence(&right, &mut right_runs)?;
     let id = split_id(project)?;
     let new_item = ScreenplayElement::new(id, element_type, right)?;
     dual_dialogue::insert_group_member_at_flat_index(
@@ -541,14 +543,10 @@ fn split_at(
     )?;
     BodyOwner::update(&mut project.elements[position.element], |element| {
         element.text = left;
-        if !item.runs.is_empty() {
-            element.runs = left_runs;
-        }
+        element.runs = left_runs;
     });
     let mut new_item = new_item;
-    if !item.runs.is_empty() {
-        new_item.runs = right_runs;
-    }
+    new_item.runs = right_runs;
     project
         .elements
         .insert(position.element + 1, BodyOwner::shared(new_item));
@@ -714,15 +712,6 @@ pub(super) fn join_at(project: &mut Project, index: usize) -> Result<(), EditErr
     }
     ensure_join_types_match(project, index)?;
     let right = project.elements[index + 1].text.clone();
-    let joined_runs =
-        if project.elements[index].runs.is_empty() && project.elements[index + 1].runs.is_empty() {
-            Vec::new()
-        } else {
-            let mut runs = effective_runs(&project.elements[index]);
-            runs.extend(effective_runs(&project.elements[index + 1]));
-            coalesce_runs(&mut runs);
-            runs
-        };
     if project.elements[index]
         .text
         .len()
@@ -731,8 +720,12 @@ pub(super) fn join_at(project: &mut Project, index: usize) -> Result<(), EditErr
     {
         return Err(EditError::TextTooLong);
     }
+    let joined_text = format!("{}{}", project.elements[index].text, right);
+    let mut joined_runs = effective_runs(&project.elements[index]);
+    joined_runs.extend(effective_runs(&project.elements[index + 1]));
+    normalize_run_sequence(&joined_text, &mut joined_runs)?;
     BodyOwner::update(&mut project.elements[index], |item| {
-        item.text.push_str(&right);
+        item.text = joined_text;
         item.runs = joined_runs;
     });
     remove_body_owner(project, index + 1);
