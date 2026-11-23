@@ -36,6 +36,13 @@ impl ScriptCraftApp {
                 self.toggle_active_surface_invisibles(ctx);
                 DesktopCommandOutcome::EffectDispatched
             }
+            Command::ViewRulerToggle => {
+                let visible = !self.settings_store.ruler_visible();
+                if self.settings_store.set_ruler_visible(visible) {
+                    ctx.request_repaint();
+                }
+                DesktopCommandOutcome::EffectDispatched
+            }
             Command::WindowTitlePageOpen => {
                 self.open_title_page_window(ctx);
                 DesktopCommandOutcome::EffectDispatched
@@ -76,10 +83,9 @@ impl ScriptCraftApp {
                         crate::chrome::theme::AppearanceMode::System,
                         ThemeChoice::System,
                     ),
-                    Appearance::Day => (
-                        crate::chrome::theme::AppearanceMode::Day,
-                        ThemeChoice::Day,
-                    ),
+                    Appearance::Day => {
+                        (crate::chrome::theme::AppearanceMode::Day, ThemeChoice::Day)
+                    }
                     Appearance::Night => (
                         crate::chrome::theme::AppearanceMode::Night,
                         ThemeChoice::Night,

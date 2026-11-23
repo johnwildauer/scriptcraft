@@ -41,6 +41,7 @@ pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::FileSaveAsRequest => Command::FileSaveAsRequest,
         CommandId::FileSaveAsPdf => Command::FileSaveAsPdf,
         CommandId::ViewInvisiblesToggle => Command::ViewInvisiblesToggle,
+        CommandId::ViewRulerToggle => Command::ViewRulerToggle,
         CommandId::FilePrint => Command::FilePrint,
         CommandId::ApplicationQuit => Command::ApplicationQuit,
         CommandId::EditUndo => Command::EditUndo,
@@ -197,9 +198,8 @@ impl ScriptCraftApp {
             ),
             command @ (Command::WindowTitlePageOpen
             | Command::WindowTitlePageClose
-            | Command::ViewInvisiblesToggle) => {
-                self.dispatch_view_command(command, ctx)
-            }
+            | Command::ViewInvisiblesToggle
+            | Command::ViewRulerToggle) => self.dispatch_view_command(command, ctx),
             command @ (Command::FormatElementsOpen
             | Command::FormatElementsClose
             | Command::FormatTemplateSelectorOpen

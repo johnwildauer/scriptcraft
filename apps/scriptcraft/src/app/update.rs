@@ -57,6 +57,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                     app.script_view_mode,
                     projection.say_undual,
                     projection.invisibles_visible,
+                    projection.ruler_visible,
                     &mut app.pending_commands,
                 );
             });
@@ -242,11 +243,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         app.timer_title_host_geometry = None;
     }
     if !app.element_windows.owns_input() {
-        app.open_pending_sprint_timer_completion(
-            EditorSurface::Body,
-            timer_button_rect,
-            &ctx,
-        );
+        app.open_pending_sprint_timer_completion(EditorSurface::Body, timer_button_rect, &ctx);
     }
     let timer_commands = if app.timer_popup_surface == EditorSurface::Body
         && !app.element_windows.owns_input()

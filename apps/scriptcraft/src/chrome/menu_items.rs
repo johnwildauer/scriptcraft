@@ -65,6 +65,7 @@ pub(crate) fn menu_item_label(
     item: &MenuItemSpec,
     say_undual: bool,
     invisibles_visible: bool,
+    ruler_visible: bool,
 ) -> &'static str {
     match item.behavior {
         MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle) if say_undual => {
@@ -74,6 +75,8 @@ pub(crate) fn menu_item_label(
             "Hide Invisibles"
         }
         MenuItemBehavior::Command(CommandId::ViewInvisiblesToggle) => "Show Invisibles",
+        MenuItemBehavior::Command(CommandId::ViewRulerToggle) if ruler_visible => "Hide Ruler",
+        MenuItemBehavior::Command(CommandId::ViewRulerToggle) => "Show Ruler",
         _ => item.label,
     }
 }
@@ -537,12 +540,14 @@ const VIEW_ENTRIES: &[MenuEntrySpec] = &[
         ITEM,
         Some(primary_shortcut(ShortcutKey::M, true)),
     ),
-    placeholder(
+    command_item(
         "view.ruler",
         "Show Ruler",
-        "Show Ruler (disabled placeholder)",
-        ITEM,
+        "Show Ruler",
         None,
+        None,
+        None,
+        CommandId::ViewRulerToggle,
     ),
     SEP,
     MenuEntrySpec::Submenu(&VIEW_DOCUMENT_MENU),

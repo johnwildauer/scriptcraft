@@ -6,7 +6,7 @@
 
 - **Requirements:** [Page layout](../../requirements/features/page-layout.md); [Desktop workspace](../../requirements/features/desktop-workspace.md) owns `REQ-WRITING-LOOP-006` for `AC-WRITING-006.5`–`AC-WRITING-006.11`.
 - **Technical context:** [Technical context](../technical-context.md)
-- **Requirements traced:** `REQ-WRITING-LOOP-002`, `REQ-WRITING-LOOP-006`; `AC-WRITING-002.1`–`AC-WRITING-002.15`, `AC-WRITING-006.5`–`AC-WRITING-006.11`.
+- **Requirements traced:** `REQ-WRITING-LOOP-002`, `REQ-WRITING-LOOP-006`; `AC-WRITING-002.1`–`AC-WRITING-002.16`, `AC-WRITING-006.5`–`AC-WRITING-006.11`, and the desktop ruler-menu projection in `AC-WRITING-011.12`.
 - **Area summary:** One complete source-mapped layout is the authority for pagination, hit testing, navigation, visible-page status, and print composition. Viewport scale and desktop appearance are projections, not layout inputs.
 
 ## Shared composition
@@ -45,6 +45,12 @@ For Body and managed TitlePage Content, underline and strikethrough use optional
 - **Presentation and boundary:** Page retains the workspace backdrop and per-page paper chrome. Normal uses the page-paper backdrop without per-page chrome and adds a text-colored rule at each imaginary full-paper bottom edge that precedes another page; full-page height and existing inter-page spacing remain. Speed uses the page-paper backdrop without fill, border, or rule; it removes only the configured paper margins, retains unused space inside printable bounds, and removes both explicit and implicit inter-page spacing without repagination or reflow. The selected mode is transient Body window presentation, is not persisted to FDX, and does not affect session/revision/dirty/history state, zoom, source mapping, or exports. The separate Title Page viewport resolves Page independently of Body mode.
 
 The preceding Script View boundary's “not persisted to FDX” sentence is superseded for the current disposable native view-state contract. The bounded imported first-wins mode initializes Body on startup/successful activation, and Save/Save As capture the live Body mode in the detached FDX `SplitState/ScriptPanel` projection. Mode still does not enter Project/EditingSession semantics or change canonical geometry, zoom, output, dirty/history state, or Title Page Page mode.
+
+### Script View ruler projection
+
+- **Requirements:** `AC-WRITING-002.16`; [Desktop workspace](../../requirements/features/desktop-workspace.md) owns the preference/command and `AC-WRITING-011.12` menu contract.
+- **Composition and flow:** The root Body Script View projects a global ruler preference above its ScrollArea and outside canonical page/layout content. A 20-point strip contains a 12-point tick band with four-point marker overflow on each edge and uses the existing mode-aware backdrop without a border. Paint occurs after ScrollArea composition and takes the actual first presented page rectangle and that frame's scale, preserving Page, Normal, and Speed horizontal geometry without a competing centering/scale calculation. The only cached ruler data is the tick plan and owned labels, keyed by effective paper width. Focus markers are recalculated from the current focused paragraph's first indexed canonical line each frame.
+- **Canonical geometry and boundary:** Integer eighth-inch ordinals identify eighth-, half-, and whole-inch ticks; whole-inch labels begin at 1 and appear only when the full inch lies within paper width, with no numeric zero label. The unidentified heavier reference mark near 0.5 inch is not implemented. First-line, left, and right markers use `unaligned_line_left` and final `paragraph_bounds` from the indexed [`first_line_for_element()`](../../../crates/scriptcraft-layout/src/interaction.rs:363) query, retaining direct paragraph overrides and active dual-column geometry. The ruler is clipped and pixel-snapped for paint only; markers and ticks do not respond to input or alter canonical layout, editing, Project/FDX state, page interaction, or output. One ruler is shown only for root Body; Title Page has none and placeholder Split/Beat Board views do not imply per-pane rulers. Pure functions are production geometry rather than permanent tests; no test suite is added or run, and user-owned rendered/native/persistence evidence is distinct from compilation.
 
 ## Decisions
 

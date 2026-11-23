@@ -399,11 +399,7 @@ fn menu_font_id(ui: &egui::Ui, size: f32) -> egui::FontId {
 fn measured_menu_text_width(ui: &egui::Ui, text: &str, font_id: egui::FontId) -> f32 {
     let measured = ui
         .painter()
-        .layout_no_wrap(
-            text.to_owned(),
-            font_id,
-            egui::Color32::TRANSPARENT,
-        )
+        .layout_no_wrap(text.to_owned(), font_id, egui::Color32::TRANSPARENT)
         .size()
         .x;
     nonnegative_finite_dimension(measured)
@@ -414,6 +410,7 @@ fn menu_content_metrics(
     entries: &[MenuEntrySpec],
     say_undual: bool,
     invisibles_visible: bool,
+    ruler_visible: bool,
     metrics: MenuPresentationMetrics,
 ) -> MenuContentMetrics {
     let item_font = menu_font_id(ui, metrics.item_text_size);
@@ -429,7 +426,7 @@ fn menu_content_metrics(
             MenuEntrySpec::Item(item) => {
                 let label_width = measured_menu_text_width(
                     ui,
-                    menu_item_label(item, say_undual, invisibles_visible),
+                    menu_item_label(item, say_undual, invisibles_visible, ruler_visible),
                     item_font.clone(),
                 );
                 let shortcut = menu_shortcut_label(item);
@@ -455,10 +452,8 @@ fn menu_content_metrics(
             MenuEntrySpec::Submenu(menu) => {
                 let label_width = measured_menu_text_width(ui, menu.label, item_font.clone());
                 let mut width = add_finite_dimensions(label_width, row_gap_x);
-                width = add_finite_dimensions(
-                    width,
-                    nonnegative_finite_dimension(metrics.icon_size),
-                );
+                width =
+                    add_finite_dimensions(width, nonnegative_finite_dimension(metrics.icon_size));
                 add_finite_dimensions(
                     width,
                     add_finite_dimensions(button_padding_x, button_padding_x),
@@ -472,9 +467,7 @@ fn menu_content_metrics(
             MenuEntrySpec::Item(_) | MenuEntrySpec::Submenu(_) => {
                 nonnegative_finite_dimension(metrics.row_height)
             }
-            MenuEntrySpec::Separator => {
-                nonnegative_finite_dimension(metrics.separator_spacing)
-            }
+            MenuEntrySpec::Separator => nonnegative_finite_dimension(metrics.separator_spacing),
         };
         desired_content_height = add_finite_dimensions(desired_content_height, row_height);
     }
@@ -508,14 +501,24 @@ fn render_menu_popup(
     script_view_mode: ScriptViewMode,
     say_undual: bool,
     invisibles_visible: bool,
+    ruler_visible: bool,
     pending: &mut PendingDesktopCommands,
     metrics: MenuPresentationMetrics,
     available_inner_viewport_height: f32,
 ) {
-    let content = menu_content_metrics(ui, entries, say_undual, invisibles_visible, metrics);
+    let content = menu_content_metrics(
+        ui,
+        entries,
+        say_undual,
+        invisibles_visible,
+        ruler_visible,
+        metrics,
+    );
     let max_height = content
         .desired_content_height
-        .min(nonnegative_finite_dimension(available_inner_viewport_height));
+        .min(nonnegative_finite_dimension(
+            available_inner_viewport_height,
+        ));
     ui.set_min_width(content.required_content_width);
     egui::ScrollArea::vertical()
         .max_height(max_height)
@@ -529,6 +532,7 @@ fn render_menu_popup(
                 script_view_mode,
                 say_undual,
                 invisibles_visible,
+                ruler_visible,
                 pending,
                 metrics,
             );
@@ -543,6 +547,7 @@ pub(crate) fn show_menu_bar(
     script_view_mode: ScriptViewMode,
     say_undual: bool,
     invisibles_visible: bool,
+    ruler_visible: bool,
     pending: &mut PendingDesktopCommands,
 ) {
     let metrics = MENU_PRESENTATION;
@@ -602,6 +607,7 @@ pub(crate) fn show_menu_bar(
                             script_view_mode,
                             say_undual,
                             invisibles_visible,
+                            ruler_visible,
                             pending,
                             metrics,
                             popup_max_height,
@@ -647,6 +653,7 @@ fn render_menu_entries(
     script_view_mode: ScriptViewMode,
     say_undual: bool,
     invisibles_visible: bool,
+    ruler_visible: bool,
     pending: &mut PendingDesktopCommands,
     metrics: MenuPresentationMetrics,
 ) {
@@ -672,6 +679,7 @@ fn render_menu_entries(
                             script_view_mode,
                             say_undual,
                             invisibles_visible,
+                            ruler_visible,
                             pending,
                             metrics,
                             available_inner_viewport_height,
@@ -688,7 +696,7 @@ fn render_menu_entries(
                         .is_some_and(|command| command_enabled(command.id(), availability)),
                     MenuItemBehavior::DisabledPlaceholder(_) => false,
                 };
-                let label = menu_item_label(item, say_undual, invisibles_visible);
+                let label = menu_item_label(item, say_undual, invisibles_visible, ruler_visible);
                 let shortcut = menu_shortcut_label(item);
                 let icon_atom = menu_icon_atom(item, script_view_mode, metrics);
                 let mut label_atom =

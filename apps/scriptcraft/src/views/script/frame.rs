@@ -11,6 +11,7 @@ use super::page_policy::{
     presented_page_policy, resolve_presentation_mode, viewport_paint_page_range,
 };
 use super::reveal;
+use super::ruler::{paint_ruler, RULER_STRIP_HEIGHT};
 use super::zoom_scroll::{
     page_scroll_geometry, prepaint_zoom_scroll_offset, presentation_metrics_at_zoom,
     SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING, SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING,
@@ -111,8 +112,7 @@ fn paint_editor_scrollbar_handle<R>(
         };
 
         let handle_cross_thickness = EDITOR_SCROLLBAR_HANDLE_THICKNESS * show_factor;
-        let handle_cross_min =
-            track_cross_min + (track_thickness - handle_cross_thickness) * 0.5;
+        let handle_cross_min = track_cross_min + (track_thickness - handle_cross_thickness) * 0.5;
         let from_content = |content| {
             egui::emath::remap_clamp(
                 content,
@@ -131,12 +131,18 @@ fn paint_editor_scrollbar_handle<R>(
         let handle_rect = if axis == 0 {
             egui::Rect::from_min_max(
                 egui::pos2(handle_start, handle_cross_min),
-                egui::pos2(handle_start + handle_length, handle_cross_min + handle_cross_thickness),
+                egui::pos2(
+                    handle_start + handle_length,
+                    handle_cross_min + handle_cross_thickness,
+                ),
             )
         } else {
             egui::Rect::from_min_max(
                 egui::pos2(handle_cross_min, handle_start),
-                egui::pos2(handle_cross_min + handle_cross_thickness, handle_start + handle_length),
+                egui::pos2(
+                    handle_cross_min + handle_cross_thickness,
+                    handle_start + handle_length,
+                ),
             )
         };
 
@@ -231,6 +237,20 @@ impl ScriptCraftApp {
         }
         self.rendered_revision = Some(self.session.revision());
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
+        let ruler_rect = if surface == EditorSurface::Body && self.settings_store.ruler_visible() {
+            let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), RULER_STRIP_HEIGHT));
+            ui.painter().rect_filled(
+                rect,
+                0.0,
+                super::page_policy::script_view_backdrop(
+                    presentation_mode,
+                    self.theme_palette.script_workspace,
+                ),
+            );
+            Some(rect)
+        } else {
+            None
+        };
         let scroll_outer_rect = ui.available_rect_before_wrap();
         let mut presented_pages = Vec::with_capacity(layout.pages.len());
         let mut frame_projections = std::iter::repeat_with(|| None)
@@ -432,6 +452,20 @@ impl ScriptCraftApp {
                 }
             }
         });
+        if let (Some(strip), Some(first_page)) = (ruler_rect, presented_pages.first()) {
+            paint_ruler(
+                ui,
+                strip,
+                first_page.rect.left(),
+                first_page.rect.width(),
+                rendered_scale,
+                layout.inputs.paper_width,
+                selection.focus.element,
+                &layout,
+                &mut self.ruler,
+                ui.visuals().dark_mode,
+            );
+        }
         let editor_scrollbar_palette = self.theme_palette.script_workspace.editor_scrollbar;
         paint_editor_scrollbar_handle(ui, &scroll_output, editor_scrollbar_palette);
         if self.development_mode {
@@ -483,14 +517,12 @@ impl ScriptCraftApp {
         if !element_windows_own_input {
             let scrollbar_width = ui.style().spacing.scroll.bar_width;
             if scroll_output.content_size.y > scroll_output.inner_rect.height() {
-                editor_interaction_rect.max.x =
-                    (editor_interaction_rect.max.x - scrollbar_width)
-                        .max(editor_interaction_rect.min.x);
+                editor_interaction_rect.max.x = (editor_interaction_rect.max.x - scrollbar_width)
+                    .max(editor_interaction_rect.min.x);
             }
             if scroll_output.content_size.x > scroll_output.inner_rect.width() {
-                editor_interaction_rect.max.y =
-                    (editor_interaction_rect.max.y - scrollbar_width)
-                        .max(editor_interaction_rect.min.y);
+                editor_interaction_rect.max.y = (editor_interaction_rect.max.y - scrollbar_width)
+                    .max(editor_interaction_rect.min.y);
             }
         }
         let response = ui

@@ -31,7 +31,7 @@ const fn descriptor(
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 60] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 61] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -227,6 +227,11 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 60] = [
         CommandId::ViewInvisiblesToggle,
         "view",
         "none; toggle active editor-surface presentation",
+    ),
+    descriptor(
+        CommandId::ViewRulerToggle,
+        "view",
+        "none; desktop-only global presentation/settings effect",
     ),
 ];
 

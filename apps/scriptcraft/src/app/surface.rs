@@ -82,6 +82,18 @@ impl ScriptCraftApp {
         }
     }
 
+    pub(crate) fn ruler_visible(&self) -> bool {
+        self.settings_store.ruler_visible()
+    }
+
+    pub(crate) fn ruler_action_label(&self) -> &'static str {
+        if self.ruler_visible() {
+            "Hide Ruler"
+        } else {
+            "Show Ruler"
+        }
+    }
+
     pub(crate) fn invisibles_color(&self) -> egui::Color32 {
         let color = self.invisibles.color;
         egui::Color32::from_rgb(color.red, color.green, color.blue)

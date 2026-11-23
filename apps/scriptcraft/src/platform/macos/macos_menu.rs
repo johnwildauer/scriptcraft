@@ -59,6 +59,7 @@ struct NativeMenuProjection {
     script_view_mode: ScriptViewMode,
     say_undual: bool,
     invisibles_visible: bool,
+    ruler_visible: bool,
 }
 
 #[derive(Debug, Default)]
@@ -173,6 +174,7 @@ impl NativeMenuController {
                 availability,
                 script_view_mode,
                 availability.invisibles_visible,
+                availability.ruler_visible,
                 &mut command_items,
                 &mut retained_submenus,
                 &mut retained_predefined_items,
@@ -250,6 +252,7 @@ impl NativeMenuController {
             script_view_mode,
             say_undual,
             invisibles_visible: availability.invisibles_visible,
+            ruler_visible: availability.ruler_visible,
         };
         if !self.synchronization.should_synchronize(projection) {
             return;
@@ -271,6 +274,7 @@ impl NativeMenuController {
                 script_view_mode,
                 say_undual,
                 availability.invisibles_visible,
+                availability.ruler_visible,
                 &self.command_items,
             );
         }
@@ -283,6 +287,7 @@ fn append_catalog_entries(
     availability: AppCommandAvailability,
     script_view_mode: ScriptViewMode,
     invisibles_visible: bool,
+    ruler_visible: bool,
     command_items: &mut HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
     retained_submenus: &mut Vec<Submenu>,
     retained_predefined_items: &mut Vec<PredefinedMenuItem>,
@@ -304,6 +309,7 @@ fn append_catalog_entries(
                     availability,
                     script_view_mode,
                     invisibles_visible,
+                    ruler_visible,
                     command_items,
                     retained_submenus,
                     retained_predefined_items,
@@ -321,6 +327,7 @@ fn append_catalog_entries(
                 availability,
                 script_view_mode,
                 invisibles_visible,
+                ruler_visible,
                 command_items,
                 retained_submenus,
                 placeholder_items,
@@ -349,6 +356,7 @@ fn append_catalog_item(
     availability: AppCommandAvailability,
     script_view_mode: ScriptViewMode,
     invisibles_visible: bool,
+    ruler_visible: bool,
     command_items: &mut HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
     retained_submenus: &mut Vec<Submenu>,
     placeholder_items: &mut Vec<MenuItem>,
@@ -359,7 +367,7 @@ fn append_catalog_item(
         MenuItemBehavior::Command(command) => {
             let item = MenuItem::with_id(
                 spec.id,
-                menu_item_label(spec, false, invisibles_visible),
+                menu_item_label(spec, false, invisibles_visible, ruler_visible),
                 availability.is_enabled(command),
                 accelerator,
             );
@@ -379,7 +387,7 @@ fn append_catalog_item(
             let item = if requires_checked_native_item(spec) {
                 let item = CheckMenuItem::with_id(
                     spec.id,
-                    menu_item_label(spec, false, invisibles_visible),
+                    menu_item_label(spec, false, invisibles_visible, ruler_visible),
                     availability.is_enabled(command.id()),
                     menu_item_is_checked(spec, script_view_mode),
                     accelerator,
@@ -391,7 +399,7 @@ fn append_catalog_item(
             } else {
                 let item = MenuItem::with_id(
                     spec.id,
-                    menu_item_label(spec, false, invisibles_visible),
+                    menu_item_label(spec, false, invisibles_visible, ruler_visible),
                     availability.is_enabled(command.id()),
                     accelerator,
                 );
@@ -439,6 +447,7 @@ fn synchronize_entries(
     script_view_mode: ScriptViewMode,
     say_undual: bool,
     invisibles_visible: bool,
+    ruler_visible: bool,
     command_items: &HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
 ) {
     for entry in entries {
@@ -450,13 +459,15 @@ fn synchronize_entries(
                     script_view_mode,
                     say_undual,
                     invisibles_visible,
+                    ruler_visible,
                     command_items,
                 );
             }
             MenuEntrySpec::Item(spec) => {
                 let id = native_menu_id(spec);
                 if let Some((command, item)) = command_items.get(&id) {
-                    let label = menu_item_label(spec, say_undual, invisibles_visible);
+                    let label =
+                        menu_item_label(spec, say_undual, invisibles_visible, ruler_visible);
                     item.set_text(label);
                     item.set_enabled(availability.is_enabled(command.id()));
                     item.set_checked(menu_item_is_checked(spec, script_view_mode));

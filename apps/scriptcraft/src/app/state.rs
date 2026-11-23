@@ -9,7 +9,8 @@ use crate::documents::save::fresh_document_title_for_builtin_template;
 use crate::platform::macos::{
     macos_lifecycle, macos_menu, macos_open_documents, macos_print_dialog,
 };
-use crate::views::script::RevealIntent;
+use crate::settings::SettingsStore;
+use crate::views::script::{RevealIntent, RulerState};
 use crate::{
     chrome::{
         dynamic_controls::{DynamicElementControls, DynamicIssueSummary},
@@ -23,7 +24,6 @@ use crate::{
     presentation::{document_font, wheel_zoom},
     widgets::{elements::state::ElementWindowState, sprint_timer},
 };
-use crate::settings::SettingsStore;
 use eframe::egui;
 use scriptcraft_commands::{Command, DiagnosticMessage, EditorSurface, ScriptViewMode};
 use scriptcraft_layout::{LayoutCache, ScreenplayLayout};
@@ -168,6 +168,7 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) reveal_intent: RevealIntent,
     pub(crate) preferred_vertical_x: Option<i64>,
     pub(crate) page_geometry: ViewportPageTracker,
+    pub(crate) ruler: RulerState,
     pub(crate) pending_zoom_anchor: Option<ViewportCenterAnchor>,
     pub(crate) page_scale: Option<f32>,
     pub(crate) effective_pixels_per_point: Option<f32>,
@@ -213,14 +214,10 @@ impl ScriptCraftApp {
         settings_store: SettingsStore,
         development_mode: bool,
     ) -> Result<Self, String> {
-        let fresh_document_title =
-            fresh_document_title_for_builtin_template(effective_template_id);
-        let builtin_document = scriptcraft_fdx::instantiate_builtin_template(
-            effective_template_id,
-        )
-        .map_err(|error| format!("startup built-in template failed: {error:?}"))?;
-        let script_view_mode =
-            Self::script_view_mode_from_fdx(builtin_document.display_mode);
+        let fresh_document_title = fresh_document_title_for_builtin_template(effective_template_id);
+        let builtin_document = scriptcraft_fdx::instantiate_builtin_template(effective_template_id)
+            .map_err(|error| format!("startup built-in template failed: {error:?}"))?;
+        let script_view_mode = Self::script_view_mode_from_fdx(builtin_document.display_mode);
         let invisibles = builtin_document.invisibles;
         let project = builtin_document.project;
         let session = EditingSession::with_policy(project, EditPolicy::default())
@@ -314,6 +311,7 @@ impl ScriptCraftApp {
             reveal_intent: RevealIntent::None,
             preferred_vertical_x: None,
             page_geometry: ViewportPageTracker::default(),
+            ruler: RulerState::default(),
             pending_zoom_anchor: None,
             page_scale: None,
             effective_pixels_per_point: None,

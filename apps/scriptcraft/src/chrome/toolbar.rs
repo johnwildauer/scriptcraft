@@ -262,8 +262,7 @@ fn elements_popup_metrics(
             text_height,
             add_finite_dimensions(spacing.button_padding.y, spacing.button_padding.y),
         );
-        let row_height = nonnegative_finite_dimension(spacing.interact_size.y)
-            .max(row_text_height);
+        let row_height = nonnegative_finite_dimension(spacing.interact_size.y).max(row_text_height);
         desired_content_height = add_finite_dimensions(desired_content_height, row_height);
     }
     let row_gap = nonnegative_finite_dimension(spacing.item_spacing.y);
@@ -277,8 +276,7 @@ fn elements_popup_metrics(
         nonnegative_finite_dimension(popup_margin.bottom),
     );
     let available_outer_height = nonnegative_finite_dimension(ui.ctx().content_rect().height());
-    let available_content_height =
-        (available_outer_height - vertical_popup_margin).max(0.0);
+    let available_content_height = (available_outer_height - vertical_popup_margin).max(0.0);
     let maximum_outer_height = add_finite_dimensions(desired_content_height, vertical_popup_margin)
         .min(available_outer_height);
     let horizontal_option_padding = nonnegative_finite_dimension(
@@ -342,8 +340,10 @@ fn apply_toolbar_enablement(items: &mut [ToolbarItemSpec], availability: AppComm
                     EnablementPolicy::Enabled
                 }
             }
-            ToolbarBehavior::InvisiblesDropdown => {
-                if availability.is_enabled(scriptcraft_commands::CommandId::ViewInvisiblesToggle) {
+            ToolbarBehavior::ShowHideDropdown => {
+                if availability.is_enabled(scriptcraft_commands::CommandId::ViewInvisiblesToggle)
+                    && availability.is_enabled(scriptcraft_commands::CommandId::ViewRulerToggle)
+                {
                     EnablementPolicy::Enabled
                 } else {
                     EnablementPolicy::Disabled
@@ -353,6 +353,21 @@ fn apply_toolbar_enablement(items: &mut [ToolbarItemSpec], availability: AppComm
             | ToolbarBehavior::ElementsRoleDropdown
             | ToolbarBehavior::OverflowMenu => item.enablement,
         };
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ShowHideAction {
+    Invisibles,
+    Ruler,
+}
+
+impl ShowHideAction {
+    fn command(self) -> Command {
+        match self {
+            Self::Invisibles => Command::ViewInvisiblesToggle,
+            Self::Ruler => Command::ViewRulerToggle,
+        }
     }
 }
 
@@ -798,7 +813,7 @@ impl ScriptCraftApp {
         }
     }
 
-    fn invisibles_toolbar_item(
+    fn show_hide_toolbar_item(
         &mut self,
         ui: &mut egui::Ui,
         item: ToolbarItemSpec,
@@ -819,13 +834,14 @@ impl ScriptCraftApp {
                 toolbar_action_sense(enabled),
             )
             .on_hover_cursor(toolbar_cursor_icon());
-        let accessible_name = format!("{}: {}", item.accessibility_name, self.invisibles_action_label());
+        let invisibles_label = self.invisibles_action_label();
+        let ruler_label = self.ruler_action_label();
+        let accessible_name = format!(
+            "{}: {}; {}",
+            item.accessibility_name, invisibles_label, ruler_label
+        );
         response.widget_info(|| {
-            egui::WidgetInfo::labeled(
-                egui::WidgetType::Button,
-                enabled,
-                accessible_name.clone(),
-            )
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, accessible_name.clone())
         });
         let fill = if enabled {
             toolbar_action_fill(ui.style(), enabled, response.hovered())
@@ -866,28 +882,32 @@ impl ScriptCraftApp {
                 input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
             });
         let activated = enabled && (response.clicked() || keyboard_activated);
-        let mut chosen = false;
+        let mut chosen = None;
         egui::Popup::menu(&response)
             .open_memory(activated.then_some(egui::SetOpenCommand::Toggle))
             .show(|ui| {
-                let action_label = self.invisibles_action_label();
-                let row = ui.add_enabled(enabled, egui::Button::new(action_label));
-                row.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Button,
-                        enabled,
-                        action_label,
-                    )
+                let invisibles_row = ui.add_enabled(enabled, egui::Button::new(invisibles_label));
+                invisibles_row.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, invisibles_label)
                 });
-                if row.clicked() && enabled {
-                    chosen = true;
+                if invisibles_row.clicked() && enabled {
+                    chosen = Some(ShowHideAction::Invisibles);
+                    ui.close();
+                }
+
+                let ruler_row = ui.add_enabled(enabled, egui::Button::new(ruler_label));
+                ruler_row.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, ruler_label)
+                });
+                if ruler_row.clicked() && enabled {
+                    chosen = Some(ShowHideAction::Ruler);
                     ui.close();
                 }
             });
 
-        if chosen {
+        if let Some(action) = chosen {
             self.dispatch_command(
-                CommandInvocation::new(Command::ViewInvisiblesToggle, CommandOrigin::Toolbar),
+                CommandInvocation::new(action.command(), CommandOrigin::Toolbar),
                 ui.ctx(),
             );
         }
@@ -1385,7 +1405,7 @@ impl ScriptCraftApp {
     ) {
         let mut chosen_action = None;
         let mut chosen_element_type = None;
-        let mut chosen_invisibles_toggle = false;
+        let mut chosen_show_hide_action = None;
         let icon = match indicator.graphic {
             ToolbarGraphic::Icon(icon) => icon,
             _ => unreachable!("overflow indicator must use a single Material icon"),
@@ -1445,29 +1465,48 @@ impl ScriptCraftApp {
                                     });
                             });
                         }
-                        ToolbarBehavior::InvisiblesDropdown => {
+                        ToolbarBehavior::ShowHideDropdown => {
                             let enabled = item.enablement == EnablementPolicy::Enabled;
+                            let invisibles_label = self.invisibles_action_label();
+                            let ruler_label = self.ruler_action_label();
                             let accessible_name = format!(
-                                "{}: {}",
+                                "{}: {}; {}",
                                 item.accessibility_name,
-                                self.invisibles_action_label()
+                                invisibles_label,
+                                ruler_label
                             );
                             ui.add_enabled_ui(enabled, |ui| {
                                 let submenu = ui.menu_button(item.label, |ui| {
-                                    let action_label = self.invisibles_action_label();
-                                    let row = ui.add_enabled(
+                                    let invisibles_row = ui.add_enabled(
                                         enabled,
-                                        egui::Button::new(action_label),
+                                        egui::Button::new(invisibles_label),
                                     );
-                                    row.widget_info(|| {
+                                    invisibles_row.widget_info(|| {
                                         egui::WidgetInfo::labeled(
                                             egui::WidgetType::Button,
                                             enabled,
-                                            action_label,
+                                            invisibles_label,
                                         )
                                     });
-                                    if row.clicked() && enabled {
-                                        chosen_invisibles_toggle = true;
+                                    if invisibles_row.clicked() && enabled {
+                                        chosen_show_hide_action =
+                                            Some(ShowHideAction::Invisibles);
+                                        ui.close();
+                                    }
+
+                                    let ruler_row = ui.add_enabled(
+                                        enabled,
+                                        egui::Button::new(ruler_label),
+                                    );
+                                    ruler_row.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::Button,
+                                            enabled,
+                                            ruler_label,
+                                        )
+                                    });
+                                    if ruler_row.clicked() && enabled {
+                                        chosen_show_hide_action = Some(ShowHideAction::Ruler);
                                         ui.close();
                                     }
                                 });
@@ -1521,9 +1560,9 @@ impl ScriptCraftApp {
                 );
             }
         }
-        if chosen_invisibles_toggle {
+        if let Some(action) = chosen_show_hide_action {
             self.dispatch_command(
-                CommandInvocation::new(Command::ViewInvisiblesToggle, CommandOrigin::Toolbar),
+                CommandInvocation::new(action.command(), CommandOrigin::Toolbar),
                 ui.ctx(),
             );
         }
@@ -1610,8 +1649,8 @@ impl ScriptCraftApp {
                                 presentation,
                                 &element_choices,
                             ),
-                            ToolbarBehavior::InvisiblesDropdown => {
-                                self.invisibles_toolbar_item(ui, item, width, presentation)
+                            ToolbarBehavior::ShowHideDropdown => {
+                                self.show_hide_toolbar_item(ui, item, width, presentation)
                             }
                             ToolbarBehavior::StylesInlineGroup
                             | ToolbarBehavior::AlignmentInlineGroup => self

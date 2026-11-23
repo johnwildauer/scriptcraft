@@ -8,10 +8,10 @@ User settings retain a writer's small set of app-wide preferences across launche
 
 ## Global preference scope and schema
 
-- **REQ-WRITING-LOOP-013: Persistent global user settings.** ScriptCraft shall retain the user's supported global appearance and default new-document template choices while keeping them separate from screenplay documents and editing state.
-  - **AC-WRITING-013.1:** Schema version 1 contains exactly the `schema_version`, `theme`, and `template` fields, defaulting to System and `screenplay`. Missing fields use those version-1 defaults. Additional future global preferences are additive and defaulted; removing or renaming a field, theme variant, or template ID requires an explicit migration note and step.
+- **REQ-WRITING-LOOP-013: Persistent global user settings.** ScriptCraft shall retain the user's supported global appearance, default new-document template, and ruler-visibility choices while keeping them separate from screenplay documents and editing state.
+  - **AC-WRITING-013.1:** Schema version 1 contains exactly the `schema_version`, `theme`, `template`, and `show_ruler` fields, defaulting to System, `screenplay`, and shown (`true`). Missing fields use those version-1 defaults, including when an older settings file lacks `show_ruler`. Additional future global preferences are additive and defaulted; removing or renaming a field, theme variant, or template ID requires an explicit migration note and step.
   - **AC-WRITING-013.2:** The persisted theme choice is exactly one of System, Day, Night, or Midnight, encoded as the lowercase values `system`, `day`, `night`, or `midnight`. Only the choice is stored. System resolves to Day or Night from egui's supplied OS theme and follows live changes where egui supplies them; it never resolves to Midnight. Midnight is selected explicitly.
-  - **AC-WRITING-013.3:** The persisted default template is a stable ID from the packaged FDX built-in catalog, not a display name, path, or template contents. The FDX catalog remains the sole registry and validator. Other application globals are outside the initial schema.
+  - **AC-WRITING-013.3:** The persisted default template is a stable ID from the packaged FDX built-in catalog, not a display name, path, or template contents. The FDX catalog remains the sole registry and validator. Other application globals are outside the version-1 schema.
 
 ## Startup and launch precedence
 
@@ -24,12 +24,13 @@ User settings retain a writer's small set of app-wide preferences across launche
 ## Recovery, reset, and process limits
 
 - **AC-WRITING-013.6:** Missing files load defaults without creating a file merely because the app launched; partial files use defaults for missing fields; unknown keys are tolerated. An unknown theme resolves to System while retaining other valid values. An unknown template remains raw in memory and is not sanitized by an unrelated save. Malformed, unreadable, or unsupported-version files are backed up before defaults are used. Backup names are non-destructive (`settings.toml.bak`, then available bounded numeric suffixes); if preservation fails, ordinary persistence is disabled for that process. Missing schema version means version 1; only version 1 is emitted. Ordinary load and fallback do not themselves save.
-  - **AC-WRITING-013.6a:** `--reset-settings` restores System and Screenplay and queues a defaults write without a manual save. Reset is not a document operation and displays no success dialog.
+  - **AC-WRITING-013.6a:** `--reset-settings` restores System, Screenplay, and shown ruler visibility and queues a defaults write without a manual save. Reset is not a document operation and displays no success dialog.
   - **AC-WRITING-013.6b:** No shutdown flush is promised; a change made inside the debounce interval may be lost on exit. Independent processes neither watch nor merge the file, and the last completed atomic save wins. A child launched during debounce may read older on-disk globals, while its explicit template argument remains authoritative.
+  - **AC-WRITING-013.7:** The `show_ruler` preference is global and defaults to shown. The View and toolbar Show/Hide Ruler actions change it through the same real toggle; `--reset-settings` also restores shown visibility as specified in AC-WRITING-013.6a. Loading an older or partial file without the field yields shown visibility; merely loading settings or rendering the ruler does not write settings. A real toggle uses the existing no-op-aware settings update and complete-snapshot writer, without adding a write path. Ruler preference changes do not alter a document, session history, layout identity, or exports; the existing recovery and process limits in AC-WRITING-013.6–.6b remain unchanged.
 
 ## Schema changelog
 
-- **Version 1:** Initial schema containing `schema_version`, `theme`, and `template`; theme choices are System, Day, Night, and Midnight, and template is a stable built-in FDX catalog ID. Field, variant, or template-ID removal/renaming requires an explicit migration note and step. During alpha, unknown keys are tolerated on read but are not promised to survive a later rewrite.
+- **Version 1:** Schema containing `schema_version`, `theme`, `template`, and `show_ruler`; theme choices are System, Day, Night, and Midnight, template is a stable built-in FDX catalog ID, and `show_ruler` defaults to `true`. Missing fields use their version-1 defaults. Field, variant, or template-ID removal/renaming requires an explicit migration note and step. During alpha, unknown keys are tolerated on read but are not promised to survive a later rewrite.
 
 ## Related documents
 

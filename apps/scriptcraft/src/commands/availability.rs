@@ -7,6 +7,7 @@ pub(crate) struct AppCommandAvailability {
     pub(crate) modal_blocked: bool,
     pub(crate) native_output_active: bool,
     pub(crate) invisibles_visible: bool,
+    pub(crate) ruler_visible: bool,
     /// Replacement handoff lock; deliberately independent from the migration
     /// modal that alone enables File Import Resolve.
     pub(crate) replacement_pending: bool,
@@ -36,6 +37,7 @@ pub(crate) struct AppCommandProjection {
     pub(crate) availability: AppCommandAvailability,
     pub(crate) say_undual: bool,
     pub(crate) invisibles_visible: bool,
+    pub(crate) ruler_visible: bool,
 }
 
 /// Every non-session input to the shared availability/label projection. Session
@@ -47,6 +49,7 @@ struct AppCommandProjectionKey {
     session_mutation_token: u64,
     active_editor_surface: EditorSurface,
     invisibles_visible: bool,
+    ruler_visible: bool,
     migration_pending: bool,
     replacement_pending: bool,
     native_output_active: bool,
@@ -94,6 +97,7 @@ impl ScriptCraftApp {
             session_mutation_token: self.session.mutation_token(),
             active_editor_surface: self.active_editor_surface,
             invisibles_visible: self.active_surface_invisibles_visible(),
+            ruler_visible: self.settings_store.ruler_visible(),
             migration_pending: self.pending_fdx_open.is_some(),
             replacement_pending: self.replacement_open_pending(),
             native_output_active: self.native_output_active(),
@@ -127,6 +131,7 @@ impl ScriptCraftApp {
                 Some(scriptcraft_model::dual_dialogue::ToggleTarget::Disable(_))
             ),
             invisibles_visible: key.invisibles_visible,
+            ruler_visible: key.ruler_visible,
         };
         self.command_projection_cache = Some(CachedAppCommandProjection { key, projection });
         projection
@@ -230,6 +235,7 @@ impl ScriptCraftApp {
             modal_blocked: migration_pending && !replacement_pending,
             native_output_active,
             invisibles_visible: self.active_surface_invisibles_visible(),
+            ruler_visible: self.settings_store.ruler_visible(),
             replacement_pending,
             title_page_only_close: self.active_editor_surface() == EditorSurface::TitlePage
                 && self.title_page_window_open,
@@ -324,8 +330,7 @@ impl AppCommandAvailability {
             return match command {
                 // Dialog presentation keeps only its own typed actions, harmless
                 // focus activations, status projection, and root lifecycle.
-                CommandId::UiStatusSet
-                | CommandId::ApplicationQuit => true,
+                CommandId::UiStatusSet | CommandId::ApplicationQuit => true,
                 CommandId::FormatTemplateSelectorOpen => !self.selector_viewport_unsupported,
                 CommandId::FormatElementsOpen => self.element_inspector_open,
                 CommandId::FormatElementsClose => {
@@ -370,6 +375,7 @@ impl AppCommandAvailability {
             // The global modal gates above still disable Quit during migration
             // and native-output dialogs; otherwise it is focus-independent.
             CommandId::ApplicationQuit => true,
+            CommandId::ViewRulerToggle => true,
             CommandId::FilePrint => cfg!(any(target_os = "macos", target_os = "windows")),
             _ => true,
         }

@@ -73,11 +73,12 @@ pub enum CommandId {
     FileNewFromTemplateOpen,
     FileNewFromTemplate,
     ViewInvisiblesToggle,
+    ViewRulerToggle,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 60] = [
+    pub const ALL: [Self; 61] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -138,6 +139,7 @@ impl CommandId {
         Self::FileNewFromTemplateOpen,
         Self::FileNewFromTemplate,
         Self::ViewInvisiblesToggle,
+        Self::ViewRulerToggle,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -202,6 +204,7 @@ impl CommandId {
             Self::FileNewFromTemplateOpen => "file.new-from-template.open",
             Self::FileNewFromTemplate => "file.new-from-template",
             Self::ViewInvisiblesToggle => "view.invisibles.toggle",
+            Self::ViewRulerToggle => "view.ruler.toggle",
         }
     }
 }
@@ -426,6 +429,8 @@ pub enum Command {
     FileNewFromTemplate { template: BuiltinTemplateValue },
     #[serde(rename = "view.invisibles.toggle")]
     ViewInvisiblesToggle,
+    #[serde(rename = "view.ruler.toggle")]
+    ViewRulerToggle,
 }
 
 impl Command {
@@ -516,6 +521,7 @@ impl Command {
             Self::FileNewFromTemplateOpen => CommandId::FileNewFromTemplateOpen,
             Self::FileNewFromTemplate { .. } => CommandId::FileNewFromTemplate,
             Self::ViewInvisiblesToggle => CommandId::ViewInvisiblesToggle,
+            Self::ViewRulerToggle => CommandId::ViewRulerToggle,
         }
     }
 }

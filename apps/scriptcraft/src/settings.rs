@@ -3,14 +3,14 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
 use directories::ProjectDirs;
+use scriptcraft_fdx::{BuiltinTemplateId, DEFAULT_BUILTIN_TEMPLATE_ID};
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use scriptcraft_fdx::{BuiltinTemplateId, DEFAULT_BUILTIN_TEMPLATE_ID};
 
 const SETTINGS_FILE_NAME: &str = "settings.toml";
 const SETTINGS_SCHEMA_VERSION: u32 = 1;
@@ -26,6 +26,7 @@ pub(crate) struct Settings {
     pub(crate) schema_version: u32,
     pub(crate) theme: ThemeChoice,
     pub(crate) template: String,
+    pub(crate) show_ruler: bool,
 }
 
 impl Default for Settings {
@@ -34,6 +35,7 @@ impl Default for Settings {
             schema_version: SETTINGS_SCHEMA_VERSION,
             theme: ThemeChoice::System,
             template: DEFAULT_BUILTIN_TEMPLATE_ID.as_str().to_owned(),
+            show_ruler: true,
         }
     }
 }
@@ -162,6 +164,10 @@ impl SettingsStore {
             .unwrap_or(DEFAULT_BUILTIN_TEMPLATE_ID)
     }
 
+    pub(crate) fn ruler_visible(&self) -> bool {
+        self.settings.show_ruler
+    }
+
     /// Updates the active theme and publishes only a real change.
     pub(crate) fn set_theme(&mut self, theme: ThemeChoice) -> bool {
         if self.settings.theme == theme {
@@ -182,12 +188,20 @@ impl SettingsStore {
         true
     }
 
+    /// Updates ruler visibility and publishes only a real change.
+    pub(crate) fn set_ruler_visible(&mut self, visible: bool) -> bool {
+        if self.settings.show_ruler == visible {
+            return false;
+        }
+        self.settings.show_ruler = visible;
+        self.publish_snapshot();
+        true
+    }
+
     /// Restores version-1 defaults and forces a write even when already equal.
     pub(crate) fn reset_to_defaults(&mut self) {
         if self.writer.is_none() {
-            eprintln!(
-                "Warning: settings reset is memory-only because persistence is unavailable"
-            );
+            eprintln!("Warning: settings reset is memory-only because persistence is unavailable");
         }
         self.settings = Settings::default();
         self.publish_snapshot();
@@ -203,7 +217,9 @@ impl SettingsStore {
         };
         if writer.send(self.settings.clone()).is_err() {
             self.writer = None;
-            eprintln!("Warning: settings writer is unavailable; persistence disabled for this process");
+            eprintln!(
+                "Warning: settings writer is unavailable; persistence disabled for this process"
+            );
         }
     }
 }
@@ -243,7 +259,10 @@ fn recover_existing_file(path: &Path) -> (Settings, bool) {
     match backup_existing_file(path) {
         Ok(()) => (Settings::default(), true),
         Err(error) => {
-            eprintln!("Warning: could not preserve settings file; persistence disabled ({})", error.kind());
+            eprintln!(
+                "Warning: could not preserve settings file; persistence disabled ({})",
+                error.kind()
+            );
             (Settings::default(), false)
         }
     }

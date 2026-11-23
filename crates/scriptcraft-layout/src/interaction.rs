@@ -235,11 +235,7 @@ impl ScreenplayLayout {
                 .min_by_key(|(index, entry)| {
                     diagnostics.examined();
                     (
-                        interval_distance(
-                            pointer_y,
-                            entry.absolute_y,
-                            entry.absolute_bottom_y,
-                        ),
+                        interval_distance(pointer_y, entry.absolute_y, entry.absolute_bottom_y),
                         horizontal_distance(
                             &self.pages[entry.location.page].lines[entry.location.line],
                         ),
@@ -354,6 +350,18 @@ impl ScreenplayLayout {
         }
         Err(LayoutError {
             kind: LayoutErrorKind::InvalidPosition,
+        })
+    }
+
+    /// Returns the first canonical layout line indexed for a Body element.
+    /// This optional lookup reads only the existing per-element index and does
+    /// not resolve paragraph settings or recompute layout.
+    pub fn first_line_for_element(&self, element: usize) -> Option<LocatedLayoutLine<'_>> {
+        let location = self.element_line_index.get(element)?.first()?;
+        let line = self.pages.get(location.page)?.lines.get(location.line)?;
+        Some(LocatedLayoutLine {
+            page_index: location.page,
+            line,
         })
     }
 
