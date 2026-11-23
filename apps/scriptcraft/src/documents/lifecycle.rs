@@ -121,8 +121,18 @@ pub(crate) fn show_native_lifecycle_error(title: &str, message: &str) {
 }
 
 impl ScriptCraftApp {
-    fn reset_element_windows_for_root_close(&mut self, decision: RootCloseDecision) {
+    fn reset_element_windows_for_root_close(
+        &mut self,
+        decision: RootCloseDecision,
+        ctx: &egui::Context,
+    ) {
         if root_close_cleanup_allowed(decision) {
+            crate::widgets::elements::selector::send_close(ctx);
+            crate::widgets::elements::inspector::send_close(ctx);
+            self.appearance_applications
+                .clear(crate::chrome::theme::AppearanceContext::Elements);
+            self.appearance_applications
+                .clear(crate::chrome::theme::AppearanceContext::TemplateSelector);
             self.element_windows.reset();
             self.command_projection_cache = None;
         }
@@ -160,7 +170,7 @@ impl ScriptCraftApp {
             RootCloseDecision::Allow | RootCloseDecision::AllowAuthorized => {
                 // Only an actually permitted root close discards transient
                 // dialog state. A canceled dirty close keeps it intact.
-                self.reset_element_windows_for_root_close(decision);
+                self.reset_element_windows_for_root_close(decision, ctx);
                 root_close_cleanup_allowed(decision)
             }
             RootCloseDecision::CancelAndPrompt => {

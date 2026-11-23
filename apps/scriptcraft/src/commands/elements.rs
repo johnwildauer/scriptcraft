@@ -31,6 +31,12 @@ impl ScriptCraftApp {
                         super::DesktopUnavailableReason::ModalBlocked,
                     );
                 }
+                crate::widgets::elements::selector::send_close(ctx);
+                crate::widgets::elements::inspector::send_close(ctx);
+                self.appearance_applications
+                    .clear(crate::chrome::theme::AppearanceContext::Elements);
+                self.appearance_applications
+                    .clear(crate::chrome::theme::AppearanceContext::TemplateSelector);
                 self.command_projection_cache = None;
                 self.restore_focus_after_element_windows(return_surface, ctx);
                 ctx.request_repaint();
@@ -59,12 +65,11 @@ impl ScriptCraftApp {
                         super::DesktopUnavailableReason::ModalBlocked,
                     );
                 }
+                crate::widgets::elements::selector::send_close(ctx);
+                self.appearance_applications
+                    .clear(crate::chrome::theme::AppearanceContext::TemplateSelector);
                 self.command_projection_cache = None;
-                if inspector_remains_open {
-                    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
-                } else {
-                    self.restore_focus_after_element_windows(return_surface, ctx);
-                }
+                self.focus_element_window_or_restore(return_surface, ctx, inspector_remains_open);
                 ctx.request_repaint();
                 DesktopCommandOutcome::EffectDispatched
             }
@@ -82,12 +87,32 @@ impl ScriptCraftApp {
                     execute_editor_command_on_surface(&mut self.session, &command, active_surface);
                 match &outcome {
                     CommandOutcome::Changed => {
+                        let return_surface = self.element_windows.focus_return_surface();
+                        let inspector_remains_open = self.element_windows.elements_open();
                         self.refresh_after_builtin_template_apply(ctx);
                         self.element_windows.cancel_selector();
+                        crate::widgets::elements::selector::send_close(ctx);
+                        self.appearance_applications
+                            .clear(crate::chrome::theme::AppearanceContext::TemplateSelector);
+                        self.focus_element_window_or_restore(
+                            return_surface,
+                            ctx,
+                            inspector_remains_open,
+                        );
                         self.command_projection_cache = None;
                     }
                     CommandOutcome::NoOp => {
+                        let return_surface = self.element_windows.focus_return_surface();
+                        let inspector_remains_open = self.element_windows.elements_open();
                         self.element_windows.cancel_selector();
+                        crate::widgets::elements::selector::send_close(ctx);
+                        self.appearance_applications
+                            .clear(crate::chrome::theme::AppearanceContext::TemplateSelector);
+                        self.focus_element_window_or_restore(
+                            return_surface,
+                            ctx,
+                            inspector_remains_open,
+                        );
                         self.command_projection_cache = None;
                         ctx.request_repaint();
                     }
@@ -117,9 +142,17 @@ impl ScriptCraftApp {
                 }
                 if self.launch_template_instance(template_id).is_ok() {
                     let return_surface = self.element_windows.focus_return_surface();
+                    let inspector_remains_open = self.element_windows.elements_open();
                     self.element_windows.cancel_selector();
+                    crate::widgets::elements::selector::send_close(ctx);
+                    self.appearance_applications
+                        .clear(crate::chrome::theme::AppearanceContext::TemplateSelector);
                     self.command_projection_cache = None;
-                    self.restore_focus_after_element_windows(return_surface, ctx);
+                    self.focus_element_window_or_restore(
+                        return_surface,
+                        ctx,
+                        inspector_remains_open,
+                    );
                 } else {
                     self.element_windows.set_selector_error(
                         crate::widgets::elements::state::TemplateSelectorError::NewDocumentLaunch,
@@ -162,7 +195,20 @@ impl ScriptCraftApp {
                 memory.surrender_focus(editor_id);
             }
         });
-        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
+        crate::widgets::elements::focus_topmost_element_viewport(self, ctx);
+    }
+
+    fn focus_element_window_or_restore(
+        &mut self,
+        return_surface: Option<EditorSurface>,
+        ctx: &eframe::egui::Context,
+        inspector_remains_open: bool,
+    ) {
+        if inspector_remains_open || self.element_windows.selector_open() {
+            crate::widgets::elements::focus_topmost_element_viewport(self, ctx);
+        } else {
+            self.restore_focus_after_element_windows(return_surface, ctx);
+        }
     }
 
     fn restore_focus_after_element_windows(
@@ -193,6 +239,46 @@ impl ScriptCraftApp {
             ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
         }
         self.restore_editor_focus(ctx);
+    }
+}
+
+impl ScriptCraftApp {
+    /// Terminates a renderer-rejected element viewport once, without an embedded fallback.
+    pub(crate) fn handle_unsupported_element_viewport(
+        &mut self,
+        selector_unsupported: bool,
+        ctx: &eframe::egui::Context,
+    ) {
+        if selector_unsupported {
+            self.element_windows.mark_selector_viewport_unsupported();
+            let return_surface = self.element_windows.focus_return_surface();
+            let inspector_remains_open = self.element_windows.elements_open();
+            self.element_windows.cancel_selector();
+            crate::widgets::elements::selector::send_close(ctx);
+            self.appearance_applications
+                .clear(crate::chrome::theme::AppearanceContext::TemplateSelector);
+            self.command_projection_cache = None;
+            self.focus_element_window_or_restore(return_surface, ctx, inspector_remains_open);
+            self.show_error(
+                "ELEMENT_SELECTOR_VIEWPORT_UNSUPPORTED: this renderer cannot create a separate native window; selector cancelled",
+            );
+        } else {
+            self.element_windows.mark_elements_viewport_unsupported();
+            let return_surface = self.element_windows.focus_return_surface();
+            self.element_windows.close_elements();
+            crate::widgets::elements::selector::send_close(ctx);
+            crate::widgets::elements::inspector::send_close(ctx);
+            self.appearance_applications
+                .clear(crate::chrome::theme::AppearanceContext::Elements);
+            self.appearance_applications
+                .clear(crate::chrome::theme::AppearanceContext::TemplateSelector);
+            self.command_projection_cache = None;
+            self.restore_focus_after_element_windows(return_surface, ctx);
+            self.show_error(
+                "ELEMENTS_VIEWPORT_UNSUPPORTED: this renderer cannot create a separate native window; Elements remains closed",
+            );
+        }
+        ctx.request_repaint();
     }
 }
 

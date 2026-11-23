@@ -4,7 +4,7 @@
 //! no document/session references and cannot construct or mutate a candidate.
 
 use scriptcraft_commands::EditorSurface;
-use scriptcraft_fdx::BuiltinTemplateId;
+use scriptcraft_fdx::{BuiltinTemplateId, DEFAULT_BUILTIN_TEMPLATE_ID};
 use scriptcraft_model::ElementTypeKey;
 
 /// The read-only detail section shown for the selected element.
@@ -45,7 +45,7 @@ impl TemplateSelectorState {
     fn new(mode: TemplateSelectorMode) -> Self {
         Self {
             mode,
-            selected_template: None,
+            selected_template: Some(DEFAULT_BUILTIN_TEMPLATE_ID),
             error: None,
             focus_requested: true,
         }
@@ -105,6 +105,9 @@ pub(crate) struct ElementWindowState {
     elements_focus_requested: bool,
     selected_element: Option<ElementTypeKey>,
     active_tab: ElementsTab,
+    elements_viewport_unsupported: bool,
+    selector_viewport_unsupported: bool,
+    native_close_pending: bool,
 }
 
 impl ElementWindowState {
@@ -114,6 +117,32 @@ impl ElementWindowState {
 
     pub(crate) const fn selector_open(&self) -> bool {
         self.selector.is_some()
+    }
+
+    pub(crate) const fn elements_viewport_unsupported(&self) -> bool {
+        self.elements_viewport_unsupported
+    }
+
+    pub(crate) const fn selector_viewport_unsupported(&self) -> bool {
+        self.selector_viewport_unsupported
+    }
+
+    /// Schedules one presentation-only close for the next Elements composition.
+    pub(crate) fn schedule_native_close(&mut self) {
+        self.native_close_pending = true;
+    }
+
+    /// Consumes a deferred native close request exactly once.
+    pub(crate) fn take_native_close_request(&mut self) -> bool {
+        std::mem::take(&mut self.native_close_pending)
+    }
+
+    pub(crate) fn mark_elements_viewport_unsupported(&mut self) {
+        self.elements_viewport_unsupported = true;
+    }
+
+    pub(crate) fn mark_selector_viewport_unsupported(&mut self) {
+        self.selector_viewport_unsupported = true;
     }
 
     /// Element windows own keyboard and pointer input while either surface is
@@ -206,6 +235,9 @@ impl ElementWindowState {
     /// an already-open Elements window is intentionally a non-resetting focus
     /// activation, including when the selector is currently topmost.
     pub(crate) fn open_elements(&mut self, return_surface: EditorSurface) -> bool {
+        if self.elements_viewport_unsupported {
+            return false;
+        }
         if self.elements_open {
             if let Some(selector) = self.selector.as_mut() {
                 selector.focus_requested = true;
@@ -223,6 +255,9 @@ impl ElementWindowState {
     /// Opens the Apply selector only as a child of the Elements inspector, or
     /// leaves an existing selector untouched so activation only focuses it.
     pub(crate) fn open_selector(&mut self, mode: TemplateSelectorMode) -> bool {
+        if self.selector_viewport_unsupported {
+            return false;
+        }
         if let Some(selector) = self.selector.as_mut() {
             selector.focus_requested = true;
             return false;
@@ -237,6 +272,9 @@ impl ElementWindowState {
     /// File → New from Template presents the shared selector without opening
     /// the read-only Elements inspector behind it.
     pub(crate) fn open_new_template_selector(&mut self, return_surface: EditorSurface) -> bool {
+        if self.selector_viewport_unsupported {
+            return false;
+        }
         if let Some(selector) = self.selector.as_mut() {
             selector.focus_requested = true;
             return false;
@@ -274,7 +312,7 @@ impl ElementWindowState {
         if self.elements_open {
             self.elements_focus_requested = true;
         } else if selector.mode() == TemplateSelectorMode::NewDocument {
-            *self = Self::default();
+            self.clear_dialog_state();
         }
         true
     }
@@ -290,12 +328,22 @@ impl ElementWindowState {
         {
             return false;
         }
-        *self = Self::default();
+        self.clear_dialog_state();
         true
     }
 
     /// Document activation and authorized root close discard all dialog state.
     pub(crate) fn reset(&mut self) {
-        *self = Self::default();
+        self.clear_dialog_state();
+    }
+
+    fn clear_dialog_state(&mut self) {
+        let elements_viewport_unsupported = self.elements_viewport_unsupported;
+        let selector_viewport_unsupported = self.selector_viewport_unsupported;
+        *self = Self {
+            elements_viewport_unsupported,
+            selector_viewport_unsupported,
+            ..Self::default()
+        };
     }
 }

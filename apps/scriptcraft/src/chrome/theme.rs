@@ -37,12 +37,16 @@ pub(crate) type AppliedAppearance = Option<(AppearanceMode, egui::Theme)>;
 pub(crate) enum AppearanceContext {
     Root,
     TitlePage,
+    Elements,
+    TemplateSelector,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct AppearanceApplications {
     root: AppliedAppearance,
     title_page: AppliedAppearance,
+    elements: AppliedAppearance,
+    template_selector: AppliedAppearance,
 }
 
 impl AppearanceApplications {
@@ -50,6 +54,8 @@ impl AppearanceApplications {
         match context {
             AppearanceContext::Root => self.root,
             AppearanceContext::TitlePage => self.title_page,
+            AppearanceContext::Elements => self.elements,
+            AppearanceContext::TemplateSelector => self.template_selector,
         }
     }
 
@@ -57,6 +63,8 @@ impl AppearanceApplications {
         match context {
             AppearanceContext::Root => self.root = applied,
             AppearanceContext::TitlePage => self.title_page = applied,
+            AppearanceContext::Elements => self.elements = applied,
+            AppearanceContext::TemplateSelector => self.template_selector = applied,
         }
     }
 

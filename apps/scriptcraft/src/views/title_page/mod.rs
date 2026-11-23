@@ -73,7 +73,11 @@ pub(crate) fn show_if_open(app: &mut ScriptCraftApp, root_ctx: &egui::Context) {
                 return;
             }
             if child_ctx.input(|input| input.viewport().focused) == Some(true) {
-                app.set_active_editor_surface(EditorSurface::TitlePage);
+                if app.element_windows.owns_input() {
+                    crate::widgets::elements::focus_topmost_element_viewport(app, &child_ctx);
+                } else {
+                    app.set_active_editor_surface(EditorSurface::TitlePage);
+                }
             }
 
             app.swap_title_view_state();

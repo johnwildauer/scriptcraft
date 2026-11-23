@@ -297,13 +297,19 @@ impl eframe::App for ScriptCraftApp {
         });
         let effective_pixels_per_point = status_bar::resolved_ui_pixels_per_point(native_scale);
         ctx.set_zoom_factor(status_bar::ui_zoom_factor(native_scale));
-        let scale_changed = self.effective_pixels_per_point != Some(effective_pixels_per_point);
-        self.effective_pixels_per_point = Some(effective_pixels_per_point);
+        let title_page_viewport = raw_input.viewport_id == title_page::viewport_id();
+        let element_viewport = raw_input.viewport_id
+            == crate::widgets::elements::inspector::viewport_id()
+            || raw_input.viewport_id == crate::widgets::elements::selector::viewport_id();
+        let scale_changed = !element_viewport
+            && self.effective_pixels_per_point != Some(effective_pixels_per_point);
+        if !element_viewport {
+            self.effective_pixels_per_point = Some(effective_pixels_per_point);
+        }
 
         // eframe invokes this hook for each viewport. Keep the middle-button
         // gesture state viewport-local while routing both windows through the
         // same pinch command and anchor/repaint implementation.
-        let title_page_viewport = raw_input.viewport_id == title_page::viewport_id();
         let viewport_close_requested = raw_input
             .viewports
             .get(&raw_input.viewport_id)
@@ -318,7 +324,7 @@ impl eframe::App for ScriptCraftApp {
             } else {
                 &mut self.wheel_zoom
             };
-            if viewport_close_requested || element_dialog_open {
+            if viewport_close_requested || element_dialog_open || element_viewport {
                 adapter.reset();
                 Vec::new()
             } else {
@@ -326,18 +332,20 @@ impl eframe::App for ScriptCraftApp {
             }
         };
         let surface = if title_page_viewport {
-            EditorSurface::TitlePage
+            Some(EditorSurface::TitlePage)
+        } else if element_viewport {
+            None
         } else {
-            EditorSurface::Body
+            Some(EditorSurface::Body)
         };
         if title_page_viewport && !self.title_page_window_open {
             self.title_view.wheel_zoom.reset();
-        } else {
+        } else if let Some(surface) = surface {
             self.dispatch_wheel_zoom_factors(surface, ctx, wheel_factors);
         }
 
         for event in &raw_input.events {
-            if !element_dialog_open {
+            if !element_dialog_open && !element_viewport {
                 if let egui::Event::Zoom(factor) = event {
                     self.record_native_event("zoom");
                     if let Ok(factor) = ZoomFactor::new(*factor) {
@@ -354,7 +362,7 @@ impl eframe::App for ScriptCraftApp {
         }
         // The app has consumed the event for page zoom. Keep it out of egui's
         // later input-state zoom delta so no other surface can apply it again.
-        if !element_dialog_open {
+        if element_dialog_open || element_viewport {
             raw_input
                 .events
                 .retain(|event| !matches!(event, egui::Event::Zoom(_)));
@@ -465,7 +473,11 @@ impl ScriptCraftApp {
         measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
             app.update_native_window_state(&ctx);
             if ctx.input(|input| input.viewport().focused) == Some(true) {
-                app.set_active_editor_surface(EditorSurface::Body);
+                if app.element_windows.owns_input() {
+                    elements::focus_topmost_element_viewport(app, &ctx);
+                } else {
+                    app.set_active_editor_surface(EditorSurface::Body);
+                }
             }
         });
         let startup_outcome =

@@ -587,7 +587,12 @@ impl ScriptCraftApp {
         self.active_body_dual_dialogue_group = None;
         self.surface_focused = false;
         self.session = replacement;
+        self.appearance_applications
+            .clear(crate::chrome::theme::AppearanceContext::Elements);
+        self.appearance_applications
+            .clear(crate::chrome::theme::AppearanceContext::TemplateSelector);
         self.element_windows.reset();
+        self.element_windows.schedule_native_close();
         self.command_projection_cache = None;
         self.invalidate_dynamic_controls();
         self.zoom_percent = text_state.scaling.clamp(

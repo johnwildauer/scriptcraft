@@ -1,15 +1,29 @@
 //! Compact, read-only Elements window.
 
-use super::{
-    presentation,
-    state::ElementsTab,
-    summary::ElementDefinitionSummary,
-};
+use super::{presentation, state::ElementsTab, summary::ElementDefinitionSummary};
+use crate::chrome::{status_bar, theme};
 use eframe::egui;
 use scriptcraft_model::ElementTypeKey;
 
-const FOOTER_RESERVED_HEIGHT: f32 = 52.0;
-const FOOTER_HEIGHT: f32 = 34.0;
+pub(crate) fn viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("scriptcraft-elements-inspector")
+}
+
+fn viewport_builder() -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title("Elements")
+        .with_inner_size(presentation::DEFAULT_INSPECTOR_SIZE)
+        .with_min_inner_size(presentation::MIN_INSPECTOR_SIZE)
+        .with_resizable(true)
+}
+
+pub(crate) fn send_close(ctx: &egui::Context) {
+    ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
+}
+
+pub(crate) fn send_focus(ctx: &egui::Context) {
+    ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
+}
 
 /// Deferred inspector presentation and command intents.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,147 +34,177 @@ pub(crate) enum ElementsWindowIntent {
     CloseElements,
 }
 
-/// Shows a bounded root-context inspector and returns at most one deferred intent.
+/// Shows the native inspector and returns a deferred intent or unsupported outcome.
 pub(crate) fn show_elements_window(
-    ctx: &egui::Context,
+    root_ctx: &egui::Context,
     summaries: &[ElementDefinitionSummary],
     selected_key: Option<&ElementTypeKey>,
     selected_summary: Option<&ElementDefinitionSummary>,
     active_tab: ElementsTab,
     selector_is_topmost: bool,
     focus_requested: bool,
-) -> Option<ElementsWindowIntent> {
-    let viewport = ctx.input(|input| input.viewport_rect());
-    let (default_size, max_size) = window_sizes(viewport.size());
-    let escape_pressed =
-        !selector_is_topmost && ctx.input(|input| input.key_pressed(egui::Key::Escape));
-    let mut open = true;
-    let mut close_clicked = false;
-    let mut action_clicked = false;
-    let mut presentation_intent = None;
+    appearance_mode: theme::AppearanceMode,
+    applied_appearance: theme::AppliedAppearance,
+) -> Result<(Option<ElementsWindowIntent>, theme::AppliedAppearance), ()> {
+    let mut outcome = None;
+    root_ctx.show_viewport_immediate(viewport_id(), viewport_builder(), |viewport_ui, class| {
+        if class != egui::ViewportClass::Immediate {
+            outcome = Some(Err(()));
+            return;
+        }
 
-    egui::Window::new("Elements")
-        .id(egui::Id::new("elements-inspector-window"))
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(true)
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .default_size(default_size)
-        .max_size(max_size)
-        .show(ctx, |ui| {
-            let available = ui.available_size();
-            let body_height = (available.y - FOOTER_RESERVED_HEIGHT).max(1.0);
-            let body_width = available.x.max(1.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(body_width, body_height),
-                egui::Layout::left_to_right(egui::Align::Min),
-                |body| {
-                    let left_width = (body.available_width() * 0.31)
-                        .clamp(
-                            presentation::LIST_COLUMN_MIN_WIDTH,
-                            presentation::LIST_COLUMN_MAX_WIDTH,
-                        )
-                        .min((body.available_width() - presentation::PANE_GAP - 1.0).max(1.0));
-                    body.allocate_ui_with_layout(
-                        egui::vec2(left_width, body_height),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |list_ui| {
-                            presentation::listbox_frame(list_ui).show(list_ui, |pane| {
-                                let pane_width = pane.available_width();
-                                let pane_height = pane.available_height();
-                                egui::ScrollArea::vertical()
-                                    .id_salt("elements-definition-list")
-                                    .max_width(pane_width)
-                                    .max_height(pane_height)
-                                    .auto_shrink([false, false])
-                                    .show(pane, |rows| {
-                                        rows.set_min_width(pane_width);
-                                        for summary in summaries {
-                                            let is_selected = selected_key
-                                                .is_some_and(|key| key == &summary.key);
-                                            let response = rows.push_id(
-                                                &summary.key,
-                                                |row_ui| {
-                                                    presentation::selectable_row(
-                                                        row_ui,
-                                                        summary.key.as_str(),
-                                                        is_selected,
-                                                        focus_requested && is_selected,
-                                                    )
-                                                },
-                                            );
-                                            if response.inner.clicked() {
-                                                presentation_intent = Some(
-                                                    ElementsWindowIntent::SelectElement(
-                                                        summary.key.clone(),
-                                                    ),
-                                                );
-                                            }
-                                        }
-                                    });
-                            });
-                        },
-                    );
-                    body.add_space(presentation::PANE_GAP);
-                    let detail_width = body.available_width().max(1.0);
-                    body.allocate_ui_with_layout(
-                        egui::vec2(detail_width, body_height),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |detail_ui| {
-                            show_detail_pane(
-                                detail_ui,
-                                selected_summary,
-                                active_tab,
-                                &mut presentation_intent,
-                            );
-                        },
-                    );
-                },
-            );
+        let child_ctx = viewport_ui.ctx().clone();
+        if selector_is_topmost
+            && child_ctx.input(|input| input.viewport().focused) == Some(true)
+        {
+            super::focus_topmost_element_viewport_for_state(&child_ctx, true, true);
+        }
+        if child_ctx.input(|input| input.viewport().close_requested()) {
+            if selector_is_topmost {
+                child_ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                super::focus_topmost_element_viewport_for_state(&child_ctx, true, true);
+                return;
+            }
+            outcome = Some(Ok((Some(ElementsWindowIntent::CloseElements), applied_appearance)));
+            return;
+        }
+        if !selector_is_topmost && child_ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            outcome = Some(Ok((Some(ElementsWindowIntent::CloseElements), applied_appearance)));
+            return;
+        }
 
-            ui.add_space(4.0);
-            ui.separator();
-            let footer_width = ui.available_width().max(1.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(footer_width, FOOTER_HEIGHT),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |footer| {
-                    let apply = footer.button("Apply a Template");
-                    apply.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            apply.enabled(),
-                            "Apply a Template".to_owned(),
-                        )
-                    });
-                    action_clicked = apply.clicked();
-                    footer.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |footer| {
-                            let close = footer.button("Close");
-                            close.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::WidgetType::Button,
-                                    close.enabled(),
-                                    "Close".to_owned(),
-                                )
-                            });
-                            close_clicked = close.clicked();
-                        },
-                    );
-                },
-            );
+        let native_scale = child_ctx.input(|input| input.viewport().native_pixels_per_point);
+        child_ctx.set_zoom_factor(status_bar::ui_zoom_factor(native_scale));
+        let (_, applied, _) = theme::configure_appearance(
+            &child_ctx,
+            appearance_mode,
+            applied_appearance,
+        );
+        egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
+            let mut intent = None;
+            let mut close_clicked = false;
+            let mut action_clicked = false;
+            ui.add_enabled_ui(!selector_is_topmost, |ui| {
+                show_elements_content(
+                    ui,
+                    summaries,
+                    selected_key,
+                    selected_summary,
+                    active_tab,
+                    focus_requested,
+                    &mut intent,
+                    &mut action_clicked,
+                    &mut close_clicked,
+                );
+            });
+            outcome = Some(Ok((if close_clicked {
+                Some(ElementsWindowIntent::CloseElements)
+            } else if action_clicked {
+                Some(ElementsWindowIntent::OpenTemplateSelector)
+            } else {
+                intent
+            }, applied)));
         });
+    });
+    outcome.unwrap_or(Ok((None, applied_appearance)))
+}
 
-    // Window close/Escape outrank the same-frame footer or presentation input.
-    if !open || escape_pressed || close_clicked {
-        Some(ElementsWindowIntent::CloseElements)
-    } else if action_clicked {
-        Some(ElementsWindowIntent::OpenTemplateSelector)
-    } else {
-        presentation_intent
-    }
+fn show_elements_content(
+    ui: &mut egui::Ui,
+    summaries: &[ElementDefinitionSummary],
+    selected_key: Option<&ElementTypeKey>,
+    selected_summary: Option<&ElementDefinitionSummary>,
+    active_tab: ElementsTab,
+    focus_requested: bool,
+    presentation_intent: &mut Option<ElementsWindowIntent>,
+    action_clicked: &mut bool,
+    close_clicked: &mut bool,
+) {
+    let available = ui.available_size();
+    let body_height = (available.y - presentation::INSPECTOR_FOOTER_RESERVED_HEIGHT)
+        .max(presentation::MIN_PANE_WIDTH);
+    let body_width = available.x.max(presentation::MIN_PANE_WIDTH);
+    ui.allocate_ui_with_layout(
+        egui::vec2(body_width, body_height),
+        egui::Layout::left_to_right(egui::Align::Min),
+        |body| {
+            let (left_width, pane_gap) = presentation::list_pane_widths(body.available_width());
+            body.allocate_ui_with_layout(
+                egui::vec2(left_width, body_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |list_ui| {
+                    presentation::listbox_frame(list_ui).show(list_ui, |pane| {
+                        let pane_width = pane.available_width();
+                        let pane_height = pane.available_height();
+                        egui::ScrollArea::vertical()
+                            .id_salt("elements-definition-list")
+                            .max_width(pane_width)
+                            .max_height(pane_height)
+                            .auto_shrink([false, false])
+                            .show(pane, |rows| {
+                                rows.spacing_mut().item_spacing.y = presentation::SELECTABLE_ROW_GAP;
+                                rows.set_min_width(pane_width);
+                                for summary in summaries {
+                                    let is_selected = selected_key.is_some_and(|key| key == &summary.key);
+                                    let response = rows.push_id(&summary.key, |row_ui| {
+                                        presentation::selectable_row(
+                                            row_ui,
+                                            summary.key.as_str(),
+                                            is_selected,
+                                            focus_requested && is_selected,
+                                        )
+                                    });
+                                    if response.inner.clicked() {
+                                        *presentation_intent = Some(
+                                            ElementsWindowIntent::SelectElement(summary.key.clone()),
+                                        );
+                                    }
+                                }
+                            });
+                    });
+                },
+            );
+            body.add_space(pane_gap);
+            let detail_width = body.available_width().max(presentation::MIN_PANE_WIDTH);
+            body.allocate_ui_with_layout(
+                egui::vec2(detail_width, body_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |detail_ui| {
+                    show_detail_pane(detail_ui, selected_summary, active_tab, presentation_intent);
+                },
+            );
+        },
+    );
+
+    ui.add_space(presentation::FOOTER_CONTENT_GAP);
+    ui.separator();
+    let footer_width = ui.available_width().max(1.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(footer_width, presentation::INSPECTOR_FOOTER_HEIGHT),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |footer| {
+            let apply = footer.button("Apply a Template");
+            apply.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    apply.enabled(),
+                    "Apply a Template".to_owned(),
+                )
+            });
+            *action_clicked = apply.clicked();
+            footer.with_layout(egui::Layout::right_to_left(egui::Align::Center), |footer| {
+                let close = footer.button("Close");
+                close.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        close.enabled(),
+                        "Close".to_owned(),
+                    )
+                });
+                *close_clicked = close.clicked();
+            });
+        },
+    );
 }
 
 fn show_detail_pane(
@@ -290,16 +334,4 @@ fn show_paragraph(ui: &mut egui::Ui, summary: &ElementDefinitionSummary) {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "Yes" } else { "No" }
-}
-
-fn window_sizes(viewport: egui::Vec2) -> (egui::Vec2, egui::Vec2) {
-    let max_size = egui::vec2(
-        (viewport.x - presentation::VIEWPORT_MARGIN).max(1.0),
-        (viewport.y - presentation::VIEWPORT_MARGIN).max(1.0),
-    );
-    let default_size = egui::vec2(
-        presentation::DEFAULT_INSPECTOR_SIZE.x.min(max_size.x),
-        presentation::DEFAULT_INSPECTOR_SIZE.y.min(max_size.y),
-    );
-    (default_size, max_size)
 }

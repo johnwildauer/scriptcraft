@@ -5,23 +5,40 @@ use super::state::{
     TemplateSelectorMode,
 };
 use super::presentation::{
-    detail_frame, listbox_frame, selectable_row, DEFAULT_SELECTOR_SIZE, LIST_COLUMN_MAX_WIDTH,
-    LIST_COLUMN_MIN_WIDTH, PANE_GAP, VIEWPORT_MARGIN,
+    self, detail_frame, listbox_frame, selectable_row, DEFAULT_SELECTOR_SIZE,
+    FOOTER_BUTTON_GAP, FOOTER_BUTTON_HEIGHT, FOOTER_BUTTON_WIDTH, MIN_PANE_WIDTH,
+    MIN_SELECTOR_SIZE, SELECTOR_FOOTER_ALLOWANCE, WINDOW_CONTENT_HORIZONTAL_ALLOWANCE,
 };
+use crate::chrome::{status_bar, theme};
 use eframe::egui;
 use scriptcraft_fdx::{
     builtin_template_metadata, builtin_template_preview_description, builtin_templates,
     BuiltinTemplateId,
 };
 
-const WINDOW_FOOTER_ALLOWANCE: f32 = 112.0;
-const FOOTER_BUTTON_WIDTH: f32 = 88.0;
-const FOOTER_BUTTON_HEIGHT: f32 = 30.0;
-const FOOTER_BUTTON_GAP: f32 = 8.0;
-
 const CANCEL_LABEL: &str = "Cancel";
 const APPLY_LABEL: &str = "Apply";
 const NEW_LABEL: &str = "New";
+
+pub(crate) fn viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("scriptcraft-elements-template-selector")
+}
+
+fn viewport_builder(mode: TemplateSelectorMode) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title(selector_title(mode))
+        .with_inner_size(DEFAULT_SELECTOR_SIZE)
+        .with_min_inner_size(MIN_SELECTOR_SIZE)
+        .with_resizable(true)
+}
+
+pub(crate) fn send_close(ctx: &egui::Context) {
+    ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Close);
+}
+
+pub(crate) fn send_focus(ctx: &egui::Context) {
+    ctx.send_viewport_cmd_to(viewport_id(), egui::ViewportCommand::Focus);
+}
 
 /// A deferred selector interaction. None of these intents loads or constructs a template.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,178 +64,195 @@ pub(crate) const fn selector_can_new(
     selector_mode_can_create_new(mode, selected_template)
 }
 
-/// Renders the catalog metadata and returns at most one deferred intent.
+/// Shows the native catalog/preview viewport and returns an intent or unsupported outcome.
 pub(crate) fn show_template_selector(
-    ctx: &egui::Context,
+    root_ctx: &egui::Context,
     mode: TemplateSelectorMode,
     selected_template: Option<BuiltinTemplateId>,
     error: Option<TemplateSelectorError>,
     focus_requested: bool,
-) -> Option<TemplateSelectorIntent> {
-    let viewport = ctx.input(|input| input.viewport_rect());
-    let (default_size, max_size) = window_sizes(viewport.size());
-    let escape_pressed = ctx.input(|input| input.key_pressed(egui::Key::Escape));
-    let mut open = true;
-    let mut selected = selected_template;
-    let mut cancel_clicked = false;
-    let mut primary_clicked = false;
+    appearance_mode: theme::AppearanceMode,
+    applied_appearance: theme::AppliedAppearance,
+) -> Result<(Option<TemplateSelectorIntent>, theme::AppliedAppearance), ()> {
+    let mut outcome = None;
+    root_ctx.show_viewport_immediate(viewport_id(), viewport_builder(mode), |viewport_ui, class| {
+        if class != egui::ViewportClass::Immediate {
+            outcome = Some(Err(()));
+            return;
+        }
+        let child_ctx = viewport_ui.ctx().clone();
+        if child_ctx.input(|input| input.viewport().close_requested()) {
+            outcome = Some(Ok((Some(TemplateSelectorIntent::Cancel), applied_appearance)));
+            return;
+        }
+        let escape_pressed = child_ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        if escape_pressed {
+            outcome = Some(Ok((Some(TemplateSelectorIntent::Cancel), applied_appearance)));
+            return;
+        }
 
-    egui::Window::new(selector_title(mode))
-        .id(egui::Id::new("elements-template-selector-window"))
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(true)
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .default_size(default_size)
-        .max_size(max_size)
-        .show(ctx, |ui| {
-            ui.set_max_width((max_size.x - 24.0).max(1.0));
-            let body_width = ui.available_width();
-            let body_height = (ui.available_height() - WINDOW_FOOTER_ALLOWANCE).max(1.0);
+        let native_scale = child_ctx.input(|input| input.viewport().native_pixels_per_point);
+        child_ctx.set_zoom_factor(status_bar::ui_zoom_factor(native_scale));
+        let (_, applied, _) = theme::configure_appearance(
+            &child_ctx,
+            appearance_mode,
+            applied_appearance,
+        );
+        egui::CentralPanel::default().show_inside(viewport_ui, |ui| {
+            let mut selected = selected_template;
+            let mut cancel_clicked = false;
+            let mut primary_clicked = false;
+            show_selector_content(
+                ui,
+                mode,
+                error,
+                focus_requested,
+                &mut selected,
+                &mut cancel_clicked,
+                &mut primary_clicked,
+            );
+            outcome = Some(Ok((
+                resolve_selector_intent(
+                    true,
+                    false,
+                    cancel_clicked,
+                    primary_clicked,
+                    mode,
+                    selected_template,
+                    selected,
+                ),
+                applied,
+            )));
+        });
+    });
+    outcome.unwrap_or(Ok((None, applied_appearance)))
+}
+
+fn show_selector_content(
+    ui: &mut egui::Ui,
+    mode: TemplateSelectorMode,
+    error: Option<TemplateSelectorError>,
+    focus_requested: bool,
+    selected: &mut Option<BuiltinTemplateId>,
+    cancel_clicked: &mut bool,
+    primary_clicked: &mut bool,
+) {
+    ui.set_max_width(
+        (ui.available_width() - WINDOW_CONTENT_HORIZONTAL_ALLOWANCE).max(MIN_PANE_WIDTH),
+    );
+    let body_width = ui.available_width();
+    let body_height = (ui.available_height() - SELECTOR_FOOTER_ALLOWANCE).max(MIN_PANE_WIDTH);
+    ui.allocate_ui_with_layout(
+        egui::vec2(body_width, body_height),
+        egui::Layout::left_to_right(egui::Align::Min),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let pane_width = ui.available_width();
+            let (list_width, pane_gap) = presentation::list_pane_widths(pane_width);
+            let preview_width = (pane_width - list_width - pane_gap).max(MIN_PANE_WIDTH);
             ui.allocate_ui_with_layout(
-                egui::vec2(body_width, body_height),
-                egui::Layout::left_to_right(egui::Align::Min),
+                egui::vec2(list_width, body_height),
+                egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    let pane_width = ui.available_width();
-                    let pane_gap = PANE_GAP.min((pane_width - 2.0).max(0.0));
-                    let list_space = (pane_width - pane_gap - 1.0).max(1.0);
-                    let list_width = list_space
-                        .min(LIST_COLUMN_MAX_WIDTH)
-                        .max(LIST_COLUMN_MIN_WIDTH.min(list_space));
-                    let preview_width = (pane_width - list_width - pane_gap).max(1.0);
-
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(list_width, body_height),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            listbox_frame(ui).show(ui, |ui| {
-                                egui::ScrollArea::vertical()
-                                    .id_salt("elements-template-catalog")
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-                                        for (index, metadata) in
-                                            builtin_templates().iter().enumerate()
-                                        {
-                                            ui.push_id(metadata.id.as_str(), |ui| {
-                                                let is_selected = selected == Some(metadata.id);
-                                                let response = selectable_row(
-                                                    ui,
-                                                    metadata.display_name,
-                                                    is_selected,
-                                                    index == 0 && focus_requested,
-                                                );
-                                                if response.clicked() {
-                                                    selected = Some(metadata.id);
-                                                }
-                                            });
+                    listbox_frame(ui).show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("elements-template-catalog")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = presentation::SELECTABLE_ROW_GAP;
+                                for metadata in builtin_templates() {
+                                    ui.push_id(metadata.id.as_str(), |ui| {
+                                        let is_selected = *selected == Some(metadata.id);
+                                        let response = selectable_row(
+                                            ui,
+                                            metadata.display_name,
+                                            is_selected,
+                                            is_selected && focus_requested,
+                                        );
+                                        if response.clicked() {
+                                            *selected = Some(metadata.id);
                                         }
                                     });
-                            });
-                        },
-                    );
-                    ui.add_space(pane_gap);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(preview_width, body_height),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            detail_frame(ui).show(ui, |ui| {
-                                if let Some(id) = selected {
-                                    let metadata = builtin_template_metadata(id);
-                                    ui.heading(metadata.display_name);
-
-                                    if let Some(description) =
-                                        builtin_template_preview_description(id)
-                                    {
-                                        egui::ScrollArea::vertical()
-                                            .id_salt("elements-template-preview-description")
-                                            .auto_shrink([false, false])
-                                            .show(ui, |ui| {
-                                                let response = ui.add(
-                                                    egui::Label::new(description.as_str())
-                                                        .wrap()
-                                                        .selectable(true),
-                                                );
-                                                response.widget_info(|| {
-                                                    egui::WidgetInfo::labeled(
-                                                        egui::WidgetType::Label,
-                                                        response.enabled(),
-                                                        format!("Preview Description: {description}"),
-                                                    )
-                                                });
-                                            });
-                                    }
                                 }
                             });
-                        },
-                    );
+                    });
                 },
             );
-
-            if let Some(message) = selector_error_text(error) {
-                ui.add_space(4.0);
-                ui.colored_label(ui.visuals().error_fg_color, message);
-            }
-
-            ui.separator();
-            // Place controls explicitly so keyboard traversal follows Cancel,
-            // then the enabled primary action, while the visual order remains
-            // bottom-right with the primary action at the far right.
-            let footer_width = ui.available_width();
-            let footer_rect = ui
-                .allocate_space(egui::vec2(footer_width, FOOTER_BUTTON_HEIGHT))
-                .1;
-            let (cancel_rect, primary_rect) = footer_button_rects(footer_rect);
-            let primary_enabled =
-                selector_can_apply(mode, selected) || selector_can_new(mode, selected);
-
-            let mut cancel_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(cancel_rect)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            ui.add_space(pane_gap);
+            ui.allocate_ui_with_layout(
+                egui::vec2(preview_width, body_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    detail_frame(ui).show(ui, |ui| {
+                        if let Some(id) = *selected {
+                            let metadata = builtin_template_metadata(id);
+                            ui.heading(metadata.display_name);
+                            if let Some(description) = builtin_template_preview_description(id) {
+                                egui::ScrollArea::vertical()
+                                    .id_salt("elements-template-preview-description")
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        let response = ui.add(
+                                            egui::Label::new(description.as_str())
+                                                .wrap()
+                                                .selectable(true),
+                                        );
+                                        response.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::WidgetType::Label,
+                                                response.enabled(),
+                                                format!("Preview Description: {description}"),
+                                            )
+                                        });
+                                    });
+                            }
+                        }
+                    });
+                },
             );
-            let cancel_response =
-                cancel_ui.add_sized(cancel_rect.size(), egui::Button::new(CANCEL_LABEL));
-            cancel_response.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    cancel_response.enabled(),
-                    CANCEL_LABEL.to_owned(),
-                )
-            });
-            cancel_clicked = cancel_response.clicked();
+        },
+    );
 
-            let mut primary_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(primary_rect)
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            );
-            let primary_response = primary_ui.add_enabled(
-                primary_enabled,
-                egui::Button::new(primary_label(mode)).min_size(primary_rect.size()),
-            );
-            primary_response.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    primary_response.enabled(),
-                    primary_label(mode).to_owned(),
-                )
-            });
-            primary_clicked = primary_response.clicked();
-        });
-
-    // Terminal selector actions outrank any underlying Elements-window close.
-    // Escape and title-button close intentionally share the Cancel intent.
-    resolve_selector_intent(
-        open,
-        escape_pressed,
-        cancel_clicked,
-        primary_clicked,
-        mode,
-        selected_template,
-        selected,
-    )
+    if let Some(message) = selector_error_text(error) {
+        ui.add_space(presentation::FOOTER_CONTENT_GAP);
+        ui.colored_label(ui.visuals().error_fg_color, message);
+    }
+    ui.separator();
+    let footer_width = ui.available_width();
+    let footer_rect = ui.allocate_space(egui::vec2(footer_width, FOOTER_BUTTON_HEIGHT)).1;
+    let (cancel_rect, primary_rect) = footer_button_rects(footer_rect);
+    let primary_enabled = selector_can_apply(mode, *selected) || selector_can_new(mode, *selected);
+    let mut cancel_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(cancel_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let cancel_response = cancel_ui.add_sized(cancel_rect.size(), egui::Button::new(CANCEL_LABEL));
+    cancel_response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            cancel_response.enabled(),
+            CANCEL_LABEL.to_owned(),
+        )
+    });
+    *cancel_clicked = cancel_response.clicked();
+    let mut primary_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(primary_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let primary_response = primary_ui.add_enabled(
+        primary_enabled,
+        egui::Button::new(primary_label(mode)).min_size(primary_rect.size()),
+    );
+    primary_response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            primary_response.enabled(),
+            primary_label(mode).to_owned(),
+        )
+    });
+    *primary_clicked = primary_response.clicked();
 }
 
 fn resolve_selector_intent(
@@ -275,20 +309,9 @@ fn selector_error_text(error: Option<TemplateSelectorError>) -> Option<&'static 
     }
 }
 
-fn window_sizes(viewport: egui::Vec2) -> (egui::Vec2, egui::Vec2) {
-    let max_size = egui::vec2(
-        (viewport.x - VIEWPORT_MARGIN).max(1.0),
-        (viewport.y - VIEWPORT_MARGIN).max(1.0),
-    );
-    let default_size = egui::vec2(
-        DEFAULT_SELECTOR_SIZE.x.min(max_size.x),
-        DEFAULT_SELECTOR_SIZE.y.min(max_size.y),
-    );
-    (default_size, max_size)
-}
-
 fn footer_button_rects(footer: egui::Rect) -> (egui::Rect, egui::Rect) {
-    let button_gap = FOOTER_BUTTON_GAP.min((footer.width() - 2.0).max(0.0));
+    let button_gap = FOOTER_BUTTON_GAP
+        .min((footer.width() - MIN_PANE_WIDTH * 2.0).max(0.0));
     let button_width = ((footer.width() - button_gap).max(0.0) * 0.5).min(FOOTER_BUTTON_WIDTH);
     let cancel = egui::Rect::from_min_size(
         egui::pos2(

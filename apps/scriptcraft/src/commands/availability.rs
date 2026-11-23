@@ -22,6 +22,8 @@ pub(crate) struct AppCommandAvailability {
     pub(crate) title_open: bool,
     pub(crate) title_close: bool,
     pub(crate) element_windows_available: bool,
+    pub(crate) elements_viewport_unsupported: bool,
+    pub(crate) selector_viewport_unsupported: bool,
     pub(crate) element_inspector_open: bool,
     pub(crate) template_selector_open: bool,
     pub(crate) template_apply_ready: bool,
@@ -47,6 +49,8 @@ struct AppCommandProjectionKey {
     native_output_active: bool,
     title_page_window_open: bool,
     title_viewport_unsupported: bool,
+    elements_viewport_unsupported: bool,
+    selector_viewport_unsupported: bool,
     element_inspector_open: bool,
     template_selector_open: bool,
     template_apply_ready: bool,
@@ -91,6 +95,8 @@ impl ScriptCraftApp {
             native_output_active: self.native_output_active(),
             title_page_window_open: self.title_page_window_open,
             title_viewport_unsupported: self.title_viewport_unsupported,
+            elements_viewport_unsupported: self.element_windows.elements_viewport_unsupported(),
+            selector_viewport_unsupported: self.element_windows.selector_viewport_unsupported(),
             element_inspector_open: self.element_windows.elements_open(),
             template_selector_open: self.element_windows.selector_open(),
             template_apply_ready: self.element_windows.selector_apply_ready(),
@@ -173,6 +179,8 @@ impl ScriptCraftApp {
         let migration_pending = self.pending_fdx_open.is_some();
         let replacement_pending = self.replacement_open_pending();
         let native_output_active = self.native_output_active();
+        let elements_viewport_unsupported = self.element_windows.elements_viewport_unsupported();
+        let selector_viewport_unsupported = self.element_windows.selector_viewport_unsupported();
         let element_inspector_open = self.element_windows.elements_open();
         let template_selector_open = self.element_windows.selector_open();
         let (selection, text_len, role_is_empty_parenthetical, element_count) =
@@ -244,6 +252,8 @@ impl ScriptCraftApp {
             element_windows_available: !migration_pending
                 && !replacement_pending
                 && !native_output_active,
+            elements_viewport_unsupported,
+            selector_viewport_unsupported,
             element_inspector_open,
             template_selector_open,
             template_apply_ready: self.element_windows.selector().is_some_and(|selector| {
@@ -309,8 +319,8 @@ impl AppCommandAvailability {
                 // Dialog presentation keeps only its own typed actions, harmless
                 // focus activations, status projection, and root lifecycle.
                 CommandId::UiStatusSet
-                | CommandId::FormatTemplateSelectorOpen
                 | CommandId::ApplicationQuit => true,
+                CommandId::FormatTemplateSelectorOpen => !self.selector_viewport_unsupported,
                 CommandId::FormatElementsOpen => self.element_inspector_open,
                 CommandId::FormatElementsClose => {
                     self.element_inspector_open && !self.template_selector_open
@@ -334,16 +344,22 @@ impl AppCommandAvailability {
             CommandId::EditorDualDialogueToggle => self.dual_dialogue_toggle,
             CommandId::WindowTitlePageOpen => self.title_open,
             CommandId::WindowTitlePageClose => self.title_close,
-            CommandId::FormatElementsOpen => self.element_windows_available,
+            CommandId::FormatElementsOpen => {
+                self.element_windows_available && !self.elements_viewport_unsupported
+            }
             CommandId::FormatElementsClose => {
                 self.element_windows_available && self.element_inspector_open
             }
             CommandId::FormatTemplateSelectorOpen => {
-                self.element_windows_available && self.element_inspector_open
+                self.element_windows_available
+                    && self.element_inspector_open
+                    && !self.selector_viewport_unsupported
             }
             CommandId::FormatTemplateSelectorCancel => self.template_selector_open,
             CommandId::FormatTemplateApply => self.template_apply_ready,
-            CommandId::FileNewFromTemplateOpen => self.element_windows_available,
+            CommandId::FileNewFromTemplateOpen => {
+                self.element_windows_available && !self.selector_viewport_unsupported
+            }
             CommandId::FileNewFromTemplate => self.template_new_ready,
             // The global modal gates above still disable Quit during migration
             // and native-output dialogs; otherwise it is focus-independent.
