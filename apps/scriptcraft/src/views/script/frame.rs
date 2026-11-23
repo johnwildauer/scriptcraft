@@ -11,7 +11,7 @@ use super::page_policy::{
     presented_page_policy, resolve_presentation_mode, viewport_paint_page_range,
 };
 use super::reveal;
-use super::ruler::{paint_ruler, RULER_STRIP_HEIGHT};
+use super::ruler::{paint_ruler, RULER_ALLOCATED_HEIGHT};
 use super::zoom_scroll::{
     page_scroll_geometry, prepaint_zoom_scroll_offset, presentation_metrics_at_zoom,
     SCRIPT_VIEW_BOTTOM_PAGE_EDGE_PADDING, SCRIPT_VIEW_TOP_PAGE_EDGE_PADDING,
@@ -238,7 +238,8 @@ impl ScriptCraftApp {
         self.rendered_revision = Some(self.session.revision());
         let editor_id = ui.id().with(EDITOR_SURFACE_ID);
         let ruler_rect = if surface == EditorSurface::Body && self.settings_store.ruler_visible() {
-            let (_, rect) = ui.allocate_space(Vec2::new(ui.available_width(), RULER_STRIP_HEIGHT));
+            let (_, rect) =
+                ui.allocate_space(Vec2::new(ui.available_width(), RULER_ALLOCATED_HEIGHT));
             ui.painter().rect_filled(
                 rect,
                 0.0,
@@ -458,6 +459,7 @@ impl ScriptCraftApp {
                 strip,
                 first_page.rect.left(),
                 first_page.rect.width(),
+                self.theme_palette.script_workspace.page.paper,
                 rendered_scale,
                 layout.inputs.paper_width,
                 selection.focus.element,
