@@ -39,7 +39,6 @@ pub(super) const DARK_ROW_SELECTED_FILL: egui::Color32 = egui::Color32::from_rgb
 pub(super) const DARK_ROW_HOVER_FILL: egui::Color32 = egui::Color32::from_rgb(64, 64, 64);
 pub(super) const DARK_ROW_FOCUS_STROKE: egui::Color32 = egui::Color32::from_rgb(198, 215, 255);
 pub(super) const DARK_SELECTED_FOREGROUND: egui::Color32 = egui::Color32::WHITE;
-pub(super) const DARK_SELECTED_STROKE: egui::Color32 = egui::Color32::WHITE;
 pub(super) const DARK_TAB_SELECTED_FILL: egui::Color32 = egui::Color32::from_rgb(92, 92, 92);
 pub(super) const DARK_TAB_UNSELECTED_FILL: egui::Color32 = egui::Color32::from_rgb(58, 58, 58);
 
@@ -67,7 +66,7 @@ pub(super) fn listbox_frame(ui: &egui::Ui) -> egui::Frame {
         } else {
             visuals.widgets.noninteractive.bg_stroke.color
         }))
-        .inner_margin(egui::Margin::same(LIST_INSET))
+        .inner_margin(egui::Margin::symmetric(0, LIST_INSET))
 }
 
 /// Inset frame for the selected-definition detail pane.
@@ -105,7 +104,6 @@ pub(super) fn selectable_row(
     };
     if visuals.dark_mode {
         visuals.selection.bg_fill = DARK_ROW_SELECTED_FILL;
-        visuals.selection.stroke = egui::Stroke::new(FRAME_BORDER_WIDTH, DARK_SELECTED_STROKE);
     }
     visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
     visuals.widgets.hovered.bg_fill = if visuals.dark_mode {
@@ -139,27 +137,17 @@ pub(super) fn selectable_row(
         let (fill, foreground) = if selected {
             (
                 ui.visuals().selection.bg_fill,
-                ui.visuals().selection.stroke.color,
+                if ui.visuals().dark_mode {
+                    DARK_SELECTED_FOREGROUND
+                } else {
+                    ui.visuals().selection.stroke.color
+                },
             )
         } else {
             (widget_visuals.bg_fill, widget_visuals.fg_stroke.color)
         };
-        ui.painter().rect_filled(rect, widget_visuals.corner_radius, fill);
-        if selected {
-            ui.painter().rect_stroke(
-                rect,
-                widget_visuals.corner_radius,
-                ui.visuals().selection.stroke,
-                egui::StrokeKind::Inside,
-            );
-        } else if widget_visuals.bg_stroke.width > 0.0 {
-            ui.painter().rect_stroke(
-                rect,
-                widget_visuals.corner_radius,
-                widget_visuals.bg_stroke,
-                egui::StrokeKind::Inside,
-            );
-        }
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::ZERO, fill);
         let label_rect = rect.shrink2(egui::vec2(
             SELECTABLE_ROW_PADDING_X,
             SELECTABLE_ROW_PADDING_Y,
@@ -175,6 +163,7 @@ pub(super) fn selectable_row(
                     .size(SELECTABLE_ROW_FONT_SIZE)
                     .color(foreground),
             )
+            .selectable(false)
             .halign(egui::Align::Min),
         );
         if focus_requested {
@@ -190,7 +179,9 @@ pub(super) fn selectable_row(
         }
         response
     });
-    response.inner
+    response
+        .inner
+        .on_hover_cursor(egui::CursorIcon::Default)
 }
 
 /// Small read-only label/value line shared by the inspector detail sections.
