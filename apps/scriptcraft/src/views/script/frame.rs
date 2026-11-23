@@ -240,14 +240,8 @@ impl ScriptCraftApp {
         let ruler_rect = if surface == EditorSurface::Body && self.settings_store.ruler_visible() {
             let (_, rect) =
                 ui.allocate_space(Vec2::new(ui.available_width(), RULER_ALLOCATED_HEIGHT));
-            ui.painter().rect_filled(
-                rect,
-                0.0,
-                super::page_policy::script_view_backdrop(
-                    presentation_mode,
-                    self.theme_palette.script_workspace,
-                ),
-            );
+            ui.painter()
+                .rect_filled(rect, 0.0, self.theme_palette.script_workspace.background);
             Some(rect)
         } else {
             None

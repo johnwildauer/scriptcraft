@@ -15,13 +15,15 @@ pub(super) const RULER_ALLOCATED_HEIGHT: f32 = RULER_BAR_HEIGHT + 2.0 * RULER_MA
 pub(super) const RULER_TICK_WIDTH: f32 = 2.0;
 pub(super) const RULER_EIGHTH_TICK_HEIGHT: f32 = 3.0;
 pub(super) const RULER_HALF_TICK_HEIGHT: f32 = 6.0;
-pub(super) const RULER_INCH_TICK_HEIGHT: f32 = 6.0;
 pub(super) const RULER_LABEL_FONT_SIZE: f32 = 10.0;
 pub(super) const RULER_LABEL_Y_OFFSET: f32 = 0.0;
 
 pub(super) const RULER_MARKER_WIDTH: f32 = 10.0;
 pub(super) const RULER_MARKER_HEIGHT: f32 = 8.0;
 pub(super) const RULER_MARKER_STEM_WIDTH: f32 = 2.0;
+pub(super) const RULER_FIRST_LINE_CENTER_OFFSET: f32 = 10.0;
+pub(super) const RULER_BOTTOM_MARKER_CENTER_OFFSET: f32 = 10.0;
+pub(super) const RULER_LEFT_FOOT_HEIGHT: f32 = 6.0;
 
 pub(super) const RULER_DAY_TICK_COLOR: Color32 = Color32::from_gray(112);
 pub(super) const RULER_DAY_LABEL_COLOR: Color32 = Color32::from_gray(80);
@@ -68,11 +70,13 @@ impl RulerTickPlan {
             };
             let label = (ordinal != 0 && kind == RulerTickKind::WholeInch)
                 .then(|| (ordinal / 8).to_string());
-            ticks.push(RulerTick {
-                document_x,
-                kind,
-                label,
-            });
+            if document_x != 0 && document_x != paper_width {
+                ticks.push(RulerTick {
+                    document_x,
+                    kind,
+                    label,
+                });
+            }
 
             if paper_width - document_x < RULER_TICK_STEP_POINTS {
                 break;
@@ -196,17 +200,22 @@ pub(super) fn paint_ruler(
             if x < page_left || x > page_right {
                 continue;
             }
-            let (width, height) = match tick.kind {
-                RulerTickKind::Eighth => (RULER_TICK_WIDTH, RULER_EIGHTH_TICK_HEIGHT),
-                RulerTickKind::Half => (RULER_TICK_WIDTH, RULER_HALF_TICK_HEIGHT),
-                RulerTickKind::WholeInch => (RULER_TICK_WIDTH, RULER_INCH_TICK_HEIGHT),
+            let height = match tick.kind {
+                RulerTickKind::Eighth => Some(RULER_EIGHTH_TICK_HEIGHT),
+                RulerTickKind::Half => Some(RULER_HALF_TICK_HEIGHT),
+                RulerTickKind::WholeInch => None,
             };
-            paint_snapped_rect(
-                tick_painter,
-                egui::Rect::from_center_size(egui::pos2(x, bar_center_y), Vec2::new(width, height)),
-                pixels_per_point,
-                tick_color,
-            );
+            if let Some(height) = height {
+                paint_snapped_rect(
+                    tick_painter,
+                    egui::Rect::from_center_size(
+                        egui::pos2(x, bar_center_y),
+                        Vec2::new(RULER_TICK_WIDTH, height),
+                    ),
+                    pixels_per_point,
+                    tick_color,
+                );
+            }
 
             if let Some(label) = tick.label.as_deref() {
                 tick_painter.text(
@@ -228,51 +237,70 @@ pub(super) fn paint_ruler(
     let left_x = document_x_to_screen(page_left, scale, positions.left_x);
     let right_x = document_x_to_screen(page_left, scale, positions.right_x);
     let marker_stroke = Stroke::new(1.0 / pixels_per_point, marker_color);
-    let top = strip.top();
-    let bottom = strip.bottom();
     let marker_half_width = RULER_MARKER_WIDTH * 0.5;
     let marker_height = RULER_MARKER_HEIGHT;
-    let band_center = bar_center_y;
+    let first_triangle_top = bar_center_y - RULER_FIRST_LINE_CENTER_OFFSET;
+    let first_triangle_tip = first_triangle_top + marker_height;
+    let bottom_marker_y = bar_center_y + RULER_BOTTOM_MARKER_CENTER_OFFSET;
+    let left_foot_top = bottom_marker_y - RULER_LEFT_FOOT_HEIGHT;
+    let right_triangle_tip = bottom_marker_y - marker_height;
 
     if first_x >= page_left && first_x <= page_right {
         paint_marker_stem(
             &strip_painter,
             first_x,
-            top + marker_height,
-            band_center,
+            first_triangle_tip,
+            bar_center_y,
             pixels_per_point,
             marker_color,
         );
         paint_triangle_outline(
             &strip_painter,
             [
-                egui::pos2(first_x - marker_half_width, top),
-                egui::pos2(first_x + marker_half_width, top),
-                egui::pos2(first_x, top + marker_height),
+                egui::pos2(first_x - marker_half_width, first_triangle_top),
+                egui::pos2(first_x + marker_half_width, first_triangle_top),
+                egui::pos2(first_x, first_triangle_tip),
             ],
             pixels_per_point,
             marker_stroke,
         );
     }
 
-    for marker_x in [left_x, right_x] {
-        if marker_x < page_left || marker_x > page_right {
-            continue;
-        }
+    if left_x >= page_left && left_x <= page_right {
         paint_marker_stem(
             &strip_painter,
-            marker_x,
-            band_center,
-            bottom - marker_height,
+            left_x,
+            bar_center_y,
+            left_foot_top,
+            pixels_per_point,
+            marker_color,
+        );
+        paint_rect_outline(
+            &strip_painter,
+            egui::Rect::from_min_max(
+                egui::pos2(left_x - marker_half_width, left_foot_top),
+                egui::pos2(left_x + marker_half_width, bottom_marker_y),
+            ),
+            pixels_per_point,
+            marker_stroke,
+        );
+    }
+
+    if right_x >= page_left && right_x <= page_right {
+        paint_marker_stem(
+            &strip_painter,
+            right_x,
+            bar_center_y,
+            right_triangle_tip,
             pixels_per_point,
             marker_color,
         );
         paint_triangle_outline(
             &strip_painter,
             [
-                egui::pos2(marker_x, bottom - marker_height),
-                egui::pos2(marker_x - marker_half_width, bottom),
-                egui::pos2(marker_x + marker_half_width, bottom),
+                egui::pos2(right_x, right_triangle_tip),
+                egui::pos2(right_x - marker_half_width, bottom_marker_y),
+                egui::pos2(right_x + marker_half_width, bottom_marker_y),
             ],
             pixels_per_point,
             marker_stroke,
@@ -314,6 +342,25 @@ fn paint_triangle_outline(
     painter.line_segment([points[0], points[1]], stroke);
     painter.line_segment([points[1], points[2]], stroke);
     painter.line_segment([points[2], points[0]], stroke);
+}
+
+fn paint_rect_outline(
+    painter: &eframe::egui::Painter,
+    rect: eframe::egui::Rect,
+    pixels_per_point: f32,
+    stroke: eframe::egui::Stroke,
+) {
+    let points = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ]
+    .map(|point| snap_pixel_center(point, pixels_per_point));
+    painter.line_segment([points[0], points[1]], stroke);
+    painter.line_segment([points[1], points[2]], stroke);
+    painter.line_segment([points[2], points[3]], stroke);
+    painter.line_segment([points[3], points[0]], stroke);
 }
 
 fn paint_snapped_rect(
