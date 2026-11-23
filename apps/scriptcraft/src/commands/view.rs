@@ -1,4 +1,5 @@
 use crate::app::ScriptCraftApp;
+use crate::settings::ThemeChoice;
 use eframe::egui;
 use scriptcraft_commands::{Appearance, Command, CommandRejection, EditorSurface};
 
@@ -50,14 +51,27 @@ impl ScriptCraftApp {
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::ViewAppearanceSet { appearance } => {
-                let appearance = match appearance {
-                    Appearance::System => crate::chrome::theme::AppearanceMode::System,
-                    Appearance::Day => crate::chrome::theme::AppearanceMode::Day,
-                    Appearance::Night => crate::chrome::theme::AppearanceMode::Night,
-                    Appearance::Midnight => crate::chrome::theme::AppearanceMode::Midnight,
+                let (appearance, theme_choice) = match appearance {
+                    Appearance::System => (
+                        crate::chrome::theme::AppearanceMode::System,
+                        ThemeChoice::System,
+                    ),
+                    Appearance::Day => (
+                        crate::chrome::theme::AppearanceMode::Day,
+                        ThemeChoice::Day,
+                    ),
+                    Appearance::Night => (
+                        crate::chrome::theme::AppearanceMode::Night,
+                        ThemeChoice::Night,
+                    ),
+                    Appearance::Midnight => (
+                        crate::chrome::theme::AppearanceMode::Midnight,
+                        ThemeChoice::Midnight,
+                    ),
                 };
                 if self.appearance_mode != appearance {
                     self.appearance_mode = appearance;
+                    self.settings_store.set_theme(theme_choice);
                     ctx.request_repaint();
                 }
                 DesktopCommandOutcome::EffectDispatched

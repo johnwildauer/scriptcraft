@@ -42,10 +42,13 @@ pub(crate) struct TemplateSelectorState {
 }
 
 impl TemplateSelectorState {
-    fn new(mode: TemplateSelectorMode) -> Self {
+    fn new(mode: TemplateSelectorMode, new_document_template: BuiltinTemplateId) -> Self {
         Self {
             mode,
-            selected_template: Some(DEFAULT_BUILTIN_TEMPLATE_ID),
+            selected_template: Some(match mode {
+                TemplateSelectorMode::ApplyToCurrent => DEFAULT_BUILTIN_TEMPLATE_ID,
+                TemplateSelectorMode::NewDocument => new_document_template,
+            }),
             error: None,
             focus_requested: true,
         }
@@ -265,13 +268,20 @@ impl ElementWindowState {
         if !self.elements_open || mode != TemplateSelectorMode::ApplyToCurrent {
             return false;
         }
-        self.selector = Some(TemplateSelectorState::new(mode));
+        self.selector = Some(TemplateSelectorState::new(
+            mode,
+            DEFAULT_BUILTIN_TEMPLATE_ID,
+        ));
         true
     }
 
     /// File → New from Template presents the shared selector without opening
     /// the read-only Elements inspector behind it.
-    pub(crate) fn open_new_template_selector(&mut self, return_surface: EditorSurface) -> bool {
+    pub(crate) fn open_new_template_selector(
+        &mut self,
+        return_surface: EditorSurface,
+        initial_template: BuiltinTemplateId,
+    ) -> bool {
         if self.selector_viewport_unsupported {
             return false;
         }
@@ -282,6 +292,7 @@ impl ElementWindowState {
         self.focus_return_surface = Some(return_surface);
         self.selector = Some(TemplateSelectorState::new(
             TemplateSelectorMode::NewDocument,
+            initial_template,
         ));
         true
     }

@@ -4,6 +4,8 @@
 
 ## Scope and requirements
 
+Persistent global preference behavior is specified by [User settings requirements](../../requirements/features/user-settings.md) and the [User Settings component blueprint](../components/user-settings.md), with requirement IDs `REQ-WRITING-LOOP-013` and `AC-WRITING-013.1`–`AC-WRITING-013.6b`.
+
 - **Requirements:** [Desktop workspace](../../requirements/features/desktop-workspace.md); [Page layout](../../requirements/features/page-layout.md) owns `AC-WRITING-002.15` and `AC-WRITING-006.5`–`AC-WRITING-006.11`; [Screenplay editing command boundary](../../requirements/features/screenplay-editing.md)
 - **Technical context:** [Technical context](../technical-context.md)
 - **Requirements traced:** `REQ-WRITING-LOOP-002`, `REQ-WRITING-LOOP-005`, `REQ-WRITING-LOOP-006`, `REQ-WRITING-LOOP-010`, `REQ-WRITING-LOOP-011`, `REQ-WRITING-LOOP-012`; `AC-WRITING-002.15`, `AC-WRITING-005.1`–`AC-WRITING-005.9` including `.2d`–`.2g`, `AC-WRITING-006.1`–`AC-WRITING-006.13`, `AC-WRITING-010.1`–`AC-WRITING-010.5`, `AC-WRITING-011.1`–`AC-WRITING-011.10`, `AC-WRITING-012.1`–`AC-WRITING-012.8`.
@@ -13,6 +15,12 @@
 
 - [ScriptCraft Desktop](../containers/scriptcraft-desktop.md) owns the runnable process and window coordination.
 - [Document Model](../components/document-model.md) owns canonical document values, including Project composition in [`project.rs`](../../../crates/scriptcraft-model/src/project.rs), ordered element definitions, and Body values in [`element.rs`](../../../crates/scriptcraft-model/src/element.rs); [Editing session](../components/editing-session.md) owns editing/history and native storage; [FDX preservation and storage](../components/fdx-preservation-and-storage.md) composes model-owned retained source, FDX codec, and session publication. [Layout and pagination](../components/layout-and-pagination.md) supplies complete geometry; [Exports and print](exports-and-print.md) documents bounded reusable output and Print composition; [Command contract](../components/command-contract.md) owns shared typed activations and headless editing execution. [Desktop adapters](../components/desktop-adapters.md) owns Script View, toolbar, status, menus, theme, focus, and host integrations.
+
+## Persistent global settings composition
+
+The desktop app's private settings module owns only the app-wide theme choice and stable default-template ID; it adds no package/internal edge and does not move globals into Project, EditingSession, FDX, layout, command wire, or export. Startup loads before first rendered content and projects appearance through existing app/theme state. Ordinary new-document behavior uses the saved default with a non-mutating Screenplay fallback; explicit New-from-Template selection and supplied document paths retain precedence. New selector mode initializes from the effective saved default, Apply retains Screenplay, and only successful child spawn persists the New-from-Template selection. Recovery, atomic debounced persistence, reset, no shutdown flush, and independent-process boundaries are owned by the linked requirements/component documents.
+
+This composition supersedes the Appearance portion of the transient-state description under “Workspace status and transient view state” below: the applied UI state remains per-process presentation, but its selected global preference persists separately. It also supersedes Screenplay-only ordinary-startup/File-New wording and any selector-initial-value wording elsewhere in this blueprint: Apply starts at Screenplay, while New-document mode starts at the effective saved default. Unrelated workspace and lifecycle contracts remain unchanged.
 
 ## Capability realization
 

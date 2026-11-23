@@ -12,6 +12,8 @@ ScriptCraft is a Rust Cargo workspace defined by [`Cargo.toml`](../../Cargo.toml
 | [`scriptcraft-commands`](../../crates/scriptcraft-commands/) | [`src/`](../../crates/scriptcraft-commands/src/) owns the 60-entry stable typed command vocabulary, Serde wire boundary, built-in catalog conversions, and headless executor. Command 60, `view.invisibles.toggle`, is a desktop-only presentation command and is not executed by the headless editing executor.                                                                                                                                                                                                                                                                                                                                                                                        |
 | [`scriptcraft` desktop app](../../apps/scriptcraft/)         | [`src/`](../../apps/scriptcraft/src/) owns desktop state and presentation, host dispatch, documents/dialogs, printing adapters, platform integration, and process startup, including the active-surface invisibles command/menu/toolbar projections and editor-only overlay. It remains one app package; no separate UI library is introduced.                                                                                                                                                                                                                                                                                                                                                 |
 
+The integrated persistent-settings implementation adds the app-private [`settings.rs`](../../apps/scriptcraft/src/settings.rs) module and direct app dependencies on Serde `=1.0.229` with derive support, TOML `=1.2.1`, and `directories = "6.0"`; it adds no internal package edge and leaves the six-library graph above unchanged. It persists only global theme and default-template preferences, outside Project, EditingSession, FDX, layout, command-wire, and export state. It introduces no permanent tests or test-only fixtures. This dependency declaration records direct requirements only; it makes no claim about new resolved transitive versions before normal lockfile resolution.
+
 ## Internal dependency direction
 
 The approved acyclic package graph is:
@@ -31,6 +33,10 @@ No final package depends on the retired `scriptcraft-core` package, and no rever
 The workspace dependency direction is unchanged by typography/page-layout work. Windows-native output retains its target-gated direct [`windows-numerics`](../../apps/scriptcraft/Cargo.toml) pin at `=0.3.1`, alongside the existing Windows API dependencies; it does not move into the export package or create a new internal edge.
 
 The graph above lists production edges. All workspace source packages have zero permanent Rust test groups and no test-only fixture directories. This policy changes no production ownership, API, editing, source-preservation, Apply, command-wire, or native-storage contract. The commands package has no development-dependency declarations: its production FDX edge remains required for typed built-in-template conversions, alongside its Model and Session edges. Test absence is not validation or acceptance evidence. Development agents follow the [zero-permanent-test prevention guidelines](../../.plan/2026-11-20-template-typography-pruning/future-agent-guidelines.md).
+
+## Persistent user-settings integration contract
+
+The focused [User Settings requirements](../requirements/features/user-settings.md) and [component blueprint](components/user-settings.md) describe the integrated app-private settings behavior: settings load before first rendered content; the saved template choice governs ordinary no-document/File-New behavior, explicit child template or supplied document path retains precedence, and an unknown template's raw ID is never rewritten by fallback. Appearance is a persistent global choice projected through per-process UI state. Only successful New-from-Template child spawn updates the saved default. Recovery, version-1 schema, debounced atomic best-effort saves, reset, no shutdown flush, and independent-process last-completed-save-wins limits remain in the component/requirements contract. This is source-aligned documentation, not evidence of execution, validation, or acceptance. In the current Templates and lifecycle map entry, its Screenplay-only ordinary-startup/File-New sentence is superseded; in Apply and Elements, its selector-initial-state sentence is superseded so Apply starts at Screenplay and New-document mode starts at the effective saved default. The Phase 7 template lifecycle section's ordinary-startup default is likewise superseded. The transient-only Appearance clause is replaced only to the extent noted above; unrelated contracts and historical phase narratives remain unchanged.
 
 ## Final repository behavior map
 
@@ -304,6 +310,7 @@ The desktop app pins `ttf-parser = "=0.25.1"`, matching the export parser pin re
 - [FDX preservation and storage](components/fdx-preservation-and-storage.md)
 - [Layout and pagination](components/layout-and-pagination.md)
 - [Desktop adapters](components/desktop-adapters.md)
+- [User settings](components/user-settings.md)
 
 ### Features
 
@@ -313,6 +320,7 @@ The desktop app pins `ttf-parser = "=0.25.1"`, matching the export parser pin re
 - [Title page editing](features/title-page-editing.md)
 - [Exports and print](features/exports-and-print.md)
 - [Desktop workspace](features/desktop-workspace.md)
+- [User settings](../requirements/features/user-settings.md)
 - [Dual dialogue](features/dual-dialogue.md)
 - [macOS packaging](features/macos-packaging.md)
 

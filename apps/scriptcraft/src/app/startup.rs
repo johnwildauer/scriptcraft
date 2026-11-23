@@ -6,8 +6,9 @@ use crate::documents::{
 };
 use crate::{
     app::ScriptCraftApp,
-    chrome::{menu, toolbar_items},
+    chrome::{menu, theme, toolbar_items},
     presentation::{document_font, material_font, runtime_icon},
+    settings::{SettingsStore, ThemeChoice},
     StartupFailureKind,
 };
 use std::ffi::OsString;
@@ -25,7 +26,7 @@ use scriptcraft_fdx::BuiltinTemplateId;
 // produced one argument, so paths are never split or reparsed here. Ordinary
 // shell associations should pass the selected path as one quoted native path.
 // `--open-handoff=<id>` is internal and only accompanies the custom option.
-pub(crate) const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--menu-platform=auto|macos|windows] [--new-template=screenplay|stageplay|dramatists-guild-musical (internal; exclusive of document paths) | <UTF-8 FDX or FDXT path> | --document-path=<UTF-8 FDX or FDXT path> [--open-handoff=<id> (internal)]]";
+pub(crate) const STARTUP_USAGE: &str = "usage: scriptcraft [--dev] [--reset-settings] [--menu-platform=auto|macos|windows] [--new-template=screenplay|stageplay|dramatists-guild-musical (internal; exclusive of document paths) | <UTF-8 FDX or FDXT path> | --document-path=<UTF-8 FDX or FDXT path> [--open-handoff=<id> (internal)]]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartupDocumentSource {
@@ -50,10 +51,12 @@ struct StartupConfig {
     menu_platform: menu::MenuPlatformChoice,
     startup_document: Option<StartupDocumentInput>,
     startup_template: Option<BuiltinTemplateId>,
+    reset_settings: bool,
 }
 
 fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<StartupConfig, String> {
     let mut seen_development = false;
+    let mut seen_reset_settings = false;
     let mut seen_menu_platform = false;
     let mut seen_document_path = false;
     let mut seen_open_handoff = false;
@@ -63,6 +66,7 @@ fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<Startu
     let mut document_input: Option<(PathBuf, StartupDocumentSource)> = None;
     let mut handoff_id = None;
     let mut startup_template = None;
+    let mut reset_settings = false;
 
     for argument in args {
         let Some(argument) = argument.to_str() else {
@@ -76,6 +80,14 @@ fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<Startu
             development = true;
         } else if argument.starts_with("--dev=") {
             return Err(format!("--dev does not accept a value\n{STARTUP_USAGE}"));
+        } else if argument == "--reset-settings" {
+            if seen_reset_settings {
+                return Err(format!("duplicate --reset-settings option\n{STARTUP_USAGE}"));
+            }
+            seen_reset_settings = true;
+            reset_settings = true;
+        } else if argument.starts_with("--reset-settings=") {
+            return Err(format!("--reset-settings does not accept a value\n{STARTUP_USAGE}"));
         } else if argument == "--menu-platform" {
             if seen_menu_platform {
                 return Err(format!("duplicate --menu-platform option\n{STARTUP_USAGE}"));
@@ -239,7 +251,17 @@ fn parse_startup_args(args: impl IntoIterator<Item = OsString>) -> Result<Startu
             },
         }),
         startup_template,
+        reset_settings,
     })
+}
+
+pub(super) fn appearance_mode_for_theme(choice: ThemeChoice) -> theme::AppearanceMode {
+    match choice {
+        ThemeChoice::System => theme::AppearanceMode::System,
+        ThemeChoice::Day => theme::AppearanceMode::Day,
+        ThemeChoice::Night => theme::AppearanceMode::Night,
+        ThemeChoice::Midnight => theme::AppearanceMode::Midnight,
+    }
 }
 
 pub(crate) fn menu_platform_argument(choice: menu::MenuPlatformChoice) -> OsString {
@@ -330,10 +352,20 @@ pub(crate) fn run() -> eframe::Result {
             crate::exit_for_startup_failure(StartupFailureKind::InvalidInvocation, &error);
         }
     };
+    let mut settings_store = SettingsStore::load();
+    if startup.reset_settings {
+        settings_store.reset_to_defaults();
+    }
+    let appearance_mode = appearance_mode_for_theme(settings_store.theme());
+    let effective_template = startup.startup_template.unwrap_or_else(|| {
+        if startup.startup_document.is_some() {
+            scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID
+        } else {
+            settings_store.effective_template()
+        }
+    });
     let initial_native_title = fresh_document_title_for_builtin_template(
-        startup
-            .startup_template
-            .unwrap_or(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID),
+        effective_template,
     );
     let StartupPresentation {
         options,
@@ -375,9 +407,20 @@ pub(crate) fn run() -> eframe::Result {
                 startup.menu_platform,
                 startup_document,
                 startup_template,
+                effective_template,
+                appearance_mode,
+                settings_store,
                 startup.development,
             )
                 .and_then(|mut app| {
+                    let (_, applied, palette) = theme::configure_appearance(
+                        &cc.egui_ctx,
+                        app.appearance_mode,
+                        None,
+                    );
+                    app.appearance_applications
+                        .set(theme::AppearanceContext::Root, applied);
+                    app.theme_palette = palette;
                     app.document_font_store = document_font_store;
                     #[cfg(target_os = "macos")]
                     {

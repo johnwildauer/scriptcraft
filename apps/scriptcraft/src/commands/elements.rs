@@ -50,8 +50,11 @@ impl ScriptCraftApp {
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FileNewFromTemplateOpen => {
-                self.element_windows
-                    .open_new_template_selector(self.active_editor_surface());
+                let effective_template = self.settings_store.effective_template();
+                self.element_windows.open_new_template_selector(
+                    self.active_editor_surface(),
+                    effective_template,
+                );
                 self.command_projection_cache = None;
                 self.transfer_focus_to_element_windows(ctx);
                 ctx.request_repaint();
@@ -141,6 +144,8 @@ impl ScriptCraftApp {
                     );
                 }
                 if self.launch_template_instance(template_id).is_ok() {
+                    self.settings_store
+                        .set_template(template_id.as_str().to_owned());
                     let return_surface = self.element_windows.focus_return_surface();
                     let inspector_remains_open = self.element_windows.elements_open();
                     self.element_windows.cancel_selector();

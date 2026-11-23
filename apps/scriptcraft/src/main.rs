@@ -13,6 +13,7 @@ mod commands;
 mod documents;
 mod platform;
 mod presentation;
+mod settings;
 mod views;
 mod widgets;
 use documents::lifecycle::show_native_lifecycle_error;

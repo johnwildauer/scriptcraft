@@ -23,6 +23,7 @@ use crate::{
     presentation::{document_font, wheel_zoom},
     widgets::{elements::state::ElementWindowState, sprint_timer},
 };
+use crate::settings::SettingsStore;
 use eframe::egui;
 use scriptcraft_commands::{Command, DiagnosticMessage, EditorSurface, ScriptViewMode};
 use scriptcraft_layout::{LayoutCache, ScreenplayLayout};
@@ -92,6 +93,7 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) menu_policy: menu::RuntimeMenuPolicy,
     pub(crate) menu_platform_choice: menu::MenuPlatformChoice,
     pub(crate) development_mode: bool,
+    pub(crate) settings_store: SettingsStore,
     #[cfg(target_os = "macos")]
     pub(crate) native_menu: Option<macos_menu::NativeMenuController>,
     #[cfg(target_os = "macos")]
@@ -186,11 +188,17 @@ pub(crate) struct ScriptCraftApp {
 
 impl ScriptCraftApp {
     pub(super) fn new() -> Result<Self, String> {
+        let settings_store = SettingsStore::load();
+        let appearance_mode = super::startup::appearance_mode_for_theme(settings_store.theme());
+        let effective_template = settings_store.effective_template();
         Self::new_with_startup(
             menu::RuntimeMenuPolicy::for_current_target(),
             menu::MenuPlatformChoice::Auto,
             None,
             None,
+            effective_template,
+            appearance_mode,
+            settings_store,
             false,
         )
     }
@@ -200,10 +208,11 @@ impl ScriptCraftApp {
         menu_platform_choice: menu::MenuPlatformChoice,
         startup_document: Option<StartupDocumentInput>,
         startup_template: Option<scriptcraft_fdx::BuiltinTemplateId>,
+        effective_template_id: scriptcraft_fdx::BuiltinTemplateId,
+        appearance_mode: theme::AppearanceMode,
+        settings_store: SettingsStore,
         development_mode: bool,
     ) -> Result<Self, String> {
-        let effective_template_id = startup_template
-            .unwrap_or(scriptcraft_fdx::DEFAULT_BUILTIN_TEMPLATE_ID);
         let fresh_document_title =
             fresh_document_title_for_builtin_template(effective_template_id);
         let builtin_document = scriptcraft_fdx::instantiate_builtin_template(
@@ -233,6 +242,7 @@ impl ScriptCraftApp {
             menu_policy,
             menu_platform_choice,
             development_mode,
+            settings_store,
             #[cfg(target_os = "macos")]
             native_menu: None,
             #[cfg(target_os = "macos")]
@@ -308,7 +318,7 @@ impl ScriptCraftApp {
             zoom_percent: 100,
             pinch_zoom_percent: 100.0,
             script_view_mode: ScriptViewMode::Page,
-            appearance_mode: theme::AppearanceMode::System,
+            appearance_mode,
             appearance_applications: theme::AppearanceApplications::default(),
             theme_palette: theme::ApplicationPalette::from_visuals(
                 theme::ResolvedAppearance::Day,

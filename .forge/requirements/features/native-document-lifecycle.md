@@ -78,6 +78,10 @@ Generated-Parenthetical bookkeeping referenced by AC-WRITING-003.6 is transient 
   - **AC-WRITING-010.4:** A confirmed-close authorization applies to at most the next root update’s Close request and expires if that update has no request. It is transient lifecycle state, not document/session state.
   - **AC-WRITING-010.5:** If native prompt presentation is unavailable or returns no recognized choice, the decision fails safe to Cancel; the root window and session remain open.
 
+### Global default-template precedence
+
+[User Settings](user-settings.md) defines the persistent global default separately from document-owned state. A supplied FDX or FDXT startup path takes precedence over that default: the preference never replaces opened content or definitions, and never changes the source, native path, storage baseline, or activation disposition. A template-backed fresh session remains untitled, has no native path or FDX storage baseline, and has no source-template save target. A saved default is not an explicit `--new-template` argument and does not consume/finalize the macOS cold-open initial slot; the existing staged-open and first-cold-request behavior remain unchanged. For an already-known startup document, its content is staged and activated through the existing lifecycle rather than being initialized from the saved default.
+
 ## Constraints
 
 - Native FDX remains the semantic source of truth; transient view and history state do not replace it.

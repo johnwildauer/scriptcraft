@@ -6,6 +6,8 @@ ScriptCraft is a focused desktop writing tool for individual screenwriters. Writ
 
 ## What a writer can expect
 
+The desktop workspace also retains a writer's global appearance choice and default built-in template preference across launches. These preferences do not become part of a screenplay or change the content or definitions of an opened document; see [User settings](features/user-settings.md).
+
 A writer can create and edit screenplay scenes using the element types and editing behavior defined by the current document. Unfamiliar element types remain editable rather than being silently converted to a default type. Writers can navigate and revise the draft and undo or redo changes. The editor presents a readable screenplay page view so writers can work with both text and page flow. Formatting stays focused on screenplay writing rather than attempting to be a general word processor.
 
 A title page can be edited alongside the screenplay while remaining a distinct part of the document. ScriptCraft presents the screenplay and title page in a desktop workspace, with document actions available as part of the writing flow.
@@ -34,6 +36,7 @@ Writers can create a new document from the Screenplay, Stageplay, or Dramatists 
 - [Title-page editing](features/title-page-editing.md) — work with the document's title page.
 - [Exports and print](features/exports-and-print.md) — create PDF and plain-text copies and print.
 - [Desktop workspace](features/desktop-workspace.md) — the desktop environment for working with a screenplay.
+- [User settings](features/user-settings.md) — persistent global appearance and default-template preferences.
 - [Dual dialogue](features/dual-dialogue.md) — write and present paired dialogue.
 - [Fountain conversion](features/fountain-conversion.md) — bring Fountain screenplay text into ScriptCraft.
 - [macOS packaging](features/macos-packaging.md) — macOS app distribution.
