@@ -44,6 +44,8 @@ The following toolbar criterion retains its stable ID in this area because it sp
 
 - **AC-WRITING-007.11:** Body and Title Page invisibles visibility are independent per-document editor view flags. The View > Document action, primary+J shortcut, and main-toolbar Show/Hide dropdown toggle the flag for the currently active editor surface, including when the Title Page window is open; toggling Body leaves Title visibility unchanged and vice versa. The Title Page flag remains with the document while its window is closed. Title marks use the same color, canonical-position, noninteractive overlay as Body and appear only in Title Page editor-purpose layouts; they do not change title content, selection/caret/pointer/IME behavior, history, dirty state, layout, or output.
 
+Shared typed paragraph Leading/Spacing values, FDX representations, and layout resolution also apply coherently to managed TitlePage Content when those values are present. This shared representation does not add Title Page formatting menus, a Title Page inline-typing patch, a Title Page context menu, or the Body explicit-Type paragraph-format reset. Title Page Type-only assignments retain their separate preservation contract in AC-WRITING-007.9, and Apply Template retains its separate bulk policy.
+
 ## Related documents
 
 - **Product overview:** [`../product-overview.md`](../product-overview.md)

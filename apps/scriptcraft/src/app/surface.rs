@@ -176,7 +176,7 @@ impl ScriptCraftApp {
         }
     }
 
-    fn zoom_for_surface(&self, surface: EditorSurface) -> u16 {
+    pub(crate) fn zoom_for_surface(&self, surface: EditorSurface) -> u16 {
         match surface {
             EditorSurface::Body => self.zoom_percent,
             EditorSurface::TitlePage if self.title_view_state_swapped => self.zoom_percent,

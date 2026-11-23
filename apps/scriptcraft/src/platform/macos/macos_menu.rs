@@ -4,9 +4,14 @@
 //! The custom Command-Q item enters the same FIFO as catalog activations and
 //! requests guarded root Close through the typed application command.
 
+use crate::chrome::element_choices::{
+    DynamicElementMenuProjection, ElementChoicesSnapshot,
+};
+use crate::chrome::formatting_menu::FormattingMenuProjection;
 use crate::chrome::menu_items::{
-    command_for_action, menu_item_is_checked, menu_item_label, MenuAction, MenuEntrySpec,
-    MenuItemBehavior, MenuItemSpec, PlaceholderKind, MENU_CATALOG,
+    activation_for_action, command_for_action, menu_item_is_checked, menu_item_label,
+    DynamicSubmenuKind, MenuActivation, MenuEntrySpec, MenuItemBehavior, MenuItemSpec,
+    PlaceholderKind, ViewMenuProjection, ZOOM_STEP_ITEMS, MENU_CATALOG,
 };
 use crate::chrome::shortcuts::{LogicalShortcut, ShortcutKey};
 use crate::commands::AppCommandAvailability;
@@ -14,7 +19,9 @@ use muda::accelerator::{Accelerator, Code, Modifiers};
 use muda::{
     AboutMetadata, CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
-use scriptcraft_commands::{Command, CommandId, CommandOrigin, EditorSurface, ScriptViewMode};
+use scriptcraft_commands::{
+    Command, CommandId, CommandOrigin, EditorSurface, ElementTypeValue, ScriptViewMode,
+};
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -53,13 +60,16 @@ impl RetainedNativeCommandItem {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeMenuProjection {
     availability: AppCommandAvailability,
     script_view_mode: ScriptViewMode,
     say_undual: bool,
     invisibles_visible: bool,
     ruler_visible: bool,
+    focused_element_type: Option<scriptcraft_model::ElementTypeKey>,
+    formatting: FormattingMenuProjection,
+    view: ViewMenuProjection,
 }
 
 #[derive(Debug, Default)]
@@ -69,10 +79,10 @@ struct NativeMenuSynchronizationState {
 
 impl NativeMenuSynchronizationState {
     fn should_synchronize(&mut self, projection: NativeMenuProjection) -> bool {
-        if self.last_synchronized == Some(projection) {
+        if self.last_synchronized.as_ref() == Some(&projection) {
             return false;
         }
-        self.last_synchronized = Some(projection);
+        self.last_synchronized = Some(projection.clone());
         true
     }
 }
@@ -84,13 +94,18 @@ pub(crate) struct NativeMenuController {
     _root: Menu,
     application_menu: Submenu,
     _submenus: Vec<Submenu>,
-    command_items: HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
+    command_items: HashMap<MenuId, (MenuActivation, RetainedNativeCommandItem)>,
     _placeholder_items: Vec<MenuItem>,
     _checked_placeholder_items: Vec<CheckMenuItem>,
     _predefined_items: Vec<PredefinedMenuItem>,
     _sf_symbols: super::macos_sf_symbols::SfSymbolsAdapter,
     event_inbox: NativeEventInbox,
     synchronization: NativeMenuSynchronizationState,
+    element_submenu: Submenu,
+    zoom_submenu: Submenu,
+    element_choices_snapshot: ElementChoicesSnapshot,
+    dynamic_element_ids: Vec<MenuId>,
+    dynamic_element_generation: u64,
     _main_thread_only: PhantomData<Rc<()>>,
 }
 
@@ -100,6 +115,8 @@ impl NativeMenuController {
     pub(crate) fn install(
         availability: AppCommandAvailability,
         script_view_mode: ScriptViewMode,
+        dynamic_elements: &DynamicElementMenuProjection,
+        formatting: &FormattingMenuProjection,
         repaint_context: eframe::egui::Context,
     ) -> Result<Self, String> {
         let root = Menu::new();
@@ -108,6 +125,10 @@ impl NativeMenuController {
         let mut placeholder_items = Vec::new();
         let mut checked_placeholder_items = Vec::new();
         let mut retained_predefined_items = Vec::new();
+        let mut element_submenu = None;
+        let mut zoom_submenu = None;
+        let mut dynamic_element_ids = Vec::new();
+        let dynamic_element_generation = 1;
 
         let application_menu = Submenu::with_id("application", APPLICATION_MENU_TITLE, true);
         append_predefined(
@@ -159,7 +180,7 @@ impl NativeMenuController {
         command_items.insert(
             MenuId::new(APPLICATION_QUIT_MENU_ITEM_ID),
             (
-                Command::ApplicationQuit,
+                MenuActivation::Command(Command::ApplicationQuit),
                 RetainedNativeCommandItem::Plain(quit_item),
             ),
         );
@@ -175,6 +196,13 @@ impl NativeMenuController {
                 script_view_mode,
                 availability.invisibles_visible,
                 availability.ruler_visible,
+                dynamic_elements,
+                formatting,
+                ViewMenuProjection::default(),
+                dynamic_element_generation,
+                &mut element_submenu,
+                &mut zoom_submenu,
+                &mut dynamic_element_ids,
                 &mut command_items,
                 &mut retained_submenus,
                 &mut retained_predefined_items,
@@ -186,6 +214,11 @@ impl NativeMenuController {
             })?;
             retained_submenus.push(submenu);
         }
+
+        let element_submenu = element_submenu
+            .ok_or_else(|| "native Format menu omitted Change Element To".to_owned())?;
+        let zoom_submenu = zoom_submenu
+            .ok_or_else(|| "native View menu omitted Zoom".to_owned())?;
 
         // Safe muda API; all construction and global installation are on the
         // app-creation/main thread.
@@ -216,6 +249,11 @@ impl NativeMenuController {
             _sf_symbols: sf_symbols,
             event_inbox,
             synchronization: NativeMenuSynchronizationState::default(),
+            element_submenu,
+            zoom_submenu,
+            element_choices_snapshot: dynamic_elements.snapshot.clone(),
+            dynamic_element_ids,
+            dynamic_element_generation,
             _main_thread_only: PhantomData,
         })
     }
@@ -231,10 +269,7 @@ impl NativeMenuController {
         };
         for id in events {
             if let Some((command, _)) = self.command_items.get(&id) {
-                pending.enqueue(crate::commands::CommandInvocation::new(
-                    command.clone(),
-                    CommandOrigin::NativeMenu,
-                ));
+                pending.enqueue_activation(command.clone(), CommandOrigin::NativeMenu);
             }
         }
     }
@@ -246,6 +281,9 @@ impl NativeMenuController {
         availability: AppCommandAvailability,
         script_view_mode: ScriptViewMode,
         say_undual: bool,
+        dynamic_elements: &DynamicElementMenuProjection,
+        formatting: &FormattingMenuProjection,
+        view: ViewMenuProjection,
     ) {
         let projection = NativeMenuProjection {
             availability,
@@ -253,19 +291,30 @@ impl NativeMenuController {
             say_undual,
             invisibles_visible: availability.invisibles_visible,
             ruler_visible: availability.ruler_visible,
+            focused_element_type: dynamic_elements.focused_type_key.clone(),
+            formatting: formatting.clone(),
+            view,
         };
-        if !self.synchronization.should_synchronize(projection) {
+        let choices_changed = self.element_choices_snapshot != dynamic_elements.snapshot;
+        if !self
+            .synchronization
+            .should_synchronize(projection.clone())
+            && !choices_changed
+        {
             return;
+        }
+        if choices_changed {
+            self.replace_dynamic_element_rows(dynamic_elements, availability);
         }
         // Keep the macOS primary Application menu independent of the active
         // document's native window title. The item text also supplies its
         // accessible name in the native menu tree.
         self.application_menu.set_text(APPLICATION_MENU_TITLE);
-        if let Some((command, item)) = self
+        if let Some((activation, item)) = self
             .command_items
             .get(&MenuId::new(APPLICATION_QUIT_MENU_ITEM_ID))
         {
-            item.set_enabled(availability.is_enabled(command.id()));
+            item.set_enabled(availability.is_enabled(activation_command_id(activation)));
         }
         for menu in MENU_CATALOG {
             synchronize_entries(
@@ -276,6 +325,55 @@ impl NativeMenuController {
                 availability.invisibles_visible,
                 availability.ruler_visible,
                 &self.command_items,
+                formatting,
+                view,
+            );
+        }
+        self.zoom_submenu
+            .set_enabled(availability.is_enabled(CommandId::ViewZoomSet));
+        synchronize_zoom_rows(availability, view, &self.command_items);
+        self.element_submenu.set_enabled(
+            availability.is_enabled(CommandId::EditorElementChange)
+                && !dynamic_elements.choices().is_empty(),
+        );
+        for (choice, id) in dynamic_elements
+            .choices()
+            .iter()
+            .zip(self.dynamic_element_ids.iter())
+        {
+            if let Some((_, item)) = self.command_items.get(id) {
+                item.set_enabled(availability.element_change);
+                item.set_checked(projection.focused_element_type.as_ref() == Some(&choice.key));
+            }
+        }
+    }
+
+    fn replace_dynamic_element_rows(
+        &mut self,
+        dynamic_elements: &DynamicElementMenuProjection,
+        availability: AppCommandAvailability,
+    ) {
+        for _ in 0..self.dynamic_element_ids.len() {
+            let _ = self.element_submenu.remove_at(0);
+        }
+        for id in self.dynamic_element_ids.drain(..) {
+            self.command_items.remove(&id);
+        }
+        self.dynamic_element_generation = self.dynamic_element_generation.saturating_add(1);
+        self.element_submenu.set_enabled(false);
+        let result = append_dynamic_element_rows(
+            &self.element_submenu,
+            dynamic_elements,
+            availability,
+            self.dynamic_element_generation,
+            &mut self.command_items,
+            &mut self.dynamic_element_ids,
+        );
+        if result.is_ok() {
+            self.element_choices_snapshot = dynamic_elements.snapshot.clone();
+            self.element_submenu.set_enabled(
+                availability.is_enabled(CommandId::EditorElementChange)
+                    && !dynamic_elements.choices().is_empty(),
             );
         }
     }
@@ -288,7 +386,14 @@ fn append_catalog_entries(
     script_view_mode: ScriptViewMode,
     invisibles_visible: bool,
     ruler_visible: bool,
-    command_items: &mut HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
+    dynamic_elements: &DynamicElementMenuProjection,
+    formatting: &FormattingMenuProjection,
+    view: ViewMenuProjection,
+    dynamic_element_generation: u64,
+    element_submenu: &mut Option<Submenu>,
+    zoom_submenu: &mut Option<Submenu>,
+    dynamic_element_ids: &mut Vec<MenuId>,
+    command_items: &mut HashMap<MenuId, (MenuActivation, RetainedNativeCommandItem)>,
     retained_submenus: &mut Vec<Submenu>,
     retained_predefined_items: &mut Vec<PredefinedMenuItem>,
     placeholder_items: &mut Vec<MenuItem>,
@@ -310,6 +415,13 @@ fn append_catalog_entries(
                     script_view_mode,
                     invisibles_visible,
                     ruler_visible,
+                    dynamic_elements,
+                    formatting,
+                    view,
+                    dynamic_element_generation,
+                    element_submenu,
+                    zoom_submenu,
+                    dynamic_element_ids,
                     command_items,
                     retained_submenus,
                     retained_predefined_items,
@@ -321,6 +433,44 @@ fn append_catalog_entries(
                 })?;
                 retained_submenus.push(child);
             }
+            MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::ChangeElementTo) => {
+                let child = Submenu::with_id(
+                    DynamicSubmenuKind::ChangeElementTo.id(),
+                    DynamicSubmenuKind::ChangeElementTo.label(),
+                    availability.is_enabled(CommandId::EditorElementChange)
+                        && !dynamic_elements.choices().is_empty(),
+                );
+                append_dynamic_element_rows(
+                    &child,
+                    dynamic_elements,
+                    availability,
+                    dynamic_element_generation,
+                    command_items,
+                    dynamic_element_ids,
+                )?;
+                submenu.append(&child).map_err(|error| {
+                format!("could not append native Change Element To submenu: {error}")
+                })?;
+                *element_submenu = Some(child);
+            }
+            MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::Zoom) => {
+                let child = Submenu::with_id(
+                    DynamicSubmenuKind::Zoom.id(),
+                    DynamicSubmenuKind::Zoom.label(),
+                    availability.is_enabled(CommandId::ViewZoomSet),
+                );
+                append_zoom_menu_rows(
+                    &child,
+                    availability,
+                    view,
+                    command_items,
+                    retained_predefined_items,
+                )?;
+                submenu.append(&child).map_err(|error| {
+                    format!("could not append native Zoom submenu: {error}")
+                })?;
+                *zoom_submenu = Some(child);
+            }
             MenuEntrySpec::Item(item) => append_catalog_item(
                 submenu,
                 item,
@@ -328,12 +478,54 @@ fn append_catalog_entries(
                 script_view_mode,
                 invisibles_visible,
                 ruler_visible,
+                formatting,
+                view,
                 command_items,
                 retained_submenus,
                 placeholder_items,
                 checked_placeholder_items,
             )?,
         }
+    }
+    Ok(())
+}
+
+fn append_dynamic_element_rows(
+    submenu: &Submenu,
+    projection: &DynamicElementMenuProjection,
+    availability: AppCommandAvailability,
+    generation: u64,
+    command_items: &mut HashMap<MenuId, (MenuActivation, RetainedNativeCommandItem)>,
+    dynamic_ids: &mut Vec<MenuId>,
+) -> Result<(), String> {
+    for (index, choice) in projection.choices().iter().enumerate() {
+        // IDs are unique within each rebuilt generation. Semantic identity is
+        // always the exact key in the typed command payload, never this index.
+        let owned_id = format!("{}.generation.{generation}.choice.{index}", DynamicSubmenuKind::ChangeElementTo.id());
+        let enabled = availability.is_enabled(CommandId::EditorElementChange);
+        let checked = projection.focused_type_key.as_ref() == Some(&choice.key);
+        let item = CheckMenuItem::with_id(
+            owned_id.as_str(),
+            choice.label(),
+            enabled,
+            checked,
+            None,
+        );
+        submenu.append(&item).map_err(|error| {
+            format!("could not append native element choice {}: {error}", choice.label())
+        })?;
+        let id = MenuId::new(owned_id);
+        command_items.insert(
+            id.clone(),
+            (
+                MenuActivation::Command(Command::EditorElementChange {
+                    element_type: ElementTypeValue::from_key(choice.key.clone()),
+                    surface: EditorSurface::Body,
+                }),
+                RetainedNativeCommandItem::Checked(item),
+            ),
+        );
+        dynamic_ids.push(id);
     }
     Ok(())
 }
@@ -357,7 +549,9 @@ fn append_catalog_item(
     script_view_mode: ScriptViewMode,
     invisibles_visible: bool,
     ruler_visible: bool,
-    command_items: &mut HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
+    formatting: &FormattingMenuProjection,
+    view: ViewMenuProjection,
+    command_items: &mut HashMap<MenuId, (MenuActivation, RetainedNativeCommandItem)>,
     retained_submenus: &mut Vec<Submenu>,
     placeholder_items: &mut Vec<MenuItem>,
     checked_placeholder_items: &mut Vec<CheckMenuItem>,
@@ -377,19 +571,22 @@ fn append_catalog_item(
             command_items.insert(
                 native_menu_id(spec),
                 (
-                    crate::commands::command_for_id(command).expect("catalog command is mapped"),
+                    MenuActivation::Command(
+                        crate::commands::command_for_id(command).expect("catalog command is mapped"),
+                    ),
                     RetainedNativeCommandItem::Plain(item),
                 ),
             );
         }
         MenuItemBehavior::MenuCommand(action) => {
-            let command = command_for_action(action, EditorSurface::Body);
+            let activation = activation_for_action(action, EditorSurface::Body);
+            let command_id = activation_command_id(&activation);
             let item = if requires_checked_native_item(spec) {
                 let item = CheckMenuItem::with_id(
                     spec.id,
                     menu_item_label(spec, false, invisibles_visible, ruler_visible),
-                    availability.is_enabled(command.id()),
-                    menu_item_is_checked(spec, script_view_mode),
+                    availability.is_enabled(command_id),
+                    menu_item_is_checked(spec, script_view_mode, formatting, view),
                     accelerator,
                 );
                 submenu.append(&item).map_err(|error| {
@@ -400,7 +597,7 @@ fn append_catalog_item(
                 let item = MenuItem::with_id(
                     spec.id,
                     menu_item_label(spec, false, invisibles_visible, ruler_visible),
-                    availability.is_enabled(command.id()),
+                    availability.is_enabled(command_id),
                     accelerator,
                 );
                 submenu.append(&item).map_err(|error| {
@@ -408,7 +605,7 @@ fn append_catalog_item(
                 })?;
                 RetainedNativeCommandItem::Plain(item)
             };
-            command_items.insert(native_menu_id(spec), (command, item));
+            command_items.insert(native_menu_id(spec), (activation, item));
         }
         MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Disclosure) => {
             let child_menu = Submenu::with_id(spec.id, spec.label, false);
@@ -441,6 +638,91 @@ fn append_catalog_item(
     Ok(())
 }
 
+fn append_zoom_menu_rows(
+    submenu: &Submenu,
+    availability: AppCommandAvailability,
+    view: ViewMenuProjection,
+    command_items: &mut HashMap<MenuId, (MenuActivation, RetainedNativeCommandItem)>,
+    retained_predefined_items: &mut Vec<PredefinedMenuItem>,
+) -> Result<(), String> {
+    for spec in ZOOM_STEP_ITEMS {
+        let activation = activation_for_action(
+            match spec.behavior {
+                MenuItemBehavior::MenuCommand(action) => action,
+                _ => unreachable!("zoom step rows are menu actions"),
+            },
+            EditorSurface::Body,
+        );
+        let item = MenuItem::with_id(
+            spec.id,
+            spec.label,
+            availability.is_enabled(CommandId::ViewZoomSet),
+            spec.shortcut.map(native_accelerator),
+        );
+        submenu
+            .append(&item)
+            .map_err(|error| format!("could not append native {} item: {error}", spec.label))?;
+        command_items.insert(
+            MenuId::new(spec.id),
+            (activation, RetainedNativeCommandItem::Plain(item)),
+        );
+    }
+    append_predefined(
+        submenu,
+        PredefinedMenuItem::separator(),
+        retained_predefined_items,
+    )?;
+    for percent in crate::chrome::status_bar::ZOOM_PRESETS {
+        let id = format!("view.zoom.preset.{percent}");
+        let label = format!("{percent}%");
+        let activation = activation_for_action(
+            crate::chrome::menu_items::MenuAction::SetZoom(percent),
+            EditorSurface::Body,
+        );
+        let item = CheckMenuItem::with_id(
+            id.as_str(),
+            label,
+            availability.is_enabled(CommandId::ViewZoomSet),
+            view.zoom_percent == percent,
+            None,
+        );
+        submenu
+            .append(&item)
+            .map_err(|error| format!("could not append native zoom preset {percent}%: {error}"))?;
+        command_items.insert(
+            MenuId::new(id),
+            (activation, RetainedNativeCommandItem::Checked(item)),
+        );
+    }
+    Ok(())
+}
+
+fn activation_command_id(activation: &MenuActivation) -> CommandId {
+    match activation {
+        MenuActivation::Command(command) => command.id(),
+        MenuActivation::ZoomStep(_) => CommandId::ViewZoomSet,
+    }
+}
+
+fn synchronize_zoom_rows(
+    availability: AppCommandAvailability,
+    view: ViewMenuProjection,
+    command_items: &HashMap<MenuId, (MenuActivation, RetainedNativeCommandItem)>,
+) {
+    for spec in ZOOM_STEP_ITEMS {
+        if let Some((_, item)) = command_items.get(&MenuId::new(spec.id)) {
+            item.set_enabled(availability.is_enabled(CommandId::ViewZoomSet));
+        }
+    }
+    for percent in crate::chrome::status_bar::ZOOM_PRESETS {
+        let id = MenuId::new(format!("view.zoom.preset.{percent}"));
+        if let Some((_, item)) = command_items.get(&id) {
+            item.set_enabled(availability.is_enabled(CommandId::ViewZoomSet));
+            item.set_checked(view.zoom_percent == percent);
+        }
+    }
+}
+
 fn synchronize_entries(
     entries: &'static [MenuEntrySpec],
     availability: AppCommandAvailability,
@@ -448,7 +730,9 @@ fn synchronize_entries(
     say_undual: bool,
     invisibles_visible: bool,
     ruler_visible: bool,
-    command_items: &HashMap<MenuId, (Command, RetainedNativeCommandItem)>,
+    command_items: &HashMap<MenuId, (MenuActivation, RetainedNativeCommandItem)>,
+    formatting: &FormattingMenuProjection,
+    view: ViewMenuProjection,
 ) {
     for entry in entries {
         match entry {
@@ -461,6 +745,8 @@ fn synchronize_entries(
                     invisibles_visible,
                     ruler_visible,
                     command_items,
+                    formatting,
+                    view,
                 );
             }
             MenuEntrySpec::Item(spec) => {
@@ -469,10 +755,12 @@ fn synchronize_entries(
                     let label =
                         menu_item_label(spec, say_undual, invisibles_visible, ruler_visible);
                     item.set_text(label);
-                    item.set_enabled(availability.is_enabled(command.id()));
-                    item.set_checked(menu_item_is_checked(spec, script_view_mode));
+                    item.set_enabled(availability.is_enabled(activation_command_id(command)));
+                    item.set_checked(menu_item_is_checked(spec, script_view_mode, formatting, view));
                 }
             }
+            MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::Zoom)
+            | MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::ChangeElementTo) => {}
             MenuEntrySpec::Separator => {}
         }
     }
@@ -483,10 +771,7 @@ fn native_menu_id(spec: &MenuItemSpec) -> MenuId {
 }
 
 fn requires_checked_native_item(spec: &MenuItemSpec) -> bool {
-    matches!(
-        spec.behavior,
-        MenuItemBehavior::MenuCommand(MenuAction::SetScriptView(_))
-    )
+    matches!(spec.behavior, MenuItemBehavior::MenuCommand(_))
 }
 
 fn native_accelerator(shortcut: LogicalShortcut) -> Accelerator {
@@ -539,6 +824,8 @@ fn native_key(key: ShortcutKey) -> Code {
         ShortcutKey::Semicolon => Code::Semicolon,
         ShortcutKey::Colon => Code::Semicolon,
         ShortcutKey::Period => Code::Period,
+        ShortcutKey::Plus | ShortcutKey::Equals => Code::Equal,
+        ShortcutKey::Minus => Code::Minus,
         ShortcutKey::Enter => Code::Enter,
         ShortcutKey::Tab => Code::Tab,
         ShortcutKey::Backspace => Code::Backspace,

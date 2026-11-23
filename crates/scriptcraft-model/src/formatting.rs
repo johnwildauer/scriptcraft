@@ -84,6 +84,95 @@ pub enum ParagraphAlignment {
     Justified,
 }
 
+/// Bounded direct paragraph leading choices. Definition-owned leading remains
+/// a string and is interpreted only for these exact supported values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ParagraphLeading {
+    Regular,
+    Tight,
+    Loose,
+}
+
+impl ParagraphLeading {
+    pub const fn fdx_value(self) -> &'static str {
+        match self {
+            Self::Regular => "Regular",
+            Self::Tight => "Tight",
+            Self::Loose => "Loose",
+        }
+    }
+
+    pub fn from_fdx_value(value: &str) -> Option<Self> {
+        match value {
+            "Regular" => Some(Self::Regular),
+            "Tight" => Some(Self::Tight),
+            "Loose" => Some(Self::Loose),
+            _ => None,
+        }
+    }
+
+    /// Definition data also uses `Single` for the regular baseline.
+    pub fn from_definition_value(value: &str) -> Option<Self> {
+        match value {
+            "Regular" | "Single" => Some(Self::Regular),
+            "Tight" => Some(Self::Tight),
+            "Loose" => Some(Self::Loose),
+            _ => None,
+        }
+    }
+
+    pub const fn adjustment_hundredths(self) -> i64 {
+        match self {
+            Self::Regular => 0,
+            Self::Tight => -FixedPoint::SCALE,
+            Self::Loose => FixedPoint::SCALE,
+        }
+    }
+}
+
+/// Bounded direct paragraph spacing choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ParagraphSpacing {
+    Single,
+    OneAndHalf,
+    Double,
+}
+
+impl ParagraphSpacing {
+    pub const fn fdx_value(self) -> &'static str {
+        match self {
+            Self::Single => "1",
+            Self::OneAndHalf => "1.5",
+            Self::Double => "2",
+        }
+    }
+
+    pub fn from_fdx_value(value: &str) -> Option<Self> {
+        match value {
+            "1" => Some(Self::Single),
+            "1.5" => Some(Self::OneAndHalf),
+            "2" => Some(Self::Double),
+            _ => None,
+        }
+    }
+
+    pub const fn from_definition_value(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Single),
+            2 => Some(Self::Double),
+            _ => None,
+        }
+    }
+
+    pub const fn ratio(self) -> (i64, i64) {
+        match self {
+            Self::Single => (1, 1),
+            Self::OneAndHalf => (3, 2),
+            Self::Double => (2, 1),
+        }
+    }
+}
+
 /// Only supported imported fields are populated. `None` deliberately means
 /// that field is absent from a direct paragraph override.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -92,9 +181,24 @@ pub struct SourceParagraphSpec {
     pub first_indent: Option<FixedPoint>,
     pub left_indent: Option<FixedPoint>,
     pub right_indent: Option<FixedPoint>,
-    pub leading_regular: Option<bool>,
+    pub leading: Option<ParagraphLeading>,
     pub space_before: Option<FixedPoint>,
-    pub spacing_single: Option<bool>,
+    pub spacing: Option<ParagraphSpacing>,
+}
+
+/// Typed, sparse request for one paragraph-formatting operation. `None` means
+/// unchanged; `space_before_lines` is converted using the current definition's
+/// base font size by the shared model operation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ParagraphFormattingPatch {
+    pub alignment: Option<ParagraphAlignment>,
+    pub first_indent: Option<FixedPoint>,
+    pub leading: Option<ParagraphLeading>,
+    pub left_indent: Option<FixedPoint>,
+    pub right_indent: Option<FixedPoint>,
+    pub space_before_lines: Option<u8>,
+    pub spacing: Option<ParagraphSpacing>,
+    pub starts_new_page: Option<bool>,
 }
 
 /// Valid direct paragraph attributes associated with one imported managed body

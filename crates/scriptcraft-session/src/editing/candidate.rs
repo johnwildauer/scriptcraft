@@ -264,6 +264,8 @@ impl EditingSession {
                             .elements
                             .get(scope_start.element)
                             .is_some_and(|element| &element.id == id)
+                        && project.direct_paragraph_overrides
+                            == self.project.direct_paragraph_overrides
                         && selection.anchor.element == scope_start.element
                         && selection.focus.element == scope_start.element
                         // Scoped validation currently assumes that a single
@@ -400,6 +402,7 @@ impl EditingSession {
                 title_selection: self.title_selection,
                 title_typing_style: self.title_typing_style,
                 body_typing_style: self.body_typing_style,
+                body_typing_formatting: self.body_typing_formatting,
                 generated_parentheticals: self.generated_parentheticals.clone(),
             });
             self.selection = selection;

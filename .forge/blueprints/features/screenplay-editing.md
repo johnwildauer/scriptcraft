@@ -6,7 +6,7 @@
 
 - **Requirements:** [Screenplay editing](../../requirements/features/screenplay-editing.md); [Desktop workspace](../../requirements/features/desktop-workspace.md) owns `REQ-WRITING-LOOP-011`, whose clipboard criterion is `AC-WRITING-011.3`; [Native document lifecycle](../../requirements/features/native-document-lifecycle.md) owns the shared `REQ-WRITING-LOOP-007` statement.
 - **Technical context:** [Technical context](../technical-context.md)
-- **Requirements traced:** `REQ-WRITING-LOOP-001`, `REQ-WRITING-LOOP-007`, `REQ-WRITING-LOOP-011`, `REQ-WRITING-LOOP-012`; `AC-WRITING-011.3`.
+- **Requirements traced:** `REQ-WRITING-LOOP-001`, `REQ-WRITING-LOOP-007`, `REQ-WRITING-LOOP-011`, `REQ-WRITING-LOOP-012`; `AC-WRITING-007.12`–`.13`, `AC-WRITING-011.3`, `AC-WRITING-012.9`.
 - **Area summary:** Keyboard, pointer, menus, toolbar, and clipboard actions converge on one typed operation path over the current editing session. Exact open element-type keys and ordered document-owned definitions are semantic authority; canonical text and formatting are edited independently of display, selection, and host presentation.
 
 ## Shared composition
@@ -24,7 +24,7 @@
 
 ### Phase 4 dynamic editing contract
 
-Return/Tab execution and read-only guidance share current-document exact-key Behavior resolution. Absent or unresolved targets are consumed nonmutating no-ops; no static transition or Action/General fallback participates. Exact-label capabilities alone govern strict Scene Heading/Character/Transition boundaries, Dialogue interior Enter, blank-Character Tab, Parenthetical editing, scene/cast semantics, and dual recognition. Arbitrary and case-variant labels remain editable but receive no guessed semantics; `PaginateAs` is layout-only. Ordinary split retains its exact key, join requires exact key equality, and generic Type-only changes preserve all non-Type content and source ownership. Automatic Parenthetical generation belongs to high-level editing transitions/assignment, not generic Type replacement/remapping. These editing decisions and transaction outcomes are headlessly observable; physical desktop shortcuts, controls, focus/IME routing, and rendered guidance wait for the grouped Phase 4–6 desktop gate.
+Return/Tab execution and read-only guidance share current-document exact-key Behavior resolution. Absent or unresolved targets are consumed nonmutating no-ops; no static transition or Action/General fallback participates. Exact-label capabilities alone govern strict Scene Heading/Character/Transition boundaries, Dialogue interior Enter, blank-Character Tab, Parenthetical editing, scene/cast semantics, and dual recognition. Arbitrary and case-variant labels remain editable but receive no guessed semantics; `PaginateAs` is layout-only. Ordinary split retains its exact key, join requires exact key equality, and generic retained-Type projection remains Type-only. A separate explicit Body per-paragraph Type-change candidate follows the narrowly approved direct-formatting reset contract below; Apply Template and Title Page Type changes remain separate. Automatic Parenthetical generation belongs to high-level editing transitions/assignment, not generic Type replacement/remapping. These editing decisions and transaction outcomes are headlessly observable; physical desktop shortcuts, controls, focus/IME routing, and rendered guidance remain user-owned.
 
 ### Selection, navigation, and clipboard
 
@@ -39,6 +39,10 @@ Return/Tab execution and read-only guidance share current-document exact-key Beh
 - **Boundary:** Marks are paint-only, noninteractive, and absent from Print-purpose layouts. They do not change canonical text/advances, wrapping, pagination, layout/cache identity, selection/caret/pointer/IME geometry, clipboard, undo/redo, or dirty state, and no PDF, plain-text, or native-print path consumes the overlay.
 
 ## Decisions
+
+### Landed inline, paragraph, and pointer editing contracts
+
+Font, Size, and Color edits apply as one undoable edit only to selected UTF-8 run ranges, changing only the requested attribute and retaining unrelated ordered run attributes and source. At a collapsed Body caret these choices update independent transient typing-patch fields, not the whole paragraph; changing the patch advances the mutation token without changing Project, dirty state, document revision, or undo history; undo/redo snapshots retain it, moving the caret clears it, and subsequent insertion overlays it on inherited attributes. Replacing a noncollapsed selection performs the selected-run edit rather than applying the caret patch. Paragraph actions use one complete-baseline setter shared with Alignment. A different-key explicit Body Type change clears only recognized direct paragraph formatting and the semantic paragraph-override entry; it retains text, inline run formatting, identity, selection, attachments, opaque source, and dual membership. Same-key assignment is a no-op, Tab uses the same per-paragraph candidate, Enter-created right paragraphs keep their no-copy behavior, and generic retained-Type/Apply Template/Title Page policies remain distinct. A secondary click preserves a selection only when the canonical hit is inside its ordered inclusive bounds; otherwise a valid Body hit collapses the caret, while a failed hit preserves selection. Exact accepted values, full baseline fields and order, reset field list, and layout formula are defined by the linked Screenplay Editing and Page Layout requirements and their component blueprints.
 
 - Route every enabled editing action through the shared command and session path; do not let widgets mutate project state directly.
 - Keep canonical text, display transformations, and transient input state separate.

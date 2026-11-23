@@ -3,7 +3,7 @@ use super::{
     FixedRect,
 };
 use scriptcraft_model::{
-    formatting::{FixedPoint, ParagraphAlignment},
+    formatting::{FixedPoint, ParagraphAlignment, ParagraphLeading, ParagraphSpacing},
     layout_inputs::{DocumentLeading, PageLayoutInputs},
     typography::{
         DocumentFontEnvironment, EffectiveTextStyle as ResolvedTextStyle, FaceStyle,
@@ -240,6 +240,8 @@ pub struct EffectiveParagraph {
     pub space_before: FixedPoint,
     pub space_before_units: u32,
     pub base_leading: FixedPoint,
+    pub leading: ParagraphLeading,
+    pub spacing: ParagraphSpacing,
     pub starts_new_page: bool,
     pub pagination: PaginationPolicy,
 }
@@ -372,9 +374,9 @@ pub fn resolve_effective_title(
                 first_indent: overrides.first_indent,
                 left_indent: overrides.left_indent,
                 right_indent: overrides.right_indent,
-                leading_regular: overrides.leading_regular,
+                leading: overrides.leading,
                 space_before: overrides.space_before,
-                spacing_single: overrides.spacing_single,
+                spacing: overrides.spacing,
             },
             starts_new_page: overrides.starts_new_page,
         };
@@ -502,24 +504,27 @@ fn resolve_paragraph_values(
         .or_else(|| indent_fits(paragraph.first_indent).then_some(paragraph.first_indent))
         .unwrap_or_default();
     let style = effective_definition_style(definition, &environment.fonts)?;
-    match paragraph.leading.as_str() {
-        "Regular" | "Single" => (),
-        _ => {
-            return Err(LayoutError {
-                kind: LayoutErrorKind::Model(ModelError::InvalidNumber),
-            })
-        }
-    }
-    let spacing_single = direct
+    let leading = direct
         .paragraph
-        .spacing_single
-        .unwrap_or(paragraph.spacing == 1);
-    if !spacing_single {
-        return Err(LayoutError {
+        .leading
+        .or_else(|| ParagraphLeading::from_definition_value(&paragraph.leading))
+        .ok_or(LayoutError {
             kind: LayoutErrorKind::Model(ModelError::InvalidNumber),
-        });
-    }
-    let base_leading = resolve_style_leading(&style, environment)?;
+        })?;
+    let spacing = direct
+        .paragraph
+        .spacing
+        .or_else(|| ParagraphSpacing::from_definition_value(paragraph.spacing))
+        .ok_or(LayoutError {
+            kind: LayoutErrorKind::Model(ModelError::InvalidNumber),
+        })?;
+    let base_ordinary_leading = resolve_style_ordinary_leading(&style, environment)?;
+    let base_leading = resolve_effective_leading(
+        base_ordinary_leading,
+        spacing,
+        leading,
+        resolve_document_leading_adjustment(environment)?,
+    )?;
     let source_size = style.size;
     let definition_space_before = paragraph.space_before;
     let (space_before_units, space_before) = match direct.paragraph.space_before {
@@ -536,6 +541,8 @@ fn resolve_paragraph_values(
         space_before,
         space_before_units,
         base_leading,
+        leading,
+        spacing,
         starts_new_page: direct.starts_new_page.unwrap_or(paragraph.starts_new_page),
         pagination,
     })
@@ -572,12 +579,15 @@ fn resolve_page_baseline_paragraph(
         .first_indent
         .filter(|indent| indent_fits(*indent))
         .unwrap_or_default();
-    if formatting.spacing_single == Some(false) {
-        return Err(LayoutError {
-            kind: LayoutErrorKind::Model(ModelError::InvalidNumber),
-        });
-    }
-    let base_leading = resolve_style_leading(style, environment)?;
+    let leading = formatting.leading.unwrap_or(ParagraphLeading::Regular);
+    let spacing = formatting.spacing.unwrap_or(ParagraphSpacing::Single);
+    let base_ordinary_leading = resolve_style_ordinary_leading(style, environment)?;
+    let base_leading = resolve_effective_leading(
+        base_ordinary_leading,
+        spacing,
+        leading,
+        resolve_document_leading_adjustment(environment)?,
+    )?;
     let (space_before_units, space_before) = match formatting.space_before {
         Some(value) => derive_space_before(value, style.size, base_leading)
             .unwrap_or((0, FixedPoint::default())),
@@ -605,12 +615,14 @@ fn resolve_page_baseline_paragraph(
         space_before,
         space_before_units,
         base_leading,
+        leading,
+        spacing,
         starts_new_page: formatting.starts_new_page.unwrap_or(false),
         pagination: PaginationPolicy::Ordinary,
     })
 }
 
-pub(super) fn resolve_style_leading(
+fn resolve_style_ordinary_leading(
     style: &ResolvedTextStyle,
     environment: &LayoutEnvironment,
 ) -> Result<FixedPoint, LayoutError> {
@@ -622,9 +634,26 @@ pub(super) fn resolve_style_leading(
     let base = i64::from(style.size)
         .checked_mul(ratio)
         .ok_or(LayoutError { kind: LayoutErrorKind::InvalidEffectiveLeading })?;
-    let adjustment = resolve_document_leading_adjustment(environment)?.raw();
-    let raw = base
-        .checked_add(adjustment)
+    let raw = (base > 0)
+        .then_some(base)
+        .ok_or(LayoutError { kind: LayoutErrorKind::InvalidEffectiveLeading })?;
+    Ok(FixedPoint::from_raw(raw))
+}
+
+fn resolve_effective_leading(
+    ordinary: FixedPoint,
+    spacing: ParagraphSpacing,
+    paragraph_leading: ParagraphLeading,
+    document_adjustment: FixedPoint,
+) -> Result<FixedPoint, LayoutError> {
+    let (numerator, denominator) = spacing.ratio();
+    let raw = ordinary
+        .raw()
+        .checked_mul(numerator)
+        .and_then(|value| value.checked_add(denominator / 2))
+        .and_then(|value| value.checked_div(denominator))
+        .and_then(|value| value.checked_add(document_adjustment.raw()))
+        .and_then(|value| value.checked_add(paragraph_leading.adjustment_hundredths()))
         .filter(|value| *value > 0)
         .ok_or(LayoutError { kind: LayoutErrorKind::InvalidEffectiveLeading })?;
     Ok(FixedPoint::from_raw(raw))
@@ -670,9 +699,10 @@ pub(super) fn resolve_line_vertical_metrics(
     base: &ResolvedTextStyle,
     scalars: &[super::wrap::ResolvedDisplayScalar],
     environment: &LayoutEnvironment,
+    paragraph: EffectiveParagraph,
 ) -> Result<LineVerticalMetrics, LayoutError> {
-    let mut leading = resolve_style_leading(base, environment)?;
     let document_leading_adjustment = resolve_document_leading_adjustment(environment)?;
+    let mut ordinary_leading = resolve_style_ordinary_leading(base, environment)?;
     let mut natural_ascent = FixedPoint::from_raw(i64::MIN);
     let mut natural_descent = FixedPoint::from_raw(i64::MAX);
     let mut participants: Vec<&ResolvedTextStyle> = Vec::new();
@@ -686,16 +716,22 @@ pub(super) fn resolve_line_vertical_metrics(
         }
     }
     for style in participants {
-        leading = leading.max(resolve_style_leading(style, environment)?);
+        ordinary_leading = ordinary_leading.max(resolve_style_ordinary_leading(style, environment)?);
         let face = environment.fonts.require_face(&style.resolved_font_id)?;
         natural_ascent = natural_ascent.max(face.metrics.scale_ascent(style.size)?);
         natural_descent = natural_descent.min(face.metrics.scale_descent(style.size)?);
     }
+    let leading = resolve_effective_leading(
+        ordinary_leading,
+        paragraph.spacing,
+        paragraph.leading,
+        document_leading_adjustment,
+    )?;
     let baseline_offset = natural_ascent
         .raw()
         .checked_add(document_leading_adjustment.raw())
+        .and_then(|value| value.checked_add(paragraph.leading.adjustment_hundredths()))
         .map(FixedPoint::from_raw)
         .ok_or(LayoutError { kind: LayoutErrorKind::InvalidEffectiveLeading })?;
     Ok(LineVerticalMetrics { leading, natural_ascent, natural_descent, baseline_offset })
 }
-

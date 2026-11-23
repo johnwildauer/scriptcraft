@@ -3,7 +3,7 @@ use super::toolbar_items::{
     ToolbarItemSpec, ToolbarLayoutPolicy,
 };
 use crate::app::ScriptCraftApp;
-use crate::chrome::element_choices::ElementChoice;
+use crate::chrome::element_choices::{focused_body_element_type_key, ElementChoice};
 use crate::commands::AppCommandAvailability;
 use crate::commands::{command_for_id, CommandInvocation};
 use eframe::egui::{self, *};
@@ -21,7 +21,7 @@ use scriptcraft_model::formatted_text::{
     RunStyleFlags,
 };
 use scriptcraft_model::formatting::ParagraphAlignment;
-use scriptcraft_model::{ElementTypeKey, Position, Project};
+use scriptcraft_model::{ElementTypeKey, Position};
 
 // Manual toolbar geometry controls: tune Item group width and row spacing here.
 // The 46-point normal slot is the compact baseline recorded by the focused
@@ -300,14 +300,6 @@ fn element_change_command(key: ElementTypeKey) -> Command {
         element_type: ElementTypeValue::from_key(key),
         surface: EditorSurface::Body,
     }
-}
-
-fn focused_body_element_type_key(project: &Project, focus: Position) -> Option<ElementTypeKey> {
-    let key = project.elements.get(focus.element)?.element_type();
-    project
-        .element_definitions()
-        .get(&key)
-        .map(|definition| definition.key.clone())
 }
 
 fn toolbar_items_for(
@@ -1223,7 +1215,10 @@ impl ScriptCraftApp {
     }
 
     pub(super) fn focused_element_type_key(&self) -> Option<ElementTypeKey> {
-        focused_body_element_type_key(self.session.project(), self.session.selection().focus)
+        focused_body_element_type_key(
+            self.session.project(),
+            self.session.selection().focus.element,
+        )
     }
 
     pub(super) fn change_element_type_from_toolbar(

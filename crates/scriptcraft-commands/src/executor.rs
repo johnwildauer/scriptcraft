@@ -34,6 +34,7 @@ pub enum UnavailableReason {
 pub enum CommandRejection {
     UnsupportedCommand(CommandId),
     InvalidElementTarget,
+    UnsupportedSurface,
     InvalidSelection(SelectionError),
     PositionOutOfRange(PositionError),
 }
@@ -190,6 +191,24 @@ pub fn execute_editor_command_on_surface(
             EditorSurface::Body => session.set_body_alignment(alignment.as_core()),
             EditorSurface::TitlePage => session.set_title_alignment(alignment.as_core()),
         },
+        Command::EditorRunFormattingSet { surface, patch } => {
+            if *surface != EditorSurface::Body {
+                return CommandOutcome::Rejected(CommandRejection::UnsupportedSurface);
+            }
+            if active_surface != EditorSurface::Body {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            session.set_body_run_formatting(patch.as_core())
+        }
+        Command::EditorParagraphFormattingSet { surface, patch } => {
+            if *surface != EditorSurface::Body {
+                return CommandOutcome::Rejected(CommandRejection::UnsupportedSurface);
+            }
+            if active_surface != EditorSurface::Body {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            session.set_body_paragraph_formatting(patch.as_core())
+        }
         other => return rejected(other),
     };
 

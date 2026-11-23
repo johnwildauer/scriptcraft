@@ -1,5 +1,7 @@
 use scriptcraft_model::{
-    element_type::ElementTypeKey, formatted_text::RunStyle, formatting::ParagraphAlignment,
+    element_type::ElementTypeKey,
+    formatted_text::{InlineColor, InlineFont, InlineSize, RunStyle},
+    formatting::{ParagraphAlignment, ParagraphFormattingPatch, ParagraphLeading, ParagraphSpacing},
     ModelError,
 };
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -187,6 +189,186 @@ impl ParagraphAlignmentValue {
             Self::Right => ParagraphAlignment::Right,
             Self::Center => ParagraphAlignment::Center,
             Self::Justified => ParagraphAlignment::Justified,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InlineFontValue {
+    ElementDefault,
+    CourierFinalDraft,
+    CourierPrime,
+    Arial,
+    TimesNewRoman,
+}
+
+impl<'de> Deserialize<'de> for InlineFontValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: Deserializer<'de> {
+        match String::deserialize(deserializer)?.as_str() {
+            "element_default" => Ok(Self::ElementDefault),
+            "courier_final_draft" => Ok(Self::CourierFinalDraft),
+            "courier_prime" => Ok(Self::CourierPrime),
+            "arial" => Ok(Self::Arial),
+            "times_new_roman" => Ok(Self::TimesNewRoman),
+            value => Err(de::Error::custom(format!("unsupported inline font: {value}"))),
+        }
+    }
+}
+
+impl InlineFontValue {
+    pub const fn as_core(self) -> Option<InlineFont> {
+        match self {
+            Self::ElementDefault => None,
+            Self::CourierFinalDraft => Some(InlineFont::CourierFinalDraft),
+            Self::CourierPrime => Some(InlineFont::CourierPrime),
+            Self::Arial => Some(InlineFont::Arial),
+            Self::TimesNewRoman => Some(InlineFont::TimesNewRoman),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineSizeValue { Seven, Eight, Nine, Ten, Twelve, Fourteen, Eighteen, TwentyFour }
+
+impl Serialize for InlineSizeValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        serializer.serialize_u8(self.as_core().points())
+    }
+}
+
+impl<'de> Deserialize<'de> for InlineSizeValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: Deserializer<'de> {
+        match u8::deserialize(deserializer)? {
+            7 => Ok(Self::Seven), 8 => Ok(Self::Eight), 9 => Ok(Self::Nine), 10 => Ok(Self::Ten),
+            12 => Ok(Self::Twelve), 14 => Ok(Self::Fourteen), 18 => Ok(Self::Eighteen), 24 => Ok(Self::TwentyFour),
+            value => Err(de::Error::custom(format!("unsupported inline size: {value}"))),
+        }
+    }
+}
+
+impl InlineSizeValue {
+    pub const fn as_core(self) -> InlineSize {
+        match self {
+            Self::Seven => InlineSize::Seven, Self::Eight => InlineSize::Eight,
+            Self::Nine => InlineSize::Nine, Self::Ten => InlineSize::Ten,
+            Self::Twelve => InlineSize::Twelve, Self::Fourteen => InlineSize::Fourteen,
+            Self::Eighteen => InlineSize::Eighteen, Self::TwentyFour => InlineSize::TwentyFour,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InlineColorValue { ElementDefault, Black, White, Red, Green, Blue }
+
+impl<'de> Deserialize<'de> for InlineColorValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: Deserializer<'de> {
+        match String::deserialize(deserializer)?.as_str() {
+            "element_default" => Ok(Self::ElementDefault), "black" => Ok(Self::Black),
+            "white" => Ok(Self::White), "red" => Ok(Self::Red), "green" => Ok(Self::Green),
+            "blue" => Ok(Self::Blue), value => Err(de::Error::custom(format!("unsupported inline color: {value}"))),
+        }
+    }
+}
+
+impl InlineColorValue {
+    pub const fn as_core(self) -> Option<InlineColor> {
+        match self {
+            Self::ElementDefault => None, Self::Black => Some(InlineColor::Black),
+            Self::White => Some(InlineColor::White), Self::Red => Some(InlineColor::Red),
+            Self::Green => Some(InlineColor::Green), Self::Blue => Some(InlineColor::Blue),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunFormattingPatchValue {
+    #[serde(default)] pub font: Option<InlineFontValue>,
+    #[serde(default)] pub size: Option<InlineSizeValue>,
+    #[serde(default)] pub color: Option<InlineColorValue>,
+}
+
+impl RunFormattingPatchValue {
+    pub const fn as_core(self) -> scriptcraft_model::formatted_text::InlineRunFormattingPatch {
+        scriptcraft_model::formatted_text::InlineRunFormattingPatch {
+            font: match self.font { Some(value) => Some(value.as_core()), None => None },
+            size: match self.size { Some(value) => Some(value.as_core()), None => None },
+            color: match self.color { Some(value) => Some(value.as_core()), None => None },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParagraphSpacingValue { Single, OneAndHalf, Double }
+impl<'de> Deserialize<'de> for ParagraphSpacingValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error> where D: Deserializer<'de> {
+        match String::deserialize(deserializer)?.as_str() {
+            "single" => Ok(Self::Single), "one_and_half" => Ok(Self::OneAndHalf), "double" => Ok(Self::Double),
+            value => Err(de::Error::custom(format!("unknown paragraph spacing: {value}"))),
+        }
+    }
+}
+impl ParagraphSpacingValue {
+    pub const fn as_core(self) -> ParagraphSpacing {
+        match self { Self::Single => ParagraphSpacing::Single, Self::OneAndHalf => ParagraphSpacing::OneAndHalf, Self::Double => ParagraphSpacing::Double }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParagraphLeadingValue { Regular, Tight, Loose }
+impl<'de> Deserialize<'de> for ParagraphLeadingValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error> where D: Deserializer<'de> {
+        match String::deserialize(deserializer)?.as_str() {
+            "regular" => Ok(Self::Regular), "tight" => Ok(Self::Tight), "loose" => Ok(Self::Loose),
+            value => Err(de::Error::custom(format!("unknown paragraph leading: {value}"))),
+        }
+    }
+}
+impl ParagraphLeadingValue {
+    pub const fn as_core(self) -> ParagraphLeading {
+        match self { Self::Regular => ParagraphLeading::Regular, Self::Tight => ParagraphLeading::Tight, Self::Loose => ParagraphLeading::Loose }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct SpaceBeforeLines(u8);
+impl SpaceBeforeLines {
+    pub const fn new(value: u8) -> Option<Self> {
+        if value <= 3 { Some(Self(value)) } else { None }
+    }
+
+    pub const fn get(self) -> u8 { self.0 }
+}
+impl<'de> Deserialize<'de> for SpaceBeforeLines {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error> where D: Deserializer<'de> {
+        let value = u8::deserialize(deserializer)?;
+        if value <= 3 { Ok(Self(value)) } else { Err(de::Error::custom("space-before lines must be 0..=3")) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParagraphFormattingPatchValue {
+    #[serde(default)] pub spacing: Option<ParagraphSpacingValue>,
+    #[serde(default)] pub space_before_lines: Option<SpaceBeforeLines>,
+    #[serde(default)] pub leading: Option<ParagraphLeadingValue>,
+}
+impl ParagraphFormattingPatchValue {
+    pub fn as_core(self) -> ParagraphFormattingPatch {
+        ParagraphFormattingPatch {
+            spacing: match self.spacing { Some(value) => Some(value.as_core()), None => None },
+            space_before_lines: match self.space_before_lines { Some(value) => Some(value.get()), None => None },
+            leading: match self.leading { Some(value) => Some(value.as_core()), None => None },
+            ..ParagraphFormattingPatch::default()
         }
     }
 }

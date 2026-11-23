@@ -6,7 +6,8 @@ use super::{
     Appearance, BuiltinTemplateValue, DiagnosticMessage, DocumentPath, EditorSurface,
     ElementTypeValue, HorizontalDirection, ImportResolution, LineEdge, ParagraphAlignmentValue,
     PdfExportOptions, PointerPhase, Position, ScriptViewMode, Selection, SprintTimerMode,
-    TitleTextStyle, VerticalDirection, ZoomFactor, ZoomPercent,
+    TitleTextStyle, VerticalDirection, ZoomFactor, ZoomPercent, RunFormattingPatchValue,
+    ParagraphFormattingPatchValue,
 };
 
 /// Stable identifier for a command. Identifiers are intentionally independent
@@ -46,6 +47,8 @@ pub enum CommandId {
     WindowTitlePageClose,
     EditorStyleToggle,
     EditorAlignmentSet,
+    EditorRunFormattingSet,
+    EditorParagraphFormattingSet,
     PdfIncludeTitlePageResolve,
     ViewZoomSet,
     ViewZoomPinch,
@@ -78,7 +81,7 @@ pub enum CommandId {
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 61] = [
+    pub const ALL: [Self; 63] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -112,6 +115,8 @@ impl CommandId {
         Self::WindowTitlePageClose,
         Self::EditorStyleToggle,
         Self::EditorAlignmentSet,
+        Self::EditorRunFormattingSet,
+        Self::EditorParagraphFormattingSet,
         Self::PdfIncludeTitlePageResolve,
         Self::ViewZoomSet,
         Self::ViewZoomPinch,
@@ -177,6 +182,8 @@ impl CommandId {
             Self::WindowTitlePageClose => "window.title-page.close",
             Self::EditorStyleToggle => "editor.style.toggle",
             Self::EditorAlignmentSet => "editor.alignment.set",
+            Self::EditorRunFormattingSet => "editor.run-formatting.set",
+            Self::EditorParagraphFormattingSet => "editor.paragraph-formatting.set",
             Self::PdfIncludeTitlePageResolve => "pdf.include-title-page.resolve",
             Self::ViewZoomSet => "view.zoom.set",
             Self::ViewZoomPinch => "view.zoom.pinch",
@@ -375,6 +382,10 @@ pub enum Command {
         surface: EditorSurface,
         alignment: ParagraphAlignmentValue,
     },
+    #[serde(rename = "editor.run-formatting.set")]
+    EditorRunFormattingSet { surface: EditorSurface, patch: RunFormattingPatchValue },
+    #[serde(rename = "editor.paragraph-formatting.set")]
+    EditorParagraphFormattingSet { surface: EditorSurface, patch: ParagraphFormattingPatchValue },
     #[serde(rename = "pdf.include-title-page.resolve")]
     PdfIncludeTitlePageResolve { options: PdfExportOptions },
     #[serde(rename = "view.zoom.set")]
@@ -494,6 +505,8 @@ impl Command {
             Self::WindowTitlePageClose => CommandId::WindowTitlePageClose,
             Self::EditorStyleToggle { .. } => CommandId::EditorStyleToggle,
             Self::EditorAlignmentSet { .. } => CommandId::EditorAlignmentSet,
+            Self::EditorRunFormattingSet { .. } => CommandId::EditorRunFormattingSet,
+            Self::EditorParagraphFormattingSet { .. } => CommandId::EditorParagraphFormattingSet,
             Self::PdfIncludeTitlePageResolve { .. } => CommandId::PdfIncludeTitlePageResolve,
             Self::ViewZoomSet { .. } => CommandId::ViewZoomSet,
             Self::ViewZoomPinch { .. } => CommandId::ViewZoomPinch,

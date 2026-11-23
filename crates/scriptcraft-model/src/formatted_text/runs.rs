@@ -1,10 +1,12 @@
 //! Canonical run-style primitives and UTF-8 range projections.
 
 use crate::{
-    element::{RunAttribute, TextRun, MAX_RUNS_PER_ELEMENT},
+    element::{BodyOwner, RunAttribute, TextRun, MAX_RUNS_PER_ELEMENT},
     error::ModelError,
     preservation::PreservationError,
+    project::Project,
 };
+use super::paragraphs::ParagraphTarget;
 use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -91,6 +93,7 @@ pub enum FormattedTextError {
     EmptyParagraphSelection,
     DuplicateParagraphTarget,
     AmbiguousDirectAttribute,
+    AmbiguousInlineAttribute,
     Preservation(PreservationError),
     Model(ModelError),
 }
@@ -120,6 +123,91 @@ pub struct RunStyleRange<'a> {
     pub canonical_text: &'a str,
     pub runs: &'a [TextRun],
     pub range: Range<usize>,
+}
+
+/// Bounded inline font families accepted by the initial formatting controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InlineFont {
+    CourierFinalDraft,
+    CourierPrime,
+    Arial,
+    TimesNewRoman,
+}
+
+impl InlineFont {
+    pub const fn fdx_value(self) -> &'static str {
+        match self {
+            Self::CourierFinalDraft => "Courier Final Draft",
+            Self::CourierPrime => "Courier Prime",
+            Self::Arial => "Arial",
+            Self::TimesNewRoman => "Times New Roman",
+        }
+    }
+}
+
+/// Bounded inline sizes accepted by the initial formatting controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InlineSize {
+    Seven,
+    Eight,
+    Nine,
+    Ten,
+    Twelve,
+    Fourteen,
+    Eighteen,
+    TwentyFour,
+}
+
+impl InlineSize {
+    pub const fn points(self) -> u8 {
+        match self {
+            Self::Seven => 7,
+            Self::Eight => 8,
+            Self::Nine => 9,
+            Self::Ten => 10,
+            Self::Twelve => 12,
+            Self::Fourteen => 14,
+            Self::Eighteen => 18,
+            Self::TwentyFour => 24,
+        }
+    }
+}
+
+/// Bounded normalized colors accepted by the initial formatting controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InlineColor {
+    Black,
+    White,
+    Red,
+    Green,
+    Blue,
+}
+
+impl InlineColor {
+    pub const fn fdx_value(self) -> &'static str {
+        match self {
+            Self::Black => "#000000000000",
+            Self::White => "#FFFFFFFFFFFF",
+            Self::Red => "#FFFF00000000",
+            Self::Green => "#0000FFFF0000",
+            Self::Blue => "#00000000FFFF",
+        }
+    }
+}
+
+/// `None` means unchanged; `Some(None)` removes an inherited Font/Color, and
+/// `Some(Some(value))` writes a bounded explicit value. Size has no removal row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InlineRunFormattingPatch {
+    pub font: Option<Option<InlineFont>>,
+    pub size: Option<InlineSize>,
+    pub color: Option<Option<InlineColor>>,
+}
+
+impl InlineRunFormattingPatch {
+    pub const fn is_empty(self) -> bool {
+        self.font.is_none() && self.size.is_none() && self.color.is_none()
+    }
 }
 /// Parse source `Style` tokens without normalizing unknown token spellings.
 pub fn parse_style_attribute(
@@ -435,6 +523,142 @@ pub fn toggle_style_over_ranges(
             )
         })
         .collect()
+}
+
+/// Apply a typed inline attribute patch to exact UTF-8 ranges as one candidate.
+/// Every affected source range is checked before run publication; attribute
+/// slots stay in place, and only adjacent runs with identical ordered vectors
+/// are coalesced.
+pub fn set_paragraph_run_formatting(
+    project: &mut Project,
+    selections: &[(ParagraphTarget, Range<usize>)],
+    patch: InlineRunFormattingPatch,
+) -> Result<bool, FormattedTextError> {
+    if selections.is_empty() {
+        return Err(FormattedTextError::EmptyParagraphSelection);
+    }
+    if patch.is_empty() {
+        return Ok(false);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if selections.iter().any(|(target, _)| !seen.insert(*target)) {
+        return Err(FormattedTextError::DuplicateParagraphTarget);
+    }
+
+    let mut candidate = project.clone();
+    let mut snapshots = Vec::with_capacity(selections.len());
+    for (target, range) in selections {
+        let (id, text, runs, has_provenance) = match *target {
+            ParagraphTarget::Body(index) => {
+                let element = candidate.elements.get(index)
+                    .ok_or(FormattedTextError::ParagraphOutOfRange)?;
+                (element.id.clone(), element.text.clone(), element.runs.clone(), element.source_provenance.is_some())
+            }
+            ParagraphTarget::TitlePage(index) => {
+                let paragraph = candidate.title_page.get(index)
+                    .ok_or(FormattedTextError::ParagraphOutOfRange)?;
+                (paragraph.id.clone(), paragraph.text.clone(), paragraph.runs.clone(), paragraph.source_provenance.is_some())
+            }
+        };
+        validate_range(&text, range)?;
+        if !range.is_empty() {
+            if let Some(preservation) = candidate.preservation.as_ref() {
+                preservation.ensure_run_range_is_contiguous(&id, range.clone())?;
+            }
+        }
+        snapshots.push((*target, id, text, runs, range.clone(), has_provenance));
+    }
+
+    let mut changed = false;
+    for (target, id, text, runs, range, has_provenance) in snapshots {
+        if range.is_empty() {
+            continue;
+        }
+        let source_runs = effective_runs(&text, &runs)?;
+        let mut transformed = Vec::with_capacity(source_runs.len().saturating_add(2));
+        let mut global_start = 0usize;
+        for run in &source_runs {
+            let global_end = global_start.saturating_add(run.text.len());
+            let local_start = range.start.max(global_start).min(global_end) - global_start;
+            let local_end = range.end.max(global_start).min(global_end) - global_start;
+            if local_start == local_end {
+                push_run_coalescing(&mut transformed, &run.text, &run.attributes);
+            } else {
+                push_run_coalescing(&mut transformed, &run.text[..local_start], &run.attributes);
+                let attributes = patch_inline_attributes(&run.attributes, patch)?;
+                push_run_coalescing(&mut transformed, &run.text[local_start..local_end], &attributes);
+                push_run_coalescing(&mut transformed, &run.text[local_end..], &run.attributes);
+            }
+            global_start = global_end;
+        }
+        if transformed.len() > MAX_RUNS_PER_ELEMENT {
+            return Err(FormattedTextError::TooManyRuns);
+        }
+        if transformed == source_runs {
+            continue;
+        }
+        changed = true;
+        match target {
+            ParagraphTarget::Body(index) => BodyOwner::update(&mut candidate.elements[index], |element| {
+                element.text = text.clone();
+                element.runs = transformed.clone();
+            }),
+            ParagraphTarget::TitlePage(index) => {
+                candidate.title_page[index].text = text.clone();
+                candidate.title_page[index].runs = transformed.clone();
+            }
+        }
+        if let Some(preservation) = candidate.preservation.as_mut() {
+            if preservation.has_managed_element(&id) {
+                preservation.sync_managed_text_runs(&id, &text, &transformed)?;
+            } else if has_provenance {
+                return Err(FormattedTextError::Preservation(PreservationError::ManagedAnchorMissing));
+            }
+        }
+    }
+    if changed {
+        candidate.validate()?;
+        *project = candidate;
+    }
+    Ok(changed)
+}
+
+fn patch_inline_attributes(
+    source: &[RunAttribute],
+    patch: InlineRunFormattingPatch,
+) -> Result<Vec<RunAttribute>, FormattedTextError> {
+    let mut result = source.to_vec();
+    for (name, requested) in [
+        ("Font", patch.font.map(|value| value.map(|font| font.fdx_value()))),
+        ("Color", patch.color.map(|value| value.map(|color| color.fdx_value()))),
+    ] {
+        let Some(value) = requested else { continue };
+        let mut matches = result.iter().enumerate().filter(|(_, attribute)| attribute.name == name);
+        let index = matches.next().map(|(index, _)| index);
+        if matches.next().is_some() {
+            return Err(FormattedTextError::AmbiguousInlineAttribute);
+        }
+        match (index, value) {
+            (Some(index), Some(value)) => result[index].value = value.to_owned(),
+            (Some(index), None) => { result.remove(index); }
+            (None, Some(value)) => result.push(RunAttribute { name: name.to_owned(), value: value.to_owned() }),
+            (None, None) => {}
+        }
+    }
+    if let Some(size) = patch.size {
+        let value = size.points().to_string();
+        let mut matches = result.iter().enumerate().filter(|(_, attribute)| attribute.name == "Size");
+        let index = matches.next().map(|(index, _)| index);
+        if matches.next().is_some() {
+            return Err(FormattedTextError::AmbiguousInlineAttribute);
+        }
+        if let Some(index) = index {
+            result[index].value = value;
+        } else {
+            result.push(RunAttribute { name: "Size".to_owned(), value });
+        }
+    }
+    Ok(result)
 }
 
 /// Removes only the five supported run styles from one canonical UTF-8 range.

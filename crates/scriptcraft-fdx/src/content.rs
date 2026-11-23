@@ -9,9 +9,11 @@ use crate::tree::{preserve_misc_node, preserve_opaque_element, preserved_element
 use crate::writer::validate_qname;
 use scriptcraft_model::dual_dialogue::{DualDialogueGroup, DualDialogueWrapperProvenance};
 use scriptcraft_model::element_definition::SemanticCapabilities;
+use scriptcraft_model::element_definition::{ElementDefinition, ElementParagraphSpec};
 use scriptcraft_model::element_type::ElementTypeKey;
 use scriptcraft_model::formatting::{
-    FixedPoint, ParagraphAlignment, SourceLayoutSettings, SourceParagraphOverrides,
+    FixedPoint, ParagraphAlignment, ParagraphLeading, ParagraphSpacing, SourceLayoutSettings,
+    SourceParagraphOverrides,
 };
 use scriptcraft_model::paragraph_id::ParagraphIdAllocator;
 use scriptcraft_model::preservation::{
@@ -486,14 +488,16 @@ pub(crate) enum ImportedSemanticParagraph {
 
 pub(crate) fn new_paragraph(
     semantic: &ScreenplayElement,
+    definition: &ElementDefinition,
     direct_overrides: Option<SourceParagraphOverrides>,
     paragraph_ids: &mut ParagraphIdAllocator,
 ) -> Result<PreservedNode, FdxError> {
     let element_type = semantic.element_type();
-    let mut paragraph = preserved_element("Paragraph", vec![("Type", element_type.as_str())]);
+    let mut paragraph = preserved_element("Paragraph", Vec::new());
     if let Some(overrides) = direct_overrides {
-        add_member_direct_attributes(&mut paragraph, overrides)?;
+        add_member_direct_attributes(&mut paragraph, overrides, &definition.paragraph)?;
     }
+    push_unqualified_attribute(&mut paragraph, "Type", element_type.as_str());
     paragraph.attributes.push(PreservedAttribute {
         name: SourceName {
             namespace_uri: None,
@@ -552,32 +556,17 @@ pub(crate) fn new_paragraph(
 pub(crate) fn add_member_direct_attributes(
     paragraph: &mut PreservedElement,
     overrides: SourceParagraphOverrides,
+    definition: &ElementParagraphSpec,
 ) -> Result<(), FdxError> {
     let spec = overrides.paragraph;
-    if let Some(alignment) = spec.alignment {
-        push_unqualified_attribute(paragraph, "Alignment", alignment.fdx_value());
-    }
-    for (name, value) in [
-        ("FirstIndent", spec.first_indent),
-        ("LeftIndent", spec.left_indent),
-        ("RightIndent", spec.right_indent),
-    ] {
-        if let Some(value) = value {
-            push_unqualified_attribute(paragraph, name, &fixed_inches_string(value));
-        }
-    }
-    if spec.leading_regular == Some(true) {
-        push_unqualified_attribute(paragraph, "Leading", "Regular");
-    }
-    if let Some(value) = spec.space_before {
-        push_unqualified_attribute(paragraph, "SpaceBefore", &value.decimal_string());
-    }
-    if spec.spacing_single == Some(true) {
-        push_unqualified_attribute(paragraph, "Spacing", "1");
-    }
-    if let Some(value) = overrides.starts_new_page {
-        push_unqualified_attribute(paragraph, "StartsNewPage", if value { "Yes" } else { "No" });
-    }
+    push_unqualified_attribute(paragraph, "Alignment", spec.alignment.unwrap_or(definition.alignment).fdx_value());
+    push_unqualified_attribute(paragraph, "FirstIndent", &fixed_inches_string(spec.first_indent.unwrap_or(definition.first_indent)));
+    push_unqualified_attribute(paragraph, "Leading", spec.leading.map_or(definition.leading.as_str(), |value| value.fdx_value()));
+    push_unqualified_attribute(paragraph, "LeftIndent", &fixed_inches_string(spec.left_indent.unwrap_or(definition.left_indent)));
+    push_unqualified_attribute(paragraph, "RightIndent", &fixed_inches_string(spec.right_indent.unwrap_or(definition.right_indent)));
+    push_unqualified_attribute(paragraph, "SpaceBefore", &spec.space_before.unwrap_or(definition.space_before).decimal_string());
+    push_unqualified_attribute(paragraph, "Spacing", &spec.spacing.map_or_else(|| definition.spacing.to_string(), |value| value.fdx_value().to_owned()));
+    push_unqualified_attribute(paragraph, "StartsNewPage", if overrides.starts_new_page.unwrap_or(definition.starts_new_page) { "Yes" } else { "No" });
     Ok(())
 }
 
@@ -670,11 +659,11 @@ pub(crate) fn direct_paragraph_overrides(element: &RawElement) -> Option<SourceP
         attribute(element, "LeftIndent").and_then(|value| bounded_inches(value, false));
     paragraph.right_indent =
         attribute(element, "RightIndent").and_then(|value| bounded_inches(value, false));
-    paragraph.leading_regular = (attribute(element, "Leading") == Some("Regular")).then_some(true);
+    paragraph.leading = attribute(element, "Leading").and_then(ParagraphLeading::from_fdx_value);
     paragraph.space_before = attribute(element, "SpaceBefore")
         .and_then(FixedPoint::parse_points)
         .filter(|value| (0..=79_200).contains(&value.raw()));
-    paragraph.spacing_single = (attribute(element, "Spacing") == Some("1")).then_some(true);
+    paragraph.spacing = attribute(element, "Spacing").and_then(ParagraphSpacing::from_fdx_value);
     overrides.starts_new_page = attribute(element, "StartsNewPage").and_then(|value| match value {
         "Yes" => Some(true),
         "No" => Some(false),
@@ -685,9 +674,9 @@ pub(crate) fn direct_paragraph_overrides(element: &RawElement) -> Option<SourceP
         || paragraph.first_indent.is_some()
         || paragraph.left_indent.is_some()
         || paragraph.right_indent.is_some()
-        || paragraph.leading_regular.is_some()
+        || paragraph.leading.is_some()
         || paragraph.space_before.is_some()
-        || paragraph.spacing_single.is_some()
+        || paragraph.spacing.is_some()
         || overrides.starts_new_page.is_some())
     .then_some(overrides)
 }
@@ -804,4 +793,3 @@ pub(crate) fn semantic_text_runs(
     }
     Ok(runs)
 }
-

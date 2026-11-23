@@ -6,7 +6,7 @@
 
 - **Requirements:** [Title page editing](../../requirements/features/title-page-editing.md); [Desktop workspace](../../requirements/features/desktop-workspace.md) owns `REQ-WRITING-LOOP-005` for `AC-WRITING-005.10`; [Native document lifecycle](../../requirements/features/native-document-lifecycle.md) owns the shared `REQ-WRITING-LOOP-007` statement.
 - **Technical context:** [Technical context](../technical-context.md)
-- **Requirements traced:** `REQ-WRITING-LOOP-005`, `REQ-WRITING-LOOP-007`; `AC-WRITING-007.3`, `AC-WRITING-007.5`–`AC-WRITING-007.9`, `AC-WRITING-007.11`, `AC-WRITING-005.10`.
+- **Requirements traced:** `REQ-WRITING-LOOP-005`, `REQ-WRITING-LOOP-007`; `AC-WRITING-007.3`, `AC-WRITING-007.5`–`AC-WRITING-007.9`, `AC-WRITING-007.11`–`.13`, `AC-WRITING-005.10`.
 - **Area summary:** Title Content is a separately editable surface of the same native project, not another element type, project, or process. Only title-page Content paragraphs are managed and editable; their optional exact type keys use the same open ordered registry as Body. Type-less Content paragraphs remain valid, while other title structure remains opaque and source-preserved. Surface-specific controls feed the same session and history; independent Title Page invisibles visibility is disposable FDX view state rather than title content or Project semantics.
 
 ## Shared composition
@@ -36,6 +36,10 @@ Managed TitlePage Content consumes the same Project-owned effective PageLayout a
 Body and Title Page invisibles flags are independent per-document desktop presentation state. The shared typed toggle resolves the currently active surface at execution time; View > Document and primary+J therefore target Title Page while it is active, and the main-toolbar dropdown follows the active surface. Closing Title Page does not clear its flag. FDX import projects only the bounded direct TitlePage/TextState ShowInvisibles value; transactional Save/Save As persists the current Title flag in the detached candidate. Title marks use the shared canonical-position editor overlay and are absent from output paths.
 
 ## Decisions
+
+### Shared formatting representation boundary
+
+Managed TitlePage Content shares the bounded Leading/Spacing model values and their FDX/layout representation with Body. This representation migration does not add Title Page formatting-menu rows, a Title Page inline-typing patch, a context menu, or explicit-Type paragraph-format reset semantics. Title Page Type assignment continues to preserve its existing title formatting/source contract; only the explicitly scoped Body Type candidate has the new paragraph-format reset. Apply Template remains governed by its existing bulk remapping contract.
 
 - Use one semantic document session and history with explicit surface identity, not a second document/editor model.
 - Keep the native title window as a desktop adapter concern; title values belong to the model, edits/history to session, title composition to layout, and FDX encoding/source projection to the FDX/session boundary.

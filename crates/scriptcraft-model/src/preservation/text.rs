@@ -15,6 +15,109 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 
 impl PreservationState {
+    /// Atomically updates a bounded set of direct Paragraph attributes while
+    /// retaining existing slots and unrelated source. Missing attributes are
+    /// inserted in the supplied order before Type/ID and indexes are rebuilt
+    /// once after the detached paragraph projection is complete.
+    pub fn set_managed_paragraph_attributes(
+        &mut self,
+        id: &StableId,
+        updates: &[(&str, Option<String>)],
+    ) -> Result<(), PreservationError> {
+        let mut names = BTreeSet::new();
+        if updates.iter().any(|(name, _)| !names.insert(*name)) {
+            return Err(PreservationError::AmbiguousDirectAttribute);
+        }
+        let paragraph = self.managed_element_mut_indexed(id)?;
+        if paragraph.name.local_name != "Paragraph" {
+            return Err(PreservationError::ManagedAnchorMissing);
+        }
+        let mut attributes = paragraph.attributes.clone();
+        let mut missing = Vec::new();
+        for (name, value) in updates {
+            let matching = attributes
+                .iter()
+                .enumerate()
+                .filter(|(_, attribute)| {
+                    attribute.name.namespace_uri.is_none() && attribute.name.local_name == *name
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if matching.len() > 1 {
+                return Err(PreservationError::AmbiguousDirectAttribute);
+            }
+            match (matching.first().copied(), value) {
+                (Some(index), Some(value)) => {
+                    attributes[index].value = value.clone();
+                }
+                (Some(index), None) => {
+                    attributes.remove(index);
+                }
+                (None, Some(value)) => missing.push(PreservedAttribute {
+                    name: SourceName {
+                        namespace_uri: None,
+                        local_name: (*name).to_owned(),
+                        qualified_name: Some((*name).to_owned()),
+                    },
+                    value: value.clone(),
+                }),
+                (None, None) => {}
+            }
+        }
+        if !missing.is_empty() {
+            let insertion = attributes
+                .iter()
+                .position(|attribute| {
+                    attribute.name.namespace_uri.is_none()
+                        && matches!(attribute.name.local_name.as_str(), "Type" | "ID" | "id")
+                })
+                .unwrap_or(attributes.len());
+            attributes.splice(insertion..insertion, missing);
+        }
+        paragraph.attributes = attributes;
+        self.rebuild_managed_paragraph_index();
+        Ok(())
+    }
+
+    /// Keeps the semantic direct-override projection coherent with the
+    /// atomically materialized managed Paragraph attributes.
+    pub fn set_direct_paragraph_overrides(
+        &mut self,
+        id: &StableId,
+        overrides: crate::formatting::SourceParagraphOverrides,
+    ) {
+        self.source_layout_settings
+            .direct_paragraph_overrides
+            .insert(id.clone(), overrides);
+    }
+
+    /// Removes recognized direct paragraph-formatting source fields from one
+    /// managed Body member while leaving Type, ID, and unrelated source intact.
+    pub fn clear_managed_paragraph_formatting(
+        &mut self,
+        id: &StableId,
+    ) -> Result<(), PreservationError> {
+        self.set_managed_paragraph_attributes(
+            id,
+            &[
+                ("Alignment", None),
+                ("FirstIndent", None),
+                ("Leading", None),
+                ("LeftIndent", None),
+                ("RightIndent", None),
+                ("SpaceBefore", None),
+                ("Spacing", None),
+                ("StartsNewPage", None),
+            ],
+        )
+    }
+
+    pub fn clear_direct_paragraph_overrides(&mut self, id: &StableId) {
+        self.source_layout_settings
+            .direct_paragraph_overrides
+            .remove(id);
+    }
+
     /// Updates exactly one unqualified managed Paragraph attribute while
     /// retaining its original ordered slot and every unrelated source value.
     pub fn set_managed_paragraph_attribute(

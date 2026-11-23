@@ -211,6 +211,7 @@ impl EditingSession {
                         }
                         let old_type = project.elements[position.element].element_type();
                         if old_type != element_type {
+                            clear_body_paragraph_formatting(project, position.element)?;
                             update_preserved_type(project, position.element, &element_type)?;
                             BodyOwner::update(&mut project.elements[position.element], |element| {
                                 element.set_element_type(element_type.clone());
@@ -269,8 +270,8 @@ impl EditingSession {
     }
 
     /// Changes the selected body paragraph to an exact document-owned type.
-    /// This operation is nonstructural: it never unwraps a dual-dialogue group
-    /// or changes text, runs, formatting, or source-owned attachments.
+    /// A real key change resets direct paragraph formatting but retains inline
+    /// runs, text, identity, attachments, and dual-dialogue membership.
     pub fn change_element_type(&mut self, element_type: ElementTypeKey) -> Result<(), EditError> {
         self.change_element_type_candidate(element_type, false)
     }
@@ -312,6 +313,7 @@ impl EditingSession {
                     return Err(EditError::InvalidSelection);
                 }
                 if project.elements[start.element].element_type() != element_type {
+                    clear_body_paragraph_formatting(project, start.element)?;
                     update_preserved_type(project, start.element, &element_type)?;
                     BodyOwner::update(&mut project.elements[start.element], |element| {
                         element.set_element_type(element_type.clone());
@@ -348,6 +350,28 @@ impl EditingSession {
             },
         )
     }
+}
+
+fn clear_body_paragraph_formatting(
+    project: &mut Project,
+    element_index: usize,
+) -> Result<(), EditError> {
+    let id = project
+        .elements
+        .get(element_index)
+        .ok_or(EditError::InvalidElement)?
+        .id
+        .clone();
+    project.direct_paragraph_overrides.remove(&id);
+    if let Some(preservation) = project.preservation.as_mut() {
+        if preservation.has_managed_element(&id) {
+            preservation
+                .clear_managed_paragraph_formatting(&id)
+                .map_err(EditError::Preservation)?;
+        }
+        preservation.clear_direct_paragraph_overrides(&id);
+    }
+    Ok(())
 }
 
 pub(super) fn update_preserved_type(

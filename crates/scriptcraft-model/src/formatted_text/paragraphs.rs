@@ -5,7 +5,12 @@ use super::runs::{
     FormattedTextError, RunStyle, RunStyleEdit, RunStyleFlags, RunStyleRange,
 };
 use crate::{
-    element::BodyOwner, formatting::ParagraphAlignment, preservation::PreservationError,
+    element::BodyOwner,
+    formatting::{
+        FixedPoint, ParagraphAlignment, ParagraphFormattingPatch, ParagraphLeading,
+        ParagraphSpacing, SourceParagraphOverrides, SourceParagraphSpec,
+    },
+    preservation::PreservationError,
     project::Project,
 };
 use std::ops::Range;
@@ -29,9 +34,37 @@ pub fn set_paragraph_alignments(
     targets: &[ParagraphTarget],
     alignment: ParagraphAlignment,
 ) -> Result<(), FormattedTextError> {
+    set_paragraph_formatting(
+        project,
+        targets,
+        ParagraphFormattingPatch {
+            alignment: Some(alignment),
+            ..ParagraphFormattingPatch::default()
+        },
+    )
+}
+
+/// Applies one typed field to each selected paragraph using a complete
+/// definition-derived baseline. Source projection and semantic overrides are
+/// staged together and published only after full candidate validation.
+pub fn set_paragraph_formatting(
+    project: &mut Project,
+    targets: &[ParagraphTarget],
+    patch: ParagraphFormattingPatch,
+) -> Result<(), FormattedTextError> {
     if targets.is_empty() {
         return Err(FormattedTextError::EmptyParagraphSelection);
     }
+    if targets.iter().copied().collect::<std::collections::BTreeSet<_>>().len() != targets.len() {
+        return Err(FormattedTextError::DuplicateParagraphTarget);
+    }
+    if patch.space_before_lines.is_some_and(|lines| lines > 3) {
+        return Err(FormattedTextError::Model(crate::ModelError::InvalidNumber));
+    }
+    if patch == ParagraphFormattingPatch::default() {
+        return Ok(());
+    }
+
     let mut candidate = project.clone();
     for target in targets {
         match *target {
@@ -41,46 +74,254 @@ pub fn set_paragraph_alignments(
                     .get(index)
                     .ok_or(FormattedTextError::ParagraphOutOfRange)?;
                 let id = element.id.clone();
-                let previous_alignment = candidate
+                let element_type = element.element_type();
+                let definition = candidate
+                    .element_definitions()
+                    .get(&element_type)
+                    .ok_or_else(|| FormattedTextError::Model(
+                        crate::ModelError::MissingElementDefinition(element_type.clone()),
+                    ))?;
+                let old = candidate
                     .direct_paragraph_overrides
                     .get(&id)
-                    .and_then(|overrides| overrides.paragraph.alignment);
-                let overrides = candidate
-                    .direct_paragraph_overrides
-                    .entry(id.clone())
-                    .or_default();
-                overrides.paragraph.alignment = Some(alignment);
+                    .copied()
+                    .unwrap_or_default();
+                let mut complete = definition_paragraph_baseline(definition);
+                overlay_paragraph_overrides(&mut complete, old);
+                if !paragraph_patch_changes(complete, patch, definition.font.size)? {
+                    continue;
+                }
+                apply_paragraph_patch(&mut complete, patch, definition.font.size)?;
+                let source_attributes = paragraph_source_attributes(
+                    complete,
+                    &definition.paragraph.leading,
+                    definition.paragraph.spacing,
+                );
+                let has_source_provenance = candidate.elements[index].source_provenance.is_some();
                 if let Some(preservation) = candidate.preservation.as_mut() {
-                    preservation.set_managed_paragraph_attribute(
-                        &id,
-                        "Alignment",
-                        Some(alignment.fdx_value()),
-                    )?;
-                    preservation.set_direct_paragraph_alignment(&id, alignment);
+                    if preservation.has_managed_element(&id) {
+                        preservation.set_managed_paragraph_attributes(&id, &source_attributes)?;
+                    } else if has_source_provenance {
+                        return Err(FormattedTextError::Preservation(
+                            PreservationError::ManagedAnchorMissing,
+                        ));
+                    }
+                    preservation.set_direct_paragraph_overrides(&id, complete);
                 }
-                if previous_alignment != Some(alignment) {
-                    BodyOwner::revise(&mut candidate.elements[index]);
-                }
+                candidate.direct_paragraph_overrides.insert(id, complete);
+                BodyOwner::revise(&mut candidate.elements[index]);
             }
             ParagraphTarget::TitlePage(index) => {
                 let paragraph = candidate
                     .title_page
-                    .get_mut(index)
+                    .get(index)
                     .ok_or(FormattedTextError::ParagraphOutOfRange)?;
-                if let Some(preservation) = candidate.preservation.as_mut() {
-                    preservation.set_managed_paragraph_attribute(
-                        &paragraph.id,
-                        "Alignment",
-                        Some(alignment.fdx_value()),
-                    )?;
+                let id = paragraph.id.clone();
+                let Some(element_type) = paragraph.element_type.clone() else {
+                    if patch.alignment.is_none() {
+                        return Err(FormattedTextError::Model(crate::ModelError::InvalidNumber));
+                    }
+                    let alignment = patch.alignment.ok_or(FormattedTextError::Model(
+                        crate::ModelError::InvalidNumber,
+                    ))?;
+                    if paragraph.formatting.alignment == Some(alignment.into()) {
+                        continue;
+                    }
+                    if let Some(preservation) = candidate.preservation.as_mut() {
+                        preservation.set_managed_paragraph_attribute(
+                            &id,
+                            "Alignment",
+                            Some(alignment.fdx_value()),
+                        )?;
+                    }
+                    candidate.title_page[index].formatting.alignment = Some(alignment.into());
+                    continue;
+                };
+                let definition = candidate
+                    .element_definitions()
+                    .get(&element_type)
+                    .ok_or_else(|| FormattedTextError::Model(
+                        crate::ModelError::MissingElementDefinition(element_type.clone()),
+                    ))?;
+                let mut complete = definition_paragraph_baseline(definition);
+                overlay_title_formatting(&mut complete, paragraph.formatting);
+                if !paragraph_patch_changes(complete, patch, definition.font.size)? {
+                    continue;
                 }
-                paragraph.formatting.alignment = Some(alignment.into());
+                apply_paragraph_patch(&mut complete, patch, definition.font.size)?;
+                let source_attributes = paragraph_source_attributes(
+                    complete,
+                    &definition.paragraph.leading,
+                    definition.paragraph.spacing,
+                );
+                let has_source_provenance = candidate.title_page[index].source_provenance.is_some();
+                if let Some(preservation) = candidate.preservation.as_mut() {
+                    if preservation.has_managed_element(&id) {
+                        preservation.set_managed_paragraph_attributes(&id, &source_attributes)?;
+                    } else if has_source_provenance {
+                        return Err(FormattedTextError::Preservation(
+                            PreservationError::ManagedAnchorMissing,
+                        ));
+                    }
+                }
+                candidate.title_page[index].formatting = title_formatting_from_overrides(complete);
             }
         }
     }
     candidate.validate()?;
-    *project = candidate;
+    if candidate != *project {
+        *project = candidate;
+    }
     Ok(())
+}
+
+fn definition_paragraph_baseline(
+    definition: &crate::ElementDefinition,
+) -> SourceParagraphOverrides {
+    SourceParagraphOverrides {
+        paragraph: SourceParagraphSpec {
+            alignment: Some(definition.paragraph.alignment),
+            first_indent: Some(definition.paragraph.first_indent),
+            leading: ParagraphLeading::from_definition_value(&definition.paragraph.leading),
+            left_indent: Some(definition.paragraph.left_indent),
+            right_indent: Some(definition.paragraph.right_indent),
+            space_before: Some(definition.paragraph.space_before),
+            spacing: ParagraphSpacing::from_definition_value(definition.paragraph.spacing),
+        },
+        starts_new_page: Some(definition.paragraph.starts_new_page),
+    }
+}
+
+fn overlay_paragraph_overrides(
+    target: &mut SourceParagraphOverrides,
+    source: SourceParagraphOverrides,
+) {
+    macro_rules! overlay {
+        ($field:ident) => {
+            if source.paragraph.$field.is_some() {
+                target.paragraph.$field = source.paragraph.$field;
+            }
+        };
+    }
+    overlay!(alignment);
+    overlay!(first_indent);
+    overlay!(leading);
+    overlay!(left_indent);
+    overlay!(right_indent);
+    overlay!(space_before);
+    overlay!(spacing);
+    if source.starts_new_page.is_some() {
+        target.starts_new_page = source.starts_new_page;
+    }
+}
+
+fn overlay_title_formatting(
+    target: &mut SourceParagraphOverrides,
+    source: crate::TitlePageParagraphFormatting,
+) {
+    target.paragraph.alignment = source.alignment.map(Into::into).or(target.paragraph.alignment);
+    target.paragraph.first_indent = source.first_indent.or(target.paragraph.first_indent);
+    target.paragraph.leading = source.leading.or(target.paragraph.leading);
+    target.paragraph.left_indent = source.left_indent.or(target.paragraph.left_indent);
+    target.paragraph.right_indent = source.right_indent.or(target.paragraph.right_indent);
+    target.paragraph.space_before = source.space_before.or(target.paragraph.space_before);
+    target.paragraph.spacing = source.spacing.or(target.paragraph.spacing);
+    target.starts_new_page = source.starts_new_page.or(target.starts_new_page);
+}
+
+fn apply_paragraph_patch(
+    target: &mut SourceParagraphOverrides,
+    patch: ParagraphFormattingPatch,
+    base_font_size: u8,
+) -> Result<(), FormattedTextError> {
+    if let Some(value) = patch.alignment { target.paragraph.alignment = Some(value); }
+    if let Some(value) = patch.first_indent { target.paragraph.first_indent = Some(value); }
+    if let Some(value) = patch.leading { target.paragraph.leading = Some(value); }
+    if let Some(value) = patch.left_indent { target.paragraph.left_indent = Some(value); }
+    if let Some(value) = patch.right_indent { target.paragraph.right_indent = Some(value); }
+    if let Some(lines) = patch.space_before_lines {
+        let points = i64::from(base_font_size)
+            .checked_mul(i64::from(lines))
+            .ok_or(FormattedTextError::Model(crate::ModelError::InvalidNumber))?;
+        target.paragraph.space_before = Some(FixedPoint::from_points(points));
+    }
+    if let Some(value) = patch.spacing { target.paragraph.spacing = Some(value); }
+    if let Some(value) = patch.starts_new_page { target.starts_new_page = Some(value); }
+    Ok(())
+}
+
+fn paragraph_patch_changes(
+    current: SourceParagraphOverrides,
+    patch: ParagraphFormattingPatch,
+    base_font_size: u8,
+) -> Result<bool, FormattedTextError> {
+    if patch.alignment.is_some_and(|value| current.paragraph.alignment != Some(value))
+        || patch.first_indent.is_some_and(|value| current.paragraph.first_indent != Some(value))
+        || patch.leading.is_some_and(|value| current.paragraph.leading != Some(value))
+        || patch.left_indent.is_some_and(|value| current.paragraph.left_indent != Some(value))
+        || patch.right_indent.is_some_and(|value| current.paragraph.right_indent != Some(value))
+        || patch.spacing.is_some_and(|value| current.paragraph.spacing != Some(value))
+        || patch.starts_new_page.is_some_and(|value| current.starts_new_page != Some(value))
+    {
+        return Ok(true);
+    }
+    if let Some(lines) = patch.space_before_lines {
+        let points = i64::from(base_font_size)
+            .checked_mul(i64::from(lines))
+            .ok_or(FormattedTextError::Model(crate::ModelError::InvalidNumber))?;
+        if current.paragraph.space_before != Some(FixedPoint::from_points(points)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn title_formatting_from_overrides(
+    overrides: SourceParagraphOverrides,
+) -> crate::TitlePageParagraphFormatting {
+    crate::TitlePageParagraphFormatting {
+        alignment: overrides.paragraph.alignment.map(Into::into),
+        first_indent: overrides.paragraph.first_indent,
+        leading: overrides.paragraph.leading,
+        left_indent: overrides.paragraph.left_indent,
+        right_indent: overrides.paragraph.right_indent,
+        space_before: overrides.paragraph.space_before,
+        spacing: overrides.paragraph.spacing,
+        starts_new_page: overrides.starts_new_page,
+    }
+}
+
+fn paragraph_source_attributes(
+    overrides: SourceParagraphOverrides,
+    definition_leading: &str,
+    definition_spacing: u8,
+) -> Vec<(&'static str, Option<String>)> {
+    let spec = overrides.paragraph;
+    let attribute = |name, value: Option<String>| (name, value);
+    vec![
+        attribute("Alignment", spec.alignment.map(|value| value.fdx_value().to_owned())),
+        attribute("FirstIndent", spec.first_indent.map(format_inches)),
+        attribute("Leading", Some(spec.leading.map_or_else(|| definition_leading.to_owned(), |value| value.fdx_value().to_owned()))),
+        attribute("LeftIndent", spec.left_indent.map(format_inches)),
+        attribute("RightIndent", spec.right_indent.map(format_inches)),
+        attribute("SpaceBefore", spec.space_before.map(FixedPoint::decimal_string)),
+        attribute("Spacing", Some(spec.spacing.map_or_else(|| definition_spacing.to_string(), |value| value.fdx_value().to_owned()))),
+        attribute("StartsNewPage", overrides.starts_new_page.map(|value| if value { "Yes" } else { "No" }.to_owned())),
+    ]
+}
+
+fn format_inches(value: FixedPoint) -> String {
+    let raw = value.raw();
+    const PER_INCH: u64 = 7_200;
+    let magnitude = raw.unsigned_abs();
+    let mut whole = magnitude / PER_INCH;
+    let mut fraction = (magnitude % PER_INCH * 1_000_000 + PER_INCH / 2) / PER_INCH;
+    if fraction == 1_000_000 { whole += 1; fraction = 0; }
+    let sign = if raw < 0 { "-" } else { "" };
+    if fraction == 0 { return format!("{sign}{whole}"); }
+    let mut fraction = format!("{fraction:06}");
+    while fraction.ends_with('0') { fraction.pop(); }
+    format!("{sign}{whole}.{fraction}")
 }
 /// A paragraph alignment is exclusive only when the nonempty affected set is
 /// uniform. Mixed selections and empty selections produce no lit alignment.

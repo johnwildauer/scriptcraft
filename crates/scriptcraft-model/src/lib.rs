@@ -37,6 +37,7 @@ pub use element_definitions::{DocumentElementDefinitions, MAX_DOCUMENT_ELEMENT_D
 pub use element_semantics::{BehaviorTargetResolution, ElementSemantics, ParagraphBehaviorKey};
 pub use element_type::{ElementTypeKey, MAX_ELEMENT_TYPE_KEY_BYTES};
 pub use error::ModelError;
+pub use formatting::{ParagraphFormattingPatch, ParagraphLeading, ParagraphSpacing};
 pub use identity::{StableId, StableIdAllocator};
 pub use layout_inputs::{DocumentLeading, DocumentPageLayout, LayoutInputs, PageLayoutInputs};
 pub use position::{Position, Selection};

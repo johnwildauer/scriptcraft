@@ -250,8 +250,8 @@ pub(crate) fn validate_wrapper_overrides(project: &Project) -> Result<(), DualDi
         if !group_ids.contains(id)
             || overrides.paragraph.alignment.is_some()
             || overrides.paragraph.first_indent.is_some()
-            || overrides.paragraph.leading_regular.is_some()
-            || overrides.paragraph.spacing_single.is_some()
+            || overrides.paragraph.leading.is_some()
+            || overrides.paragraph.spacing.is_some()
         {
             return Err(DualDialogueError::InvalidWrapperOverride);
         }

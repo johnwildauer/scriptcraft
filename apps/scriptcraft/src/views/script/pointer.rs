@@ -139,7 +139,65 @@ impl ScriptCraftApp {
         } else {
             self.reconcile_body_active_group();
         }
-        if let Some(pointer) = response.interact_pointer_pos() {
+        if surface == EditorSurface::Body && response.secondary_clicked() {
+            self.native_input_diagnostics.pointer_activations = self
+                .native_input_diagnostics
+                .pointer_activations
+                .saturating_add(1);
+            self.set_active_editor_surface(EditorSurface::Body);
+            self.dispatch_command(
+                CommandInvocation::new(Command::EditorFocus, CommandOrigin::Pointer),
+                ui.ctx(),
+            );
+            if let Some(pointer) = response.interact_pointer_pos() {
+                if let Some(page_index) = Self::pointer_surface_page(
+                    layout,
+                    presented_pages,
+                    pointer,
+                    EditorSurface::Body,
+                ) {
+                    if let Some(position) = self.caret_from_pointer(
+                        layout,
+                        page_index,
+                        presented_pages[page_index],
+                        scale,
+                        pointer,
+                        Some(projections),
+                    ) {
+                        let selection = self.session.selection();
+                        let (start, end) = if
+                            (selection.anchor.element, selection.anchor.offset)
+                                <= (selection.focus.element, selection.focus.offset)
+                        {
+                            (selection.anchor, selection.focus)
+                        } else {
+                            (selection.focus, selection.anchor)
+                        };
+                        let hit = (position.element, position.offset);
+                        let inside_existing_selection = selection.anchor != selection.focus
+                            && (start.element, start.offset) <= hit
+                            && hit <= (end.element, end.offset);
+                        if !inside_existing_selection {
+                            if let Ok(position) =
+                                scriptcraft_commands::Position::from_core(position)
+                            {
+                                self.dispatch_command(
+                                    CommandInvocation::new(
+                                        Command::EditorSelectionPointer {
+                                            position,
+                                            phase: PointerPhase::Release,
+                                            surface: EditorSurface::Body,
+                                        },
+                                        CommandOrigin::Pointer,
+                                    ),
+                                    ui.ctx(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        } else if let Some(pointer) = response.interact_pointer_pos() {
             let pointer_active = response.clicked()
                 || response.double_clicked()
                 || response.triple_clicked()

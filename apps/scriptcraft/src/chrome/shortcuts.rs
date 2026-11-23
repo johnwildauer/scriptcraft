@@ -73,6 +73,9 @@ pub(crate) enum ShortcutKey {
     Semicolon,
     Colon,
     Period,
+    Plus,
+    Equals,
+    Minus,
     Enter,
     Tab,
     Backspace,
@@ -157,6 +160,9 @@ pub(super) fn key_for_shortcut(key: ShortcutKey) -> Option<egui::Key> {
         ShortcutKey::Semicolon => return None,
         ShortcutKey::Colon => return None,
         ShortcutKey::Period => return None,
+        ShortcutKey::Plus => egui::Key::Plus,
+        ShortcutKey::Equals => egui::Key::Equals,
+        ShortcutKey::Minus => egui::Key::Minus,
         ShortcutKey::Enter => egui::Key::Enter,
         ShortcutKey::Tab => egui::Key::Tab,
         ShortcutKey::Backspace => egui::Key::Backspace,
@@ -331,6 +337,9 @@ pub(crate) fn element_shortcut_label(
         ShortcutKey::Semicolon | ShortcutKey::Colon => ";",
         ShortcutKey::Comma => ",",
         ShortcutKey::Period => ".",
+        ShortcutKey::Plus => "+",
+        ShortcutKey::Equals => "=",
+        ShortcutKey::Minus => "-",
         ShortcutKey::Enter => "Enter",
         ShortcutKey::Tab => "Tab",
         ShortcutKey::Backspace => "Backspace",
@@ -465,4 +474,3 @@ pub(crate) fn modifiers_are_none(modifiers: egui::Modifiers) -> bool {
 pub(crate) const fn shortcut_input_allowed(ime_active: bool, ime_event_in_frame: bool) -> bool {
     !ime_active && !ime_event_in_frame
 }
-

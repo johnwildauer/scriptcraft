@@ -288,8 +288,12 @@ pub(super) fn wrap_resolved_for_layout(
         .into_iter()
         .map(|range| -> Result<WrappedLine, LayoutError> {
             let selected = &scalars[range.scalar_range.clone()];
-            let vertical_metrics =
-                inputs::resolve_line_vertical_metrics(base_style, selected, environment)?;
+            let vertical_metrics = inputs::resolve_line_vertical_metrics(
+                base_style,
+                selected,
+                environment,
+                paragraph,
+            )?;
             let mut display_text = String::new();
             let mut display_source_map: Vec<DisplaySourceSegment> = Vec::new();
             for (display_index, scalar) in selected.iter().enumerate() {

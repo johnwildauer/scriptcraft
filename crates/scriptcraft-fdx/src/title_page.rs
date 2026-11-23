@@ -6,7 +6,8 @@ use crate::identity::raw_identity_attribute as identity_attribute;
 use crate::reader::{attribute, validate_xml_chars, RawElement};
 use crate::tree::{preserved_element, preserved_element_owned};
 use crate::writer::validate_qname;
-use scriptcraft_model::formatting::FixedPoint;
+use scriptcraft_model::element_definition::ElementDefinition;
+use scriptcraft_model::formatting::{FixedPoint, ParagraphLeading, ParagraphSpacing};
 use scriptcraft_model::paragraph_id::ParagraphIdAllocator;
 use scriptcraft_model::preservation::{
     PreservedAttribute, PreservedElement, PreservedNode, SourceName,
@@ -108,44 +109,71 @@ pub(crate) fn new_title_page_header_and_footer(
 
 pub(crate) fn new_title_page_paragraph(
     semantic: &TitlePageParagraph,
+    definition: Option<&ElementDefinition>,
     paragraph_ids: &mut ParagraphIdAllocator,
 ) -> Result<PreservedNode, FdxError> {
     let formatting = semantic.formatting;
-    if formatting.leading_regular == Some(false) || formatting.spacing_single == Some(false) {
-        return Err(FdxError::UnsupportedConstruct);
-    }
     let mut attributes = Vec::with_capacity(12);
-    if let Some(alignment) = formatting.alignment {
-        let value = match alignment {
-            TitlePageAlignment::Left => "Left",
-            TitlePageAlignment::Right => "Right",
-            TitlePageAlignment::Center => "Center",
-            TitlePageAlignment::Justified => "Full",
-        };
-        attributes.push(("Alignment", value.to_owned()));
-    }
-    if let Some(value) = formatting.first_indent {
-        attributes.push(("FirstIndent", format_inches_attribute(value)));
-    }
-    if formatting.leading_regular == Some(true) {
-        attributes.push(("Leading", "Regular".to_owned()));
-    }
-    if let Some(value) = formatting.left_indent {
-        attributes.push(("LeftIndent", format_inches_attribute(value)));
+    let has_direct_formatting = formatting.alignment.is_some()
+        || formatting.first_indent.is_some()
+        || formatting.leading.is_some()
+        || formatting.left_indent.is_some()
+        || formatting.right_indent.is_some()
+        || formatting.space_before.is_some()
+        || formatting.spacing.is_some()
+        || formatting.starts_new_page.is_some();
+    if let Some(definition) = definition.filter(|_| has_direct_formatting) {
+        let paragraph = &definition.paragraph;
+        attributes.push(("Alignment", formatting.alignment.map_or_else(
+            || paragraph.alignment.fdx_value().to_owned(),
+            |alignment| title_alignment_fdx(alignment).to_owned(),
+        )));
+        attributes.push(("FirstIndent", format_inches_attribute(
+            formatting.first_indent.unwrap_or(paragraph.first_indent),
+        )));
+        attributes.push(("Leading", formatting.leading.map_or_else(
+            || paragraph.leading.clone(),
+            |value| value.fdx_value().to_owned(),
+        )));
+        attributes.push(("LeftIndent", format_inches_attribute(
+            formatting.left_indent.unwrap_or(paragraph.left_indent),
+        )));
+        attributes.push(("RightIndent", format_inches_attribute(
+            formatting.right_indent.unwrap_or(paragraph.right_indent),
+        )));
+        attributes.push(("SpaceBefore", formatting.space_before.unwrap_or(paragraph.space_before).decimal_string()));
+        attributes.push(("Spacing", formatting.spacing.map_or_else(
+            || paragraph.spacing.to_string(),
+            |value| value.fdx_value().to_owned(),
+        )));
+        attributes.push(("StartsNewPage", if formatting.starts_new_page.unwrap_or(paragraph.starts_new_page) { "Yes" } else { "No" }.to_owned()));
+    } else {
+        if let Some(alignment) = formatting.alignment {
+            attributes.push(("Alignment", title_alignment_fdx(alignment).to_owned()));
+        }
+        if let Some(value) = formatting.first_indent {
+            attributes.push(("FirstIndent", format_inches_attribute(value)));
+        }
+        if let Some(value) = formatting.leading {
+            attributes.push(("Leading", value.fdx_value().to_owned()));
+        }
+        if let Some(value) = formatting.left_indent {
+            attributes.push(("LeftIndent", format_inches_attribute(value)));
+        }
+        if let Some(value) = formatting.right_indent {
+            attributes.push(("RightIndent", format_inches_attribute(value)));
+        }
+        if let Some(value) = formatting.space_before {
+            attributes.push(("SpaceBefore", value.decimal_string()));
+        }
+        if let Some(value) = formatting.spacing {
+            attributes.push(("Spacing", value.fdx_value().to_owned()));
+        }
+        if let Some(value) = formatting.starts_new_page {
+            attributes.push(("StartsNewPage", if value { "Yes" } else { "No" }.to_owned()));
+        }
     }
     attributes.push(("OutlineLevel", "1".to_owned()));
-    if let Some(value) = formatting.right_indent {
-        attributes.push(("RightIndent", format_inches_attribute(value)));
-    }
-    if let Some(value) = formatting.space_before {
-        attributes.push(("SpaceBefore", value.decimal_string()));
-    }
-    if formatting.spacing_single == Some(true) {
-        attributes.push(("Spacing", "1".to_owned()));
-    }
-    if let Some(value) = formatting.starts_new_page {
-        attributes.push(("StartsNewPage", if value { "Yes" } else { "No" }.to_owned()));
-    }
     if let Some(element_type) = semantic.element_type() {
         attributes.push(("Type", element_type.into_string()));
     }
@@ -198,6 +226,15 @@ pub(crate) fn new_title_page_paragraph(
         paragraph.children.push(PreservedNode::Element(text));
     }
     Ok(PreservedNode::Element(paragraph))
+}
+
+fn title_alignment_fdx(alignment: TitlePageAlignment) -> &'static str {
+    match alignment {
+        TitlePageAlignment::Left => "Left",
+        TitlePageAlignment::Right => "Right",
+        TitlePageAlignment::Center => "Center",
+        TitlePageAlignment::Justified => "Full",
+    }
 }
 
 fn format_inches_attribute(value: FixedPoint) -> String {
@@ -255,11 +292,11 @@ fn direct_title_page_formatting(element: &RawElement) -> TitlePageParagraphForma
             .and_then(|value| crate::settings::bounded_inches(value, false)),
         right_indent: attribute(element, "RightIndent")
             .and_then(|value| crate::settings::bounded_inches(value, false)),
-        leading_regular: (attribute(element, "Leading") == Some("Regular")).then_some(true),
+        leading: attribute(element, "Leading").and_then(ParagraphLeading::from_fdx_value),
         space_before: attribute(element, "SpaceBefore")
             .and_then(FixedPoint::parse_points)
             .filter(|value| (0..=79_200).contains(&value.raw())),
-        spacing_single: (attribute(element, "Spacing") == Some("1")).then_some(true),
+        spacing: attribute(element, "Spacing").and_then(ParagraphSpacing::from_fdx_value),
         starts_new_page: attribute(element, "StartsNewPage").and_then(|value| match value {
             "Yes" => Some(true),
             "No" => Some(false),
@@ -267,4 +304,3 @@ fn direct_title_page_formatting(element: &RawElement) -> TitlePageParagraphForma
         }),
     }
 }
-

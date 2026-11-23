@@ -31,7 +31,7 @@ const fn descriptor(
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 61] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 63] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -136,6 +136,16 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 61] = [
         CommandId::EditorAlignmentSet,
         "editor",
         "surface, alignment: bounded_alignment",
+    ),
+    descriptor(
+        CommandId::EditorRunFormattingSet,
+        "editor",
+        "surface: body, patch: bounded_font_size_color_patch",
+    ),
+    descriptor(
+        CommandId::EditorParagraphFormattingSet,
+        "editor",
+        "surface: body, patch: bounded_spacing_space_before_leading_patch",
     ),
     descriptor(
         CommandId::PdfIncludeTitlePageResolve,

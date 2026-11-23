@@ -343,6 +343,7 @@ impl EditingSession {
             title_selection: self.title_selection,
             title_typing_style: self.title_typing_style,
             body_typing_style: self.body_typing_style,
+            body_typing_formatting: self.body_typing_formatting,
             generated_parentheticals: self.generated_parentheticals.clone(),
         });
         self.project = project;

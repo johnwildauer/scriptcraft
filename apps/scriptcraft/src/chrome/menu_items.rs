@@ -9,7 +9,10 @@ use super::shortcuts::{display_shortcut, primary_shortcut};
 pub(super) use super::shortcuts::{LogicalShortcut, ShortcutKey};
 use scriptcraft_commands::CommandId;
 use scriptcraft_commands::{
-    Command, EditorSurface, ParagraphAlignmentValue, ScriptViewMode, TitleTextStyle,
+    Appearance, Command, EditorSurface, InlineColorValue, InlineFontValue, InlineSizeValue,
+    ParagraphAlignmentValue, ParagraphFormattingPatchValue, ParagraphLeadingValue,
+    ParagraphSpacingValue, RunFormattingPatchValue, ScriptViewMode, SpaceBeforeLines,
+    TitleTextStyle, ZoomPercent,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +28,29 @@ pub(crate) enum MenuEntrySpec {
     Item(MenuItemSpec),
     Separator,
     Submenu(&'static MenuSpec),
+    DynamicSubmenu(DynamicSubmenuKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DynamicSubmenuKind {
+    ChangeElementTo,
+    Zoom,
+}
+
+impl DynamicSubmenuKind {
+    pub(crate) const fn id(self) -> &'static str {
+        match self {
+            Self::ChangeElementTo => "format.change-element",
+            Self::Zoom => "view.zoom",
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::ChangeElementTo => "Change Element To",
+            Self::Zoom => "Zoom",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +66,49 @@ pub(crate) enum MenuAction {
     ClearStyles,
     SetAlignment(ParagraphAlignmentValue),
     SetScriptView(ScriptViewMode),
+    SetInlineFont(InlineFontValue),
+    SetInlineSize(InlineSizeValue),
+    SetInlineColor(InlineColorValue),
+    SetParagraphSpacing(ParagraphSpacingValue),
+    SetSpaceBefore(SpaceBeforeLines),
+    SetParagraphLeading(ParagraphLeadingValue),
+    SetAppearance(Appearance),
+    SetZoom(u16),
+    ZoomStep(ZoomStepDirection),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ZoomStepDirection {
+    In,
+    Out,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum MenuActivation {
+    Command(Command),
+    ZoomStep(ZoomStepDirection),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ViewMenuProjection {
+    pub(crate) zoom_percent: u16,
+    pub(crate) appearance_mode: super::theme::AppearanceMode,
+}
+
+impl Default for ViewMenuProjection {
+    fn default() -> Self {
+        Self {
+            zoom_percent: 100,
+            appearance_mode: super::theme::AppearanceMode::System,
+        }
+    }
+}
+
+pub(crate) fn activation_for_action(action: MenuAction, surface: EditorSurface) -> MenuActivation {
+    match action {
+        MenuAction::ZoomStep(direction) => MenuActivation::ZoomStep(direction),
+        action => MenuActivation::Command(command_for_action(action, surface)),
+    }
 }
 
 pub(crate) fn command_for_action(action: MenuAction, surface: EditorSurface) -> Command {
@@ -48,16 +117,66 @@ pub(crate) fn command_for_action(action: MenuAction, surface: EditorSurface) -> 
         MenuAction::ClearStyles => Command::EditorStyleClear { surface },
         MenuAction::SetAlignment(alignment) => Command::EditorAlignmentSet { surface, alignment },
         MenuAction::SetScriptView(mode) => Command::ViewScriptViewSet { mode },
+        MenuAction::SetAppearance(appearance) => Command::ViewAppearanceSet { appearance },
+        MenuAction::SetZoom(percent) => Command::ViewZoomSet {
+            percent: ZoomPercent::new(percent).expect("menu zoom preset is bounded"),
+        },
+        MenuAction::ZoomStep(_) => unreachable!("zoom steps are deferred until activation"),
+        MenuAction::SetInlineFont(font) => Command::EditorRunFormattingSet {
+            surface,
+            patch: RunFormattingPatchValue { font: Some(font), ..RunFormattingPatchValue::default() },
+        },
+        MenuAction::SetInlineSize(size) => Command::EditorRunFormattingSet {
+            surface,
+            patch: RunFormattingPatchValue { size: Some(size), ..RunFormattingPatchValue::default() },
+        },
+        MenuAction::SetInlineColor(color) => Command::EditorRunFormattingSet {
+            surface,
+            patch: RunFormattingPatchValue { color: Some(color), ..RunFormattingPatchValue::default() },
+        },
+        MenuAction::SetParagraphSpacing(spacing) => Command::EditorParagraphFormattingSet {
+            surface,
+            patch: ParagraphFormattingPatchValue { spacing: Some(spacing), ..ParagraphFormattingPatchValue::default() },
+        },
+        MenuAction::SetSpaceBefore(lines) => Command::EditorParagraphFormattingSet {
+            surface,
+            patch: ParagraphFormattingPatchValue { space_before_lines: Some(lines), ..ParagraphFormattingPatchValue::default() },
+        },
+        MenuAction::SetParagraphLeading(leading) => Command::EditorParagraphFormattingSet {
+            surface,
+            patch: ParagraphFormattingPatchValue { leading: Some(leading), ..ParagraphFormattingPatchValue::default() },
+        },
     }
 }
 
 /// Projects the checked appearance for a menu item from current application
 /// state while retaining the catalog's unrelated static checked placeholder.
-pub(crate) fn menu_item_is_checked(item: &MenuItemSpec, script_view_mode: ScriptViewMode) -> bool {
+pub(crate) fn menu_item_is_checked(
+    item: &MenuItemSpec,
+    script_view_mode: ScriptViewMode,
+    formatting: &super::formatting_menu::FormattingMenuProjection,
+    view: ViewMenuProjection,
+) -> bool {
     match item.behavior {
         MenuItemBehavior::MenuCommand(MenuAction::SetScriptView(mode)) => mode == script_view_mode,
+        MenuItemBehavior::MenuCommand(MenuAction::SetAppearance(appearance)) => {
+            appearance_mode_for_choice(appearance) == view.appearance_mode
+        }
+        MenuItemBehavior::MenuCommand(MenuAction::SetZoom(percent)) => {
+            percent == view.zoom_percent
+        }
+        MenuItemBehavior::MenuCommand(action) => formatting.is_checked(action),
         MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Checked) => true,
         _ => false,
+    }
+}
+
+fn appearance_mode_for_choice(appearance: Appearance) -> super::theme::AppearanceMode {
+    match appearance {
+        Appearance::System => super::theme::AppearanceMode::System,
+        Appearance::Day => super::theme::AppearanceMode::Day,
+        Appearance::Night => super::theme::AppearanceMode::Night,
+        Appearance::Midnight => super::theme::AppearanceMode::Midnight,
     }
 }
 
@@ -178,6 +297,62 @@ const ITEM: PlaceholderKind = PlaceholderKind::Item;
 const DISCLOSURE: PlaceholderKind = PlaceholderKind::Disclosure;
 const CHECKED: PlaceholderKind = PlaceholderKind::Checked;
 const SEARCH: PlaceholderKind = PlaceholderKind::Search;
+
+pub(crate) const ZOOM_IN_ITEM: MenuItemSpec = MenuItemSpec {
+    id: "view.zoom.in",
+    label: "Zoom In",
+    accessibility_name: "Zoom In",
+    icon: None,
+    shortcut: Some(primary_shortcut(ShortcutKey::Plus, true)),
+    windows_alias: Some(primary_shortcut(ShortcutKey::Equals, false)),
+    behavior: MenuItemBehavior::MenuCommand(MenuAction::ZoomStep(ZoomStepDirection::In)),
+};
+
+pub(crate) const ZOOM_OUT_ITEM: MenuItemSpec = MenuItemSpec {
+    id: "view.zoom.out",
+    label: "Zoom Out",
+    accessibility_name: "Zoom Out",
+    icon: None,
+    shortcut: Some(primary_shortcut(ShortcutKey::Minus, false)),
+    windows_alias: None,
+    behavior: MenuItemBehavior::MenuCommand(MenuAction::ZoomStep(ZoomStepDirection::Out)),
+};
+
+pub(crate) const ZOOM_STEP_ITEMS: [MenuItemSpec; 2] = [ZOOM_IN_ITEM, ZOOM_OUT_ITEM];
+
+const APPEARANCE_ENTRIES: &[MenuEntrySpec] = &[
+    menu_command_item(
+        "view.appearance.system",
+        "System",
+        None,
+        MenuAction::SetAppearance(Appearance::System),
+    ),
+    menu_command_item(
+        "view.appearance.day",
+        "Day",
+        None,
+        MenuAction::SetAppearance(Appearance::Day),
+    ),
+    menu_command_item(
+        "view.appearance.night",
+        "Night",
+        None,
+        MenuAction::SetAppearance(Appearance::Night),
+    ),
+    menu_command_item(
+        "view.appearance.midnight",
+        "Midnight",
+        None,
+        MenuAction::SetAppearance(Appearance::Midnight),
+    ),
+];
+
+const APPEARANCE_MENU: MenuSpec = MenuSpec {
+    id: "view.appearance",
+    label: "Appearance",
+    accessibility_name: "Appearance",
+    entries: APPEARANCE_ENTRIES,
+};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const PRINT_ENTRY: MenuEntrySpec = command_item(
@@ -552,13 +727,7 @@ const VIEW_ENTRIES: &[MenuEntrySpec] = &[
     SEP,
     MenuEntrySpec::Submenu(&VIEW_DOCUMENT_MENU),
     SEP,
-    placeholder(
-        "view.zoom",
-        "Zoom",
-        "Zoom submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
+    MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::Zoom),
     placeholder(
         "view.zoom-outline-editor",
         "Zoom Outline Editor",
@@ -575,13 +744,7 @@ const VIEW_ENTRIES: &[MenuEntrySpec] = &[
         None,
     ),
     SEP,
-    placeholder(
-        "view.appearance",
-        "Appearance",
-        "Appearance submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
+    MenuEntrySpec::Submenu(&APPEARANCE_MENU),
     SEP,
     placeholder(
         "view.tab-bar",
@@ -662,13 +825,7 @@ const FORMAT_ENTRIES: &[MenuEntrySpec] = &[
         None,
         CommandId::FormatElementsOpen,
     ),
-    placeholder(
-        "format.change-element",
-        "Change Element To",
-        "Change Element To submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
+    MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::ChangeElementTo),
     placeholder(
         "format.cast-list-options",
         "Cast List Element Options...",
@@ -691,28 +848,10 @@ const FORMAT_ENTRIES: &[MenuEntrySpec] = &[
         ITEM,
         None,
     ),
-    placeholder(
-        "format.font",
-        "Font",
-        "Font submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
-    placeholder(
-        "format.size",
-        "Size",
-        "Size submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
+    MenuEntrySpec::Submenu(&FONT_MENU),
+    MenuEntrySpec::Submenu(&SIZE_MENU),
     MenuEntrySpec::Submenu(&STYLE_MENU),
-    placeholder(
-        "format.color",
-        "Color",
-        "Color submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
+    MenuEntrySpec::Submenu(&COLOR_MENU),
     placeholder(
         "format.highlight",
         "Highlight",
@@ -729,27 +868,9 @@ const FORMAT_ENTRIES: &[MenuEntrySpec] = &[
     ),
     SEP,
     MenuEntrySpec::Submenu(&ALIGNMENT_MENU),
-    placeholder(
-        "format.spacing",
-        "Spacing",
-        "Spacing submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
-    placeholder(
-        "format.space-before",
-        "Space Before",
-        "Space Before submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
-    placeholder(
-        "format.leading",
-        "Leading",
-        "Leading submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
+    MenuEntrySpec::Submenu(&SPACING_MENU),
+    MenuEntrySpec::Submenu(&SPACE_BEFORE_MENU),
+    MenuEntrySpec::Submenu(&LEADING_MENU),
     SEP,
     placeholder(
         "format.beat-board",
@@ -837,6 +958,53 @@ const ALIGNMENT_ENTRIES: &[MenuEntrySpec] = &[
     ),
 ];
 
+const FONT_ENTRIES: &[MenuEntrySpec] = &[
+    menu_command_item("format.font.default", "Element Default", None, MenuAction::SetInlineFont(InlineFontValue::ElementDefault)),
+    menu_command_item("format.font.courier-final-draft", "Courier Final Draft", None, MenuAction::SetInlineFont(InlineFontValue::CourierFinalDraft)),
+    menu_command_item("format.font.courier-prime", "Courier Prime", None, MenuAction::SetInlineFont(InlineFontValue::CourierPrime)),
+    menu_command_item("format.font.arial", "Arial", None, MenuAction::SetInlineFont(InlineFontValue::Arial)),
+    menu_command_item("format.font.times-new-roman", "Times New Roman", None, MenuAction::SetInlineFont(InlineFontValue::TimesNewRoman)),
+];
+
+const SIZE_ENTRIES: &[MenuEntrySpec] = &[
+    menu_command_item("format.size.7", "7", None, MenuAction::SetInlineSize(InlineSizeValue::Seven)),
+    menu_command_item("format.size.8", "8", None, MenuAction::SetInlineSize(InlineSizeValue::Eight)),
+    menu_command_item("format.size.9", "9", None, MenuAction::SetInlineSize(InlineSizeValue::Nine)),
+    menu_command_item("format.size.10", "10", None, MenuAction::SetInlineSize(InlineSizeValue::Ten)),
+    menu_command_item("format.size.12", "12", None, MenuAction::SetInlineSize(InlineSizeValue::Twelve)),
+    menu_command_item("format.size.14", "14", None, MenuAction::SetInlineSize(InlineSizeValue::Fourteen)),
+    menu_command_item("format.size.18", "18", None, MenuAction::SetInlineSize(InlineSizeValue::Eighteen)),
+    menu_command_item("format.size.24", "24", None, MenuAction::SetInlineSize(InlineSizeValue::TwentyFour)),
+];
+
+const COLOR_ENTRIES: &[MenuEntrySpec] = &[
+    menu_command_item("format.color.default", "Element Default", None, MenuAction::SetInlineColor(InlineColorValue::ElementDefault)),
+    menu_command_item("format.color.black", "Black", None, MenuAction::SetInlineColor(InlineColorValue::Black)),
+    menu_command_item("format.color.white", "White", None, MenuAction::SetInlineColor(InlineColorValue::White)),
+    menu_command_item("format.color.red", "Red", None, MenuAction::SetInlineColor(InlineColorValue::Red)),
+    menu_command_item("format.color.green", "Green", None, MenuAction::SetInlineColor(InlineColorValue::Green)),
+    menu_command_item("format.color.blue", "Blue", None, MenuAction::SetInlineColor(InlineColorValue::Blue)),
+];
+
+const SPACING_ENTRIES: &[MenuEntrySpec] = &[
+    menu_command_item("format.spacing.single", "Single", None, MenuAction::SetParagraphSpacing(ParagraphSpacingValue::Single)),
+    menu_command_item("format.spacing.one-and-half", "1.5 Lines", None, MenuAction::SetParagraphSpacing(ParagraphSpacingValue::OneAndHalf)),
+    menu_command_item("format.spacing.double", "Double", None, MenuAction::SetParagraphSpacing(ParagraphSpacingValue::Double)),
+];
+
+const SPACE_BEFORE_ENTRIES: &[MenuEntrySpec] = &[
+    menu_command_item("format.space-before.none", "None", None, MenuAction::SetSpaceBefore(SpaceBeforeLines::new(0).unwrap())),
+    menu_command_item("format.space-before.one-line", "1 Line", None, MenuAction::SetSpaceBefore(SpaceBeforeLines::new(1).unwrap())),
+    menu_command_item("format.space-before.two-lines", "2 Lines", None, MenuAction::SetSpaceBefore(SpaceBeforeLines::new(2).unwrap())),
+    menu_command_item("format.space-before.three-lines", "3 Lines", None, MenuAction::SetSpaceBefore(SpaceBeforeLines::new(3).unwrap())),
+];
+
+const LEADING_ENTRIES: &[MenuEntrySpec] = &[
+    menu_command_item("format.leading.regular", "Regular", None, MenuAction::SetParagraphLeading(ParagraphLeadingValue::Regular)),
+    menu_command_item("format.leading.tight", "Tight", None, MenuAction::SetParagraphLeading(ParagraphLeadingValue::Tight)),
+    menu_command_item("format.leading.loose", "Loose", None, MenuAction::SetParagraphLeading(ParagraphLeadingValue::Loose)),
+];
+
 const STYLE_MENU: MenuSpec = MenuSpec {
     id: "format.style",
     label: "Style",
@@ -849,6 +1017,12 @@ const ALIGNMENT_MENU: MenuSpec = MenuSpec {
     accessibility_name: "Alignment",
     entries: ALIGNMENT_ENTRIES,
 };
+const FONT_MENU: MenuSpec = MenuSpec { id: "format.font", label: "Font", accessibility_name: "Font", entries: FONT_ENTRIES };
+const SIZE_MENU: MenuSpec = MenuSpec { id: "format.size", label: "Size", accessibility_name: "Size", entries: SIZE_ENTRIES };
+const COLOR_MENU: MenuSpec = MenuSpec { id: "format.color", label: "Color", accessibility_name: "Color", entries: COLOR_ENTRIES };
+const SPACING_MENU: MenuSpec = MenuSpec { id: "format.spacing", label: "Spacing", accessibility_name: "Spacing", entries: SPACING_ENTRIES };
+const SPACE_BEFORE_MENU: MenuSpec = MenuSpec { id: "format.space-before", label: "Space Before", accessibility_name: "Space Before", entries: SPACE_BEFORE_ENTRIES };
+const LEADING_MENU: MenuSpec = MenuSpec { id: "format.leading", label: "Leading", accessibility_name: "Leading", entries: LEADING_ENTRIES };
 
 const INSERT_ENTRIES: &[MenuEntrySpec] = &[
     placeholder(
@@ -989,12 +1163,14 @@ const DOCUMENT_ENTRIES: &[MenuEntrySpec] = &[
         None,
     ),
     SEP,
-    placeholder(
+    command_item(
         "document.title-page",
-        "Title Page...",
-        "Title Page (disabled placeholder)",
-        ITEM,
+        "Title Page",
+        "Title Page",
         None,
+        None,
+        None,
+        CommandId::WindowTitlePageOpen,
     ),
     placeholder(
         "document.smarttype",

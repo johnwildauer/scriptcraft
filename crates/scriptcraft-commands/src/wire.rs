@@ -425,6 +425,11 @@ impl<'de> Deserialize<'de> for RawParams {
 
 impl RawCommand {
     fn into_command(self, version: u16) -> Result<Command, String> {
+        if matches!(self.id.as_str(), "editor.run-formatting.set" | "editor.paragraph-formatting.set")
+            && version != COMMAND_WIRE_VERSION
+        {
+            return Err("inline and paragraph formatting commands require wire version 2".to_owned());
+        }
         if self.id == "editor.element.change" {
             return self.into_element_change(version);
         }

@@ -64,5 +64,9 @@ The default/template-backed lifecycle clause below is superseded only where it s
 
 ## Decisions
 
+### Landed menu, context, and formatting ownership
+
+Menu/context composition adds no package or dependency edge. The existing desktop dispatcher continues to own current availability and host-effect coordination; model/session/FDX/layout own the typed formatting semantics described in their component contracts. Shared menu projections, current checks, ordered element choices, popup state, and native dynamic-submenu handles are transient desktop state, not Project, FDX, settings, layout identity, or export inputs. The Body-only context popup belongs at the shared single editor-response boundary and uses typed Pointer-origin dispatch; it does not introduce a Title Page or native OS context menu. The command catalog contains 63 stable IDs at command-envelope version 2 after adding only the two specified typed formatting commands. Native Zoom/Appearance checkmarks are seeded as 100%/System at installation and are synchronized from live state on the first ordinary root update; exact initial native checkmarks before that synchronization are not guaranteed. This does not add a PageLayout command or alter the six-library/app package graph.
+
 - Keep the desktop independently runnable while keeping semantic editing, FDX, and fixed geometry headless and reusable.
 - Use one typed activation boundary; place platform-specific effects behind desktop adapters rather than in document components.

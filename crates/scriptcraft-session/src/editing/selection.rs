@@ -23,6 +23,7 @@ impl EditingSession {
         validate_selection(&self.project, selection)?;
         let previous_selection = self.selection;
         let previous_typing_style = self.body_typing_style;
+        let previous_typing_formatting = self.body_typing_formatting;
         let next_typing_style = if selection.anchor == selection.focus {
             let element = &self.project.elements[selection.focus.element];
             project_style_at_caret(
@@ -39,7 +40,14 @@ impl EditingSession {
 
         self.selection = selection;
         self.body_typing_style = next_typing_style;
-        if self.selection != previous_selection || self.body_typing_style != previous_typing_style {
+        if selection.anchor != selection.focus && selection != previous_selection
+            || selection.anchor == selection.focus && selection.focus != previous_selection.focus
+        {
+            self.body_typing_formatting = Default::default();
+        }
+        if self.selection != previous_selection || self.body_typing_style != previous_typing_style
+            || self.body_typing_formatting != previous_typing_formatting
+        {
             self.mark_mutated();
         }
         Ok(())

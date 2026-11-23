@@ -543,6 +543,9 @@ impl ScriptCraftApp {
                 &frame_projections,
                 surface,
             );
+            if surface == EditorSurface::Body {
+                self.show_body_context_menu(&response, ui.ctx());
+            }
         }
         self.native_input_diagnostics.focused = self.surface_focused && !element_windows_own_input;
         if self.surface_focused && !element_windows_own_input {

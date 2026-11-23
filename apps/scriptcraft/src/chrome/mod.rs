@@ -3,6 +3,7 @@
 pub(crate) mod dynamic_controls;
 pub(crate) mod element_choices;
 pub(crate) mod element_shortcuts;
+pub(crate) mod formatting_menu;
 pub(crate) mod focus_mode;
 pub(crate) mod menu;
 pub(crate) mod menu_items;

@@ -25,9 +25,9 @@ pub(crate) fn status_modifiers_changed(
     previous != current
 }
 
-pub(super) const MIN_ZOOM_PERCENT: u16 = 75;
-pub(super) const MAX_ZOOM_PERCENT: u16 = 300;
-pub(super) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250, 300];
+pub(crate) const MIN_ZOOM_PERCENT: u16 = 75;
+pub(crate) const MAX_ZOOM_PERCENT: u16 = 300;
+pub(crate) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250, 300];
 
 /// Status-only presentation values. Keep these independent of toolbar and
 /// framework defaults so later manual tuning cannot silently affect other UI.

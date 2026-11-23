@@ -1,14 +1,21 @@
 //! Menu presentation policy and the shared ordered desktop-command handoff.
 
+use super::element_choices::DynamicElementMenuProjection;
 use super::element_shortcuts::ReservedElementChords;
+use super::formatting_menu::FormattingMenuProjection;
 use super::menu_items::{
-    command_for_action, menu_item_label, LogicalShortcut, MenuAction, MenuEntrySpec,
-    MenuItemBehavior, MenuItemSpec, PlaceholderKind, SemanticIcon, ShortcutKey, MENU_CATALOG,
+    activation_for_action, menu_item_label, DynamicSubmenuKind,
+    LogicalShortcut, MenuAction, MenuEntrySpec, MenuItemBehavior, MenuItemSpec,
+    PlaceholderKind, SemanticIcon, ShortcutKey, ViewMenuProjection, ZoomStepDirection,
+    ZOOM_STEP_ITEMS, MENU_CATALOG,
 };
+pub(crate) use super::menu_items::MenuActivation;
 use super::shortcuts::{shortcut_matches, ShortcutPlatform};
 use crate::commands::{command_for_id, AppCommandAvailability, CommandInvocation};
 use eframe::egui;
-use scriptcraft_commands::{Command, CommandId, CommandOrigin, ScriptViewMode};
+use scriptcraft_commands::{
+    Command, CommandId, CommandOrigin, EditorSurface, ElementTypeValue, ScriptViewMode, ZoomPercent,
+};
 use std::collections::VecDeque;
 
 /// Initial presentation values are agent-defaults pending user review against
@@ -124,6 +131,19 @@ pub(crate) fn reserved_element_chords(platform: ShortcutPlatform) -> ReservedEle
                     }
                 }
                 MenuEntrySpec::Submenu(menu) => append(menu.entries, platform, out),
+                MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::Zoom) => {
+                    for item in ZOOM_STEP_ITEMS {
+                        if let Some(shortcut) = item.shortcut {
+                            out.push(shortcut);
+                        }
+                        if platform == ShortcutPlatform::Windows {
+                            if let Some(alias) = item.windows_alias {
+                                out.push(alias);
+                            }
+                        }
+                    }
+                }
+                MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::ChangeElementTo) => {}
                 MenuEntrySpec::Separator => {}
             }
         }
@@ -252,7 +272,10 @@ pub(crate) fn command_for_key_event_command(
     key: egui::Key,
     modifiers: egui::Modifiers,
 ) -> Option<Command> {
-    command_for_shortcut_event_on_platform(key, modifiers, ShortcutPlatform::current())
+    match command_for_shortcut_event_on_platform(key, modifiers, ShortcutPlatform::current())? {
+        MenuActivation::Command(command) => Some(command),
+        MenuActivation::ZoomStep(_) => None,
+    }
 }
 
 fn command_for_key_event_on_platform(
@@ -260,20 +283,54 @@ fn command_for_key_event_on_platform(
     modifiers: egui::Modifiers,
     platform: ShortcutPlatform,
 ) -> Option<CommandId> {
-    command_for_shortcut_event_on_platform(key, modifiers, platform).map(|command| command.id())
+    match command_for_shortcut_event_on_platform(key, modifiers, platform)? {
+        MenuActivation::Command(command) => Some(command.id()),
+        MenuActivation::ZoomStep(_) => None,
+    }
 }
 
 fn command_for_shortcut_event_on_platform(
     key: egui::Key,
     modifiers: egui::Modifiers,
     platform: ShortcutPlatform,
-) -> Option<Command> {
+) -> Option<MenuActivation> {
+    fn item_activation(
+        item: &MenuItemSpec,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+        platform: ShortcutPlatform,
+    ) -> Option<MenuActivation> {
+        let dual = item.behavior == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle);
+        if dual && platform == ShortcutPlatform::Other {
+            return None;
+        }
+        let advertised = !(dual && platform == ShortcutPlatform::Windows)
+            && item
+                .shortcut
+                .is_some_and(|shortcut| shortcut_matches(shortcut, key, modifiers, platform));
+        let windows_alias = platform == ShortcutPlatform::Windows
+            && item
+                .windows_alias
+                .is_some_and(|shortcut| shortcut_matches(shortcut, key, modifiers, platform));
+        if !advertised && !windows_alias {
+            return None;
+        }
+        match item.behavior {
+            MenuItemBehavior::Command(command) => crate::commands::command_for_id(command)
+                .map(MenuActivation::Command),
+            MenuItemBehavior::MenuCommand(action) => {
+                Some(activation_for_action(action, EditorSurface::Body))
+            }
+            MenuItemBehavior::DisabledPlaceholder(_) => None,
+        }
+    }
+
     fn visit(
         entries: &'static [MenuEntrySpec],
         key: egui::Key,
         modifiers: egui::Modifiers,
         platform: ShortcutPlatform,
-    ) -> Option<Command> {
+    ) -> Option<MenuActivation> {
         for entry in entries {
             match entry {
                 MenuEntrySpec::Submenu(menu) => {
@@ -281,33 +338,18 @@ fn command_for_shortcut_event_on_platform(
                         return Some(command);
                     }
                 }
-                MenuEntrySpec::Item(item) => {
-                    let dual = item.behavior
-                        == MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle);
-                    if dual && platform == ShortcutPlatform::Other {
-                        continue;
-                    }
-                    let advertised = !(dual && platform == ShortcutPlatform::Windows)
-                        && item.shortcut.is_some_and(|shortcut| {
-                            shortcut_matches(shortcut, key, modifiers, platform)
-                        });
-                    let windows_alias = platform == ShortcutPlatform::Windows
-                        && item.windows_alias.is_some_and(|shortcut| {
-                            shortcut_matches(shortcut, key, modifiers, platform)
-                        });
-                    if !advertised && !windows_alias {
-                        continue;
-                    }
-                    return match item.behavior {
-                        MenuItemBehavior::Command(command) => {
-                            crate::commands::command_for_id(command)
+                MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::Zoom) => {
+                    for item in ZOOM_STEP_ITEMS {
+                        if let Some(activation) = item_activation(&item, key, modifiers, platform) {
+                            return Some(activation);
                         }
-                        MenuItemBehavior::MenuCommand(action) => Some(command_for_action(
-                            action,
-                            scriptcraft_commands::EditorSurface::Body,
-                        )),
-                        MenuItemBehavior::DisabledPlaceholder(_) => None,
-                    };
+                    }
+                }
+                MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::ChangeElementTo) => {}
+                MenuEntrySpec::Item(item) => {
+                    if let Some(activation) = item_activation(item, key, modifiers, platform) {
+                        return Some(activation);
+                    }
                 }
                 MenuEntrySpec::Separator => {}
             }
@@ -322,7 +364,7 @@ fn command_for_shortcut_event_on_platform(
 pub(crate) fn command_for_pressed_key_event(
     event: &egui::Event,
     platform: ShortcutPlatform,
-) -> Option<Command> {
+) -> Option<MenuActivation> {
     match event {
         egui::Event::Key {
             key,
@@ -339,12 +381,38 @@ pub(crate) fn command_for_pressed_key_event(
 /// rechecks availability after detaching each activation-ordered batch.
 #[derive(Debug, Default)]
 pub(crate) struct PendingDesktopCommands {
-    pending: VecDeque<CommandInvocation>,
+    pending: VecDeque<PendingDesktopAction>,
+}
+
+#[derive(Debug)]
+enum PendingDesktopAction {
+    Invocation(CommandInvocation),
+    ZoomStep {
+        direction: ZoomStepDirection,
+        origin: CommandOrigin,
+    },
 }
 
 impl PendingDesktopCommands {
     pub(crate) fn enqueue(&mut self, invocation: CommandInvocation) {
-        self.pending.push_back(invocation);
+        self.pending
+            .push_back(PendingDesktopAction::Invocation(invocation));
+    }
+
+    pub(crate) fn enqueue_activation(
+        &mut self,
+        activation: MenuActivation,
+        origin: CommandOrigin,
+    ) {
+        match activation {
+            MenuActivation::Command(command) => {
+                self.enqueue(CommandInvocation::new(command, origin));
+            }
+            MenuActivation::ZoomStep(direction) => {
+                self.pending
+                    .push_back(PendingDesktopAction::ZoomStep { direction, origin });
+            }
+        }
     }
 
     pub(super) fn enqueue_id(&mut self, id: CommandId, origin: CommandOrigin) {
@@ -357,7 +425,7 @@ impl PendingDesktopCommands {
     /// dispatch; commands enqueued afterward remain for the next handoff.
     pub(super) fn take_pending(
         &mut self,
-    ) -> std::collections::vec_deque::IntoIter<CommandInvocation> {
+    ) -> std::collections::vec_deque::IntoIter<PendingDesktopAction> {
         std::mem::take(&mut self.pending).into_iter()
     }
 }
@@ -459,12 +527,21 @@ fn menu_content_metrics(
                     add_finite_dimensions(button_padding_x, button_padding_x),
                 )
             }
+            MenuEntrySpec::DynamicSubmenu(kind) => {
+                let label_width = measured_menu_text_width(ui, kind.label(), item_font.clone());
+                let mut width = add_finite_dimensions(label_width, row_gap_x);
+                width = add_finite_dimensions(width, nonnegative_finite_dimension(metrics.icon_size));
+                add_finite_dimensions(
+                    width,
+                    add_finite_dimensions(button_padding_x, button_padding_x),
+                )
+            }
             MenuEntrySpec::Separator => 0.0,
         };
         required_content_width = required_content_width.max(row_width);
 
         let row_height = match entry {
-            MenuEntrySpec::Item(_) | MenuEntrySpec::Submenu(_) => {
+            MenuEntrySpec::Item(_) | MenuEntrySpec::Submenu(_) | MenuEntrySpec::DynamicSubmenu(_) => {
                 nonnegative_finite_dimension(metrics.row_height)
             }
             MenuEntrySpec::Separator => nonnegative_finite_dimension(metrics.separator_spacing),
@@ -498,6 +575,9 @@ fn render_menu_popup(
     ui: &mut egui::Ui,
     entries: &'static [MenuEntrySpec],
     availability: AppCommandAvailability,
+    dynamic_elements: &DynamicElementMenuProjection,
+    formatting: &FormattingMenuProjection,
+    view: ViewMenuProjection,
     script_view_mode: ScriptViewMode,
     say_undual: bool,
     invisibles_visible: bool,
@@ -529,6 +609,9 @@ fn render_menu_popup(
                 ui,
                 entries,
                 availability,
+                dynamic_elements,
+                formatting,
+                view,
                 script_view_mode,
                 say_undual,
                 invisibles_visible,
@@ -544,6 +627,9 @@ fn render_menu_popup(
 pub(crate) fn show_menu_bar(
     ui: &mut egui::Ui,
     availability: AppCommandAvailability,
+    dynamic_elements: &DynamicElementMenuProjection,
+    formatting: &FormattingMenuProjection,
+    view: ViewMenuProjection,
     script_view_mode: ScriptViewMode,
     say_undual: bool,
     invisibles_visible: bool,
@@ -604,6 +690,9 @@ pub(crate) fn show_menu_bar(
                             ui,
                             menu.entries,
                             availability,
+                            dynamic_elements,
+                            formatting,
+                            view,
                             script_view_mode,
                             say_undual,
                             invisibles_visible,
@@ -650,6 +739,9 @@ fn render_menu_entries(
     ui: &mut egui::Ui,
     entries: &'static [MenuEntrySpec],
     availability: AppCommandAvailability,
+    dynamic_elements: &DynamicElementMenuProjection,
+    formatting: &FormattingMenuProjection,
+    view: ViewMenuProjection,
     script_view_mode: ScriptViewMode,
     say_undual: bool,
     invisibles_visible: bool,
@@ -676,6 +768,9 @@ fn render_menu_entries(
                             ui,
                             menu.entries,
                             availability,
+                            dynamic_elements,
+                            formatting,
+                            view,
                             script_view_mode,
                             say_undual,
                             invisibles_visible,
@@ -687,18 +782,73 @@ fn render_menu_entries(
                     },
                 );
             }
+            MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::ChangeElementTo) => {
+                let available_inner_viewport_height =
+                    available_menu_inner_viewport_height(ui, metrics);
+                let enabled = availability.is_enabled(CommandId::EditorElementChange)
+                    && !dynamic_elements.choices().is_empty();
+                let response = ui.add_enabled_ui(enabled, |ui| {
+                    ui.menu_button(
+                        egui::RichText::new("Change Element To").size(metrics.item_text_size),
+                        |ui| {
+                            render_dynamic_element_menu_popup(
+                                ui,
+                                dynamic_elements,
+                                availability,
+                                pending,
+                                metrics,
+                                available_inner_viewport_height,
+                            );
+                        },
+                    )
+                });
+                response.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        enabled,
+                        "Change Element To".to_owned(),
+                    )
+                });
+            }
+            MenuEntrySpec::DynamicSubmenu(DynamicSubmenuKind::Zoom) => {
+                let available_inner_viewport_height =
+                    available_menu_inner_viewport_height(ui, metrics);
+                let enabled = availability.is_enabled(CommandId::ViewZoomSet);
+                let response = ui.add_enabled_ui(enabled, |ui| {
+                    ui.menu_button(
+                        egui::RichText::new("Zoom").size(metrics.item_text_size),
+                        |ui| {
+                            render_zoom_menu_popup(
+                                ui,
+                                availability,
+                                view,
+                                pending,
+                                metrics,
+                                available_inner_viewport_height,
+                            );
+                        },
+                    )
+                });
+                response.response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "Zoom".to_owned())
+                });
+            }
             MenuEntrySpec::Item(item) => {
-                let command = menu_item_command(item);
+                let activation = menu_item_activation(item);
                 let enabled = match item.behavior {
                     MenuItemBehavior::Command(command) => command_enabled(command, availability),
-                    MenuItemBehavior::MenuCommand(_) => command
-                        .as_ref()
-                        .is_some_and(|command| command_enabled(command.id(), availability)),
+                    MenuItemBehavior::MenuCommand(_) => activation.as_ref().is_some_and(|activation| {
+                        let command_id = match activation {
+                            MenuActivation::Command(command) => command.id(),
+                            MenuActivation::ZoomStep(_) => CommandId::ViewZoomSet,
+                        };
+                        command_enabled(command_id, availability)
+                    }),
                     MenuItemBehavior::DisabledPlaceholder(_) => false,
                 };
                 let label = menu_item_label(item, say_undual, invisibles_visible, ruler_visible);
                 let shortcut = menu_shortcut_label(item);
-                let icon_atom = menu_icon_atom(item, script_view_mode, metrics);
+                let icon_atom = menu_icon_atom(item, script_view_mode, formatting, view, metrics);
                 let mut label_atom =
                     egui::Atom::from(egui::RichText::new(label).size(metrics.item_text_size));
                 label_atom.grow = true;
@@ -720,8 +870,8 @@ fn render_menu_entries(
                     );
                 }
                 if response.clicked() {
-                    if let Some(command) = command {
-                        pending.enqueue(CommandInvocation::new(command, CommandOrigin::Menu));
+                    if let Some(activation) = activation {
+                        pending.enqueue_activation(activation, CommandOrigin::Menu);
                         ui.close();
                         ui.ctx().request_repaint();
                     }
@@ -731,13 +881,245 @@ fn render_menu_entries(
     }
 }
 
-fn menu_item_command(item: &MenuItemSpec) -> Option<Command> {
+fn zoom_menu_metrics(ui: &egui::Ui, metrics: MenuPresentationMetrics) -> MenuContentMetrics {
+    let font = menu_font_id(ui, metrics.item_text_size);
+    let spacing = ui.spacing();
+    let padding_x = nonnegative_finite_dimension(spacing.button_padding.x);
+    let gap_x = nonnegative_finite_dimension(spacing.item_spacing.x);
+    let measure_row = |width: f32, label: &str, shortcut: Option<&str>| {
+        let label_width = measured_menu_text_width(ui, label, font.clone());
+        let mut row_width = add_finite_dimensions(
+            add_finite_dimensions(metrics.icon_slot_width, gap_x),
+            label_width,
+        );
+        if let Some(shortcut) = shortcut {
+            row_width = add_finite_dimensions(
+                add_finite_dimensions(row_width, gap_x),
+                measured_menu_text_width(ui, shortcut, menu_font_id(ui, metrics.shortcut_text_size)),
+            );
+        }
+        width.max(add_finite_dimensions(row_width, padding_x + padding_x))
+    };
+    let mut width = 0.0;
+    for item in ZOOM_STEP_ITEMS {
+        width = measure_row(width, item.label, Some(&menu_shortcut_label(&item)));
+    }
+    for percent in crate::chrome::status_bar::ZOOM_PRESETS {
+        width = measure_row(width, &format!("{percent}%"), None);
+    }
+    let row_count = 2 + crate::chrome::status_bar::ZOOM_PRESETS.len();
+    let separator_height = nonnegative_finite_dimension(metrics.separator_spacing);
+    let rows_height = (0..row_count).fold(0.0, |height, _| {
+        add_finite_dimensions(height, nonnegative_finite_dimension(metrics.row_height))
+    });
+    let spacing_y = nonnegative_finite_dimension(spacing.item_spacing.y);
+    let gaps = (0..row_count.saturating_sub(1)).fold(0.0, |height, _| {
+        add_finite_dimensions(height, spacing_y)
+    });
+    MenuContentMetrics {
+        required_content_width: nonnegative_finite_dimension(width),
+        desired_content_height: add_finite_dimensions(
+            add_finite_dimensions(rows_height, gaps),
+            separator_height,
+        ),
+    }
+}
+
+fn render_zoom_menu_popup(
+    ui: &mut egui::Ui,
+    availability: AppCommandAvailability,
+    view: ViewMenuProjection,
+    pending: &mut PendingDesktopCommands,
+    metrics: MenuPresentationMetrics,
+    available_inner_viewport_height: f32,
+) {
+    let content = zoom_menu_metrics(ui, metrics);
+    ui.set_min_width(content.required_content_width);
+    egui::ScrollArea::vertical()
+        .max_height(content.desired_content_height.min(nonnegative_finite_dimension(
+            available_inner_viewport_height,
+        )))
+        .min_scrolled_height(0.0)
+        .auto_shrink([true, true])
+        .show(ui, |ui| {
+            for item in ZOOM_STEP_ITEMS {
+                render_menu_action_row(
+                    ui,
+                    item.label,
+                    item.accessibility_name,
+                    menu_shortcut_label(&item),
+                    activation_for_action(
+                        match item.behavior {
+                            MenuItemBehavior::MenuCommand(action) => action,
+                            _ => unreachable!("zoom step entries are menu actions"),
+                        },
+                        EditorSurface::Body,
+                    ),
+                    availability,
+                    metrics,
+                    pending,
+                    false,
+                );
+            }
+            ui.add(
+                egui::Separator::default()
+                    .spacing(metrics.separator_spacing)
+                    .horizontal(),
+            );
+            for percent in crate::chrome::status_bar::ZOOM_PRESETS {
+                let label = format!("{percent}%");
+                let action = MenuAction::SetZoom(percent);
+                let activation = activation_for_action(action, EditorSurface::Body);
+                render_menu_action_row(
+                    ui,
+                    &label,
+                    &label,
+                    String::new(),
+                    activation,
+                    availability,
+                    metrics,
+                    pending,
+                    view.zoom_percent == percent,
+                );
+            }
+        });
+}
+
+fn render_menu_action_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    accessibility_name: &str,
+    shortcut: String,
+    activation: MenuActivation,
+    availability: AppCommandAvailability,
+    metrics: MenuPresentationMetrics,
+    pending: &mut PendingDesktopCommands,
+    checked: bool,
+) {
+    let command_id = match &activation {
+        MenuActivation::Command(command) => command.id(),
+        MenuActivation::ZoomStep(_) => CommandId::ViewZoomSet,
+    };
+    let enabled = availability.is_enabled(command_id);
+    let mut check_atom = egui::Atom::from(if checked { "✓" } else { "" });
+    check_atom.size = Some(egui::vec2(metrics.icon_slot_width, metrics.row_height));
+    check_atom.align = egui::Align2::CENTER_CENTER;
+    let mut label_atom = egui::Atom::from(
+        egui::RichText::new(label).size(metrics.item_text_size),
+    );
+    label_atom.grow = true;
+    label_atom.align = egui::Align2::LEFT_CENTER;
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new((check_atom, label_atom))
+            .shortcut_text(egui::RichText::new(shortcut).size(metrics.shortcut_text_size))
+            .min_size(egui::vec2(0.0, metrics.row_height))
+            .corner_radius(egui::CornerRadius::same(metrics.row_corner_radius)),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, accessibility_name.to_owned())
+    });
+    if response.clicked() {
+        pending.enqueue_activation(activation, CommandOrigin::Menu);
+        ui.close();
+        ui.ctx().request_repaint();
+    }
+}
+
+fn dynamic_element_menu_metrics(
+    ui: &egui::Ui,
+    projection: &DynamicElementMenuProjection,
+    metrics: MenuPresentationMetrics,
+) -> MenuContentMetrics {
+    let font = menu_font_id(ui, metrics.item_text_size);
+    let spacing = ui.spacing();
+    let padding_x = nonnegative_finite_dimension(spacing.button_padding.x);
+    let gap_x = nonnegative_finite_dimension(spacing.item_spacing.x);
+    let mut width = 0.0_f32;
+    for choice in projection.choices() {
+        let label_width = measured_menu_text_width(ui, choice.label(), font.clone());
+        let row_width = add_finite_dimensions(
+            add_finite_dimensions(metrics.icon_slot_width, gap_x),
+            label_width,
+        );
+        width = width.max(add_finite_dimensions(
+            row_width,
+            add_finite_dimensions(padding_x, padding_x),
+        ));
+    }
+    let row_height = nonnegative_finite_dimension(metrics.row_height);
+    let row_count = projection.choices().len();
+    let rows_height = (0..row_count).fold(0.0, |height, _| {
+        add_finite_dimensions(height, row_height)
+    });
+    let row_gaps = (0..row_count.saturating_sub(1)).fold(0.0, |height, _| {
+        add_finite_dimensions(height, nonnegative_finite_dimension(spacing.item_spacing.y))
+    });
+    MenuContentMetrics {
+        required_content_width: nonnegative_finite_dimension(width),
+        desired_content_height: add_finite_dimensions(rows_height, row_gaps),
+    }
+}
+
+fn render_dynamic_element_menu_popup(
+    ui: &mut egui::Ui,
+    projection: &DynamicElementMenuProjection,
+    availability: AppCommandAvailability,
+    pending: &mut PendingDesktopCommands,
+    metrics: MenuPresentationMetrics,
+    available_inner_viewport_height: f32,
+) {
+    let content = dynamic_element_menu_metrics(ui, projection, metrics);
+    ui.set_min_width(content.required_content_width);
+    egui::ScrollArea::vertical()
+        .max_height(content.desired_content_height.min(nonnegative_finite_dimension(
+            available_inner_viewport_height,
+        )))
+        .min_scrolled_height(0.0)
+        .auto_shrink([true, true])
+        .show(ui, |ui| {
+            for choice in projection.choices() {
+                let checked = projection.focused_type_key.as_ref() == Some(&choice.key);
+                let mut check_atom = egui::Atom::from(if checked { "✓" } else { "" });
+                check_atom.size = Some(egui::vec2(metrics.icon_slot_width, metrics.row_height));
+                check_atom.align = egui::Align2::CENTER_CENTER;
+                let mut label_atom = egui::Atom::from(
+                    egui::RichText::new(choice.label()).size(metrics.item_text_size),
+                );
+                label_atom.grow = true;
+                label_atom.align = egui::Align2::LEFT_CENTER;
+                let button = egui::Button::new((check_atom, label_atom))
+                    .min_size(egui::vec2(0.0, metrics.row_height))
+                    .corner_radius(egui::CornerRadius::same(metrics.row_corner_radius));
+                let enabled = availability.is_enabled(CommandId::EditorElementChange);
+                let response = ui.add_enabled(enabled, button);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        enabled,
+                        choice.label().to_owned(),
+                    )
+                });
+                if response.clicked() {
+                    pending.enqueue(CommandInvocation::new(
+                        Command::EditorElementChange {
+                            element_type: ElementTypeValue::from_key(choice.key.clone()),
+                            surface: EditorSurface::Body,
+                        },
+                        CommandOrigin::Menu,
+                    ));
+                    ui.close();
+                    ui.ctx().request_repaint();
+                }
+            }
+        });
+}
+
+fn menu_item_activation(item: &MenuItemSpec) -> Option<MenuActivation> {
     match item.behavior {
-        MenuItemBehavior::Command(id) => crate::commands::command_for_id(id),
-        MenuItemBehavior::MenuCommand(action) => Some(command_for_action(
-            action,
-            scriptcraft_commands::EditorSurface::Body,
-        )),
+        MenuItemBehavior::Command(id) => crate::commands::command_for_id(id)
+            .map(MenuActivation::Command),
+        MenuItemBehavior::MenuCommand(action) => Some(activation_for_action(action, EditorSurface::Body)),
         MenuItemBehavior::DisabledPlaceholder(_) => None,
     }
 }
@@ -745,10 +1127,12 @@ fn menu_item_command(item: &MenuItemSpec) -> Option<Command> {
 fn menu_icon_atom(
     item: &MenuItemSpec,
     script_view_mode: ScriptViewMode,
+    formatting: &FormattingMenuProjection,
+    view: ViewMenuProjection,
     metrics: MenuPresentationMetrics,
 ) -> egui::Atom<'static> {
     let slot_size = egui::vec2(metrics.icon_slot_width, metrics.row_height);
-    if super::menu_items::menu_item_is_checked(item, script_view_mode) {
+    if super::menu_items::menu_item_is_checked(item, script_view_mode, formatting, view) {
         let mut atom = egui::Atom::from(egui::RichText::new("✓").size(metrics.icon_size));
         atom.size = Some(slot_size);
         return atom;
@@ -843,6 +1227,9 @@ fn shortcut_label(shortcut: LogicalShortcut) -> String {
         ShortcutKey::Semicolon => ";",
         ShortcutKey::Colon => ":",
         ShortcutKey::Period => ".",
+        ShortcutKey::Plus => "+",
+        ShortcutKey::Equals => "=",
+        ShortcutKey::Minus => "-",
         ShortcutKey::Enter => "Enter",
         ShortcutKey::Tab => "Tab",
         ShortcutKey::Backspace => "Backspace",
@@ -891,7 +1278,9 @@ fn shortcut_label(shortcut: LogicalShortcut) -> String {
     if shortcut.option {
         parts.push("Alt");
     }
-    if shortcut.shift {
+    // The Plus key already represents the shifted physical equals key; do not
+    // render a redundant Shift modifier beside the plus glyph.
+    if shortcut.shift && shortcut.key != ShortcutKey::Plus {
         parts.push("Shift");
     }
     parts.push(key);
@@ -902,8 +1291,40 @@ impl crate::app::ScriptCraftApp {
     /// Dispatches the detached queue batch in order. Each shared command
     /// performs its normal current-availability check before it can mutate.
     pub(crate) fn dispatch_pending_commands(&mut self, ctx: &eframe::egui::Context) {
-        for invocation in self.pending_commands.take_pending() {
-            self.dispatch_command(invocation, ctx);
+        for action in self.pending_commands.take_pending() {
+            match action {
+                PendingDesktopAction::Invocation(invocation) => {
+                    self.dispatch_command(invocation, ctx);
+                }
+                PendingDesktopAction::ZoomStep { direction, origin } => {
+                    let surface = self.active_editor_surface();
+                    let current = self.zoom_for_surface(surface);
+                    let target = zoom_step_target(current, direction);
+                    if target != current {
+                        if let Ok(percent) = ZoomPercent::new(target) {
+                            self.dispatch_command(
+                                CommandInvocation::new(Command::ViewZoomSet { percent }, origin),
+                                ctx,
+                            );
+                        }
+                    }
+                }
+            }
         }
+    }
+}
+
+fn zoom_step_target(current: u16, direction: ZoomStepDirection) -> u16 {
+    let presets = crate::chrome::status_bar::ZOOM_PRESETS;
+    match direction {
+        ZoomStepDirection::In => presets
+            .into_iter()
+            .find(|preset| *preset > current)
+            .unwrap_or(crate::chrome::status_bar::MAX_ZOOM_PERCENT),
+        ZoomStepDirection::Out => presets
+            .into_iter()
+            .rev()
+            .find(|preset| *preset < current)
+            .unwrap_or(crate::chrome::status_bar::MIN_ZOOM_PERCENT),
     }
 }

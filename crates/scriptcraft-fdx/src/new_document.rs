@@ -99,8 +99,16 @@ pub(crate) fn make_new_document_nodes(
                     .filter(|candidate| &candidate.id == member_id)
                     .ok_or_else(|| SaveDiagnosticCode::NewDocumentHeadingNodeMismatch.error())?;
                 let overrides = project.direct_paragraph_overrides.get(member_id).copied();
-                dual.children
-                    .push(new_paragraph(member, overrides, &mut paragraph_ids)?);
+                let definition = project
+                    .element_definitions()
+                    .get(&member.element_type())
+                    .ok_or(FdxError::InvalidValue)?;
+                dual.children.push(new_paragraph(
+                    member,
+                    definition,
+                    overrides,
+                    &mut paragraph_ids,
+                )?);
             }
             outer.children.push(PreservedNode::Element(dual));
             content.children.push(PreservedNode::Element(outer));
@@ -111,7 +119,16 @@ pub(crate) fn make_new_document_nodes(
         }
 
         let direct_overrides = project.direct_paragraph_overrides.get(&element.id).copied();
-        let mut paragraph = new_paragraph(element, direct_overrides, &mut paragraph_ids)?;
+        let definition = project
+            .element_definitions()
+            .get(&element.element_type())
+            .ok_or(FdxError::InvalidValue)?;
+        let mut paragraph = new_paragraph(
+            element,
+            definition,
+            direct_overrides,
+            &mut paragraph_ids,
+        )?;
         if has_capability(project, element, |capabilities| capabilities.scene_boundary) {
             let scene_end = project.elements[index + 1..]
                 .iter()
@@ -190,9 +207,22 @@ pub(crate) fn make_new_document_nodes(
         )?));
     let mut title_content = preserved_element("Content", Vec::new());
     for element in &project.title_page {
+        let definition = match element.element_type() {
+            Some(key) => Some(
+                project
+                    .element_definitions()
+                    .get(&key)
+                    .ok_or(FdxError::InvalidValue)?,
+            ),
+            None => None,
+        };
         title_content
             .children
-            .push(new_title_page_paragraph(element, &mut paragraph_ids)?);
+            .push(new_title_page_paragraph(
+                element,
+                definition,
+                &mut paragraph_ids,
+            )?);
     }
     title_page
         .children

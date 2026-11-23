@@ -30,6 +30,16 @@ impl ScriptCraftApp {
                 RevealIntent::Conditional,
                 ctx,
             ),
+            Command::EditorRunFormattingSet { surface, patch } => self.execute_editor(
+                &Command::EditorRunFormattingSet { surface, patch },
+                RevealIntent::Conditional,
+                ctx,
+            ),
+            Command::EditorParagraphFormattingSet { surface, patch } => self.execute_editor(
+                &Command::EditorParagraphFormattingSet { surface, patch },
+                RevealIntent::Conditional,
+                ctx,
+            ),
             Command::EditorDualDialogueToggle => {
                 self.execute_editor(&Command::EditorDualDialogueToggle, RevealIntent::None, ctx)
             }

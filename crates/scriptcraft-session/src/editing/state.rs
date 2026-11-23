@@ -6,7 +6,7 @@ use super::{
     validate_full_candidate, EditError, EditMutationDiagnostics, EditPolicy, Position, Selection,
 };
 use scriptcraft_model::formatted_text::{
-    project_style_at_caret, RunBoundaryAffinity, RunStyleFlags,
+    project_style_at_caret, InlineRunFormattingPatch, RunBoundaryAffinity, RunStyleFlags,
 };
 use scriptcraft_model::{validate_layout_inputs, LayoutInputs, Project};
 use std::collections::BTreeSet;
@@ -26,6 +26,7 @@ pub struct EditingSession {
     pub(crate) title_selection: Selection,
     pub(super) title_typing_style: RunStyleFlags,
     pub(super) body_typing_style: RunStyleFlags,
+    pub(super) body_typing_formatting: InlineRunFormattingPatch,
     pub(crate) dirty: bool,
     pub(crate) revision: u64,
     pub(crate) clean_project: Project,
@@ -56,6 +57,7 @@ impl PartialEq for EditingSession {
             && self.title_selection == other.title_selection
             && self.title_typing_style == other.title_typing_style
             && self.body_typing_style == other.body_typing_style
+            && self.body_typing_formatting == other.body_typing_formatting
             && self.dirty == other.dirty
             && self.revision == other.revision
             && self.clean_project == other.clean_project
@@ -133,6 +135,7 @@ impl EditingSession {
             }),
             title_typing_style,
             body_typing_style,
+            body_typing_formatting: InlineRunFormattingPatch::default(),
             dirty: false,
             revision: 0,
             history: Vec::new(),
@@ -187,6 +190,12 @@ impl EditingSession {
     /// session-only and does not participate in document dirty tracking.
     pub fn body_typing_style(&self) -> RunStyleFlags {
         self.body_typing_style
+    }
+
+    /// Transient Body Font/Size/Color overrides for insertion at the current
+    /// collapsed caret. This state is session-only and never dirties the Project.
+    pub fn body_typing_formatting(&self) -> InlineRunFormattingPatch {
+        self.body_typing_formatting
     }
 
     /// Current title-page-local selection. Its paragraph indexes are never

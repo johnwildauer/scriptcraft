@@ -20,6 +20,9 @@ pub(crate) struct AppCommandAvailability {
     pub(crate) copy: bool,
     pub(crate) paste: bool,
     pub(crate) body_only: bool,
+    pub(crate) element_change: bool,
+    pub(crate) run_formatting: bool,
+    pub(crate) paragraph_formatting: bool,
     pub(crate) dual_dialogue_toggle: bool,
     pub(crate) title_open: bool,
     pub(crate) title_close: bool,
@@ -163,7 +166,8 @@ impl ScriptCraftApp {
                 EditorSurface::Body => self.session.selection(),
                 EditorSurface::TitlePage => self.session.title_selection(),
             };
-            availability.body_only = scriptcraft_commands::Selection::from_core(core_selection)
+            availability.element_change = *surface == self.active_editor_surface
+                && scriptcraft_commands::Selection::from_core(core_selection)
                 .ok()
                 .is_some_and(|selection| {
                     selection
@@ -171,6 +175,17 @@ impl ScriptCraftApp {
                         .is_ok()
                         && selection.anchor.element == selection.focus.element
                 });
+        }
+        if let scriptcraft_commands::Command::EditorRunFormattingSet { surface, .. }
+            | scriptcraft_commands::Command::EditorParagraphFormattingSet { surface, .. } = command
+        {
+            let eligible = *surface == EditorSurface::Body
+                && self.active_editor_surface == EditorSurface::Body
+                && scriptcraft_commands::Selection::from_core(self.session.selection())
+                    .ok()
+                    .is_some_and(|selection| selection.validate_for_surface(self.session.project(), EditorSurface::Body).is_ok());
+            availability.run_formatting = eligible;
+            availability.paragraph_formatting = eligible;
         }
         if let scriptcraft_commands::Command::FormatTemplateApply { template } = command {
             availability.template_apply_ready = self
@@ -230,6 +245,22 @@ impl ScriptCraftApp {
         } else {
             selection.focus.offset < text_len || role_is_empty_parenthetical
         };
+        let element_change = self.active_editor_surface == EditorSurface::Body
+            && scriptcraft_commands::Selection::from_core(self.session.selection())
+                .ok()
+                .is_some_and(|selection| {
+                    selection
+                        .validate_for_surface(self.session.project(), EditorSurface::Body)
+                        .is_ok()
+                        && selection.anchor.element == selection.focus.element
+                });
+        let valid_body_selection = scriptcraft_commands::Selection::from_core(self.session.selection())
+            .ok()
+            .is_some_and(|selection| {
+                selection
+                    .validate_for_surface(self.session.project(), EditorSurface::Body)
+                    .is_ok()
+            });
 
         AppCommandAvailability {
             modal_blocked: migration_pending && !replacement_pending,
@@ -249,6 +280,9 @@ impl ScriptCraftApp {
             // Clipboard state is read only when Paste is activated, never per frame.
             paste: !migration_pending && !replacement_pending,
             body_only: self.active_editor_surface == EditorSurface::Body,
+            element_change,
+            run_formatting: self.active_editor_surface == EditorSurface::Body && valid_body_selection,
+            paragraph_formatting: self.active_editor_surface == EditorSurface::Body && valid_body_selection,
             dual_dialogue_toggle: false,
             // In-app Open is a selected-path replacement request and is blocked
             // while the current document is resolving another lifecycle gate.
@@ -351,7 +385,9 @@ impl AppCommandAvailability {
             CommandId::EditCut => self.cut,
             CommandId::EditCopy => self.copy,
             CommandId::EditPaste => self.paste,
-            CommandId::EditorElementChange => self.body_only,
+            CommandId::EditorElementChange => self.element_change,
+            CommandId::EditorRunFormattingSet => self.run_formatting,
+            CommandId::EditorParagraphFormattingSet => self.paragraph_formatting,
             CommandId::EditorDualDialogueToggle => self.dual_dialogue_toggle,
             CommandId::WindowTitlePageOpen => self.title_open,
             CommandId::WindowTitlePageClose => self.title_close,
@@ -392,7 +428,10 @@ impl AppCommandAvailability {
             CommandId::EditSelectAll | CommandId::EditCut | CommandId::EditCopy => {
                 DesktopUnavailableReason::Selection
             }
-            CommandId::EditorDualDialogueToggle => DesktopUnavailableReason::Selection,
+            CommandId::EditorElementChange
+            | CommandId::EditorDualDialogueToggle
+            | CommandId::EditorRunFormattingSet
+            | CommandId::EditorParagraphFormattingSet => DesktopUnavailableReason::Selection,
             _ => DesktopUnavailableReason::ModalBlocked,
         }
     }

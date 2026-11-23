@@ -210,6 +210,8 @@ impl ScriptCraftApp {
             command @ (Command::EditorStyleToggle { .. }
             | Command::EditorStyleClear { .. }
             | Command::EditorAlignmentSet { .. }
+            | Command::EditorRunFormattingSet { .. }
+            | Command::EditorParagraphFormattingSet { .. }
             | Command::EditorDualDialogueToggle
             | Command::EditUndo
             | Command::EditRedo
@@ -325,14 +327,18 @@ fn route_to_focused_surface(
     match command {
         Command::EditorTextInsert { text, .. } => Command::EditorTextInsert { text, surface },
         Command::EditorTextPaste { text, .. } => Command::EditorTextPaste { text, surface },
-        Command::EditorElementChange { element_type, .. } => Command::EditorElementChange {
-            element_type,
-            surface,
-        },
         Command::EditorStyleToggle { style, .. } => Command::EditorStyleToggle { surface, style },
         Command::EditorStyleClear { .. } => Command::EditorStyleClear { surface },
         Command::EditorAlignmentSet { alignment, .. } => {
             Command::EditorAlignmentSet { surface, alignment }
+        }
+        // These new formatting commands intentionally retain their explicit
+        // Body target rather than following the focused-surface rewrite.
+        Command::EditorRunFormattingSet { surface, patch } => {
+            Command::EditorRunFormattingSet { surface, patch }
+        }
+        Command::EditorParagraphFormattingSet { surface, patch } => {
+            Command::EditorParagraphFormattingSet { surface, patch }
         }
         Command::EditorSelectionSet { selection, .. } => {
             Command::EditorSelectionSet { selection, surface }

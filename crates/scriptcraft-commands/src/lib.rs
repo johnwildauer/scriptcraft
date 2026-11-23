@@ -11,7 +11,9 @@ mod values;
 pub use values::{
     Appearance, BuiltinTemplateValue, EditorSurface, ElementTypeValue, HorizontalDirection,
     ImportResolution, LineEdge, ParagraphAlignmentValue, PdfExportOptions, PointerPhase,
-    ScriptViewMode, SprintTimerMode, TitleTextStyle, VerticalDirection,
+    ScriptViewMode, SprintTimerMode, TitleTextStyle, VerticalDirection, InlineFontValue,
+    InlineSizeValue, InlineColorValue, RunFormattingPatchValue, ParagraphSpacingValue,
+    ParagraphLeadingValue, SpaceBeforeLines, ParagraphFormattingPatchValue,
 };
 
 mod conversions;

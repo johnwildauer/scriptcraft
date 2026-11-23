@@ -431,6 +431,8 @@ pub(super) fn command_restores_editor_focus(command: CommandId) -> bool {
             | CommandId::EditorStyleToggle
             | CommandId::EditorStyleClear
             | CommandId::EditorAlignmentSet
+            | CommandId::EditorRunFormattingSet
+            | CommandId::EditorParagraphFormattingSet
             | CommandId::EditorDualDialogueToggle
     )
 }

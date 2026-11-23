@@ -1,4 +1,5 @@
 mod caret;
+mod context_menu;
 mod frame;
 mod invisibles;
 mod keyboard;

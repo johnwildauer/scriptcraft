@@ -6,7 +6,7 @@ use super::selection::SelectionOrdering;
 use super::structure::{join_at, remove_body_owner, update_preserved_type};
 use super::text::{next_boundary, previous_boundary, replace_range, synchronize_body_typing_style};
 use super::{EditError, EditingSession, Position, Selection};
-use scriptcraft_model::{BodyOwner, ElementTypeKey, Project};
+use scriptcraft_model::{formatted_text::{set_paragraph_run_formatting, ParagraphTarget}, BodyOwner, ElementTypeKey, Project};
 use std::collections::BTreeSet;
 
 impl EditingSession {
@@ -15,6 +15,7 @@ impl EditingSession {
     /// unsafe inline intersections reject the whole operation.
     pub fn insert(&mut self, text: &str) -> Result<(), EditError> {
         let typing = self.body_typing_style;
+        let inline_typing = self.body_typing_formatting;
         let (start, end) = self.selection.ordered();
         let operation = |project: &mut Project,
                          selection: &Selection,
@@ -40,6 +41,13 @@ impl EditingSession {
             replace_range(project, start, end, text)?;
             if !text.is_empty() {
                 synchronize_body_typing_style(project, start, text, insertion_style)?;
+                if start == end && !inline_typing.is_empty() {
+                    set_paragraph_run_formatting(
+                        project,
+                        &[(ParagraphTarget::Body(start.element), start.offset..start.offset.saturating_add(text.len()))],
+                        inline_typing,
+                    ).map_err(EditError::FormattedText)?;
+                }
             }
             Ok(Selection::caret(Position {
                 element: start.element,

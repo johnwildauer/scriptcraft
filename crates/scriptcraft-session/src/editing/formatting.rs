@@ -5,12 +5,58 @@ use super::selection::{validate_selection, validate_title_selection, SelectionOr
 use super::{EditError, EditingSession, Selection};
 use scriptcraft_model::formatted_text::{
     clear_paragraph_run_styles, project_style_at_caret, set_paragraph_alignments,
-    toggle_paragraph_run_styles, ParagraphTarget, RunBoundaryAffinity, RunStyle, RunStyleFlags,
+    set_paragraph_formatting, set_paragraph_run_formatting, toggle_paragraph_run_styles,
+    InlineRunFormattingPatch, ParagraphTarget, RunBoundaryAffinity, RunStyle, RunStyleFlags,
 };
-use scriptcraft_model::formatting::ParagraphAlignment;
+use scriptcraft_model::formatting::{ParagraphAlignment, ParagraphFormattingPatch};
 use scriptcraft_model::Project;
 
 impl EditingSession {
+    /// Applies a typed Font/Size/Color patch to the selected Body runs, or
+    /// updates the transient insertion patch at a collapsed Body caret.
+    pub fn set_body_run_formatting(
+        &mut self,
+        patch: InlineRunFormattingPatch,
+    ) -> Result<(), EditError> {
+        if patch.is_empty() {
+            return Ok(());
+        }
+        let selection = self.selection;
+        if selection.anchor == selection.focus {
+            let position = selection.focus;
+            self.project.elements.get(position.element).ok_or(EditError::InvalidElement)?;
+            let mut next = self.body_typing_formatting;
+            if let Some(font) = patch.font { next.font = Some(font); }
+            if let Some(size) = patch.size { next.size = Some(size); }
+            if let Some(color) = patch.color { next.color = Some(color); }
+            if next != self.body_typing_formatting {
+                self.body_typing_formatting = next;
+                self.mark_mutated();
+            }
+            return Ok(());
+        }
+        let ranges = selection_run_ranges(&self.project, selection, false)?;
+        self.mutate(MutationValidationScope::Complete, |project, _, _, _| {
+            set_paragraph_run_formatting(project, &ranges, patch)
+                .map_err(EditError::FormattedText)?;
+            Ok(selection)
+        })
+    }
+
+    /// Applies paragraph fields through WO-002's complete-baseline operation.
+    pub fn set_body_paragraph_formatting(
+        &mut self,
+        patch: ParagraphFormattingPatch,
+    ) -> Result<(), EditError> {
+        let selection = self.selection;
+        let targets = selection_paragraph_targets(&self.project, selection, false)?;
+        self.mutate(MutationValidationScope::Complete, |project, _, _, _| {
+            set_paragraph_formatting(project, &targets, patch)
+                .map_err(EditError::FormattedText)?;
+            Ok(selection)
+        })
+    }
+
     /// Applies a run-style toggle to the body selection through the same
     /// canonical range engine used by title text.
     pub fn toggle_body_run_style(&mut self, style: RunStyle) -> Result<(), EditError> {

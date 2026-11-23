@@ -1,6 +1,9 @@
 //! Disposable, current-document controls shared by the toolbar, status, and editor.
 
-use super::element_choices::{ordered_element_choices, ElementChoice};
+use super::element_choices::{
+    focused_body_element_type_key, ordered_element_choices, DynamicElementMenuProjection,
+    ElementChoice, ElementChoicesSnapshot,
+};
 use super::element_shortcuts::{
     resolve_element_shortcuts, ElementShortcutIssueKind, ResolvedElementShortcuts,
 };
@@ -54,6 +57,7 @@ impl DynamicIssueSummary {
 pub(crate) struct DynamicElementControls {
     key: DynamicControlsKey,
     pub(crate) choices: Arc<[ElementChoice]>,
+    choices_snapshot: ElementChoicesSnapshot,
     pub(crate) shortcuts: ResolvedElementShortcuts,
     issue_summary: Option<DynamicIssueSummary>,
 }
@@ -69,14 +73,18 @@ impl DynamicElementControls {
         let shortcuts =
             resolve_element_shortcuts(project.element_definitions(), platform, &reserved);
         let issue_summary = summarize_issues(&shortcuts);
+        let choices: Arc<[ElementChoice]> =
+            ordered_element_choices(project.element_definitions()).into();
+        let document_identity = Arc::clone(project.layout_identity());
         Self {
             key: DynamicControlsKey {
-                document_identity: Arc::clone(project.layout_identity()),
+                document_identity: Arc::clone(&document_identity),
                 session_mutation_token: app.session.mutation_token(),
                 platform,
                 accelerator_owner,
             },
-            choices: ordered_element_choices(project.element_definitions()).into(),
+            choices_snapshot: ElementChoicesSnapshot::new(document_identity, Arc::clone(&choices)),
+            choices,
             shortcuts,
             issue_summary,
         }
@@ -95,6 +103,16 @@ impl DynamicElementControls {
                 platform,
                 accelerator_owner,
             }
+    }
+
+    pub(crate) fn menu_projection(
+        &self,
+        focused_type_key: Option<scriptcraft_model::ElementTypeKey>,
+    ) -> DynamicElementMenuProjection {
+        DynamicElementMenuProjection {
+            snapshot: self.choices_snapshot.clone(),
+            focused_type_key,
+        }
     }
 }
 
@@ -140,6 +158,19 @@ impl ScriptCraftApp {
     pub(crate) fn invalidate_dynamic_controls(&mut self) {
         self.dynamic_controls = None;
         self.reported_dynamic_issue_summary = None;
+    }
+
+    pub(crate) fn dynamic_element_menu_projection(&mut self) -> DynamicElementMenuProjection {
+        let focused_type_key = if self.app_command_availability().element_change {
+            focused_body_element_type_key(
+                self.session.project(),
+                self.session.selection().focus.element,
+            )
+        } else {
+            None
+        };
+        self.refresh_dynamic_controls()
+            .menu_projection(focused_type_key)
     }
 
     fn report_dynamic_control_issues(&mut self) {
@@ -210,4 +241,3 @@ impl ScriptCraftApp {
         }
     }
 }
-

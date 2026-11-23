@@ -6,7 +6,7 @@ use crate::{
         MAX_RUN_ATTRIBUTES, MAX_RUN_ATTRIBUTE_BYTES,
     },
     element_type::ElementTypeKey,
-    formatting::FixedPoint,
+    formatting::{FixedPoint, ParagraphLeading, ParagraphSpacing},
     identity::StableId,
     ModelError, MAX_TEXT_BYTES,
 };
@@ -27,9 +27,9 @@ pub struct TitlePageParagraphFormatting {
     pub first_indent: Option<FixedPoint>,
     pub left_indent: Option<FixedPoint>,
     pub right_indent: Option<FixedPoint>,
-    pub leading_regular: Option<bool>,
+    pub leading: Option<ParagraphLeading>,
     pub space_before: Option<FixedPoint>,
-    pub spacing_single: Option<bool>,
+    pub spacing: Option<ParagraphSpacing>,
     pub starts_new_page: Option<bool>,
 }
 

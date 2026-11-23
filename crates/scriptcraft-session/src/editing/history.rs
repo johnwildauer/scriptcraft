@@ -3,7 +3,7 @@
 use super::derived::PendingDerivedInvalidation;
 use super::selection::{validate_selection, validate_title_selection};
 use super::{validate_full_candidate, EditError, EditingSession, Selection};
-use scriptcraft_model::{formatted_text::RunStyleFlags, Project};
+use scriptcraft_model::{formatted_text::{InlineRunFormattingPatch, RunStyleFlags}, Project};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +15,7 @@ pub(super) struct Snapshot {
     pub(super) title_selection: Selection,
     pub(super) title_typing_style: RunStyleFlags,
     pub(super) body_typing_style: RunStyleFlags,
+    pub(super) body_typing_formatting: InlineRunFormattingPatch,
     pub(super) generated_parentheticals: BTreeSet<String>,
 }
 
@@ -45,6 +46,7 @@ impl EditingSession {
             title_selection: self.title_selection,
             title_typing_style: self.title_typing_style,
             body_typing_style: self.body_typing_style,
+            body_typing_formatting: self.body_typing_formatting,
             generated_parentheticals: self.generated_parentheticals.clone(),
         };
         self.history.pop();
@@ -55,6 +57,7 @@ impl EditingSession {
         self.title_selection = snapshot.title_selection;
         self.title_typing_style = snapshot.title_typing_style;
         self.body_typing_style = snapshot.body_typing_style;
+        self.body_typing_formatting = snapshot.body_typing_formatting;
         self.generated_parentheticals = snapshot.generated_parentheticals;
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;
@@ -81,6 +84,7 @@ impl EditingSession {
             title_selection: self.title_selection,
             title_typing_style: self.title_typing_style,
             body_typing_style: self.body_typing_style,
+            body_typing_formatting: self.body_typing_formatting,
             generated_parentheticals: self.generated_parentheticals.clone(),
         };
         self.redo.pop();
@@ -91,6 +95,7 @@ impl EditingSession {
         self.title_selection = snapshot.title_selection;
         self.title_typing_style = snapshot.title_typing_style;
         self.body_typing_style = snapshot.body_typing_style;
+        self.body_typing_formatting = snapshot.body_typing_formatting;
         self.generated_parentheticals = snapshot.generated_parentheticals;
         self.revision = self.revision.saturating_add(1);
         self.dirty = self.project != self.clean_project;

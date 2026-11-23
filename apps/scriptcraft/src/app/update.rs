@@ -46,6 +46,15 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
 
     if app.menu_policy.renders_in_window() {
         let projection = app.app_command_projection();
+        let dynamic_elements = app.dynamic_element_menu_projection();
+        let formatting = crate::chrome::formatting_menu::project(
+            &app.session,
+            app.active_editor_surface,
+        );
+        let view_menu = crate::chrome::menu_items::ViewMenuProjection {
+            zoom_percent: app.zoom_for_surface(app.active_editor_surface()),
+            appearance_mode: app.appearance_mode,
+        };
         let menu_panel = egui::Panel::top("application-menu")
             .frame(chrome_frame(app.theme_palette.toolbar))
             .show_separator_line(false)
@@ -54,6 +63,9 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                 menu::show_menu_bar(
                     ui,
                     projection.availability,
+                    &dynamic_elements,
+                    &formatting,
+                    view_menu,
                     app.script_view_mode,
                     projection.say_undual,
                     projection.invisibles_visible,
@@ -388,22 +400,25 @@ impl eframe::App for ScriptCraftApp {
                 dialog_availability.is_enabled(CommandId::ApplicationQuit);
             let mut retained_events = Vec::with_capacity(raw_input.events.len());
             for event in std::mem::take(&mut raw_input.events) {
-                let command = menu::command_for_pressed_key_event(
+                let activation = menu::command_for_pressed_key_event(
                     &event,
                     shortcuts::ShortcutPlatform::current(),
                 );
-                if let Some(command) = command.filter(|command| {
-                    !element_dialog_open
-                        || element_dialog_shortcut_allowed(
-                            command.id(),
-                            inspector_open,
-                            selector_open,
-                            root_close_enabled,
-                            application_quit_enabled,
-                        )
+                if let Some(activation) = activation.filter(|activation| match activation {
+                    menu::MenuActivation::Command(command) => {
+                        !element_dialog_open
+                            || element_dialog_shortcut_allowed(
+                                command.id(),
+                                inspector_open,
+                                selector_open,
+                                root_close_enabled,
+                                application_quit_enabled,
+                            )
+                    }
+                    menu::MenuActivation::ZoomStep(_) => !element_dialog_open,
                 }) {
                     self.pending_commands
-                        .enqueue(CommandInvocation::new(command, CommandOrigin::Shortcut));
+                        .enqueue_activation(activation, CommandOrigin::Shortcut);
                 } else {
                     retained_events.push(event);
                 }
@@ -611,11 +626,23 @@ impl ScriptCraftApp {
         measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
             if app.menu_policy.installs_native_macos() {
                 let projection = app.app_command_projection();
+                let dynamic_elements = app.dynamic_element_menu_projection();
+                let formatting = crate::chrome::formatting_menu::project(
+                    &app.session,
+                    app.active_editor_surface,
+                );
+                let view_menu = crate::chrome::menu_items::ViewMenuProjection {
+                    zoom_percent: app.zoom_for_surface(app.active_editor_surface()),
+                    appearance_mode: app.appearance_mode,
+                };
                 if let Some(native_menu) = &mut app.native_menu {
                     native_menu.synchronize(
                         projection.availability,
                         app.script_view_mode,
                         projection.say_undual,
+                        &dynamic_elements,
+                        &formatting,
+                        view_menu,
                     );
                 }
             }

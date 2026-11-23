@@ -8,7 +8,7 @@ Persistent global preference behavior is specified by [User settings requirement
 
 - **Requirements:** [Desktop workspace](../../requirements/features/desktop-workspace.md); [Page layout](../../requirements/features/page-layout.md) owns `AC-WRITING-002.15` and `AC-WRITING-006.5`–`AC-WRITING-006.11`; [Screenplay editing command boundary](../../requirements/features/screenplay-editing.md)
 - **Technical context:** [Technical context](../technical-context.md)
-- **Requirements traced:** `REQ-WRITING-LOOP-002`, `REQ-WRITING-LOOP-005`, `REQ-WRITING-LOOP-006`, `REQ-WRITING-LOOP-010`, `REQ-WRITING-LOOP-011`, `REQ-WRITING-LOOP-012`; `AC-WRITING-002.15`–`.16`, `AC-WRITING-005.1`–`AC-WRITING-005.9` including `.2d`–`.2g`, `AC-WRITING-006.1`–`AC-WRITING-006.13`, `AC-WRITING-010.1`–`AC-WRITING-010.5`, `AC-WRITING-011.1`–`AC-WRITING-011.12`, `AC-WRITING-012.1`–`AC-WRITING-012.8`.
+- **Requirements traced:** `REQ-WRITING-LOOP-002`, `REQ-WRITING-LOOP-005`, `REQ-WRITING-LOOP-006`, `REQ-WRITING-LOOP-010`, `REQ-WRITING-LOOP-011`, `REQ-WRITING-LOOP-012`; `AC-WRITING-002.15`–`.16`, `AC-WRITING-005.1`–`AC-WRITING-005.9` including `.2d`–`.2g`, `AC-WRITING-006.1`–`AC-WRITING-006.13`, `AC-WRITING-010.1`–`AC-WRITING-010.5`, `AC-WRITING-011.1`–`AC-WRITING-011.13`, `AC-WRITING-012.1`–`AC-WRITING-012.9`, and [Screenplay Editing](screenplay-editing.md) `AC-WRITING-007.12`–`.13`.
 - **Area summary:** Toolbar, menus, keyboard, editor surface, and status controls are projections and activation sources over one session. Every enabled ScriptCraft-owned user action enters a stable typed command path where applicable; the workspace never becomes a second owner of document semantics.
 
 ## Shared composition
@@ -99,6 +99,10 @@ The preceding ruler visual summary is superseded as to ruler geometry and paint:
 - **Boundary:** Timer notifications, fullscreen transitions, native menu presentation, clipboard, and viewport effects remain host-owned. Diagnostic presentation is privacy-safe and cannot control failure-safety behavior.
 
 ## Decisions
+
+### Landed menu and context-action composition
+
+The landed menu behavior follows [Desktop Workspace requirements](../../requirements/features/desktop-workspace.md#req-writing-loop-011-shared-desktop-application-menus) and [Desktop Adapters](../components/desktop-adapters.md#landed-shared-menu-and-body-context-projections): current ordered element choices and focused Body key, active-surface zoom, Appearance, effective formatting values, and shared availability form transient projections. Dynamic element rows are generated from the current registry and retain explicit Body routing; fixed formatting and view rows use typed commands with fresh availability. Native macOS structural replacement is limited to the dynamic element submenu. The Body context popup uses Pointer-origin shared dispatch, resolves secondary-click selection before composing at the single editor response, and adds no Title Page or native OS context menu. Native Zoom/Appearance checks initially use provisional 100%/System values until the first ordinary root update synchronizes current state; the contract does not guarantee exact checks before that synchronization. The exact menu rows, values, check behavior, current-zoom stepping, accelerator ownership, global availability locks, and deliberate exclusions are specified in the requirements.
 
 - Make command dispatch the universal activation boundary for application-owned actions; keep raw framework bookkeeping out of semantic commands.
 - Separate model-owned canonical values, session-owned edits/history/storage, FDX codec, layout, export, and commands from app-owned transient per-window controls and native effects.

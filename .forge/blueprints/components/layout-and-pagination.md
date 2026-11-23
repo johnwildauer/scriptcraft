@@ -115,5 +115,9 @@ After a Changed Apply, Body and any open Title Page layout observe the current P
 
 ## Decisions
 
+### Landed direct paragraph formatting layout formula
+
+Direct paragraph values are typed `ParagraphLeading` (Regular, Tight, Loose) and `ParagraphSpacing` (Single, OneAndHalf, Double); absence inherits from the current exact definition. Unrecognized imported values remain source-owned and have no numeric interpretation. For each visual line, compute ordinary leading for the element base style and styles actually present on that line from effective size and exact resolved-face category without document/paragraph adjustments, take their maximum, multiply by spacing ratio 1, 3/2, or 2 using fixed-point arithmetic, then add DocumentLeading's +0/+1/−1/−2 point adjustment and ParagraphLeading's Regular +0, Tight −1, or Loose +1 point adjustment. Require positive finite leading. ParagraphLeading is also added to the baseline offset in the same way as DocumentLeading; neither point adjustment is multiplied by spacing. Space Before uses the resulting effective base leading; menu choices 0/1/2/3 lines multiply the current definition's base font size in points, not inline run size. Typed direct values and effective paragraph values participate in complete cache equality. This approved formula supersedes the earlier boolean-only Regular/Single and unsupported Tight/Loose/1.5 descriptions for these direct overrides. It is an application contract, not a claim of Final Draft pixel parity.
+
 - Keep document-point geometry authoritative for pagination and output, with explicit resolved-font metrics as canonical inputs; desktop rasterization may vary glyph appearance but not advances, wrapping, alignment, or page geometry.
 - Treat caches and query indexes as disposable derivations whose reuse must be equivalent to fresh complete layout.
