@@ -98,6 +98,12 @@ pub(crate) struct PagePalette {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BeatPaintPalette {
+    pub(crate) grid: Color32,
+    pub(crate) unselected_card_border: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ToolbarPalette {
     pub(crate) background: Color32,
     pub(crate) border: Color32,
@@ -115,6 +121,7 @@ pub(crate) struct ToolbarPalette {
 pub(crate) struct ScriptWorkspacePalette {
     pub(crate) background: Color32,
     pub(crate) page: PagePalette,
+    pub(crate) beat: BeatPaintPalette,
     pub(crate) editor_scrollbar: EditorScrollbarPalette,
 }
 
@@ -247,6 +254,20 @@ impl ApplicationPalette {
                 scrollbar_hovered: Color32::from_rgb(150, 150, 150),
             },
         };
+        let beat = match appearance {
+            ResolvedAppearance::Day => BeatPaintPalette {
+                grid: Color32::from_rgb(189, 189, 189),
+                unselected_card_border: Color32::from_rgb(189, 189, 189),
+            },
+            ResolvedAppearance::Night => BeatPaintPalette {
+                grid: Color32::from_rgb(80, 80, 80),
+                unselected_card_border: Color32::from_rgb(105, 105, 105),
+            },
+            ResolvedAppearance::Midnight => BeatPaintPalette {
+                grid: Color32::from_rgb(50, 50, 50),
+                unselected_card_border: Color32::from_rgb(80, 80, 80),
+            },
+        };
         let hovered_foreground = widgets.hovered.text_color();
         let (toolbar_background, toolbar_border, toolbar_foreground, workspace_background) =
             match appearance {
@@ -322,6 +343,7 @@ impl ApplicationPalette {
             script_workspace: ScriptWorkspacePalette {
                 background: workspace_background,
                 page,
+                beat,
                 editor_scrollbar: EditorScrollbarPalette {
                     track: page.scrollbar_background,
                     resting_handle: page.scrollbar_neutral,

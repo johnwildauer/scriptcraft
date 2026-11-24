@@ -18,6 +18,7 @@ impl ScriptCraftApp {
             command @ (Command::BeatBoardCardCreate { .. } | Command::BeatBoardCardActivate { .. }
                 | Command::BeatBoardCardGeometrySet { .. } | Command::BeatBoardSelectionSet { .. }
                 | Command::BeatBoardTextEdit { .. } | Command::BeatBoardNavigation { .. }
+                | Command::BeatBoardCardDelete { .. }
                 | Command::BeatBoardStyleToggle { .. } | Command::BeatBoardStyleClear
                 | Command::BeatBoardRunFormattingSet { .. }) =>
                 self.execute_editor(&command, RevealIntent::None, ctx),
@@ -56,11 +57,27 @@ impl ScriptCraftApp {
                 self.execute_editor(&Command::EditRedo, RevealIntent::Conditional, ctx)
             }
             Command::EditDelete => {
-                if self.root_document_view == crate::app::RootDocumentView::BeatBoard && self.beat_text.focused {
-                    if matches!(self.session.beat_selection(), scriptcraft_session::editing::BeatSelection::Text { anchor, focus, .. } if anchor != focus) {
-                        return self.execute_editor(&Command::BeatBoardTextEdit { operation: scriptcraft_commands::BeatTextEditValue::DeleteForward }, RevealIntent::None, ctx);
+                if self.root_document_view == crate::app::RootDocumentView::BeatBoard {
+                    match self.session.beat_selection() {
+                        scriptcraft_session::editing::BeatSelection::Card { card } => {
+                            let delete = Command::BeatBoardCardDelete {
+                                card: scriptcraft_commands::BeatCardIdValue::from_core(card.clone()),
+                            };
+                            let availability = self.command_dispatch_availability(&delete);
+                            if !availability.is_enabled(delete.id()) {
+                                return super::DesktopCommandOutcome::Unavailable(availability.unavailable_reason(delete.id()));
+                            }
+                            return self.execute_editor(&delete, RevealIntent::None, ctx);
+                        }
+                        scriptcraft_session::editing::BeatSelection::Text { anchor, focus, .. } if self.beat_text.focused => {
+                            if anchor != focus {
+                                return self.execute_editor(&Command::BeatBoardTextEdit { operation: scriptcraft_commands::BeatTextEditValue::DeleteForward }, RevealIntent::None, ctx);
+                            }
+                            return super::DesktopCommandOutcome::Unavailable(super::DesktopUnavailableReason::Selection);
+                        }
+                        _ if self.beat_text.focused => return super::DesktopCommandOutcome::Unavailable(super::DesktopUnavailableReason::Selection),
+                        _ => {}
                     }
-                    return super::DesktopCommandOutcome::Unavailable(super::DesktopUnavailableReason::Selection);
                 }
                 self.execute_editor(&Command::EditDelete, RevealIntent::Conditional, ctx)
             }
@@ -169,7 +186,7 @@ impl ScriptCraftApp {
         .then(std::time::Instant::now);
         let active_surface = self.active_editor_surface();
         let beat_command = matches!(command, Command::BeatBoardCardCreate { .. } | Command::BeatBoardCardActivate { .. }
-            | Command::BeatBoardCardGeometrySet { .. } | Command::BeatBoardSelectionSet { .. }
+            | Command::BeatBoardCardGeometrySet { .. } | Command::BeatBoardCardDelete { .. } | Command::BeatBoardSelectionSet { .. }
             | Command::BeatBoardTextEdit { .. } | Command::BeatBoardNavigation { .. }
             | Command::BeatBoardStyleToggle { .. } | Command::BeatBoardStyleClear
             | Command::BeatBoardRunFormattingSet { .. });

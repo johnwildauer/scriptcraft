@@ -90,11 +90,6 @@ pub(super) fn paint(
     if selection_only { return; }
 
     if !focused || start != end { return; }
-    let placeholder = match field {
-        BeatTextField::Title => card.title.is_empty(),
-        BeatTextField::Body => card.paragraphs.iter().all(|paragraph| paragraph.text.is_empty()),
-    };
-    if placeholder && state.ime_preedit.is_empty() { return; }
     let Some(rect) = caret_rect(layout, *field, end) else { return };
     let caret = Rect::from_min_size(
         local_screen(origin, rect.left(), rect.top(), zoom,
@@ -106,7 +101,7 @@ pub(super) fn paint(
     let phase = ((now - state.caret_reset_time).max(0.0) / 0.5).floor() as u64;
     painter.ctx().request_repaint_after(Duration::from_millis(500));
     let clip = if *field == BeatTextField::Title { title_rect } else { body_rect };
-    if !placeholder && phase.is_multiple_of(2) && clip.contains(caret.min) { painter.rect_filled(caret.intersect(clip), 0.0, palette.caret); }
+    if phase.is_multiple_of(2) && clip.contains(caret.min) { painter.rect_filled(caret.intersect(clip), 0.0, palette.caret); }
     if !state.ime_preedit.is_empty() {
         let text_pos = Pos2::new(caret.left(), caret.top());
         let galley = painter.layout_no_wrap(state.ime_preedit.clone(), egui::FontId::proportional(12.0 * zoom), palette.ime_text);

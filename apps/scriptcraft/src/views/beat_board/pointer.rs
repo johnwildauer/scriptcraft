@@ -1,6 +1,9 @@
 //! Spatial gestures are transient; losing focus or the pointer cancels capture.
 use super::geometry::{pixels, ViewportGeometry};
+use super::scrollbars::{self, ScrollbarInteraction};
+use crate::chrome::theme::EditorScrollbarPalette;
 use eframe::egui::{self, Pos2};
+use scriptcraft_fdx::BeatBoardViewState;
 use scriptcraft_commands::{BeatCardIdValue, BeatPointValue, BeatRectValue, BeatSelectionValue, Command};
 use scriptcraft_model::{BeatBoard, BeatRect, BoardFixed, StableId};
 use scriptcraft_session::editing::BeatSelection;
@@ -12,13 +15,17 @@ enum Mode { Move, Resize(Edges), Text }
 #[derive(Clone)]
 struct Press { card: StableId, start_screen: Pos2, start: (f64, f64), last: (f64, f64), rect: [f64; 4], mode: Mode, token: u64, dragging: bool }
 #[derive(Default)]
-pub(crate) struct BeatInteraction { press: Option<Press> }
+pub(crate) struct BeatInteraction { press: Option<Press>, scrollbars: ScrollbarInteraction }
 
 fn card_rect(rect: BeatRect) -> [f64; 4] { [pixels(rect.left), pixels(rect.top), pixels(rect.width), pixels(rect.height)] }
 fn fixed(v: f64) -> BoardFixed { BoardFixed::from_milli_pixels((v.max(0.0) * 1000.0).round() as i64) }
 fn model_rect(r: [f64; 4]) -> BeatRect { BeatRect { left: fixed(r[0]), top: fixed(r[1]), width: fixed(r[2]), height: fixed(r[3]) } }
 fn snap(v: f64) -> f64 { ((v.max(0.0) + 10.0) / 20.0).floor() * 20.0 }
 fn grid_limit(v: f64) -> f64 { (v.max(0.0) / 20.0).floor() * 20.0 }
+
+fn is_active_card(selection: &BeatSelection, id: &StableId) -> bool {
+    matches!(selection, BeatSelection::Card { card } | BeatSelection::Text { card, .. } if card == id)
+}
 
 fn preview(press: &Press, point: (f64, f64), board: &BeatBoard) -> [f64; 4] {
     let [x, y, w, h] = press.rect;
@@ -55,7 +62,7 @@ fn hit(board: &BeatBoard, geometry: ViewportGeometry, selection: &BeatSelection,
         let [x, y, w, h] = card_rect(card.rect);
         let rect = egui::Rect::from_min_max(geometry.board_to_screen(x, y), geometry.board_to_screen(x + w, y + h));
         if !rect.expand(5.0).contains(pos) { continue; }
-        let selected = matches!(selection, BeatSelection::Card { card: id } | BeatSelection::Text { card: id, .. } if id == &card.id);
+        let selected = is_active_card(selection, &card.id);
         if selected {
             let edge = Edges { x: if (pos.x - rect.left()).abs() <= 5.0 { -1 } else if (pos.x - rect.right()).abs() <= 5.0 { 1 } else { 0 },
                 y: if (pos.y - rect.top()).abs() <= 5.0 { -1 } else if (pos.y - rect.bottom()).abs() <= 5.0 { 1 } else { 0 } };
@@ -66,7 +73,7 @@ fn hit(board: &BeatBoard, geometry: ViewportGeometry, selection: &BeatSelection,
         let lx = px - x; let ly = py - y;
         // Same default padded Title and Body regions as the canonical card layout.
         let text = lx >= 12.0 && lx <= w - 12.0 && ((ly >= 12.0 && ly <= 32.0) || (ly >= 40.0 && ly <= h - 12.0));
-        return Some((card.id.clone(), if text { Mode::Text } else { Mode::Move }));
+        return Some((card.id.clone(), if selected && text { Mode::Text } else { Mode::Move }));
     }
     None
 }
@@ -78,12 +85,21 @@ fn cursor(mode: Mode) -> egui::CursorIcon {
         Mode::Resize(Edges { x, y }) if x == y => egui::CursorIcon::ResizeNwSe,
         Mode::Resize(_) => egui::CursorIcon::ResizeNeSw,
         Mode::Move => egui::CursorIcon::Grab,
-        Mode::Text => egui::CursorIcon::Default,
+        Mode::Text => egui::CursorIcon::Text,
     }
 }
 
 impl BeatInteraction {
-    pub(crate) fn cancel(&mut self) { self.press = None; }
+    pub(crate) fn cancel(&mut self) { self.press = None; self.scrollbars = ScrollbarInteraction::default(); }
+    pub(crate) fn observe_view(&mut self, ctx: &egui::Context, view: BeatBoardViewState) { self.scrollbars.observe_view(ctx, view); }
+    pub(super) fn handle_scrollbars(&mut self, ui: &egui::Ui, geometry: ViewportGeometry, view: &mut BeatBoardViewState, token: u64, enabled: bool) -> bool {
+        let consumed = scrollbars::handle(ui, geometry, view, &mut self.scrollbars, token, enabled);
+        if consumed { self.press = None; }
+        consumed
+    }
+    pub(super) fn paint_scrollbars(&self, ui: &egui::Ui, geometry: ViewportGeometry, palette: EditorScrollbarPalette) {
+        scrollbars::paint(ui, geometry, &self.scrollbars, palette);
+    }
     pub(super) fn preview_card(&self, board: &BeatBoard, geometry: ViewportGeometry, pos: Option<Pos2>) -> Option<(StableId, BeatRect)> {
         let press = self.press.as_ref().filter(|p| p.dragging)?;
         let point = pos.map(|p| geometry.screen_to_board(p)).unwrap_or(press.last);
@@ -114,8 +130,9 @@ impl BeatInteraction {
         if let Some(pos) = pos.filter(|p| response.hovered() && geometry.clip.contains(*p) && geometry.board_screen_rect().contains(*p)) {
             let target = hit(board, geometry, selection, pos);
             if let Some((id, mode)) = &target {
-                let selected = matches!(selection, BeatSelection::Card { card } if card == id);
-                ctx.set_cursor_icon(if !selected && matches!(mode, Mode::Text) { egui::CursorIcon::Grab } else { cursor(*mode) });
+                let active = is_active_card(selection, id);
+                let icon = if matches!(mode, Mode::Text) && !active { egui::CursorIcon::Grab } else { cursor(*mode) };
+                ctx.set_cursor_icon(icon);
             }
             if response.double_clicked() && target.is_none() {
                 let (x, y) = geometry.screen_to_board(pos);
@@ -128,9 +145,7 @@ impl BeatInteraction {
                     let item = board.cards.iter().find(|item| item.id == card)?;
                     // A selected card's text region belongs to the text editor;
                     // do not create a spatial press that can consume its drag.
-                    if matches!(selection, BeatSelection::Card { card: active } | BeatSelection::Text { card: active, .. } if active == &card)
-                        && matches!(mode, Mode::Text)
-                    { return None; }
+                    if is_active_card(selection, &card) && matches!(mode, Mode::Text) { return None; }
                     let start = geometry.screen_to_board(pos);
                     self.press = Some(Press { card, start_screen: pos, start, last: start, rect: card_rect(item.rect), mode, token, dragging: false });
                 } else {

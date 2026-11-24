@@ -117,6 +117,7 @@ pub fn execute_editor_command_on_surface(
         Command::BeatBoardCardCreate { position } => session.create_beat_card(position.to_core()),
         Command::BeatBoardCardActivate { card } => session.activate_beat_card(card.as_core().clone()),
         Command::BeatBoardCardGeometrySet { card, rect, activate } => session.set_beat_card_geometry(card.as_core().clone(), rect.to_core(), *activate),
+        Command::BeatBoardCardDelete { card } => session.delete_beat_card(card.as_core().clone()),
         Command::BeatBoardSelectionSet { selection } => session.set_beat_selection(match selection {
             value => match crate::beat_selection_to_core(value) {
                 Ok(selection) => selection,

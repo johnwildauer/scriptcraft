@@ -31,7 +31,7 @@ const fn descriptor(
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 73] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 74] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -253,6 +253,7 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 73] = [
     descriptor(CommandId::BeatBoardStyleToggle, "beat-board", "style: bold, italics, underline, all_caps, or strikethrough; active Body selection/caret"),
     descriptor(CommandId::BeatBoardStyleClear, "beat-board", "none; clear supported Body run styles"),
     descriptor(CommandId::BeatBoardRunFormattingSet, "beat-board", "patch: bounded Font/Size/Color/Background; active Body selection/caret"),
+    descriptor(CommandId::BeatBoardCardDelete, "beat-board", "card: stable card ID"),
 ];
 
 pub fn descriptor_for(id: CommandId) -> Option<&'static CommandDescriptor> {

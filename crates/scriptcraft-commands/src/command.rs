@@ -89,11 +89,12 @@ pub enum CommandId {
     BeatBoardStyleToggle,
     BeatBoardStyleClear,
     BeatBoardRunFormattingSet,
+    BeatBoardCardDelete,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 73] = [
+    pub const ALL: [Self; 74] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -167,6 +168,7 @@ impl CommandId {
         Self::BeatBoardStyleToggle,
         Self::BeatBoardStyleClear,
         Self::BeatBoardRunFormattingSet,
+        Self::BeatBoardCardDelete,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -244,6 +246,7 @@ impl CommandId {
             Self::BeatBoardStyleToggle => "beat-board.style.toggle",
             Self::BeatBoardStyleClear => "beat-board.style.clear",
             Self::BeatBoardRunFormattingSet => "beat-board.run-formatting.set",
+            Self::BeatBoardCardDelete => "beat-board.card.delete",
         }
     }
 }
@@ -494,6 +497,8 @@ pub enum Command {
     BeatBoardStyleClear,
     #[serde(rename = "beat-board.run-formatting.set")]
     BeatBoardRunFormattingSet { patch: RunFormattingPatchValue },
+    #[serde(rename = "beat-board.card.delete")]
+    BeatBoardCardDelete { card: BeatCardIdValue },
 }
 
 impl Command {
@@ -597,6 +602,7 @@ impl Command {
             Self::BeatBoardStyleToggle { .. } => CommandId::BeatBoardStyleToggle,
             Self::BeatBoardStyleClear => CommandId::BeatBoardStyleClear,
             Self::BeatBoardRunFormattingSet { .. } => CommandId::BeatBoardRunFormattingSet,
+            Self::BeatBoardCardDelete { .. } => CommandId::BeatBoardCardDelete,
         }
     }
 }

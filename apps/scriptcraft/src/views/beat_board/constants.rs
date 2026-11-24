@@ -7,7 +7,7 @@ pub(super) const GRID_STROKE_PIXELS: f32 = 1.0;
 pub(super) const VIEWPORT_ID: &str = "beat-board-viewport";
 pub(crate) const WHEEL_POINTS_PER_LINE: f32 = 40.0;
 
-// Use the page and workspace palette roles so all supported appearances remain legible.
+// Keep the Beat grid appearance-specific; the shared page border belongs to Script/Title views.
 pub(super) fn colors(palette: ScriptWorkspacePalette) -> (Color32, Color32, Color32) {
-    (palette.background, palette.page.paper, palette.page.border)
+    (palette.background, palette.page.paper, palette.beat.grid)
 }

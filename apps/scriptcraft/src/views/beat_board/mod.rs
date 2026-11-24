@@ -5,6 +5,7 @@ mod constants;
 pub(crate) mod geometry;
 mod paint;
 mod pointer;
+mod scrollbars;
 mod text_state;
 mod text_pointer;
 mod text_input;

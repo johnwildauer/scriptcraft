@@ -243,6 +243,7 @@ impl ScriptCraftApp {
             | Command::BeatBoardCardCreate { .. }
             | Command::BeatBoardCardActivate { .. }
             | Command::BeatBoardCardGeometrySet { .. }
+            | Command::BeatBoardCardDelete { .. }
             | Command::BeatBoardSelectionSet { .. }
             | Command::BeatBoardTextEdit { .. }
             | Command::BeatBoardNavigation { .. }

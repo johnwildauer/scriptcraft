@@ -1415,7 +1415,7 @@ impl StatusSurfaceOptions {
     pub(super) const BEAT: Self = Self {
         show_page: false,
         show_center: false,
-        show_focus_mode: false,
+        show_focus_mode: true,
         show_diagnostics: true,
     };
 }
@@ -1451,10 +1451,11 @@ pub(crate) fn show_with_focus_mode(
 pub(crate) fn show_beat(
     ui: &mut egui::Ui, palette: StatusPalette, page: VisiblePage,
     diagnostics: Option<DiagnosticProjection<'_>>, development_mode: bool,
-    zoom_percent: u16, appearance: AppearanceMode, policy: ZoomPolicy,
+    zoom_percent: u16, appearance: AppearanceMode, focus_view: &FocusModeView,
+    policy: ZoomPolicy,
 ) -> StatusCommandIntents {
     show_impl_with_appearance(ui, palette, page, &ready_center(), diagnostics,
-        development_mode, zoom_percent, appearance, None, None, StatusSurfaceOptions::BEAT, policy)
+        development_mode, zoom_percent, appearance, None, Some(focus_view), StatusSurfaceOptions::BEAT, policy)
 }
 
 #[allow(clippy::too_many_arguments)]

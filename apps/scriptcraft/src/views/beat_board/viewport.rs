@@ -7,15 +7,18 @@ use scriptcraft_model::BeatBoard;
 use scriptcraft_session::editing::BeatSelection;
 use scriptcraft_commands::Command;
 
-pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardViewState, published: &mut Option<ViewportGeometry>, palette: ScriptWorkspacePalette, cache: &mut BeatLayoutCache, prepared: Option<(&LayoutEnvironment, &PreparedDocumentFonts)>, selection: &BeatSelection, token: u64, interaction: &mut BeatInteraction, text_state: &mut BeatTextState, enabled: bool) -> (bool, Vec<Command>) {
+pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardViewState, published: &mut Option<ViewportGeometry>, palette: ScriptWorkspacePalette, cache: &mut BeatLayoutCache, prepared: Option<(&LayoutEnvironment, &PreparedDocumentFonts)>, selection: &BeatSelection, token: u64, interaction: &mut BeatInteraction, text_state: &mut BeatTextState, enabled: bool, card_delete_keyboard_enabled: bool) -> (bool, Vec<Command>) {
     let mut success = true;
     cache.retain_board(board);
     let (rect, _) = ui.allocate_exact_size(ui.available_size().max(egui::Vec2::ZERO), egui::Sense::hover());
     let response = ui.interact(rect, ui.id().with(constants::VIEWPORT_ID), egui::Sense::click_and_drag());
     text_state.viewport_id = Some(response.id);
     let pointer = ui.ctx().input(|input| input.pointer.hover_pos());
-    let geometry = ViewportGeometry::new(rect, ui.clip_rect(), board, *view, pointer);
-    let spatial_command = interaction.input(ui, &response, geometry, board, selection, token, enabled);
+    interaction.observe_view(ui.ctx(), *view);
+    let mut geometry = ViewportGeometry::new(rect, ui.clip_rect(), board, *view, pointer);
+    let scrollbar_consumed = interaction.handle_scrollbars(ui, geometry, view, token, enabled);
+    geometry = geometry.with_view(*view);
+    let spatial_command = if scrollbar_consumed { None } else { interaction.input(ui, &response, geometry, board, selection, token, enabled) };
     let preview = interaction.preview_card(board, geometry, ui.ctx().input(|i| i.pointer.interact_pos()));
     *view = geometry.view;
     let mut commands = spatial_command.into_iter().collect::<Vec<_>>();
@@ -57,7 +60,7 @@ pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardVie
             }
             for card in board.cards.iter().filter(|card| preview.as_ref().is_none_or(|(id, _)| id != &card.id)).filter(|card| rect_visible(card.rect, visible)) {
                 let selected = matches!(selection, BeatSelection::Card { card: id } | BeatSelection::Text { card: id, .. } if id == &card.id);
-                paint::paint_card_frame(&painter, geometry, card, palette.page, selected);
+                paint::paint_card_frame(&painter, geometry, card, palette.page, palette.beat.unselected_card_border, selected);
                 if let Some((environment, fonts)) = prepared {
                     match cache.get_or_build(card, environment, fonts, BeatCardMetrics::default()) {
                         Ok(layouts) => {
@@ -75,7 +78,7 @@ pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardVie
                     let mut card = card.clone();
                     card.rect = *rect;
                     if rect_visible(card.rect, visible) {
-                        paint::paint_card_frame(&painter, geometry, &card, palette.page, true);
+                        paint::paint_card_frame(&painter, geometry, &card, palette.page, palette.beat.unselected_card_border, true);
                         if let Some((environment, fonts)) = prepared {
                             match cache.get_or_build(&card, environment, fonts, BeatCardMetrics::default()) {
                                 Ok(layouts) => success &= paint::paint_card(&painter, geometry, &card, layouts, palette.page, fonts, text_state),
@@ -87,7 +90,7 @@ pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardVie
             }
         }
     }
-    if commands.is_empty() && enabled {
+    if commands.is_empty() && enabled && !scrollbar_consumed {
         let selected_id = match selection { BeatSelection::Card { card } | BeatSelection::Text { card, .. } => Some(card), _ => None };
         if let (Some(card), Some((environment, fonts))) = (selected_id.and_then(|id| board.cards.iter().find(|card| &card.id == id)), prepared) {
             if let Ok(layouts) = cache.get_or_build(card, environment, fonts, BeatCardMetrics::default()) {
@@ -102,9 +105,19 @@ pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardVie
             text_state.blur();
         }
     }
+    if commands.is_empty() && card_delete_keyboard_enabled && !text_state.focused
+        && matches!(selection, BeatSelection::Card { .. })
+        && !scrollbar_consumed
+        && ui.ctx().input(|input| input.events.iter().any(|event| matches!(event,
+            egui::Event::Key { key: egui::Key::Backspace | egui::Key::Delete, pressed: true,
+                repeat: false, modifiers, .. }
+                if crate::chrome::shortcuts::modifiers_are_none(*modifiers)))) {
+        commands.push(Command::EditDelete);
+    }
     if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) && !text_state.focused {
         text_state.clear_field_view();
     }
+    interaction.paint_scrollbars(ui, geometry, palette.editor_scrollbar);
     *published = Some(geometry);
     (success, commands)
 }

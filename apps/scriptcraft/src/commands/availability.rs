@@ -15,6 +15,7 @@ pub(crate) struct AppCommandAvailability {
     pub(crate) undo: bool,
     pub(crate) redo: bool,
     pub(crate) delete: bool,
+    pub(crate) beat_card_delete: bool,
     pub(crate) select_all: bool,
     pub(crate) cut: bool,
     pub(crate) copy: bool,
@@ -56,6 +57,7 @@ struct AppCommandProjectionKey {
     active_editor_surface: EditorSurface,
     root_document_view: RootDocumentView,
     beat_text_focused: bool,
+    title_surface_focused: bool,
     invisibles_visible: bool,
     ruler_visible: bool,
     migration_pending: bool,
@@ -106,6 +108,7 @@ impl ScriptCraftApp {
             active_editor_surface: self.active_editor_surface,
             root_document_view: self.root_document_view,
             beat_text_focused: self.beat_text.focused,
+            title_surface_focused: self.title_view.surface_focused,
             invisibles_visible: self.active_surface_invisibles_visible(),
             ruler_visible: self.settings_store.ruler_visible(),
             migration_pending: self.pending_fdx_open.is_some(),
@@ -206,6 +209,10 @@ impl ScriptCraftApp {
                 availability.beat_formatting = false;
             }
         }
+        if let scriptcraft_commands::Command::BeatBoardCardDelete { card } = command {
+            availability.beat_card_delete &= matches!(self.session.beat_selection(),
+                scriptcraft_session::editing::BeatSelection::Card { card: selected } if selected == card.as_core());
+        }
         if matches!(command, scriptcraft_commands::Command::BeatBoardStyleToggle { .. }
             | scriptcraft_commands::Command::BeatBoardStyleClear
             | scriptcraft_commands::Command::BeatBoardRunFormattingSet { .. }) {
@@ -302,6 +309,13 @@ impl ScriptCraftApp {
             scriptcraft_session::editing::BeatSelection::Text { anchor, focus, .. } => (true, anchor != focus),
             _ => (false, false),
         };
+        let beat_card_delete = self.root_document_view == RootDocumentView::BeatBoard
+            && self.active_editor_surface == EditorSurface::Body
+            && !self.title_view_state_swapped && !self.beat_text.focused
+            && !self.title_view.surface_focused && !self.element_windows.owns_input()
+            && !migration_pending && !replacement_pending && !native_output_active
+            && self.session.beat_selection_is_valid()
+            && matches!(self.session.beat_selection(), scriptcraft_session::editing::BeatSelection::Card { .. });
 
         AppCommandAvailability {
             modal_blocked: migration_pending && !replacement_pending,
@@ -313,7 +327,8 @@ impl ScriptCraftApp {
                 && self.title_page_window_open,
             undo: !migration_pending && !replacement_pending && self.session.can_undo(),
             redo: !migration_pending && !replacement_pending && self.session.can_redo(),
-            delete: if beat_text_focus { beat_has_range } else { editor_available && !migration_pending && !replacement_pending && delete_target_exists },
+            delete: if beat_text_focus { beat_has_range } else if beat_card_delete { true } else { editor_available && !migration_pending && !replacement_pending && delete_target_exists },
+            beat_card_delete,
             // EditingSession projects a document with at least one body element.
             select_all: if beat_text_focus { beat_has_text } else { editor_available && !migration_pending && !replacement_pending && element_count != 0 },
             cut: if beat_text_focus { beat_has_range } else { editor_available && !migration_pending && !replacement_pending && selection.anchor != selection.focus },
@@ -435,6 +450,7 @@ impl AppCommandAvailability {
             CommandId::BeatBoardCardCreate | CommandId::BeatBoardCardActivate
             | CommandId::BeatBoardCardGeometrySet | CommandId::BeatBoardSelectionSet
             | CommandId::BeatBoardTextEdit | CommandId::BeatBoardNavigation => self.beat_available,
+            CommandId::BeatBoardCardDelete => self.beat_card_delete,
             CommandId::BeatBoardStyleToggle | CommandId::BeatBoardStyleClear
             | CommandId::BeatBoardRunFormattingSet => self.beat_formatting,
             CommandId::EditorTextInsert | CommandId::EditorTextPaste | CommandId::EditorDeleteBackward
@@ -492,6 +508,7 @@ impl AppCommandAvailability {
             CommandId::EditUndo => DesktopUnavailableReason::UndoHistory,
             CommandId::EditRedo => DesktopUnavailableReason::RedoHistory,
             CommandId::EditDelete => DesktopUnavailableReason::DeleteTarget,
+            CommandId::BeatBoardCardDelete => DesktopUnavailableReason::Selection,
             CommandId::EditSelectAll | CommandId::EditCut | CommandId::EditCopy => {
                 DesktopUnavailableReason::Selection
             }

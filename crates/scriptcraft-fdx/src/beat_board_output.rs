@@ -215,6 +215,35 @@ fn identity(element: &PreservedElement) -> Option<&str> {
     matches.next().is_none().then_some(value)
 }
 
+/// Remove only direct board Item references to ListItems that are being deleted.
+/// The board containers, their other Item children, and unrelated descendants
+/// remain source-owned and in their original order.
+fn remove_deleted_card_board_items(
+    root: &mut PreservedElement,
+    removed_cards: &BTreeSet<String>,
+) {
+    if removed_cards.is_empty() { return; }
+    let root_namespace = root.name.namespace_uri.clone();
+    for node in &mut root.children {
+        let PreservedNode::Element(container) = node else { continue };
+        if container.name.local_name != "DisplayBoards"
+            || container.name.namespace_uri != root_namespace { continue; }
+        for node in &mut container.children {
+            let PreservedNode::Element(board) = node else { continue };
+            if board.name.local_name != "DisplayBoard"
+                || board.name.namespace_uri != container.name.namespace_uri { continue; }
+            let board_namespace = board.name.namespace_uri.clone();
+            board.children.retain(|node| {
+                let PreservedNode::Element(item) = node else { return true };
+                if item.name.local_name != "Item" || item.name.namespace_uri != board_namespace {
+                    return true;
+                }
+                !identity(item).is_some_and(|id| removed_cards.contains(id))
+            });
+        }
+    }
+}
+
 fn set_attribute(element: &mut PreservedElement, name: &str, value: String) -> Result<(), FdxError> {
     let indexes = element.attributes.iter().enumerate().filter_map(|(index, attribute)| {
         (attribute.name.namespace_uri.is_none() && attribute.name.local_name == name).then_some(index)
@@ -381,25 +410,90 @@ pub(crate) fn bind_candidate_paragraph_identities(
     let mut additions = Vec::new();
     let after_cards = after.cards.iter().map(|card| (&card.id, card)).collect::<BTreeMap<_, _>>();
     let before_card_ids = before.cards.iter().map(|card| &card.id).collect::<BTreeSet<_>>();
-    if after_cards.len() != after.cards.len() || before_card_ids.len() != before.cards.len()
-        || before_card_ids.iter().any(|id| !after_cards.contains_key(*id)) {
+    if after_cards.len() != after.cards.len() || before_card_ids.len() != before.cards.len() {
+        return Err(FdxError::AmbiguousIdentity);
+    }
+    let after_durable_ids = after.cards.iter().map(|card| card.foreign_id.as_str()).collect::<BTreeSet<_>>();
+    let after_stable_ids = after.cards.iter().flat_map(|card| {
+        std::iter::once(&card.id).chain(card.paragraphs.iter().map(|paragraph| &paragraph.id))
+    }).cloned().collect::<BTreeSet<_>>();
+    let mut deleted_durable_ids = BTreeSet::<String>::new();
+    let mut deleted_stable_ids = BTreeSet::new();
+    let mut original_durable_ids = BTreeSet::new();
+    for original_card in &original.cards {
+        if !original_durable_ids.insert(original_card.foreign_id.as_str()) {
+            return Err(FdxError::AmbiguousIdentity);
+        }
+        if after_durable_ids.contains(original_card.foreign_id.as_str()) { continue; }
+        // Source-backed whole-card absence is the only way an original owner
+        // may disappear. If the semantic pre-allocation ledger still has the
+        // owner, its stable and durable identities must agree with the source.
+        if let Some(before_card) = before.cards.iter().find(|card| card.id == original_card.id) {
+            if before_card.foreign_id != original_card.foreign_id { return Err(FdxError::AmbiguousIdentity); }
+        }
+        if before.cards.iter().any(|card| card.foreign_id == original_card.foreign_id
+            && card.id != original_card.id) {
+            return Err(FdxError::AmbiguousIdentity);
+        }
+        if winning_items.get(&original_card.foreign_id) != Some(&1) {
+            return Err(FdxError::AmbiguousIdentity);
+        }
+        deleted_durable_ids.insert(original_card.foreign_id.clone());
+        deleted_stable_ids.insert(original_card.id.clone());
+        deleted_stable_ids.extend(original_card.paragraphs.iter().map(|paragraph| paragraph.id.clone()));
+        deleted_durable_ids.extend(original_card.paragraphs.iter().filter_map(|paragraph| paragraph.foreign_id.clone()));
+    }
+    // A pre-allocation owner may disappear only as a whole card. Imported
+    // owners must match the retained source ledger; unsaved generated owners
+    // must have no retained source anchor or source paragraph coordinates.
+    for old_card in before.cards.iter().filter(|card| !after_cards.contains_key(&card.id)) {
+        if winning_items.contains_key(&old_card.foreign_id) {
+            if winning_items.get(&old_card.foreign_id) != Some(&1) {
+                return Err(FdxError::AmbiguousIdentity);
+            }
+            let mut originals = original.cards.iter().filter(|card| card.foreign_id == old_card.foreign_id);
+            let original_card = originals.next().ok_or(FdxError::AmbiguousIdentity)?;
+            if originals.next().is_some() || original_card.id != old_card.id {
+                return Err(FdxError::AmbiguousIdentity);
+            }
+        } else {
+            if !old_card.foreign_id.is_empty() && reserved_source_ids.contains(&old_card.foreign_id) {
+                return Err(FdxError::AmbiguousIdentity);
+            }
+            for paragraph in &old_card.paragraphs {
+                if paragraph.source_paragraph_ordinal.is_some()
+                    || paragraph.foreign_id.as_ref().is_some_and(|id| reserved_source_ids.contains(id)) {
+                    return Err(FdxError::AmbiguousIdentity);
+                }
+            }
+        }
+        if !old_card.foreign_id.is_empty() { deleted_durable_ids.insert(old_card.foreign_id.clone()); }
+        deleted_stable_ids.insert(old_card.id.clone());
+        for paragraph in &old_card.paragraphs {
+            deleted_stable_ids.insert(paragraph.id.clone());
+            if let Some(id) = &paragraph.foreign_id { deleted_durable_ids.insert(id.clone()); }
+        }
+    }
+    if deleted_durable_ids.iter().any(|id| semantic_ids.contains(id))
+        || deleted_stable_ids.iter().any(|id| after_stable_ids.contains(id)) {
         return Err(FdxError::AmbiguousIdentity);
     }
     // New cards have no retained source owner to bind. Their semantic durable
     // identities and graph registrations are already allocated by the Session;
     // register paragraph identities here on the detached save candidate only.
     for card in after.cards.iter().filter(|card| !before_card_ids.contains(&card.id)) {
-        if card.foreign_id.is_empty() {
+        if card.foreign_id.is_empty() || reserved_source_ids.contains(&card.foreign_id) {
             return Err(FdxError::AmbiguousIdentity);
         }
         for paragraph in &card.paragraphs {
             let id = paragraph.foreign_id.as_ref().ok_or(FdxError::AmbiguousIdentity)?;
+            if reserved_source_ids.contains(id) { return Err(FdxError::AmbiguousIdentity); }
             let identity = ForeignIdentity::new(ForeignIdDomain::Paragraph, id.clone()).map_err(map_preservation_error)?;
             if !state.identities.contains(&identity) { additions.push(identity); }
         }
     }
     for old_card in &before.cards {
-        let new_card = after_cards.get(&old_card.id).copied().ok_or(FdxError::AmbiguousIdentity)?;
+        let Some(new_card) = after_cards.get(&old_card.id).copied() else { continue };
         let after_paragraphs = new_card.paragraphs.iter().map(|p| (&p.id, p)).collect::<BTreeMap<_, _>>();
         let before_paragraph_ids = old_card.paragraphs.iter().map(|p| &p.id).collect::<BTreeSet<_>>();
         if after_paragraphs.len() != new_card.paragraphs.len()
@@ -601,7 +695,8 @@ fn paragraph_identity(id: &str) -> Result<ForeignIdentity, FdxError> {
 }
 
 fn ensure_unreferenced(state: &PreservationState, target: &ForeignIdentity) -> Result<(), FdxError> {
-    if state.references.iter().chain(&state.board_graph.references).any(|reference| &reference.target == target) {
+    if state.references.iter().chain(&state.board_graph.references)
+        .any(|reference| &reference.target == target && reference.policy == scriptcraft_model::preservation::ReferencePolicy::RequiredInternal) {
         return Err(FdxError::DanglingReference);
     }
     Ok(())
@@ -907,7 +1002,8 @@ fn reconcile_existing_board(
         .map_err(map_preservation_error)?;
     for id in &removed_cards {
         let card_id = ForeignIdentity::new(ForeignIdDomain::ListItem, id.clone()).map_err(map_preservation_error)?;
-        if state.references.iter().any(|reference| reference.target == card_id)
+        if state.references.iter().any(|reference| reference.target == card_id
+                && reference.policy == scriptcraft_model::preservation::ReferencePolicy::RequiredInternal)
             || state.board_graph.references.iter().any(|reference| reference.target == card_id && reference.source != board_id) {
             return Err(FdxError::DanglingReference);
         }
@@ -924,6 +1020,7 @@ fn reconcile_existing_board(
             }
         }
     }
+    remove_deleted_card_board_items(root, &removed_cards);
     {
         let boards = child_mut(root, boards_index)?;
         let board = child_mut(boards, board_index)?;

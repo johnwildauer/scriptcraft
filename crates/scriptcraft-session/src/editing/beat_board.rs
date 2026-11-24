@@ -5,7 +5,7 @@ use scriptcraft_model::{BeatCard, BeatParagraph, BeatPoint, BeatRect, Project, S
     MAX_CARD_WIDTH, MAX_CARD_HEIGHT, BOARD_SNAP_INCREMENT};
 use scriptcraft_model::paragraph_id::ParagraphIdAllocator;
 use scriptcraft_model::preservation::{BoardEntity, BoardEntityKind, ForeignIdDomain,
-    ForeignIdentity, ForeignReference, PreservedNode, ReferencePolicy};
+    AnchorTarget, ForeignIdentity, ForeignReference, PreservedNode, ReferencePolicy};
 use scriptcraft_model::formatting::{FixedPoint, ParagraphAlignment, ParagraphLeading, ParagraphSpacing, SourceParagraphOverrides};
 use scriptcraft_model::formatted_text::{clear_supported_styles_over_ranges, normalize_runs, parse_style_attribute, project_style_at_caret, set_inline_run_formatting_for_range, toggle_style_over_ranges, InlineRunFormattingPatch, RunBoundaryAffinity, RunStyle, RunStyleFlags, RunStyleRange};
 use scriptcraft_model::{RunAttribute, TextRun, MAX_TEXT_BYTES};
@@ -238,6 +238,63 @@ fn unregister_paragraph(project: &mut Project, id: Option<&str>) {
         state.board_graph.references.retain(|reference| reference.source != identity && reference.target != identity);
         state.rebuild_indexes();
     }
+}
+
+fn remove_deleted_card_graph(project: &mut Project, board_id: Option<&str>, card: &BeatCard) -> Result<(), EditError> {
+    let Some(state) = project.preservation.as_mut() else { return Ok(()) };
+    let board = board_id.map(|id| ForeignIdentity::new(ForeignIdDomain::Board, id.to_owned())
+        .map_err(EditError::Preservation)).transpose()?;
+    let item = ForeignIdentity::new(ForeignIdDomain::ListItem, card.foreign_id.clone())
+        .map_err(EditError::Preservation)?;
+    let paragraph_ids = card.paragraphs.iter().filter_map(|paragraph| paragraph.foreign_id.as_ref())
+        .map(|id| ForeignIdentity::new(ForeignIdDomain::Paragraph, id.clone()).map_err(EditError::Preservation))
+        .collect::<Result<Vec<_>, _>>()?;
+    let deleted = std::iter::once(&item).chain(paragraph_ids.iter()).cloned().collect::<BTreeSet<_>>();
+    let expected_reference = |reference: &ForeignReference| board.as_ref().is_some_and(|board| {
+        reference.source == *board && reference.target == item
+            && reference.policy == ReferencePolicy::RequiredInternal
+    });
+    let board_item_reference = |reference: &ForeignReference| {
+        reference.source.domain == ForeignIdDomain::Board && reference.target == item
+            && reference.policy == ReferencePolicy::RequiredInternal
+    };
+
+    // Semantic card identity was resolved before this helper. Graph registrations
+    // are managed metadata and may be absent or repeated; only unsafe ownership
+    // and surviving non-board reference shapes block the detached deletion. A
+    // board Item is a managed reference to its ListItem, so deleting that owner
+    // removes matching Item edges from every board without removing the boards.
+    if state.board_graph.entities.iter().any(|entity| entity.identity == item
+        && (entity.kind != BoardEntityKind::ListItem || entity.anchor.is_some()))
+        || state.references.iter().any(|reference| {
+            if deleted.contains(&reference.source) { return false; }
+            if reference.target == item {
+                return reference.source.domain == ForeignIdDomain::Board
+                    || reference.policy == ReferencePolicy::RequiredInternal;
+            }
+            paragraph_ids.contains(&reference.target)
+                && reference.policy == ReferencePolicy::RequiredInternal
+        })
+        || state.board_graph.references.iter().any(|reference| {
+            if deleted.contains(&reference.source) { return false; }
+            if reference.target == item {
+                return !expected_reference(reference) && !board_item_reference(reference);
+            }
+            paragraph_ids.contains(&reference.target)
+                && reference.policy == ReferencePolicy::RequiredInternal
+        })
+        || state.anchors.iter().any(|anchor| matches!(&anchor.target,
+            AnchorTarget::Foreign(target) if deleted.contains(target))) {
+        return Err(EditError::Preservation(scriptcraft_model::preservation::PreservationError::DanglingReference));
+    }
+
+    state.board_graph.entities.retain(|entity| entity.identity != item || entity.kind != BoardEntityKind::ListItem);
+    state.board_graph.references.retain(|reference| !deleted.contains(&reference.source)
+        && !expected_reference(reference) && !board_item_reference(reference));
+    state.references.retain(|reference| !deleted.contains(&reference.source) && !expected_reference(reference));
+    state.identities.retain(|identity| !paragraph_ids.contains(identity));
+    state.rebuild_indexes();
+    Ok(())
 }
 
 struct BeatParagraphIdAllocators {
@@ -475,6 +532,19 @@ impl EditingSession {
         order_graph(&mut candidate, &board);
         candidate.replace_beat_board(board)?;
         self.publish_beat(candidate, BeatSelection::Card { card })
+    }
+
+    /// Delete exactly one semantic Beat card and its managed graph registrations.
+    /// All graph checks and candidate validation happen on a detached Project.
+    pub fn delete_beat_card(&mut self, card: StableId) -> Result<(), EditError> {
+        let mut board = self.project.beat_board().clone();
+        let index = board.cards.iter().position(|item| item.id == card).ok_or(EditError::InvalidSelection)?;
+        let deleted = board.cards.remove(index);
+        board.card_creation_order.retain(|id| id != &card);
+        let mut candidate = self.project.clone();
+        remove_deleted_card_graph(&mut candidate, board.foreign_id.as_deref(), &deleted)?;
+        candidate.replace_beat_board(board)?;
+        self.publish_beat(candidate, BeatSelection::None)
     }
 
     pub fn set_beat_card_geometry(&mut self, card: StableId, rect: BeatRect, activate: bool) -> Result<(), EditError> {

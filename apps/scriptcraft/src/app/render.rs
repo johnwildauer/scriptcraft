@@ -34,9 +34,17 @@ impl ScriptCraftApp {
         let environment = prepared.as_ref().map(|fonts| LayoutEnvironment::new(
             self.session.layout_inputs().page_only(), fonts.environment.clone(),
         ));
-        let available = self.app_command_availability().is_enabled(scriptcraft_commands::CommandId::BeatBoardSelectionSet)
-            && !(self.menu_policy.in_window_shortcuts_owned() && crate::chrome::menu::in_window_menu_popup_open(ui.ctx()))
-            && !(self.sprint_timer.popup_open && ui.ctx().input(|i| i.pointer.hover_pos().is_some_and(|p| self.sprint_timer.popup_rect.contains(p))));
+        let command_availability = self.app_command_availability();
+        let menu_popup_blocked = self.menu_policy.in_window_shortcuts_owned()
+            && crate::chrome::menu::in_window_menu_popup_open(ui.ctx());
+        let sprint_popup_blocked = self.sprint_timer.popup_open
+            && ui.ctx().input(|i| i.pointer.hover_pos().is_some_and(|p| self.sprint_timer.popup_rect.contains(p)));
+        let available = command_availability.is_enabled(scriptcraft_commands::CommandId::BeatBoardSelectionSet)
+            && !menu_popup_blocked && !sprint_popup_blocked;
+        let ime_event_in_frame = ui.ctx().input(|input| input.events.iter().any(|event| matches!(event, eframe::egui::Event::Ime(_))));
+        let card_delete_keyboard_enabled = command_availability.beat_card_delete
+            && !menu_popup_blocked && !sprint_popup_blocked
+            && crate::chrome::shortcuts::shortcut_input_allowed(self.ime_active, ime_event_in_frame);
         let (success, command) = crate::views::beat_board::show(
             ui,
             self.session.project().beat_board(),
@@ -50,6 +58,7 @@ impl ScriptCraftApp {
             &mut self.beat_interaction,
             &mut self.beat_text,
             available,
+            card_delete_keyboard_enabled,
         );
         for command in command {
             self.dispatch_command(crate::commands::CommandInvocation::new(command, scriptcraft_commands::CommandOrigin::Pointer), ui.ctx());

@@ -62,8 +62,10 @@ fn beat_card_ids(board: &BeatBoard) -> BTreeSet<ForeignIdentity> {
 
 /// Compare the graph outside the precisely identified managed changes. Entity
 /// source ordinals are recomputed on reread; relative order and all other
-/// entity data remain significant. Only winning-board edges to managed cards
-/// and outgoing edges from authorized removed duplicates may change.
+/// entity data remain significant. Winning-board edges to managed cards may
+/// change, and any board's Item edge to a card whose ListItem is being deleted
+/// may be detached with that owner. Outgoing edges from authorized removed
+/// duplicate boards may also change.
 pub(crate) fn same_unrelated_board_graph(
     original: &BoardGraph,
     current: &BoardGraph,
@@ -74,6 +76,7 @@ pub(crate) fn same_unrelated_board_graph(
     let old_cards = beat_card_ids(old_board);
     let new_cards = beat_card_ids(new_board);
     let changing_cards = old_cards.symmetric_difference(&new_cards).cloned().collect::<BTreeSet<_>>();
+    let deleted_cards = old_cards.difference(&new_cards).cloned().collect::<BTreeSet<_>>();
     let mut changing_entities = changing_cards;
     if old_board.foreign_id != new_board.foreign_id {
         for id in old_board.foreign_id.iter().chain(&new_board.foreign_id) {
@@ -97,7 +100,9 @@ pub(crate) fn same_unrelated_board_graph(
         graph.references.iter().filter(|reference| {
             !removed_duplicates.contains(&reference.source)
                 && !(boards.contains(&reference.source) && managed_cards.contains(&reference.target))
-        }).cloned().collect::<Vec<_>>()
+                && !(reference.source.domain == ForeignIdDomain::Board
+                    && deleted_cards.contains(&reference.target))
+        }).cloned().collect::<Vec<_>>() 
     };
     entities(original) == entities(current) && references(original) == references(current)
 }

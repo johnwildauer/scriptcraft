@@ -211,7 +211,8 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
             let focus_view = app.focus_mode.view();
             let status_intents = if app.root_document_view == RootDocumentView::BeatBoard {
                 status_bar::show_beat(ui, app.theme_palette.status, page_number, diagnostics,
-                    app.development_mode, app.active_zoom(), app.appearance_mode, app.active_zoom_policy())
+                    app.development_mode, app.active_zoom(), app.appearance_mode, &focus_view,
+                    app.active_zoom_policy())
             } else { status_bar::show_with_focus_mode(
                 ui,
                 app.theme_palette.status,

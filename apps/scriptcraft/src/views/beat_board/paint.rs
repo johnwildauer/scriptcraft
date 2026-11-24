@@ -9,7 +9,7 @@ use eframe::egui::{self, Color32, Pos2, Rect, Stroke};
 use scriptcraft_layout::{BeatCardLayout, FixedRect, LayoutLine};
 use scriptcraft_model::BeatCard;
 
-const CARD_BORDER_WIDTH: f32 = 2.5;
+const CARD_BORDER_WIDTH: f32 = 1.0;
 const SELECTED_BORDER_WIDTH: f32 = 3.0;
 const SELECTED_BORDER_COLOR: Color32 = Color32::from_rgb(112, 190, 255);
 
@@ -22,13 +22,13 @@ fn card_rect(geometry: ViewportGeometry, card: &BeatCard) -> Rect {
     )
 }
 
-pub(super) fn paint_card_frame(painter: &egui::Painter, geometry: ViewportGeometry, card: &BeatCard, palette: PagePalette, selected: bool) {
+pub(super) fn paint_card_frame(painter: &egui::Painter, geometry: ViewportGeometry, card: &BeatCard, palette: PagePalette, unselected_border: Color32, selected: bool) {
     let rect = card_rect(geometry, card);
     painter.rect_filled(rect, 0.0, palette.paper);
     let stroke = if selected {
         Stroke::new(SELECTED_BORDER_WIDTH, SELECTED_BORDER_COLOR)
     } else {
-        Stroke::new(CARD_BORDER_WIDTH, palette.border)
+        Stroke::new(CARD_BORDER_WIDTH, unselected_border)
     };
     painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
 }
