@@ -64,6 +64,10 @@ impl ScriptCraftApp {
                 self.with_native_output_modal(export_pdf);
                 DesktopCommandOutcome::EffectDispatched
             }
+            Command::FileExportFountain => {
+                self.with_native_output_modal(|app| app.export_fountain());
+                DesktopCommandOutcome::EffectDispatched
+            }
             Command::FilePrint => {
                 #[cfg(target_os = "windows")]
                 {

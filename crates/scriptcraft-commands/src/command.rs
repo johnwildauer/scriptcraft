@@ -90,11 +90,12 @@ pub enum CommandId {
     BeatBoardStyleClear,
     BeatBoardRunFormattingSet,
     BeatBoardCardDelete,
+    FileExportFountain,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 74] = [
+    pub const ALL: [Self; 75] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -169,6 +170,7 @@ impl CommandId {
         Self::BeatBoardStyleClear,
         Self::BeatBoardRunFormattingSet,
         Self::BeatBoardCardDelete,
+        Self::FileExportFountain,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -247,6 +249,7 @@ impl CommandId {
             Self::BeatBoardStyleClear => "beat-board.style.clear",
             Self::BeatBoardRunFormattingSet => "beat-board.run-formatting.set",
             Self::BeatBoardCardDelete => "beat-board.card.delete",
+            Self::FileExportFountain => "file.export-fountain",
         }
     }
 }
@@ -288,6 +291,7 @@ pub enum HostEffectDescription {
     CloseTitlePageWindow,
     FocusActiveEditor,
     OpenPdfDestinationPicker,
+    OpenFountainDestinationPicker,
     OpenPrintPanel,
     ToggleFocusModeViewport,
     ResolvePdfIncludeTitlePage(PdfExportOptions),
@@ -325,6 +329,8 @@ pub enum Command {
     },
     #[serde(rename = "file.save-as-pdf")]
     FileSaveAsPdf,
+    #[serde(rename = "file.export-fountain")]
+    FileExportFountain,
     #[serde(rename = "file.print")]
     FilePrint,
     #[serde(rename = "file.import.resolve")]
@@ -505,6 +511,7 @@ impl Command {
     pub const fn host_effect_description(&self) -> Option<HostEffectDescription> {
         match self {
             Self::FileSaveAsPdf => Some(HostEffectDescription::OpenPdfDestinationPicker),
+            Self::FileExportFountain => Some(HostEffectDescription::OpenFountainDestinationPicker),
             Self::FilePrint => Some(HostEffectDescription::OpenPrintPanel),
             Self::ViewFocusModeToggle => Some(HostEffectDescription::ToggleFocusModeViewport),
             Self::EditorFocus => Some(HostEffectDescription::FocusActiveEditor),
@@ -537,6 +544,7 @@ impl Command {
             Self::FileSaveAsRequest => CommandId::FileSaveAsRequest,
             Self::FileSaveAs { .. } => CommandId::FileSaveAs,
             Self::FileSaveAsPdf => CommandId::FileSaveAsPdf,
+            Self::FileExportFountain => CommandId::FileExportFountain,
             Self::FilePrint => CommandId::FilePrint,
             Self::FileImportResolve { .. } => CommandId::FileImportResolve,
             Self::EditUndo => CommandId::EditUndo,

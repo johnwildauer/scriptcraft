@@ -41,6 +41,7 @@ pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::FileSave => Command::FileSave,
         CommandId::FileSaveAsRequest => Command::FileSaveAsRequest,
         CommandId::FileSaveAsPdf => Command::FileSaveAsPdf,
+        CommandId::FileExportFountain => Command::FileExportFountain,
         CommandId::ViewInvisiblesToggle => Command::ViewInvisiblesToggle,
         CommandId::ViewRulerToggle => Command::ViewRulerToggle,
         CommandId::ViewBeatBoardShow => Command::ViewBeatBoardShow,
@@ -204,6 +205,7 @@ impl ScriptCraftApp {
             | Command::FileSaveAs { .. }
             | Command::FileImportResolve { .. }
             | Command::FileSaveAsPdf
+            | Command::FileExportFountain
             | Command::FilePrint
             | Command::PdfIncludeTitlePageResolve { .. }) => self.dispatch_document_command(
                 command,

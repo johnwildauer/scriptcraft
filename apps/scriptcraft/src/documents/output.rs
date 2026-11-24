@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use scriptcraft_model::Project;
 
 const UNTITLED_PDF_FILENAME: &str = "Untitled Screenplay.pdf";
+const UNTITLED_FOUNTAIN_FILENAME: &str = "Untitled Screenplay.fountain";
 
 fn pdf_export_filename(active_path: Option<&Path>) -> String {
     let Some(file_name) = active_path
@@ -37,12 +38,40 @@ fn pdf_export_filename(active_path: Option<&Path>) -> String {
         .to_owned()
 }
 
+fn fountain_export_filename(active_path: Option<&Path>) -> String {
+    let Some(file_name) = active_path
+        .and_then(Path::file_name)
+        .filter(|file_name| !file_name.is_empty())
+        .and_then(std::ffi::OsStr::to_str)
+    else {
+        return UNTITLED_FOUNTAIN_FILENAME.to_owned();
+    };
+
+    let mut projected = PathBuf::from(file_name);
+    if !projected.set_extension("fountain") {
+        return UNTITLED_FOUNTAIN_FILENAME.to_owned();
+    }
+
+    projected
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|file_name| !file_name.is_empty())
+        .unwrap_or(UNTITLED_FOUNTAIN_FILENAME)
+        .to_owned()
+}
+
 #[derive(Debug)]
 enum PdfExportAdapterError {
     Picker(pdf::PdfExportPickerFailure),
     Path,
     Export(exports::ExportError),
     Write(scriptcraft_session::persistence::PersistenceError),
+}
+
+#[derive(Debug)]
+enum FountainExportFailure {
+    Export(exports::ExportError),
+    Write,
 }
 
 fn export_pdf_to_selected_path<F: FileSystem>(
@@ -73,6 +102,48 @@ fn export_pdf_to_selected_path<F: FileSystem>(
 }
 
 impl ScriptCraftApp {
+    pub(crate) fn export_fountain(&mut self) {
+        let default_filename = fountain_export_filename(self.native_path.as_deref());
+        let Some(destination) = rfd::FileDialog::new()
+            .add_filter("Fountain screenplay", &["fountain"])
+            .set_file_name(&default_filename)
+            .save_file()
+        else {
+            return;
+        };
+
+        let result = exports::export_fountain(self.session.project())
+            .map_err(FountainExportFailure::Export)
+            .and_then(|text| {
+                StdFileSystem
+                    .write(&destination, text.as_bytes())
+                    .map_err(|_| FountainExportFailure::Write)
+            });
+        self.finish_fountain_export(result);
+    }
+
+    fn finish_fountain_export(&mut self, result: Result<(), FountainExportFailure>) {
+        match result {
+            Ok(()) => self.clear_error(),
+            Err(FountainExportFailure::Export(exports::ExportError::InvalidFountainSource)) => {
+                self.show_error(
+                    "FOUNTAIN_EXPORT_SOURCE_INVALID: screenplay content could not be serialized; screenplay unchanged; no complete export produced",
+                );
+            }
+            Err(FountainExportFailure::Export(
+                exports::ExportError::OutputResourceLimitExceeded,
+            )) => self.show_error(
+                "FOUNTAIN_EXPORT_RESOURCE_LIMIT: bounded Fountain output resources were exceeded; screenplay unchanged; no complete export produced",
+            ),
+            Err(FountainExportFailure::Write) => self.show_error(
+                "FOUNTAIN_EXPORT_WRITE_FAILED: filesystem write failed; screenplay unchanged; export output may be incomplete",
+            ),
+            Err(FountainExportFailure::Export(_)) => self.show_error(
+                "FOUNTAIN_EXPORT_FAILED: Fountain export could not be completed; screenplay unchanged; no complete export produced",
+            ),
+        }
+    }
+
     pub(crate) fn export_pdf(&mut self) {
         #[cfg(target_os = "macos")]
         {
@@ -185,6 +256,11 @@ impl ScriptCraftApp {
             )) => self.show_error(
                 "PDF_EXPORT_RESOURCE_LIMIT: bounded PDF output resources were exceeded; screenplay unchanged; no complete export produced",
             ),
+            Err(PdfExportAdapterError::Export(exports::ExportError::InvalidFountainSource)) => {
+                self.show_error(
+                    "PDF_EXPORT_SOURCE_INVALID: export source data was invalid; screenplay unchanged; no complete export produced",
+                );
+            }
         }
     }
 

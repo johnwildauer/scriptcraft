@@ -27,7 +27,6 @@ const DEFAULT_TOOLBAR_IDS: &[&str] = &[
     "elements",
     "flexible-space",
     "show-hide",
-    "export-text",
     "export-pdf",
     "flexible-space",
     "overflow",

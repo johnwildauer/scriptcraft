@@ -13,6 +13,7 @@ mod pdf_font;
 mod pdf_font_policy;
 mod pdf_font_payload;
 mod text;
+mod fountain;
 
 use scriptcraft_layout::LayoutError;
 
@@ -28,8 +29,10 @@ pub enum ExportError {
     InvalidPdfFontPayload,
     /// Required packaged Courier Prime bytes failed provenance validation.
     RequiredPackagedFontEmbedding,
-    /// A bounded PDF output/resource limit was exceeded.
+    /// A bounded serialized output/resource limit was exceeded.
     OutputResourceLimitExceeded,
+    /// Fountain source runs or style attributes are internally ambiguous.
+    InvalidFountainSource,
 }
 
 impl From<LayoutError> for ExportError {
@@ -46,3 +49,4 @@ pub use pdf::{
 pub use pdf_font_policy::PdfFontEmbeddingFallbackReason;
 pub use pdf_font_payload::{PdfFontPayload, PdfResolvedFaceBytes};
 pub use text::{export_text, export_text_with_layout_inputs, LossReport, TextExport};
+pub use fountain::export_fountain;

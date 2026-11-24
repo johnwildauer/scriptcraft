@@ -427,6 +427,23 @@ const PRINT_ENTRY: MenuEntrySpec = placeholder(
     Some(primary_shortcut(ShortcutKey::P, false)),
 );
 
+const EXPORT_ENTRIES: &[MenuEntrySpec] = &[command_item(
+    "file.export-fountain",
+    "Fountain Text...",
+    "Export Fountain text",
+    None,
+    None,
+    None,
+    CommandId::FileExportFountain,
+)];
+
+const EXPORT_MENU: MenuSpec = MenuSpec {
+    id: "file.export",
+    label: "Export",
+    accessibility_name: "Export",
+    entries: EXPORT_ENTRIES,
+};
+
 const FILE_ENTRIES: &[MenuEntrySpec] = &[
     command_item(
         "file.new",
@@ -499,13 +516,7 @@ const FILE_ENTRIES: &[MenuEntrySpec] = &[
         None,
         CommandId::FileSaveAsPdf,
     ),
-    placeholder(
-        "file.export",
-        "Export",
-        "Export submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
+    MenuEntrySpec::Submenu(&EXPORT_MENU),
     placeholder(
         "file.backup",
         "Backup...",
