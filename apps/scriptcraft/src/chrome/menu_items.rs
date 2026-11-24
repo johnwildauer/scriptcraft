@@ -70,6 +70,7 @@ pub(crate) enum MenuAction {
     SetInlineSize(InlineSizeValue),
     ClearInlineSize,
     SetInlineColor(InlineColorValue),
+    SetInlineBackground(InlineColorValue),
     SetParagraphSpacing(ParagraphSpacingValue),
     SetSpaceBefore(SpaceBeforeLines),
     SetParagraphLeading(ParagraphLeadingValue),
@@ -138,6 +139,10 @@ pub(crate) fn command_for_action(action: MenuAction, surface: EditorSurface) -> 
         MenuAction::SetInlineColor(color) => Command::EditorRunFormattingSet {
             surface,
             patch: RunFormattingPatchValue { color: Some(color), ..RunFormattingPatchValue::default() },
+        },
+        MenuAction::SetInlineBackground(background) => Command::EditorRunFormattingSet {
+            surface,
+            patch: RunFormattingPatchValue { background: Some(background), ..RunFormattingPatchValue::default() },
         },
         MenuAction::SetParagraphSpacing(spacing) => Command::EditorParagraphFormattingSet {
             surface,
@@ -219,10 +224,17 @@ pub(crate) struct MenuItemSpec {
     pub(crate) label: &'static str,
     pub(crate) accessibility_name: &'static str,
     pub(crate) icon: Option<SemanticIcon>,
+    pub(crate) swatch: Option<MenuSwatch>,
     pub(crate) shortcut: Option<LogicalShortcut>,
     /// Platform-specific alternate chord where the primary shortcut differs.
     pub(crate) windows_alias: Option<LogicalShortcut>,
     pub(crate) behavior: MenuItemBehavior,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MenuSwatch {
+    Palette([u8; 3]),
+    NoColor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,6 +268,7 @@ const fn command_item(
         label,
         accessibility_name,
         icon,
+        swatch: None,
         shortcut,
         windows_alias,
         behavior: MenuItemBehavior::Command(command),
@@ -274,6 +287,7 @@ const fn placeholder(
         label,
         accessibility_name,
         icon: None,
+        swatch: None,
         shortcut,
         windows_alias: None,
         behavior: MenuItemBehavior::DisabledPlaceholder(kind),
@@ -291,6 +305,7 @@ const fn menu_command_item(
         label,
         accessibility_name: label,
         icon: None,
+        swatch: None,
         shortcut,
         windows_alias: None,
         behavior: MenuItemBehavior::MenuCommand(action),
@@ -308,6 +323,7 @@ pub(crate) const ZOOM_IN_ITEM: MenuItemSpec = MenuItemSpec {
     label: "Zoom In",
     accessibility_name: "Zoom In",
     icon: None,
+    swatch: None,
     shortcut: Some(primary_shortcut(ShortcutKey::Plus, true)),
     windows_alias: Some(primary_shortcut(ShortcutKey::Equals, false)),
     behavior: MenuItemBehavior::MenuCommand(MenuAction::ZoomStep(ZoomStepDirection::In)),
@@ -318,6 +334,7 @@ pub(crate) const ZOOM_OUT_ITEM: MenuItemSpec = MenuItemSpec {
     label: "Zoom Out",
     accessibility_name: "Zoom Out",
     icon: None,
+    swatch: None,
     shortcut: Some(primary_shortcut(ShortcutKey::Minus, false)),
     windows_alias: None,
     behavior: MenuItemBehavior::MenuCommand(MenuAction::ZoomStep(ZoomStepDirection::Out)),
@@ -857,13 +874,7 @@ const FORMAT_ENTRIES: &[MenuEntrySpec] = &[
     MenuEntrySpec::Submenu(&SIZE_MENU),
     MenuEntrySpec::Submenu(&STYLE_MENU),
     MenuEntrySpec::Submenu(&COLOR_MENU),
-    placeholder(
-        "format.highlight",
-        "Highlight",
-        "Highlight submenu placeholder",
-        DISCLOSURE,
-        None,
-    ),
+    MenuEntrySpec::Submenu(&HIGHLIGHT_MENU),
     placeholder(
         "format.toggle-case",
         "tOGGLE cASE",
@@ -983,14 +994,96 @@ const SIZE_ENTRIES: &[MenuEntrySpec] = &[
     menu_command_item("format.size.24", "24", None, MenuAction::SetInlineSize(InlineSizeValue::TwentyFour)),
 ];
 
-const COLOR_ENTRIES: &[MenuEntrySpec] = &[
-    menu_command_item("format.color.default", "Element Default", None, MenuAction::SetInlineColor(InlineColorValue::ElementDefault)),
-    menu_command_item("format.color.black", "Black", None, MenuAction::SetInlineColor(InlineColorValue::Black)),
-    menu_command_item("format.color.white", "White", None, MenuAction::SetInlineColor(InlineColorValue::White)),
-    menu_command_item("format.color.red", "Red", None, MenuAction::SetInlineColor(InlineColorValue::Red)),
-    menu_command_item("format.color.green", "Green", None, MenuAction::SetInlineColor(InlineColorValue::Green)),
-    menu_command_item("format.color.blue", "Blue", None, MenuAction::SetInlineColor(InlineColorValue::Blue)),
-];
+const fn palette_item_id(background: bool, index: usize) -> &'static str {
+    match (background, index) {
+        (false, 0) => "format.color.none",
+        (false, 1) => "format.color.pink",
+        (false, 2) => "format.color.red",
+        (false, 3) => "format.color.orange",
+        (false, 4) => "format.color.yellow",
+        (false, 5) => "format.color.olive",
+        (false, 6) => "format.color.green",
+        (false, 7) => "format.color.mint",
+        (false, 8) => "format.color.blue",
+        (false, 9) => "format.color.violet",
+        (false, 10) => "format.color.purple",
+        (false, 11) => "format.color.brown",
+        (false, 12) => "format.color.gray",
+        (true, 0) => "format.highlight.none",
+        (true, 1) => "format.highlight.pink",
+        (true, 2) => "format.highlight.red",
+        (true, 3) => "format.highlight.orange",
+        (true, 4) => "format.highlight.yellow",
+        (true, 5) => "format.highlight.olive",
+        (true, 6) => "format.highlight.green",
+        (true, 7) => "format.highlight.mint",
+        (true, 8) => "format.highlight.blue",
+        (true, 9) => "format.highlight.violet",
+        (true, 10) => "format.highlight.purple",
+        (true, 11) => "format.highlight.brown",
+        (true, 12) => "format.highlight.gray",
+        _ => "format.color.invalid",
+    }
+}
+
+const fn palette_item(background: bool, index: usize) -> MenuEntrySpec {
+    use scriptcraft_model::formatted_text::InlineColor;
+
+    if index == 0 {
+        let value = InlineColorValue::ElementDefault;
+        return menu_color_command_item(
+            palette_item_id(background, index),
+            "None",
+            value,
+            background,
+            MenuSwatch::NoColor,
+        );
+    }
+    let color = InlineColor::MENU_PALETTE[index - 1];
+    menu_color_command_item(
+        palette_item_id(background, index),
+        color.label(),
+        InlineColorValue::from_core(color),
+        background,
+        MenuSwatch::Palette(color.rgb8()),
+    )
+}
+
+const fn menu_color_command_item(
+    id: &'static str,
+    label: &'static str,
+    value: InlineColorValue,
+    background: bool,
+    swatch: MenuSwatch,
+) -> MenuEntrySpec {
+    MenuEntrySpec::Item(MenuItemSpec {
+        id,
+        label,
+        accessibility_name: label,
+        icon: None,
+        swatch: Some(swatch),
+        shortcut: None,
+        windows_alias: None,
+        behavior: MenuItemBehavior::MenuCommand(if background {
+            MenuAction::SetInlineBackground(value)
+        } else {
+            MenuAction::SetInlineColor(value)
+        }),
+    })
+}
+
+const fn color_menu_entries(background: bool) -> [MenuEntrySpec; 13] {
+    let mut entries = [MenuEntrySpec::Separator; 13];
+    let mut index = 0;
+    while index < entries.len() {
+        entries[index] = palette_item(background, index);
+        index += 1;
+    }
+    entries
+}
+
+const COLOR_ENTRIES: [MenuEntrySpec; 13] = color_menu_entries(false);
+const HIGHLIGHT_ENTRIES: [MenuEntrySpec; 13] = color_menu_entries(true);
 
 const SPACING_ENTRIES: &[MenuEntrySpec] = &[
     menu_command_item("format.spacing.single", "Single", None, MenuAction::SetParagraphSpacing(ParagraphSpacingValue::Single)),
@@ -1006,8 +1099,9 @@ const SPACE_BEFORE_ENTRIES: &[MenuEntrySpec] = &[
 ];
 
 const LEADING_ENTRIES: &[MenuEntrySpec] = &[
-    menu_command_item("format.leading.regular", "Regular", None, MenuAction::SetParagraphLeading(ParagraphLeadingValue::Regular)),
+    menu_command_item("format.leading.very-tight", "Very Tight", None, MenuAction::SetParagraphLeading(ParagraphLeadingValue::VeryTight)),
     menu_command_item("format.leading.tight", "Tight", None, MenuAction::SetParagraphLeading(ParagraphLeadingValue::Tight)),
+    menu_command_item("format.leading.regular", "Regular", None, MenuAction::SetParagraphLeading(ParagraphLeadingValue::Regular)),
     menu_command_item("format.leading.loose", "Loose", None, MenuAction::SetParagraphLeading(ParagraphLeadingValue::Loose)),
 ];
 
@@ -1025,7 +1119,8 @@ const ALIGNMENT_MENU: MenuSpec = MenuSpec {
 };
 const FONT_MENU: MenuSpec = MenuSpec { id: "format.font", label: "Font", accessibility_name: "Font", entries: FONT_ENTRIES };
 const SIZE_MENU: MenuSpec = MenuSpec { id: "format.size", label: "Size", accessibility_name: "Size", entries: SIZE_ENTRIES };
-const COLOR_MENU: MenuSpec = MenuSpec { id: "format.color", label: "Color", accessibility_name: "Color", entries: COLOR_ENTRIES };
+const COLOR_MENU: MenuSpec = MenuSpec { id: "format.color", label: "Color", accessibility_name: "Color", entries: &COLOR_ENTRIES };
+const HIGHLIGHT_MENU: MenuSpec = MenuSpec { id: "format.highlight", label: "Highlight", accessibility_name: "Highlight", entries: &HIGHLIGHT_ENTRIES };
 const SPACING_MENU: MenuSpec = MenuSpec { id: "format.spacing", label: "Spacing", accessibility_name: "Spacing", entries: SPACING_ENTRIES };
 const SPACE_BEFORE_MENU: MenuSpec = MenuSpec { id: "format.space-before", label: "Space Before", accessibility_name: "Space Before", entries: SPACE_BEFORE_ENTRIES };
 const LEADING_MENU: MenuSpec = MenuSpec { id: "format.leading", label: "Leading", accessibility_name: "Leading", entries: LEADING_ENTRIES };

@@ -39,6 +39,8 @@ Body and Title Page invisibles flags are independent per-document desktop presen
 
 ### Shared formatting representation boundary
 
+Managed TitlePage Content shares paragraph Very Tight (exact FDX spelling `Very Tight`, −2 points) and independently preserved Color/Background run data with Body through shared model/FDX normalization. Document-level Leading remains distinct and additive. This shared representation adds no Title Page formatting menu, inline-typing patch, context menu, Body Type-reset policy, or Background renderer.
+
 Managed TitlePage Content shares the bounded Leading/Spacing model values and their FDX/layout representation with Body. This representation migration does not add Title Page formatting-menu rows, a Title Page inline-typing patch, a context menu, or explicit-Type paragraph-format reset semantics. Title Page Type assignment continues to preserve its existing title formatting/source contract; only the explicitly scoped Body Type candidate has the new paragraph-format reset. Apply Template remains governed by its existing bulk remapping contract.
 
 - Use one semantic document session and history with explicit surface identity, not a second document/editor model.

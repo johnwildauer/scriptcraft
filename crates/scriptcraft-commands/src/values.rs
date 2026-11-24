@@ -263,15 +263,34 @@ impl InlineSizeValue {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InlineColorValue { ElementDefault, Black, White, Red, Green, Blue }
+pub enum InlineColorValue {
+    ElementDefault,
+    Black,
+    White,
+    Pink,
+    Red,
+    Orange,
+    Yellow,
+    Olive,
+    Green,
+    Mint,
+    Blue,
+    Violet,
+    Purple,
+    Brown,
+    Gray,
+}
 
 impl<'de> Deserialize<'de> for InlineColorValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: Deserializer<'de> {
         match String::deserialize(deserializer)?.as_str() {
             "element_default" => Ok(Self::ElementDefault), "black" => Ok(Self::Black),
-            "white" => Ok(Self::White), "red" => Ok(Self::Red), "green" => Ok(Self::Green),
-            "blue" => Ok(Self::Blue), value => Err(de::Error::custom(format!("unsupported inline color: {value}"))),
+            "white" => Ok(Self::White), "pink" => Ok(Self::Pink), "red" => Ok(Self::Red),
+            "orange" => Ok(Self::Orange), "yellow" => Ok(Self::Yellow), "olive" => Ok(Self::Olive),
+            "green" => Ok(Self::Green), "mint" => Ok(Self::Mint), "blue" => Ok(Self::Blue),
+            "violet" => Ok(Self::Violet), "purple" => Ok(Self::Purple), "brown" => Ok(Self::Brown),
+            "gray" => Ok(Self::Gray), value => Err(de::Error::custom(format!("unsupported inline color: {value}"))),
         }
     }
 }
@@ -280,8 +299,32 @@ impl InlineColorValue {
     pub const fn as_core(self) -> Option<InlineColor> {
         match self {
             Self::ElementDefault => None, Self::Black => Some(InlineColor::Black),
-            Self::White => Some(InlineColor::White), Self::Red => Some(InlineColor::Red),
-            Self::Green => Some(InlineColor::Green), Self::Blue => Some(InlineColor::Blue),
+            Self::White => Some(InlineColor::White), Self::Pink => Some(InlineColor::Pink),
+            Self::Red => Some(InlineColor::Red), Self::Orange => Some(InlineColor::Orange),
+            Self::Yellow => Some(InlineColor::Yellow), Self::Olive => Some(InlineColor::Olive),
+            Self::Green => Some(InlineColor::Green), Self::Mint => Some(InlineColor::Mint),
+            Self::Blue => Some(InlineColor::Blue), Self::Violet => Some(InlineColor::Violet),
+            Self::Purple => Some(InlineColor::Purple), Self::Brown => Some(InlineColor::Brown),
+            Self::Gray => Some(InlineColor::Gray),
+        }
+    }
+
+    pub const fn from_core(color: InlineColor) -> Self {
+        match color {
+            InlineColor::Black => Self::Black,
+            InlineColor::White => Self::White,
+            InlineColor::Pink => Self::Pink,
+            InlineColor::Red => Self::Red,
+            InlineColor::Orange => Self::Orange,
+            InlineColor::Yellow => Self::Yellow,
+            InlineColor::Olive => Self::Olive,
+            InlineColor::Green => Self::Green,
+            InlineColor::Mint => Self::Mint,
+            InlineColor::Blue => Self::Blue,
+            InlineColor::Violet => Self::Violet,
+            InlineColor::Purple => Self::Purple,
+            InlineColor::Brown => Self::Brown,
+            InlineColor::Gray => Self::Gray,
         }
     }
 }
@@ -292,6 +335,7 @@ pub struct RunFormattingPatchValue {
     #[serde(default)] pub font: Option<InlineFontValue>,
     #[serde(default)] pub size: Option<InlineSizeValue>,
     #[serde(default)] pub color: Option<InlineColorValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub background: Option<InlineColorValue>,
     #[serde(default, skip_serializing_if = "is_false")] pub clear_size: bool,
 }
 
@@ -306,6 +350,7 @@ impl<'de> Deserialize<'de> for RunFormattingPatchValue {
             #[serde(default)] font: Option<InlineFontValue>,
             #[serde(default)] size: Option<InlineSizeValue>,
             #[serde(default)] color: Option<InlineColorValue>,
+            #[serde(default)] background: Option<InlineColorValue>,
             #[serde(default)] clear_size: bool,
         }
 
@@ -317,6 +362,7 @@ impl<'de> Deserialize<'de> for RunFormattingPatchValue {
             font: fields.font,
             size: fields.size,
             color: fields.color,
+            background: fields.background,
             clear_size: fields.clear_size,
         })
     }
@@ -330,6 +376,7 @@ impl RunFormattingPatchValue {
             font: match self.font { Some(value) => Some(value.as_core()), None => None },
             size: if self.clear_size { Some(None) } else { match self.size { Some(value) => Some(Some(value.as_core())), None => None } },
             color: match self.color { Some(value) => Some(value.as_core()), None => None },
+            background: match self.background { Some(value) => Some(value.as_core()), None => None },
         }
     }
 }
@@ -353,18 +400,18 @@ impl ParagraphSpacingValue {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ParagraphLeadingValue { Regular, Tight, Loose }
+pub enum ParagraphLeadingValue { VeryTight, Regular, Tight, Loose }
 impl<'de> Deserialize<'de> for ParagraphLeadingValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error> where D: Deserializer<'de> {
         match String::deserialize(deserializer)?.as_str() {
-            "regular" => Ok(Self::Regular), "tight" => Ok(Self::Tight), "loose" => Ok(Self::Loose),
+            "very_tight" => Ok(Self::VeryTight), "regular" => Ok(Self::Regular), "tight" => Ok(Self::Tight), "loose" => Ok(Self::Loose),
             value => Err(de::Error::custom(format!("unknown paragraph leading: {value}"))),
         }
     }
 }
 impl ParagraphLeadingValue {
     pub const fn as_core(self) -> ParagraphLeading {
-        match self { Self::Regular => ParagraphLeading::Regular, Self::Tight => ParagraphLeading::Tight, Self::Loose => ParagraphLeading::Loose }
+        match self { Self::VeryTight => ParagraphLeading::VeryTight, Self::Regular => ParagraphLeading::Regular, Self::Tight => ParagraphLeading::Tight, Self::Loose => ParagraphLeading::Loose }
     }
 }
 

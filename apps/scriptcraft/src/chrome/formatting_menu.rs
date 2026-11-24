@@ -11,7 +11,7 @@ use scriptcraft_commands::{
     TitleTextStyle,
 };
 use scriptcraft_model::element::{RunAttribute, TextRun};
-use scriptcraft_model::formatted_text::{parse_style_attribute, InlineSizeProjection, RunStyle, RunStyleFlags};
+use scriptcraft_model::formatted_text::{parse_style_attribute, InlineColor, InlineSizeProjection, RunStyle, RunStyleFlags};
 use scriptcraft_model::formatting::FixedPoint;
 use scriptcraft_model::formatting::{ParagraphAlignment, ParagraphLeading, ParagraphSpacing};
 use scriptcraft_model::{ElementFontSpec, Project};
@@ -37,7 +37,7 @@ struct RunValues {
     size_direct: bool,
     color: Option<String>,
     base_color: Option<String>,
-    color_direct: bool,
+    background: Option<String>,
     styles: RunStyleFlags,
 }
 
@@ -98,23 +98,30 @@ pub(crate) fn project(session: &EditingSession, surface: EditorSurface) -> Forma
             }
         }
       }
-    let color_values = uniform_field(&runs, |value| Some(value.color.clone()));
-    if uniform_field(&runs, |value| Some(value.color_direct)) == Some(false) {
-        projection.checked_actions.push(MenuAction::SetInlineColor(InlineColorValue::ElementDefault));
-    }
-    if let Some(color) = color_values {
-        for value in [
-            InlineColorValue::Black,
-            InlineColorValue::White,
-            InlineColorValue::Red,
-            InlineColorValue::Green,
-            InlineColorValue::Blue,
-        ] {
-            if color.as_deref() == value.as_core().map(|value| value.fdx_value()) {
-                projection.checked_actions.push(MenuAction::SetInlineColor(value));
+    if let Some(color) = uniform_field(&runs, |value| Some(value.color.clone())) {
+        match color {
+            None => projection.checked_actions.push(MenuAction::SetInlineColor(InlineColorValue::ElementDefault)),
+            Some(value) => {
+                if let Some(color) = InlineColor::from_normalized_fdx_value(&value)
+                    .filter(|color| InlineColor::MENU_PALETTE.contains(color))
+                {
+                    projection.checked_actions.push(MenuAction::SetInlineColor(InlineColorValue::from_core(color)));
+                }
             }
         }
-      }
+    }
+    if let Some(background) = uniform_field(&runs, |value| Some(value.background.clone())) {
+        match background {
+            None => projection.checked_actions.push(MenuAction::SetInlineBackground(InlineColorValue::ElementDefault)),
+            Some(value) => {
+                if let Some(color) = InlineColor::from_normalized_fdx_value(&value)
+                    .filter(|color| InlineColor::MENU_PALETTE.contains(color))
+                {
+                    projection.checked_actions.push(MenuAction::SetInlineBackground(InlineColorValue::from_core(color)));
+                }
+            }
+        }
+    }
     }
     for (style, value) in [
         (TitleTextStyle::Bold, RunStyle::Bold),
@@ -162,6 +169,7 @@ pub(crate) fn project(session: &EditingSession, surface: EditorSurface) -> Forma
         }
         if let Some(leading) = uniform_field(&paragraphs, |value| Some(value.leading)) {
             for value in [
+                ParagraphLeadingValue::VeryTight,
                 ParagraphLeadingValue::Regular,
                 ParagraphLeadingValue::Tight,
                 ParagraphLeadingValue::Loose,
@@ -349,6 +357,7 @@ fn unique_attribute<'a>(attributes: &'a [RunAttribute], name: &str) -> Result<Op
 fn run_values(attributes: &[RunAttribute], base: &ElementFontSpec) -> Option<RunValues> {
     let font = unique_attribute(attributes, "Font").ok()?;
     let color = unique_attribute(attributes, "Color").ok()?;
+    let background = unique_attribute(attributes, "Background").ok()?;
     let _style = unique_attribute(attributes, "Style").ok()?;
     let styles = parse_style_attribute(attributes).ok()?.flags;
     let size_projection = InlineSizeProjection::parse(attributes).ok()?;
@@ -365,7 +374,7 @@ fn run_values(attributes: &[RunAttribute], base: &ElementFontSpec) -> Option<Run
         size_direct,
         color: color.map(str::to_owned).or_else(|| base.color.clone()),
         base_color: base.color.clone(),
-        color_direct: color.is_some(),
+        background: background.map(str::to_owned),
         styles: RunStyleFlags {
             bold: base.bold || styles.bold,
             italics: base.italic || styles.italics,
@@ -399,7 +408,9 @@ fn apply_typing_patch(values: &mut RunValues, patch: scriptcraft_model::formatte
         values.color = color
             .map(|color| color.fdx_value().to_owned())
             .or_else(|| values.base_color.clone());
-        values.color_direct = color.is_some();
+    }
+    if let Some(background) = patch.background {
+        values.background = background.map(|background| background.fdx_value().to_owned());
     }
 }
 

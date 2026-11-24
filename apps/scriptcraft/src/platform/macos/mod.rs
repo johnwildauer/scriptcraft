@@ -5,6 +5,8 @@ pub(crate) mod macos_lifecycle;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_menu;
 #[cfg(target_os = "macos")]
+pub(crate) mod macos_menu_swatches;
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_open_documents;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_pdf_dialog;

@@ -99,6 +99,7 @@ pub(crate) struct NativeMenuController {
     _checked_placeholder_items: Vec<CheckMenuItem>,
     _predefined_items: Vec<PredefinedMenuItem>,
     _sf_symbols: super::macos_sf_symbols::SfSymbolsAdapter,
+    _menu_swatches: super::macos_menu_swatches::MenuSwatchesAdapter,
     event_inbox: NativeEventInbox,
     synchronization: NativeMenuSynchronizationState,
     element_submenu: Submenu,
@@ -224,6 +225,7 @@ impl NativeMenuController {
         // app-creation/main thread.
         root.init_for_nsapp();
         let sf_symbols = super::macos_sf_symbols::SfSymbolsAdapter::install(&root);
+        let menu_swatches = super::macos_menu_swatches::MenuSwatchesAdapter::install(&root);
 
         // In muda 0.17.2 an installed handler replaces delivery to
         // MenuEvent::receiver(). Forward IDs into an app-drained inbox and wake
@@ -247,6 +249,7 @@ impl NativeMenuController {
             _checked_placeholder_items: checked_placeholder_items,
             _predefined_items: retained_predefined_items,
             _sf_symbols: sf_symbols,
+            _menu_swatches: menu_swatches,
             event_inbox,
             synchronization: NativeMenuSynchronizationState::default(),
             element_submenu,

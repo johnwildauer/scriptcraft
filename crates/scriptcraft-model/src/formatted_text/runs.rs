@@ -179,40 +179,131 @@ impl InlineSize {
     }
 }
 
-/// Bounded normalized colors accepted by the initial formatting controls.
+/// Bounded normalized colors accepted by inline formatting controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InlineColor {
     Black,
     White,
+    Pink,
     Red,
+    Orange,
+    Yellow,
+    Olive,
     Green,
+    Mint,
     Blue,
+    Violet,
+    Purple,
+    Brown,
+    Gray,
 }
 
 impl InlineColor {
+    /// Ordered reference palette exposed by the Color and Highlight menus.
+    pub const MENU_PALETTE: [Self; 12] = [
+        Self::Pink,
+        Self::Red,
+        Self::Orange,
+        Self::Yellow,
+        Self::Olive,
+        Self::Green,
+        Self::Mint,
+        Self::Blue,
+        Self::Violet,
+        Self::Purple,
+        Self::Brown,
+        Self::Gray,
+    ];
+
     pub const fn fdx_value(self) -> &'static str {
         match self {
             Self::Black => "#000000000000",
             Self::White => "#FFFFFFFFFFFF",
-            Self::Red => "#FFFF00000000",
-            Self::Green => "#0000FFFF0000",
-            Self::Blue => "#00000000FFFF",
+            Self::Pink => "#E2E29898DDDD",
+            Self::Red => "#EBEB62627B7B",
+            Self::Orange => "#EFEFA4A46262",
+            Self::Yellow => "#E5E5CBCB6C6C",
+            Self::Olive => "#929290900000",
+            Self::Green => "#8F8FC3C36A6A",
+            Self::Mint => "#8888CACAB8B8",
+            Self::Blue => "#6363A7A7EFEF",
+            Self::Violet => "#9A9AAEAEDBDB",
+            Self::Purple => "#AFAF9393E8E8",
+            Self::Brown => "#B2B27C7C7373",
+            Self::Gray => "#C0C0C0C0C0C0",
         }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Black => "Black",
+            Self::White => "White",
+            Self::Pink => "Pink",
+            Self::Red => "Red",
+            Self::Orange => "Orange",
+            Self::Yellow => "Yellow",
+            Self::Olive => "Olive",
+            Self::Green => "Green",
+            Self::Mint => "Mint",
+            Self::Blue => "Blue",
+            Self::Violet => "Violet",
+            Self::Purple => "Purple",
+            Self::Brown => "Brown",
+            Self::Gray => "Gray",
+        }
+    }
+
+    pub const fn rgb8(self) -> [u8; 3] {
+        match self {
+            Self::Black => [0, 0, 0],
+            Self::White => [255, 255, 255],
+            Self::Pink => [226, 152, 221],
+            Self::Red => [235, 98, 123],
+            Self::Orange => [239, 164, 98],
+            Self::Yellow => [229, 203, 108],
+            Self::Olive => [146, 144, 0],
+            Self::Green => [143, 195, 106],
+            Self::Mint => [136, 202, 184],
+            Self::Blue => [99, 167, 239],
+            Self::Violet => [154, 174, 219],
+            Self::Purple => [175, 147, 232],
+            Self::Brown => [178, 124, 115],
+            Self::Gray => [192, 192, 192],
+        }
+    }
+
+    /// Resolve only bounded normalized FDX color values, allowing hexadecimal
+    /// letter casing to differ without accepting malformed source strings.
+    pub fn from_normalized_fdx_value(value: &str) -> Option<Self> {
+        if value.len() != 13
+            || !value.starts_with('#')
+            || !value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+        {
+            return None;
+        }
+        [Self::Black, Self::White]
+            .into_iter()
+            .chain(Self::MENU_PALETTE)
+            .find(|color| value.eq_ignore_ascii_case(color.fdx_value()))
     }
 }
 
-/// `None` means unchanged; `Some(None)` clears Font, Size, or Color to inherit,
-/// and `Some(Some(value))` writes a bounded explicit value.
+/// `None` means unchanged; `Some(None)` clears Font, Size, Color, or Background
+/// to inherit/absence, and `Some(Some(value))` writes a bounded explicit value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InlineRunFormattingPatch {
     pub font: Option<Option<InlineFont>>,
     pub size: Option<Option<InlineSize>>,
     pub color: Option<Option<InlineColor>>,
+    pub background: Option<Option<InlineColor>>,
 }
 
 impl InlineRunFormattingPatch {
     pub const fn is_empty(self) -> bool {
-        self.font.is_none() && self.size.is_none() && self.color.is_none()
+        self.font.is_none()
+            && self.size.is_none()
+            && self.color.is_none()
+            && self.background.is_none()
     }
 }
 /// Parse source `Style` tokens without normalizing unknown token spellings.
@@ -605,6 +696,12 @@ fn patch_inline_attributes(
     for (name, requested) in [
         ("Font", patch.font.map(|value| value.map(|font| font.fdx_value()))),
         ("Color", patch.color.map(|value| value.map(|color| color.fdx_value()))),
+        (
+            "Background",
+            patch
+                .background
+                .map(|value| value.map(|color| color.fdx_value())),
+        ),
     ] {
         let Some(value) = requested else { continue };
         let mut matches = result.iter().enumerate().filter(|(_, attribute)| attribute.name == name);

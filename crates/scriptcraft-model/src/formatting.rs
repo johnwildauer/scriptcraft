@@ -88,6 +88,7 @@ pub enum ParagraphAlignment {
 /// a string and is interpreted only for these exact supported values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParagraphLeading {
+    VeryTight,
     Regular,
     Tight,
     Loose,
@@ -96,6 +97,7 @@ pub enum ParagraphLeading {
 impl ParagraphLeading {
     pub const fn fdx_value(self) -> &'static str {
         match self {
+            Self::VeryTight => "Very Tight",
             Self::Regular => "Regular",
             Self::Tight => "Tight",
             Self::Loose => "Loose",
@@ -104,6 +106,7 @@ impl ParagraphLeading {
 
     pub fn from_fdx_value(value: &str) -> Option<Self> {
         match value {
+            "Very Tight" => Some(Self::VeryTight),
             "Regular" => Some(Self::Regular),
             "Tight" => Some(Self::Tight),
             "Loose" => Some(Self::Loose),
@@ -114,6 +117,7 @@ impl ParagraphLeading {
     /// Definition data also uses `Single` for the regular baseline.
     pub fn from_definition_value(value: &str) -> Option<Self> {
         match value {
+            "Very Tight" => Some(Self::VeryTight),
             "Regular" | "Single" => Some(Self::Regular),
             "Tight" => Some(Self::Tight),
             "Loose" => Some(Self::Loose),
@@ -123,6 +127,7 @@ impl ParagraphLeading {
 
     pub const fn adjustment_hundredths(self) -> i64 {
         match self {
+            Self::VeryTight => -2 * FixedPoint::SCALE,
             Self::Regular => 0,
             Self::Tight => -FixedPoint::SCALE,
             Self::Loose => FixedPoint::SCALE,

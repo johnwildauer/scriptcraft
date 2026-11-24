@@ -6,7 +6,7 @@ use super::formatting_menu::FormattingMenuProjection;
 use super::menu_items::{
     activation_for_action, menu_item_label, DynamicSubmenuKind,
     LogicalShortcut, MenuAction, MenuEntrySpec, MenuItemBehavior, MenuItemSpec,
-    PlaceholderKind, SemanticIcon, ShortcutKey, ViewMenuProjection, ZoomStepDirection,
+    MenuSwatch, PlaceholderKind, SemanticIcon, ShortcutKey, ViewMenuProjection, ZoomStepDirection,
     ZOOM_STEP_ITEMS, MENU_CATALOG,
 };
 pub(crate) use super::menu_items::MenuActivation;
@@ -507,6 +507,10 @@ fn menu_content_metrics(
                     nonnegative_finite_dimension(metrics.icon_slot_width),
                     row_gap_x,
                 );
+                if item.swatch.is_some() {
+                    width = add_finite_dimensions(width, 18.0);
+                    width = add_finite_dimensions(width, row_gap_x);
+                }
                 width = add_finite_dimensions(width, label_width);
                 if !shortcut.is_empty() {
                     width = add_finite_dimensions(width, row_gap_x);
@@ -853,11 +857,22 @@ fn render_menu_entries(
                     egui::Atom::from(egui::RichText::new(label).size(metrics.item_text_size));
                 label_atom.grow = true;
                 label_atom.align = egui::Align2::LEFT_CENTER;
-                let button = egui::Button::new((icon_atom, label_atom))
-                    .shortcut_text(egui::RichText::new(shortcut).size(metrics.shortcut_text_size))
-                    .min_size(egui::vec2(0.0, metrics.row_height))
-                    .corner_radius(egui::CornerRadius::same(metrics.row_corner_radius));
+                let button = if item.swatch.is_some() {
+                    let swatch_slot = egui::Atom::custom(
+                        egui::Id::new(("menu-swatch-slot", item.id)),
+                        egui::vec2(18.0, metrics.row_height),
+                    );
+                    egui::Button::new((icon_atom, swatch_slot, label_atom))
+                } else {
+                    egui::Button::new((icon_atom, label_atom))
+                }
+                .shortcut_text(egui::RichText::new(shortcut).size(metrics.shortcut_text_size))
+                .min_size(egui::vec2(0.0, metrics.row_height))
+                .corner_radius(egui::CornerRadius::same(metrics.row_corner_radius));
                 let response = ui.add_enabled(enabled, button);
+                if let Some(swatch) = item.swatch {
+                    paint_menu_swatch(ui, response.rect, swatch, metrics);
+                }
                 response.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label.to_owned())
                 });
@@ -877,6 +892,35 @@ fn render_menu_entries(
                     }
                 }
             }
+        }
+    }
+}
+
+fn paint_menu_swatch(
+    ui: &egui::Ui,
+    row: egui::Rect,
+    swatch: MenuSwatch,
+    metrics: MenuPresentationMetrics,
+) {
+    let spacing = nonnegative_finite_dimension(ui.spacing().item_spacing.x);
+    let x = row.left()
+        + nonnegative_finite_dimension(ui.spacing().button_padding.x)
+        + nonnegative_finite_dimension(metrics.icon_slot_width)
+        + spacing
+        + 9.0;
+    let center = egui::pos2(x, row.center().y);
+    let painter = ui.painter();
+    match swatch {
+        MenuSwatch::Palette([red, green, blue]) => {
+            painter.circle_filled(center, 5.0, egui::Color32::from_rgb(red, green, blue));
+        }
+        MenuSwatch::NoColor => {
+            let color = ui.visuals().weak_text_color();
+            painter.circle_stroke(center, 5.0, egui::Stroke::new(1.2, color));
+            painter.line_segment(
+                [center + egui::vec2(-4.0, 4.0), center + egui::vec2(4.0, -4.0)],
+                egui::Stroke::new(1.2, color),
+            );
         }
     }
 }

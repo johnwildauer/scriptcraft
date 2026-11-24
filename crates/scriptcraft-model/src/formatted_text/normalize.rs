@@ -280,14 +280,14 @@ pub fn run_attributes_preserve_unknown_data(
     let source_retained = source
         .iter()
         .filter(|attribute| {
-            !matches!(attribute.name.as_str(), "Style" | "Size" | "Font" | "Color")
+            !matches!(attribute.name.as_str(), "Style" | "Size" | "Font" | "Color" | "Background")
         })
         .map(|attribute| (attribute.name.as_str(), attribute.value.as_str()))
         .collect::<Vec<_>>();
     let output_retained = output
         .iter()
         .filter(|attribute| {
-            !matches!(attribute.name.as_str(), "Style" | "Size" | "Font" | "Color")
+            !matches!(attribute.name.as_str(), "Style" | "Size" | "Font" | "Color" | "Background")
         })
         .map(|attribute| (attribute.name.as_str(), attribute.value.as_str()))
         .collect::<Vec<_>>();

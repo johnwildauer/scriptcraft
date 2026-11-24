@@ -12,7 +12,7 @@ use scriptcraft_model::formatting::{ParagraphAlignment, ParagraphFormattingPatch
 use scriptcraft_model::Project;
 
 impl EditingSession {
-    /// Applies a typed Font/Size/Color patch to the selected Body runs, or
+    /// Applies a typed Font/Size/Color/Background patch to the selected Body runs, or
     /// updates the transient insertion patch at a collapsed Body caret.
     pub fn set_body_run_formatting(
         &mut self,
@@ -29,6 +29,7 @@ impl EditingSession {
             if let Some(font) = patch.font { next.font = Some(font); }
             if let Some(size) = patch.size { next.size = Some(size); }
             if let Some(color) = patch.color { next.color = Some(color); }
+            if let Some(background) = patch.background { next.background = Some(background); }
             if next != self.body_typing_formatting {
                 self.body_typing_formatting = next;
                 self.mark_mutated();
