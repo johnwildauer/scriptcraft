@@ -630,6 +630,7 @@ fn render_submenu_button(
     ui: &mut egui::Ui,
     label: egui::RichText,
     leading_slot: bool,
+    natural_content_width: f32,
     metrics: MenuPresentationMetrics,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
@@ -639,7 +640,17 @@ fn render_submenu_button(
                 egui::vec2(metrics.icon_slot_width, metrics.row_height),
                 egui::Label::new(""),
             );
-            ui.menu_button(label, add_contents);
+            let leading_width = add_finite_dimensions(
+                nonnegative_finite_dimension(metrics.icon_slot_width),
+                nonnegative_finite_dimension(ui.spacing().item_spacing.x),
+            );
+            let button_width = nonnegative_finite_dimension(natural_content_width - leading_width);
+            egui::containers::menu::SubMenuButton::from_button(
+                egui::Button::new(label)
+                    .right_text(egui::containers::menu::SubMenuButton::RIGHT_ARROW)
+                    .min_size(egui::vec2(button_width, metrics.row_height)),
+            )
+            .ui(ui, add_contents);
         });
     } else {
         ui.menu_button(label, add_contents);
@@ -731,6 +742,7 @@ fn render_menu_popup(
                 pending,
                 metrics,
                 leading_slot,
+                content.required_content_width,
             );
         },
     );
@@ -863,6 +875,7 @@ fn render_menu_entries(
     pending: &mut PendingDesktopCommands,
     metrics: MenuPresentationMetrics,
     leading_slot: bool,
+    natural_content_width: f32,
 ) {
     for entry in entries {
         match entry {
@@ -880,6 +893,7 @@ fn render_menu_entries(
                     ui,
                     egui::RichText::new(menu.label).size(metrics.item_text_size),
                     leading_slot,
+                    natural_content_width,
                     metrics,
                     |ui| {
                         render_menu_popup(
@@ -910,6 +924,7 @@ fn render_menu_entries(
                         ui,
                         egui::RichText::new("Change Element To").size(metrics.item_text_size),
                         leading_slot,
+                        natural_content_width,
                         metrics,
                         |ui| {
                             render_dynamic_element_menu_popup(
@@ -940,6 +955,7 @@ fn render_menu_entries(
                         ui,
                         egui::RichText::new("Zoom").size(metrics.item_text_size),
                         leading_slot,
+                        natural_content_width,
                         metrics,
                         |ui| {
                             render_zoom_menu_popup(
