@@ -1,6 +1,6 @@
 use super::toolbar_items::{
     EnablementPolicy, IconSpec, ToolbarBehavior, ToolbarGraphic, ToolbarIconVariant,
-    ToolbarItemSpec, ToolbarLayoutPolicy,
+    ToolbarItemSpec, ToolbarLayoutPolicy, ViewsAction, ViewsChoiceSpec, VIEWS_CHOICES,
 };
 use crate::app::ScriptCraftApp;
 use crate::chrome::element_choices::{focused_body_element_type_key, ElementChoice};
@@ -8,7 +8,7 @@ use crate::commands::AppCommandAvailability;
 use crate::commands::{command_for_id, CommandInvocation};
 use eframe::egui::{self, *};
 use egui_material_icons::icons::{
-    ICON_FORMAT_ALIGN_CENTER, ICON_FORMAT_ALIGN_JUSTIFY, ICON_FORMAT_ALIGN_LEFT,
+    ICON_CHECK, ICON_FORMAT_ALIGN_CENTER, ICON_FORMAT_ALIGN_JUSTIFY, ICON_FORMAT_ALIGN_LEFT,
     ICON_FORMAT_ALIGN_RIGHT, ICON_FORMAT_BOLD, ICON_FORMAT_ITALIC, ICON_FORMAT_STRIKETHROUGH,
     ICON_FORMAT_UNDERLINED, ICON_TEXT_FIELDS,
 };
@@ -220,6 +220,22 @@ struct ElementsPopupMetrics {
     minimum_content_width: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ViewsPopupMetrics {
+    desired_content_height: f32,
+    available_content_height: f32,
+    content_width: f32,
+}
+
+const VIEWS_ROW_HEIGHT: f32 = 32.0;
+const VIEWS_ICON_TILE_SIZE: f32 = 32.0;
+const VIEWS_CHECK_SLOT_WIDTH: f32 = 0.0;
+const VIEWS_CHECK_SIZE: f32 = 14.0;
+const VIEWS_ROW_LABEL_SIZE: f32 = 14.0;
+const VIEWS_ROW_HORIZONTAL_PADDING: f32 = 8.0;
+const VIEWS_ROW_COLUMN_GAP: f32 = 8.0;
+const VIEWS_ROW_GAP: f32 = 4.0;
+
 fn nonnegative_finite_dimension(value: f32) -> f32 {
     if value.is_finite() {
         value.max(0.0)
@@ -295,6 +311,43 @@ fn elements_popup_metrics(
     }
 }
 
+fn views_popup_metrics(ui: &egui::Ui) -> ViewsPopupMetrics {
+    let font = FontId::proportional(VIEWS_ROW_LABEL_SIZE);
+    let mut widest_label = 0.0_f32;
+    for choice in VIEWS_CHOICES {
+        let size = ui
+            .painter()
+            .layout_no_wrap(choice.label.to_owned(), font.clone(), Color32::TRANSPARENT)
+            .size();
+        widest_label = widest_label.max(nonnegative_finite_dimension(size.x));
+    }
+
+    let fixed_width = VIEWS_ROW_HORIZONTAL_PADDING * 2.0
+        + VIEWS_CHECK_SLOT_WIDTH
+        + VIEWS_ROW_COLUMN_GAP * 2.0
+        + VIEWS_ICON_TILE_SIZE;
+    let content_width = add_finite_dimensions(widest_label, fixed_width);
+    let row_heights = VIEWS_CHOICES
+        .iter()
+        .fold(0.0, |height, _| add_finite_dimensions(height, VIEWS_ROW_HEIGHT));
+    let row_gaps = (VIEWS_CHOICES.len().saturating_sub(1) as f32) * VIEWS_ROW_GAP;
+    let desired_content_height = add_finite_dimensions(row_heights, row_gaps);
+    let popup_margin = egui::Frame::popup(ui.style()).total_margin();
+    let vertical_popup_margin = add_finite_dimensions(
+        nonnegative_finite_dimension(popup_margin.top),
+        nonnegative_finite_dimension(popup_margin.bottom),
+    );
+    let available_outer_height = nonnegative_finite_dimension(ui.ctx().content_rect().height());
+    let available_content_height =
+        (available_outer_height - vertical_popup_margin).max(0.0);
+
+    ViewsPopupMetrics {
+        desired_content_height,
+        available_content_height,
+        content_width,
+    }
+}
+
 fn element_change_command(key: ElementTypeKey) -> Command {
     Command::EditorElementChange {
         element_type: ElementTypeValue::from_key(key),
@@ -332,6 +385,15 @@ fn apply_toolbar_enablement(items: &mut [ToolbarItemSpec], availability: AppComm
                 if availability.is_enabled(scriptcraft_commands::CommandId::ViewInvisiblesToggle)
                     && availability.is_enabled(scriptcraft_commands::CommandId::ViewRulerToggle)
                 {
+                    EnablementPolicy::Enabled
+                } else {
+                    EnablementPolicy::Disabled
+                }
+            }
+            ToolbarBehavior::ViewsDropdown => {
+                if VIEWS_CHOICES.iter().filter_map(|choice| choice.action).any(|action| {
+                    availability.is_enabled(action.command().id())
+                }) {
                     EnablementPolicy::Enabled
                 } else {
                     EnablementPolicy::Disabled
@@ -692,7 +754,25 @@ fn paint_toolbar_icon(
     item: ToolbarItemSpec,
     palette: crate::chrome::theme::ToolbarPalette,
 ) {
-    let color = if matches!(item.enablement, EnablementPolicy::Enabled) {
+    paint_toolbar_icon_with_enablement(
+        ui,
+        center,
+        icon,
+        item,
+        palette,
+        item.enablement == EnablementPolicy::Enabled,
+    );
+}
+
+fn paint_toolbar_icon_with_enablement(
+    ui: &egui::Ui,
+    center: egui::Pos2,
+    icon: IconSpec,
+    item: ToolbarItemSpec,
+    palette: crate::chrome::theme::ToolbarPalette,
+    enabled: bool,
+) {
+    let color = if enabled {
         toolbar_presentation::enabled_foreground(ui, item, Some(icon))
     } else {
         toolbar_presentation::disabled_icon_foreground(item, icon, palette)
@@ -898,6 +978,277 @@ impl ScriptCraftApp {
                 }
             });
 
+        if let Some(action) = chosen {
+            self.dispatch_command(
+                CommandInvocation::new(action.command(), CommandOrigin::Toolbar),
+                ui.ctx(),
+            );
+        }
+    }
+
+    fn views_choice_is_current(&self, choice: ViewsChoiceSpec) -> bool {
+        match choice.action {
+            Some(ViewsAction::ScriptMode(mode)) => {
+                self.root_document_view == crate::app::RootDocumentView::Script
+                    && self.script_view_mode == mode
+            }
+            Some(ViewsAction::BeatBoard) => {
+                self.root_document_view == crate::app::RootDocumentView::BeatBoard
+            }
+            None => false,
+        }
+    }
+
+    fn views_current_label(&self) -> &'static str {
+        VIEWS_CHOICES
+            .iter()
+            .copied()
+            .find(|choice| self.views_choice_is_current(*choice))
+            .map_or("Script - Normal View", |choice| choice.label)
+    }
+
+    fn views_action_enabled(
+        action: ViewsAction,
+        availability: AppCommandAvailability,
+    ) -> bool {
+        availability.is_enabled(action.command().id())
+    }
+
+    fn views_row(
+        &self,
+        ui: &mut egui::Ui,
+        item: ToolbarItemSpec,
+        choice: ViewsChoiceSpec,
+        availability: AppCommandAvailability,
+        content_width: f32,
+    ) -> Option<ViewsAction> {
+        let action = choice.action;
+        let enabled = action.is_some_and(|action| Self::views_action_enabled(action, availability));
+        let selected = self.views_choice_is_current(choice);
+        let (id, rect) = ui.allocate_space(Vec2::new(content_width, VIEWS_ROW_HEIGHT));
+        let response = ui
+            .interact(
+                rect,
+                id.with(("views-choice", choice.id)),
+                if enabled { Sense::click() } else { Sense::empty() },
+            )
+            .on_hover_cursor(if enabled {
+                toolbar_cursor_icon()
+            } else {
+                egui::CursorIcon::Default
+            });
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::Button,
+                enabled,
+                selected,
+                choice.accessibility_name.to_owned(),
+            )
+        });
+
+        let fill = if enabled && response.is_pointer_button_down_on() {
+            self.theme_palette.toolbar.pressed_fill
+        } else if enabled && selected {
+            self.theme_palette.toolbar.selected_fill
+        } else if enabled && response.hovered() {
+            self.theme_palette.toolbar.hover_fill
+        } else {
+            Color32::TRANSPARENT
+        };
+        if fill != Color32::TRANSPARENT {
+            ui.painter().rect_filled(rect, 2.0, fill);
+        }
+
+        let palette = self.theme_palette.toolbar;
+        let check_slot_left = rect.left() + VIEWS_ROW_HORIZONTAL_PADDING;
+        let icon_tile_left = check_slot_left + VIEWS_CHECK_SLOT_WIDTH + VIEWS_ROW_COLUMN_GAP;
+        let icon_center = egui::pos2(
+            icon_tile_left + VIEWS_ICON_TILE_SIZE * 0.5,
+            rect.center().y,
+        );
+        if selected {
+            paint_toolbar_icon_with_enablement(
+                ui,
+                egui::pos2(
+                    check_slot_left + VIEWS_CHECK_SLOT_WIDTH * 0.5,
+                    rect.center().y,
+                ),
+                IconSpec::new(ICON_CHECK).with_point_size(VIEWS_CHECK_SIZE),
+                item,
+                palette,
+                enabled,
+            );
+        }
+        paint_toolbar_icon_with_enablement(
+            ui,
+            icon_center,
+            choice.icon,
+            item,
+            palette,
+            enabled,
+        );
+        let label_color = if enabled {
+            toolbar_presentation::enabled_foreground(ui, item, None)
+        } else {
+            toolbar_presentation::disabled_caption_foreground(item, palette)
+        };
+        let label = ui.painter().layout_no_wrap(
+            choice.label.to_owned(),
+            FontId::proportional(VIEWS_ROW_LABEL_SIZE),
+            label_color,
+        );
+        let label_left = icon_tile_left + VIEWS_ICON_TILE_SIZE + VIEWS_ROW_COLUMN_GAP;
+        paint_toolbar_galley_with_color(
+            ui,
+            egui::pos2(label_left, rect.center().y - label.size().y * 0.5),
+            label,
+            label_color,
+        );
+
+        let keyboard_activated = enabled
+            && response.has_focus()
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+            });
+        (enabled && (response.clicked() || keyboard_activated))
+            .then_some(action)
+            .flatten()
+    }
+
+    fn views_popup_rows(
+        &self,
+        ui: &mut egui::Ui,
+        item: ToolbarItemSpec,
+        availability: AppCommandAvailability,
+        content_width: f32,
+    ) -> Option<ViewsAction> {
+        let mut chosen = None;
+        for (index, choice) in VIEWS_CHOICES.iter().copied().enumerate() {
+            if index != 0 {
+                ui.add_space(VIEWS_ROW_GAP);
+            }
+            if let Some(action) = self.views_row(ui, item, choice, availability, content_width) {
+                chosen = Some(action);
+                ui.close();
+            }
+        }
+        chosen
+    }
+
+    fn views_popup_contents(
+        &self,
+        ui: &mut egui::Ui,
+        item: ToolbarItemSpec,
+        availability: AppCommandAvailability,
+    ) -> Option<ViewsAction> {
+        let metrics = views_popup_metrics(ui);
+        ui.set_min_width(metrics.content_width);
+        ui.set_max_width(metrics.content_width);
+        ui.style_mut().wrap_mode = Some(TextWrapMode::Extend);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        if metrics.desired_content_height <= metrics.available_content_height {
+            self.views_popup_rows(ui, item, availability, metrics.content_width)
+        } else {
+            let mut chosen = None;
+            egui::ScrollArea::vertical()
+                .max_height(metrics.available_content_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_min_width(metrics.content_width);
+                    ui.set_max_width(metrics.content_width);
+                    chosen = self.views_popup_rows(
+                        ui,
+                        item,
+                        availability,
+                        metrics.content_width,
+                    );
+                });
+            chosen
+        }
+    }
+
+    fn views_toolbar_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        item: ToolbarItemSpec,
+        width: f32,
+        presentation: ToolbarPresentationMetrics,
+        availability: AppCommandAvailability,
+    ) {
+        let palette = self.theme_palette.toolbar;
+        let group_height = toolbar_item_group_height(ui.style());
+        let (id, rect) = ui.allocate_space(Vec2::new(width, group_height));
+        let icon_control_size = Vec2::splat(presentation.icon_control_size);
+        let icon_control_rect = toolbar_icon_control_rect(rect, icon_control_size);
+        let icon_rect = toolbar_icon_hover_rect(icon_control_rect, TOOLBAR_ICON_HOVER_PADDING);
+        let enabled = item.enablement == EnablementPolicy::Enabled;
+        let response = ui
+            .interact(
+                icon_rect,
+                id.with("views-dropdown"),
+                toolbar_action_sense(enabled),
+            )
+            .on_hover_cursor(if enabled {
+                toolbar_cursor_icon()
+            } else {
+                egui::CursorIcon::Default
+            });
+        let accessible_name = format!("{}: {}", item.accessibility_name, self.views_current_label());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                enabled,
+                accessible_name.clone(),
+            )
+        });
+        let fill = if enabled {
+            toolbar_action_fill(ui.style(), enabled, response.hovered())
+        } else {
+            Color32::TRANSPARENT
+        };
+        if fill != Color32::TRANSPARENT {
+            ui.painter().rect_filled(icon_rect, 2.0, fill);
+        }
+        paint_toolbar_graphic(ui, icon_control_rect.center(), item.graphic, item, palette);
+        if item.caption_visible {
+            let label_color = if enabled {
+                toolbar_presentation::enabled_foreground(ui, item, None)
+            } else {
+                toolbar_presentation::disabled_caption_foreground(item, palette)
+            };
+            let label = ui.painter().layout_no_wrap(
+                item.label.to_owned(),
+                presentation.font_id(),
+                label_color,
+            );
+            let caption_rect = toolbar_caption_rect(
+                rect,
+                icon_control_rect.height(),
+                TOOLBAR_CONTROL_CAPTION_GAP,
+            );
+            paint_toolbar_galley_with_color(
+                ui,
+                egui::pos2(
+                    caption_rect.center().x - label.size().x * 0.5,
+                    caption_rect.center().y - label.size().y * 0.5,
+                ),
+                label,
+                label_color,
+            );
+        }
+
+        let keyboard_activated = enabled
+            && response.has_focus()
+            && ui.input(|input| {
+                input.key_pressed(egui::Key::Enter) || input.key_pressed(egui::Key::Space)
+            });
+        let activated = enabled && (response.clicked() || keyboard_activated);
+        let mut chosen = None;
+        egui::Popup::menu(&response)
+            .open_memory(activated.then_some(egui::SetOpenCommand::Toggle))
+            .show(|ui| {
+                chosen = self.views_popup_contents(ui, item, availability);
+            });
         if let Some(action) = chosen {
             self.dispatch_command(
                 CommandInvocation::new(action.command(), CommandOrigin::Toolbar),
@@ -1436,6 +1787,8 @@ impl ScriptCraftApp {
         let mut chosen_action = None;
         let mut chosen_element_type = None;
         let mut chosen_show_hide_action = None;
+        let mut chosen_views_action = None;
+        let availability = self.app_command_availability();
         let icon = match indicator.graphic {
             ToolbarGraphic::Icon(icon) => icon,
             _ => unreachable!("overflow indicator must use a single Material icon"),
@@ -1549,6 +1902,30 @@ impl ScriptCraftApp {
                                 });
                             });
                         }
+                        ToolbarBehavior::ViewsDropdown => {
+                            let enabled = item.enablement == EnablementPolicy::Enabled;
+                            let accessible_name = format!(
+                                "{}: {}",
+                                item.accessibility_name,
+                                self.views_current_label()
+                            );
+                            ui.add_enabled_ui(enabled, |ui| {
+                                let submenu = ui.menu_button(item.label, |ui| {
+                                    chosen_views_action = self.views_popup_contents(
+                                        ui,
+                                        item,
+                                        availability,
+                                    );
+                                });
+                                submenu.response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        enabled,
+                                        accessible_name.clone(),
+                                    )
+                                });
+                            });
+                        }
                         ToolbarBehavior::StylesInlineGroup
                         | ToolbarBehavior::AlignmentInlineGroup => {
                             if item.enablement == EnablementPolicy::Enabled {
@@ -1591,6 +1968,12 @@ impl ScriptCraftApp {
             }
         }
         if let Some(action) = chosen_show_hide_action {
+            self.dispatch_command(
+                CommandInvocation::new(action.command(), CommandOrigin::Toolbar),
+                ui.ctx(),
+            );
+        }
+        if let Some(action) = chosen_views_action {
             self.dispatch_command(
                 CommandInvocation::new(action.command(), CommandOrigin::Toolbar),
                 ui.ctx(),
@@ -1683,6 +2066,13 @@ impl ScriptCraftApp {
                             ToolbarBehavior::ShowHideDropdown => {
                                 self.show_hide_toolbar_item(ui, item, width, presentation)
                             }
+                            ToolbarBehavior::ViewsDropdown => self.views_toolbar_item(
+                                ui,
+                                item,
+                                width,
+                                presentation,
+                                availability,
+                            ),
                             ToolbarBehavior::StylesInlineGroup
                             | ToolbarBehavior::AlignmentInlineGroup => self
                                 .formatting_inline_group_button(

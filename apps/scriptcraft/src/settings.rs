@@ -20,12 +20,9 @@ const TEMP_FILE_CANDIDATES: u32 = 1_000;
 
 const DEFAULT_TOOLBAR_IDS: &[&str] = &[
     "flexible-space",
-    "new",
-    "open",
-    "save",
-    "save-as",
-    "flexible-space",
+    "views",
     "beat-board",
+    "flexible-space",
     "title-page",
     "elements",
     "flexible-space",

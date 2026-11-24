@@ -2,14 +2,15 @@ use crate::presentation::material_font::{MaterialIconAxes, MaterialIconAxisOverr
 use eframe::egui::Color32;
 use egui_material_icons::{
     icons::{
-        ICON_BOOK_5, ICON_CANCEL, ICON_DASHBOARD, ICON_DOUBLE_ARROW, ICON_DRAFT, ICON_FILE_OPEN,
-        ICON_FORMAT_ALIGN_LEFT, ICON_FORMAT_BOLD, ICON_FORMAT_ITALIC, ICON_FORMAT_STRIKETHROUGH,
-        ICON_FORMAT_UNDERLINED, ICON_KEYBOARD_ARROW_DOWN, ICON_PICTURE_AS_PDF, ICON_SAVE,
-        ICON_SAVE_AS, ICON_TEXT_FIELDS, ICON_UPLOAD_FILE, ICON_VISIBILITY,
+        ICON_ARTICLE, ICON_BOOK_5, ICON_CANCEL, ICON_DASHBOARD, ICON_DOUBLE_ARROW, ICON_DRAFT,
+        ICON_FILE_OPEN, ICON_FORMAT_ALIGN_LEFT, ICON_FORMAT_BOLD, ICON_FORMAT_ITALIC,
+        ICON_FORMAT_STRIKETHROUGH, ICON_FORMAT_UNDERLINED, ICON_GRID_VIEW,
+        ICON_KEYBOARD_ARROW_DOWN, ICON_NOTES, ICON_PICTURE_AS_PDF, ICON_SAVE, ICON_SAVE_AS,
+        ICON_TEXT_FIELDS, ICON_UPLOAD_FILE, ICON_VIEW_LIST, ICON_VISIBILITY, ICON_WEB_ASSET,
     },
     MaterialIcon,
 };
-use scriptcraft_commands::CommandId;
+use scriptcraft_commands::{Command, CommandId, ScriptViewMode};
 use crate::settings::Settings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,14 @@ const SHOW_HIDE_GRAPHIC: ToolbarGraphic = ToolbarGraphic::IconDisclosure {
     primary: IconSpec::new(ICON_VISIBILITY),
     disclosure: IconSpec::new(ICON_KEYBOARD_ARROW_DOWN),
 };
+
+const VIEWS_GRAPHIC: ToolbarGraphic = ToolbarGraphic::IconDisclosure {
+    primary: IconSpec::new(ICON_WEB_ASSET),
+    disclosure: IconSpec::new(ICON_KEYBOARD_ARROW_DOWN),
+};
+
+// Material Symbols List 2 (U+FFECA), from the pinned inventory in fonts/MaterialSymbols/README.md.
+const ICON_LIST_2: MaterialIcon = MaterialIcon::new("\u{FFECA}");
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct IconSpec {
@@ -47,6 +56,11 @@ impl IconSpec {
 
     pub(super) const fn with_point_size(mut self, point_size: f32) -> Self {
         self.point_size = Some(point_size);
+        self
+    }
+
+    pub(super) const fn with_variant(mut self, variant: ToolbarIconVariant) -> Self {
+        self.variant = Some(variant);
         self
     }
 
@@ -119,6 +133,7 @@ pub(super) enum ToolbarBehavior {
     Action(CommandId),
     ElementsRoleDropdown,
     ShowHideDropdown,
+    ViewsDropdown,
     StylesInlineGroup,
     AlignmentInlineGroup,
     OverflowMenu,
@@ -163,6 +178,82 @@ pub(super) struct ToolbarItemSpec {
     pub(super) layout: ToolbarLayoutPolicy,
     pub(super) presentation: ItemPresentationOverrides,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ViewsAction {
+    ScriptMode(ScriptViewMode),
+    BeatBoard,
+}
+
+impl ViewsAction {
+    pub(super) fn command(self) -> Command {
+        match self {
+            Self::ScriptMode(mode) => Command::ViewScriptViewSet { mode },
+            Self::BeatBoard => Command::ViewBeatBoardShow,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ViewsChoiceSpec {
+    pub(super) id: &'static str,
+    pub(super) label: &'static str,
+    pub(super) accessibility_name: &'static str,
+    pub(super) icon: IconSpec,
+    pub(super) action: Option<ViewsAction>,
+}
+
+pub(super) const VIEWS_CHOICES: [ViewsChoiceSpec; 7] = [
+    ViewsChoiceSpec {
+        id: "script-normal",
+        label: "Script - Normal View",
+        accessibility_name: "Script - Normal View",
+        icon: IconSpec::new(ICON_LIST_2),
+        action: Some(ViewsAction::ScriptMode(ScriptViewMode::Normal)),
+    },
+    ViewsChoiceSpec {
+        id: "script-page",
+        label: "Script - Page View",
+        accessibility_name: "Script - Page View",
+        icon: IconSpec::new(ICON_ARTICLE),
+        action: Some(ViewsAction::ScriptMode(ScriptViewMode::Page)),
+    },
+    ViewsChoiceSpec {
+        id: "script-speed",
+        label: "Script - Speed View",
+        accessibility_name: "Script - Speed View",
+        icon: IconSpec::new(ICON_NOTES),
+        action: Some(ViewsAction::ScriptMode(ScriptViewMode::Speed)),
+    },
+    ViewsChoiceSpec {
+        id: "beat-board",
+        label: "Beat Board",
+        accessibility_name: "Beat Board",
+        icon: IconSpec::new(ICON_DASHBOARD),
+        action: Some(ViewsAction::BeatBoard),
+    },
+    ViewsChoiceSpec {
+        id: "scene-view",
+        label: "Scene View",
+        accessibility_name: "Scene View",
+        icon: IconSpec::new(ICON_VIEW_LIST),
+        action: None,
+    },
+    ViewsChoiceSpec {
+        id: "index-cards-script",
+        label: "Index Cards - Script",
+        accessibility_name: "Index Cards - Script",
+        icon: IconSpec::new(ICON_GRID_VIEW).with_variant(ToolbarIconVariant::Filled),
+        action: None,
+    },
+    ViewsChoiceSpec {
+        id: "index-cards-summary",
+        label: "Index Cards - Summary",
+        accessibility_name: "Index Cards - Summary",
+        icon: IconSpec::new(ICON_GRID_VIEW),
+        action: None,
+    },
+];
 
 /// Immutable effective toolbar composition resolved from the raw settings snapshot.
 pub(crate) struct ConfiguredToolbars {
@@ -357,6 +448,17 @@ const SHOW_HIDE_ITEM: ToolbarItemSpec = ToolbarItemSpec {
     layout: ToolbarLayoutPolicy::Measured,
     presentation: ItemPresentationOverrides::NONE,
 };
+const VIEWS_ITEM: ToolbarItemSpec = ToolbarItemSpec {
+    id: "views",
+    label: "Views",
+    accessibility_name: "Views",
+    caption_visible: true,
+    graphic: VIEWS_GRAPHIC,
+    behavior: ToolbarBehavior::ViewsDropdown,
+    enablement: EnablementPolicy::Enabled,
+    layout: ToolbarLayoutPolicy::Measured,
+    presentation: ItemPresentationOverrides::NONE,
+};
 const EXPORT_TEXT_ITEM: ToolbarItemSpec = ToolbarItemSpec {
     id: "export-text",
     label: "Export Text",
@@ -375,13 +477,14 @@ const EXPORT_PDF_ITEM: ToolbarItemSpec = action(
     CommandId::FileSaveAsPdf,
 );
 
-const BUILTIN_TOOLBAR_ITEM_CATALOG: [ToolbarItemSpec; 16] = [
+const BUILTIN_TOOLBAR_ITEM_CATALOG: [ToolbarItemSpec; 17] = [
     FLEXIBLE_SPACE_ITEM,
     SPACE_ITEM_SPEC,
     NEW_ITEM,
     OPEN_ITEM,
     SAVE_ITEM,
     SAVE_AS_ITEM,
+    VIEWS_ITEM,
     BEAT_BOARD_ITEM,
     TITLE_PAGE_ITEM,
     ELEMENTS_ITEM,
