@@ -1,6 +1,10 @@
 //! Body Script View context popup, composed on the editor's single response.
 
 use super::ScriptCraftApp;
+use crate::chrome::menu::{
+    available_popup_inner_viewport_height, menu_check_atom, menu_popup_row_height,
+    popup_rows_content_height, render_popup_content,
+};
 use crate::chrome::element_choices::DynamicElementMenuProjection;
 use crate::commands::{command_for_id, CommandInvocation};
 use eframe::egui;
@@ -87,20 +91,24 @@ fn render_element_submenu(
         && !projection.choices().is_empty();
     ui.add_enabled_ui(enabled, |ui| {
         ui.menu_button("Change Element To", |ui| {
-            let max_height = (ui.ctx().content_rect().height() - 24.0).max(0.0);
-            egui::ScrollArea::vertical()
-                .max_height(max_height)
-                .min_scrolled_height(0.0)
-                .auto_shrink([true, true])
-                .show(ui, |ui| {
-                    for choice in projection.choices() {
+            let choices = projection.choices();
+            let row_height = menu_popup_row_height();
+            let row_gap = ui.spacing().item_spacing.y;
+            let content_height = popup_rows_content_height(choices.len(), row_height, row_gap);
+            let margin = ui.spacing().menu_margin;
+            let vertical_margin =
+                f32::from(margin.top) + f32::from(margin.bottom);
+            let available_height = available_popup_inner_viewport_height(ui, vertical_margin);
+            render_popup_content(ui, content_height, available_height, |ui| {
+                    for choice in choices {
                         let checked = projection.focused_type_key.as_ref() == Some(&choice.key);
-                        let label = if checked {
-                            format!("✓ {}", choice.label())
-                        } else {
-                            choice.label().to_owned()
-                        };
-                        let response = ui.button(label);
+                        let mut label_atom = egui::Atom::from(choice.label());
+                        label_atom.grow = true;
+                        label_atom.align = egui::Align2::LEFT_CENTER;
+                        let response = ui.add(
+                            egui::Button::new((menu_check_atom(checked), label_atom))
+                                .min_size(egui::vec2(0.0, row_height)),
+                        );
                         response.widget_info(|| {
                             egui::WidgetInfo::labeled(
                                 egui::WidgetType::Button,

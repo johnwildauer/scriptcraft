@@ -181,6 +181,33 @@ pub(crate) fn menu_item_is_checked(
     }
 }
 
+/// Whether this catalog item can display a check in any presentation state.
+/// This is deliberately separate from the current-state projection above so a
+/// popup's leading slot does not move as selection state changes.
+pub(crate) fn menu_item_can_display_check(item: &MenuItemSpec) -> bool {
+    match item.behavior {
+        MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Checked) => true,
+        MenuItemBehavior::MenuCommand(
+            MenuAction::SetScriptView(_)
+            | MenuAction::SetAppearance(_)
+            | MenuAction::SetZoom(_)
+            | MenuAction::ToggleStyle(_)
+            | MenuAction::ClearStyles
+            | MenuAction::SetAlignment(_)
+            | MenuAction::SetInlineFont(_)
+            | MenuAction::SetInlineSize(_)
+            | MenuAction::ClearInlineSize
+            | MenuAction::SetInlineColor(_)
+            | MenuAction::SetInlineBackground(_)
+            | MenuAction::SetParagraphSpacing(_)
+            | MenuAction::SetSpaceBefore(_)
+            | MenuAction::SetParagraphLeading(_),
+        ) => true,
+        MenuItemBehavior::Command(_) | MenuItemBehavior::MenuCommand(MenuAction::ZoomStep(_))
+        | MenuItemBehavior::DisabledPlaceholder(_) => false,
+    }
+}
+
 fn appearance_mode_for_choice(appearance: Appearance) -> super::theme::AppearanceMode {
     match appearance {
         Appearance::System => super::theme::AppearanceMode::System,
