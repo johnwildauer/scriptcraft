@@ -31,7 +31,7 @@ const fn descriptor(
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 63] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 73] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -152,7 +152,7 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 63] = [
         "pdf",
         "options: pdf_export_options; host dialog effect",
     ),
-    descriptor(CommandId::ViewZoomSet, "view", "percent: 75..=300"),
+    descriptor(CommandId::ViewZoomSet, "view", "percent: 5..=300; active target enforces Script/Title 75..=300 and Beat 5..=300"),
     descriptor(
         CommandId::ViewZoomPinch,
         "view",
@@ -243,6 +243,16 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 63] = [
         "view",
         "none; desktop-only global presentation/settings effect",
     ),
+    descriptor(CommandId::ViewBeatBoardShow, "view", "none; desktop-only root view effect"),
+    descriptor(CommandId::BeatBoardCardCreate, "beat-board", "position: milli-pixel point"),
+    descriptor(CommandId::BeatBoardCardActivate, "beat-board", "card: stable card ID"),
+    descriptor(CommandId::BeatBoardCardGeometrySet, "beat-board", "card, rect: milli-pixel rectangle, activate: bool (default false)"),
+    descriptor(CommandId::BeatBoardSelectionSet, "beat-board", "selection: none, card, or validated title/body text range"),
+    descriptor(CommandId::BeatBoardTextEdit, "beat-board", "operation: insert, paste, delete_backward, delete_forward, or enter; active Beat text selection"),
+    descriptor(CommandId::BeatBoardNavigation, "beat-board", "target: horizontal direction or logical paragraph edge; extend: bool"),
+    descriptor(CommandId::BeatBoardStyleToggle, "beat-board", "style: bold, italics, underline, all_caps, or strikethrough; active Body selection/caret"),
+    descriptor(CommandId::BeatBoardStyleClear, "beat-board", "none; clear supported Body run styles"),
+    descriptor(CommandId::BeatBoardRunFormattingSet, "beat-board", "patch: bounded Font/Size/Color/Background; active Body selection/caret"),
 ];
 
 pub fn descriptor_for(id: CommandId) -> Option<&'static CommandDescriptor> {

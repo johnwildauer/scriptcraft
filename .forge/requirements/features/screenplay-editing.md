@@ -89,6 +89,10 @@ Font, Size, and Color range operations and text/structure changes use this share
 
 ## Constraints
 
+### Beat Board editing boundary
+
+The separate Beat Board uses the same canonical UTF-8 and run-normalization principles, but it is not a screenplay Body or Title Page surface and does not inherit screenplay element Behavior, paragraph transitions, page layout, or the screenplay's paragraph-index selection type. Beat-specific title/body selections, multi-paragraph edit transactions, navigation, plain-text extraction, and durable save rebase are specified by [Beat Board requirements](beat-board.md). Desktop key, clipboard, and IME routing is an adapter over the Beat session APIs; it does not introduce a second editing algorithm. Inline formatting controls remain separately specified by the Beat Board work order.
+
 - Canonical screenplay text and exact element types are distinct from display-only capitalization, typography, selection, and transient editing state. Element labels are not trimmed, case-folded, or mapped to a fallback type.
 - An operation that cannot preserve authored content safely leaves the existing screenplay unchanged. Native FDX remains the durable project format; no legacy JSON migration or compatibility API is provided.
 - **NFR-WRITING-002:** Core editing, layout, and persistence behavior remains usable without opening a desktop window.

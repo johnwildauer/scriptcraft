@@ -3,6 +3,7 @@
 
 //! Canonical screenplay values shared by document and codec packages.
 
+pub mod beat_board;
 pub mod cast_list;
 pub mod dual_dialogue;
 pub mod element;
@@ -24,6 +25,11 @@ pub mod title_page;
 pub mod typography;
 pub mod validation;
 
+pub use beat_board::{
+    BeatBoard, BeatCard, BeatParagraph, BeatPoint, BeatRect, BoardFixed, BOARD_SNAP_INCREMENT,
+    DEFAULT_BOARD_HEIGHT, DEFAULT_BOARD_WIDTH, DEFAULT_CARD_HEIGHT, DEFAULT_CARD_WIDTH,
+    MAX_BOARD_DIMENSION, MAX_CARD_HEIGHT, MAX_CARD_WIDTH, MIN_CARD_HEIGHT, MIN_CARD_WIDTH,
+};
 pub use dual_dialogue::DualDialogueError;
 pub use element::{
     BodyOwner, RunAttribute, ScreenplayElement, SourceFormat, SourceProvenance, SourceSection,

@@ -180,6 +180,7 @@ impl ScriptCraftApp {
             text_state,
             self.invisibles,
             Self::fdx_display_mode_from_script_view_mode(self.script_view_mode),
+            self.beat_board_view_state,
         ) {
             Ok(outcome) => {
                 self.native_path = target.path().map(PathBuf::from);

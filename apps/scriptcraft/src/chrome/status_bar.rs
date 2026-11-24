@@ -29,6 +29,28 @@ pub(crate) const MIN_ZOOM_PERCENT: u16 = 75;
 pub(crate) const MAX_ZOOM_PERCENT: u16 = 300;
 pub(crate) const ZOOM_PRESETS: [u16; 9] = [75, 90, 100, 125, 150, 175, 200, 250, 300];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ZoomPolicy {
+    pub(crate) min: u16,
+    pub(crate) max: u16,
+    pub(crate) label: &'static str,
+}
+
+impl ZoomPolicy {
+    pub(crate) const PAGE: Self = Self { min: MIN_ZOOM_PERCENT, max: MAX_ZOOM_PERCENT, label: "Page zoom" };
+    pub(crate) const BEAT: Self = Self { min: 5, max: MAX_ZOOM_PERCENT, label: "Beat Board zoom" };
+
+    pub(crate) fn normalize(self, value: f64) -> u16 {
+        if !value.is_finite() { return 100; }
+        value.round().clamp(f64::from(self.min), f64::from(self.max)) as u16
+    }
+
+    pub(crate) fn after_factor(self, current: f64, factor: f32) -> Option<f64> {
+        if !current.is_finite() || !factor.is_finite() || factor <= 0.0 { return None; }
+        Some((current * f64::from(factor)).clamp(f64::from(self.min), f64::from(self.max)))
+    }
+}
+
 /// Status-only presentation values. Keep these independent of toolbar and
 /// framework defaults so later manual tuning cannot silently affect other UI.
 mod presentation {
@@ -297,23 +319,8 @@ pub(crate) fn ui_zoom_factor(native: Option<f32>) -> f32 {
     resolved_ui_pixels_per_point(valid_native) / valid_native.unwrap_or(1.0)
 }
 
-pub(crate) fn zoom_after_native_factor(current_percent: f64, factor: f32) -> Option<f64> {
-    if !current_percent.is_finite() || !factor.is_finite() || factor <= 0.0 {
-        return None;
-    }
-    Some(
-        (current_percent * f64::from(factor))
-            .clamp(MIN_ZOOM_PERCENT as f64, MAX_ZOOM_PERCENT as f64),
-    )
-}
-
 pub(crate) fn normalized_zoom_percent(value: f64) -> u16 {
-    if !value.is_finite() {
-        return 100;
-    }
-    value
-        .round()
-        .clamp(MIN_ZOOM_PERCENT as f64, MAX_ZOOM_PERCENT as f64) as u16
+    ZoomPolicy::PAGE.normalize(value)
 }
 
 fn zoom_controls(
@@ -323,19 +330,20 @@ fn zoom_controls(
     slider_rect: Rect,
     percentage_rect: Rect,
     percentage_label: &str,
+    policy: ZoomPolicy,
 ) -> (bool, Option<egui::Response>) {
     let old_value = *zoom_percent;
     let slider_response = (slider_rect.width() > 0.0).then(|| {
         one_line_region_at(ui, slider_rect, |slider_ui| {
-            zoom_slider(slider_ui, palette, slider_rect.width(), zoom_percent)
+            zoom_slider(slider_ui, palette, slider_rect.width(), zoom_percent, policy)
         })
         .inner
     });
 
-    one_line_region_at(ui, percentage_rect, |percentage_ui| {
-        zoom_presets_button(percentage_ui, zoom_percent, percentage_label)
-    });
-    (*zoom_percent != old_value, slider_response)
+    let preset_chosen = one_line_region_at(ui, percentage_rect, |percentage_ui| {
+        zoom_presets_button(percentage_ui, zoom_percent, percentage_label, policy)
+    }).inner;
+    (*zoom_percent != old_value || preset_chosen, slider_response)
 }
 
 fn zoom_slider(
@@ -343,6 +351,7 @@ fn zoom_slider(
     palette: StatusPalette,
     width: f32,
     zoom_percent: &mut u16,
+    policy: ZoomPolicy,
 ) -> egui::Response {
     let response = ui
         .scope(|ui| {
@@ -355,7 +364,7 @@ fn zoom_slider(
             ui.spacing_mut().slider_width = width;
             ui.add_sized(
                 [width, presentation::STATUS_ROW_HEIGHT],
-                egui::Slider::new(zoom_percent, MIN_ZOOM_PERCENT..=MAX_ZOOM_PERCENT)
+                egui::Slider::new(zoom_percent, policy.min..=policy.max)
                     .integer()
                     .trailing_fill(true)
                     .show_value(false)
@@ -365,19 +374,19 @@ fn zoom_slider(
         .inner;
     if response.has_focus() {
         if ui.input(|input| input.key_pressed(egui::Key::Home)) {
-            *zoom_percent = MIN_ZOOM_PERCENT;
+            *zoom_percent = policy.min;
         } else if ui.input(|input| input.key_pressed(egui::Key::End)) {
-            *zoom_percent = MAX_ZOOM_PERCENT;
+            *zoom_percent = policy.max;
         }
     }
     response.widget_info(|| {
-        WidgetInfo::slider(response.enabled(), f64::from(*zoom_percent), "Page zoom")
+        WidgetInfo::slider(response.enabled(), f64::from(*zoom_percent), policy.label)
     });
     ui.ctx().accesskit_node_builder(response.id, |node| {
-        node.set_label("Page zoom");
+        node.set_label(policy.label);
         node.set_numeric_value(f64::from(*zoom_percent));
-        node.set_min_numeric_value(f64::from(MIN_ZOOM_PERCENT));
-        node.set_max_numeric_value(f64::from(MAX_ZOOM_PERCENT));
+        node.set_min_numeric_value(f64::from(policy.min));
+        node.set_max_numeric_value(f64::from(policy.max));
         node.set_numeric_value_step(1.0);
     });
     response
@@ -388,6 +397,7 @@ fn paint_zoom_slider_knob(
     palette: StatusPalette,
     response: &egui::Response,
     zoom_percent: u16,
+    policy: ZoomPolicy,
     right_group_rect: Rect,
     status_row_rect: Rect,
 ) {
@@ -403,8 +413,8 @@ fn paint_zoom_slider_knob(
     // circle radius but not the value-to-position mapping.
     let handle_radius = response.rect.height() / 2.5;
     let position_range = response.rect.x_range().shrink(handle_radius);
-    let normalized = (f32::from(zoom_percent - MIN_ZOOM_PERCENT)
-        / f32::from(MAX_ZOOM_PERCENT - MIN_ZOOM_PERCENT))
+    let normalized = (f32::from(zoom_percent.saturating_sub(policy.min))
+        / f32::from(policy.max - policy.min))
     .clamp(0.0, 1.0);
     let center = egui::pos2(
         egui::emath::lerp(position_range, normalized),
@@ -450,7 +460,8 @@ fn zoom_presets_button(
     ui: &mut egui::Ui,
     zoom_percent: &mut u16,
     percentage_label: &str,
-) -> egui::Response {
+    policy: ZoomPolicy,
+) -> bool {
     let rect = ui.max_rect();
     let hover_rect = rect.intersect(ui.max_rect()).intersect(ui.clip_rect());
     let response = ui.interact(
@@ -459,7 +470,7 @@ fn zoom_presets_button(
         Sense::click(),
     );
     // .on_hover_text(format!("Page Zoom"));
-    let accessible_name = format!("Page zoom presets, currently {percentage_label}");
+    let accessible_name = format!("{} presets, currently {percentage_label}", policy.label);
     let (response, text_color) = paint_status_hover_control(ui, response, hover_rect);
     let button_response = interactive_response(ui, response, &accessible_name);
     let galley = with_status_text_style(ui, |ui| {
@@ -480,6 +491,7 @@ fn zoom_presets_button(
         .with_clip_rect(painter_clip)
         .galley(text_position, galley, text_color);
 
+    let mut chosen = false;
     egui::Popup::menu(&button_response.response)
         .open_memory(
             button_response
@@ -489,10 +501,10 @@ fn zoom_presets_button(
         .show(|ui| {
             ui.set_min_width(72.0);
             for preset in ZOOM_PRESETS {
-                ui.selectable_value(zoom_percent, preset, format!("{preset}%"));
+                chosen |= ui.selectable_value(zoom_percent, preset, format!("{preset}%")).clicked();
             }
         });
-    button_response.response
+    chosen
 }
 
 #[allow(dead_code)] // WO-002 defines reusable interaction capabilities without assigning actions.
@@ -1376,6 +1388,7 @@ pub(crate) struct StatusCommandIntents {
 /// widget, accessibility/input presence, layout slot, and associated gap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct StatusSurfaceOptions {
+    show_page: bool,
     pub(super) show_center: bool,
     pub(super) show_focus_mode: bool,
     show_diagnostics: bool,
@@ -1387,15 +1400,23 @@ fn diagnostics_disclosure_enabled(development_mode: bool, options: StatusSurface
 
 impl StatusSurfaceOptions {
     pub(super) const BODY: Self = Self {
+        show_page: true,
         show_center: true,
         show_focus_mode: true,
         show_diagnostics: true,
     };
 
     pub(super) const TITLE_PAGE: Self = Self {
+        show_page: true,
         show_center: false,
         show_focus_mode: false,
         show_diagnostics: false,
+    };
+    pub(super) const BEAT: Self = Self {
+        show_page: false,
+        show_center: false,
+        show_focus_mode: false,
+        show_diagnostics: true,
     };
 }
 
@@ -1423,7 +1444,17 @@ pub(crate) fn show_with_focus_mode(
         None,
         Some(focus_view),
         StatusSurfaceOptions::BODY,
+        ZoomPolicy::PAGE,
     )
+}
+
+pub(crate) fn show_beat(
+    ui: &mut egui::Ui, palette: StatusPalette, page: VisiblePage,
+    diagnostics: Option<DiagnosticProjection<'_>>, development_mode: bool,
+    zoom_percent: u16, appearance: AppearanceMode, policy: ZoomPolicy,
+) -> StatusCommandIntents {
+    show_impl_with_appearance(ui, palette, page, &ready_center(), diagnostics,
+        development_mode, zoom_percent, appearance, None, None, StatusSurfaceOptions::BEAT, policy)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1446,6 +1477,7 @@ pub(crate) fn show_title_page(
         None,
         None,
         StatusSurfaceOptions::TITLE_PAGE,
+        ZoomPolicy::PAGE,
     )
 }
 
@@ -1535,6 +1567,7 @@ fn show_impl_with_appearance(
     diagnostics_open: Option<bool>,
     focus_view: Option<&FocusModeView>,
     options: StatusSurfaceOptions,
+    policy: ZoomPolicy,
 ) -> StatusCommandIntents {
     let mut zoom_percent = zoom_value;
     let mut appearance = appearance_value;
@@ -1568,7 +1601,7 @@ fn show_impl_with_appearance(
     } else {
         0.0
     };
-    let page_label_width = page_label_text_width + page_inset * 2.0;
+    let page_label_width = if options.show_page { page_label_text_width + page_inset * 2.0 } else { 0.0 };
     let percentage_label = format!("{zoom_percent}%");
     let percentage_width = measured_percentage_slot_width(ui);
     let icon_width = status_icon_width();
@@ -1608,6 +1641,7 @@ fn show_impl_with_appearance(
                             layout.slider,
                             layout.percentage,
                             &percentage_label,
+                            policy,
                         );
                         zoom_changed |= changed;
                         zoom_slider_response = slider_response;
@@ -1670,6 +1704,7 @@ fn show_impl_with_appearance(
                             palette,
                             response,
                             zoom_percent,
+                            policy,
                             right_rect,
                             row_rect,
                         );
@@ -1698,7 +1733,7 @@ fn show_impl_with_appearance(
             });
         }
 
-        one_line_region_at(row_ui, layout.page, |page_ui| {
+        if options.show_page { one_line_region_at(row_ui, layout.page, |page_ui| {
             let label = page.label();
             let page_rect = page_counter_content_rect(page_ui.max_rect())
                 .intersect(page_ui.clip_rect())
@@ -1711,7 +1746,7 @@ fn show_impl_with_appearance(
                     presentation::default_foreground(page_ui),
                 );
             });
-        });
+        }); }
     });
     if let (true, Some(diagnostics)) = (
         diagnostics_disclosure_enabled(development_mode, options),

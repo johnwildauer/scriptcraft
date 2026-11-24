@@ -5,7 +5,7 @@
 
 use scriptcraft_model::{Position as CorePosition, Selection as CoreSelection};
 use scriptcraft_session::editing::{
-    ApplyTemplateError, ApplyTemplateOutcome, EditError, EditingSession,
+    ApplyTemplateError, ApplyTemplateOutcome, BeatSelection, BeatTextField, EditError, EditingSession,
 };
 
 use crate::{Command, CommandId, EditorSurface, PointerPhase, PositionError, SelectionError};
@@ -114,6 +114,43 @@ pub fn execute_editor_command_on_surface(
 
     let before = session.mutation_token();
     let result = match command {
+        Command::BeatBoardCardCreate { position } => session.create_beat_card(position.to_core()),
+        Command::BeatBoardCardActivate { card } => session.activate_beat_card(card.as_core().clone()),
+        Command::BeatBoardCardGeometrySet { card, rect, activate } => session.set_beat_card_geometry(card.as_core().clone(), rect.to_core(), *activate),
+        Command::BeatBoardSelectionSet { selection } => session.set_beat_selection(match selection {
+            value => match crate::beat_selection_to_core(value) {
+                Ok(selection) => selection,
+                Err(error) => return CommandOutcome::Rejected(CommandRejection::PositionOutOfRange(error)),
+            },
+        }),
+        Command::BeatBoardTextEdit { operation } => {
+            if !matches!(session.beat_selection(), BeatSelection::Text { .. }) { return CommandOutcome::Unavailable(UnavailableReason::Selection); }
+            session.edit_beat_text(crate::beat_text_edit_to_core(operation))
+        }
+        Command::BeatBoardNavigation { target, extend } => {
+            if !matches!(session.beat_selection(), BeatSelection::Text { .. }) { return CommandOutcome::Unavailable(UnavailableReason::Selection); }
+            let (horizontal, edge) = crate::beat_navigation_to_core(*target);
+            if let Some(edge) = edge { session.navigate_beat_line_edge(edge, *extend) }
+            else { session.navigate_beat_horizontal(horizontal, *extend) }
+        }
+        Command::BeatBoardStyleToggle { style } => {
+            if !session.beat_selection_is_valid() || !matches!(session.beat_selection(), BeatSelection::Text { field: BeatTextField::Body, .. }) {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            session.toggle_beat_run_style(style.as_core())
+        }
+        Command::BeatBoardStyleClear => {
+            if !session.beat_selection_is_valid() || !matches!(session.beat_selection(), BeatSelection::Text { field: BeatTextField::Body, .. }) {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            session.clear_beat_run_styles()
+        }
+        Command::BeatBoardRunFormattingSet { patch } => {
+            if !session.beat_selection_is_valid() || !matches!(session.beat_selection(), BeatSelection::Text { field: BeatTextField::Body, .. }) {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            session.set_beat_run_formatting(patch.as_core())
+        }
         Command::EditorTextInsert { text, surface } => insert(session, *surface, text, false),
         Command::EditorTextPaste { text, surface } => insert(session, *surface, text, true),
         Command::EditorDeleteBackward => delete_backward(session, active_surface),

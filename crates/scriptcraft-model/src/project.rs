@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::{
+    beat_board::BeatBoard,
     dual_dialogue::DualDialogueGroup,
     element::{body_owners_equal, BodyOwner},
     element_definitions::DocumentElementDefinitions,
@@ -30,6 +31,8 @@ pub struct Project {
     pub dual_dialogue_paragraph_overrides: BTreeMap<StableId, SourceParagraphOverrides>,
     /// Source-owned FDX state is separate from the semantic projection.
     pub preservation: Option<PreservationState>,
+    /// Semantic Beat content; presentation and viewport state are separate.
+    beat_board: BeatBoard,
     /// Ordered document-owned element settings. The backing registry is private
     /// and changes only through validated whole-registry replacement.
     element_definitions: DocumentElementDefinitions,
@@ -49,6 +52,7 @@ impl PartialEq for Project {
             && self.direct_paragraph_overrides == other.direct_paragraph_overrides
             && self.dual_dialogue_paragraph_overrides == other.dual_dialogue_paragraph_overrides
             && self.preservation == other.preservation
+            && self.beat_board == other.beat_board
             && self.element_definitions == other.element_definitions
             && self.page_layout == other.page_layout
     }
@@ -77,6 +81,7 @@ impl Project {
             direct_paragraph_overrides: BTreeMap::new(),
             dual_dialogue_paragraph_overrides: BTreeMap::new(),
             preservation: None,
+            beat_board: BeatBoard::default(),
             element_definitions: DocumentElementDefinitions::default(),
             page_layout,
             layout_identity: Arc::new(()),
@@ -86,6 +91,20 @@ impl Project {
     /// Returns the immutable effective document page layout.
     pub fn page_layout(&self) -> &DocumentPageLayout {
         &self.page_layout
+    }
+
+    /// Returns the semantic board without exposing unchecked live mutation.
+    pub fn beat_board(&self) -> &BeatBoard {
+        &self.beat_board
+    }
+
+    /// Replaces the board only after validating a detached complete candidate.
+    pub fn replace_beat_board(&mut self, board: BeatBoard) -> Result<(), ModelError> {
+        let mut candidate = self.clone();
+        candidate.beat_board = board;
+        candidate.validate()?;
+        self.beat_board = candidate.beat_board;
+        Ok(())
     }
 
     /// Returns the project's ordered definition registry.
@@ -131,9 +150,18 @@ impl Project {
         Ok(())
     }
 
-    /// Allocates an application element ID distinct from title-page and body IDs.
+    /// Allocates an application ID distinct from all semantic owner IDs.
     /// Foreign source IDs intentionally remain a separate namespace.
     pub fn allocate_element_id(&self) -> Result<StableId, ModelError> {
+        self.allocate_stable_id("element")
+    }
+
+    fn allocate_stable_id(&self, prefix: &str) -> Result<StableId, ModelError> {
+        self.stable_id_allocator()?.allocate(prefix)
+    }
+
+    /// Reserves every live semantic identity for detached candidate allocation.
+    pub fn stable_id_allocator(&self) -> Result<StableIdAllocator, ModelError> {
         let mut allocator = StableIdAllocator::new();
         for element in &self.title_page {
             allocator.reserve(element.id.clone())?;
@@ -144,7 +172,13 @@ impl Project {
         for group in &self.dual_dialogue_groups {
             allocator.reserve(group.id.clone())?;
         }
-        allocator.allocate("element")
+        for card in &self.beat_board.cards {
+            allocator.reserve(card.id.clone())?;
+            for paragraph in &card.paragraphs {
+                allocator.reserve(paragraph.id.clone())?;
+            }
+        }
+        Ok(allocator)
     }
 
     /// Reuses exact semantic owners after a validated persistence round trip.
@@ -174,5 +208,3 @@ impl Project {
         &self.layout_identity
     }
 }
-
-

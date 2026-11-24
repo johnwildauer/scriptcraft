@@ -2,7 +2,7 @@ use crate::presentation::material_font::{MaterialIconAxes, MaterialIconAxisOverr
 use eframe::egui::Color32;
 use egui_material_icons::{
     icons::{
-        ICON_BOOK_5, ICON_CANCEL, ICON_DOUBLE_ARROW, ICON_DRAFT, ICON_FILE_OPEN,
+        ICON_BOOK_5, ICON_CANCEL, ICON_DASHBOARD, ICON_DOUBLE_ARROW, ICON_DRAFT, ICON_FILE_OPEN,
         ICON_FORMAT_ALIGN_LEFT, ICON_FORMAT_BOLD, ICON_FORMAT_ITALIC, ICON_FORMAT_STRIKETHROUGH,
         ICON_FORMAT_UNDERLINED, ICON_KEYBOARD_ARROW_DOWN, ICON_PICTURE_AS_PDF, ICON_SAVE,
         ICON_SAVE_AS, ICON_TEXT_FIELDS, ICON_UPLOAD_FILE, ICON_VISIBILITY,
@@ -329,6 +329,12 @@ const TITLE_PAGE_ITEM: ToolbarItemSpec = action(
     ICON_BOOK_5,
     CommandId::WindowTitlePageOpen,
 );
+const BEAT_BOARD_ITEM: ToolbarItemSpec = action(
+    "beat-board",
+    "Beat Board",
+    ICON_DASHBOARD,
+    CommandId::ViewBeatBoardShow,
+);
 const ELEMENTS_ITEM: ToolbarItemSpec = ToolbarItemSpec {
     id: "elements",
     label: "Elements",
@@ -369,13 +375,14 @@ const EXPORT_PDF_ITEM: ToolbarItemSpec = action(
     CommandId::FileSaveAsPdf,
 );
 
-const BUILTIN_TOOLBAR_ITEM_CATALOG: [ToolbarItemSpec; 15] = [
+const BUILTIN_TOOLBAR_ITEM_CATALOG: [ToolbarItemSpec; 16] = [
     FLEXIBLE_SPACE_ITEM,
     SPACE_ITEM_SPEC,
     NEW_ITEM,
     OPEN_ITEM,
     SAVE_ITEM,
     SAVE_AS_ITEM,
+    BEAT_BOARD_ITEM,
     TITLE_PAGE_ITEM,
     ELEMENTS_ITEM,
     SHOW_HIDE_ITEM,

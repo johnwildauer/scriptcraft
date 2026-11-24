@@ -12,6 +12,9 @@ impl ScriptCraftApp {
         command: Command,
         ctx: &egui::Context,
     ) -> DesktopCommandOutcome {
+        if self.root_document_view == crate::app::RootDocumentView::BeatBoard && self.beat_text.focused {
+            return self.dispatch_beat_clipboard_command(command, ctx);
+        }
         match command {
             Command::EditCopy => {
                 let selection = self.active_selection();
@@ -108,6 +111,45 @@ impl ScriptCraftApp {
             other => {
                 DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id()))
             }
+        }
+    }
+
+    fn dispatch_beat_clipboard_command(&mut self, command: Command, ctx: &egui::Context) -> DesktopCommandOutcome {
+        use scriptcraft_commands::{BeatTextEditValue, CommandOutcome};
+        match command {
+            Command::EditCopy | Command::EditCut => {
+                let text = self.session.selected_beat_text().ok().flatten();
+                let Some(text) = text.filter(|text| !text.is_empty()) else {
+                    self.set_clipboard_notice("Clipboard action unavailable: no Beat text selection; document unchanged");
+                    ctx.request_repaint();
+                    return DesktopCommandOutcome::EffectDispatched;
+                };
+                match DesktopClipboard::write_text(&text) {
+                    Ok(()) if matches!(command, Command::EditCut) => {
+                        let result = self.dispatch_internal_command(Command::BeatBoardTextEdit { operation: BeatTextEditValue::DeleteForward }, ctx);
+                        if matches!(result, DesktopCommandOutcome::Editor(CommandOutcome::Changed | CommandOutcome::NoOp)) { self.clear_error(); }
+                        result
+                    }
+                    Ok(()) => { self.clear_error(); ctx.request_repaint(); DesktopCommandOutcome::EffectDispatched }
+                    Err(ClipboardAccessError::Unavailable) => {
+                        self.set_clipboard_notice("Clipboard write failed; Beat text unchanged");
+                        ctx.request_repaint();
+                        DesktopCommandOutcome::EffectDispatched
+                    }
+                }
+            }
+            Command::EditPaste => match DesktopClipboard::read_text() {
+                Ok(text) if text.is_empty() => {
+                    self.set_clipboard_notice("Paste unavailable: clipboard text is empty; Beat text unchanged");
+                    ctx.request_repaint(); DesktopCommandOutcome::EffectDispatched
+                }
+                Ok(text) => self.dispatch_internal_command(Command::BeatBoardTextEdit { operation: BeatTextEditValue::Paste { text } }, ctx),
+                Err(ClipboardAccessError::Unavailable) => {
+                    self.set_clipboard_notice("Paste unavailable: clipboard has no readable text; Beat text unchanged");
+                    ctx.request_repaint(); DesktopCommandOutcome::EffectDispatched
+                }
+            },
+            other => DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id())),
         }
     }
 

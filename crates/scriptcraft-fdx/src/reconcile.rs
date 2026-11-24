@@ -451,7 +451,7 @@ fn project_optional_paragraph_type(
     Ok(())
 }
 
-fn reconcile_managed_text_runs(
+pub(crate) fn reconcile_managed_text_runs(
     paragraph: &mut PreservedElement,
     canonical_text: &str,
     semantic_runs: &[TextRun],
@@ -726,7 +726,12 @@ fn has_opaque_text_children(element: &PreservedElement) -> bool {
         .any(|child| !matches!(child, PreservedNode::Text(_) | PreservedNode::CData(_)))
 }
 
-fn reconcile_text_element(
+/// Reconcile one caller-selected Text template; this function never selects an
+/// occurrence. The caller must establish ownership and namespace context,
+/// validate the run's text, and reject loss of unknown attributes or character
+/// data boundaries before calling it. In particular, it does not supply Beat
+/// occurrence provenance or make the paragraph-level mapper occurrence-aware.
+pub(crate) fn reconcile_text_element(
     mut element: PreservedElement,
     run: &TextRun,
 ) -> Result<PreservedElement, FdxError> {

@@ -1,4 +1,5 @@
 use crate::app::ScriptCraftApp;
+use super::DesktopUnavailableReason;
 use crate::documents::lifecycle::SaveOutcome;
 use eframe::egui;
 use scriptcraft_commands::{
@@ -42,6 +43,7 @@ pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::FileSaveAsPdf => Command::FileSaveAsPdf,
         CommandId::ViewInvisiblesToggle => Command::ViewInvisiblesToggle,
         CommandId::ViewRulerToggle => Command::ViewRulerToggle,
+        CommandId::ViewBeatBoardShow => Command::ViewBeatBoardShow,
         CommandId::FilePrint => Command::FilePrint,
         CommandId::ApplicationQuit => Command::ApplicationQuit,
         CommandId::EditUndo => Command::EditUndo,
@@ -116,9 +118,23 @@ impl ScriptCraftApp {
         let command_id = invocation.command.id();
         let origin = invocation.origin;
         self.flush_pending_diagnostic_commands(ctx);
+        let shared_body_formatting_intent = matches!(&invocation.command,
+            Command::EditorStyleToggle { surface: EditorSurface::Body, .. }
+            | Command::EditorStyleClear { surface: EditorSurface::Body }
+            | Command::EditorRunFormattingSet { surface: EditorSurface::Body, .. });
+        if self.root_document_view == crate::app::RootDocumentView::BeatBoard
+            && shared_body_formatting_intent
+            && !matches!(origin, CommandOrigin::Menu | CommandOrigin::Toolbar | CommandOrigin::NativeMenu)
+        {
+            return DesktopCommandResult { command: command_id, origin,
+                outcome: DesktopCommandOutcome::Unavailable(DesktopUnavailableReason::Selection) };
+        }
         let restore_focus = super::navigation::command_restores_editor_focus(command_id);
-        let command =
-            route_to_focused_surface(invocation.command, origin, self.active_editor_surface());
+        let command = route_to_beat_formatting(
+            route_to_focused_surface(invocation.command, origin, self.active_editor_surface()),
+            self.root_document_view,
+            origin,
+        );
         let outcome = self.dispatch_command_inner_with_pdf_handlers(
             command,
             ctx,
@@ -223,7 +239,16 @@ impl ScriptCraftApp {
             | Command::EditorParagraphTab
             | Command::EditSelectAll
             | Command::EditorElementChange { .. }
-            | Command::EditorSelectionSet { .. }) => self.dispatch_editing_command(command, ctx),
+            | Command::EditorSelectionSet { .. }
+            | Command::BeatBoardCardCreate { .. }
+            | Command::BeatBoardCardActivate { .. }
+            | Command::BeatBoardCardGeometrySet { .. }
+            | Command::BeatBoardSelectionSet { .. }
+            | Command::BeatBoardTextEdit { .. }
+            | Command::BeatBoardNavigation { .. }
+            | Command::BeatBoardStyleToggle { .. }
+            | Command::BeatBoardStyleClear
+            | Command::BeatBoardRunFormattingSet { .. }) => self.dispatch_editing_command(command, ctx),
             command @ (Command::EditorSelectionPointer { .. }
             | Command::EditorNavigationHorizontal { .. }
             | Command::EditorNavigationVertical { .. }
@@ -231,6 +256,7 @@ impl ScriptCraftApp {
             | Command::EditorFocus) => self.dispatch_navigation_command(command, ctx),
             command @ (Command::ViewZoomSet { .. }
             | Command::ViewZoomPinch { .. }
+            | Command::ViewBeatBoardShow
             | Command::ViewScriptViewSet { .. }
             | Command::ViewAppearanceSet { .. }
             | Command::ViewFocusModeToggle) => self.dispatch_view_command(command, ctx),
@@ -371,6 +397,30 @@ fn route_to_focused_surface(
                 surface,
             }
         }
+        other => other,
+    }
+}
+
+/// Existing shared menu/toolbar intents are translated only while the Beat
+/// root owns the workspace. Script and Title continue through their original
+/// command variants and executor paths.
+fn route_to_beat_formatting(
+    command: Command,
+    root: crate::app::RootDocumentView,
+    origin: CommandOrigin,
+) -> Command {
+    if root != crate::app::RootDocumentView::BeatBoard
+        || !matches!(origin, CommandOrigin::Menu | CommandOrigin::Toolbar | CommandOrigin::NativeMenu)
+    {
+        return command;
+    }
+    match command {
+        Command::EditorStyleToggle { surface: EditorSurface::Body, style } =>
+            Command::BeatBoardStyleToggle { style },
+        Command::EditorStyleClear { surface: EditorSurface::Body } =>
+            Command::BeatBoardStyleClear,
+        Command::EditorRunFormattingSet { surface: EditorSurface::Body, patch } =>
+            Command::BeatBoardRunFormattingSet { patch },
         other => other,
     }
 }

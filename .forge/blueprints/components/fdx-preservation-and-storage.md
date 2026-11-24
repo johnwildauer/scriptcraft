@@ -1,5 +1,9 @@
 # Component Blueprint: FDX Preservation and Storage
 
+## Beat edit authority (WO-007)
+
+Managed Beat board and identity/graph state are live semantic data. Card edits do not rewrite retained FDX bytes or nodes. Detached save-time reconciliation projects the current board to XML while preserving unrelated FDX content; generated semantic graph owners reserve durable IDs without being mistaken for pre-existing retained nodes. Existing save publication and rebase safeguards remain in place.
+
 > This component describes the bounded FDX codec, model-owned source preservation, and session-owned native storage composition as separate responsibilities.
 
 ## Capability
@@ -23,6 +27,16 @@ responsibilities:
 - **Session zero-permanent-test policy:** The session package retains no permanent Rust tests or test-only fixture directories. This policy changes no editing, candidate, Apply, history, selection, dirty-state, source-aware, native storage, save/rebase, conflict, or nonoverwrite contract; test absence is not validation or acceptance evidence. Follow the [prevention guidelines](../../../.plan/2026-11-20-template-typography-pruning/future-agent-guidelines.md).
 
 ## Contracts
+
+**Beat output:** The detached writer projects the semantic first-wins Beat board, cards, paragraphs, geometry and text, with transactional viewport output separate from Project semantics. Candidate finalization assigns missing durable identities. Transactional output removes later supported Beat boards, while direct source serialization retains duplicates and existing viewport attributes. The graph comparison partitions managed card/board edges and authorized duplicate removal from unrelated entities and references, preserving unrelated relative entity order and data. It derives the complete intended identity set and board graph from the reconciled detached tree, checks managed board/card/paragraph domains and winning Item order, and compares them with the reread alongside semantic and normalized-tree projections. Preservation-free generation uses the same managed shapes.
+
+The public detached board-candidate operation accepts the complete semantic board, assigns missing IDs, and returns a validated Project without changing the caller. The source projection clones retained sections at output, updates supported owners and returns paragraph identity changes to the writer. Imported id-less paragraphs use a card-local source coordinate for initial ID binding; newly created paragraphs have no coordinate. This coordinate is not a text occurrence ledger or a durable rebase key. Changed runs are authoritative and do not require matching original Text occurrences or reconstructing their original segmentation. Retained paragraph shells follow durable IDs, so surviving left paragraphs retain their unrelated attributes and children; new paragraphs receive generated supported settings without copying opaque payload.
+
+The semantic board carries card IDs in source/creation order independently of stacking. Import derives it from supported ListItems; creation appends, deletion removes, and activation leaves it unchanged. Source-backed output retains surviving ListItem order and appends new cards in creation order; preservation-free output uses that same order. Generated Items follow stacking order without reordering unrelated siblings. Writer and storage compare creation order by durable card identity, not session-local IDs.
+
+Session storage serializes and compares the same enriched candidate, then prepares durable Beat identity correspondence and the rebased clean session before filesystem publication. The matching board, unique cards and paragraphs and paragraph owner card use durable identities rather than reread positions. A bounded id-less fallback requires unique exact content in both corresponding cards; offset clamping uses the preceding UTF-8 boundary. Beat selection and typing state do not yet exist, so no such state is rebased here. Publication failure leaves the live session, target and view state unchanged. This is source integration, not persistence or acceptance evidence.
+
+Generated unformatted runs receive the approved Arial 12 attributes, including an empty Style, including first text in an empty retained paragraph. Nonempty text is not trimmed; generated empty paragraphs have no Text child or runs. Unchanged source runs retain their original topology. Changed runs are emitted in semantic order; reusable Text shells retain unrelated inline nodes where possible, and other paragraph siblings are retained. Character data may be rewritten as ordinary XML text, including when the source used CDATA. The writer and session compare the same finalized Beat text and ordered runs against the reread; screenplay and non-Beat handling is unchanged.
 
 Preservation-free generation writes the supplied Body and Title Page flags into the generated root and TitlePage TextState blocks, respectively; the default value is hidden on both surfaces. Its generated PageLayout includes the standard `InvisiblesColor=#808080808080` attribute. Source-backed direct serialization and transactional Save/Save As retain their distinct view-state projection rules described below.
 

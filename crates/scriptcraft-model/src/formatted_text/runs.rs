@@ -642,23 +642,7 @@ pub fn set_paragraph_run_formatting(
             continue;
         }
         let source_runs = effective_runs(&text, &runs)?;
-        let mut transformed = Vec::with_capacity(source_runs.len().saturating_add(2));
-        let mut global_start = 0usize;
-        for run in &source_runs {
-            let global_end = global_start.saturating_add(run.text.len());
-            let local_start = range.start.max(global_start).min(global_end) - global_start;
-            let local_end = range.end.max(global_start).min(global_end) - global_start;
-            if local_start == local_end {
-                push_run_fragment(&mut transformed, &run.text, &run.attributes);
-            } else {
-                push_run_fragment(&mut transformed, &run.text[..local_start], &run.attributes);
-                let attributes = patch_inline_attributes(&run.attributes, patch)?;
-                push_run_fragment(&mut transformed, &run.text[local_start..local_end], &attributes);
-                push_run_fragment(&mut transformed, &run.text[local_end..], &run.attributes);
-            }
-            global_start = global_end;
-        }
-        transformed = normalize_runs(&text, &transformed)?;
+        let transformed = set_inline_run_formatting_for_range(&text, &source_runs, range, patch)?;
         if transformed == source_runs {
             continue;
         }
@@ -733,6 +717,38 @@ fn patch_inline_attributes(
         }
     }
     canonicalize_run_attributes(&result)
+}
+
+/// Pure canonical-text/run helper shared by Project Body/Title editing and
+/// Beat paragraph transactions. The caller owns publication and source mapping.
+pub fn set_inline_run_formatting_for_range(
+    canonical_text: &str,
+    runs: &[TextRun],
+    range: Range<usize>,
+    patch: InlineRunFormattingPatch,
+) -> Result<Vec<TextRun>, FormattedTextError> {
+    let source_runs = effective_runs(canonical_text, runs)?;
+    validate_range(canonical_text, &range)?;
+    if range.is_empty() || patch.is_empty() {
+        return Ok(source_runs);
+    }
+    let mut transformed = Vec::with_capacity(source_runs.len().saturating_add(2));
+    let mut global_start = 0usize;
+    for run in &source_runs {
+        let global_end = global_start.saturating_add(run.text.len());
+        let local_start = range.start.max(global_start).min(global_end) - global_start;
+        let local_end = range.end.max(global_start).min(global_end) - global_start;
+        if local_start == local_end {
+            push_run_fragment(&mut transformed, &run.text, &run.attributes);
+        } else {
+            push_run_fragment(&mut transformed, &run.text[..local_start], &run.attributes);
+            let attributes = patch_inline_attributes(&run.attributes, patch)?;
+            push_run_fragment(&mut transformed, &run.text[local_start..local_end], &attributes);
+            push_run_fragment(&mut transformed, &run.text[local_end..], &run.attributes);
+        }
+        global_start = global_end;
+    }
+    normalize_runs(canonical_text, &transformed)
 }
 
 /// Removes only the five supported run styles from one canonical UTF-8 range.

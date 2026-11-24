@@ -339,7 +339,7 @@ fn project_font_signature(
     project: &Project,
     generation: u64,
 ) -> Result<PreparationSignature, FontPreparationError> {
-    let mut families = BTreeSet::from(["Courier Prime".to_owned()]);
+    let mut families = BTreeSet::from(["Courier Prime".to_owned(), "Arial".to_owned()]);
     for definition in project.element_definitions().iter() {
         insert_bounded_family(&mut families, definition.font.family.clone())?;
     }
@@ -371,6 +371,16 @@ fn project_font_signature(
             if run_has_all_caps(run) {
                 collect_uppercase_scalars(&mut scalars, &run.text)?;
             }
+        }
+    }
+    // Beat geometry and viewport state do not participate in font identity.
+    // Only the declared families and displayed scalar repertoire are relevant.
+    collect_text_scalars(&mut scalars, "Beat TitleBody…", false)?;
+    for card in &project.beat_board().cards {
+        collect_text_scalars(&mut scalars, &card.title, false)?;
+        for paragraph in &card.paragraphs {
+            collect_text_scalars(&mut scalars, &paragraph.text, false)?;
+            collect_run_inputs(&mut families, &mut scalars, &paragraph.runs)?;
         }
     }
     scalars.insert('\u{fffd}');

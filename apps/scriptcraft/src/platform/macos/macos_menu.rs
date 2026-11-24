@@ -562,22 +562,25 @@ fn append_catalog_item(
     let accelerator = spec.shortcut.map(native_accelerator);
     match spec.behavior {
         MenuItemBehavior::Command(command) => {
-            let item = MenuItem::with_id(
-                spec.id,
-                menu_item_label(spec, false, invisibles_visible, ruler_visible),
-                availability.is_enabled(command),
-                accelerator,
-            );
-            submenu.append(&item).map_err(|error| {
-                format!("could not append native menu item {}: {error}", spec.id)
-            })?;
+            let item = if command == CommandId::ViewBeatBoardShow {
+                let item = CheckMenuItem::with_id(spec.id, spec.label, availability.is_enabled(command),
+                    menu_item_is_checked(spec, script_view_mode, formatting, view), accelerator);
+                submenu.append(&item).map_err(|error| format!("could not append native menu item {}: {error}", spec.id))?;
+                RetainedNativeCommandItem::Checked(item)
+            } else {
+                let item = MenuItem::with_id(spec.id,
+                    menu_item_label(spec, false, invisibles_visible, ruler_visible),
+                    availability.is_enabled(command), accelerator);
+                submenu.append(&item).map_err(|error| format!("could not append native menu item {}: {error}", spec.id))?;
+                RetainedNativeCommandItem::Plain(item)
+            };
             command_items.insert(
                 native_menu_id(spec),
                 (
                     MenuActivation::Command(
                         crate::commands::command_for_id(command).expect("catalog command is mapped"),
                     ),
-                    RetainedNativeCommandItem::Plain(item),
+                    item,
                 ),
             );
         }

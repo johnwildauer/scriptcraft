@@ -15,6 +15,12 @@ impl ScriptCraftApp {
         ctx: &egui::Context,
     ) -> DesktopCommandOutcome {
         match command {
+            command @ (Command::BeatBoardCardCreate { .. } | Command::BeatBoardCardActivate { .. }
+                | Command::BeatBoardCardGeometrySet { .. } | Command::BeatBoardSelectionSet { .. }
+                | Command::BeatBoardTextEdit { .. } | Command::BeatBoardNavigation { .. }
+                | Command::BeatBoardStyleToggle { .. } | Command::BeatBoardStyleClear
+                | Command::BeatBoardRunFormattingSet { .. }) =>
+                self.execute_editor(&command, RevealIntent::None, ctx),
             Command::EditorStyleToggle { surface, style } => self.execute_editor(
                 &Command::EditorStyleToggle { surface, style },
                 RevealIntent::Conditional,
@@ -50,6 +56,12 @@ impl ScriptCraftApp {
                 self.execute_editor(&Command::EditRedo, RevealIntent::Conditional, ctx)
             }
             Command::EditDelete => {
+                if self.root_document_view == crate::app::RootDocumentView::BeatBoard && self.beat_text.focused {
+                    if matches!(self.session.beat_selection(), scriptcraft_session::editing::BeatSelection::Text { anchor, focus, .. } if anchor != focus) {
+                        return self.execute_editor(&Command::BeatBoardTextEdit { operation: scriptcraft_commands::BeatTextEditValue::DeleteForward }, RevealIntent::None, ctx);
+                    }
+                    return super::DesktopCommandOutcome::Unavailable(super::DesktopUnavailableReason::Selection);
+                }
                 self.execute_editor(&Command::EditDelete, RevealIntent::Conditional, ctx)
             }
             Command::EditorTextInsert { text, surface } => self.execute_editor(
@@ -76,6 +88,30 @@ impl ScriptCraftApp {
                 self.execute_editor(&Command::EditorParagraphTab, RevealIntent::Conditional, ctx)
             }
             Command::EditSelectAll => {
+                if self.root_document_view == crate::app::RootDocumentView::BeatBoard && self.beat_text.focused {
+                    if let scriptcraft_session::editing::BeatSelection::Text { card, field, .. } = self.session.beat_selection() {
+                        if let Some(card) = self.session.project().beat_board().cards.iter().find(|item| &item.id == card) {
+                            let (field_value, anchor, focus) = match field {
+                                scriptcraft_session::editing::BeatTextField::Title => (scriptcraft_commands::BeatTextFieldValue::Title,
+                                    scriptcraft_session::editing::BeatTextPosition { paragraph: 0, offset: 0 },
+                                    scriptcraft_session::editing::BeatTextPosition { paragraph: 0, offset: card.title.len() }),
+                                scriptcraft_session::editing::BeatTextField::Body => {
+                                    let last = card.paragraphs.last().map_or(0, |paragraph| paragraph.text.len());
+                                    (scriptcraft_commands::BeatTextFieldValue::Body,
+                                     scriptcraft_session::editing::BeatTextPosition { paragraph: 0, offset: 0 },
+                                     scriptcraft_session::editing::BeatTextPosition { paragraph: card.paragraphs.len().saturating_sub(1), offset: last })
+                                }
+                            };
+                            let selection = scriptcraft_commands::BeatSelectionValue::Text {
+                                card: scriptcraft_commands::BeatCardIdValue::from_core(card.id.clone()), field: field_value,
+                                anchor: scriptcraft_commands::BeatTextPositionValue { paragraph: anchor.paragraph as u32, offset: anchor.offset as u32 },
+                                focus: scriptcraft_commands::BeatTextPositionValue { paragraph: focus.paragraph as u32, offset: focus.offset as u32 },
+                            };
+                            return self.execute_editor(&Command::BeatBoardSelectionSet { selection }, RevealIntent::None, ctx);
+                        }
+                    }
+                    return super::DesktopCommandOutcome::Unavailable(super::DesktopUnavailableReason::Selection);
+                }
                 self.execute_editor(&Command::EditSelectAll, RevealIntent::Conditional, ctx)
             }
             Command::EditorElementChange {
@@ -132,6 +168,11 @@ impl ScriptCraftApp {
             && crate::app::responsiveness::is_text_editing_command(command.id()))
         .then(std::time::Instant::now);
         let active_surface = self.active_editor_surface();
+        let beat_command = matches!(command, Command::BeatBoardCardCreate { .. } | Command::BeatBoardCardActivate { .. }
+            | Command::BeatBoardCardGeometrySet { .. } | Command::BeatBoardSelectionSet { .. }
+            | Command::BeatBoardTextEdit { .. } | Command::BeatBoardNavigation { .. }
+            | Command::BeatBoardStyleToggle { .. } | Command::BeatBoardStyleClear
+            | Command::BeatBoardRunFormattingSet { .. });
         if self.development_mode {
             self.session.begin_mutation_diagnostics();
         }
@@ -155,10 +196,10 @@ impl ScriptCraftApp {
                     self.responsiveness
                         .note_accepted_edit(self.session.revision(), accepted_at);
                 }
-                self.mutate(Ok(()), reveal_intent);
+                if !beat_command { self.mutate(Ok(()), reveal_intent); }
             }
             CommandOutcome::NoOp if command.id() != CommandId::EditorDualDialogueToggle => {
-                self.mutate(Ok(()), reveal_intent);
+                if !beat_command { self.mutate(Ok(()), reveal_intent); }
             }
             CommandOutcome::NoOp => {}
             CommandOutcome::Unavailable(_) | CommandOutcome::Rejected(_) => {}
@@ -167,7 +208,7 @@ impl ScriptCraftApp {
             // is normally routed by `dispatch_elements_command`.
             CommandOutcome::ApplyTemplateFailed(_) => {}
         }
-        if matches!(&outcome, CommandOutcome::Changed | CommandOutcome::NoOp)
+        if !beat_command && matches!(&outcome, CommandOutcome::Changed | CommandOutcome::NoOp)
             && !(command.id() == CommandId::EditorDualDialogueToggle
                 && matches!(&outcome, CommandOutcome::NoOp))
         {

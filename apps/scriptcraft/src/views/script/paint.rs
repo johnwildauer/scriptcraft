@@ -8,14 +8,13 @@ use super::{
         NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH,
     },
     invisibles::{paint_overlay as paint_invisibles_overlay, OverlayPaintError},
-    text::{neutral_resolved_font, resolve_span_paint},
     zoom_scroll::PresentationMetrics,
     ScriptCraftApp,
 };
 use crate::{
     app::add_performance_counter,
     chrome::{status_bar::PresentedPage, theme},
-    presentation::geometry as presentation_geometry,
+    presentation::{geometry as presentation_geometry, span_paint::{neutral_resolved_font, resolve_span_paint}},
 };
 use eframe::egui::{self, Color32, Stroke, Vec2};
 use scriptcraft_commands::{Command, EditorSurface, ScriptViewMode};

@@ -1,6 +1,7 @@
 //! Noninteractive editor-only marks painted over canonical line projections.
 
-use super::{text::neutral_resolved_font, zoom_scroll::PresentationMetrics};
+use super::zoom_scroll::PresentationMetrics;
+use crate::presentation::span_paint::neutral_resolved_font;
 use crate::{
     presentation::{document_font::PreparedDocumentFonts, geometry},
 };

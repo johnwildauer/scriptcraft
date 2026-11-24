@@ -13,6 +13,7 @@
 //! full effective leading remains the line-top advance. Natural extents do not
 //! clip glyphs to line boxes, and oversized forward progress remains bounded.
 
+mod beat_board;
 mod cache;
 mod dual_dialogue;
 mod geometry;
@@ -23,6 +24,10 @@ mod spans;
 mod title_page;
 mod wrap;
 
+pub use beat_board::{
+    BeatCardLayout, BeatCardMetrics, BeatDisplayOnlySpan, BeatTitleProjection,
+    BEAT_BODY_PLACEHOLDER, BEAT_TITLE_PLACEHOLDER,
+};
 pub use cache::{LayoutBuildDiagnostics, LayoutCache};
 pub use geometry::{
     Caret, DisplaySourceSegment, FixedRect, LayoutError, LayoutErrorKind, LayoutLine, LayoutPage,

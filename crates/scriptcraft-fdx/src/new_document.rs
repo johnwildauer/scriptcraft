@@ -26,7 +26,8 @@ pub(crate) fn make_new_document_nodes(
         "FinalDraft",
         vec![("DocumentType", "Script"), ("Version", FDX_VERSION)],
     );
-    let mut lineage_ids = BTreeSet::new();
+    let mut lineage_ids = project_beat_ids(project);
+    lineage_ids.extend(project_source_paragraph_ids(project));
     let document_ref_id = context.allocate_lineage_id(&mut lineage_ids)?;
     let xref_id = if matches!(
         context.operation(),
@@ -245,7 +246,18 @@ pub(crate) fn make_new_document_nodes(
             ],
         )));
     root.children.push(PreservedNode::Element(title_page));
+    crate::beat_board_output::append_generated_board(&mut root, project, context)?;
     Ok(vec![PreservedNode::Element(root)])
+}
+
+fn project_beat_ids(project: &Project) -> BTreeSet<String> {
+    let mut reserved = BTreeSet::new();
+    if let Some(id) = &project.beat_board().foreign_id { reserved.insert(id.clone()); }
+    for card in &project.beat_board().cards {
+        reserved.insert(card.foreign_id.clone());
+        reserved.extend(card.paragraphs.iter().filter_map(|paragraph| paragraph.foreign_id.clone()));
+    }
+    reserved
 }
 
 fn has_capability(

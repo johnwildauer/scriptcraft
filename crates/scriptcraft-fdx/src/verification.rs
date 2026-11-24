@@ -4,16 +4,16 @@ use crate::diagnostics::{FdxError, SaveDiagnosticCode};
 use crate::reader::validate_xml_chars;
 use crate::writer::validate_qname;
 use crate::{
-    MAX_ATTRIBUTES_PER_ELEMENT, MAX_SOURCE_EVENTS, MAX_SOURCE_NAME_OR_VALUE_BYTES,
+    MAX_ATTRIBUTES_PER_ELEMENT, MAX_SOURCE_BYTES, MAX_SOURCE_EVENTS, MAX_SOURCE_NAME_OR_VALUE_BYTES,
     MAX_SOURCE_TEXT_BYTES,
 };
 use scriptcraft_model::dual_dialogue::DualDialogueGroup;
 use scriptcraft_model::preservation::{
-    ForeignIdDomain, ForeignIdentity, PreservedNode, PreservedSection, SourceAnchorId, SourceName,
-    SourceOwnership,
+    BoardEntityKind, BoardGraph, DependencyConfidence, ForeignIdDomain, ForeignIdentity,
+    PreservedNode, PreservedSection, ReferencePolicy, SourceAnchorId, SourceName, SourceOwnership,
 };
-use scriptcraft_model::{BodyOwner, Project, TitlePageParagraph};
-use std::collections::BTreeSet;
+use scriptcraft_model::{BeatBoard, BodyOwner, Project, TitlePageParagraph};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdentityDomainSummary {
@@ -51,6 +51,169 @@ pub(crate) fn same_non_paragraph_identities(
 
 pub(crate) fn identity_set(identities: &[ForeignIdentity]) -> BTreeSet<ForeignIdentity> {
     identities.iter().cloned().collect()
+}
+
+fn beat_card_ids(board: &BeatBoard) -> BTreeSet<ForeignIdentity> {
+    board.cards.iter().map(|card| ForeignIdentity {
+        domain: ForeignIdDomain::ListItem,
+        value: card.foreign_id.clone(),
+    }).collect()
+}
+
+/// Compare the graph outside the precisely identified managed changes. Entity
+/// source ordinals are recomputed on reread; relative order and all other
+/// entity data remain significant. Only winning-board edges to managed cards
+/// and outgoing edges from authorized removed duplicates may change.
+pub(crate) fn same_unrelated_board_graph(
+    original: &BoardGraph,
+    current: &BoardGraph,
+    old_board: &BeatBoard,
+    new_board: &BeatBoard,
+    removed_duplicates: &BTreeSet<ForeignIdentity>,
+) -> bool {
+    let old_cards = beat_card_ids(old_board);
+    let new_cards = beat_card_ids(new_board);
+    let changing_cards = old_cards.symmetric_difference(&new_cards).cloned().collect::<BTreeSet<_>>();
+    let mut changing_entities = changing_cards;
+    if old_board.foreign_id != new_board.foreign_id {
+        for id in old_board.foreign_id.iter().chain(&new_board.foreign_id) {
+            changing_entities.insert(ForeignIdentity { domain: ForeignIdDomain::Board, value: id.clone() });
+        }
+    }
+    changing_entities.extend(removed_duplicates.iter().cloned());
+    let entities = |graph: &BoardGraph| {
+        graph.entities.iter().filter(|entity| !changing_entities.contains(&entity.identity))
+            .map(|entity| {
+                let mut entity = entity.clone();
+                entity.source_order = 0;
+                entity
+            }).collect::<Vec<_>>()
+    };
+    let managed_cards = old_cards.union(&new_cards).cloned().collect::<BTreeSet<_>>();
+    let boards = old_board.foreign_id.iter().chain(&new_board.foreign_id)
+        .map(|id| ForeignIdentity { domain: ForeignIdDomain::Board, value: id.clone() })
+        .collect::<BTreeSet<_>>();
+    let references = |graph: &BoardGraph| {
+        graph.references.iter().filter(|reference| {
+            !removed_duplicates.contains(&reference.source)
+                && !(boards.contains(&reference.source) && managed_cards.contains(&reference.target))
+        }).cloned().collect::<Vec<_>>()
+    };
+    entities(original) == entities(current) && references(original) == references(current)
+}
+
+/// Check durable Beat owners against their actual graph domains, rather than
+/// treating ListItems or DisplayBoards as screenplay paragraph identities.
+pub(crate) fn verify_managed_beat_graph(
+    board: &BeatBoard,
+    identities: &[ForeignIdentity],
+    graph: &BoardGraph,
+) -> Result<(), FdxError> {
+    let mismatch = || SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error();
+    let board_id = ForeignIdentity {
+        domain: ForeignIdDomain::Board,
+        value: board.foreign_id.clone().ok_or_else(mismatch)?,
+    };
+    let card_ids = beat_card_ids(board);
+    if card_ids.len() != board.cards.len() { return Err(mismatch()); }
+    let mut owners = BTreeSet::new();
+    owners.insert(board_id.clone());
+    owners.extend(card_ids.iter().cloned());
+    for paragraph in board.cards.iter().flat_map(|card| &card.paragraphs) {
+        let identity = ForeignIdentity {
+            domain: ForeignIdDomain::Paragraph,
+            value: paragraph.foreign_id.clone().ok_or_else(mismatch)?,
+        };
+        if !owners.insert(identity) { return Err(mismatch()); }
+    }
+    let mut occurrences = BTreeMap::<ForeignIdentity, usize>::new();
+    for identity in identities.iter().chain(graph.entities.iter().map(|entity| &entity.identity)) {
+        let count = occurrences.entry(identity.clone()).or_default();
+        *count = count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+    }
+    let entity_kinds = graph.entities.iter().map(|entity| (entity.identity.clone(), entity.kind))
+        .collect::<BTreeMap<_, _>>();
+    let mut values = BTreeSet::new();
+    for owner in &owners {
+        if !values.insert(owner.value.as_str()) { return Err(mismatch()); }
+        if occurrences.get(owner) != Some(&1) { return Err(mismatch()); }
+        let expected_kind = match &owner.domain {
+            ForeignIdDomain::Board => Some(BoardEntityKind::DisplayBoard),
+            ForeignIdDomain::ListItem => Some(BoardEntityKind::ListItem),
+            ForeignIdDomain::Paragraph => None,
+            _ => return Err(mismatch()),
+        };
+        if entity_kinds.get(owner).copied() != expected_kind { return Err(mismatch()); }
+    }
+    let actual = graph.references.iter().filter(|reference| {
+        reference.source == board_id && card_ids.contains(&reference.target)
+    }).collect::<Vec<_>>();
+    if actual.len() != board.cards.len() || actual.iter().zip(&board.cards).any(|(reference, card)| {
+        reference.target.value != card.foreign_id || reference.policy != ReferencePolicy::RequiredInternal
+    }) { return Err(mismatch()); }
+    Ok(())
+}
+
+/// Collect the complete graph from the actual detached output tree, after all
+/// reconciliation and optional duplicate normalization, before XML emission.
+pub(crate) fn intended_output_graph(
+    nodes: &[PreservedNode],
+    transactional: bool,
+) -> Result<(Vec<ForeignIdentity>, BoardGraph), FdxError> {
+    let mut roots = nodes.iter().filter_map(|node| match node {
+        PreservedNode::Element(root) => Some(root),
+        _ => None,
+    });
+    let root = roots.next().ok_or(FdxError::InvalidRoot)?;
+    if roots.next().is_some() || root.name.local_name != "FinalDraft" {
+        return Err(FdxError::InvalidRoot);
+    }
+    let raw = crate::beat_board_output::raw_element(root);
+    if transactional {
+        let namespace = raw.name.namespace_uri.as_deref();
+        let boards = raw.children.iter().find_map(|node| match node {
+            crate::reader::RawNode::Element(element)
+                if element.name.local_name == "DisplayBoards"
+                    && element.name.namespace_uri.as_deref() == namespace => Some(element),
+            _ => None,
+        }).ok_or(FdxError::InvalidRoot)?;
+        let count = boards.children.iter().filter(|node| matches!(node,
+            crate::reader::RawNode::Element(board)
+                if board.name.local_name == "DisplayBoard"
+                    && board.name.namespace_uri.as_deref() == namespace
+                    && crate::reader::attribute(board, "Type") == Some("Beat")
+        )).count();
+        if count != 1 { return Err(FdxError::AmbiguousIdentity); }
+    }
+    crate::identity::collect_identities(&raw)
+}
+
+/// Generated nodes have no imported ownership or anchors. Compare their XML
+/// projection with the reread tree while ignoring only those in-memory fields.
+pub(crate) fn same_generated_source_tree(expected: &[PreservedNode], actual: &[PreservedNode]) -> bool {
+    fn xml_projection(nodes: &[PreservedNode]) -> Vec<PreservedNode> {
+        let mut nodes = normalize_source_tree(nodes);
+        let mut stack = nodes.iter_mut().collect::<Vec<_>>();
+        while let Some(node) = stack.pop() {
+            if let PreservedNode::Element(element) = node {
+                element.source_type = None;
+                element.ownership = SourceOwnership::Opaque;
+                element.dependency_confidence = DependencyConfidence::Unknown;
+                element.anchor = None;
+                if element.name.qualified_name.as_deref() == Some(element.name.local_name.as_str()) {
+                    element.name.qualified_name = None;
+                }
+                for attribute in &mut element.attributes {
+                    if attribute.name.qualified_name.as_deref() == Some(attribute.name.local_name.as_str()) {
+                        attribute.name.qualified_name = None;
+                    }
+                }
+                stack.extend(element.children.iter_mut());
+            }
+        }
+        nodes
+    }
+    xml_projection(expected) == xml_projection(actual)
 }
 
 pub(crate) fn first_identity_set_difference(
@@ -227,12 +390,50 @@ pub(crate) fn same_semantic_title_paragraphs(
         })
 }
 
+/// Compare durable Beat content, excluding session-local IDs and viewport state.
+pub fn same_beat_board_projection(left: &Project, right: &Project) -> bool {
+    let left = left.beat_board();
+    let right = right.beat_board();
+    let creation_ids = |board: &scriptcraft_model::BeatBoard| -> Option<Vec<String>> {
+        let cards = board.cards.iter().map(|card| (&card.id, &card.foreign_id))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if cards.len() != board.cards.len() || board.card_creation_order.len() != cards.len() {
+            return None;
+        }
+        let mut seen = BTreeSet::new();
+        board.card_creation_order.iter().map(|id| {
+            if !seen.insert(id) { return None; }
+            cards.get(id).map(|id| id.as_str().to_owned())
+        }).collect()
+    };
+    let Some(left_creation) = creation_ids(left) else { return false };
+    let Some(right_creation) = creation_ids(right) else { return false };
+    left.foreign_id == right.foreign_id
+        && left.width == right.width
+        && left.height == right.height
+        && left_creation == right_creation
+        && left.cards.len() == right.cards.len()
+        && left.cards.iter().zip(&right.cards).all(|(left, right)| {
+            left.foreign_id == right.foreign_id
+                && left.title == right.title
+                && left.rect == right.rect
+                && left.paragraphs.len() == right.paragraphs.len()
+                && left.paragraphs.iter().zip(&right.paragraphs).all(|(left, right)| {
+                    left.foreign_id == right.foreign_id
+                        && left.text == right.text
+                        && left.runs == right.runs
+                        && left.direct_settings == right.direct_settings
+                })
+        })
+}
+
 pub(crate) fn same_writer_semantic_projection(left: &Project, right: &Project) -> bool {
     left.page_layout() == right.page_layout()
         && same_semantic_element_definitions(left, right)
         && same_semantic_title_paragraphs(&left.title_page, &right.title_page)
         && same_semantic_elements(&left.elements, &right.elements)
         && same_dual_dialogue_projection(left, right)
+        && same_beat_board_projection(left, right)
 }
 
 pub(crate) fn verify_writer_semantic_projection(
@@ -249,7 +450,41 @@ pub(crate) fn verify_writer_semantic_projection(
 
 pub(crate) fn validate_project_output_budgets(project: &Project) -> Result<(), FdxError> {
     let mut text_bytes = 0usize;
+    let mut payload_bytes = 0usize;
     let mut event_count = 3usize;
+    // Account for the board and its generated containers, ListItems, Content,
+    // and Item nodes as well as their title/identity attributes.
+    event_count = event_count.checked_add(3).ok_or(FdxError::ResourceLimit)?;
+    let board = project.beat_board();
+    if let Some(id) = &board.foreign_id {
+        if id.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES {
+            return Err(FdxError::ResourceLimit);
+        }
+        validate_xml_chars(id)?;
+        payload_bytes = payload_bytes.checked_add(id.len()).ok_or(FdxError::ResourceLimit)?;
+    }
+    for card in &board.cards {
+        event_count = event_count.checked_add(3).ok_or(FdxError::ResourceLimit)?;
+        for value in [&card.foreign_id, &card.title] {
+            if value.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES {
+                return Err(FdxError::ResourceLimit);
+            }
+            validate_xml_chars(value)?;
+            payload_bytes = payload_bytes.checked_add(value.len()).ok_or(FdxError::ResourceLimit)?;
+        }
+        for paragraph in &card.paragraphs {
+            if let Some(id) = &paragraph.foreign_id {
+                if id.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES {
+                    return Err(FdxError::ResourceLimit);
+                }
+                validate_xml_chars(id)?;
+                payload_bytes = payload_bytes.checked_add(id.len()).ok_or(FdxError::ResourceLimit)?;
+            }
+        }
+        if event_count > MAX_SOURCE_EVENTS {
+            return Err(FdxError::ResourceLimit);
+        }
+    }
     for (text, runs) in project
         .title_page
         .iter()
@@ -260,22 +495,27 @@ pub(crate) fn validate_project_output_budgets(project: &Project) -> Result<(), F
                 .iter()
                 .map(|element| (element.text.as_str(), element.runs.as_slice())),
         )
+        .chain(board.cards.iter().flat_map(|card| {
+            card.paragraphs.iter().map(|paragraph| (paragraph.text.as_str(), paragraph.runs.as_slice()))
+        }))
     {
-        event_count = event_count.saturating_add(1);
-        text_bytes = text_bytes.saturating_add(text.len());
+        validate_xml_chars(text)?;
+        event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+        text_bytes = text_bytes.checked_add(text.len()).ok_or(FdxError::ResourceLimit)?;
+        payload_bytes = payload_bytes.checked_add(text.len()).ok_or(FdxError::ResourceLimit)?;
         let run_count = runs.len().max(usize::from(runs.is_empty()));
-        event_count = event_count.saturating_add(run_count);
+        event_count = event_count.checked_add(run_count).ok_or(FdxError::ResourceLimit)?;
         if runs.is_empty() && !text.is_empty() {
-            event_count = event_count.saturating_add(1);
+            event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
         }
         for run in runs {
             if !run.text.is_empty() {
-                event_count = event_count.saturating_add(1);
+                event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
             }
             if run.attributes.len() > MAX_ATTRIBUTES_PER_ELEMENT {
                 return Err(FdxError::ResourceLimit);
             }
-            event_count = event_count.saturating_add(run.attributes.len());
+            event_count = event_count.checked_add(run.attributes.len()).ok_or(FdxError::ResourceLimit)?;
             for attribute in &run.attributes {
                 if attribute.name.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES
                     || attribute.value.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES
@@ -284,12 +524,17 @@ pub(crate) fn validate_project_output_budgets(project: &Project) -> Result<(), F
                 }
                 validate_qname(&attribute.name)?;
                 validate_xml_chars(&attribute.value)?;
+                payload_bytes = payload_bytes.checked_add(attribute.name.len())
+                    .and_then(|size| size.checked_add(attribute.value.len()))
+                    .ok_or(FdxError::ResourceLimit)?;
             }
         }
-        if text_bytes > MAX_SOURCE_TEXT_BYTES || event_count > MAX_SOURCE_EVENTS {
+        if text_bytes > MAX_SOURCE_TEXT_BYTES || payload_bytes > MAX_SOURCE_BYTES
+            || event_count > MAX_SOURCE_EVENTS {
             return Err(FdxError::ResourceLimit);
         }
     }
+    if payload_bytes > MAX_SOURCE_BYTES { return Err(FdxError::ResourceLimit); }
     Ok(())
 }
 pub(crate) fn normalize_sections(sections: &[PreservedSection]) -> Vec<PreservedSection> {

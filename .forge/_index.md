@@ -14,6 +14,12 @@ At the user's explicit direction, adapt and record project-policy changes in the
 | [`requirements/`](requirements/) | Durable product intent, user-facing capabilities, and testable acceptance criteria. |
 | [`blueprints/`](blueprints/) | Durable technical context, architecture, component behavior, contracts, and feature composition. |
 
+## Beat Board initiative
+
+- **User-facing behavior:** [`requirements/features/beat-board.md`](requirements/features/beat-board.md), with lifecycle, workspace, screenplay-editing, page-layout, settings, and export boundaries linked from that feature.
+- **Technical composition:** [`blueprints/features/beat-board.md`](blueprints/features/beat-board.md), supported by the Document Model, Editing Session, FDX Preservation and Storage, Command Contract, Desktop Adapters, Layout and Pagination, User Settings, desktop container, and [technical context](blueprints/technical-context.md).
+- **Execution and user handoff:** [approved plan and work-order guide](../.plan/2026-11-24-beat-board/beat-board.md); [unexecuted user-owned review worksheet](../.plan/2026-11-24-beat-board/final-user-review.md). The worksheet is not acceptance evidence.
+
 ## Core boundaries
 
 - **Requirements** describe durable desired product behavior: what users and stakeholders need and why. Cohesive area files may group related capabilities and retain stable requirement/acceptance IDs; they do not prescribe internal implementation or carry lifecycle status, implementation evidence, progress, or history.

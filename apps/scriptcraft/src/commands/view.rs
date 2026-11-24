@@ -1,4 +1,4 @@
-use crate::app::ScriptCraftApp;
+use crate::app::{RootDocumentView, ScriptCraftApp};
 use crate::settings::ThemeChoice;
 use eframe::egui;
 use scriptcraft_commands::{Appearance, Command, CommandRejection, EditorSurface, ScriptViewMode};
@@ -53,26 +53,51 @@ impl ScriptCraftApp {
             }
             Command::ViewZoomSet { percent } => {
                 let next = percent.get();
-                self.set_zoom_for_surface(self.active_editor_surface(), next, ctx);
-                DesktopCommandOutcome::EffectDispatched
-            }
-            Command::ViewZoomPinch { factor } => {
-                let surface = self.active_editor_surface();
-                if let Some(next) = crate::chrome::status_bar::zoom_after_native_factor(
-                    self.pinch_zoom_for_surface(surface),
-                    factor.get(),
-                ) {
-                    let next_zoom = crate::chrome::status_bar::normalized_zoom_percent(next);
-                    self.set_zoom_for_surface(surface, next_zoom, ctx);
-                    self.set_pinch_zoom_for_surface(surface, next);
+                let policy = self.active_zoom_policy();
+                if (policy.min..=policy.max).contains(&next) {
+                    if self.beat_zoom_target() {
+                        self.set_beat_zoom(f64::from(next), false, ctx);
+                    } else {
+                        let surface = if self.title_view_state_swapped { EditorSurface::TitlePage } else { self.active_editor_surface() };
+                        self.set_zoom_for_surface(surface, next, ctx);
+                    }
                 }
                 DesktopCommandOutcome::EffectDispatched
             }
+            Command::ViewZoomPinch { factor } => {
+                let beat = self.beat_zoom_target();
+                let surface = if self.title_view_state_swapped { EditorSurface::TitlePage } else { self.active_editor_surface() };
+                let current = if beat { self.beat_pinch_zoom_percent } else { self.pinch_zoom_for_surface(surface) };
+                let policy = self.active_zoom_policy();
+                if let Some(next) = policy.after_factor(current, factor.get()) {
+                    if beat {
+                        self.set_beat_zoom(next, true, ctx);
+                    } else {
+                        self.set_zoom_for_surface(surface, policy.normalize(next), ctx);
+                        self.set_pinch_zoom_for_surface(surface, next);
+                    }
+                }
+                DesktopCommandOutcome::EffectDispatched
+            }
+            Command::ViewBeatBoardShow => {
+                self.set_root_document_view(RootDocumentView::BeatBoard, ctx);
+                DesktopCommandOutcome::EffectDispatched
+            }
             Command::ViewScriptViewSet { mode } => {
+                let was_script = self.root_document_view == RootDocumentView::Script;
+                self.set_root_document_view(RootDocumentView::Script, ctx);
                 if self.script_view_mode != mode {
-                    self.capture_pending_zoom_anchor(ctx);
+                    if was_script && !self.title_view_state_swapped {
+                        self.capture_pending_zoom_anchor(ctx);
+                    }
                     self.script_view_mode = mode;
-                    self.invalidate_surface(EditorSurface::Body);
+                    if self.title_view_state_swapped {
+                        self.title_view.rendered_revision = None;
+                        self.title_view.page_geometry.invalidate();
+                        self.title_view.page_scale = None;
+                    } else {
+                        self.invalidate_surface(EditorSurface::Body);
+                    }
                     ctx.request_repaint();
                 }
                 DesktopCommandOutcome::EffectDispatched

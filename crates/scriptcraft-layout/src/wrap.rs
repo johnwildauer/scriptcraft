@@ -196,6 +196,20 @@ pub(super) fn wrap_resolved_display_scalars(
     line_offset: usize,
     empty_source_offset: usize,
 ) -> Vec<ResolvedWrappedLine> {
+    wrap_resolved_display_scalars_with_limit(
+        scalars, paragraph, first_visual_line, line_offset, empty_source_offset,
+        MAX_LINES_PER_ELEMENT,
+    )
+}
+
+fn wrap_resolved_display_scalars_with_limit(
+    scalars: &[ResolvedDisplayScalar],
+    paragraph: EffectiveParagraph,
+    first_visual_line: bool,
+    line_offset: usize,
+    empty_source_offset: usize,
+    max_lines: usize,
+) -> Vec<ResolvedWrappedLine> {
     let first_left = paragraph
         .left
         .raw()
@@ -221,6 +235,7 @@ pub(super) fn wrap_resolved_display_scalars(
                 &mut first_visual_line,
                 line_offset,
                 empty_source_offset,
+                max_lines,
                 &mut lines,
             );
             if scalars[cursor].character == '\r'
@@ -245,6 +260,7 @@ pub(super) fn wrap_resolved_display_scalars(
         &mut first_visual_line,
         line_offset,
         empty_source_offset,
+        max_lines,
         &mut lines,
     );
     lines
@@ -266,6 +282,42 @@ pub(super) fn wrap_resolved_for_layout(
     line_offset: usize,
     empty_source_offset: usize,
 ) -> Result<Vec<WrappedLine>, LayoutError> {
+    wrap_resolved_for_layout_with_limit(
+        text, element, element_type, paragraph, base_style, environment, runs,
+        first_visual_line, line_offset, empty_source_offset, MAX_LINES_PER_ELEMENT,
+    )
+}
+
+/// Card flow retains all source lines rather than the screenplay element limit.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn wrap_resolved_for_card(
+    text: &str,
+    element: usize,
+    paragraph: EffectiveParagraph,
+    base_style: &ResolvedTextStyle,
+    environment: &LayoutEnvironment,
+    runs: &[TextRun],
+) -> Result<Vec<WrappedLine>, LayoutError> {
+    wrap_resolved_for_layout_with_limit(
+        text, element, None, paragraph, base_style, environment, runs,
+        true, 0, 0, usize::MAX,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn wrap_resolved_for_layout_with_limit(
+    text: &str,
+    element: usize,
+    element_type: Option<ElementTypeKey>,
+    paragraph: EffectiveParagraph,
+    base_style: &ResolvedTextStyle,
+    environment: &LayoutEnvironment,
+    runs: &[TextRun],
+    first_visual_line: bool,
+    line_offset: usize,
+    empty_source_offset: usize,
+    max_lines: usize,
+) -> Result<Vec<WrappedLine>, LayoutError> {
     let scalars = project_resolved_display_scalars(
         text,
         0..text.len(),
@@ -273,16 +325,38 @@ pub(super) fn wrap_resolved_for_layout(
         base_style,
         &environment.fonts,
     )?;
-    let ranges = wrap_resolved_display_scalars(
-        &scalars,
-        paragraph,
-        first_visual_line,
-        line_offset,
-        empty_source_offset,
-    );
+    let ranges = if max_lines == MAX_LINES_PER_ELEMENT {
+        wrap_resolved_display_scalars(
+            &scalars, paragraph, first_visual_line, line_offset, empty_source_offset,
+        )
+    } else {
+        wrap_resolved_display_scalars_with_limit(
+            &scalars, paragraph, first_visual_line, line_offset, empty_source_offset, max_lines,
+        )
+    };
     ranges
         .into_iter()
-        .map(|range| -> Result<WrappedLine, LayoutError> {
+        .map(|range| make_resolved_wrapped_line(
+            text, element, element_type.clone(), paragraph, base_style,
+            environment, runs, &scalars, range,
+        ))
+        .collect()
+}
+
+/// Constructs a line from a measured scalar range, shared by wrapped flow and
+/// single-line projections. Source offsets are always canonical UTF-8 bytes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn make_resolved_wrapped_line(
+    text: &str,
+    element: usize,
+    element_type: Option<ElementTypeKey>,
+    paragraph: EffectiveParagraph,
+    base_style: &ResolvedTextStyle,
+    environment: &LayoutEnvironment,
+    runs: &[TextRun],
+    scalars: &[ResolvedDisplayScalar],
+    range: ResolvedWrappedLine,
+) -> Result<WrappedLine, LayoutError> {
             let selected = &scalars[range.scalar_range.clone()];
             let vertical_metrics = inputs::resolve_line_vertical_metrics(
                 base_style,
@@ -312,7 +386,7 @@ pub(super) fn wrap_resolved_for_layout(
             let source = range.source_range;
             Ok(WrappedLine {
                 element,
-                element_type: element_type.clone(),
+                element_type,
                 start: source.start,
                 end: source.end,
                 text: Arc::from(&text[source.clone()]),
@@ -326,8 +400,6 @@ pub(super) fn wrap_resolved_for_layout(
                 vertical_metrics,
                 oversized: range.oversized,
             })
-        })
-        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,6 +429,7 @@ fn wrap_resolved_segment(
     first_visual_line: &mut bool,
     line_offset: usize,
     empty_source_offset: usize,
+    max_lines: usize,
     output: &mut Vec<ResolvedWrappedLine>,
 ) {
     if segment.is_empty() {
@@ -374,7 +447,7 @@ fn wrap_resolved_segment(
         return;
     }
     let mut start = segment.start;
-    while start < segment.end && line_offset.saturating_add(output.len()) < MAX_LINES_PER_ELEMENT {
+    while start < segment.end && line_offset.saturating_add(output.len()) < max_lines {
         let first_line = *first_visual_line;
         let limit = if first_line { first_limit } else { rest_limit };
         let mut end = start;

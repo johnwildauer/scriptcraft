@@ -279,6 +279,8 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     )?;
     preservation.rebuild_indexes();
     project.validate().map_err(map_model_error)?;
+    let (beat_board, beat_board_view_state) = crate::beat_board::import(root, &project)?;
+    project.replace_beat_board(beat_board).map_err(map_model_error)?;
     let text_state = raw_root_text_state(root, &project);
     let invisibles = InvisiblesState {
         show_body: raw_root_show_invisibles(root),
@@ -293,6 +295,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         text_state,
         display_mode,
         invisibles,
+        beat_board_view_state,
     })
 }
 
@@ -500,7 +503,7 @@ pub(crate) fn parse_document(input: &[u8]) -> Result<Vec<RawNode>, FdxError> {
                 if stack.len() >= MAX_SOURCE_DEPTH {
                     return Err(FdxError::ResourceLimit);
                 }
-                let element = make_element(&reader, &start, stack.is_empty())?;
+                let element = make_element(&reader, &start, &stack)?;
                 add_retained_budget(
                     &mut retained_count,
                     1usize
@@ -510,7 +513,7 @@ pub(crate) fn parse_document(input: &[u8]) -> Result<Vec<RawNode>, FdxError> {
                 stack.push(element);
             }
             Event::Empty(start) => {
-                let element = make_element(&reader, &start, stack.is_empty())?;
+                let element = make_element(&reader, &start, &stack)?;
                 add_retained_budget(
                     &mut retained_count,
                     1usize
@@ -642,10 +645,17 @@ fn append_node(
 fn make_element<R: std::io::BufRead>(
     reader: &NsReader<R>,
     start: &BytesStart<'_>,
-    document_root: bool,
+    stack: &[RawElement],
 ) -> Result<RawElement, FdxError> {
     let (resolved, local) = reader.resolver().resolve_element(start.name());
     let (namespace_uri, local_name) = resolved_name(resolved, local.as_ref())?;
+    let document_root = stack.is_empty();
+    let direct_display_board = stack.len() == 2
+        && stack[0].name.local_name == FDX_ROOT
+        && stack[1].name.local_name == "DisplayBoards"
+        && stack[1].name.namespace_uri == stack[0].name.namespace_uri
+        && local_name == "DisplayBoard"
+        && namespace_uri == stack[0].name.namespace_uri;
     if start.name().as_ref().len() > MAX_SOURCE_NAME_OR_VALUE_BYTES {
         return Err(FdxError::ResourceLimit);
     }
@@ -666,7 +676,8 @@ fn make_element<R: std::io::BufRead>(
         }
         let raw_name = utf8(attribute.key.as_ref())?.to_owned();
         let best_effort_view_attribute =
-            matches!(raw_name.as_str(), "ShowInvisibles" | "InvisiblesColor");
+            matches!(raw_name.as_str(), "ShowInvisibles" | "InvisiblesColor")
+                || (direct_display_board && matches!(raw_name.as_str(), "Type" | "ScrollOrigin" | "ZoomLevel"));
         if !seen_raw_attributes.insert(raw_name.clone())
             && (!document_root || raw_name != "Version")
             && !best_effort_view_attribute
@@ -688,7 +699,8 @@ fn make_element<R: std::io::BufRead>(
             });
         } else {
             let best_effort_view_attribute = attribute_namespace.is_none()
-                && matches!(local_name.as_str(), "ShowInvisibles" | "InvisiblesColor");
+                && (matches!(local_name.as_str(), "ShowInvisibles" | "InvisiblesColor")
+                    || (direct_display_board && matches!(local_name.as_str(), "Type" | "ScrollOrigin" | "ZoomLevel")));
             if !seen_expanded_attributes.insert((attribute_namespace.clone(), local_name.clone()))
                 && (!document_root || attribute_namespace.is_some() || local_name != "Version")
                 && !best_effort_view_attribute

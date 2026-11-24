@@ -36,6 +36,7 @@ The following print/export criterion retains its stable ID here; its parent [`RE
 
 - PDF and plain-text files are noncanonical copies; they do not replace the native project or make it clean.
 - Canonical Print layout is independent of desktop viewport zoom; PDF, plain text, macOS Print, and Windows Print do not acquire a separate wrapping or pagination authority.
+- Beat Board cards and Beat viewport state are not part of screenplay PDF, plain-text, or native Print output. Their managed native FDX persistence is specified by the [Beat Board requirements](beat-board.md); it does not add an export or print surface.
 
 ### Implementation ownership
 
@@ -44,4 +45,5 @@ The export crate's `export_text(project, environment)` and `export_text_with_lay
 ## Related documents
 
 - **Product overview:** [`../product-overview.md`](../product-overview.md)
+- **Beat Board exclusion:** [`beat-board.md`](beat-board.md)
 - **Technical blueprint:** [`../../blueprints/technical-context.md`](../../blueprints/technical-context.md)

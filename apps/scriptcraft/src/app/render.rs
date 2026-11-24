@@ -9,6 +9,65 @@ use scriptcraft_layout::{
 use std::time::Instant;
 
 impl ScriptCraftApp {
+    pub(crate) fn show_beat_board(&mut self, ui: &mut eframe::egui::Ui) {
+        let prepared = match self.document_font_store.prepare_document(self.session.project()) {
+            Ok(fonts) => {
+                self.prepared_document_fonts = Some(fonts.clone());
+                match self.document_font_store.register_prepared_fonts(ui.ctx(), &fonts) {
+                    Ok(true) => Some(fonts),
+                    Ok(false) => {
+                        // Families queued with add_font become available on the next pass.
+                        ui.ctx().request_repaint();
+                        None
+                    }
+                    Err(_) => {
+                        self.show_error("FONT_PREPARATION_FAILED: resolved face registration failed; document unchanged");
+                        None
+                    }
+                }
+            }
+            Err(_) => {
+                self.show_error("FONT_PREPARATION_FAILED: no prepared environment; document unchanged");
+                None
+            }
+        };
+        let environment = prepared.as_ref().map(|fonts| LayoutEnvironment::new(
+            self.session.layout_inputs().page_only(), fonts.environment.clone(),
+        ));
+        let available = self.app_command_availability().is_enabled(scriptcraft_commands::CommandId::BeatBoardSelectionSet)
+            && !(self.menu_policy.in_window_shortcuts_owned() && crate::chrome::menu::in_window_menu_popup_open(ui.ctx()))
+            && !(self.sprint_timer.popup_open && ui.ctx().input(|i| i.pointer.hover_pos().is_some_and(|p| self.sprint_timer.popup_rect.contains(p))));
+        let (success, command) = crate::views::beat_board::show(
+            ui,
+            self.session.project().beat_board(),
+            &mut self.beat_board_view_state,
+            &mut self.beat_viewport,
+            self.theme_palette.script_workspace,
+            &mut self.beat_layout_cache,
+            environment.as_ref().zip(prepared.as_ref()),
+            self.session.beat_selection(),
+            self.session.mutation_token(),
+            &mut self.beat_interaction,
+            &mut self.beat_text,
+            available,
+        );
+        for command in command {
+            self.dispatch_command(crate::commands::CommandInvocation::new(command, scriptcraft_commands::CommandOrigin::Pointer), ui.ctx());
+        }
+        if self.beat_text.focused {
+            match self.session.beat_selection() {
+                scriptcraft_session::editing::BeatSelection::Text { card, field, .. } => {
+                    let changed_target = self.beat_text.field.as_ref().is_none_or(|(old_card, old_field)| old_card != card || old_field != field);
+                    if changed_target { self.beat_text.focus(card.clone(), *field, ui.ctx().input(|input| input.time)); }
+                }
+                _ => self.beat_text.blur(),
+            }
+        }
+        if !success {
+            self.show_error("BEAT_LAYOUT_OR_PAINT_FAILED: card presentation unavailable; document unchanged");
+        }
+    }
+
     pub(crate) fn layout_for_render(
         &mut self,
         surface: EditorSurface,

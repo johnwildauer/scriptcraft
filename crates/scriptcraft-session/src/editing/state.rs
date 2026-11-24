@@ -24,6 +24,9 @@ pub struct EditingSession {
     pub(super) layout_inputs: LayoutInputs,
     pub(crate) selection: Selection,
     pub(crate) title_selection: Selection,
+    pub(crate) beat_selection: super::BeatSelection,
+    pub(super) beat_typing_style: RunStyleFlags,
+    pub(super) beat_typing_formatting: InlineRunFormattingPatch,
     pub(super) title_typing_style: RunStyleFlags,
     pub(super) body_typing_style: RunStyleFlags,
     pub(super) body_typing_formatting: InlineRunFormattingPatch,
@@ -55,6 +58,9 @@ impl PartialEq for EditingSession {
             && self.layout_inputs == other.layout_inputs
             && self.selection == other.selection
             && self.title_selection == other.title_selection
+            && self.beat_selection == other.beat_selection
+            && self.beat_typing_style == other.beat_typing_style
+            && self.beat_typing_formatting == other.beat_typing_formatting
             && self.title_typing_style == other.title_typing_style
             && self.body_typing_style == other.body_typing_style
             && self.body_typing_formatting == other.body_typing_formatting
@@ -133,6 +139,9 @@ impl EditingSession {
                 element: 0,
                 offset: 0,
             }),
+            beat_selection: super::BeatSelection::None,
+            beat_typing_style: RunStyleFlags::default(),
+            beat_typing_formatting: InlineRunFormattingPatch::default(),
             title_typing_style,
             body_typing_style,
             body_typing_formatting: InlineRunFormattingPatch::default(),
@@ -210,6 +219,12 @@ impl EditingSession {
         self.title_typing_style
     }
 
+    /// Transient Beat body style at the active collapsed text caret.
+    pub fn beat_typing_style(&self) -> RunStyleFlags { self.beat_typing_style }
+
+    /// Transient Beat body inline-formatting patch; never persisted or dirtied.
+    pub fn beat_typing_formatting(&self) -> InlineRunFormattingPatch { self.beat_typing_formatting }
+
     pub const fn dirty(&self) -> bool {
         self.dirty
     }
@@ -226,7 +241,7 @@ impl EditingSession {
         self.mutation_token
     }
 
-    pub(super) fn mark_mutated(&mut self) {
+    pub(crate) fn mark_mutated(&mut self) {
         self.mutation_token = self.mutation_token.wrapping_add(1);
     }
 
@@ -248,6 +263,7 @@ impl EditingSession {
     pub fn validate(&self) -> Result<(), EditError> {
         validate_full_candidate(&self.project)?;
         validate_selection(&self.project, self.selection)?;
+        super::beat_board::validate_beat_selection(&self.project, &self.beat_selection)?;
         validate_title_selection(&self.project, self.title_selection)
     }
 

@@ -1,7 +1,7 @@
 //! Root eframe adapter, input handling, and application update composition.
 
 use crate::app;
-use crate::app::{measure_root_other_bucket, responsiveness, ScriptCraftApp};
+use crate::app::{measure_root_other_bucket, responsiveness, RootDocumentView, ScriptCraftApp};
 use crate::chrome::status_bar::status_modifiers_changed;
 use crate::chrome::status_bar::DiagnosticProjection;
 use crate::chrome::toolbar::toolbar_content_height;
@@ -47,13 +47,15 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     if app.menu_policy.renders_in_window() {
         let projection = app.app_command_projection();
         let dynamic_elements = app.dynamic_element_menu_projection();
-        let formatting = crate::chrome::formatting_menu::project(
+        let formatting = crate::chrome::formatting_menu::project_for_target(
             &app.session,
             app.active_editor_surface,
+            app.root_document_view == RootDocumentView::BeatBoard,
         );
         let view_menu = crate::chrome::menu_items::ViewMenuProjection {
-            zoom_percent: app.zoom_for_surface(app.active_editor_surface()),
+            zoom_percent: app.active_zoom(),
             appearance_mode: app.appearance_mode,
+            beat_board: app.root_document_view == RootDocumentView::BeatBoard,
         };
         let menu_panel = egui::Panel::top("application-menu")
             .frame(chrome_frame(app.theme_palette.toolbar))
@@ -108,7 +110,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     });
     let availability = app.app_command_availability();
     let element_windows_own_input = app.element_windows.owns_input();
-    let body_focused = app.surface_focused
+    let body_focused = app.root_document_view == RootDocumentView::Script && app.surface_focused
         && app.active_editor_surface() == EditorSurface::Body
         && !element_windows_own_input
         && !availability.replacement_pending
@@ -207,7 +209,10 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         .show_inside(ui, |ui| {
             status_bar::apply_status_palette(ui, app.theme_palette.status);
             let focus_view = app.focus_mode.view();
-            let status_intents = status_bar::show_with_focus_mode(
+            let status_intents = if app.root_document_view == RootDocumentView::BeatBoard {
+                status_bar::show_beat(ui, app.theme_palette.status, page_number, diagnostics,
+                    app.development_mode, app.active_zoom(), app.appearance_mode, app.active_zoom_policy())
+            } else { status_bar::show_with_focus_mode(
                 ui,
                 app.theme_palette.status,
                 page_number,
@@ -217,7 +222,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                 app.zoom_percent,
                 app.appearance_mode,
                 &focus_view,
-            );
+            ) };
             timer_button_rect = status_intents.timer_button_rect;
             for command in status_intents.commands {
                 let opening_timer = matches!(&command, Command::ToolsSprintTimerTogglePopup)
@@ -236,17 +241,22 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
             }
         });
     status_bar::paint_panel_top_border(ui, status_panel.response.rect, app.theme_palette.status);
+    let frame = if app.root_document_view == RootDocumentView::BeatBoard {
+        egui::Frame::NONE.fill(app.theme_palette.script_workspace.background)
+    } else {
+        script_view::central_panel_frame(&ctx, app.script_view_mode, app.theme_palette.script_workspace)
+    };
     let central = egui::CentralPanel::default()
-        .frame(script_view::central_panel_frame(
-            &ctx,
-            app.script_view_mode,
-            app.theme_palette.script_workspace,
-        ))
+        .frame(frame)
         .show_inside(ui, |ui| {
-            let editor_scrollbar = app.theme_palette.script_workspace.editor_scrollbar;
-            script_view::with_editor_surface_scrollbar_presentation(ui, editor_scrollbar, |ui| {
-                app.live_document_surface(ui, EditorSurface::Body)
-            })
+            if app.root_document_view == RootDocumentView::BeatBoard {
+                app.show_beat_board(ui);
+            } else {
+                let editor_scrollbar = app.theme_palette.script_workspace.editor_scrollbar;
+                script_view::with_editor_surface_scrollbar_presentation(ui, editor_scrollbar, |ui| {
+                    app.live_document_surface(ui, EditorSurface::Body)
+                });
+            }
         });
     if app.timer_popup_surface == EditorSurface::TitlePage
         && (!app.title_page_window_open || app.title_viewport_unsupported)
@@ -281,7 +291,11 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
 
 impl eframe::App for ScriptCraftApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        script_view::chrome_clear_color(self.script_view_mode, self.theme_palette.script_workspace)
+        if self.root_document_view == RootDocumentView::BeatBoard {
+            self.theme_palette.script_workspace.background.to_normalized_gamma_f32()
+        } else {
+            script_view::chrome_clear_color(self.script_view_mode, self.theme_palette.script_workspace)
+        }
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -328,6 +342,11 @@ impl eframe::App for ScriptCraftApp {
             .screen_rect
             .map_or_else(|| ctx.content_rect().height(), |rect| rect.height());
         let element_dialog_open = self.element_windows.owns_input();
+        let beat_root_input = !title_page_viewport && !element_viewport
+            && self.root_document_view == RootDocumentView::BeatBoard;
+        if beat_root_input {
+            self.handle_beat_navigation_input(ctx, raw_input, viewport_close_requested);
+        } else {
         let wheel_factors = {
             let adapter = if title_page_viewport {
                 &mut self.title_view.wheel_zoom
@@ -357,6 +376,7 @@ impl eframe::App for ScriptCraftApp {
         for event in &raw_input.events {
             if !element_dialog_open && !element_viewport {
                 if let egui::Event::Zoom(factor) = event {
+                    if let Some(surface) = surface { self.set_active_editor_surface(surface); }
                     self.record_native_event("zoom");
                     if let Ok(factor) = ZoomFactor::new(*factor) {
                         self.dispatch_command(
@@ -376,6 +396,7 @@ impl eframe::App for ScriptCraftApp {
             raw_input
                 .events
                 .retain(|event| !matches!(event, egui::Event::Zoom(_)));
+        }
         }
 
         // The active platform backend owns accelerators: native macOS while the
@@ -465,6 +486,119 @@ fn dialog_menu_shortcuts_allowed(
 }
 
 impl ScriptCraftApp {
+    /// Process Beat wheel and pinch in raw event order, before egui accumulates
+    /// smooth scrolling and before queued Save commands capture view state.
+    fn handle_beat_navigation_input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput, closing: bool) {
+        let availability = self.app_command_availability();
+        let blocked = closing || self.element_windows.owns_input()
+            || raw.viewports.get(&raw.viewport_id).is_some_and(|viewport| viewport.focused == Some(false))
+            || availability.replacement_pending || availability.modal_blocked
+            || availability.native_output_active
+            || (self.menu_policy.in_window_shortcuts_owned() && menu::in_window_menu_popup_open(ctx));
+        if blocked {
+            self.wheel_zoom.reset();
+            return;
+        }
+        let mut pointer = self.beat_viewport.and_then(|geometry| geometry.pointer_screen);
+        let mut retained = Vec::with_capacity(raw.events.len());
+        for event in std::mem::take(&mut raw.events) {
+            match &event {
+                egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => pointer = Some(*pos),
+                egui::Event::PointerGone | egui::Event::WindowFocused(false) => {
+                    pointer = None;
+                    self.wheel_zoom.reset();
+                }
+                _ => {}
+            }
+            self.beat_viewport = self.beat_viewport.map(|geometry| geometry.with_pointer(pointer));
+            let inside = self.beat_viewport.is_some_and(|geometry| pointer.is_some_and(|pos|
+                geometry.clip.contains(pos) && !(self.sprint_timer.popup_open && self.sprint_timer.popup_rect.contains(pos))));
+            let owns_pinch = self.beat_viewport.is_some() && (inside || pointer.is_none());
+            if let egui::Event::Zoom(factor) = &event {
+                if owns_pinch {
+                    self.set_active_editor_surface(EditorSurface::Body);
+                    self.record_native_event("zoom");
+                    if let Ok(factor) = ZoomFactor::new(*factor) {
+                        self.dispatch_command(CommandInvocation::new(Command::ViewZoomPinch { factor }, CommandOrigin::InternalFollowUp), ctx);
+                    }
+                    continue;
+                }
+            }
+            if !inside {
+                self.wheel_zoom.reset();
+                retained.push(event);
+                continue;
+            }
+            let viewport_size = self.beat_viewport.map(|geometry| geometry.viewport.size()).unwrap_or(egui::Vec2::ZERO);
+            let mut single = vec![event];
+            let factors = self.wheel_zoom.adapt_events(&mut single, viewport_size.y);
+            self.dispatch_wheel_zoom_factors(EditorSurface::Body, ctx, factors);
+            for event in single {
+                if let egui::Event::MouseWheel { unit, delta, modifiers, .. } = &event {
+                    let multiplier = match unit {
+                        egui::MouseWheelUnit::Point => egui::Vec2::splat(1.0),
+                        egui::MouseWheelUnit::Line => egui::Vec2::splat(crate::views::beat_board::WHEEL_POINTS_PER_LINE),
+                        egui::MouseWheelUnit::Page => viewport_size,
+                    };
+                    let mut points = egui::vec2(delta.x * multiplier.x, delta.y * multiplier.y);
+                    if modifiers.shift {
+                        points.x += points.y;
+                        points.y = 0.0;
+                    }
+                    if points.x.is_finite() && points.y.is_finite() {
+                        if points.y != 0.0 && !modifiers.shift
+                            && pointer.is_some_and(|pointer| self.scroll_focused_beat_body(pointer, points.y))
+                        {
+                            ctx.request_repaint();
+                            continue;
+                        }
+                        if let Some(geometry) = self.beat_viewport {
+                            let origin = geometry.pan(points);
+                            if let Some(view) = scriptcraft_fdx::BeatBoardViewState::new(origin, self.beat_board_view_state.zoom_milli_percent()) {
+                                self.beat_board_view_state = view;
+                                self.beat_viewport = Some(geometry.with_view(view));
+                                ctx.request_repaint();
+                            }
+                        }
+                    }
+                    // Consume even invalid deltas so egui cannot scroll a second time.
+                    continue;
+                }
+                retained.push(event);
+            }
+        }
+        raw.events = retained;
+    }
+
+    fn scroll_focused_beat_body(&mut self, pointer: egui::Pos2, wheel_delta_y: f32) -> bool {
+        use crate::views::beat_board::geometry::{pixels, scale};
+        use scriptcraft_session::editing::BeatTextField;
+        if !self.beat_text.focused || self.beat_text.field.as_ref().is_none_or(|(_, field)| *field != BeatTextField::Body) {
+            return false;
+        }
+        let Some(geometry) = self.beat_viewport else { return false };
+        let Some(fonts) = self.prepared_document_fonts.as_ref() else { return false };
+        let Some((card_id, _)) = self.beat_text.field.as_ref() else { return false };
+        let Some(card) = self.session.project().beat_board().cards.iter().find(|card| &card.id == card_id) else { return false };
+        let environment = scriptcraft_layout::LayoutEnvironment::new(
+            self.session.layout_inputs().page_only(), fonts.environment.clone(),
+        );
+        let Ok(layouts) = self.beat_layout_cache.get_or_build(card, &environment, fonts, scriptcraft_layout::BeatCardMetrics::default()) else { return false };
+        let zoom = scale(geometry.view) as f32;
+        let origin = geometry.board_to_screen(pixels(card.rect.left), pixels(card.rect.top));
+        let body = layouts.card.body_rect;
+        let rect = egui::Rect::from_min_size(
+            origin + egui::vec2(body.x.to_points_f32() * zoom, body.y.to_points_f32() * zoom),
+            egui::vec2(body.width.to_points_f32() * zoom, body.height.to_points_f32() * zoom),
+        );
+        if !rect.contains(pointer) { return false; }
+        let max = (layouts.card.body_content_height.to_points_f32() - body.height.to_points_f32()).max(0.0);
+        let next = (self.beat_text.body_offset - wheel_delta_y / zoom).clamp(0.0, max);
+        if (next - self.beat_text.body_offset).abs() < f32::EPSILON { return false; }
+        self.beat_text.body_offset = next;
+        true
+    }
+
     fn update(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         self.finalize_initial_document_slot();
         let ctx = ui.ctx().clone();
@@ -549,11 +683,13 @@ impl ScriptCraftApp {
         if !migration_pending && !replacement_pending && !replacement_close_continuation {
             // Route events using the editor-focus state established by the prior
             // surface frame, then let this frame's layout and paint observe edits.
-            measure_root_other_bucket(
-                self,
-                app::responsiveness::RootOtherBucket::InputDispatch,
-                |app| app.handle_surface_input(&ctx, EditorSurface::Body),
-            );
+            if self.root_document_view == RootDocumentView::Script {
+                measure_root_other_bucket(
+                    self,
+                    app::responsiveness::RootOtherBucket::InputDispatch,
+                    |app| app.handle_surface_input(&ctx, EditorSurface::Body),
+                );
+            }
             // Scheduled derived work sees every accepted same-frame edit and
             // never delays already-queued editor input on its deadline frame.
             measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Derived, |app| {
@@ -631,13 +767,15 @@ impl ScriptCraftApp {
             if app.menu_policy.installs_native_macos() {
                 let projection = app.app_command_projection();
                 let dynamic_elements = app.dynamic_element_menu_projection();
-                let formatting = crate::chrome::formatting_menu::project(
+                let formatting = crate::chrome::formatting_menu::project_for_target(
                     &app.session,
                     app.active_editor_surface,
+                    app.root_document_view == RootDocumentView::BeatBoard,
                 );
                 let view_menu = crate::chrome::menu_items::ViewMenuProjection {
-                    zoom_percent: app.zoom_for_surface(app.active_editor_surface()),
+                    zoom_percent: app.active_zoom(),
                     appearance_mode: app.appearance_mode,
+                    beat_board: app.root_document_view == RootDocumentView::BeatBoard,
                 };
                 if let Some(native_menu) = &mut app.native_menu {
                     native_menu.synchronize(

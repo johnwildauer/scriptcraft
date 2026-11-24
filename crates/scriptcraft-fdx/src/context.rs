@@ -1,6 +1,6 @@
 use crate::{
     diagnostics::{FdxError, SaveDiagnosticCode},
-    document::{InvisiblesState, ScriptPanelDisplayMode, WindowState},
+    document::{BeatBoardViewState, InvisiblesState, ScriptPanelDisplayMode, WindowState},
     text_state::TextState,
 };
 use std::collections::BTreeSet;
@@ -24,6 +24,7 @@ pub struct SaveContext {
     text_state: TextState,
     display_mode: ScriptPanelDisplayMode,
     invisibles_state: InvisiblesState,
+    beat_board_view_state: BeatBoardViewState,
 }
 
 impl SaveContext {
@@ -36,6 +37,7 @@ impl SaveContext {
             text_state: TextState::DEFAULT,
             display_mode: ScriptPanelDisplayMode::Page,
             invisibles_state: InvisiblesState::default(),
+            beat_board_view_state: BeatBoardViewState::default(),
         }
     }
 
@@ -61,6 +63,12 @@ impl SaveContext {
 
     pub fn with_invisibles_state(mut self, invisibles_state: InvisiblesState) -> Self {
         self.invisibles_state = invisibles_state;
+        self
+    }
+
+    /// Capture the disposable Beat viewport without changing semantic state.
+    pub fn with_beat_board_view_state(mut self, state: BeatBoardViewState) -> Self {
+        self.beat_board_view_state = state;
         self
     }
 
@@ -90,6 +98,10 @@ impl SaveContext {
 
     pub(crate) const fn invisibles_state(&self) -> InvisiblesState {
         self.invisibles_state
+    }
+
+    pub(crate) const fn beat_board_view_state(&self) -> BeatBoardViewState {
+        self.beat_board_view_state
     }
 
     pub(crate) fn allocate_lineage_id(

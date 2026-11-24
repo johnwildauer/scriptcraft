@@ -14,11 +14,14 @@ pub use values::{
     ScriptViewMode, SprintTimerMode, TitleTextStyle, VerticalDirection, InlineFontValue,
     InlineSizeValue, InlineColorValue, RunFormattingPatchValue, ParagraphSpacingValue,
     ParagraphLeadingValue, SpaceBeforeLines, ParagraphFormattingPatchValue,
+    BeatCardIdValue, BeatPointValue, BeatRectValue, BeatSelectionValue, BeatTextFieldValue,
+    BeatTextPositionValue, BeatTextEditValue, BeatNavigationValue,
 };
 
 mod conversions;
 pub use conversions::{
-    builtin_template_id, builtin_template_value, pointer_selection, DiagnosticMessage,
+    builtin_template_id, builtin_template_value, beat_selection_to_core, beat_selection_from_core,
+    beat_text_edit_to_core, beat_navigation_to_core, pointer_selection, DiagnosticMessage,
     DocumentPath, InvalidDiagnosticMessage, InvalidDocumentPath, InvalidZoomFactor,
     InvalidZoomPercent, Position, PositionError, Selection, SelectionError, ZoomFactor,
     ZoomPercent, MAX_DIAGNOSTIC_MESSAGE_BYTES,

@@ -26,6 +26,7 @@ An explicit `--reset-settings` resets to System/Screenplay with ruler visibility
 
 ## Integration boundaries
 
+- The default main IDs are `flexible-space`, `new`, `open`, `save`, `save-as`, `flexible-space`, `beat-board`, `title-page`, `elements`, `flexible-space`, `show-hide`, `export-text`, `export-pdf`, `flexible-space`, `overflow`. The Title Page default remains `flexible-space`, `styles`, `alignment`, `flexible-space`, `close-title-page`, `overflow`. This additive catalog/default change does not migrate custom arrays or change the six-field schema.
 - Startup loads and recovers settings before first rendered content, resolves the effective appearance/template, and installs appearance through the eframe creation callback. Existing `configure_appearance()` System tracking remains the live Day/Night authority; Midnight is explicit only.
 - A supplied startup document path wins over the global default. The persisted default is not an explicit template argument and does not pre-finalize the macOS cold-open initial slot. Existing staged-open activation remains authoritative, and opened document definitions/content are never changed by a global preference.
 - No-document launch and ordinary File → New use the effective saved ID; an unknown ID falls back to Screenplay without rewriting the raw value. New-document selector presentation starts from the effective saved default, while Apply retains its existing Screenplay initial presentation.

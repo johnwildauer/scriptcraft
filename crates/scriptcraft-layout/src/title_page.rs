@@ -115,7 +115,7 @@ fn compose_resolved_title_pages(
                 layout.pages.push(page);
                 page = layout.new_page(true);
             }
-            let laid_out = layout.make_line(page.number, line, true, page.next_line_top);
+            let laid_out = ScreenplayLayout::make_line(page.number, line, true, page.next_line_top);
             let line_leading = laid_out.vertical_metrics.leading.raw();
             let mut laid_out = laid_out;
             laid_out.oversized |= super::geometry::natural_bottom(

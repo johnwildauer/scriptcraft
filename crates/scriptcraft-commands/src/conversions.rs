@@ -5,7 +5,57 @@ use scriptcraft_model::{Position as CorePosition, Project, Selection as CoreSele
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::{BuiltinTemplateValue, EditorSurface, PointerPhase};
+use super::{BuiltinTemplateValue, EditorSurface, PointerPhase, BeatCardIdValue, BeatSelectionValue,
+    BeatTextFieldValue, BeatTextPositionValue, BeatTextEditValue, BeatNavigationValue};
+
+/// Checked conversion from command selection payload to the session's canonical Beat selection.
+pub fn beat_selection_to_core(value: &BeatSelectionValue) -> Result<scriptcraft_session::editing::BeatSelection, PositionError> {
+    use scriptcraft_session::editing::{BeatSelection, BeatTextField};
+    Ok(match value {
+        BeatSelectionValue::None => BeatSelection::None,
+        BeatSelectionValue::Card { card } => BeatSelection::Card { card: card.as_core().clone() },
+        BeatSelectionValue::Text { card, field, anchor, focus } => BeatSelection::Text {
+            card: card.as_core().clone(),
+            field: match field { BeatTextFieldValue::Title => BeatTextField::Title, BeatTextFieldValue::Body => BeatTextField::Body },
+            anchor: anchor.to_core()?, focus: focus.to_core()?,
+        },
+    })
+}
+
+/// Checked conversion from the session's Beat selection to its wire-safe value.
+pub fn beat_selection_from_core(value: &scriptcraft_session::editing::BeatSelection) -> Result<BeatSelectionValue, PositionError> {
+    use scriptcraft_session::editing::{BeatSelection, BeatTextField};
+    Ok(match value {
+        BeatSelection::None => BeatSelectionValue::None,
+        BeatSelection::Card { card } => BeatSelectionValue::Card { card: BeatCardIdValue::from_core(card.clone()) },
+        BeatSelection::Text { card, field, anchor, focus } => BeatSelectionValue::Text {
+            card: BeatCardIdValue::from_core(card.clone()),
+            field: match field { BeatTextField::Title => BeatTextFieldValue::Title, BeatTextField::Body => BeatTextFieldValue::Body },
+            anchor: BeatTextPositionValue::from_core(*anchor)?, focus: BeatTextPositionValue::from_core(*focus)?,
+        },
+    })
+}
+
+pub fn beat_text_edit_to_core(value: &BeatTextEditValue) -> scriptcraft_session::editing::BeatTextEditOperation {
+    use scriptcraft_session::editing::BeatTextEditOperation;
+    match value {
+        BeatTextEditValue::Insert { text } => BeatTextEditOperation::Insert { text: text.clone() },
+        BeatTextEditValue::Paste { text } => BeatTextEditOperation::Paste { text: text.clone() },
+        BeatTextEditValue::DeleteBackward => BeatTextEditOperation::DeleteBackward,
+        BeatTextEditValue::DeleteForward => BeatTextEditOperation::DeleteForward,
+        BeatTextEditValue::Enter => BeatTextEditOperation::Enter,
+    }
+}
+
+pub fn beat_navigation_to_core(value: BeatNavigationValue) -> (scriptcraft_session::editing::BeatHorizontalDirection, Option<scriptcraft_session::editing::BeatLineEdge>) {
+    use scriptcraft_session::editing::{BeatHorizontalDirection, BeatLineEdge};
+    match value {
+        BeatNavigationValue::Horizontal { direction: super::HorizontalDirection::Left } => (BeatHorizontalDirection::Left, None),
+        BeatNavigationValue::Horizontal { direction: super::HorizontalDirection::Right } => (BeatHorizontalDirection::Right, None),
+        BeatNavigationValue::LineEdge { edge: super::LineEdge::Start } => (BeatHorizontalDirection::Left, Some(BeatLineEdge::Start)),
+        BeatNavigationValue::LineEdge { edge: super::LineEdge::End } => (BeatHorizontalDirection::Right, Some(BeatLineEdge::End)),
+    }
+}
 
 /// Converts the closed command-catalog value to its exact Phase 7 catalog ID.
 pub const fn builtin_template_id(value: BuiltinTemplateValue) -> BuiltinTemplateId {
@@ -270,7 +320,7 @@ impl std::error::Error for InvalidDiagnosticMessage {}
 pub struct ZoomPercent(u16);
 
 impl ZoomPercent {
-    pub const MIN: u16 = 75;
+    pub const MIN: u16 = 5;
     pub const MAX: u16 = 300;
 
     pub fn new(value: u16) -> Result<Self, InvalidZoomPercent> {

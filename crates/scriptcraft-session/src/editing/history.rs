@@ -13,6 +13,9 @@ pub(super) struct Snapshot {
     pub(super) project: Project,
     pub(super) selection: Selection,
     pub(super) title_selection: Selection,
+    pub(super) beat_selection: super::BeatSelection,
+    pub(super) beat_typing_style: RunStyleFlags,
+    pub(super) beat_typing_formatting: InlineRunFormattingPatch,
     pub(super) title_typing_style: RunStyleFlags,
     pub(super) body_typing_style: RunStyleFlags,
     pub(super) body_typing_formatting: InlineRunFormattingPatch,
@@ -40,10 +43,14 @@ impl EditingSession {
         }
         validate_selection(&snapshot.project, snapshot.selection)?;
         validate_title_selection(&snapshot.project, snapshot.title_selection)?;
+        super::beat_board::validate_beat_selection(&snapshot.project, &snapshot.beat_selection)?;
         let current = Snapshot {
             project: self.project.clone(),
             selection: self.selection,
             title_selection: self.title_selection,
+            beat_selection: self.beat_selection.clone(),
+            beat_typing_style: self.beat_typing_style,
+            beat_typing_formatting: self.beat_typing_formatting,
             title_typing_style: self.title_typing_style,
             body_typing_style: self.body_typing_style,
             body_typing_formatting: self.body_typing_formatting,
@@ -55,6 +62,9 @@ impl EditingSession {
         self.refresh_layout_inputs_from_project();
         self.selection = snapshot.selection;
         self.title_selection = snapshot.title_selection;
+        self.beat_selection = snapshot.beat_selection;
+        self.beat_typing_style = snapshot.beat_typing_style;
+        self.beat_typing_formatting = snapshot.beat_typing_formatting;
         self.title_typing_style = snapshot.title_typing_style;
         self.body_typing_style = snapshot.body_typing_style;
         self.body_typing_formatting = snapshot.body_typing_formatting;
@@ -78,10 +88,14 @@ impl EditingSession {
         }
         validate_selection(&snapshot.project, snapshot.selection)?;
         validate_title_selection(&snapshot.project, snapshot.title_selection)?;
+        super::beat_board::validate_beat_selection(&snapshot.project, &snapshot.beat_selection)?;
         let current = Snapshot {
             project: self.project.clone(),
             selection: self.selection,
             title_selection: self.title_selection,
+            beat_selection: self.beat_selection.clone(),
+            beat_typing_style: self.beat_typing_style,
+            beat_typing_formatting: self.beat_typing_formatting,
             title_typing_style: self.title_typing_style,
             body_typing_style: self.body_typing_style,
             body_typing_formatting: self.body_typing_formatting,
@@ -93,6 +107,9 @@ impl EditingSession {
         self.refresh_layout_inputs_from_project();
         self.selection = snapshot.selection;
         self.title_selection = snapshot.title_selection;
+        self.beat_selection = snapshot.beat_selection;
+        self.beat_typing_style = snapshot.beat_typing_style;
+        self.beat_typing_formatting = snapshot.beat_typing_formatting;
         self.title_typing_style = snapshot.title_typing_style;
         self.body_typing_style = snapshot.body_typing_style;
         self.body_typing_formatting = snapshot.body_typing_formatting;

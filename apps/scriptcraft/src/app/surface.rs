@@ -1,12 +1,91 @@
 //! Surface-local app state operations and zoom coordination.
 
-use super::{diagnostics::add_performance_counter, ScriptCraftApp};
+use super::{diagnostics::add_performance_counter, RootDocumentView, ScriptCraftApp};
+use crate::chrome::status_bar::ZoomPolicy;
 use crate::views::script::RevealIntent;
 use eframe::egui;
 use scriptcraft_commands::EditorSurface;
 use scriptcraft_model::StableId;
 
 impl ScriptCraftApp {
+    pub(crate) fn beat_zoom_target(&self) -> bool {
+        !self.title_view_state_swapped
+            && self.active_editor_surface != EditorSurface::TitlePage
+            && self.root_document_view == RootDocumentView::BeatBoard
+    }
+
+    pub(crate) fn active_zoom_policy(&self) -> ZoomPolicy {
+        if self.beat_zoom_target() { ZoomPolicy::BEAT } else { ZoomPolicy::PAGE }
+    }
+
+    pub(crate) fn active_zoom(&self) -> u16 {
+        if self.beat_zoom_target() {
+            self.active_zoom_policy().normalize(f64::from(self.beat_board_view_state.zoom_milli_percent()) / 1000.0)
+        } else {
+            self.zoom_for_surface(if self.title_view_state_swapped { EditorSurface::TitlePage } else { self.active_editor_surface() })
+        }
+    }
+
+    pub(crate) fn set_beat_zoom(&mut self, zoom: f64, pointer_anchor: bool, ctx: &egui::Context) {
+        if !zoom.is_finite() || zoom <= 0.0 { return; }
+        let milli = (zoom * 1000.0).round().clamp(5000.0, 300000.0) as u32;
+        self.beat_pinch_zoom_percent = zoom;
+        if milli != self.beat_board_view_state.zoom_milli_percent() {
+            // Apply the anchor immediately, so a later pan or save cannot see
+            // an unapplied zoom anchor or an obsolete scroll origin.
+            let origin = if let Some(geometry) = self.beat_viewport {
+                let screen = if pointer_anchor {
+                    geometry.pointer_screen.filter(|_| geometry.pointer_board.is_some()).unwrap_or_else(|| geometry.viewport.center())
+                } else {
+                    geometry.viewport.center()
+                };
+                geometry.origin_for_anchor(geometry.screen_to_board(screen), screen, milli)
+            } else {
+                self.beat_board_view_state.scroll_origin()
+            };
+            self.beat_board_view_state = scriptcraft_fdx::BeatBoardViewState::new(
+                origin, milli,
+            ).expect("bounded Beat zoom and existing origin");
+            self.beat_viewport = self.beat_viewport.map(|geometry| geometry.with_view(self.beat_board_view_state));
+            ctx.request_repaint();
+        }
+    }
+
+    pub(crate) fn set_root_document_view(&mut self, view: RootDocumentView, ctx: &egui::Context) {
+        if self.root_document_view == view { return; }
+        self.root_document_view = view;
+        self.beat_viewport = None;
+        self.beat_interaction.cancel();
+        self.beat_text.blur();
+        if let Some(id) = self.editor_surface_id {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+        if let Some(id) = self.beat_text.viewport_id {
+            ctx.memory_mut(|memory| memory.surrender_focus(id));
+        }
+        if self.title_view_state_swapped {
+            self.title_view.surface_focused = false;
+            self.title_view.drag_anchor = None;
+            self.title_view.ime_preedit.clear();
+            self.title_view.ime_active = false;
+            self.title_view.reveal_intent = RevealIntent::None;
+            self.title_view.preferred_vertical_x = None;
+            self.title_view.pending_zoom_anchor = None;
+        } else {
+            self.surface_focused = false;
+            self.drag_anchor = None;
+            self.ime_preedit.clear();
+            self.ime_active = false;
+            self.reveal_intent = RevealIntent::None;
+            self.preferred_vertical_x = None;
+            self.pending_zoom_anchor = None;
+            self.editor_surface_rect = None;
+            self.set_active_body_group(None);
+        }
+        self.wheel_zoom.reset();
+        ctx.request_repaint();
+    }
+
     pub(crate) fn set_active_body_group(&mut self, next: Option<StableId>) -> bool {
         if next == self.active_body_dual_dialogue_group {
             return false;

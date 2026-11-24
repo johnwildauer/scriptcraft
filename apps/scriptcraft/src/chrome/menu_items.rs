@@ -95,6 +95,7 @@ pub(crate) enum MenuActivation {
 pub(crate) struct ViewMenuProjection {
     pub(crate) zoom_percent: u16,
     pub(crate) appearance_mode: super::theme::AppearanceMode,
+    pub(crate) beat_board: bool,
 }
 
 impl Default for ViewMenuProjection {
@@ -102,6 +103,7 @@ impl Default for ViewMenuProjection {
         Self {
             zoom_percent: 100,
             appearance_mode: super::theme::AppearanceMode::System,
+            beat_board: false,
         }
     }
 }
@@ -168,7 +170,8 @@ pub(crate) fn menu_item_is_checked(
     view: ViewMenuProjection,
 ) -> bool {
     match item.behavior {
-        MenuItemBehavior::MenuCommand(MenuAction::SetScriptView(mode)) => mode == script_view_mode,
+        MenuItemBehavior::MenuCommand(MenuAction::SetScriptView(mode)) => !view.beat_board && mode == script_view_mode,
+        MenuItemBehavior::Command(CommandId::ViewBeatBoardShow) => view.beat_board,
         MenuItemBehavior::MenuCommand(MenuAction::SetAppearance(appearance)) => {
             appearance_mode_for_choice(appearance) == view.appearance_mode
         }
@@ -186,6 +189,7 @@ pub(crate) fn menu_item_is_checked(
 /// popup's leading slot does not move as selection state changes.
 pub(crate) fn menu_item_can_display_check(item: &MenuItemSpec) -> bool {
     match item.behavior {
+        MenuItemBehavior::Command(CommandId::ViewBeatBoardShow) => true,
         MenuItemBehavior::DisabledPlaceholder(PlaceholderKind::Checked) => true,
         MenuItemBehavior::MenuCommand(
             MenuAction::SetScriptView(_)
@@ -712,12 +716,14 @@ const VIEW_ENTRIES: &[MenuEntrySpec] = &[
         MenuAction::SetScriptView(ScriptViewMode::Speed),
     ),
     SEP,
-    placeholder(
+    command_item(
         "view.beat-board",
         "Beat Board",
-        "Beat Board (disabled placeholder)",
-        ITEM,
+        "Beat Board",
         None,
+        None,
+        None,
+        CommandId::ViewBeatBoardShow,
     ),
     SEP,
     placeholder(

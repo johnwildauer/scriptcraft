@@ -5,6 +5,9 @@
 //! view-state mapping.
 
 mod apply_template;
+mod beat_board;
+mod beat_board_candidate;
+mod beat_board_output;
 mod builtin_screenplay;
 mod builtin_template_preview;
 mod builtin_templates;
@@ -35,6 +38,7 @@ mod writer;
 
 pub use apply_template::{extract_element_template_settings, ElementTemplateSettings};
 pub use builtin_template_preview::builtin_template_preview_description;
+pub use beat_board_candidate::{finalize_beat_board_candidate, prepare_beat_board_candidate};
 pub use builtin_templates::{
     builtin_template_metadata, builtin_templates, instantiate_builtin_template, BuiltinTemplateId,
     BuiltinTemplateMetadata, DEFAULT_BUILTIN_TEMPLATE_ID,
@@ -44,7 +48,7 @@ pub use diagnostics::{
     save_diagnostic_at, FdxError, ModelErrorKind, PreservationErrorKind, SaveDiagnosticCode,
 };
 pub use document::{
-    FdxDocument, FdxImportCandidate, FdxImportDiagnostic, FdxImportDiagnostics, FdxImportOutcome,
+    BeatBoardViewState, FdxDocument, FdxImportCandidate, FdxImportDiagnostic, FdxImportDiagnostics, FdxImportOutcome,
     FdxMigrationConsent, FdxMigrationKind, FdxVersionDirection, FdxVersionStatus, InvisiblesColor,
     InvisiblesState, ScriptPanelDisplayMode, WindowState, MAX_FDX_IMPORT_DIAGNOSTICS,
 };
@@ -60,6 +64,6 @@ pub use text_state::{
     flat_offset_to_position, parse_flat_selection, selection_to_flat_offsets, TextState,
     MAX_TEXT_SCALING, MIN_TEXT_SCALING,
 };
-pub use verification::same_dual_dialogue_projection;
+pub use verification::{same_beat_board_projection, same_dual_dialogue_projection};
 pub use version::preflight_version;
-pub use writer::{write_v6, write_v6_for_save};
+pub use writer::{write_v6, write_v6_for_save, write_v6_for_transactional_save};

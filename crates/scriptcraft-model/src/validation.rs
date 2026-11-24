@@ -1,13 +1,21 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::{
+    beat_board::{
+        BeatBoard, MAX_BOARD_DIMENSION, MAX_CARD_HEIGHT, MAX_CARD_WIDTH, MIN_CARD_HEIGHT,
+        MIN_CARD_WIDTH,
+    },
     dual_dialogue::{self, DualDialogueError},
     element::{
-        ScreenplayElement, MAX_PROVENANCE_STRING_BYTES, MAX_RUNS_PER_ELEMENT, MAX_RUN_ATTRIBUTES,
-        MAX_RUN_ATTRIBUTE_BYTES,
+        ScreenplayElement, TextRun, MAX_PROVENANCE_STRING_BYTES, MAX_RUNS_PER_ELEMENT,
+        MAX_RUN_ATTRIBUTES, MAX_RUN_ATTRIBUTE_BYTES,
     },
     identity::StableId,
+    preservation::{
+        BoardEntityKind, ForeignIdDomain, ForeignIdentity, PreservationError, PreservationState,
+        ReferencePolicy,
+    },
     project::Project,
     ModelError, MAX_TEXT_BYTES,
 };
@@ -17,15 +25,32 @@ pub const MAX_ELEMENTS: usize = 10_000;
 /// Validates canonical screenplay element text, runs, identity, and provenance.
 pub(crate) fn validate_element(element: &ScreenplayElement) -> Result<(), ModelError> {
     StableId::new(element.id.as_str())?;
-    if element.text.len() > MAX_TEXT_BYTES {
+    validate_text_runs(&element.text, &element.runs, false)?;
+    if element.source_provenance.as_ref().is_some_and(|source| {
+        source
+            .foreign_id
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_PROVENANCE_STRING_BYTES)
+            || source
+                .foreign_role
+                .as_ref()
+                .is_some_and(|value| value.len() > MAX_PROVENANCE_STRING_BYTES)
+    }) {
+        return Err(ModelError::StringTooLong);
+    }
+    Ok(())
+}
+
+fn validate_text_runs(text: &str, runs: &[TextRun], exact: bool) -> Result<(), ModelError> {
+    if text.len() > MAX_TEXT_BYTES {
         return Err(ModelError::TextTooLong);
     }
-    if element.runs.len() > MAX_RUNS_PER_ELEMENT {
+    if runs.len() > MAX_RUNS_PER_ELEMENT {
         return Err(ModelError::TooManyRuns);
     }
     let mut run_text = String::new();
     let mut attribute_count = 0usize;
-    for run in &element.runs {
+    for run in runs {
         if run_text.len().saturating_add(run.text.len()) > MAX_TEXT_BYTES {
             return Err(ModelError::TextTooLong);
         }
@@ -42,20 +67,138 @@ pub(crate) fn validate_element(element: &ScreenplayElement) -> Result<(), ModelE
     if attribute_count > MAX_RUN_ATTRIBUTES {
         return Err(ModelError::TooManyRunAttributes);
     }
-    if !element.runs.is_empty() && run_text != element.text {
+    if (exact || !runs.is_empty()) && run_text != text {
         return Err(ModelError::InvalidRunProjection);
     }
-    if element.source_provenance.as_ref().is_some_and(|source| {
-        source
-            .foreign_id
-            .as_ref()
-            .is_some_and(|value| value.len() > MAX_PROVENANCE_STRING_BYTES)
-            || source
-                .foreign_role
-                .as_ref()
-                .is_some_and(|value| value.len() > MAX_PROVENANCE_STRING_BYTES)
-    }) {
-        return Err(ModelError::StringTooLong);
+    Ok(())
+}
+
+fn foreign_identity(domain: ForeignIdDomain, value: &str) -> Result<ForeignIdentity, ModelError> {
+    ForeignIdentity::new(domain, value).map_err(ModelError::InvalidPreservationState)
+}
+
+fn validate_beat_board(
+    board: &BeatBoard,
+    ids: &mut BTreeSet<StableId>,
+    preservation: Option<&PreservationState>,
+) -> Result<(), ModelError> {
+    if board.width.raw() <= 0
+        || board.height.raw() <= 0
+        || board.width > MAX_BOARD_DIMENSION
+        || board.height > MAX_BOARD_DIMENSION
+    {
+        return Err(ModelError::InvalidNumber);
+    }
+    if board.cards.len() > MAX_ELEMENTS {
+        return Err(ModelError::TooManyElements);
+    }
+    let card_stable_ids = board.cards.iter().map(|card| &card.id).collect::<BTreeSet<_>>();
+    let creation_ids = board.card_creation_order.iter().collect::<BTreeSet<_>>();
+    if card_stable_ids.len() != board.cards.len()
+        || creation_ids.len() != board.card_creation_order.len()
+        || card_stable_ids != creation_ids
+    {
+        return Err(ModelError::DuplicateId);
+    }
+    let board_id = board
+        .foreign_id
+        .as_deref()
+        .map(|value| foreign_identity(ForeignIdDomain::Board, value))
+        .transpose()?;
+    let mut card_ids = BTreeSet::new();
+    let mut paragraph_count = 0usize;
+    for card in &board.cards {
+        StableId::new(card.id.as_str())?;
+        if !ids.insert(card.id.clone()) {
+            return Err(ModelError::DuplicateId);
+        }
+        let card_id = foreign_identity(ForeignIdDomain::ListItem, &card.foreign_id)?;
+        if !card_ids.insert(card_id) {
+            return Err(ModelError::DuplicateId);
+        }
+        if card.title.len() > MAX_TEXT_BYTES {
+            return Err(ModelError::TextTooLong);
+        }
+        if card.title.contains(['\r', '\n']) {
+            return Err(ModelError::InvalidRunProjection);
+        }
+        if card.rect.width < MIN_CARD_WIDTH
+            || card.rect.width > MAX_CARD_WIDTH
+            || card.rect.height < MIN_CARD_HEIGHT
+            || card.rect.height > MAX_CARD_HEIGHT
+            || !card.rect.contained_in(board.width, board.height)
+        {
+            return Err(ModelError::InvalidNumber);
+        }
+        if card.paragraphs.is_empty() {
+            return Err(ModelError::InvalidRunProjection);
+        }
+        paragraph_count = paragraph_count.saturating_add(card.paragraphs.len());
+        if paragraph_count > MAX_ELEMENTS {
+            return Err(ModelError::TooManyElements);
+        }
+        for paragraph in &card.paragraphs {
+            StableId::new(paragraph.id.as_str())?;
+            if !ids.insert(paragraph.id.clone()) {
+                return Err(ModelError::DuplicateId);
+            }
+            if let Some(value) = &paragraph.foreign_id {
+                foreign_identity(ForeignIdDomain::Paragraph, value)?;
+            }
+            validate_text_runs(&paragraph.text, &paragraph.runs, true)?;
+            if paragraph.text.is_empty() && !paragraph.runs.is_empty() {
+                return Err(ModelError::InvalidRunProjection);
+            }
+        }
+    }
+    if let Some(preservation) = preservation {
+        validate_beat_graph_coherence(board_id.as_ref(), &card_ids, preservation)?;
+    }
+    Ok(())
+}
+
+/// Checks graph facts already known without assuming source-node ownership.
+/// WO-002 must bind the winning supported nodes and paragraph identities; the
+/// later output projection must account for new or removed graph registrations.
+fn validate_beat_graph_coherence(
+    board_id: Option<&ForeignIdentity>,
+    card_ids: &BTreeSet<ForeignIdentity>,
+    preservation: &PreservationState,
+) -> Result<(), ModelError> {
+    if board_id.is_none() && card_ids.is_empty() {
+        return Ok(());
+    }
+    let entities = preservation
+        .board_graph
+        .entities
+        .iter()
+        .map(|entity| (&entity.identity, entity.kind))
+        .collect::<BTreeMap<_, _>>();
+    let graph_error = || ModelError::InvalidPreservationState(PreservationError::DanglingReference);
+    if board_id
+        .and_then(|id| entities.get(id))
+        .is_some_and(|kind| *kind != BoardEntityKind::DisplayBoard)
+        || card_ids.iter().any(|id| {
+            entities
+                .get(id)
+                .is_some_and(|kind| *kind != BoardEntityKind::ListItem)
+        })
+    {
+        return Err(graph_error());
+    }
+    let references = preservation
+        .board_graph
+        .references
+        .iter()
+        .filter(|reference| reference.policy == ReferencePolicy::RequiredInternal)
+        .map(|reference| (&reference.source, &reference.target))
+        .collect::<BTreeSet<_>>();
+    if let Some(board_id) = board_id.filter(|id| entities.contains_key(*id)) {
+        for card_id in card_ids.iter().filter(|id| entities.contains_key(*id)) {
+            if !references.contains(&(board_id, card_id)) {
+                return Err(graph_error());
+            }
+        }
     }
     Ok(())
 }
@@ -115,7 +258,7 @@ impl Project {
                     return Err(ModelError::MissingElementDefinition(key));
                 }
             }
-            if !ids.insert(&item.id) {
+            if !ids.insert(item.id.clone()) {
                 return Err(ModelError::DuplicateId);
             }
             element_ids.insert(item.id.clone());
@@ -126,12 +269,18 @@ impl Project {
             if self.element_definitions().get(&key).is_none() {
                 return Err(ModelError::MissingElementDefinition(key));
             }
-            if !ids.insert(&item.id) {
+            if !ids.insert(item.id.clone()) {
                 return Err(ModelError::DuplicateId);
             }
             element_ids.insert(item.id.clone());
         }
         dual_dialogue::validate_groups(self).map_err(ModelError::InvalidDualDialogue)?;
+        ids.extend(
+            self.dual_dialogue_groups
+                .iter()
+                .map(|group| group.id.clone()),
+        );
+        validate_beat_board(self.beat_board(), &mut ids, self.preservation.as_ref())?;
         if self
             .direct_paragraph_overrides
             .keys()
@@ -192,6 +341,7 @@ impl Project {
             || self.direct_paragraph_overrides != baseline.direct_paragraph_overrides
             || self.element_definitions() != baseline.element_definitions()
             || self.page_layout() != baseline.page_layout()
+            || self.beat_board() != baseline.beat_board()
             || !Arc::ptr_eq(&self.layout_identity, &baseline.layout_identity)
         {
             return Ok(false);

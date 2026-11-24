@@ -1510,9 +1510,8 @@ impl crate::app::ScriptCraftApp {
                     self.dispatch_command(invocation, ctx);
                 }
                 PendingDesktopAction::ZoomStep { direction, origin } => {
-                    let surface = self.active_editor_surface();
-                    let current = self.zoom_for_surface(surface);
-                    let target = zoom_step_target(current, direction);
+                    let current = self.active_zoom();
+                    let target = zoom_step_target(current, direction, self.active_zoom_policy());
                     if target != current {
                         if let Ok(percent) = ZoomPercent::new(target) {
                             self.dispatch_command(
@@ -1527,17 +1526,17 @@ impl crate::app::ScriptCraftApp {
     }
 }
 
-fn zoom_step_target(current: u16, direction: ZoomStepDirection) -> u16 {
+fn zoom_step_target(current: u16, direction: ZoomStepDirection, policy: crate::chrome::status_bar::ZoomPolicy) -> u16 {
     let presets = crate::chrome::status_bar::ZOOM_PRESETS;
     match direction {
         ZoomStepDirection::In => presets
             .into_iter()
             .find(|preset| *preset > current)
-            .unwrap_or(crate::chrome::status_bar::MAX_ZOOM_PERCENT),
+            .unwrap_or(policy.max),
         ZoomStepDirection::Out => presets
             .into_iter()
             .rev()
             .find(|preset| *preset < current)
-            .unwrap_or(crate::chrome::status_bar::MIN_ZOOM_PERCENT),
+            .unwrap_or(policy.min),
     }
 }

@@ -35,6 +35,13 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RootDocumentView {
+    #[default]
+    Script,
+    BeatBoard,
+}
+
 /// Transient title-window presentation state. Semantic selection and all edits
 /// remain in the shared EditingSession; only viewport-local interaction state is
 /// separate from the body window.
@@ -83,6 +90,13 @@ impl Default for TitlePageViewState {
 pub(crate) struct ScriptCraftApp {
     pub(crate) session: EditingSession,
     pub(crate) invisibles: scriptcraft_fdx::InvisiblesState,
+    pub(crate) beat_board_view_state: scriptcraft_fdx::BeatBoardViewState,
+    pub(crate) root_document_view: RootDocumentView,
+    pub(crate) beat_pinch_zoom_percent: f64,
+    pub(crate) beat_viewport: Option<crate::views::beat_board::geometry::ViewportGeometry>,
+    pub(crate) beat_layout_cache: crate::views::beat_board::BeatLayoutCache,
+    pub(crate) beat_interaction: crate::views::beat_board::BeatInteraction,
+    pub(crate) beat_text: crate::views::beat_board::BeatTextState,
     pub(crate) root_close_lifecycle: RootCloseLifecycle,
     pub(crate) document_font_store: document_font::DocumentFontStore,
     pub(crate) prepared_document_fonts: Option<document_font::PreparedDocumentFonts>,
@@ -221,6 +235,7 @@ impl ScriptCraftApp {
             .map_err(|error| format!("startup built-in template failed: {error:?}"))?;
         let script_view_mode = Self::script_view_mode_from_fdx(builtin_document.display_mode);
         let invisibles = builtin_document.invisibles;
+        let beat_board_view_state = builtin_document.beat_board_view_state;
         let project = builtin_document.project;
         let session = EditingSession::with_policy(project, EditPolicy::default())
             .map_err(|error| format!("session failed: {error:?}"))?;
@@ -233,6 +248,13 @@ impl ScriptCraftApp {
         Ok(Self {
             session,
             invisibles,
+            beat_board_view_state,
+            root_document_view: RootDocumentView::Script,
+            beat_pinch_zoom_percent: f64::from(beat_board_view_state.zoom_milli_percent()) / 1000.0,
+            beat_viewport: None,
+            beat_layout_cache: crate::views::beat_board::BeatLayoutCache::default(),
+            beat_interaction: crate::views::beat_board::BeatInteraction::default(),
+            beat_text: crate::views::beat_board::BeatTextState::default(),
             root_close_lifecycle: RootCloseLifecycle::default(),
             document_font_store: document_font::DocumentFontStore::default(),
             prepared_document_fonts: None,

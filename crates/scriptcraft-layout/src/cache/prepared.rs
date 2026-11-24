@@ -392,7 +392,7 @@ pub(crate) fn prepare_body_for_layout(
         paragraph,
         lines: lines
             .into_iter()
-            .map(|line| layout.make_line(0, line, false, FixedPoint::default()))
+            .map(|line| ScreenplayLayout::make_line(0, line, false, FixedPoint::default()))
             .collect::<Vec<_>>()
             .into(),
     });

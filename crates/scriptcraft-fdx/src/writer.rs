@@ -12,8 +12,9 @@ use crate::reconcile::reconcile_project_elements;
 use crate::split_state::reconcile_root_display_mode;
 use crate::text_state::{reconcile_root_text_state, reconcile_title_page_invisibles};
 use crate::verification::{
-    first_identity_set_difference, first_source_tree_difference, identity_set, normalize_sections,
-    same_non_paragraph_identities, validate_project_output_budgets,
+    first_identity_set_difference, first_source_tree_difference, identity_set, intended_output_graph,
+    normalize_sections, same_generated_source_tree, same_non_paragraph_identities,
+    same_unrelated_board_graph, validate_project_output_budgets, verify_managed_beat_graph,
     verify_writer_semantic_projection, IdentitySetDifference, SourceTreeDifference,
 };
 use crate::version::prepare_preserved_root_output;
@@ -278,11 +279,25 @@ pub fn write_v6(project: &Project) -> Result<Vec<u8>, FdxError> {
     write_v6_with_diagnostics(project).map_err(|failure| failure.error)
 }
 
+/// Serialize with save-scoped context without transactional duplicate removal.
+/// The session's transactional candidate uses the separate entry point below.
 pub fn write_v6_for_save(
     project: &Project,
     context: &mut SaveContext,
 ) -> Result<Vec<u8>, FdxError> {
     write_v6_with_context(project, context).map_err(|failure| failure.error)
+}
+
+/// Serialize the detached candidate prepared by transactional Save/Save As.
+/// Unlike direct serialization, this removes later supported Beat boards.
+pub fn write_v6_for_transactional_save(
+    project: &Project,
+    context: &mut SaveContext,
+) -> Result<Vec<u8>, FdxError> {
+    if !matches!(context.operation(), SaveOperation::Save | SaveOperation::SaveAs) {
+        return Err(FdxError::InvalidValue);
+    }
+    write_v6_with_transactional_context(project, context).map_err(|failure| failure.error)
 }
 
 // WriterFailure intentionally carries bounded structural/identity differences
@@ -298,6 +313,23 @@ fn write_v6_with_context(
     project: &Project,
     context: &mut SaveContext,
 ) -> Result<Vec<u8>, WriterFailure> {
+    write_v6_with_mode(project, context, false)
+}
+
+#[allow(clippy::result_large_err)]
+fn write_v6_with_transactional_context(
+    project: &Project,
+    context: &mut SaveContext,
+) -> Result<Vec<u8>, WriterFailure> {
+    write_v6_with_mode(project, context, true)
+}
+
+#[allow(clippy::result_large_err)]
+fn write_v6_with_mode(
+    project: &Project,
+    context: &mut SaveContext,
+    normalize_duplicates: bool,
+) -> Result<Vec<u8>, WriterFailure> {
     let mut stage = WriterStage::ProjectValidation;
     let mut structural_difference = None;
     let mut identity_difference = None;
@@ -307,6 +339,7 @@ fn write_v6_with_context(
         &mut stage,
         &mut structural_difference,
         &mut identity_difference,
+        normalize_duplicates,
     )
     .map_err(|error| WriterFailure {
         error,
@@ -322,12 +355,14 @@ fn write_v6_inner(
     stage: &mut WriterStage,
     structural_difference: &mut Option<SourceTreeDifference>,
     identity_difference: &mut Option<IdentitySetDifference>,
+    normalize_duplicates: bool,
 ) -> Result<Vec<u8>, FdxError> {
     // Serialization owns a defensive detached normalization boundary. Every
     // subsequent validation, reconciliation, budget, and reread comparison
     // consumes this same candidate rather than mutating the caller's Project.
     let normalized_project =
         normalize_project_runs(project).map_err(map_inline_normalization_error)?;
+    let normalized_project = crate::beat_board_candidate::finalize_beat_board_candidate(&normalized_project)?;
     let project = &normalized_project;
 
     // Project validation requires every retained definition anchor to resolve
@@ -381,7 +416,10 @@ fn write_v6_inner(
             .ok_or_else(|| SaveDiagnosticCode::WriteOriginalPreservationMissing.error())?;
         if !same_non_paragraph_identities(&state.identities, &original_state.identities)
             || state.references != original_state.references
-            || state.board_graph != original_state.board_graph
+            || !same_unrelated_board_graph(
+                &original_state.board_graph, &state.board_graph,
+                original.project.beat_board(), project.beat_board(), &BTreeSet::new(),
+            )
         {
             return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
         }
@@ -394,6 +432,7 @@ fn write_v6_inner(
             effective_identities.extend(reconcile_document_lineage(
                 &mut sections,
                 &state.identities,
+                project,
                 context,
             )?);
             reconcile_root_window_state(&mut sections, context.window_state())?;
@@ -415,6 +454,15 @@ fn write_v6_inner(
         )?;
         let mut sections = definition_projection.sections;
         reconcile_project_elements(&mut sections, project)?;
+        let beat_projection = crate::beat_board_output::project_beat_source(
+            &sections, project, context, state, original.project.beat_board(), original_state,
+            normalize_duplicates,
+        )?;
+        let mut sections = beat_projection.sections;
+        let beat_changes = beat_projection.paragraphs;
+        let removed_boards = beat_projection.removed_boards;
+        effective_identities.retain(|id| !beat_changes.removed.contains(id));
+        effective_identities.extend(beat_changes.added);
         let original_paragraph_ids = original_state
             .identities
             .iter()
@@ -429,13 +477,35 @@ fn write_v6_inner(
             .into_iter()
             .flat_map(|section| section.children)
             .collect::<Vec<_>>();
-        (nodes, Some((expected_sections, effective_identities)))
+        (nodes, Some((expected_sections, effective_identities, removed_boards,
+            original_state.board_graph.clone(), original.project.beat_board().clone(), state.references.clone())))
     } else {
         *stage = WriterStage::NewDocumentGeneration;
         let mut nodes = crate::new_document::make_new_document_nodes(project, context)?;
         format_generated_structure(&mut nodes);
         (nodes, None)
     };
+
+    // Derive the complete intended graph from the detached tree, not from the
+    // pre-reconciliation preservation registry or the eventual reread alone.
+    *stage = WriterStage::IdentityComparison;
+    let (intended_identities, intended_graph) = intended_output_graph(&nodes, normalize_duplicates)?;
+    verify_managed_beat_graph(project.beat_board(), &intended_identities, &intended_graph)?;
+    if let Some((_, expected_identities, removed_boards, original_graph, original_board, _)) =
+        &expected_preserved_sections
+    {
+        let expected = identity_set(expected_identities);
+        let intended = identity_set(&intended_identities);
+        if expected != intended {
+            *identity_difference = first_identity_set_difference(&expected, &intended);
+            return Err(SaveDiagnosticCode::WriteIdentitySetMismatch.error());
+        }
+        if !same_unrelated_board_graph(original_graph, &intended_graph, original_board,
+            project.beat_board(), removed_boards)
+        {
+            return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
+        }
+    }
 
     *stage = WriterStage::XmlWriting;
     let declaration = if project.preservation.is_some() {
@@ -463,15 +533,34 @@ fn write_v6_inner(
     })?;
     *stage = WriterStage::SemanticComparison;
     verify_writer_semantic_projection(project, &written.project)?;
-    if let Some((expected_sections, expected_identities)) = expected_preserved_sections {
-        *stage = WriterStage::IdentityComparison;
-        let actual_state = written
-            .project
-            .preservation
-            .as_ref()
-            .ok_or_else(|| SaveDiagnosticCode::WriteOutputPreservationMissing.error())?;
+    *stage = WriterStage::IdentityComparison;
+    let actual_state = written.project.preservation.as_ref()
+        .ok_or_else(|| SaveDiagnosticCode::WriteOutputPreservationMissing.error())?;
+    let expected_complete = identity_set(&intended_identities);
+    let actual_complete = identity_set(&actual_state.identities);
+    if expected_complete != actual_complete {
+        *identity_difference = first_identity_set_difference(&expected_complete, &actual_complete);
+        return Err(SaveDiagnosticCode::WriteIdentitySetMismatch.error());
+    }
+    if actual_state.board_graph != intended_graph {
+        return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
+    }
+    verify_managed_beat_graph(project.beat_board(), &actual_state.identities, &actual_state.board_graph)?;
+    if let Some((expected_sections, expected_identities, removed_boards, _, _, expected_references)) = expected_preserved_sections {
+        if actual_state.references != expected_references {
+            return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
+        }
         let actual_identity_set = identity_set(&actual_state.identities);
         let expected_identity_set = identity_set(&expected_identities);
+        if actual_state.board_graph.entities.iter().any(|entity| removed_boards.contains(&entity.identity))
+            || actual_state.board_graph.references.iter().any(|reference| {
+                removed_boards.contains(&reference.source) || removed_boards.contains(&reference.target)
+            })
+            || actual_state.references.iter().any(|reference| {
+                removed_boards.contains(&reference.source) || removed_boards.contains(&reference.target)
+            }) {
+            return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
+        }
         if actual_identity_set != expected_identity_set {
             *identity_difference =
                 first_identity_set_difference(&expected_identity_set, &actual_identity_set);
@@ -488,6 +577,15 @@ fn write_v6_inner(
             let public_detail = difference.public_detail();
             *structural_difference = Some(difference);
             return Err(FdxError::SaveDiagnosticSourceTreeMismatch(public_detail));
+        }
+    } else {
+        *stage = WriterStage::SourceTreeComparison;
+        let mut expected = vec![PreservedNode::Text("\n".into())];
+        expected.extend(nodes.iter().cloned());
+        let actual = actual_state.sections.iter().flat_map(|section| &section.children)
+            .cloned().collect::<Vec<_>>();
+        if !same_generated_source_tree(&expected, &actual) {
+            return Err(SaveDiagnosticCode::WriteNormalizedSourceTreeMismatch.error());
         }
     }
     Ok(bytes)

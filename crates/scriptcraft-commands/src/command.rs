@@ -8,6 +8,8 @@ use super::{
     PdfExportOptions, PointerPhase, Position, ScriptViewMode, Selection, SprintTimerMode,
     TitleTextStyle, VerticalDirection, ZoomFactor, ZoomPercent, RunFormattingPatchValue,
     ParagraphFormattingPatchValue,
+    BeatCardIdValue, BeatPointValue, BeatRectValue, BeatSelectionValue,
+    BeatTextEditValue, BeatNavigationValue,
 };
 
 /// Stable identifier for a command. Identifiers are intentionally independent
@@ -77,11 +79,21 @@ pub enum CommandId {
     FileNewFromTemplate,
     ViewInvisiblesToggle,
     ViewRulerToggle,
+    ViewBeatBoardShow,
+    BeatBoardCardCreate,
+    BeatBoardCardActivate,
+    BeatBoardCardGeometrySet,
+    BeatBoardSelectionSet,
+    BeatBoardTextEdit,
+    BeatBoardNavigation,
+    BeatBoardStyleToggle,
+    BeatBoardStyleClear,
+    BeatBoardRunFormattingSet,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 73] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -145,6 +157,16 @@ impl CommandId {
         Self::FileNewFromTemplate,
         Self::ViewInvisiblesToggle,
         Self::ViewRulerToggle,
+        Self::ViewBeatBoardShow,
+        Self::BeatBoardCardCreate,
+        Self::BeatBoardCardActivate,
+        Self::BeatBoardCardGeometrySet,
+        Self::BeatBoardSelectionSet,
+        Self::BeatBoardTextEdit,
+        Self::BeatBoardNavigation,
+        Self::BeatBoardStyleToggle,
+        Self::BeatBoardStyleClear,
+        Self::BeatBoardRunFormattingSet,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -212,6 +234,16 @@ impl CommandId {
             Self::FileNewFromTemplate => "file.new-from-template",
             Self::ViewInvisiblesToggle => "view.invisibles.toggle",
             Self::ViewRulerToggle => "view.ruler.toggle",
+            Self::ViewBeatBoardShow => "view.beat-board.show",
+            Self::BeatBoardCardCreate => "beat-board.card.create",
+            Self::BeatBoardCardActivate => "beat-board.card.activate",
+            Self::BeatBoardCardGeometrySet => "beat-board.card.geometry.set",
+            Self::BeatBoardSelectionSet => "beat-board.selection.set",
+            Self::BeatBoardTextEdit => "beat-board.text.edit",
+            Self::BeatBoardNavigation => "beat-board.navigation",
+            Self::BeatBoardStyleToggle => "beat-board.style.toggle",
+            Self::BeatBoardStyleClear => "beat-board.style.clear",
+            Self::BeatBoardRunFormattingSet => "beat-board.run-formatting.set",
         }
     }
 }
@@ -442,6 +474,26 @@ pub enum Command {
     ViewInvisiblesToggle,
     #[serde(rename = "view.ruler.toggle")]
     ViewRulerToggle,
+    #[serde(rename = "view.beat-board.show")]
+    ViewBeatBoardShow,
+    #[serde(rename = "beat-board.card.create")]
+    BeatBoardCardCreate { position: BeatPointValue },
+    #[serde(rename = "beat-board.card.activate")]
+    BeatBoardCardActivate { card: BeatCardIdValue },
+    #[serde(rename = "beat-board.card.geometry.set")]
+    BeatBoardCardGeometrySet { card: BeatCardIdValue, rect: BeatRectValue, #[serde(default)] activate: bool },
+    #[serde(rename = "beat-board.selection.set")]
+    BeatBoardSelectionSet { selection: BeatSelectionValue },
+    #[serde(rename = "beat-board.text.edit")]
+    BeatBoardTextEdit { operation: BeatTextEditValue },
+    #[serde(rename = "beat-board.navigation")]
+    BeatBoardNavigation { target: BeatNavigationValue, #[serde(default)] extend: bool },
+    #[serde(rename = "beat-board.style.toggle")]
+    BeatBoardStyleToggle { style: TitleTextStyle },
+    #[serde(rename = "beat-board.style.clear")]
+    BeatBoardStyleClear,
+    #[serde(rename = "beat-board.run-formatting.set")]
+    BeatBoardRunFormattingSet { patch: RunFormattingPatchValue },
 }
 
 impl Command {
@@ -535,6 +587,16 @@ impl Command {
             Self::FileNewFromTemplate { .. } => CommandId::FileNewFromTemplate,
             Self::ViewInvisiblesToggle => CommandId::ViewInvisiblesToggle,
             Self::ViewRulerToggle => CommandId::ViewRulerToggle,
+            Self::ViewBeatBoardShow => CommandId::ViewBeatBoardShow,
+            Self::BeatBoardCardCreate { .. } => CommandId::BeatBoardCardCreate,
+            Self::BeatBoardCardActivate { .. } => CommandId::BeatBoardCardActivate,
+            Self::BeatBoardCardGeometrySet { .. } => CommandId::BeatBoardCardGeometrySet,
+            Self::BeatBoardSelectionSet { .. } => CommandId::BeatBoardSelectionSet,
+            Self::BeatBoardTextEdit { .. } => CommandId::BeatBoardTextEdit,
+            Self::BeatBoardNavigation { .. } => CommandId::BeatBoardNavigation,
+            Self::BeatBoardStyleToggle { .. } => CommandId::BeatBoardStyleToggle,
+            Self::BeatBoardStyleClear => CommandId::BeatBoardStyleClear,
+            Self::BeatBoardRunFormattingSet { .. } => CommandId::BeatBoardRunFormattingSet,
         }
     }
 }

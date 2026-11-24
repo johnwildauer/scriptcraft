@@ -618,7 +618,7 @@ fn push_unqualified_attribute(element: &mut PreservedElement, name: &str, value:
     });
 }
 
-fn fixed_inches_string(value: FixedPoint) -> String {
+pub(crate) fn fixed_inches_string(value: FixedPoint) -> String {
     let raw = value.raw();
     const PER_INCH: u64 = 7_200;
     let magnitude = raw.unsigned_abs();

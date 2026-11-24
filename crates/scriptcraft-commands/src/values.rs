@@ -6,6 +6,71 @@ use scriptcraft_model::{
 };
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BeatCardIdValue(scriptcraft_model::StableId);
+impl BeatCardIdValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, ModelError> { scriptcraft_model::StableId::new(value).map(Self) }
+    pub fn from_core(value: scriptcraft_model::StableId) -> Self { Self(value) }
+    pub fn as_core(&self) -> &scriptcraft_model::StableId { &self.0 }
+}
+impl Serialize for BeatCardIdValue {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { serializer.serialize_str(self.0.as_str()) }
+}
+impl<'de> Deserialize<'de> for BeatCardIdValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(|_| de::Error::custom("invalid Beat card ID"))
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BeatPointValue { pub x: i64, pub y: i64 }
+impl BeatPointValue {
+    pub fn to_core(self) -> scriptcraft_model::BeatPoint { scriptcraft_model::BeatPoint { x: scriptcraft_model::BoardFixed::from_milli_pixels(self.x), y: scriptcraft_model::BoardFixed::from_milli_pixels(self.y) } }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BeatRectValue { pub left: i64, pub top: i64, pub width: i64, pub height: i64 }
+impl BeatRectValue {
+    pub fn to_core(self) -> scriptcraft_model::BeatRect { scriptcraft_model::BeatRect { left: scriptcraft_model::BoardFixed::from_milli_pixels(self.left), top: scriptcraft_model::BoardFixed::from_milli_pixels(self.top), width: scriptcraft_model::BoardFixed::from_milli_pixels(self.width), height: scriptcraft_model::BoardFixed::from_milli_pixels(self.height) } }
+    pub fn from_core(rect: scriptcraft_model::BeatRect) -> Self { Self { left: rect.left.raw(), top: rect.top.raw(), width: rect.width.raw(), height: rect.height.raw() } }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BeatSelectionValue {
+    None,
+    Card { card: BeatCardIdValue },
+    Text { card: BeatCardIdValue, field: BeatTextFieldValue, anchor: BeatTextPositionValue, focus: BeatTextPositionValue },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeatTextFieldValue { Title, Body }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BeatTextPositionValue { pub paragraph: u32, pub offset: u32 }
+
+impl BeatTextPositionValue {
+    pub fn to_core(self) -> Result<scriptcraft_session::editing::BeatTextPosition, crate::PositionError> {
+        Ok(scriptcraft_session::editing::BeatTextPosition {
+            paragraph: usize::try_from(self.paragraph).map_err(|_| crate::PositionError::IndexOutOfRange)?,
+            offset: usize::try_from(self.offset).map_err(|_| crate::PositionError::IndexOutOfRange)?,
+        })
+    }
+    pub fn from_core(value: scriptcraft_session::editing::BeatTextPosition) -> Result<Self, crate::PositionError> {
+        Ok(Self { paragraph: u32::try_from(value.paragraph).map_err(|_| crate::PositionError::IndexOutOfRange)?,
+            offset: u32::try_from(value.offset).map_err(|_| crate::PositionError::IndexOutOfRange)? })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BeatTextEditValue { Insert { text: String }, Paste { text: String }, DeleteBackward, DeleteForward, Enter }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BeatNavigationValue { Horizontal { direction: HorizontalDirection }, LineEdge { edge: LineEdge } }
+
 /// Owned, exact element-type key carried by command 22.
 ///
 /// This value is open: it preserves arbitrary labels and case distinctions and

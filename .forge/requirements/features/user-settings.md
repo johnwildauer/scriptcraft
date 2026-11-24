@@ -44,6 +44,7 @@ toolbar = [
   "save",
   "save-as",
   "flexible-space",
+  "beat-board",
   "title-page",
   "elements",
   "flexible-space",
@@ -63,7 +64,7 @@ title_page_toolbar = [
 ]
 ```
 
-The arrays are global preferences, not Project, EditingSession, FDX, command-wire, layout, export, dirty/history, or native-save state. Resolution is nonmutating and occurs once during app construction; the existing toolbar continues to project live availability and dispatch behavior. Overflow is itself a built-in item ID: when a custom list omits it, nonfitting items have no overflow affordance and no static indicator is synthesized; other menus and command entry points remain unchanged. Repeated rendered entries use ordered position as well as item ID for widget identity. No toolbar editor, drag/drop customization, live reload, or user-defined item presentation is included.
+The arrays are global preferences, not Project, EditingSession, FDX, command-wire, layout, export, dirty/history, or native-save state. Resolution is nonmutating and occurs once during app construction; the existing toolbar continues to project live availability and dispatch behavior. The new default Beat Board item does not migrate or change existing custom arrays; their membership and order remain authoritative under the existing unknown/empty fallback rules. Overflow is itself a built-in item ID: when a custom list omits it, nonfitting items have no overflow affordance and no static indicator is synthesized; other menus and command entry points remain unchanged. Repeated rendered entries use ordered position as well as item ID for widget identity. No toolbar editor, drag/drop customization, live reload, or user-defined item presentation is included.
 
 ## Related documents
 

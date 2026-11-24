@@ -1,5 +1,5 @@
 use crate::text_state::TextState;
-use scriptcraft_model::Project;
+use scriptcraft_model::{BeatPoint, Project, MAX_BOARD_DIMENSION};
 
 /// A Version 6 reader result. `project` owns the effective document page layout;
 /// its preservation state independently retains the original FDX source graph
@@ -22,6 +22,40 @@ pub struct FdxDocument {
     pub display_mode: ScriptPanelDisplayMode,
     /// Independent disposable visibility and marker color for the editor surfaces.
     pub invisibles: InvisiblesState,
+    /// Disposable Beat viewport, independent of Project and editing history.
+    pub beat_board_view_state: BeatBoardViewState,
+}
+
+/// Exact disposable Beat viewport coordinates and thousandths of a percent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BeatBoardViewState {
+    scroll_origin: BeatPoint,
+    zoom_milli_percent: u32,
+}
+
+impl BeatBoardViewState {
+    pub fn new(scroll_origin: BeatPoint, zoom_milli_percent: u32) -> Option<Self> {
+        (scroll_origin.x.raw() >= 0
+            && scroll_origin.y.raw() >= 0
+            && scroll_origin.x <= MAX_BOARD_DIMENSION
+            && scroll_origin.y <= MAX_BOARD_DIMENSION
+            && (5_000..=300_000).contains(&zoom_milli_percent))
+            .then_some(Self { scroll_origin, zoom_milli_percent })
+    }
+
+    pub const fn scroll_origin(self) -> BeatPoint {
+        self.scroll_origin
+    }
+
+    pub const fn zoom_milli_percent(self) -> u32 {
+        self.zoom_milli_percent
+    }
+}
+
+impl Default for BeatBoardViewState {
+    fn default() -> Self {
+        Self { scroll_origin: BeatPoint::default(), zoom_milli_percent: 100_000 }
+    }
 }
 
 /// Disposable FDX ScriptPanel presentation mode for the document body.

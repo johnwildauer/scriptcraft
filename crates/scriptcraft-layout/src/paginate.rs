@@ -216,7 +216,6 @@ impl ScreenplayLayout {
     }
 
     pub(super) fn make_line(
-        &self,
         page_number: usize,
         line: WrappedLine,
         title_page: bool,

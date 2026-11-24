@@ -1,4 +1,4 @@
-use crate::app::ScriptCraftApp;
+use crate::app::{RootDocumentView, ScriptCraftApp};
 use crate::widgets::elements::state::TemplateSelectorMode;
 use scriptcraft_commands::{BuiltinTemplateValue, CommandId, EditorSurface};
 
@@ -20,8 +20,11 @@ pub(crate) struct AppCommandAvailability {
     pub(crate) copy: bool,
     pub(crate) paste: bool,
     pub(crate) body_only: bool,
+    pub(crate) editor_available: bool,
+    pub(crate) beat_available: bool,
     pub(crate) element_change: bool,
     pub(crate) run_formatting: bool,
+    pub(crate) beat_formatting: bool,
     pub(crate) paragraph_formatting: bool,
     pub(crate) dual_dialogue_toggle: bool,
     pub(crate) title_open: bool,
@@ -51,6 +54,8 @@ pub(crate) struct AppCommandProjection {
 struct AppCommandProjectionKey {
     session_mutation_token: u64,
     active_editor_surface: EditorSurface,
+    root_document_view: RootDocumentView,
+    beat_text_focused: bool,
     invisibles_visible: bool,
     ruler_visible: bool,
     migration_pending: bool,
@@ -99,6 +104,8 @@ impl ScriptCraftApp {
         AppCommandProjectionKey {
             session_mutation_token: self.session.mutation_token(),
             active_editor_surface: self.active_editor_surface,
+            root_document_view: self.root_document_view,
+            beat_text_focused: self.beat_text.focused,
             invisibles_visible: self.active_surface_invisibles_visible(),
             ruler_visible: self.settings_store.ruler_visible(),
             migration_pending: self.pending_fdx_open.is_some(),
@@ -166,7 +173,7 @@ impl ScriptCraftApp {
                 EditorSurface::Body => self.session.selection(),
                 EditorSurface::TitlePage => self.session.title_selection(),
             };
-            availability.element_change = *surface == self.active_editor_surface
+            availability.element_change = availability.editor_available && *surface == self.active_editor_surface
                 && scriptcraft_commands::Selection::from_core(core_selection)
                 .ok()
                 .is_some_and(|selection| {
@@ -179,13 +186,35 @@ impl ScriptCraftApp {
         if let scriptcraft_commands::Command::EditorRunFormattingSet { surface, .. }
             | scriptcraft_commands::Command::EditorParagraphFormattingSet { surface, .. } = command
         {
-            let eligible = *surface == EditorSurface::Body
+            let eligible = availability.editor_available && *surface == EditorSurface::Body
                 && self.active_editor_surface == EditorSurface::Body
                 && scriptcraft_commands::Selection::from_core(self.session.selection())
                     .ok()
                     .is_some_and(|selection| selection.validate_for_surface(self.session.project(), EditorSurface::Body).is_ok());
             availability.run_formatting = eligible;
             availability.paragraph_formatting = eligible;
+        }
+        if let scriptcraft_commands::Command::EditorStyleToggle { surface, .. }
+            | scriptcraft_commands::Command::EditorStyleClear { surface } = command
+        {
+            if *surface != self.active_editor_surface {
+                availability.beat_formatting = false;
+            }
+        }
+        if let scriptcraft_commands::Command::EditorRunFormattingSet { surface, .. } = command {
+            if *surface != EditorSurface::Body {
+                availability.beat_formatting = false;
+            }
+        }
+        if matches!(command, scriptcraft_commands::Command::BeatBoardStyleToggle { .. }
+            | scriptcraft_commands::Command::BeatBoardStyleClear
+            | scriptcraft_commands::Command::BeatBoardRunFormattingSet { .. }) {
+            availability.beat_formatting = availability.beat_available
+                && self.beat_text.focused
+                && matches!(self.session.beat_selection(),
+                    scriptcraft_session::editing::BeatSelection::Text {
+                        field: scriptcraft_session::editing::BeatTextField::Body, ..
+                    }) && self.session.beat_selection_is_valid();
         }
         if let scriptcraft_commands::Command::FormatTemplateApply { template } = command {
             availability.template_apply_ready = self
@@ -202,6 +231,8 @@ impl ScriptCraftApp {
 
     fn app_command_availability_without_dual_dialogue(&self) -> AppCommandAvailability {
         let migration_pending = self.pending_fdx_open.is_some();
+        let editor_available = self.active_editor_surface == EditorSurface::TitlePage
+            || self.title_view_state_swapped || self.root_document_view == RootDocumentView::Script;
         let replacement_pending = self.replacement_open_pending();
         let native_output_active = self.native_output_active();
         let elements_viewport_unsupported = self.element_windows.elements_viewport_unsupported();
@@ -261,6 +292,16 @@ impl ScriptCraftApp {
                     .validate_for_surface(self.session.project(), EditorSurface::Body)
                     .is_ok()
             });
+        let beat_text_focus = self.root_document_view == RootDocumentView::BeatBoard
+            && self.active_editor_surface == EditorSurface::Body
+            && !self.title_view_state_swapped
+            && self.beat_text.focused
+            && !self.element_windows.owns_input()
+            && !migration_pending && !replacement_pending && !native_output_active;
+        let (beat_has_text, beat_has_range) = match self.session.beat_selection() {
+            scriptcraft_session::editing::BeatSelection::Text { anchor, focus, .. } => (true, anchor != focus),
+            _ => (false, false),
+        };
 
         AppCommandAvailability {
             modal_blocked: migration_pending && !replacement_pending,
@@ -272,17 +313,30 @@ impl ScriptCraftApp {
                 && self.title_page_window_open,
             undo: !migration_pending && !replacement_pending && self.session.can_undo(),
             redo: !migration_pending && !replacement_pending && self.session.can_redo(),
-            delete: !migration_pending && !replacement_pending && delete_target_exists,
+            delete: if beat_text_focus { beat_has_range } else { editor_available && !migration_pending && !replacement_pending && delete_target_exists },
             // EditingSession projects a document with at least one body element.
-            select_all: !migration_pending && !replacement_pending && element_count != 0,
-            cut: !migration_pending && !replacement_pending && selection.anchor != selection.focus,
-            copy: !migration_pending && !replacement_pending && selection.anchor != selection.focus,
+            select_all: if beat_text_focus { beat_has_text } else { editor_available && !migration_pending && !replacement_pending && element_count != 0 },
+            cut: if beat_text_focus { beat_has_range } else { editor_available && !migration_pending && !replacement_pending && selection.anchor != selection.focus },
+            copy: if beat_text_focus { beat_has_range } else { editor_available && !migration_pending && !replacement_pending && selection.anchor != selection.focus },
             // Clipboard state is read only when Paste is activated, never per frame.
-            paste: !migration_pending && !replacement_pending,
-            body_only: self.active_editor_surface == EditorSurface::Body,
-            element_change,
-            run_formatting: self.active_editor_surface == EditorSurface::Body && valid_body_selection,
-            paragraph_formatting: self.active_editor_surface == EditorSurface::Body && valid_body_selection,
+            paste: if beat_text_focus { beat_has_text } else { editor_available && !migration_pending && !replacement_pending },
+            body_only: editor_available && self.active_editor_surface == EditorSurface::Body,
+            editor_available,
+            beat_available: self.root_document_view == RootDocumentView::BeatBoard
+                && self.active_editor_surface == EditorSurface::Body && !self.title_view_state_swapped
+                && !self.title_view.surface_focused && !self.element_windows.owns_input(),
+            element_change: editor_available && element_change,
+            run_formatting: editor_available && self.active_editor_surface == EditorSurface::Body && valid_body_selection,
+            beat_formatting: self.root_document_view == RootDocumentView::BeatBoard
+                && self.active_editor_surface == EditorSurface::Body && !self.title_view_state_swapped
+                && !self.title_view.surface_focused && self.beat_text.focused
+                && !self.element_windows.owns_input() && !migration_pending
+                && !replacement_pending && !native_output_active
+                && matches!(self.session.beat_selection(),
+                    scriptcraft_session::editing::BeatSelection::Text {
+                        field: scriptcraft_session::editing::BeatTextField::Body, ..
+                    }) && self.session.beat_selection_is_valid(),
+            paragraph_formatting: editor_available && self.active_editor_surface == EditorSurface::Body && valid_body_selection,
             dual_dialogue_toggle: false,
             // In-app Open is a selected-path replacement request and is blocked
             // while the current document is resolving another lifecycle gate.
@@ -316,7 +370,7 @@ impl ScriptCraftApp {
     fn dual_dialogue_toggle_target(
         &mut self,
     ) -> Option<scriptcraft_model::dual_dialogue::ToggleTarget> {
-        if self.active_editor_surface != EditorSurface::Body {
+        if self.active_editor_surface != EditorSurface::Body || self.root_document_view == RootDocumentView::BeatBoard {
             return None;
         }
         self.session
@@ -378,6 +432,19 @@ impl AppCommandAvailability {
             };
         }
         match command {
+            CommandId::BeatBoardCardCreate | CommandId::BeatBoardCardActivate
+            | CommandId::BeatBoardCardGeometrySet | CommandId::BeatBoardSelectionSet
+            | CommandId::BeatBoardTextEdit | CommandId::BeatBoardNavigation => self.beat_available,
+            CommandId::BeatBoardStyleToggle | CommandId::BeatBoardStyleClear
+            | CommandId::BeatBoardRunFormattingSet => self.beat_formatting,
+            CommandId::EditorTextInsert | CommandId::EditorTextPaste | CommandId::EditorDeleteBackward
+            | CommandId::EditorParagraphEnter | CommandId::EditorParagraphTab
+            | CommandId::EditorSelectionSet | CommandId::EditorSelectionPointer
+            | CommandId::EditorNavigationHorizontal | CommandId::EditorNavigationVertical
+            | CommandId::EditorNavigationLineEdge | CommandId::EditorFocus
+            | CommandId::EditorAlignmentSet => self.editor_available,
+            CommandId::EditorStyleToggle | CommandId::EditorStyleClear =>
+                self.editor_available || self.beat_formatting,
             CommandId::EditUndo => self.undo,
             CommandId::EditRedo => self.redo,
             CommandId::EditDelete => self.delete,
@@ -386,7 +453,7 @@ impl AppCommandAvailability {
             CommandId::EditCopy => self.copy,
             CommandId::EditPaste => self.paste,
             CommandId::EditorElementChange => self.element_change,
-            CommandId::EditorRunFormattingSet => self.run_formatting,
+            CommandId::EditorRunFormattingSet => self.run_formatting || self.beat_formatting,
             CommandId::EditorParagraphFormattingSet => self.paragraph_formatting,
             CommandId::EditorDualDialogueToggle => self.dual_dialogue_toggle,
             CommandId::WindowTitlePageOpen => self.title_open,

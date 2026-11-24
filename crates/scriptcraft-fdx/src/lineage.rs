@@ -38,6 +38,7 @@ pub(crate) fn raw_document_ref_datetime(root: &RawElement) -> Option<String> {
 pub(crate) fn reconcile_document_lineage(
     sections: &mut [PreservedSection],
     existing_identities: &[ForeignIdentity],
+    project: &scriptcraft_model::Project,
     context: &mut SaveContext,
 ) -> Result<Vec<ForeignIdentity>, FdxError> {
     if !valid_document_ref_datetime(context.timestamp()) {
@@ -59,6 +60,11 @@ pub(crate) fn reconcile_document_lineage(
         .iter()
         .map(|identity| identity.value.clone())
         .collect::<BTreeSet<_>>();
+    if let Some(id) = &project.beat_board().foreign_id { reserved.insert(id.clone()); }
+    for card in &project.beat_board().cards {
+        reserved.insert(card.foreign_id.clone());
+        reserved.extend(card.paragraphs.iter().filter_map(|paragraph| paragraph.foreign_id.clone()));
+    }
     collect_preserved_id_attributes(&root.children, &mut reserved);
 
     let document_ref_indices = root

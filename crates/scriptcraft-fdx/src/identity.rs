@@ -214,6 +214,22 @@ pub(crate) fn collect_identities(
         Ok(())
     })?;
 
+    // Beat paragraphs remain opaque to screenplay reconciliation. Register only
+    // the first Content of supported ListItems referenced by the winning board.
+    let root_namespace = root.name.namespace_uri.as_deref();
+    for (_, list_item) in crate::beat_board::winning_items(root)? {
+        for paragraph in crate::beat_board::paragraphs(list_item, root_namespace) {
+            if raw_identity_attribute_count(paragraph) > 1 {
+                return Err(FdxError::AmbiguousIdentity);
+            }
+            if let Some(value) = raw_identity_attribute(paragraph) {
+                let identity = ForeignIdentity::new(ForeignIdDomain::Paragraph, value.to_owned())
+                    .map_err(map_preservation_error)?;
+                definitions.push(("Paragraph".to_owned(), identity, paragraph.attributes.clone(), false));
+            }
+        }
+    }
+
     // Only repeated identities whose every typed occurrence is a supported
     // managed paragraph are coalesced. Duplicate checks for all other typed
     // identity contexts remain strict; opaque ancestry is not promoted here.
@@ -387,6 +403,7 @@ where
         // recognized only at these exact root/board paths.
         let root_child = depth == 1 && is_fdx_element(parent, FDX_ROOT, root_namespace);
         let board_container = root_child
+            && element.name.namespace_uri.as_deref() == root_namespace
             && matches!(
                 element.name.local_name.as_str(),
                 "DisplayBoards" | "ListItems" | "Images"
@@ -411,14 +428,16 @@ where
             );
         let board_entity = under_board_container
             && matches!(
-                element.name.local_name.as_str(),
-                "DisplayBoard" | "ListItem" | "Image"
+                (parent.name.local_name.as_str(), element.name.local_name.as_str()),
+                ("DisplayBoards", "DisplayBoard") | ("ListItems", "ListItem") | ("Images", "Image")
             )
             && element.name.namespace_uri.as_deref() == root_namespace;
         if board_entity {
             return content::SourceClass::KnownIdentity;
         }
-        if depth == 2
+        if (depth == 2 || (depth == 3 && grandparent.is_some_and(|container| {
+            is_fdx_element(container, "DisplayBoards", root_namespace)
+        })))
             && is_fdx_element(parent, "DisplayBoard", root_namespace)
             && matches!(element.name.local_name.as_str(), "Item" | "Picture")
             && element.name.namespace_uri.as_deref() == root_namespace

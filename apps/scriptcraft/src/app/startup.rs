@@ -440,9 +440,10 @@ pub(crate) fn run() -> eframe::Result {
                     if app.menu_policy.installs_native_macos() {
                         let availability = app.app_command_availability();
                         let dynamic_elements = app.dynamic_element_menu_projection();
-                        let formatting = crate::chrome::formatting_menu::project(
+                        let formatting = crate::chrome::formatting_menu::project_for_target(
                             &app.session,
                             app.active_editor_surface,
+                            app.root_document_view == crate::app::RootDocumentView::BeatBoard,
                         );
                         app.native_menu = Some(
                             macos_menu::NativeMenuController::install(

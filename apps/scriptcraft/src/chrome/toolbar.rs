@@ -910,6 +910,33 @@ impl ScriptCraftApp {
         &self,
         surface: EditorSurface,
     ) -> (RunStyleFlags, Option<ParagraphAlignment>) {
+        if self.root_document_view == crate::app::RootDocumentView::BeatBoard && surface == EditorSurface::Body {
+            use scriptcraft_session::editing::{BeatSelection, BeatTextField};
+            let typing = self.session.beat_typing_style();
+            let BeatSelection::Text { card, field: BeatTextField::Body, anchor, focus } = self.session.beat_selection() else {
+                return (RunStyleFlags::default(), None);
+            };
+            let Some(card) = self.session.project().beat_board().cards.iter().find(|item| &item.id == card) else {
+                return (RunStyleFlags::default(), None);
+            };
+            let (start, end) = if anchor <= focus { (*anchor, *focus) } else { (*focus, *anchor) };
+            if start == end {
+                let Some(paragraph) = card.paragraphs.get(start.paragraph) else { return (typing, None) };
+                let styles = project_style_at_caret(&paragraph.text, &paragraph.runs, start.offset,
+                    RunBoundaryAffinity::Right, typing).unwrap_or(typing);
+                return (styles, None);
+            }
+            let mut styles = RunStyleFlags::default();
+            for index in start.paragraph..=end.paragraph {
+                let Some(paragraph) = card.paragraphs.get(index) else { continue };
+                let range = (if index == start.paragraph { start.offset } else { 0 })..
+                    (if index == end.paragraph { end.offset } else { paragraph.text.len() });
+                if let Ok(projected) = project_lit_styles(&paragraph.text, &paragraph.runs, range, typing) {
+                    styles = style_union(styles, projected);
+                }
+            }
+            return (styles, None);
+        }
         let project = self.session.project();
         let selection = match surface {
             EditorSurface::Body => self.session.selection(),
@@ -1095,7 +1122,11 @@ impl ScriptCraftApp {
         presentation: ToolbarPresentationMetrics,
         surface: EditorSurface,
     ) {
-        let enabled = item.enablement == EnablementPolicy::Enabled;
+        let beat_target = self.root_document_view == crate::app::RootDocumentView::BeatBoard && surface == EditorSurface::Body;
+        let enabled = if beat_target {
+            matches!(item.behavior, ToolbarBehavior::StylesInlineGroup)
+                && self.app_command_availability().beat_formatting
+        } else { item.enablement == EnablementPolicy::Enabled };
         let (styles, alignment) = self.selected_editor_state(surface);
         let style_choices = matches!(item.behavior, ToolbarBehavior::StylesInlineGroup);
         let choices = if style_choices {
@@ -1188,12 +1219,15 @@ impl ScriptCraftApp {
         item: ToolbarItemSpec,
         surface: EditorSurface,
     ) {
+        let beat_target = self.root_document_view == crate::app::RootDocumentView::BeatBoard && surface == EditorSurface::Body;
         let (styles, alignment) = self.selected_editor_state(surface);
         let choices = if matches!(item.behavior, ToolbarBehavior::StylesInlineGroup) {
             &STYLE_CHOICES[..]
         } else {
             &ALIGNMENT_CHOICES[..]
         };
+        let beat_style_enabled = !beat_target || (matches!(item.behavior, ToolbarBehavior::StylesInlineGroup)
+            && self.app_command_availability().beat_formatting);
         let mut chosen = None;
         ui.menu_button(item.label, |ui| {
             for choice in choices.iter().copied() {
@@ -1202,7 +1236,7 @@ impl ScriptCraftApp {
                     item,
                     choice,
                     formatting_choice_active(choice.choice, styles, alignment),
-                    item.enablement == EnablementPolicy::Enabled,
+                    beat_style_enabled && item.enablement == EnablementPolicy::Enabled,
                 ) {
                     chosen = Some(choice.choice);
                     ui.close();

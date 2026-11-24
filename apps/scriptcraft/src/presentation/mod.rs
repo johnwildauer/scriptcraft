@@ -10,5 +10,6 @@ pub(crate) mod material_font;
 // for painting and interaction.
 pub(crate) mod geometry;
 pub(crate) mod runtime_icon;
+pub(crate) mod span_paint;
 pub(crate) mod style;
 pub(crate) mod wheel_zoom;

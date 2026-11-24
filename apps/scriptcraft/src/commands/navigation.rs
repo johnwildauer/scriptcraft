@@ -293,6 +293,16 @@ impl ScriptCraftApp {
     /// Returns egui focus to the one screenplay interaction surface after an
     /// Edit command, without making the command target depend on popup focus.
     pub(crate) fn restore_editor_focus(&mut self, ctx: &egui::Context) {
+        if self.root_document_view == crate::app::RootDocumentView::BeatBoard
+            && self.active_editor_surface == EditorSurface::Body && !self.title_view_state_swapped {
+            if self.beat_text.focused {
+                if let Some(id) = self.beat_text.viewport_id {
+                    ctx.memory_mut(|memory| memory.request_focus(id));
+                    ctx.request_repaint();
+                }
+            }
+            return;
+        }
         if self.active_editor_surface == EditorSurface::TitlePage && !self.title_view_state_swapped
         {
             ctx.send_viewport_cmd_to(
@@ -434,5 +444,8 @@ pub(super) fn command_restores_editor_focus(command: CommandId) -> bool {
             | CommandId::EditorRunFormattingSet
             | CommandId::EditorParagraphFormattingSet
             | CommandId::EditorDualDialogueToggle
+            | CommandId::BeatBoardStyleToggle
+            | CommandId::BeatBoardStyleClear
+            | CommandId::BeatBoardRunFormattingSet
     )
 }

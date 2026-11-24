@@ -57,6 +57,8 @@ The ruler contract above is clarified as follows: the allocated strip uses the S
 
 The first-line marker is a downward pentagon, the right marker an upward pentagon without a foot, and the left marker an upward polygon whose vertical sides extend through its integrated foot; each is drawn by one filled polygon. `RULER_FIRST_LINE_CENTER_OFFSET` and `RULER_BOTTOM_MARKER_CENTER_OFFSET` remain the respective 10-point sources of the first-line top and left bottom. Stems remain snapped 2-point filled rectangles behind the marker shapes.
 
+The real Beat Board root never allocates a Script ruler, regardless of the global ruler preference; Title Page likewise has no ruler. This supersedes the placeholder-Beat wording in AC-WRITING-002.16 without changing the Script ruler contract or preference.
+
 ### Inline Size parsing
 
 Direct run Size is interpreted through the shared bounded fixed-point point parser, with hundredth-point precision and a supported range of 1 through 1000 points. Valid integer and decimal values affect effective typography without whole-point truncation; absent Size inherits the current definition. Invalid, zero, negative, malformed, or over-limit source values remain source-owned and use the bounded fallback rather than being silently rewritten. Layout, paint, PDF, and native-print consumers share that projection, and host floating-point conversion occurs only at final presentation/API boundaries.

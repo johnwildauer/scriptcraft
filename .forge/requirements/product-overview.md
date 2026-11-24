@@ -24,9 +24,9 @@ Writers can create a new document from the Screenplay, Stageplay, or Dramatists 
 
 ## Product boundaries
 
-**In scope:** screenplay-focused writing and revision; title-page editing; readable page presentation; native screenplay document open/save; PDF and plain-text exports; and the desktop workspace needed to use these capabilities. Bounded support for dual dialogue and conversion from Fountain text are included as focused writing workflows.
+**In scope:** screenplay-focused writing and revision; title-page editing; readable page presentation; native screenplay document open/save; PDF and plain-text exports; and the desktop workspace needed to use these capabilities. Bounded support for dual dialogue and conversion from Fountain text are included as focused writing workflows. The focused Beat Board is an explicit outlining exception: its independent cards have plain titles and rich, multi-paragraph bodies and do not enter screenplay exports.
 
-**Out of scope:** general-purpose word processing; guaranteed compatibility or pixel-perfect rendering for every screenplay file or application; collaboration, cloud services, and revision tracking; production planning and scheduling; broad outlining or beat-board tools; and web-based editing. Unsupported source structures may be retained without becoming editable product features; unfamiliar element-type labels alone do not make managed paragraphs opaque.
+**Out of scope:** general-purpose word processing; guaranteed compatibility or pixel-perfect rendering for every screenplay file or application; collaboration, cloud services, and revision tracking; production planning and scheduling; broader outlining beyond the focused Beat Board, Story Map and other board views; and web-based editing. Unsupported source structures may be retained without becoming editable product features; unfamiliar element-type labels alone do not make managed paragraphs opaque.
 
 ## Feature map
 
@@ -38,5 +38,6 @@ Writers can create a new document from the Screenplay, Stageplay, or Dramatists 
 - [Desktop workspace](features/desktop-workspace.md) — the desktop environment for working with a screenplay.
 - [User settings](features/user-settings.md) — persistent global appearance, default-template, ruler-visibility, and main/Title Page toolbar-composition preferences.
 - [Dual dialogue](features/dual-dialogue.md) — write and present paired dialogue.
+- [Beat Board](features/beat-board.md) — organize independent rich-text cards on a finite board.
 - [Fountain conversion](features/fountain-conversion.md) — bring Fountain screenplay text into ScriptCraft.
 - [macOS packaging](features/macos-packaging.md) — macOS app distribution.

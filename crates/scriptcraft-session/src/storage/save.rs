@@ -6,9 +6,9 @@ use super::filesystem::FdxStorageFileSystem;
 use super::publication::{replace, save_as, save_as_overwrite};
 use super::target::{FdxSaveMode, FdxSaveTarget};
 use crate::editing::{
-    map_selection_to_project, map_title_selection_to_project, EditError, EditingSession,
+    map_selection_to_project, map_title_selection_to_project, BeatIdentityRebase, EditError, EditingSession,
 };
-use scriptcraft_fdx::{self as fdx, same_dual_dialogue_projection, write_v6_for_save, FdxError};
+use scriptcraft_fdx::{self as fdx, same_dual_dialogue_projection, write_v6_for_transactional_save, FdxError};
 use scriptcraft_model::formatted_text::{normalize_project_runs, FormattedTextError};
 use scriptcraft_model::{
     cast_list, BodyOwner, ElementTypeKey, Project, StableId, TitlePageParagraph,
@@ -35,6 +35,7 @@ pub fn save_session<F: FdxStorageFileSystem>(
         text_state,
         fdx::InvisiblesState::default(),
         fdx::ScriptPanelDisplayMode::Page,
+        fdx::BeatBoardViewState::default(),
     )
 }
 
@@ -60,6 +61,7 @@ pub fn save_session_with_window_state<F: FdxStorageFileSystem>(
         text_state,
         fdx::InvisiblesState::default(),
         fdx::ScriptPanelDisplayMode::Page,
+        fdx::BeatBoardViewState::default(),
     )
 }
 
@@ -74,6 +76,7 @@ pub fn save_session_with_view_state<F: FdxStorageFileSystem>(
     text_state: fdx::TextState,
     invisibles_state: fdx::InvisiblesState,
     display_mode: fdx::ScriptPanelDisplayMode,
+    beat_board_view_state: fdx::BeatBoardViewState,
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
     save_session_with_codec_and_view_state(
         fs,
@@ -85,6 +88,7 @@ pub fn save_session_with_view_state<F: FdxStorageFileSystem>(
         text_state,
         invisibles_state,
         display_mode,
+        beat_board_view_state,
     )
 }
 
@@ -105,7 +109,7 @@ impl SaveCandidateCodec for NativeSaveCandidateCodec {
         project: &Project,
         context: &mut fdx::SaveContext,
     ) -> Result<PreparedFdx, TransactionalSaveError> {
-        let bytes = write_v6_for_save(project, context).map_err(TransactionalSaveError::Codec)?;
+        let bytes = write_v6_for_transactional_save(project, context).map_err(TransactionalSaveError::Codec)?;
         PreparedFdx::from_validated_bytes(bytes).map_err(|error| match &error.kind {
             FdxStorageErrorKind::InvalidFdx(codec_error) => {
                 TransactionalSaveError::Codec(codec_error.clone())
@@ -133,6 +137,7 @@ fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandid
     text_state: fdx::TextState,
     invisibles_state: fdx::InvisiblesState,
     display_mode: fdx::ScriptPanelDisplayMode,
+    beat_board_view_state: fdx::BeatBoardViewState,
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
     let operation = match &mode {
         FdxSaveMode::Save => fdx::SaveOperation::Save,
@@ -143,7 +148,8 @@ fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandid
         .with_window_state(window_state)
         .with_text_state(text_state)
         .with_invisibles_state(invisibles_state)
-        .with_display_mode(display_mode);
+        .with_display_mode(display_mode)
+        .with_beat_board_view_state(beat_board_view_state);
     save_session_with_context(fs, session, target, mode, context, codec)
 }
 
@@ -177,6 +183,8 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
         .map_err(TransactionalSaveError::Session)?;
     let normalized = normalize_project_runs(&corrected)
         .map_err(|error| TransactionalSaveError::Codec(map_normalization_error(error)))?;
+    let normalized = fdx::finalize_beat_board_candidate(&normalized)
+        .map_err(TransactionalSaveError::Codec)?;
     let prepared = codec.serialize(&normalized, &mut context)?;
     let rebased_project = codec
         .reread(&prepared.bytes)
@@ -187,7 +195,7 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
         ));
     }
     let publishable_session = session
-        .prepare_saved_rebase(rebased_project)
+        .prepare_saved_rebase(&normalized, rebased_project)
         .map_err(TransactionalSaveError::Session)?;
 
     // The destination and all session work are now prepared. No fallible
@@ -269,6 +277,7 @@ fn same_save_projection(expected: &Project, actual: &Project) -> bool {
         && same_title_paragraphs(&expected.title_page, &actual.title_page)
         && same_elements(&expected.elements, &actual.elements)
         && same_dual_dialogue_projection(expected, actual)
+        && fdx::same_beat_board_projection(expected, actual)
 }
 
 fn same_title_paragraphs(expected: &[TitlePageParagraph], actual: &[TitlePageParagraph]) -> bool {
@@ -389,8 +398,48 @@ impl EditingSession {
         cast_list::prepare_save_candidate(self.project()).map_err(EditError::CastList)
     }
 
-    pub(crate) fn prepare_saved_rebase(&self, mut project: Project) -> Result<Self, EditError> {
+    pub(crate) fn prepare_saved_rebase(
+        &self,
+        candidate: &Project,
+        mut project: Project,
+    ) -> Result<Self, EditError> {
         project.validate()?;
+        // The caller has already verified the candidate and reread projection.
+        // Resolve using allocated candidate identities, never reread positions.
+        // Card selection maps through the same durable correspondence used by
+        // the verified writer candidate and reread.
+        let beat_rebase = BeatIdentityRebase::new(candidate, &project)?;
+        let beat_selection = match &self.beat_selection {
+            crate::editing::BeatSelection::None => crate::editing::BeatSelection::None,
+            crate::editing::BeatSelection::Card { card } => crate::editing::BeatSelection::Card {
+                card: beat_rebase.card_for_candidate_id(card).ok_or(EditError::InvalidSelection)?.id.clone(),
+            },
+            crate::editing::BeatSelection::Text { card, field, anchor, focus } => {
+                let old_card = candidate.beat_board().cards.iter().find(|item| &item.id == card).ok_or(EditError::InvalidSelection)?;
+                let new_card = beat_rebase.card_for_candidate_id(card).ok_or(EditError::InvalidSelection)?;
+                let map_position = |position: crate::editing::BeatTextPosition| -> Result<crate::editing::BeatTextPosition, EditError> {
+                    match field {
+                        crate::editing::BeatTextField::Title => Ok(crate::editing::BeatTextPosition { paragraph: 0,
+                            offset: crate::editing::clamp_beat_text_offset(&new_card.title, position.offset) }),
+                        crate::editing::BeatTextField::Body => {
+                            let old_paragraph = old_card.paragraphs.get(position.paragraph).ok_or(EditError::InvalidSelection)?;
+                            let mapped = if old_paragraph.foreign_id.is_some() {
+                                let (mapped_card, paragraph) = beat_rebase.paragraph_for_candidate_id(&old_paragraph.id).ok_or(EditError::InvalidSelection)?;
+                                if mapped_card.foreign_id != new_card.foreign_id { return Err(EditError::InvalidSelection); }
+                                paragraph
+                            } else {
+                                crate::editing::map_idless_beat_paragraph(candidate.beat_board(), project.beat_board(),
+                                    &old_card.foreign_id, &old_paragraph.id)?
+                            };
+                            let paragraph = new_card.paragraphs.iter().position(|item| item.id == mapped.id).ok_or(EditError::InvalidSelection)?;
+                            Ok(crate::editing::BeatTextPosition { paragraph, offset: crate::editing::clamp_beat_text_offset(&mapped.text, position.offset) })
+                        }
+                    }
+                };
+                crate::editing::BeatSelection::Text { card: new_card.id.clone(), field: *field,
+                    anchor: map_position(*anchor)?, focus: map_position(*focus)? }
+            }
+        };
         project.share_unchanged_body_owners_from(self.project());
         if let Some(preservation) = project.preservation.as_mut() {
             preservation.rebuild_indexes();
@@ -429,12 +478,14 @@ impl EditingSession {
         rebased.clean_project = project;
         rebased.selection = selection;
         rebased.title_selection = title_selection;
+        rebased.beat_selection = beat_selection;
         rebased.generated_parentheticals = generated_parentheticals;
         rebased.dirty = false;
         rebased.reset_derived_after_saved_rebase();
         // Saving changes the preservation baseline and therefore invalidates
         // render caches even when the visible semantic text did not change.
         rebased.revision = rebased.revision.saturating_add(1);
+        rebased.mark_mutated();
         rebased.validate()?;
         Ok(rebased)
     }

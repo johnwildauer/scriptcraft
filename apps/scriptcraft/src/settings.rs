@@ -25,6 +25,7 @@ const DEFAULT_TOOLBAR_IDS: &[&str] = &[
     "save",
     "save-as",
     "flexible-space",
+    "beat-board",
     "title-page",
     "elements",
     "flexible-space",

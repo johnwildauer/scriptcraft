@@ -532,6 +532,7 @@ impl ScriptCraftApp {
                     document.text_state,
                     document.invisibles,
                     display_mode,
+                    document.beat_board_view_state,
                 ))
             }
             Ok(FdxImportOutcome::Cancelled { .. }) => {
@@ -556,6 +557,7 @@ impl ScriptCraftApp {
         text_state: fdx::TextState,
         invisibles: fdx::InvisiblesState,
         display_mode: fdx::ScriptPanelDisplayMode,
+        beat_board_view_state: fdx::BeatBoardViewState,
     ) -> Result<(), StagedOpenOutcome> {
         let (native_path, fdx_baseline) = match persistence {
             ActivationPersistence::Saved { path, baseline } => {
@@ -613,6 +615,11 @@ impl ScriptCraftApp {
         self.session = replacement;
         self.script_view_mode = script_view_mode;
         self.invisibles = invisibles;
+        self.beat_board_view_state = beat_board_view_state;
+        self.beat_pinch_zoom_percent = f64::from(beat_board_view_state.zoom_milli_percent()) / 1000.0;
+        self.beat_viewport = None;
+        self.beat_interaction.cancel();
+        self.beat_text.blur();
         self.appearance_applications
             .clear(crate::chrome::theme::AppearanceContext::Elements);
         self.appearance_applications
