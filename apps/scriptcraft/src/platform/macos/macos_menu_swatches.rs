@@ -1,8 +1,9 @@
 //! Main-thread-only static Color and Highlight swatches for native menus.
 
 use crate::chrome::menu_items::{MenuEntrySpec, MenuItemSpec, MenuSwatch, MENU_CATALOG};
+use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::MainThreadMarker;
+use objc2::{runtime::Bool, MainThreadMarker};
 use objc2_app_kit::{NSBezierPath, NSColor, NSImage, NSMenu, NSMenuItem};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use std::marker::PhantomData;
@@ -127,38 +128,38 @@ fn find_unique_item_by_title(menu: &NSMenu, title: &str) -> Option<Retained<NSMe
 
 fn make_swatch_image(swatch: MenuSwatch) -> Option<Retained<NSImage>> {
     let size = NSSize::new(18.0, 18.0);
-    let image = NSImage::new();
-    image.setSize(size);
-    image.lockFocus();
-    let circle = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-        NSPoint::new(4.0, 4.0),
-        NSSize::new(10.0, 10.0),
-    ));
-    match swatch {
-        MenuSwatch::Palette([red, green, blue]) => {
-            NSColor::colorWithSRGBRed_green_blue_alpha(
-                f64::from(red) / 255.0,
-                f64::from(green) / 255.0,
-                f64::from(blue) / 255.0,
-                1.0,
-            )
-            .setFill();
-            circle.fill();
+    let drawing_handler: RcBlock<dyn Fn(NSRect) -> Bool> = RcBlock::new(move |_rect: NSRect| {
+        let circle = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(4.0, 4.0),
+            NSSize::new(10.0, 10.0),
+        ));
+        match swatch {
+            MenuSwatch::Palette([red, green, blue]) => {
+                NSColor::colorWithSRGBRed_green_blue_alpha(
+                    f64::from(red) / 255.0,
+                    f64::from(green) / 255.0,
+                    f64::from(blue) / 255.0,
+                    1.0,
+                )
+                .setFill();
+                circle.fill();
+            }
+            MenuSwatch::NoColor => {
+                NSColor::secondaryLabelColor().setStroke();
+                circle.setLineWidth(1.4);
+                circle.stroke();
+                let slash = NSBezierPath::bezierPath();
+                slash.moveToPoint(NSPoint::new(4.5, 4.5));
+                slash.lineToPoint(NSPoint::new(13.5, 13.5));
+                slash.setLineWidth(1.4);
+                slash.stroke();
+            }
         }
-        MenuSwatch::NoColor => {
-            NSColor::secondaryLabelColor().setStroke();
-            circle.setLineWidth(1.4);
-            circle.stroke();
-            let slash = NSBezierPath::bezierPath();
-            slash.moveToPoint(NSPoint::new(4.5, 4.5));
-            slash.lineToPoint(NSPoint::new(13.5, 13.5));
-            slash.setLineWidth(1.4);
-            slash.stroke();
-        }
-    }
-    image.unlockFocus();
-    image.setSize(size);
-    Some(image)
+        Bool::YES
+    });
+    let image = NSImage::imageWithSize_flipped_drawingHandler(size, false, &*drawing_handler);
+    let actual_size = image.size();
+    (actual_size.width == size.width && actual_size.height == size.height).then_some(image)
 }
 
 fn warn_unavailable(catalog_item: &str) {

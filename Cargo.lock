@@ -3151,6 +3151,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "arboard",
+ "block2 0.6.2",
  "directories",
  "eframe",
  "egui_material_icons",
