@@ -1,5 +1,6 @@
 //! Main-thread-only AppKit SF Symbols images for selected native menu items.
 
+use super::request_visible_menu_item_image;
 use muda::{ContextMenu, Menu};
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
@@ -105,7 +106,10 @@ impl SfSymbolsAdapter {
 
         for (_, item_id, symbol_name, _) in &requests {
             match (items.get(item_id), images.get(item_id)) {
-                (Some(item), Some(image)) => item.setImage(Some(image)),
+                (Some(item), Some(image)) => {
+                    item.setImage(Some(image));
+                    request_visible_menu_item_image(item);
+                }
                 _ => warn_unavailable(item_id, symbol_name),
             }
         }

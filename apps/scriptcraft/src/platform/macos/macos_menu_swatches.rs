@@ -1,6 +1,7 @@
 //! Main-thread-only static Color and Highlight swatches for native menus.
 
 use crate::chrome::menu_items::{MenuEntrySpec, MenuItemSpec, MenuSwatch, MENU_CATALOG};
+use super::request_visible_menu_item_image;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::{runtime::Bool, MainThreadMarker};
@@ -58,6 +59,7 @@ impl MenuSwatchesAdapter {
             match (resolved, image) {
                 (Some(native_item), Some(image)) => {
                     native_item.setImage(Some(&image));
+                    request_visible_menu_item_image(&native_item);
                     items.insert(item.id, native_item);
                     images.insert(item.id, image);
                 }
