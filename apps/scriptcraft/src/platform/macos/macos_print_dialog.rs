@@ -1,16 +1,17 @@
 //! Narrow AppKit adapter for the native Print panel and Include Title Page option.
 //!
-//! The panel has no safely borrowed owner window at the typed-command boundary,
-//! so this adapter uses native modal presentation. It deliberately omits the
-//! panel preview option until a Print-composed document preview can be supplied.
+//! The shared coordinator supplies the actual root owner and owns each panel and
+//! delivery lifetime. This adapter deliberately omits the panel preview option
+//! until a Print-composed document preview can be supplied.
 
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::AnyObject;
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSButton, NSControlStateValueOff, NSControlStateValueOn, NSPrintInfo, NSPrintOperation,
     NSPrintPanel, NSPrintPanelAccessorizing, NSPrintPanelAccessorySummaryItemDescriptionKey,
     NSPrintPanelAccessorySummaryItemNameKey, NSPrintPanelAccessorySummaryKey, NSPrintPanelOptions,
-    NSPrintPanelResult, NSView, NSViewController,
+    NSPrintPanelResult, NSView, NSViewController, NSWindow,
 };
 use objc2_foundation::{
     NSArray, NSData, NSDictionary, NSObjectProtocol, NSPoint, NSSet, NSSize, NSString,
@@ -19,6 +20,10 @@ use objc2_pdf_kit::{PDFDocument, PDFPrintScalingMode};
 use scriptcraft_commands::PdfExportOptions;
 
 use crate::documents::print::PrintCompositionSnapshot;
+use crate::platform::macos::macos_native_dialogs::{
+    NativeOperationCompletionSink, NativeOperationOutcome, NativePanelResponse,
+};
+use std::ffi::c_void;
 
 const ACCESSORY_WIDTH: f64 = 300.0;
 const ACCESSORY_HEIGHT: f64 = 28.0;
@@ -26,59 +31,27 @@ const PRINT_OPERATION_SHOWS_PANEL: bool = false;
 const PDF_PRINT_AUTO_ROTATE: bool = true;
 const PDF_PRINT_SCALING_MODE: PDFPrintScalingMode = PDFPrintScalingMode::PageScaleNone;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PanelResponse {
-    Accepted,
-    Cancelled,
-    Failed,
-}
-
 /// The one owned accepted-panel result. The snapshot is taken before display;
 /// accepted AppKit settings and the title-page choice travel with it.
 pub(crate) struct AcceptedPrintSettings {
     print_info: Retained<NSPrintInfo>,
     options: PdfExportOptions,
     snapshot: PrintCompositionSnapshot,
+    _accessory_controller: Retained<TitlePageAccessoryController>,
 }
 
-impl AcceptedPrintSettings {
-    pub(super) fn print_info(&self) -> &NSPrintInfo {
-        &self.print_info
-    }
-
-    pub(super) fn options(&self) -> PdfExportOptions {
-        self.options
-    }
-
-    pub(super) fn snapshot(&self) -> &PrintCompositionSnapshot {
-        &self.snapshot
-    }
-}
-
-pub(crate) enum PrintPanelResult {
+pub(crate) enum PrintPanelCompletion {
     Cancelled,
     Accepted(AcceptedPrintSettings),
-    Unavailable,
     Failed,
 }
 
-pub(crate) enum PrintPanelDispatch<T> {
-    Cancelled,
-    Accepted(T),
-    Unavailable,
-    Failed,
-}
-
-pub(crate) fn dispatch_panel_result<T>(
-    result: PrintPanelResult,
-    deliver: impl FnOnce(AcceptedPrintSettings) -> T,
-) -> PrintPanelDispatch<T> {
-    match result {
-        PrintPanelResult::Cancelled => PrintPanelDispatch::Cancelled,
-        PrintPanelResult::Accepted(settings) => PrintPanelDispatch::Accepted(deliver(settings)),
-        PrintPanelResult::Unavailable => PrintPanelDispatch::Unavailable,
-        PrintPanelResult::Failed => PrintPanelDispatch::Failed,
-    }
+pub(crate) struct PrintPanelResources {
+    panel: Retained<NSPrintPanel>,
+    print_info: Retained<NSPrintInfo>,
+    checkbox: Retained<NSButton>,
+    accessory_controller: Retained<TitlePageAccessoryController>,
+    snapshot: PrintCompositionSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,78 +69,105 @@ pub(crate) struct PrintDeliveryOutcome {
     pub(crate) fallback_summary: Option<String>,
 }
 
-struct PrintOperationResources<Settings, Request, Data, Document, Operation> {
-    _settings: Settings,
-    _request: Request,
-    _data: Data,
-    _document: Document,
-    operation: Operation,
+pub(crate) struct PrintDeliveryResources {
+    _settings: AcceptedPrintSettings,
+    request: crate::documents::print::PrintRequest,
+    _data: Retained<NSData>,
+    _document: Retained<PDFDocument>,
+    operation: Retained<NSPrintOperation>,
+    _completion_delegate: Option<Retained<PrintOperationCompletionDelegate>>,
 }
 
-fn run_retaining_resources<Settings, Request, Data, Document, Operation, Result>(
-    resources: PrintOperationResources<Settings, Request, Data, Document, Operation>,
-    run: impl FnOnce(&Operation) -> Result,
-) -> Result {
-    let result = run(&resources.operation);
-    drop(resources);
-    result
-}
+pub(crate) fn prepare_print_panel(
+    snapshot: PrintCompositionSnapshot,
+    main_thread: MainThreadMarker,
+) -> PrintPanelResources {
+    let checkbox = include_title_page_checkbox(main_thread);
+    let accessory_controller = TitlePageAccessoryController::new(checkbox.clone(), main_thread);
+    let print_info = NSPrintInfo::new();
+    let (paper_width, paper_height) = snapshot.paper_size_points();
+    print_info.setPaperSize(NSSize::new(paper_width as _, paper_height as _));
+    print_info.setLeftMargin(0.0);
+    print_info.setRightMargin(0.0);
+    print_info.setTopMargin(0.0);
+    print_info.setBottomMargin(0.0);
+    print_info.setScalingFactor(1.0);
+    print_info.setHorizontallyCentered(false);
+    print_info.setVerticallyCentered(false);
+    let panel = NSPrintPanel::printPanel(main_thread);
+    let options = NSPrintPanelOptions::ShowsCopies
+        | NSPrintPanelOptions::ShowsPageRange
+        | NSPrintPanelOptions::ShowsPaperSize
+        | NSPrintPanelOptions::ShowsOrientation
+        | NSPrintPanelOptions::ShowsScaling;
+    panel.setOptions(options);
 
-fn run_once_after_preparation<Prepared>(
-    prepared: Result<Prepared, PrintDeliveryResult>,
-    submit: impl FnOnce(Prepared) -> bool,
-) -> Result<PrintDeliveryResult, PrintDeliveryResult> {
-    prepared.map(|prepared| {
-        if submit(prepared) {
-            PrintDeliveryResult::OperationReportedSuccess
-        } else {
-            PrintDeliveryResult::OperationCancelledOrFailed
-        }
-    })
-}
+    // SAFETY: `accessory_controller` is a retained main-thread NSViewController
+    // subclass implementing NSPrintPanelAccessorizing and remains retained by
+    // PrintPanelResources until its asynchronous sheet completion is routed.
+    #[allow(unsafe_code)]
+    unsafe {
+        panel.addAccessoryController(&accessory_controller);
+    }
 
-/// Builds and submits one PDFKit-backed operation from the accepted settings
-/// and request-time snapshot. A false AppKit Boolean is intentionally not
-/// classified further: the API does not distinguish cancellation from failure.
-pub(crate) fn deliver_print(settings: AcceptedPrintSettings) -> PrintDeliveryOutcome {
-    let Some(main_thread) = MainThreadMarker::new() else {
-        return PrintDeliveryOutcome {
-            result: PrintDeliveryResult::MainThreadUnavailable,
-            fallback_summary: None,
-        };
-    };
-
-    let prepared = prepare_print_operation(settings, main_thread);
-    let fallback_summary = prepared
-        .as_ref()
-        .ok()
-        .map(|resources| resources._request.fallback_summary());
-    let result = run_once_after_preparation(prepared, |resources| {
-        run_retaining_resources(resources, |operation| operation.runOperation())
-    })
-    .unwrap_or_else(|error| error);
-    PrintDeliveryOutcome {
-        result,
-        fallback_summary,
+    PrintPanelResources {
+        panel,
+        print_info,
+        checkbox,
+        accessory_controller,
+        snapshot,
     }
 }
 
-fn prepare_print_operation(
+pub(crate) fn begin_print_panel(
+    resources: &PrintPanelResources,
+    owner: &NSWindow,
+    completion_sink: NativeOperationCompletionSink,
+) {
+    let completion = block2::RcBlock::new(move |response: NSPrintPanelResult| {
+        let outcome = if response == NSPrintPanelResult::Printed {
+            NativeOperationOutcome::Panel(NativePanelResponse::Accepted)
+        } else if response == NSPrintPanelResult::Cancelled {
+            NativeOperationOutcome::Panel(NativePanelResponse::Cancelled)
+        } else {
+            NativeOperationOutcome::Panel(NativePanelResponse::Failed)
+        };
+        let _ = completion_sink.enqueue(outcome);
+    });
+    resources.panel.beginSheetUsingPrintInfo_onWindow_completionHandler(
+        &resources.print_info,
+        owner,
+        Some(&*completion),
+    );
+}
+
+pub(crate) fn complete_print_panel(
+    resources: PrintPanelResources,
+    response: NativePanelResponse,
+) -> PrintPanelCompletion {
+    match response {
+        NativePanelResponse::Cancelled => PrintPanelCompletion::Cancelled,
+        NativePanelResponse::Accepted => PrintPanelCompletion::Accepted(AcceptedPrintSettings {
+            print_info: resources.panel.printInfo(),
+            options: PdfExportOptions {
+                include_title_page: resources.checkbox.state() == NSControlStateValueOn,
+            },
+            snapshot: resources.snapshot,
+            _accessory_controller: resources.accessory_controller,
+        }),
+        NativePanelResponse::Unavailable | NativePanelResponse::Failed => {
+            PrintPanelCompletion::Failed
+        }
+    }
+}
+
+pub(crate) fn prepare_print_delivery(
     settings: AcceptedPrintSettings,
     main_thread: MainThreadMarker,
-) -> Result<
-    PrintOperationResources<
-        AcceptedPrintSettings,
-        crate::documents::print::PrintRequest,
-        Retained<NSData>,
-        Retained<PDFDocument>,
-        Retained<NSPrintOperation>,
-    >,
-    PrintDeliveryResult,
-> {
+) -> Result<PrintDeliveryResources, PrintDeliveryResult> {
     let request = settings
-        .snapshot()
-        .build_request(settings.options())
+        .snapshot
+        .build_request(settings.options)
         .map_err(|_| PrintDeliveryResult::PdfBuildFailed)?;
     if request.pdf_data().is_empty() {
         return Err(PrintDeliveryResult::PdfDocumentInvalid);
@@ -196,7 +196,7 @@ fn prepare_print_operation(
     #[allow(unsafe_code)]
     let Some(operation) = (unsafe {
         document.printOperationForPrintInfo_scalingMode_autoRotate(
-            Some(settings.print_info()),
+            Some(&settings.print_info),
             PDF_PRINT_SCALING_MODE,
             PDF_PRINT_AUTO_ROTATE,
             main_thread,
@@ -209,108 +209,70 @@ fn prepare_print_operation(
     operation.setJobTitle(Some(&job_title));
     operation.setShowsPrintPanel(PRINT_OPERATION_SHOWS_PANEL);
 
-    Ok(PrintOperationResources {
+    Ok(PrintDeliveryResources {
         _settings: settings,
-        _request: request,
+        request,
         _data: data,
         _document: document,
         operation,
+        _completion_delegate: None,
     })
 }
 
-/// Opens one native Print panel with fresh defaults and returns panel settings,
-/// option, and pre-panel composition snapshot together. Cancellation does not
-/// construct the PDF bytes.
-pub(crate) fn show_print_panel(snapshot: PrintCompositionSnapshot) -> PrintPanelResult {
-    let Some(main_thread) = MainThreadMarker::new() else {
-        return PrintPanelResult::Unavailable;
-    };
-
-    let include_title_page = include_title_page_checkbox(main_thread);
-    let accessory = TitlePageAccessoryController::new(include_title_page.clone(), main_thread);
-    let print_info = NSPrintInfo::new();
-    let (paper_width, paper_height) = snapshot.paper_size_points();
-    print_info.setPaperSize(NSSize::new(paper_width as _, paper_height as _));
-    print_info.setLeftMargin(0.0);
-    print_info.setRightMargin(0.0);
-    print_info.setTopMargin(0.0);
-    print_info.setBottomMargin(0.0);
-    print_info.setScalingFactor(1.0);
-    print_info.setHorizontallyCentered(false);
-    print_info.setVerticallyCentered(false);
-    let panel = NSPrintPanel::printPanel(main_thread);
-    let options = NSPrintPanelOptions::ShowsCopies
-        | NSPrintPanelOptions::ShowsPageRange
-        | NSPrintPanelOptions::ShowsPaperSize
-        | NSPrintPanelOptions::ShowsOrientation
-        | NSPrintPanelOptions::ShowsScaling;
-    panel.setOptions(options);
-
-    // SAFETY: `accessory` is a retained main-thread NSViewController subclass
-    // implementing NSPrintPanelAccessorizing and remains alive through the
-    // complete synchronous panel lifetime.
+pub(crate) fn begin_print_delivery(
+    resources: &mut PrintDeliveryResources,
+    owner: &NSWindow,
+    completion_sink: NativeOperationCompletionSink,
+    main_thread: MainThreadMarker,
+) {
+    let delegate = PrintOperationCompletionDelegate::new(completion_sink, main_thread);
+    resources._completion_delegate = Some(delegate.clone());
+    // SAFETY: The pinned objc2-app-kit binding documents this API as an
+    // asynchronous window-modal operation. The retained delegate implements
+    // the exact `printOperationDidRun:success:contextInfo:` selector and remains
+    // owned by PrintDeliveryResources;
+    // the documented Boolean argument maps to Rust bool, and null is a valid
+    // context pointer because operation identity is captured by the sink.
     #[allow(unsafe_code)]
     unsafe {
-        panel.addAccessoryController(&accessory);
+        resources
+            .operation
+            .runOperationModalForWindow_delegate_didRunSelector_contextInfo(
+                owner,
+                Some(&delegate as &AnyObject),
+                Some(sel!(printOperationDidRun:success:contextInfo:)),
+                std::ptr::null_mut(),
+            );
     }
+}
 
-    let response = panel.runModalWithPrintInfo(&print_info);
-    let response = if response == NSPrintPanelResult::Printed.0 {
-        PanelResponse::Accepted
-    } else if response == NSPrintPanelResult::Cancelled.0 {
-        PanelResponse::Cancelled
+pub(crate) fn complete_print_delivery(
+    resources: PrintDeliveryResources,
+    reported_success: bool,
+) -> PrintDeliveryOutcome {
+    let fallback_summary = Some(resources.request.fallback_summary());
+    let result = if reported_success {
+        PrintDeliveryResult::OperationReportedSuccess
     } else {
-        PanelResponse::Failed
+        PrintDeliveryResult::OperationCancelledOrFailed
     };
-
-    let accepted_info = (response == PanelResponse::Accepted).then(|| panel.printInfo());
-    match map_panel_response(
-        response,
-        accepted_info,
-        include_title_page.state() == NSControlStateValueOn,
-        snapshot,
-    ) {
-        PanelMapping::Cancelled => PrintPanelResult::Cancelled,
-        PanelMapping::Failed => PrintPanelResult::Failed,
-        PanelMapping::Accepted {
-            print_info,
-            options,
-            snapshot,
-        } => PrintPanelResult::Accepted(AcceptedPrintSettings {
-            print_info,
-            options,
-            snapshot,
-        }),
+    drop(resources);
+    PrintDeliveryOutcome {
+        result,
+        fallback_summary,
     }
 }
 
-enum PanelMapping<T> {
-    Cancelled,
-    Accepted {
-        print_info: T,
-        options: PdfExportOptions,
-        snapshot: PrintCompositionSnapshot,
-    },
-    Failed,
-}
+impl PrintDeliveryResources {
+    pub(crate) fn fallback_summary(&self) -> String {
+        self.request.fallback_summary()
+    }
 
-fn map_panel_response<T>(
-    response: PanelResponse,
-    print_info: Option<T>,
-    include_title_page: bool,
-    snapshot: PrintCompositionSnapshot,
-) -> PanelMapping<T> {
-    match response {
-        PanelResponse::Cancelled => PanelMapping::Cancelled,
-        PanelResponse::Failed => PanelMapping::Failed,
-        PanelResponse::Accepted => match print_info {
-            Some(print_info) => PanelMapping::Accepted {
-                print_info,
-                options: PdfExportOptions { include_title_page },
-                snapshot,
-            },
-            None => PanelMapping::Failed,
-        },
+    pub(crate) fn failure_outcome(error: PrintDeliveryResult) -> PrintDeliveryOutcome {
+        PrintDeliveryOutcome {
+            result: error,
+            fallback_summary: None,
+        }
     }
 }
 
@@ -421,5 +383,52 @@ impl TitlePageAccessoryController {
 
     fn include_title_page(&self) -> bool {
         self.ivars().checkbox.state() == NSControlStateValueOn
+    }
+}
+
+struct PrintOperationCompletionIvars {
+    completion_sink: NativeOperationCompletionSink,
+}
+
+// SAFETY: The delegate is created and retained on the AppKit main thread. Its
+// callback only forwards the primitive success value to the bounded sink.
+#[allow(unsafe_code)]
+define_class!(
+    #[unsafe(super = objc2_foundation::NSObject)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = PrintOperationCompletionIvars]
+    struct PrintOperationCompletionDelegate;
+
+    // SAFETY: NSObjectProtocol adds no implementation requirements.
+    unsafe impl NSObjectProtocol for PrintOperationCompletionDelegate {}
+
+    impl PrintOperationCompletionDelegate {
+        #[unsafe(method(printOperationDidRun:success:contextInfo:))]
+        fn print_operation_did_run(
+            &self,
+            _operation: &NSPrintOperation,
+            reported_success: bool,
+            _context_info: *mut c_void,
+        ) {
+            let _ = self.ivars().completion_sink.enqueue(
+                NativeOperationOutcome::PrintDelivered(reported_success),
+            );
+        }
+    }
+);
+
+impl PrintOperationCompletionDelegate {
+    fn new(
+        completion_sink: NativeOperationCompletionSink,
+        main_thread: MainThreadMarker,
+    ) -> Retained<Self> {
+        let this = Self::alloc(main_thread).set_ivars(PrintOperationCompletionIvars {
+            completion_sink,
+        });
+        // SAFETY: NSObject's initializer is invoked on a valid allocated
+        // main-thread-only delegate instance.
+        #[allow(unsafe_code)]
+        let delegate: Retained<Self> = unsafe { msg_send![super(this), init] };
+        delegate
     }
 }

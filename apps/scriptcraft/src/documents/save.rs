@@ -261,6 +261,29 @@ impl ScriptCraftApp {
     }
 
     pub(crate) fn save_as_native(&mut self, ctx: &egui::Context) -> SaveOutcome {
+        #[cfg(target_os = "macos")]
+        {
+            use crate::platform::macos::macos_native_dialogs::{
+                NativeFilePanelContinuation, NativeFilePanelRequest,
+            };
+            let result = self.native_operation_coordinator.present_file_panel(
+                NativeFilePanelRequest {
+                    continuation: NativeFilePanelContinuation::SaveAs,
+                    title: "Save As",
+                    default_filename: "Untitled Screenplay.fdx",
+                    allowed_extensions: &["fdx"],
+                    include_title_page: false,
+                },
+            );
+            return if result.is_ok() {
+                SaveOutcome::Pending
+            } else {
+                self.show_error("SAVE_AS_PICKER_UNAVAILABLE: destination picker could not be presented; document unchanged");
+                SaveOutcome::Failed
+            };
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
         let picker_result = rfd::FileDialog::new()
             .add_filter("Final Draft document", &["fdx"])
             .set_file_name("Untitled Screenplay.fdx")
@@ -268,11 +291,12 @@ impl ScriptCraftApp {
         save_picker_outcome(picker_result, |path| {
             self.dispatch_save_as_path(&path, true, ctx)
         })
+        }
     }
 
     /// Save As has a typed follow-up boundary so accepted picker destinations
     /// preserve the durable save result; path routing itself is not success.
-    fn dispatch_save_as_path(
+    pub(crate) fn dispatch_save_as_path(
         &mut self,
         path: &std::path::Path,
         overwrite: bool,

@@ -96,7 +96,11 @@ impl ScriptCraftApp {
                 || self.windows_print_preparation.is_some()
                 || self.windows_print_session.is_some()
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        {
+            self.native_output_modal_active || self.native_operation_coordinator.is_active()
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {
             self.native_output_modal_active
         }

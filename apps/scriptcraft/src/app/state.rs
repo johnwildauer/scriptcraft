@@ -7,7 +7,8 @@ use crate::chrome::status_bar::{ViewportCenterAnchor, ViewportPageTracker};
 use crate::documents::save::fresh_document_title_for_builtin_template;
 #[cfg(target_os = "macos")]
 use crate::platform::macos::{
-    macos_lifecycle, macos_menu, macos_open_documents, macos_print_dialog,
+    macos_lifecycle, macos_menu, macos_native_dialogs, macos_open_documents,
+    macos_print_dialog,
 };
 use crate::settings::SettingsStore;
 use crate::views::script::{RevealIntent, RulerState};
@@ -98,6 +99,10 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) beat_interaction: crate::views::beat_board::BeatInteraction,
     pub(crate) beat_text: crate::views::beat_board::BeatTextState,
     pub(crate) root_close_lifecycle: RootCloseLifecycle,
+    #[cfg(target_os = "macos")]
+    pub(crate) lifecycle_save_pending: bool,
+    #[cfg(target_os = "macos")]
+    pub(crate) lifecycle_close_request_pending: bool,
     pub(crate) document_font_store: document_font::DocumentFontStore,
     pub(crate) prepared_document_fonts: Option<document_font::PreparedDocumentFonts>,
     pub(crate) pending_commands: menu::PendingDesktopCommands,
@@ -115,6 +120,8 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) native_lifecycle: Option<macos_lifecycle::NativeLifecycleController>,
     #[cfg(target_os = "macos")]
     pub(crate) native_open_documents: Option<macos_open_documents::NativeOpenDocumentsController>,
+    #[cfg(target_os = "macos")]
+    pub(crate) native_operation_coordinator: macos_native_dialogs::NativeOperationCoordinator,
     pub(crate) focus_mode: focus_mode::FocusModeController,
     pub(crate) sprint_timer: sprint_timer::SprintTimer,
     pub(crate) timer_popup_surface: EditorSurface,
@@ -160,8 +167,6 @@ pub(crate) struct ScriptCraftApp {
     /// Last published native-window title, not a native path, FDX baseline, or
     /// screenplay-content value.
     pub(crate) native_title: String,
-    #[cfg(target_os = "macos")]
-    pub(crate) accepted_print_settings: Option<macos_print_dialog::AcceptedPrintSettings>,
     #[cfg(target_os = "windows")]
     pub(crate) windows_print_session: Option<crate::platform::windows::windows_print::PrintSession>,
     #[cfg(target_os = "windows")]
@@ -256,6 +261,10 @@ impl ScriptCraftApp {
             beat_interaction: crate::views::beat_board::BeatInteraction::default(),
             beat_text: crate::views::beat_board::BeatTextState::default(),
             root_close_lifecycle: RootCloseLifecycle::default(),
+            #[cfg(target_os = "macos")]
+            lifecycle_save_pending: false,
+            #[cfg(target_os = "macos")]
+            lifecycle_close_request_pending: false,
             document_font_store: document_font::DocumentFontStore::default(),
             prepared_document_fonts: None,
             pending_commands: menu::PendingDesktopCommands::default(),
@@ -273,6 +282,9 @@ impl ScriptCraftApp {
             native_lifecycle: None,
             #[cfg(target_os = "macos")]
             native_open_documents: None,
+            #[cfg(target_os = "macos")]
+            native_operation_coordinator:
+                macos_native_dialogs::NativeOperationCoordinator::new(),
             focus_mode: focus_mode::FocusModeController::default(),
             sprint_timer: sprint_timer::SprintTimer::default(),
             timer_popup_surface: EditorSurface::Body,
@@ -313,8 +325,6 @@ impl ScriptCraftApp {
             native_path: None,
             fresh_document_title: fresh_document_title.clone(),
             native_title: fresh_document_title,
-            #[cfg(target_os = "macos")]
-            accepted_print_settings: None,
             #[cfg(target_os = "windows")]
             windows_print_session: None,
             #[cfg(target_os = "windows")]

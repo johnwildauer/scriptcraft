@@ -23,6 +23,7 @@ pub(crate) enum SaveOutcome {
     Saved,
     Cancelled,
     Failed,
+    Pending,
 }
 
 /// A lifecycle continuation requires both a successful save and a clean live
@@ -32,6 +33,7 @@ pub(crate) fn clean_save_outcome(outcome: SaveOutcome, is_dirty: bool) -> SaveOu
         (SaveOutcome::Saved, false) => SaveOutcome::Saved,
         (SaveOutcome::Cancelled, _) => SaveOutcome::Cancelled,
         (SaveOutcome::Failed, _) | (SaveOutcome::Saved, true) => SaveOutcome::Failed,
+        (SaveOutcome::Pending, _) => SaveOutcome::Pending,
     }
 }
 
@@ -159,6 +161,19 @@ impl ScriptCraftApp {
             }
             return false;
         }
+        #[cfg(target_os = "macos")]
+        if self.lifecycle_close_request_pending {
+            self.lifecycle_close_request_pending = false;
+            self.arm_and_request_root_close(ctx);
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        if self.lifecycle_save_pending {
+            if close_requested {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+            return false;
+        }
         let request = close_requested.then(|| RootCloseRequest {
             is_dirty: self.session.dirty(),
         });
@@ -188,7 +203,12 @@ impl ScriptCraftApp {
                 } else {
                     None
                 };
-                if confirmed_close_for_choice(choice, save_outcome) {
+                if save_outcome == Some(SaveOutcome::Pending) {
+                    #[cfg(target_os = "macos")]
+                    {
+                        self.lifecycle_save_pending = true;
+                    }
+                } else if confirmed_close_for_choice(choice, save_outcome) {
                     self.arm_and_request_root_close(ctx);
                 }
                 false
@@ -213,5 +233,31 @@ impl ScriptCraftApp {
             );
         }
         lifecycle_outcome
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn finish_pending_lifecycle_save(
+        &mut self,
+        outcome: SaveOutcome,
+    ) {
+        if !self.lifecycle_save_pending {
+            return;
+        }
+        self.lifecycle_save_pending = false;
+        let is_dirty = self.session.dirty();
+        let lifecycle_outcome = clean_save_outcome(outcome, is_dirty);
+        if outcome == SaveOutcome::Saved && is_dirty {
+            self.show_error(
+                "LIFECYCLE_SAVE_REPORTED_SUCCESS_BUT_DIRTY: the live session remains dirty after save",
+            );
+        }
+        if lifecycle_outcome == SaveOutcome::Failed {
+            show_native_lifecycle_error(
+                "Could Not Save Document",
+                "The document could not be saved. It remains open, and its unsaved changes have been preserved.",
+            );
+        } else if lifecycle_outcome == SaveOutcome::Saved {
+            self.lifecycle_close_request_pending = true;
+        }
     }
 }

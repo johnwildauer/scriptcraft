@@ -104,6 +104,28 @@ fn export_pdf_to_selected_path<F: FileSystem>(
 impl ScriptCraftApp {
     pub(crate) fn export_fountain(&mut self) {
         let default_filename = fountain_export_filename(self.native_path.as_deref());
+        #[cfg(target_os = "macos")]
+        {
+            use crate::platform::macos::macos_native_dialogs::{
+                NativeFilePanelContinuation, NativeFilePanelRequest,
+            };
+            if self
+                .native_operation_coordinator
+                .present_file_panel(NativeFilePanelRequest {
+                    continuation: NativeFilePanelContinuation::FountainExport,
+                    title: "Export Fountain Text",
+                    default_filename: &default_filename,
+                    allowed_extensions: &["fountain"],
+                    include_title_page: false,
+                })
+                .is_err()
+            {
+                self.show_error("FOUNTAIN_EXPORT_PICKER_UNAVAILABLE: destination picker could not be presented; screenplay unchanged");
+            }
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
         let Some(destination) = rfd::FileDialog::new()
             .add_filter("Fountain screenplay", &["fountain"])
             .set_file_name(&default_filename)
@@ -112,6 +134,23 @@ impl ScriptCraftApp {
             return;
         };
 
+        let result = exports::export_fountain(self.session.project())
+            .map_err(FountainExportFailure::Export)
+            .and_then(|text| {
+                StdFileSystem
+                    .write(&destination, text.as_bytes())
+                    .map_err(|_| FountainExportFailure::Write)
+        });
+        self.finish_fountain_export(result);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn finish_fountain_export_to(&mut self, destination: PathBuf) {
+        if destination.to_str().is_none() {
+            self.show_error("FOUNTAIN_EXPORT_PATH_REJECTED: selected path is not valid UTF-8; screenplay unchanged");
+            return;
+        }
         let result = exports::export_fountain(self.session.project())
             .map_err(FountainExportFailure::Export)
             .and_then(|text| {
@@ -147,9 +186,25 @@ impl ScriptCraftApp {
     pub(crate) fn export_pdf(&mut self) {
         #[cfg(target_os = "macos")]
         {
-            self.export_pdf_with_picker(
-                crate::platform::macos::macos_pdf_dialog::show_pdf_save_panel,
-            );
+            use crate::platform::macos::macos_native_dialogs::{
+                NativeFilePanelContinuation, NativeFilePanelRequest,
+            };
+            let default_filename = pdf_export_filename(self.native_path.as_deref());
+            if self
+                .native_operation_coordinator
+                .present_file_panel(NativeFilePanelRequest {
+                    continuation: NativeFilePanelContinuation::PdfExport,
+                    title: "Save As PDF",
+                    default_filename: &default_filename,
+                    allowed_extensions: &["pdf"],
+                    include_title_page: true,
+                })
+                .is_err()
+            {
+                self.finish_pdf_export(pdf::PdfExportPickerResult::Error(
+                    pdf::PdfExportPickerFailure::Unavailable,
+                ));
+            }
         }
         #[cfg(target_os = "windows")]
         {
@@ -179,6 +234,31 @@ impl ScriptCraftApp {
         &mut self,
         options: scriptcraft_commands::PdfExportOptions,
     ) {
+        #[cfg(target_os = "macos")]
+        {
+            use crate::platform::macos::macos_native_dialogs::{
+                NativeFilePanelContinuation, NativeFilePanelRequest,
+            };
+            let default_filename = pdf_export_filename(self.native_path.as_deref());
+            if self
+                .native_operation_coordinator
+                .present_file_panel(NativeFilePanelRequest {
+                    continuation: NativeFilePanelContinuation::PdfExportWithOptions(options),
+                    title: "Save As PDF",
+                    default_filename: &default_filename,
+                    allowed_extensions: &["pdf"],
+                    include_title_page: false,
+                })
+                .is_err()
+            {
+                self.finish_pdf_export(pdf::PdfExportPickerResult::Error(
+                    pdf::PdfExportPickerFailure::Unavailable,
+                ));
+            }
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
         let default_filename = pdf_export_filename(self.native_path.as_deref());
         let picker_result = rfd::FileDialog::new()
             .add_filter("PDF document", &["pdf"])
@@ -192,9 +272,10 @@ impl ScriptCraftApp {
             });
 
         self.finish_pdf_export(picker_result);
+        }
     }
 
-    fn finish_pdf_export(&mut self, picker_result: pdf::PdfExportPickerResult) {
+    pub(crate) fn finish_pdf_export(&mut self, picker_result: pdf::PdfExportPickerResult) {
         match export_pdf_to_selected_path(picker_result, &StdFileSystem, |selected_options| {
             self.build_pdf_with_options(selected_options)
         }) {
@@ -351,7 +432,6 @@ impl ScriptCraftApp {
     pub(crate) fn open_print_panel(&mut self) {
         #[cfg(target_os = "macos")]
         {
-            self.accepted_print_settings = None;
             let (environment, font_payload) = match self.output_pdf_inputs() {
                 Ok(inputs) => inputs,
                 Err(_) => {
@@ -368,44 +448,14 @@ impl ScriptCraftApp {
                 font_payload,
                 self.native_path.as_deref(),
             );
-            let panel_result =
-                crate::platform::macos::macos_print_dialog::show_print_panel(snapshot);
-            let delivery = crate::platform::macos::macos_print_dialog::dispatch_panel_result(
-                panel_result,
-                |settings| {
-                    self.accepted_print_settings = Some(settings);
-                    match self.accepted_print_settings.take() {
-                    Some(settings) => crate::platform::macos::macos_print_dialog::deliver_print(settings),
-                    None => crate::platform::macos::macos_print_dialog::PrintDeliveryOutcome {
-                        result: crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PrintOperationUnavailable,
-                        fallback_summary: None,
-                    },
-                }
-                },
-            );
-            match delivery {
-                crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Cancelled => self.clear_error(),
-                crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Accepted(outcome) => {
-                    let message = match outcome.result {
-                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::OperationReportedSuccess => "PRINT_OPERATION_REPORTED_SUCCESS: macOS reported successful operation; physical printer delivery is unconfirmed; screenplay unchanged",
-                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::OperationCancelledOrFailed => "PRINT_OPERATION_CANCELLED_OR_FAILED: native print operation was cancelled or failed; AppKit does not distinguish these results; printer delivery is unknown; screenplay unchanged",
-                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PdfBuildFailed => "PRINT_PDF_BUILD_FAILED: Print-composed PDF could not be built; no operation submitted; screenplay unchanged",
-                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PdfDocumentInvalid => "PRINT_PDF_INVALID: PDFKit could not open the generated PDF; no operation submitted; screenplay unchanged",
-                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::MainThreadUnavailable => "PRINT_OPERATION_UNAVAILABLE: PDFKit printing requires the AppKit main thread; no operation submitted; screenplay unchanged",
-                        crate::platform::macos::macos_print_dialog::PrintDeliveryResult::PrintOperationUnavailable => "PRINT_OPERATION_UNAVAILABLE: PDFKit could not prepare a native print operation; no operation submitted; screenplay unchanged",
-                    };
-                    if let Some(summary) = outcome.fallback_summary {
-                        self.show_error(format!("{message}; {summary}"));
-                    } else {
-                        self.show_error(message);
-                    }
-                }
-                crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Unavailable => self.show_error(
+            if self
+                .native_operation_coordinator
+                .present_print_panel(snapshot)
+                .is_err()
+            {
+                self.show_error(
                     "PRINT_PANEL_UNAVAILABLE: native print panel unavailable; screenplay unchanged",
-                ),
-                crate::platform::macos::macos_print_dialog::PrintPanelDispatch::Failed => self.show_error(
-                    "PRINT_PANEL_FAILED: native print settings could not be collected; screenplay unchanged",
-                ),
+                );
             }
         }
         #[cfg(target_os = "windows")]
@@ -439,6 +489,28 @@ impl ScriptCraftApp {
                     self.report_windows_print_start_failure(failure);
                 }
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn finish_print_delivery(
+        &mut self,
+        outcome: crate::platform::macos::macos_print_dialog::PrintDeliveryOutcome,
+    ) {
+        use crate::platform::macos::macos_print_dialog::PrintDeliveryResult;
+
+        let message = match outcome.result {
+            PrintDeliveryResult::OperationReportedSuccess => "PRINT_OPERATION_REPORTED_SUCCESS: macOS reported successful operation; physical printer delivery is unconfirmed; screenplay unchanged",
+            PrintDeliveryResult::OperationCancelledOrFailed => "PRINT_OPERATION_CANCELLED_OR_FAILED: native print operation was cancelled or failed; AppKit does not distinguish these results; printer delivery is unknown; screenplay unchanged",
+            PrintDeliveryResult::PdfBuildFailed => "PRINT_PDF_BUILD_FAILED: Print-composed PDF could not be built; no operation submitted; screenplay unchanged",
+            PrintDeliveryResult::PdfDocumentInvalid => "PRINT_PDF_INVALID: PDFKit could not open the generated PDF; no operation submitted; screenplay unchanged",
+            PrintDeliveryResult::MainThreadUnavailable => "PRINT_OPERATION_UNAVAILABLE: PDFKit printing requires the AppKit main thread; no operation submitted; screenplay unchanged",
+            PrintDeliveryResult::PrintOperationUnavailable => "PRINT_OPERATION_UNAVAILABLE: PDFKit could not prepare a native print operation; no operation submitted; screenplay unchanged",
+        };
+        if let Some(summary) = outcome.fallback_summary {
+            self.show_error(format!("{message}; {summary}"));
+        } else {
+            self.show_error(message);
         }
     }
 }

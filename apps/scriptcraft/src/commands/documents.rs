@@ -46,9 +46,9 @@ impl ScriptCraftApp {
                 DesktopViewportEffects::close_root(ctx);
                 DesktopCommandOutcome::EffectDispatched
             }
-            Command::FileSave => DesktopCommandOutcome::SaveCompleted(self.save_native(ctx)),
+            Command::FileSave => save_command_outcome(self.save_native(ctx)),
             Command::FileSaveAsRequest => {
-                DesktopCommandOutcome::SaveCompleted(self.save_as_native(ctx))
+                save_command_outcome(self.save_as_native(ctx))
             }
             Command::FileSaveAs { path, overwrite } => {
                 DesktopCommandOutcome::SaveCompleted(self.save_fdx_as_at(path.as_path(), overwrite))
@@ -61,14 +61,22 @@ impl ScriptCraftApp {
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FileSaveAsPdf => {
+                #[cfg(target_os = "macos")]
+                export_pdf(self);
+                #[cfg(not(target_os = "macos"))]
                 self.with_native_output_modal(export_pdf);
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FileExportFountain => {
+                #[cfg(target_os = "macos")]
+                self.export_fountain();
+                #[cfg(not(target_os = "macos"))]
                 self.with_native_output_modal(|app| app.export_fountain());
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::FilePrint => {
+                #[cfg(target_os = "macos")]
+                open_print_panel(self);
                 #[cfg(target_os = "windows")]
                 {
                     // Windows printing outlives this dispatch: preparation runs
@@ -78,11 +86,14 @@ impl ScriptCraftApp {
                     self.native_output_modal_active = true;
                     open_print_panel(self);
                 }
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 self.with_native_output_modal(open_print_panel);
                 DesktopCommandOutcome::EffectDispatched
             }
             Command::PdfIncludeTitlePageResolve { options } => {
+                #[cfg(target_os = "macos")]
+                resolve_pdf_options(self, options);
+                #[cfg(not(target_os = "macos"))]
                 self.with_native_output_modal(|app| resolve_pdf_options(app, options));
                 DesktopCommandOutcome::EffectDispatched
             }
@@ -113,6 +124,13 @@ impl ScriptCraftApp {
             "SAVE_DISPATCH_UNAVAILABLE: {reason:?}; document unchanged"
         ));
         Some(DesktopCommandOutcome::SaveCompleted(SaveOutcome::Failed))
+    }
+}
+
+fn save_command_outcome(outcome: SaveOutcome) -> DesktopCommandOutcome {
+    match outcome {
+        SaveOutcome::Pending => DesktopCommandOutcome::EffectDispatched,
+        completed => DesktopCommandOutcome::SaveCompleted(completed),
     }
 }
 

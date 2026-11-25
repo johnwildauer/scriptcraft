@@ -1,6 +1,8 @@
 //! Desktop document workflows and lifecycle coordination.
 
 pub(crate) mod lifecycle;
+#[cfg(target_os = "macos")]
+pub(crate) mod native_operations;
 pub(crate) mod open;
 pub(crate) mod output;
 pub(crate) mod pdf;

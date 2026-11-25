@@ -372,6 +372,28 @@ impl ScriptCraftApp {
     }
 
     pub(crate) fn open_native(&mut self, ctx: &egui::Context) {
+        #[cfg(target_os = "macos")]
+        {
+            use crate::platform::macos::macos_native_dialogs::{
+                NativeFilePanelContinuation, NativeFilePanelRequest,
+            };
+            let result = self.native_operation_coordinator.present_file_panel(
+                NativeFilePanelRequest {
+                    continuation: NativeFilePanelContinuation::Open,
+                    title: "Open Final Draft Document",
+                    default_filename: "",
+                    allowed_extensions: FINAL_DRAFT_OPEN_EXTENSIONS,
+                    include_title_page: false,
+                },
+            );
+            if result.is_err() {
+                self.show_error("OPEN_PICKER_UNAVAILABLE: document picker could not be presented; active document unchanged");
+            }
+            let _ = ctx;
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
         let dialog = rfd::FileDialog::new().add_filter(
             "Final Draft documents and templates",
             FINAL_DRAFT_OPEN_EXTENSIONS,
@@ -379,9 +401,10 @@ impl ScriptCraftApp {
         dispatch_open_selection(dialog.pick_file(), |path| {
             self.dispatch_document_path_command(path, ctx);
         });
+        }
     }
 
-    fn dispatch_document_path_command(&mut self, path: &Path, ctx: &egui::Context) {
+    pub(crate) fn dispatch_document_path_command(&mut self, path: &Path, ctx: &egui::Context) {
         let Some(path) = path.to_str().and_then(|path| DocumentPath::new(path).ok()) else {
             self.show_error("DOCUMENT_PATH_REJECTED: selected path is not valid UTF-8; active document unchanged");
             return;

@@ -601,8 +601,13 @@ impl ScriptCraftApp {
     }
 
     fn update(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
-        self.finalize_initial_document_slot();
         let ctx = ui.ctx().clone();
+        #[cfg(target_os = "macos")]
+        {
+            self.native_operation_coordinator.refresh_root_owner(frame, &ctx);
+            self.poll_native_operation_completion(&ctx);
+        }
+        self.finalize_initial_document_slot();
         let frame_started = Instant::now();
         if self.development_mode {
             self.responsiveness.begin_update();
