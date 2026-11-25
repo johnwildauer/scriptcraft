@@ -636,6 +636,7 @@ impl ScriptCraftApp {
         self.active_body_dual_dialogue_group = None;
         self.surface_focused = false;
         self.session = replacement;
+        self.script_note_workspace.reset_document_activation();
         self.script_view_mode = script_view_mode;
         self.invisibles = invisibles;
         self.beat_board_view_state = beat_board_view_state;

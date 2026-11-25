@@ -1048,6 +1048,14 @@ fn render_menu_entries(
     }
 }
 
+pub(crate) fn paint_script_note_color_swatch(ui: &egui::Ui, row: egui::Rect, rgb: [u8; 3]) {
+    paint_menu_swatch(ui, row, MenuSwatch::Palette(rgb), MENU_PRESENTATION, true);
+}
+
+pub(crate) fn paint_script_note_no_color_swatch(ui: &egui::Ui, row: egui::Rect) {
+    paint_menu_swatch(ui, row, MenuSwatch::NoColor, MENU_PRESENTATION, true);
+}
+
 fn paint_menu_swatch(
     ui: &egui::Ui,
     row: egui::Rect,

@@ -5,7 +5,11 @@ use crate::scene_metadata::{
     derived_character_projection, has_capability, reconcile_project_candidate_with_scope,
     scene_arc_names, SceneMetadataError,
 };
-use crate::{BodyOwner, ModelError, Project, TextRun, MAX_TEXT_BYTES};
+use crate::{
+    body_offsets::{flat_document_len, paragraph_flat_start},
+    script_notes::BodyTextReplacement,
+    BodyOwner, ModelError, Project, TextRun, MAX_TEXT_BYTES,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -374,6 +378,20 @@ fn replace_cast_list_text(
         .elements
         .get(element_index)
         .ok_or(CastListError::Model(ModelError::InvalidNumber))?;
+    let document_len = flat_document_len(project)
+        .ok_or(CastListError::Model(ModelError::InvalidNumber))?;
+    let flat_start = paragraph_flat_start(project, element_index)
+        .ok_or(CastListError::Model(ModelError::InvalidNumber))?;
+    let flat_end = flat_start
+        .checked_add(element.text.encode_utf16().count())
+        .ok_or(CastListError::Model(ModelError::InvalidNumber))?;
+    let replacement_value = BodyTextReplacement::new(
+        flat_start,
+        flat_end,
+        replacement.encode_utf16().count(),
+        document_len,
+    )
+    .ok_or(CastListError::Model(ModelError::InvalidNumber))?;
     if replacement.len() > MAX_TEXT_BYTES {
         return Err(CastListError::Model(ModelError::TextTooLong));
     }
@@ -445,5 +463,8 @@ fn replace_cast_list_text(
             .sync_managed_text_runs(&id, &element.text, &element.runs)
             .map_err(CastListError::Preservation)?;
     }
+    project
+        .apply_body_text_replacement(replacement_value)
+        .map_err(CastListError::Model)?;
     Ok(())
 }

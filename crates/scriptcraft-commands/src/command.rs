@@ -91,11 +91,19 @@ pub enum CommandId {
     BeatBoardRunFormattingSet,
     BeatBoardCardDelete,
     FileExportFountain,
+    ScriptNoteCreate,
+    ScriptNoteDelete,
+    ScriptNotePropertiesSet,
+    ScriptNoteSelectionSet,
+    ScriptNoteTextEdit,
+    ScriptNoteTextNavigate,
+    ScriptNotePresent,
+    ScriptNoteDismiss,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 75] = [
+    pub const ALL: [Self; 83] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -171,6 +179,14 @@ impl CommandId {
         Self::BeatBoardRunFormattingSet,
         Self::BeatBoardCardDelete,
         Self::FileExportFountain,
+        Self::ScriptNoteCreate,
+        Self::ScriptNoteDelete,
+        Self::ScriptNotePropertiesSet,
+        Self::ScriptNoteSelectionSet,
+        Self::ScriptNoteTextEdit,
+        Self::ScriptNoteTextNavigate,
+        Self::ScriptNotePresent,
+        Self::ScriptNoteDismiss,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -250,6 +266,14 @@ impl CommandId {
             Self::BeatBoardRunFormattingSet => "beat-board.run-formatting.set",
             Self::BeatBoardCardDelete => "beat-board.card.delete",
             Self::FileExportFountain => "file.export-fountain",
+            Self::ScriptNoteCreate => "script-note.create",
+            Self::ScriptNoteDelete => "script-note.delete",
+            Self::ScriptNotePropertiesSet => "script-note.properties.set",
+            Self::ScriptNoteSelectionSet => "script-note.selection.set",
+            Self::ScriptNoteTextEdit => "script-note.text.edit",
+            Self::ScriptNoteTextNavigate => "script-note.text.navigate",
+            Self::ScriptNotePresent => "script-note.present",
+            Self::ScriptNoteDismiss => "script-note.dismiss",
         }
     }
 }
@@ -301,6 +325,8 @@ pub enum HostEffectDescription {
     CancelTemplateSelector,
     OpenNewTemplateSelector,
     LaunchIndependentTemplateChild(BuiltinTemplateValue),
+    OpenScriptNote,
+    CloseScriptNote,
 }
 
 /// Typed command payload. Adjacent tagging fixes the wire keys to `id` and
@@ -505,6 +531,22 @@ pub enum Command {
     BeatBoardRunFormattingSet { patch: RunFormattingPatchValue },
     #[serde(rename = "beat-board.card.delete")]
     BeatBoardCardDelete { card: BeatCardIdValue },
+    #[serde(rename = "script-note.create")]
+    ScriptNoteCreate { input: super::ScriptNoteCreateValue },
+    #[serde(rename = "script-note.delete")]
+    ScriptNoteDelete { note: super::ScriptNoteIdValue },
+    #[serde(rename = "script-note.properties.set")]
+    ScriptNotePropertiesSet { properties: super::ScriptNotePropertiesValue },
+    #[serde(rename = "script-note.selection.set")]
+    ScriptNoteSelectionSet { selection: super::ScriptNoteSelectionValue },
+    #[serde(rename = "script-note.text.edit")]
+    ScriptNoteTextEdit { edit: super::ScriptNoteTextEditValue },
+    #[serde(rename = "script-note.text.navigate")]
+    ScriptNoteTextNavigate { target: super::ScriptNoteNavigationValue, #[serde(default)] extend: bool },
+    #[serde(rename = "script-note.present")]
+    ScriptNotePresent { presentation: super::ScriptNotePresentValue },
+    #[serde(rename = "script-note.dismiss")]
+    ScriptNoteDismiss,
 }
 
 impl Command {
@@ -530,6 +572,8 @@ impl Command {
             Self::FileNewFromTemplate { template } => Some(
                 HostEffectDescription::LaunchIndependentTemplateChild(*template),
             ),
+            Self::ScriptNotePresent { .. } => Some(HostEffectDescription::OpenScriptNote),
+            Self::ScriptNoteDismiss => Some(HostEffectDescription::CloseScriptNote),
             _ => None,
         }
     }
@@ -611,6 +655,14 @@ impl Command {
             Self::BeatBoardStyleClear => CommandId::BeatBoardStyleClear,
             Self::BeatBoardRunFormattingSet { .. } => CommandId::BeatBoardRunFormattingSet,
             Self::BeatBoardCardDelete { .. } => CommandId::BeatBoardCardDelete,
+            Self::ScriptNoteCreate { .. } => CommandId::ScriptNoteCreate,
+            Self::ScriptNoteDelete { .. } => CommandId::ScriptNoteDelete,
+            Self::ScriptNotePropertiesSet { .. } => CommandId::ScriptNotePropertiesSet,
+            Self::ScriptNoteSelectionSet { .. } => CommandId::ScriptNoteSelectionSet,
+            Self::ScriptNoteTextEdit { .. } => CommandId::ScriptNoteTextEdit,
+            Self::ScriptNoteTextNavigate { .. } => CommandId::ScriptNoteTextNavigate,
+            Self::ScriptNotePresent { .. } => CommandId::ScriptNotePresent,
+            Self::ScriptNoteDismiss => CommandId::ScriptNoteDismiss,
         }
     }
 }

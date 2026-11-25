@@ -35,14 +35,14 @@ raw-window-handle = "0.6.2"
 windows-numerics = "=0.3.1"
 windows-core = "=0.62.2"
 windows-future = "=0.3.2"
-windows = { version = "=0.62.2", default-features = false, features = ["Foundation", "Graphics_Printing", "Graphics_Printing_OptionDetails", "Win32_Foundation", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_DirectWrite", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Imaging", "Win32_Graphics_Printing", "Win32_Storage_Xps_Printing", "Win32_System_Com", "Win32_System_WinRT", "Win32_System_WinRT_Printing", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "=0.62.2", default-features = false, features = ["Foundation", "Graphics_Printing", "Graphics_Printing_OptionDetails", "Win32_Foundation", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_DirectWrite", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Graphics_Imaging", "Win32_Graphics_Printing", "Win32_Storage_Xps_Printing", "Win32_System_Com", "Win32_System_WinRT", "Win32_System_WinRT_Printing", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "=0.6.2"
 muda = { version = "0.17", default-features = false }
 objc2 = { version = "=0.6.5", default-features = false, features = ["std"] }
 raw-window-handle = "0.6.2"
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSAlert", "NSApplication", "NSBezierPath", "NSButton", "NSCell", "NSColor", "NSControl", "NSMenu", "NSMenuItem", "NSOpenPanel", "NSPanel", "NSPrintInfo", "NSPrintOperation", "NSPrintPanel", "NSResponder", "NSSavePanel", "NSView", "NSViewController", "NSWindow", "NSImage", "objc2-core-foundation", "objc2-uniform-type-identifiers"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSAlert", "NSApplication", "NSBezierPath", "NSButton", "NSCell", "NSColor", "NSControl", "NSMenu", "NSMenuItem", "NSOpenPanel", "NSPanel", "NSPrintInfo", "NSPrintOperation", "NSPrintPanel", "NSResponder", "NSSavePanel", "NSView", "NSViewController", "NSWindow", "NSScreen", "NSImage", "objc2-core-foundation", "objc2-uniform-type-identifiers"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSAppleEventDescriptor", "NSAppleEventManager", "NSGeometry", "NSNotification", "NSObject", "NSSet", "NSString", "NSURL", "objc2-core-services"] }
 objc2-core-services = { version = "=0.3.2", default-features = false, features = ["std", "AEDataModel", "AppleEvents"] }
 objc2-pdf-kit = { version = "=0.3.2", default-features = false, features = ["std", "PDFDocument", "objc2-app-kit"] }

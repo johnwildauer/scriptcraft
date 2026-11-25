@@ -6,6 +6,7 @@
 use scriptcraft_model::{Position as CorePosition, Selection as CoreSelection};
 use scriptcraft_session::editing::{
     ApplyTemplateError, ApplyTemplateOutcome, BeatSelection, BeatTextField, EditError, EditingSession,
+    ScriptNoteColorUpdate, ScriptNoteCreationInput, ScriptNoteSelection,
 };
 
 use crate::{Command, CommandId, EditorSurface, PointerPhase, PositionError, SelectionError};
@@ -37,6 +38,7 @@ pub enum CommandRejection {
     UnsupportedSurface,
     InvalidSelection(SelectionError),
     PositionOutOfRange(PositionError),
+    InvalidScriptNoteValue,
 }
 
 /// Executes with the legacy Body target for generic surface-less commands.
@@ -151,6 +153,88 @@ pub fn execute_editor_command_on_surface(
                 return CommandOutcome::Unavailable(UnavailableReason::Selection);
             }
             session.set_beat_run_formatting(patch.as_core())
+        }
+        Command::ScriptNoteCreate { input } => {
+            if input.validate().is_err() {
+                return CommandOutcome::Rejected(CommandRejection::InvalidScriptNoteValue);
+            }
+            session.create_script_note(ScriptNoteCreationInput {
+                color: input.color.and_then(|color| color.as_core()),
+                note_type: input.note_type.clone(),
+                timestamp: input.timestamp.as_str().to_owned(),
+            }).map(|_| ())
+        }
+        Command::ScriptNoteDelete { note } => {
+            if session.project().script_notes().get(note.as_core()).is_none() {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            session.delete_script_note(note.as_core().clone())
+        }
+        Command::ScriptNotePropertiesSet { properties } => {
+            if properties.validate().is_err() {
+                return CommandOutcome::Rejected(CommandRejection::InvalidScriptNoteValue);
+            }
+            if session.project().script_notes().get(properties.note.as_core()).is_none() {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            session.set_script_note_properties(
+                properties.note.as_core().clone(), match properties.color {
+                    None => ScriptNoteColorUpdate::Preserve,
+                    Some(crate::ScriptNoteColorValue::ThemeDefault) => ScriptNoteColorUpdate::ThemeDefault,
+                    Some(color) => match color.as_core() {
+                        Some(color) => ScriptNoteColorUpdate::Explicit(color),
+                        None => ScriptNoteColorUpdate::ThemeDefault,
+                    },
+                },
+                properties.note_type.clone(), properties.modified.as_str().to_owned(),
+            )
+        }
+        Command::ScriptNoteSelectionSet { selection } => {
+            let selection = match crate::script_note_selection_to_core(selection) {
+                Ok(selection) => selection,
+                Err(error) => return CommandOutcome::Rejected(CommandRejection::PositionOutOfRange(error)),
+            };
+            if let ScriptNoteSelection::Text { note, .. } = &selection {
+                if session.project().script_notes().get(note).is_none() {
+                    return CommandOutcome::Unavailable(UnavailableReason::Selection);
+                }
+            }
+            match session.set_script_note_selection(selection) {
+                Err(EditError::InvalidSelection | EditError::InvalidUtf8Boundary) => {
+                    return CommandOutcome::Unavailable(UnavailableReason::Selection);
+                }
+                result => result,
+            }
+        }
+        Command::ScriptNoteTextEdit { edit } => {
+            if edit.operation.validate().is_err() {
+                return CommandOutcome::Rejected(CommandRejection::InvalidScriptNoteValue);
+            }
+            if !session.script_note_selection_is_valid()
+                || !matches!(session.script_note_selection(), ScriptNoteSelection::Text { .. })
+            {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            session.edit_script_note_text(
+                crate::script_note_text_operation_to_core(&edit.operation),
+                edit.modified.as_str().to_owned(),
+            )
+        }
+        Command::ScriptNoteTextNavigate { target, extend } => {
+            if !session.script_note_selection_is_valid()
+                || !matches!(session.script_note_selection(), ScriptNoteSelection::Text { .. })
+            {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            let (horizontal, edge) = crate::script_note_navigation_to_core(*target);
+            if let Some(edge) = edge {
+                session.navigate_script_note_line_edge(edge, *extend)
+            } else {
+                session.navigate_script_note_horizontal(horizontal, *extend)
+            }
+        }
+        Command::ScriptNotePresent { .. } | Command::ScriptNoteDismiss => {
+            return rejected(command);
         }
         Command::EditorTextInsert { text, surface } => insert(session, *surface, text, false),
         Command::EditorTextPaste { text, surface } => insert(session, *surface, text, true),

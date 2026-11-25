@@ -6,7 +6,8 @@ use super::filesystem::FdxStorageFileSystem;
 use super::publication::{replace, save_as, save_as_overwrite};
 use super::target::{FdxSaveMode, FdxSaveTarget};
 use crate::editing::{
-    map_selection_to_project, map_title_selection_to_project, BeatIdentityRebase, EditError, EditingSession,
+    map_selection_to_project, map_title_selection_to_project, BeatIdentityRebase, EditError,
+    EditingSession, ScriptNoteIdentityRebase,
 };
 use scriptcraft_fdx::{self as fdx, same_dual_dialogue_projection, write_v6_for_transactional_save, FdxError};
 use scriptcraft_model::formatted_text::{normalize_project_runs, FormattedTextError};
@@ -185,6 +186,8 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
         .map_err(|error| TransactionalSaveError::Codec(map_normalization_error(error)))?;
     let normalized = fdx::finalize_beat_board_candidate(&normalized)
         .map_err(TransactionalSaveError::Codec)?;
+    let normalized = fdx::finalize_script_notes_candidate(&normalized)
+        .map_err(TransactionalSaveError::Codec)?;
     let prepared = codec.serialize(&normalized, &mut context)?;
     let rebased_project = codec
         .reread(&prepared.bytes)
@@ -278,6 +281,7 @@ fn same_save_projection(expected: &Project, actual: &Project) -> bool {
         && same_elements(&expected.elements, &actual.elements)
         && same_dual_dialogue_projection(expected, actual)
         && fdx::same_beat_board_projection(expected, actual)
+        && fdx::same_script_notes_projection(expected, actual)
 }
 
 fn same_title_paragraphs(expected: &[TitlePageParagraph], actual: &[TitlePageParagraph]) -> bool {
@@ -409,6 +413,8 @@ impl EditingSession {
         // Card selection maps through the same durable correspondence used by
         // the verified writer candidate and reread.
         let beat_rebase = BeatIdentityRebase::new(candidate, &project)?;
+        let script_note_rebase = ScriptNoteIdentityRebase::new(candidate, &project)?;
+        let script_note_selection = script_note_rebase.map_selection(candidate, &project, &self.script_note_selection)?;
         let beat_selection = match &self.beat_selection {
             crate::editing::BeatSelection::None => crate::editing::BeatSelection::None,
             crate::editing::BeatSelection::Card { card } => crate::editing::BeatSelection::Card {
@@ -479,6 +485,7 @@ impl EditingSession {
         rebased.selection = selection;
         rebased.title_selection = title_selection;
         rebased.beat_selection = beat_selection;
+        rebased.script_note_selection = script_note_selection;
         rebased.generated_parentheticals = generated_parentheticals;
         rebased.dirty = false;
         rebased.reset_derived_after_saved_rebase();

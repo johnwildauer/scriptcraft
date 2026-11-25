@@ -4,6 +4,7 @@ mod frame;
 mod invisibles;
 mod keyboard;
 mod navigation;
+mod note_overlay;
 mod page_policy;
 mod paint;
 mod pointer;
@@ -16,5 +17,8 @@ pub(crate) use self::frame::{
     central_panel_frame, chrome_clear_color, with_editor_surface_scrollbar_presentation,
 };
 pub(crate) use self::reveal::RevealIntent;
+pub(crate) use self::note_overlay::{
+    navigate, navigation_enabled, ordered_note_ids, NoteNavigationDirection,
+};
 pub(crate) use self::ruler::RulerState;
 pub(super) use crate::app::ScriptCraftApp;

@@ -8,6 +8,7 @@ use super::{
         NORMAL_VIEW_PAGE_BOTTOM_RULE_WIDTH,
     },
     invisibles::{paint_overlay as paint_invisibles_overlay, OverlayPaintError},
+    note_overlay::{highlight_color, highlight_display_range, paint_markers, NoteLineKey, NoteMarkerGeometry},
     zoom_scroll::PresentationMetrics,
     ScriptCraftApp,
 };
@@ -120,6 +121,8 @@ impl ScriptCraftApp {
         caret_geometry: Option<CaretPresentation>,
         surface: EditorSurface,
         presentation_mode: ScriptViewMode,
+        note_markers: &[NoteMarkerGeometry],
+        hovered_note_marker: Option<NoteLineKey>,
     ) {
         let scale = metrics.scale;
         let page_rect = presented_page.rect;
@@ -133,6 +136,21 @@ impl ScriptCraftApp {
         let palette = self.theme_palette.script_workspace.page;
         let show_invisibles = layout.purpose == scriptcraft_layout::LayoutPurpose::Editor
             && self.invisibles_visible_for(surface);
+        let note_highlight = (surface == EditorSurface::Body
+            && layout.purpose == scriptcraft_layout::LayoutPurpose::Editor)
+            .then(|| {
+                self.script_note_workspace
+                    .open_note
+                    .as_ref()
+                    .and_then(|id| self.session.project().script_notes().get(id))
+                    .map(|note| {
+                        (
+                            note.range,
+                            highlight_color(note.color_projection(), palette.text),
+                        )
+                    })
+            })
+            .flatten();
         let invisibles_color = show_invisibles.then(|| self.invisibles_color());
         if page_chrome_visible(presentation_mode) {
             painter.rect_filled(page_rect, 2.0, palette.paper);
@@ -323,6 +341,28 @@ impl ScriptCraftApp {
                 let span = projected.core;
                 let span_origin =
                     egui::pos2(page_rect.left() + projected.origin_x, line_top_screen);
+                if let Some((note_range, note_color)) = note_highlight {
+                    if let Some((from, to)) =
+                        highlight_display_range(self.session.project(), note_range, span)
+                    {
+                        let boundaries = &projected.display_boundary_offsets;
+                        let start = from.min(boundaries.len().saturating_sub(1));
+                        let end = to.min(boundaries.len().saturating_sub(1));
+                        let highlight_rect = egui::Rect::from_min_max(
+                            egui::pos2(
+                                span_origin.x + boundaries[start],
+                                line_top_screen,
+                            ),
+                            egui::pos2(
+                                span_origin.x + boundaries[end],
+                                line_top_screen + line_box_height,
+                            ),
+                        );
+                        if highlight_rect.width() > 0.0 && highlight_rect.height() > 0.0 {
+                            line_painter.rect_filled(highlight_rect, 0.0, note_color);
+                        }
+                    }
+                }
                 let selected_display = Self::selected_display_range(span, selection);
                 if let Some((from, to)) = selected_display {
                     add_performance_counter(&mut self.performance.selection_spans_submitted, 1);
@@ -457,6 +497,20 @@ impl ScriptCraftApp {
                         ),
                 }
             }
+        }
+
+        if surface == EditorSurface::Body
+            && layout.purpose == scriptcraft_layout::LayoutPurpose::Editor
+        {
+            paint_markers(
+                &painter,
+                page_rect,
+                scale,
+                palette.paper,
+                palette.text,
+                note_markers,
+                hovered_note_marker,
+            );
         }
 
         let selection = match surface {

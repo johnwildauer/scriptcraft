@@ -23,7 +23,7 @@ use crate::{
         replacement_transport,
     },
     presentation::{document_font, wheel_zoom},
-    widgets::{elements::state::ElementWindowState, sprint_timer},
+    widgets::{elements::state::ElementWindowState, script_note::state::ScriptNoteWorkspaceState, sprint_timer},
 };
 use eframe::egui;
 use scriptcraft_commands::{Command, DiagnosticMessage, EditorSurface, ScriptViewMode};
@@ -98,6 +98,8 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) beat_layout_cache: crate::views::beat_board::BeatLayoutCache,
     pub(crate) beat_interaction: crate::views::beat_board::BeatInteraction,
     pub(crate) beat_text: crate::views::beat_board::BeatTextState,
+    pub(crate) script_note_workspace: ScriptNoteWorkspaceState,
+    pub(crate) script_note_layout_cache: crate::widgets::script_note::cache::ScriptNoteLayoutCache,
     pub(crate) root_close_lifecycle: RootCloseLifecycle,
     #[cfg(target_os = "macos")]
     pub(crate) lifecycle_save_pending: bool,
@@ -260,6 +262,8 @@ impl ScriptCraftApp {
             beat_layout_cache: crate::views::beat_board::BeatLayoutCache::default(),
             beat_interaction: crate::views::beat_board::BeatInteraction::default(),
             beat_text: crate::views::beat_board::BeatTextState::default(),
+            script_note_workspace: ScriptNoteWorkspaceState::default(),
+            script_note_layout_cache: crate::widgets::script_note::cache::ScriptNoteLayoutCache::default(),
             root_close_lifecycle: RootCloseLifecycle::default(),
             #[cfg(target_os = "macos")]
             lifecycle_save_pending: false,

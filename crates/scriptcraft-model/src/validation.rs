@@ -17,6 +17,7 @@ use crate::{
         ReferencePolicy,
     },
     project::Project,
+    script_notes::{ScriptNoteIdentity, ScriptNotes},
     ModelError, MAX_TEXT_BYTES,
 };
 
@@ -157,6 +158,131 @@ fn validate_beat_board(
     Ok(())
 }
 
+fn is_xml_compatible(value: &str) -> bool {
+    value.chars().all(|character| {
+        matches!(character, '\u{9}' | '\u{A}' | '\u{D}')
+            || ('\u{20}'..='\u{D7FF}').contains(&character)
+            || ('\u{E000}'..='\u{FFFD}').contains(&character)
+            || ('\u{10000}'..='\u{10FFFF}').contains(&character)
+    })
+}
+
+fn validate_bounded_xml_string(value: &str, max_bytes: usize) -> Result<(), ModelError> {
+    if value.len() > max_bytes {
+        return Err(ModelError::StringTooLong);
+    }
+    if !is_xml_compatible(value) {
+        return Err(ModelError::InvalidRunProjection);
+    }
+    Ok(())
+}
+
+fn validate_script_notes(
+    notes: &ScriptNotes,
+    project: &Project,
+    ids: &mut BTreeSet<StableId>,
+) -> Result<(), ModelError> {
+    if notes.len() > MAX_ELEMENTS {
+        return Err(ModelError::TooManyElements);
+    }
+    let body_length = crate::body_offsets::flat_document_len(project).ok_or(ModelError::InvalidNumber)?;
+    let mut total_values = notes.len();
+    let mut source_note_ordinals = BTreeSet::new();
+    let mut durable_note_ids = BTreeSet::new();
+    let mut durable_paragraph_ids = BTreeSet::new();
+
+    for note in notes.iter() {
+        StableId::new(note.id.as_str())?;
+        if !ids.insert(note.id.clone()) {
+            return Err(ModelError::DuplicateId);
+        }
+        if note.source_note_ordinal.is_some_and(|ordinal| !source_note_ordinals.insert(ordinal)) {
+            return Err(ModelError::DuplicateId);
+        }
+        if let Some(identity) = note.durable_identity() {
+            if !durable_note_ids.insert(identity) {
+                return Err(ModelError::DuplicateId);
+            }
+        }
+        if note.numeric_id.as_deref().is_some_and(|value| {
+            !value.is_empty() && !value.bytes().all(|byte| byte.is_ascii_digit())
+        }) {
+            return Err(ModelError::InvalidNumber);
+        }
+        for value in [
+            note.numeric_id.as_deref(),
+            note.ref_id.as_deref(),
+            Some(note.color.as_str()),
+            note.note_type.as_deref(),
+            Some(note.writer_id.as_str()),
+            Some(note.writer_name.as_str()),
+            Some(note.date_time.as_str()),
+            Some(note.date_modified.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            validate_bounded_xml_string(value, crate::element::MAX_PROVENANCE_STRING_BYTES)?;
+        }
+        if note.title.len() > MAX_TEXT_BYTES {
+            return Err(ModelError::TextTooLong);
+        }
+        if !is_xml_compatible(&note.title) {
+            return Err(ModelError::InvalidRunProjection);
+        }
+        if note.title.contains(['\r', '\n']) {
+            return Err(ModelError::InvalidRunProjection);
+        }
+        if note.note_type.as_deref().is_some_and(str::is_empty) {
+            return Err(ModelError::InvalidRunProjection);
+        }
+        if note.paragraphs.is_empty() {
+            return Err(ModelError::InvalidRunProjection);
+        }
+        if note.range.start() > note.range.end()
+            || note.range.start() > body_length
+            || note.range.end() > body_length
+            || crate::body_offsets::flat_offset_to_position(project, note.range.start()).is_none()
+            || crate::body_offsets::flat_offset_to_position(project, note.range.end()).is_none()
+        {
+            return Err(ModelError::InvalidUtf8Boundary);
+        }
+
+        total_values = total_values
+            .checked_add(note.paragraphs.len())
+            .ok_or(ModelError::TooManyElements)?;
+        if total_values > MAX_ELEMENTS {
+            return Err(ModelError::TooManyElements);
+        }
+        let mut source_paragraph_ordinals = BTreeSet::new();
+        for paragraph in &note.paragraphs {
+            StableId::new(paragraph.id.as_str())?;
+            if !ids.insert(paragraph.id.clone()) {
+                return Err(ModelError::DuplicateId);
+            }
+            if paragraph.source_paragraph_ordinal.is_some_and(|ordinal| {
+                !source_paragraph_ordinals.insert(ordinal)
+            }) {
+                return Err(ModelError::DuplicateId);
+            }
+            if let Some(durable_id) = paragraph.durable_id.as_deref() {
+                validate_bounded_xml_string(
+                    durable_id,
+                    crate::element::MAX_PROVENANCE_STRING_BYTES,
+                )?;
+                if !durable_id.is_empty() && !durable_paragraph_ids.insert(durable_id) {
+                    return Err(ModelError::DuplicateId);
+                }
+            }
+            validate_text_runs(&paragraph.text, &paragraph.runs, true)?;
+            if paragraph.text.is_empty() && !paragraph.runs.is_empty() {
+                return Err(ModelError::InvalidRunProjection);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Checks graph facts already known without assuming source-node ownership.
 /// WO-002 must bind the winning supported nodes and paragraph identities; the
 /// later output projection must account for new or removed graph registrations.
@@ -275,12 +401,13 @@ impl Project {
             element_ids.insert(item.id.clone());
         }
         dual_dialogue::validate_groups(self).map_err(ModelError::InvalidDualDialogue)?;
-        ids.extend(
-            self.dual_dialogue_groups
-                .iter()
-                .map(|group| group.id.clone()),
-        );
+        for group in &self.dual_dialogue_groups {
+            if !ids.insert(group.id.clone()) {
+                return Err(ModelError::DuplicateId);
+            }
+        }
         validate_beat_board(self.beat_board(), &mut ids, self.preservation.as_ref())?;
+        validate_script_notes(self.script_notes(), self, &mut ids)?;
         if self
             .direct_paragraph_overrides
             .keys()
@@ -342,6 +469,7 @@ impl Project {
             || self.element_definitions() != baseline.element_definitions()
             || self.page_layout() != baseline.page_layout()
             || self.beat_board() != baseline.beat_board()
+            || self.script_notes() != baseline.script_notes()
             || !Arc::ptr_eq(&self.layout_identity, &baseline.layout_identity)
         {
             return Ok(false);

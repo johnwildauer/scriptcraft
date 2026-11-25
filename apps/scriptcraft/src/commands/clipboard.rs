@@ -1,6 +1,9 @@
 use crate::app::ScriptCraftApp;
 use eframe::egui;
-use scriptcraft_commands::{Command, CommandOutcome, CommandRejection, EditorSurface};
+use scriptcraft_commands::{
+    Command, CommandOutcome, CommandRejection, EditorSurface, ScriptNoteTextEditValue,
+    ScriptNoteTextOperationValue, ScriptNoteTimestampValue,
+};
 use scriptcraft_model::Project;
 use scriptcraft_session::editing::Selection;
 
@@ -12,6 +15,15 @@ impl ScriptCraftApp {
         command: Command,
         ctx: &egui::Context,
     ) -> DesktopCommandOutcome {
+        if self.script_note_workspace.focused
+            && self.script_note_workspace.viewport_focused
+            && self.session.script_note_selection_is_valid()
+            && matches!(self.session.script_note_selection(),
+                scriptcraft_session::editing::ScriptNoteSelection::Text { note, .. }
+                    if self.script_note_workspace.open_note.as_ref() == Some(note))
+        {
+            return self.dispatch_script_note_clipboard_command(command, ctx);
+        }
         if self.root_document_view == crate::app::RootDocumentView::BeatBoard && self.beat_text.focused {
             return self.dispatch_beat_clipboard_command(command, ctx);
         }
@@ -111,6 +123,78 @@ impl ScriptCraftApp {
             other => {
                 DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id()))
             }
+        }
+    }
+
+    fn dispatch_script_note_clipboard_command(
+        &mut self,
+        command: Command,
+        ctx: &egui::Context,
+    ) -> DesktopCommandOutcome {
+        match command {
+            Command::EditCopy | Command::EditCut => {
+                let text = self.session.selected_script_note_text().ok().flatten();
+                let Some(text) = text.filter(|text| !text.is_empty()) else {
+                    self.set_clipboard_notice("Clipboard action unavailable: no ScriptNote text selection; note unchanged");
+                    ctx.request_repaint();
+                    return DesktopCommandOutcome::EffectDispatched;
+                };
+                match DesktopClipboard::write_text(&text) {
+                    Ok(()) if matches!(command, Command::EditCut) => {
+                        match ScriptNoteTimestampValue::new(scriptcraft_fdx::current_timestamp()).ok() {
+                            Some(modified) => self.dispatch_internal_command(
+                                Command::ScriptNoteTextEdit {
+                                    edit: ScriptNoteTextEditValue {
+                                        operation: ScriptNoteTextOperationValue::DeleteForward,
+                                        modified,
+                                    },
+                                },
+                                ctx,
+                            ),
+                            None => {
+                                self.set_clipboard_notice("ScriptNote timestamp could not be represented; note unchanged");
+                                ctx.request_repaint();
+                                DesktopCommandOutcome::EffectDispatched
+                            }
+                        }
+                    }
+                    Ok(()) => { self.clear_error(); ctx.request_repaint(); DesktopCommandOutcome::EffectDispatched }
+                    Err(ClipboardAccessError::Unavailable) => {
+                        self.set_clipboard_notice("Clipboard write failed; ScriptNote unchanged");
+                        ctx.request_repaint();
+                        DesktopCommandOutcome::EffectDispatched
+                    }
+                }
+            }
+            Command::EditPaste => match DesktopClipboard::read_text() {
+                Ok(text) if text.is_empty() => {
+                    self.set_clipboard_notice("Paste unavailable: clipboard text is empty; ScriptNote unchanged");
+                    ctx.request_repaint(); DesktopCommandOutcome::EffectDispatched
+                }
+                Ok(text) => {
+                    match ScriptNoteTimestampValue::new(scriptcraft_fdx::current_timestamp()).ok() {
+                        Some(modified) => self.dispatch_internal_command(
+                            Command::ScriptNoteTextEdit {
+                                edit: ScriptNoteTextEditValue {
+                                    operation: ScriptNoteTextOperationValue::Paste { text },
+                                    modified,
+                                },
+                            },
+                            ctx,
+                        ),
+                        None => {
+                            self.set_clipboard_notice("ScriptNote timestamp could not be represented; note unchanged");
+                            ctx.request_repaint();
+                            DesktopCommandOutcome::EffectDispatched
+                        }
+                    }
+                }
+                Err(ClipboardAccessError::Unavailable) => {
+                    self.set_clipboard_notice("Paste unavailable: clipboard has no readable text; ScriptNote unchanged");
+                    ctx.request_repaint(); DesktopCommandOutcome::EffectDispatched
+                }
+            },
+            other => DesktopCommandOutcome::Rejected(CommandRejection::UnsupportedCommand(other.id())),
         }
     }
 

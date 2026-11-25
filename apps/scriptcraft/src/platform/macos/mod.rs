@@ -18,6 +18,8 @@ pub(crate) mod macos_print_dialog;
 pub(crate) mod macos_sf_symbols;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos_unsaved_changes_prompt;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_work_area;
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]

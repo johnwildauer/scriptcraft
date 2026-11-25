@@ -1239,12 +1239,14 @@ const INSERT_ENTRIES: &[MenuEntrySpec] = &[
             false,
         )),
     ),
-    placeholder(
+    command_item(
         "insert.script-note",
         "ScriptNote",
-        "ScriptNote (disabled placeholder)",
-        ITEM,
+        "Insert ScriptNote",
+        None,
         Some(primary_shortcut(ShortcutKey::K, true)),
+        None,
+        CommandId::ScriptNoteCreate,
     ),
     placeholder(
         "insert.label",

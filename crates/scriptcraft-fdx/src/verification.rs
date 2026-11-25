@@ -164,6 +164,7 @@ pub(crate) fn verify_managed_beat_graph(
 pub(crate) fn intended_output_graph(
     nodes: &[PreservedNode],
     transactional: bool,
+    project: &Project,
 ) -> Result<(Vec<ForeignIdentity>, BoardGraph), FdxError> {
     let mut roots = nodes.iter().filter_map(|node| match node {
         PreservedNode::Element(root) => Some(root),
@@ -190,7 +191,7 @@ pub(crate) fn intended_output_graph(
         )).count();
         if count != 1 { return Err(FdxError::AmbiguousIdentity); }
     }
-    crate::identity::collect_identities(&raw)
+    crate::identity::collect_identities(&raw, project)
 }
 
 /// Generated nodes have no imported ownership or anchors. Compare their XML
@@ -432,6 +433,41 @@ pub fn same_beat_board_projection(left: &Project, right: &Project) -> bool {
         })
 }
 
+/// Compare the complete durable ScriptNote projection, excluding only
+/// session-local stable IDs and import-coordinate ordinals.
+pub fn same_script_notes_projection(left: &Project, right: &Project) -> bool {
+    fn note_key(note: &scriptcraft_model::ScriptNote) -> Option<String> {
+        note.ref_id.as_deref().filter(|value| !value.is_empty()).map(|value| format!("R:{value}"))
+            .or_else(|| note.numeric_id.as_deref().filter(|value| !value.is_empty()).map(|value| format!("I:{value}")))
+    }
+    let left_notes = left.script_notes().iter().collect::<Vec<_>>();
+    let right_notes = right.script_notes().iter().collect::<Vec<_>>();
+    if left_notes.len() != right_notes.len() { return false; }
+    for (expected, actual) in left_notes.iter().zip(&right_notes) {
+        if note_key(expected) != note_key(actual)
+            || expected.numeric_id != actual.numeric_id
+            || expected.ref_id != actual.ref_id
+            || expected.range != actual.range
+            || expected.color != actual.color
+            || expected.title != actual.title
+            || expected.note_type != actual.note_type
+            || expected.writer_id != actual.writer_id
+            || expected.writer_name != actual.writer_name
+            || expected.date_time != actual.date_time
+            || expected.date_modified != actual.date_modified
+            || expected.paragraphs.len() != actual.paragraphs.len()
+        { return false; }
+        for (expected_paragraph, actual_paragraph) in expected.paragraphs.iter().zip(&actual.paragraphs) {
+            if expected_paragraph.durable_id != actual_paragraph.durable_id
+                || expected_paragraph.text != actual_paragraph.text
+                || expected_paragraph.runs != actual_paragraph.runs
+                || expected_paragraph.direct_settings != actual_paragraph.direct_settings
+            { return false; }
+        }
+    }
+    true
+}
+
 pub(crate) fn same_writer_semantic_projection(left: &Project, right: &Project) -> bool {
     left.page_layout() == right.page_layout()
         && same_semantic_element_definitions(left, right)
@@ -439,6 +475,7 @@ pub(crate) fn same_writer_semantic_projection(left: &Project, right: &Project) -
         && same_semantic_elements(&left.elements, &right.elements)
         && same_dual_dialogue_projection(left, right)
         && same_beat_board_projection(left, right)
+        && same_script_notes_projection(left, right)
 }
 
 pub(crate) fn verify_writer_semantic_projection(
@@ -489,6 +526,50 @@ pub(crate) fn validate_project_output_budgets(project: &Project) -> Result<(), F
         if event_count > MAX_SOURCE_EVENTS {
             return Err(FdxError::ResourceLimit);
         }
+    }
+    for note in project.script_notes().iter() {
+        event_count = event_count.checked_add(1).and_then(|value| value.checked_add(10))
+            .ok_or(FdxError::ResourceLimit)?;
+        let range = format!("{},{}", note.range.start(), note.range.end());
+        let values = [note.color.as_str(), note.date_modified.as_str(), note.date_time.as_str(),
+            note.numeric_id.as_deref().unwrap_or(""), note.title.as_str(), range.as_str(),
+            note.ref_id.as_deref().unwrap_or(""), note.note_type.as_deref().unwrap_or(""),
+            note.writer_id.as_str(), note.writer_name.as_str()];
+        for value in values {
+            if value.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES { return Err(FdxError::ResourceLimit); }
+            validate_xml_chars(value)?;
+            payload_bytes = payload_bytes.checked_add(value.len()).ok_or(FdxError::ResourceLimit)?;
+        }
+        for paragraph in &note.paragraphs {
+            event_count = event_count.checked_add(12).ok_or(FdxError::ResourceLimit)?;
+            if let Some(id) = &paragraph.durable_id {
+                if id.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES { return Err(FdxError::ResourceLimit); }
+                validate_xml_chars(id)?;
+                payload_bytes = payload_bytes.checked_add(id.len()).ok_or(FdxError::ResourceLimit)?;
+            }
+            validate_xml_chars(&paragraph.text)?;
+            text_bytes = text_bytes.checked_add(paragraph.text.len()).ok_or(FdxError::ResourceLimit)?;
+            payload_bytes = payload_bytes.checked_add(paragraph.text.len()).ok_or(FdxError::ResourceLimit)?;
+            for run in &paragraph.runs {
+                event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+                if !run.text.is_empty() {
+                    event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+                }
+                for attribute in &run.attributes {
+                    if attribute.name.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES
+                        || attribute.value.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES
+                    { return Err(FdxError::ResourceLimit); }
+                    validate_qname(&attribute.name)?;
+                    validate_xml_chars(&attribute.value)?;
+                    payload_bytes = payload_bytes.checked_add(attribute.name.len())
+                        .and_then(|size| size.checked_add(attribute.value.len()))
+                        .ok_or(FdxError::ResourceLimit)?;
+                    event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+                }
+            }
+        }
+        if text_bytes > MAX_SOURCE_TEXT_BYTES || payload_bytes > MAX_SOURCE_BYTES
+            || event_count > MAX_SOURCE_EVENTS { return Err(FdxError::ResourceLimit); }
     }
     for (text, runs) in project
         .title_page

@@ -7,7 +7,7 @@ use scriptcraft_model::paragraph_id::ParagraphIdAllocator;
 use scriptcraft_model::preservation::{BoardEntity, BoardEntityKind, ForeignIdDomain,
     AnchorTarget, ForeignIdentity, ForeignReference, PreservedNode, ReferencePolicy};
 use scriptcraft_model::formatting::{FixedPoint, ParagraphAlignment, ParagraphLeading, ParagraphSpacing, SourceParagraphOverrides};
-use scriptcraft_model::formatted_text::{clear_supported_styles_over_ranges, normalize_runs, parse_style_attribute, project_style_at_caret, set_inline_run_formatting_for_range, toggle_style_over_ranges, InlineRunFormattingPatch, RunBoundaryAffinity, RunStyle, RunStyleFlags, RunStyleRange};
+use scriptcraft_model::formatted_text::{clear_supported_styles_over_ranges, parse_style_attribute, project_style_at_caret, set_inline_run_formatting_for_range, toggle_style_over_ranges, InlineRunFormattingPatch, RunBoundaryAffinity, RunStyle, RunStyleFlags, RunStyleRange};
 use scriptcraft_model::{RunAttribute, TextRun, MAX_TEXT_BYTES};
 use std::collections::BTreeSet;
 
@@ -152,33 +152,15 @@ fn paragraph_defaults() -> SourceParagraphOverrides {
 }
 
 fn effective_beat_runs(paragraph: &BeatParagraph) -> Vec<TextRun> {
-    if paragraph.runs.is_empty() {
-        if paragraph.text.is_empty() { Vec::new() } else { vec![TextRun { text: paragraph.text.clone(), attributes: Vec::new() }] }
-    } else { paragraph.runs.clone() }
+    super::rich_paragraph::effective_runs(&paragraph.text, &paragraph.runs)
 }
 
 fn slice_beat_runs(runs: &[TextRun], start: usize, end: usize) -> Vec<TextRun> {
-    let mut result = Vec::new();
-    let mut base = 0usize;
-    for run in runs {
-        let limit = base.saturating_add(run.text.len());
-        let from = start.saturating_sub(base).min(run.text.len());
-        let to = end.saturating_sub(base).min(run.text.len());
-        if from < to { result.push(TextRun { text: run.text[from..to].to_owned(), attributes: run.attributes.clone() }); }
-        base = limit;
-        if base >= end { break; }
-    }
-    result
+    super::rich_paragraph::slice_runs(runs, start, end)
 }
 
 fn attributes_at(runs: &[TextRun], offset: usize, total: usize) -> Vec<RunAttribute> {
-    let mut base = 0usize;
-    for run in runs {
-        let limit = base.saturating_add(run.text.len());
-        if offset < limit || (offset == total && limit == total) { return run.attributes.clone(); }
-        base = limit;
-    }
-    Vec::new()
+    super::rich_paragraph::attributes_at(runs, offset, total)
 }
 
 fn insert_attribute(attributes: &mut Vec<RunAttribute>, name: &str, value: Option<String>) {
@@ -206,16 +188,12 @@ fn styled_attributes(mut attributes: Vec<RunAttribute>, style: RunStyleFlags, pa
     Ok(attributes)
 }
 
-fn push_run(runs: &mut Vec<TextRun>, text: &str, attributes: &[RunAttribute]) {
-    if !text.is_empty() { runs.push(TextRun { text: text.to_owned(), attributes: attributes.to_vec() }); }
-}
-
 fn previous_boundary(text: &str, offset: usize) -> usize {
-    text[..offset].char_indices().next_back().map_or(0, |(index, _)| index)
+    super::rich_paragraph::previous_boundary(text, offset)
 }
 
 fn next_boundary(text: &str, offset: usize) -> usize {
-    text[offset..].char_indices().nth(1).map_or(text.len(), |(index, _)| offset + index)
+    super::rich_paragraph::next_boundary(text, offset)
 }
 
 fn register_paragraph(project: &mut Project, id: &str) -> Result<(), EditError> {
@@ -314,10 +292,7 @@ impl BeatParagraphIdAllocators {
 }
 
 fn set_paragraph_text(paragraph: &mut BeatParagraph, text: String, runs: Vec<TextRun>) -> Result<(), EditError> {
-    if text.len() > MAX_TEXT_BYTES { return Err(EditError::TextTooLong); }
-    paragraph.runs = normalize_runs(&text, &runs).map_err(EditError::FormattedText)?;
-    paragraph.text = text;
-    Ok(())
+    super::rich_paragraph::set_normalized_text(&mut paragraph.text, &mut paragraph.runs, text, runs)
 }
 
 impl EditingSession {
@@ -711,11 +686,13 @@ fn replace_beat_body_range(project: &mut Project, board: &mut scriptcraft_model:
     let chunks = if inserted.is_empty() { vec![String::new()] } else { inserted.to_vec() };
     let multiline = chunks.len() > 1;
     let prefix = left.text[..start.offset].to_owned();
-    let suffix = right.text[end.offset..].to_owned();
+    let composed = super::rich_paragraph::compose_replacement_chunks(
+        &left.text, &left_runs, start.offset, &right.text, &right_runs, end.offset, &chunks, &attrs,
+    );
     let mut new_paragraphs = Vec::with_capacity(chunks.len());
     let mut allocated = Vec::new();
     let mut ids = BeatParagraphIdAllocators::new(project)?;
-    for (i, chunk) in chunks.iter().enumerate() {
+    for i in 0..chunks.len() {
         let preserve_right = multiline && i + 1 == chunks.len() && end.paragraph > start.paragraph;
         let mut paragraph = if i == 0 { left.clone() } else if preserve_right { right.clone() } else {
             let (id, foreign_id) = ids.allocate()?;
@@ -723,16 +700,7 @@ fn replace_beat_body_range(project: &mut Project, board: &mut scriptcraft_model:
             BeatParagraph { id, foreign_id: Some(foreign_id), source_paragraph_ordinal: None,
                 text: String::new(), runs: Vec::new(), direct_settings: paragraph_defaults() }
         };
-        let mut text = String::new();
-        let mut runs = Vec::new();
-        if i == 0 { text.push_str(&prefix); runs.extend(slice_beat_runs(&left_runs, 0, start.offset)); }
-        text.push_str(chunk); push_run(&mut runs, chunk, &attrs);
-        if i + 1 == chunks.len() { text.push_str(&suffix); runs.extend(slice_beat_runs(&right_runs, end.offset, right.text.len())); }
-        if i == 0 && chunks.len() == 1 && start.paragraph == end.paragraph {
-            runs = slice_beat_runs(&left_runs, 0, start.offset);
-            push_run(&mut runs, chunk, &attrs);
-            runs.extend(slice_beat_runs(&left_runs, end.offset, left.text.len()));
-        }
+        let (text, runs) = composed[i].clone();
         set_paragraph_text(&mut paragraph, text, runs)?;
         new_paragraphs.push(paragraph);
     }

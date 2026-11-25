@@ -37,6 +37,8 @@ pub(crate) struct AppCommandAvailability {
     pub(crate) template_selector_open: bool,
     pub(crate) template_apply_ready: bool,
     pub(crate) template_new_ready: bool,
+    pub(crate) script_note_create: bool,
+    pub(crate) script_note_open: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +59,7 @@ struct AppCommandProjectionKey {
     active_editor_surface: EditorSurface,
     root_document_view: RootDocumentView,
     beat_text_focused: bool,
+    script_note_text_focused: bool,
     title_surface_focused: bool,
     invisibles_visible: bool,
     ruler_visible: bool,
@@ -67,6 +70,7 @@ struct AppCommandProjectionKey {
     title_viewport_unsupported: bool,
     elements_viewport_unsupported: bool,
     selector_viewport_unsupported: bool,
+    script_note_open: bool,
     element_inspector_open: bool,
     template_selector_open: bool,
     template_apply_ready: bool,
@@ -112,6 +116,12 @@ impl ScriptCraftApp {
             active_editor_surface: self.active_editor_surface,
             root_document_view: self.root_document_view,
             beat_text_focused: self.beat_text.focused,
+            script_note_text_focused: self.script_note_workspace.focused
+                && self.script_note_workspace.viewport_focused
+                && self.session.script_note_selection_is_valid()
+                && matches!(self.session.script_note_selection(),
+                    scriptcraft_session::editing::ScriptNoteSelection::Text { note, .. }
+                        if self.script_note_workspace.open_note.as_ref() == Some(note)),
             title_surface_focused: self.title_view.surface_focused,
             invisibles_visible: self.active_surface_invisibles_visible(),
             ruler_visible: self.settings_store.ruler_visible(),
@@ -122,6 +132,7 @@ impl ScriptCraftApp {
             title_viewport_unsupported: self.title_viewport_unsupported,
             elements_viewport_unsupported: self.element_windows.elements_viewport_unsupported(),
             selector_viewport_unsupported: self.element_windows.selector_viewport_unsupported(),
+            script_note_open: self.script_note_workspace.open_note.is_some(),
             element_inspector_open: self.element_windows.elements_open(),
             template_selector_open: self.element_windows.selector_open(),
             template_apply_ready: self.element_windows.selector_apply_ready(),
@@ -237,6 +248,35 @@ impl ScriptCraftApp {
                 .element_windows
                 .selector_new_matches(builtin_template_id(*template));
         }
+        if let scriptcraft_commands::Command::ScriptNoteDelete { note }
+            | scriptcraft_commands::Command::ScriptNotePropertiesSet {
+                properties: scriptcraft_commands::ScriptNotePropertiesValue { note, .. },
+            }
+            | scriptcraft_commands::Command::ScriptNoteSelectionSet {
+                selection: scriptcraft_commands::ScriptNoteSelectionValue::Text { note, .. },
+            }
+            | scriptcraft_commands::Command::ScriptNotePresent {
+                presentation: scriptcraft_commands::ScriptNotePresentValue { note, .. },
+            } = command
+        {
+            availability.script_note_open &= self.session.project().script_notes().get(note.as_core()).is_some()
+                && self.script_note_workspace.open_note.as_ref() == Some(note.as_core());
+        }
+        if let scriptcraft_commands::Command::ScriptNotePresent { presentation } = command {
+            availability.script_note_open = self.session.project().script_notes().get(presentation.note.as_core()).is_some()
+                && availability.editor_available && self.active_editor_surface == EditorSurface::Body
+                && self.root_document_view == RootDocumentView::Script
+                && !availability.modal_blocked && !availability.replacement_pending
+                && !availability.native_output_active && !self.element_windows.owns_input();
+        }
+        if matches!(command, scriptcraft_commands::Command::ScriptNoteTextEdit { .. }
+            | scriptcraft_commands::Command::ScriptNoteTextNavigate { .. })
+        {
+            availability.script_note_open &= self.session.script_note_selection_is_valid()
+                && matches!(self.session.script_note_selection(),
+                    scriptcraft_session::editing::ScriptNoteSelection::Text { note, .. }
+                        if self.script_note_workspace.open_note.as_ref() == Some(note));
+        }
         availability
     }
 
@@ -303,6 +343,32 @@ impl ScriptCraftApp {
                     .validate_for_surface(self.session.project(), EditorSurface::Body)
                     .is_ok()
             });
+        let script_note_create = self.root_document_view == RootDocumentView::Script
+            && self.active_editor_surface == EditorSurface::Body
+            && !self.title_view_state_swapped
+            && !self.title_view.surface_focused
+            && !self.element_windows.owns_input()
+            && !migration_pending && !replacement_pending && !native_output_active
+            && valid_body_selection;
+        let script_note_open = self.root_document_view == RootDocumentView::Script
+            && self.active_editor_surface == EditorSurface::Body
+            && !self.title_view_state_swapped
+            && !self.title_view.surface_focused
+            && !self.element_windows.owns_input()
+            && !migration_pending && !replacement_pending && !native_output_active
+            && self.script_note_workspace.open_note.is_some();
+        let note_text_focus = self.script_note_workspace.focused
+            && self.script_note_workspace.viewport_focused
+            && self.session.script_note_selection_is_valid()
+            && matches!(self.session.script_note_selection(),
+                scriptcraft_session::editing::ScriptNoteSelection::Text { note, .. }
+                    if self.script_note_workspace.open_note.as_ref() == Some(note))
+            && self.active_editor_surface == EditorSurface::Body
+            && self.root_document_view == RootDocumentView::Script
+            && !self.element_windows.owns_input()
+            && !migration_pending && !replacement_pending && !native_output_active;
+        let note_has_range = note_text_focus && self.session.script_note_selection().ordered()
+            .is_some_and(|(start, end)| start != end);
         let beat_text_focus = self.root_document_view == RootDocumentView::BeatBoard
             && self.active_editor_surface == EditorSurface::Body
             && !self.title_view_state_swapped
@@ -331,14 +397,14 @@ impl ScriptCraftApp {
                 && self.title_page_window_open,
             undo: !migration_pending && !replacement_pending && self.session.can_undo(),
             redo: !migration_pending && !replacement_pending && self.session.can_redo(),
-            delete: if beat_text_focus { beat_has_range } else if beat_card_delete { true } else { editor_available && !migration_pending && !replacement_pending && delete_target_exists },
+            delete: if note_text_focus { false } else if beat_text_focus { beat_has_range } else if beat_card_delete { true } else { editor_available && !migration_pending && !replacement_pending && delete_target_exists },
             beat_card_delete,
             // EditingSession projects a document with at least one body element.
-            select_all: if beat_text_focus { beat_has_text } else { editor_available && !migration_pending && !replacement_pending && element_count != 0 },
-            cut: if beat_text_focus { beat_has_range } else { editor_available && !migration_pending && !replacement_pending && selection.anchor != selection.focus },
-            copy: if beat_text_focus { beat_has_range } else { editor_available && !migration_pending && !replacement_pending && selection.anchor != selection.focus },
+            select_all: if note_text_focus { true } else if beat_text_focus { beat_has_text } else { editor_available && !migration_pending && !replacement_pending && element_count != 0 },
+            cut: if note_text_focus { note_has_range } else if beat_text_focus { beat_has_range } else { editor_available && !migration_pending && !replacement_pending && selection.anchor != selection.focus },
+            copy: if note_text_focus { note_has_range } else if beat_text_focus { beat_has_range } else { editor_available && !migration_pending && !replacement_pending && selection.anchor != selection.focus },
             // Clipboard state is read only when Paste is activated, never per frame.
-            paste: if beat_text_focus { beat_has_text } else { editor_available && !migration_pending && !replacement_pending },
+            paste: if note_text_focus { true } else if beat_text_focus { beat_has_text } else { editor_available && !migration_pending && !replacement_pending },
             body_only: editor_available && self.active_editor_surface == EditorSurface::Body,
             editor_available,
             beat_available: self.root_document_view == RootDocumentView::BeatBoard
@@ -383,6 +449,8 @@ impl ScriptCraftApp {
                 selector.mode() == TemplateSelectorMode::NewDocument
                     && selector.selected_template().is_some()
             }),
+            script_note_create,
+            script_note_open,
         }
     }
 
@@ -457,6 +525,11 @@ impl AppCommandAvailability {
             CommandId::BeatBoardCardDelete => self.beat_card_delete,
             CommandId::BeatBoardStyleToggle | CommandId::BeatBoardStyleClear
             | CommandId::BeatBoardRunFormattingSet => self.beat_formatting,
+            CommandId::ScriptNoteCreate => self.script_note_create,
+            CommandId::ScriptNoteDelete | CommandId::ScriptNotePropertiesSet
+            | CommandId::ScriptNoteSelectionSet | CommandId::ScriptNoteTextEdit
+            | CommandId::ScriptNoteTextNavigate | CommandId::ScriptNotePresent => self.script_note_open,
+            CommandId::ScriptNoteDismiss => true,
             CommandId::EditorTextInsert | CommandId::EditorTextPaste | CommandId::EditorDeleteBackward
             | CommandId::EditorParagraphEnter | CommandId::EditorParagraphTab
             | CommandId::EditorSelectionSet | CommandId::EditorSelectionPointer
@@ -519,7 +592,11 @@ impl AppCommandAvailability {
             CommandId::EditorElementChange
             | CommandId::EditorDualDialogueToggle
             | CommandId::EditorRunFormattingSet
-            | CommandId::EditorParagraphFormattingSet => DesktopUnavailableReason::Selection,
+            | CommandId::EditorParagraphFormattingSet
+            | CommandId::ScriptNoteCreate | CommandId::ScriptNoteDelete
+            | CommandId::ScriptNotePropertiesSet | CommandId::ScriptNoteSelectionSet
+            | CommandId::ScriptNoteTextEdit | CommandId::ScriptNoteTextNavigate
+            | CommandId::ScriptNotePresent => DesktopUnavailableReason::Selection,
             _ => DesktopUnavailableReason::ModalBlocked,
         }
     }

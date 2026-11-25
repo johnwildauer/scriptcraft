@@ -292,7 +292,9 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
 
 impl eframe::App for ScriptCraftApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        if self.root_document_view == RootDocumentView::BeatBoard {
+        if self.script_note_workspace.open_note.is_some() {
+            [0.0, 0.0, 0.0, 0.0]
+        } else if self.root_document_view == RootDocumentView::BeatBoard {
             self.theme_palette.script_workspace.background.to_normalized_gamma_f32()
         } else {
             script_view::chrome_clear_color(self.script_view_mode, self.theme_palette.script_workspace)
@@ -323,12 +325,64 @@ impl eframe::App for ScriptCraftApp {
         let effective_pixels_per_point = status_bar::resolved_ui_pixels_per_point(native_scale);
         ctx.set_zoom_factor(status_bar::ui_zoom_factor(native_scale));
         let title_page_viewport = raw_input.viewport_id == title_page::viewport_id();
+        let script_note_viewport = raw_input.viewport_id == crate::widgets::script_note::viewport::viewport_id()
+            || raw_input.viewport_id == crate::widgets::script_note::type_dialog::viewport_id()
+            || raw_input.viewport_id == crate::widgets::script_note::properties::color_viewport_id()
+            || raw_input.viewport_id == crate::widgets::script_note::properties::type_viewport_id();
+        let type_dialog_open = self.script_note_workspace.new_type_dialog_open;
+        let note_family_open = self.script_note_workspace.open_note.is_some() || type_dialog_open;
+        if raw_input.viewport_id == egui::ViewportId::ROOT && note_family_open {
+            let root_pointer_click = raw_input.events.iter().any(|event| {
+                matches!(event, egui::Event::PointerButton { pressed: true, .. })
+            });
+            if root_pointer_click {
+                let root_origin = raw_input.viewports.get(&raw_input.viewport_id)
+                    .and_then(|viewport| viewport.outer_rect).map_or(egui::Pos2::ZERO, |rect| rect.min);
+                let content_origin = raw_input.screen_rect.map_or(egui::Pos2::ZERO, |rect| rect.min);
+                let regions = self.script_note_workspace.native_position
+                    .map(crate::widgets::script_note::geometry::CardRegions::at);
+                for event in &raw_input.events {
+                    let egui::Event::PointerButton { pos, pressed: true, .. } = event else { continue };
+                    let screen_pos = root_origin + (*pos - content_origin);
+                    if self.script_note_workspace.color_menu_open
+                        && !regions.is_some_and(|regions| regions.color_region.contains(screen_pos))
+                    {
+                        self.script_note_workspace.color_menu_open = false;
+                        self.script_note_workspace.color_menu_close_pending = true;
+                    }
+                    if self.script_note_workspace.type_menu_open
+                        && !regions.is_some_and(|regions| regions.type_region.contains(screen_pos))
+                    {
+                        self.script_note_workspace.type_menu_open = false;
+                        self.script_note_workspace.type_menu_close_pending = true;
+                    }
+                }
+            }
+            let outside_note_click = raw_input.events.iter().any(|event| {
+                let egui::Event::PointerButton { pos, pressed: true, .. } = event else { return false };
+                let root_origin = raw_input.viewports.get(&raw_input.viewport_id)
+                    .and_then(|viewport| viewport.outer_rect).map_or(egui::Pos2::ZERO, |rect| rect.min);
+                let content_origin = raw_input.screen_rect.map_or(egui::Pos2::ZERO, |rect| rect.min);
+                let screen_pos = root_origin + (*pos - content_origin);
+                let note_rect = self.script_note_workspace.native_position.map(|origin| {
+                    egui::Rect::from_min_size(origin, crate::widgets::script_note::geometry::CARD_SIZE)
+                });
+                let type_rect = crate::widgets::script_note::type_dialog::rect(&self.script_note_workspace);
+                (!note_rect.is_some_and(|rect| rect.contains(screen_pos))
+                    && !type_rect.is_some_and(|rect| rect.contains(screen_pos)))
+            });
+            if outside_note_click {
+                self.script_note_workspace.dismiss();
+                self.script_note_workspace.viewport_close_pending = true;
+                ctx.request_repaint();
+            }
+        }
         let element_viewport = raw_input.viewport_id
             == crate::widgets::elements::inspector::viewport_id()
             || raw_input.viewport_id == crate::widgets::elements::selector::viewport_id();
-        let scale_changed = !element_viewport
+        let scale_changed = !element_viewport && !script_note_viewport && !type_dialog_open
             && self.effective_pixels_per_point != Some(effective_pixels_per_point);
-        if !element_viewport {
+        if !element_viewport && !script_note_viewport && !type_dialog_open {
             self.effective_pixels_per_point = Some(effective_pixels_per_point);
         }
 
@@ -343,7 +397,7 @@ impl eframe::App for ScriptCraftApp {
             .screen_rect
             .map_or_else(|| ctx.content_rect().height(), |rect| rect.height());
         let element_dialog_open = self.element_windows.owns_input();
-        let beat_root_input = !title_page_viewport && !element_viewport
+        let beat_root_input = !title_page_viewport && !element_viewport && !script_note_viewport
             && self.root_document_view == RootDocumentView::BeatBoard;
         if beat_root_input {
             self.handle_beat_navigation_input(ctx, raw_input, viewport_close_requested);
@@ -354,7 +408,7 @@ impl eframe::App for ScriptCraftApp {
             } else {
                 &mut self.wheel_zoom
             };
-            if viewport_close_requested || element_dialog_open || element_viewport {
+            if viewport_close_requested || element_dialog_open || element_viewport || script_note_viewport || type_dialog_open {
                 adapter.reset();
                 Vec::new()
             } else {
@@ -363,6 +417,8 @@ impl eframe::App for ScriptCraftApp {
         };
         let surface = if title_page_viewport {
             Some(EditorSurface::TitlePage)
+        } else if script_note_viewport {
+            None
         } else if element_viewport {
             None
         } else {
@@ -376,24 +432,26 @@ impl eframe::App for ScriptCraftApp {
 
         for event in &raw_input.events {
             if !element_dialog_open && !element_viewport {
-                if let egui::Event::Zoom(factor) = event {
-                    if let Some(surface) = surface { self.set_active_editor_surface(surface); }
-                    self.record_native_event("zoom");
-                    if let Ok(factor) = ZoomFactor::new(*factor) {
-                        self.dispatch_command(
-                            CommandInvocation::new(
-                                Command::ViewZoomPinch { factor },
-                                CommandOrigin::InternalFollowUp,
-                            ),
-                            ctx,
-                        );
+                    if !script_note_viewport && !type_dialog_open {
+                    if let egui::Event::Zoom(factor) = event {
+                        if let Some(surface) = surface { self.set_active_editor_surface(surface); }
+                        self.record_native_event("zoom");
+                        if let Ok(factor) = ZoomFactor::new(*factor) {
+                            self.dispatch_command(
+                                CommandInvocation::new(
+                                    Command::ViewZoomPinch { factor },
+                                    CommandOrigin::InternalFollowUp,
+                                ),
+                                ctx,
+                            );
+                        }
                     }
                 }
             }
         }
         // The app has consumed the event for page zoom. Keep it out of egui's
         // later input-state zoom delta so no other surface can apply it again.
-        if element_dialog_open || element_viewport {
+        if element_dialog_open || element_viewport || script_note_viewport || type_dialog_open {
             raw_input
                 .events
                 .retain(|event| !matches!(event, egui::Event::Zoom(_)));
@@ -407,7 +465,7 @@ impl eframe::App for ScriptCraftApp {
             .events
             .iter()
             .any(|event| matches!(event, egui::Event::Ime(_)));
-        if self.menu_policy.in_window_shortcuts_owned()
+        if !script_note_viewport && !type_dialog_open && self.menu_policy.in_window_shortcuts_owned()
             && dialog_menu_shortcuts_allowed(
                 self.ime_active,
                 self.title_view.ime_active,
@@ -602,6 +660,8 @@ impl ScriptCraftApp {
 
     fn update(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let native_pixels_per_point = ctx.input(|input| input.viewport().native_pixels_per_point);
+        self.script_note_workspace.work_bounds = current_root_work_area(frame, native_pixels_per_point);
         #[cfg(target_os = "macos")]
         {
             self.native_operation_coordinator.refresh_root_owner(frame, &ctx);
@@ -689,7 +749,9 @@ impl ScriptCraftApp {
         if !migration_pending && !replacement_pending && !replacement_close_continuation {
             // Route events using the editor-focus state established by the prior
             // surface frame, then let this frame's layout and paint observe edits.
-            if self.root_document_view == RootDocumentView::Script {
+            if self.root_document_view == RootDocumentView::Script
+                && !self.script_note_workspace.new_type_dialog_open
+            {
                 measure_root_other_bucket(
                     self,
                     app::responsiveness::RootOtherBucket::InputDispatch,
@@ -746,6 +808,7 @@ impl ScriptCraftApp {
         }
         if root_close_allowed {
             measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+                app.script_note_workspace.reset_document_activation();
                 app.close_title_page_window(&ctx);
                 if app.timer_popup_surface == EditorSurface::Body {
                     app.finalize_sprint_timer_popup(&ctx);
@@ -760,6 +823,144 @@ impl ScriptCraftApp {
             measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |_| {
                 show_pending_replacement_indicator(&ctx)
             });
+        }
+        if self.script_note_workspace.viewport_close_pending {
+            if self.script_note_workspace.open_note.is_none() {
+                crate::widgets::script_note::viewport::close(&ctx);
+                crate::widgets::script_note::type_dialog::close(&ctx);
+            } else {
+                crate::widgets::script_note::type_dialog::close(&ctx);
+            }
+            self.script_note_workspace.type_dialog_close_pending = false;
+            self.script_note_workspace.viewport_close_pending = false;
+        }
+        if self.script_note_workspace.open_note.is_some() {
+            measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+                crate::widgets::script_note::viewport::show(app, &ctx)
+            });
+        }
+        crate::widgets::script_note::properties::flush_pending_closes(
+            &ctx,
+            &mut self.script_note_workspace,
+        );
+        let property_action = self.script_note_workspace.open_note.as_ref()
+            .and_then(|note_id| self.session.project().script_notes().get(note_id).cloned())
+            .map(|note| {
+                let types = crate::widgets::script_note::properties::used_types(
+                    self.session.project().script_notes(),
+                );
+                crate::widgets::script_note::properties::show_native_menus(
+                    &ctx,
+                    &mut self.script_note_workspace,
+                    &note,
+                    &types,
+                )
+            })
+            .flatten();
+        crate::widgets::script_note::properties::flush_pending_closes(
+            &ctx,
+            &mut self.script_note_workspace,
+        );
+        if let Some(action) = property_action {
+            crate::widgets::script_note::viewport::apply_property_menu_action(self, &ctx, action);
+        }
+        let type_dialog_action = crate::widgets::script_note::type_dialog::show(self, &ctx);
+        if let Some(action) = type_dialog_action {
+            use crate::widgets::script_note::type_dialog::TypeDialogAction;
+            match action {
+                TypeDialogAction::Cancel => {
+                    let return_focus = self.script_note_workspace.type_return_focus.take();
+                    self.script_note_workspace.new_type_dialog_open = false;
+                    self.script_note_workspace.type_draft.clear();
+                    self.script_note_workspace.type_dialog_error = false;
+                    self.script_note_workspace.type_dialog_focused = false;
+                    crate::widgets::script_note::type_dialog::close(&ctx);
+                    if let Some(field) = return_focus {
+                        self.script_note_workspace.field = Some(field);
+                        self.script_note_workspace.focused = true;
+                        ctx.send_viewport_cmd_to(
+                            crate::widgets::script_note::viewport::viewport_id(),
+                            egui::ViewportCommand::Focus,
+                        );
+                    }
+                }
+                TypeDialogAction::Apply(draft) => {
+                    let requested_type = if draft.is_empty() || draft == "None" { None } else { Some(draft) };
+                    let current_note = self.script_note_workspace.open_note.as_ref()
+                        .and_then(|id| self.session.project().script_notes().get(id))
+                        .map(|note| (
+                            note.id.clone(),
+                            crate::widgets::script_note::properties::resolve_color(
+                                note.color_projection(),
+                                self.theme_palette.script_workspace.page.text,
+                            ).default_color,
+                        ));
+                    if let Some((note_id, color)) = current_note {
+                        let modified = scriptcraft_commands::ScriptNoteTimestampValue::new(
+                            scriptcraft_fdx::current_timestamp(),
+                        ).ok();
+                        let outcome = modified.map(|modified| self.dispatch_command(
+                            CommandInvocation::new(Command::ScriptNotePropertiesSet {
+                                properties: scriptcraft_commands::ScriptNotePropertiesValue {
+                                    note: scriptcraft_commands::ScriptNoteIdValue::from_core(note_id.clone()),
+                                    color: color.and_then(scriptcraft_commands::ScriptNoteColorValue::from_core),
+                                    note_type: requested_type.clone(),
+                                    modified,
+                                },
+                            }, CommandOrigin::Pointer),
+                            &ctx,
+                        ).outcome);
+                        if matches!(outcome,
+                            Some(crate::commands::DesktopCommandOutcome::Editor(
+                                scriptcraft_commands::CommandOutcome::Changed
+                                    | scriptcraft_commands::CommandOutcome::NoOp
+                            )))
+                        {
+                            self.script_note_workspace.new_type_dialog_open = false;
+                            self.script_note_workspace.type_draft.clear();
+                            self.script_note_workspace.type_dialog_error = false;
+                            self.script_note_workspace.type_return_focus = None;
+                            self.script_note_workspace.type_dialog_focused = false;
+                            crate::widgets::script_note::type_dialog::close(&ctx);
+                            self.script_note_workspace.field = Some(scriptcraft_session::editing::ScriptNoteField::Body);
+                            self.script_note_workspace.focused = true;
+                            let body_position = match self.session.script_note_selection() {
+                                scriptcraft_session::editing::ScriptNoteSelection::Text {
+                                    note, field: scriptcraft_session::editing::ScriptNoteField::Body, focus, ..
+                                } if note == &note_id => *focus,
+                                _ => scriptcraft_session::editing::ScriptNoteTextPosition { paragraph: 0, offset: 0 },
+                            };
+                            let selection = scriptcraft_commands::ScriptNoteSelectionValue::Text {
+                                note: scriptcraft_commands::ScriptNoteIdValue::from_core(note_id),
+                                field: scriptcraft_commands::ScriptNoteFieldValue::Body,
+                                anchor: scriptcraft_commands::ScriptNoteTextPositionValue {
+                                    paragraph: body_position.paragraph as u32,
+                                    offset: body_position.offset as u32,
+                                },
+                                focus: scriptcraft_commands::ScriptNoteTextPositionValue {
+                                    paragraph: body_position.paragraph as u32,
+                                    offset: body_position.offset as u32,
+                                },
+                            };
+                            let _ = self.dispatch_command(
+                                CommandInvocation::new(
+                                    Command::ScriptNoteSelectionSet { selection },
+                                    CommandOrigin::InternalFollowUp,
+                                ),
+                                &ctx,
+                            );
+                            ctx.send_viewport_cmd_to(
+                                crate::widgets::script_note::viewport::viewport_id(),
+                                egui::ViewportCommand::Focus,
+                            );
+                        } else {
+                            self.script_note_workspace.type_dialog_error = true;
+                        }
+                    } else {
+                        self.script_note_workspace.type_dialog_error = true;
+                    }
+                }
+            }
         }
         measure_root_other_bucket(
             self,
@@ -806,6 +1007,26 @@ impl ScriptCraftApp {
             .performance
             .frame_nanos
             .saturating_add(frame_started.elapsed().as_nanos());
+    }
+}
+
+fn current_root_work_area(
+    frame: &eframe::Frame,
+    native_pixels_per_point: Option<f32>,
+) -> Option<crate::widgets::script_note::state::WorkAreaBounds> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = native_pixels_per_point;
+        crate::platform::macos::macos_work_area::current_work_area(frame)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        crate::platform::windows::windows_work_area::current_work_area(frame, native_pixels_per_point)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (frame, native_pixels_per_point);
+        None
     }
 }
 

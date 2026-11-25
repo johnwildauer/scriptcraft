@@ -5,6 +5,10 @@ use eframe::egui;
 use scriptcraft_commands::{
     Command, CommandId, CommandOrigin, CommandOutcome, CommandRejection, DiagnosticMessage,
     EditorSurface, HostEffectDescription, MAX_DIAGNOSTIC_MESSAGE_BYTES,
+    ScriptNoteColorValue, ScriptNoteCreateValue, ScriptNoteIdValue,
+    ScriptNoteNavigationValue, ScriptNotePresentValue, ScriptNotePropertiesValue,
+    ScriptNoteSelectionValue, ScriptNoteTextEditValue, ScriptNoteTextOperationValue,
+    ScriptNoteTimestampValue,
 };
 use std::collections::VecDeque;
 
@@ -64,6 +68,45 @@ pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::FormatElementsClose => Command::FormatElementsClose,
         CommandId::FormatTemplateSelectorOpen => Command::FormatTemplateSelectorOpen,
         CommandId::FormatTemplateSelectorCancel => Command::FormatTemplateSelectorCancel,
+        CommandId::ScriptNoteCreate => Command::ScriptNoteCreate {
+            input: ScriptNoteCreateValue {
+                color: None,
+                note_type: None,
+                timestamp: current_local_timestamp_value()?,
+            },
+        },
+        CommandId::ScriptNoteDelete => Command::ScriptNoteDelete {
+            note: ScriptNoteIdValue::new("script-note").expect("fixed ScriptNote ID is valid"),
+        },
+        CommandId::ScriptNotePropertiesSet => Command::ScriptNotePropertiesSet {
+            properties: ScriptNotePropertiesValue {
+                note: ScriptNoteIdValue::new("script-note").expect("fixed ScriptNote ID is valid"),
+                color: None,
+                note_type: None,
+                modified: current_local_timestamp_value()?,
+            },
+        },
+        CommandId::ScriptNoteSelectionSet => Command::ScriptNoteSelectionSet {
+            selection: ScriptNoteSelectionValue::None,
+        },
+        CommandId::ScriptNoteTextEdit => Command::ScriptNoteTextEdit {
+            edit: ScriptNoteTextEditValue {
+                operation: ScriptNoteTextOperationValue::Enter,
+                modified: current_local_timestamp_value()?,
+            },
+        },
+        CommandId::ScriptNoteTextNavigate => Command::ScriptNoteTextNavigate {
+            target: ScriptNoteNavigationValue::Horizontal { direction: scriptcraft_commands::HorizontalDirection::Left },
+            extend: false,
+        },
+        CommandId::ScriptNotePresent => Command::ScriptNotePresent {
+            presentation: ScriptNotePresentValue {
+                note: ScriptNoteIdValue::new("script-note").expect("fixed ScriptNote ID is valid"),
+                move_caret: false,
+                focus_body: false,
+            },
+        },
+        CommandId::ScriptNoteDismiss => Command::ScriptNoteDismiss,
         _ => return None,
     })
 }
@@ -119,6 +162,41 @@ impl ScriptCraftApp {
         let command_id = invocation.command.id();
         let origin = invocation.origin;
         self.flush_pending_diagnostic_commands(ctx);
+        let mut command = invocation.command.clone();
+        let mut note_ids_before_create = None;
+        let activation_availability = self.command_dispatch_availability(&command);
+        if matches!(command, Command::ScriptNoteCreate { .. })
+            && activation_availability.is_enabled(CommandId::ScriptNoteCreate)
+        {
+            let Some(timestamp) = current_local_timestamp_value() else {
+                self.post_diagnostic("ScriptNote timestamp could not be represented; note unchanged");
+                self.flush_pending_diagnostic_commands(ctx);
+                return DesktopCommandResult {
+                    command: command_id,
+                    origin,
+                    outcome: DesktopCommandOutcome::Rejected(CommandRejection::InvalidScriptNoteValue),
+                };
+            };
+            note_ids_before_create = Some(self.session.project().script_notes().iter()
+                .map(|note| note.id.clone()).collect::<Vec<_>>());
+            self.script_note_workspace.dismiss();
+            self.script_note_workspace.viewport_close_pending = true;
+            let color = self.script_note_workspace.last_color.and_then(ScriptNoteColorValue::from_core);
+            command = Command::ScriptNoteCreate {
+                input: ScriptNoteCreateValue {
+                    color,
+                    note_type: self.script_note_workspace.last_type.clone(),
+                    timestamp,
+                },
+            };
+        }
+        if activation_availability.is_enabled(command_id)
+            && should_dismiss_script_note_for(command_id)
+            && self.script_note_workspace.open_note.is_some()
+        {
+            self.dismiss_script_note(ctx);
+        }
+        let dispatched_command = command.clone();
         let shared_body_formatting_intent = matches!(&invocation.command,
             Command::EditorStyleToggle { surface: EditorSurface::Body, .. }
             | Command::EditorStyleClear { surface: EditorSurface::Body }
@@ -132,7 +210,7 @@ impl ScriptCraftApp {
         }
         let restore_focus = super::navigation::command_restores_editor_focus(command_id);
         let command = route_to_beat_formatting(
-            route_to_focused_surface(invocation.command, origin, self.active_editor_surface()),
+            route_to_focused_surface(command, origin, self.active_editor_surface()),
             self.root_document_view,
             origin,
         );
@@ -143,6 +221,9 @@ impl ScriptCraftApp {
             resolve_pdf_options,
             open_print_panel,
         );
+        self.finish_script_note_follow_up(
+            &dispatched_command, &outcome, note_ids_before_create, ctx,
+        );
         self.flush_pending_diagnostic_commands(ctx);
         if restore_focus && !self.replacement_open_pending() {
             self.restore_editor_focus(ctx);
@@ -151,6 +232,60 @@ impl ScriptCraftApp {
             command: command_id,
             origin,
             outcome,
+        }
+    }
+
+    fn finish_script_note_follow_up(
+        &mut self,
+        command: &Command,
+        outcome: &DesktopCommandOutcome,
+        note_ids_before_create: Option<Vec<scriptcraft_model::StableId>>,
+        ctx: &egui::Context,
+    ) {
+        match command {
+            Command::ScriptNoteCreate { .. }
+                if matches!(outcome, DesktopCommandOutcome::Editor(CommandOutcome::Changed)) =>
+            {
+                let before = note_ids_before_create.unwrap_or_default();
+                let added = self.session.project().script_notes().iter()
+                    .filter(|note| !before.contains(&note.id)).map(|note| note.id.clone())
+                    .collect::<Vec<_>>();
+                if let [note] = added.as_slice() {
+                    let present = Command::ScriptNotePresent { presentation: ScriptNotePresentValue {
+                        note: ScriptNoteIdValue::from_core(note.clone()),
+                        move_caret: false,
+                        focus_body: true,
+                    }};
+                    if !matches!(self.dispatch_internal_command(present, ctx),
+                        DesktopCommandOutcome::EffectDispatched)
+                    {
+                        self.post_diagnostic("ScriptNote was created but could not be presented safely");
+                    }
+                } else {
+                    self.post_diagnostic("ScriptNote was created but its new identity could not be established safely");
+                }
+            }
+            Command::ScriptNotePropertiesSet { properties }
+                if matches!(outcome, DesktopCommandOutcome::Editor(CommandOutcome::Changed | CommandOutcome::NoOp)) =>
+            {
+                if let Some(note) = self.session.project().script_notes().get(properties.note.as_core()) {
+                    self.script_note_workspace.update_defaults(
+                        crate::widgets::script_note::properties::resolve_color(
+                            note.color_projection(),
+                            self.theme_palette.script_workspace.page.text,
+                        ).default_color,
+                        note.note_type.clone(),
+                    );
+                }
+            }
+            Command::ScriptNoteDelete { note }
+                if matches!(outcome, DesktopCommandOutcome::Editor(CommandOutcome::Changed))
+                    && self.script_note_workspace.open_note.as_ref() == Some(note.as_core()) =>
+            {
+                self.script_note_workspace.dismiss();
+                ctx.request_repaint();
+            }
+            _ => {}
         }
     }
 
@@ -252,6 +387,15 @@ impl ScriptCraftApp {
             | Command::BeatBoardStyleToggle { .. }
             | Command::BeatBoardStyleClear
             | Command::BeatBoardRunFormattingSet { .. }) => self.dispatch_editing_command(command, ctx),
+            command @ (Command::ScriptNoteCreate { .. }
+            | Command::ScriptNoteDelete { .. }
+            | Command::ScriptNotePropertiesSet { .. }
+            | Command::ScriptNoteSelectionSet { .. }
+            | Command::ScriptNoteTextEdit { .. }
+            | Command::ScriptNoteTextNavigate { .. }) => self.dispatch_editing_command(command, ctx),
+            command @ (Command::ScriptNotePresent { .. } | Command::ScriptNoteDismiss) => {
+                self.dispatch_script_note_host_command(command, ctx)
+            }
             command @ (Command::EditorSelectionPointer { .. }
             | Command::EditorNavigationHorizontal { .. }
             | Command::EditorNavigationVertical { .. }
@@ -426,4 +570,21 @@ fn route_to_beat_formatting(
             Command::BeatBoardRunFormattingSet { patch },
         other => other,
     }
+}
+
+fn should_dismiss_script_note_for(command: CommandId) -> bool {
+    matches!(command,
+        CommandId::FileNew | CommandId::FileOpenRequest | CommandId::FileOpen
+        | CommandId::FileClose | CommandId::FileSave | CommandId::FileSaveAsRequest
+        | CommandId::FileSaveAs | CommandId::FileNewFromTemplateOpen
+        | CommandId::WindowTitlePageOpen | CommandId::ViewBeatBoardShow
+        | CommandId::FormatElementsOpen | CommandId::FormatTemplateSelectorOpen
+        | CommandId::FileSaveAsPdf | CommandId::FileExportFountain | CommandId::FilePrint
+        | CommandId::PdfIncludeTitlePageResolve
+    )
+}
+
+/// Convert the shared local-wall-clock provider into the bounded command value.
+pub(crate) fn current_local_timestamp_value() -> Option<ScriptNoteTimestampValue> {
+    ScriptNoteTimestampValue::new(scriptcraft_fdx::current_timestamp()).ok()
 }

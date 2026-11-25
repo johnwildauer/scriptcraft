@@ -35,6 +35,13 @@ impl ScriptCraftApp {
             ] {
                 context_command_row(ui, label, command_id, availability, &mut selected_command);
             }
+            context_command_row(
+                ui,
+                "ScriptNote",
+                CommandId::ScriptNoteCreate,
+                availability,
+                &mut selected_command,
+            );
             ui.separator();
             for (label, command_id) in [
                 ("Undo", CommandId::EditUndo),

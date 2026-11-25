@@ -20,6 +20,12 @@ At the user's explicit direction, adapt and record project-policy changes in the
 - **Technical composition:** [`blueprints/features/beat-board.md`](blueprints/features/beat-board.md), supported by the Document Model, Editing Session, FDX Preservation and Storage, Command Contract, Desktop Adapters, Layout and Pagination, User Settings, desktop container, and [technical context](blueprints/technical-context.md).
 - **Execution and user handoff:** [approved plan and work-order guide](../.plan/2026-11-24-beat-board/beat-board.md); [unexecuted user-owned review worksheet](../.plan/2026-11-24-beat-board/final-user-review.md). The worksheet is not acceptance evidence.
 
+## ScriptNotes initiative
+
+- **User-facing behavior:** [ScriptNotes requirements](requirements/features/script-notes.md), alongside its native-document lifecycle and export boundaries.
+- **Technical composition:** [ScriptNotes blueprint](blueprints/features/script-notes.md), with the current integration map in [technical context](blueprints/technical-context.md).
+- **Execution and user handoff:** [ScriptNotes work-order plan](../.plan/2026-11-25-script-notes/work-orders/README.md); [unchecked, user-owned review worksheet](../.plan/2026-11-25-script-notes/final-user-review.md). The worksheet is unexecuted and is not acceptance evidence.
+
 ## Core boundaries
 
 - **Requirements** describe durable desired product behavior: what users and stakeholders need and why. Cohesive area files may group related capabilities and retain stable requirement/acceptance IDs; they do not prescribe internal implementation or carry lifecycle status, implementation evidence, progress, or history.

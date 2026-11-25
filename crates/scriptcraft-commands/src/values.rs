@@ -13,6 +13,220 @@ impl BeatCardIdValue {
     pub fn from_core(value: scriptcraft_model::StableId) -> Self { Self(value) }
     pub fn as_core(&self) -> &scriptcraft_model::StableId { &self.0 }
 }
+
+/// Stable ScriptNote identity accepted by the command wire format.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ScriptNoteIdValue(scriptcraft_model::StableId);
+
+impl ScriptNoteIdValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, ModelError> {
+        scriptcraft_model::StableId::new(value).map(Self)
+    }
+
+    pub fn from_core(value: scriptcraft_model::StableId) -> Self { Self(value) }
+    pub fn as_core(&self) -> &scriptcraft_model::StableId { &self.0 }
+}
+
+impl Serialize for ScriptNoteIdValue {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ScriptNoteIdValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(|_| de::Error::custom("invalid ScriptNote ID"))
+    }
+}
+
+/// ScriptNote property colors, plus the wire-only theme-default sentinel.
+/// White and ElementDefault remain intentionally excluded from explicit colors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptNoteColorValue {
+    Black, Pink, Red, Orange, Yellow, Olive, Green, Mint, Blue, Violet, Purple, Brown, Gray,
+    #[serde(rename = "none")]
+    ThemeDefault,
+}
+
+impl ScriptNoteColorValue {
+    pub const fn as_core(self) -> Option<InlineColor> {
+        match self {
+            Self::Black => Some(InlineColor::Black), Self::Pink => Some(InlineColor::Pink),
+            Self::Red => Some(InlineColor::Red), Self::Orange => Some(InlineColor::Orange),
+            Self::Yellow => Some(InlineColor::Yellow), Self::Olive => Some(InlineColor::Olive),
+            Self::Green => Some(InlineColor::Green), Self::Mint => Some(InlineColor::Mint),
+            Self::Blue => Some(InlineColor::Blue), Self::Violet => Some(InlineColor::Violet),
+            Self::Purple => Some(InlineColor::Purple), Self::Brown => Some(InlineColor::Brown),
+            Self::Gray => Some(InlineColor::Gray),
+            Self::ThemeDefault => None,
+        }
+    }
+
+    pub const fn from_core(color: InlineColor) -> Option<Self> {
+        match color {
+            InlineColor::Black => Some(Self::Black), InlineColor::Pink => Some(Self::Pink),
+            InlineColor::Red => Some(Self::Red), InlineColor::Orange => Some(Self::Orange),
+            InlineColor::Yellow => Some(Self::Yellow), InlineColor::Olive => Some(Self::Olive),
+            InlineColor::Green => Some(Self::Green), InlineColor::Mint => Some(Self::Mint),
+            InlineColor::Blue => Some(Self::Blue), InlineColor::Violet => Some(Self::Violet),
+            InlineColor::Purple => Some(Self::Purple), InlineColor::Brown => Some(Self::Brown),
+            InlineColor::Gray => Some(Self::Gray), InlineColor::White => None,
+        }
+    }
+}
+
+/// Maximum Type string accepted at the command boundary.
+pub const MAX_SCRIPT_NOTE_TYPE_BYTES: usize = 1024;
+/// Maximum text payload accepted by a single ScriptNote text command.
+pub const MAX_SCRIPT_NOTE_TEXT_BYTES: usize = 1_048_576;
+
+fn validate_script_note_type(value: Option<String>) -> Result<Option<String>, &'static str> {
+    if let Some(value) = &value {
+        if value.is_empty() || value.len() > MAX_SCRIPT_NOTE_TYPE_BYTES
+            || value.chars().any(char::is_control)
+        {
+            return Err("ScriptNote Type must be nonempty, bounded, and contain no control characters");
+        }
+    }
+    Ok(value)
+}
+
+fn deserialize_script_note_type<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    validate_script_note_type(Option::<String>::deserialize(deserializer)?)
+        .map_err(de::Error::custom)
+}
+
+/// A bounded local-wall-clock timestamp in YYYYMMDDTHHMMSS form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ScriptNoteTimestampValue(String);
+
+impl ScriptNoteTimestampValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidScriptNoteTimestamp> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        let digits = |range: std::ops::Range<usize>| -> Option<u32> {
+            bytes.get(range)?.iter().try_fold(0_u32, |number, byte| {
+                byte.is_ascii_digit().then(|| number * 10 + u32::from(*byte - b'0'))
+            })
+        };
+        let valid = bytes.len() == 15 && bytes.get(8) == Some(&b'T')
+            && bytes.iter().enumerate().all(|(index, byte)| index == 8 || byte.is_ascii_digit())
+            && digits(4..6).is_some_and(|month| (1..=12).contains(&month))
+            && digits(6..8).is_some_and(|day| (1..=31).contains(&day))
+            && digits(9..11).is_some_and(|hour| hour <= 23)
+            && digits(11..13).is_some_and(|minute| minute <= 59)
+            && digits(13..15).is_some_and(|second| second <= 59);
+        valid.then_some(Self(value)).ok_or(InvalidScriptNoteTimestamp)
+    }
+
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+
+impl<'de> Deserialize<'de> for ScriptNoteTimestampValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidScriptNoteTimestamp;
+
+impl std::fmt::Display for InvalidScriptNoteTimestamp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("timestamp must have bounded YYYYMMDDTHHMMSS fields")
+    }
+}
+impl std::error::Error for InvalidScriptNoteTimestamp {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptNoteCreateValue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<ScriptNoteColorValue>,
+    #[serde(default, deserialize_with = "deserialize_script_note_type")]
+    pub note_type: Option<String>,
+    pub timestamp: ScriptNoteTimestampValue,
+}
+
+impl ScriptNoteCreateValue {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        validate_script_note_type(self.note_type.clone()).map(|_| ())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptNotePropertiesValue {
+    pub note: ScriptNoteIdValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<ScriptNoteColorValue>,
+    #[serde(default, deserialize_with = "deserialize_script_note_type")]
+    pub note_type: Option<String>,
+    pub modified: ScriptNoteTimestampValue,
+}
+
+impl ScriptNotePropertiesValue {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        validate_script_note_type(self.note_type.clone()).map(|_| ())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptNoteTextPositionValue { pub paragraph: u32, pub offset: u32 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptNoteFieldValue { Title, Body }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ScriptNoteSelectionValue {
+    None,
+    Text {
+        note: ScriptNoteIdValue,
+        field: ScriptNoteFieldValue,
+        anchor: ScriptNoteTextPositionValue,
+        focus: ScriptNoteTextPositionValue,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ScriptNoteTextOperationValue {
+    Insert { text: String }, Paste { text: String }, DeleteBackward, DeleteForward, Enter,
+}
+
+impl ScriptNoteTextOperationValue {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let text = match self { Self::Insert { text } | Self::Paste { text } => text, _ => return Ok(()) };
+        if text.len() > MAX_SCRIPT_NOTE_TEXT_BYTES { Err("ScriptNote text payload exceeds its byte bound") } else { Ok(()) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ScriptNoteNavigationValue {
+    Horizontal { direction: HorizontalDirection },
+    LineEdge { edge: LineEdge },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptNoteTextEditValue {
+    pub operation: ScriptNoteTextOperationValue,
+    pub modified: ScriptNoteTimestampValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptNotePresentValue {
+    pub note: ScriptNoteIdValue,
+    pub move_caret: bool,
+    pub focus_body: bool,
+}
 impl Serialize for BeatCardIdValue {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> { serializer.serialize_str(self.0.as_str()) }
 }

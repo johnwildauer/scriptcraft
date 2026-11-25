@@ -25,6 +25,12 @@ pub struct EditingSession {
     pub(crate) selection: Selection,
     pub(crate) title_selection: Selection,
     pub(crate) beat_selection: super::BeatSelection,
+    pub(crate) script_note_selection: super::ScriptNoteSelection,
+    /// Parallel immutable selection payloads aligned with the existing shared
+    /// history stacks; kept here so all existing snapshot publishers remain
+    /// ownership-neutral while note edits join the same timeline.
+    pub(super) history_note_selections: Vec<super::ScriptNoteSelection>,
+    pub(super) redo_note_selections: Vec<super::ScriptNoteSelection>,
     pub(super) beat_typing_style: RunStyleFlags,
     pub(super) beat_typing_formatting: InlineRunFormattingPatch,
     pub(super) title_typing_style: RunStyleFlags,
@@ -59,6 +65,9 @@ impl PartialEq for EditingSession {
             && self.selection == other.selection
             && self.title_selection == other.title_selection
             && self.beat_selection == other.beat_selection
+            && self.script_note_selection == other.script_note_selection
+            && self.history_note_selections == other.history_note_selections
+            && self.redo_note_selections == other.redo_note_selections
             && self.beat_typing_style == other.beat_typing_style
             && self.beat_typing_formatting == other.beat_typing_formatting
             && self.title_typing_style == other.title_typing_style
@@ -140,6 +149,9 @@ impl EditingSession {
                 offset: 0,
             }),
             beat_selection: super::BeatSelection::None,
+            script_note_selection: super::ScriptNoteSelection::None,
+            history_note_selections: Vec::new(),
+            redo_note_selections: Vec::new(),
             beat_typing_style: RunStyleFlags::default(),
             beat_typing_formatting: InlineRunFormattingPatch::default(),
             title_typing_style,
@@ -264,7 +276,8 @@ impl EditingSession {
         validate_full_candidate(&self.project)?;
         validate_selection(&self.project, self.selection)?;
         super::beat_board::validate_beat_selection(&self.project, &self.beat_selection)?;
-        validate_title_selection(&self.project, self.title_selection)
+        validate_title_selection(&self.project, self.title_selection)?;
+        super::script_notes::validate_script_note_selection(&self.project, &self.script_note_selection)
     }
 
     pub fn mark_saved(&mut self) {

@@ -20,6 +20,7 @@ mod geometry;
 mod inputs;
 mod interaction;
 mod paginate;
+mod script_note;
 mod spans;
 mod title_page;
 mod wrap;
@@ -29,6 +30,10 @@ pub use beat_board::{
     BEAT_BODY_PLACEHOLDER, BEAT_TITLE_PLACEHOLDER,
 };
 pub use cache::{LayoutBuildDiagnostics, LayoutCache};
+pub use script_note::{
+    ScriptNoteDisplayOnlySpan, ScriptNoteLayout, ScriptNoteMetrics,
+    ScriptNoteTitleProjection, SCRIPT_NOTE_BODY_PLACEHOLDER, SCRIPT_NOTE_TITLE_PLACEHOLDER,
+};
 pub use geometry::{
     Caret, DisplaySourceSegment, FixedRect, LayoutError, LayoutErrorKind, LayoutLine, LayoutPage,
     LineVerticalMetrics, LocatedLayoutLine, PositionedStyledSpan, Rect, ScreenplayLayout,

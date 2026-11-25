@@ -119,11 +119,11 @@ impl EditingSession {
                     if project.elements.len() == 1 {
                         return Ok(Selection::caret(start));
                     }
-                    return Ok(remove_empty_body_element(
+                    return remove_empty_body_element(
                         project,
                         start.element,
                         DeleteDirection::Forward,
-                    ));
+                    );
                 }
                 let has_parenthetical_capability = project
                     .element_semantics(&item.element_type())
@@ -165,7 +165,7 @@ impl EditingSession {
                     let previous = start.element.saturating_sub(1);
                     let offset = project.elements[previous].text.len();
                     generated.remove(&id);
-                    remove_body_owner(project, start.element);
+                    remove_body_owner(project, start.element)?;
                     return Ok(Selection::caret(Position {
                         element: previous,
                         offset,
@@ -185,7 +185,7 @@ impl EditingSession {
                 } else if start.element + 1 < project.elements.len() {
                     let offset = item.text.len();
                     if project.elements[start.element + 1].text.is_empty() {
-                        remove_body_owner(project, start.element + 1);
+                        remove_body_owner(project, start.element + 1)?;
                     } else {
                         join_at(project, start.element)?;
                     }
@@ -228,11 +228,11 @@ impl EditingSession {
                     if project.elements.len() == 1 {
                         return Ok(Selection::caret(start));
                     }
-                    return Ok(remove_empty_body_element(
+                    return remove_empty_body_element(
                         project,
                         start.element,
                         DeleteDirection::Backward,
-                    ));
+                    );
                 }
                 if start.offset > 0 {
                     let previous = previous_boundary(&item.text, start.offset);
@@ -249,7 +249,7 @@ impl EditingSession {
                         .get(start.element - 1)
                         .ok_or(EditError::InvalidElement)?;
                     if previous.text.is_empty() {
-                        remove_body_owner(project, start.element - 1);
+                        remove_body_owner(project, start.element - 1)?;
                         return Ok(Selection::caret(Position {
                             element: start.element - 1,
                             offset: 0,
@@ -327,7 +327,7 @@ fn remove_empty_body_element(
     project: &mut Project,
     index: usize,
     direction: DeleteDirection,
-) -> Selection {
+) -> Result<Selection, EditError> {
     let (caret_element, caret_offset) = match direction {
         DeleteDirection::Forward if index + 1 < project.elements.len() => (index, 0),
         DeleteDirection::Forward => (index - 1, project.elements[index - 1].text.len()),
@@ -336,9 +336,9 @@ fn remove_empty_body_element(
         }
         DeleteDirection::Backward => (index, 0),
     };
-    remove_body_owner(project, index);
-    Selection::caret(Position {
+    remove_body_owner(project, index)?;
+    Ok(Selection::caret(Position {
         element: caret_element,
         offset: caret_offset,
-    })
+    }))
 }

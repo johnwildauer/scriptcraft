@@ -1,6 +1,8 @@
 use super::selection::{validate_position, validate_title_position};
-use super::structure::remove_body_owner;
+use super::structure::remove_body_owner_raw;
 use super::{EditError, Position};
+#[path = "body_change.rs"]
+pub(super) mod body_change;
 use scriptcraft_model::formatted_text::{
     canonical_style_value, canonicalize_run_attributes, insert_run_attribute, normalize_runs,
     parse_style_attribute, project_style_at_caret, toggle_paragraph_run_styles, ParagraphTarget,
@@ -143,6 +145,7 @@ pub(super) fn replace_range(
         replace_element_text(project, start.element, start.offset, end.offset, inserted)?;
         return Ok(());
     }
+    let replacement = body_change::text_replacement(project, start, end, inserted)?;
     // The transaction-level preservation reconciliation retains the first ID,
     // removes the consumed source paragraphs and carries source runs forward.
     let prefix = project.elements[start.element].text[..start.offset].to_owned();
@@ -157,12 +160,30 @@ pub(super) fn replace_range(
         element.runs = runs;
     });
     for _ in start.element + 1..=end.element {
-        remove_body_owner(project, start.element + 1);
+        remove_body_owner_raw(project, start.element + 1);
     }
+    body_change::apply(project, replacement)?;
     Ok(())
 }
 
 pub(super) fn replace_element_text(
+    project: &mut Project,
+    element_index: usize,
+    start: usize,
+    end: usize,
+    inserted: &str,
+) -> Result<(), EditError> {
+    let replacement = body_change::text_replacement(
+        project,
+        Position { element: element_index, offset: start },
+        Position { element: element_index, offset: end },
+        inserted,
+    )?;
+    replace_element_text_raw(project, element_index, start, end, inserted)?;
+    body_change::apply(project, replacement)
+}
+
+fn replace_element_text_raw(
     project: &mut Project,
     element_index: usize,
     start: usize,

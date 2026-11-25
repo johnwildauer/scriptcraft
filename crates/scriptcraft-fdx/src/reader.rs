@@ -185,7 +185,6 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     let mut source_layout_settings = SourceLayoutSettings::default();
     validate_image_payload_budgets(root, root_namespace)?;
     validate_user_paragraph_data_locations(root, root_namespace)?;
-    let (identities, board_graph) = collect_identities(root)?;
     let mut anchors = Vec::new();
     let mut next_id = 1usize;
     let mut next_anchor = 1usize;
@@ -210,6 +209,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         &mut next_id,
         &mut next_anchor,
     )?;
+    let (identities, board_graph) = collect_identities(root, &project)?;
 
     let mut preserved_children = parsed
         .into_iter()
@@ -281,6 +281,8 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     project.validate().map_err(map_model_error)?;
     let (beat_board, beat_board_view_state) = crate::beat_board::import(root, &project)?;
     project.replace_beat_board(beat_board).map_err(map_model_error)?;
+    crate::script_notes::import(root, &mut project)?;
+    project.validate().map_err(map_model_error)?;
     let text_state = raw_root_text_state(root, &project);
     let invisibles = InvisiblesState {
         show_body: raw_root_show_invisibles(root),
@@ -650,6 +652,10 @@ fn make_element<R: std::io::BufRead>(
     let (resolved, local) = reader.resolver().resolve_element(start.name());
     let (namespace_uri, local_name) = resolved_name(resolved, local.as_ref())?;
     let document_root = stack.is_empty();
+    let direct_root_script_note = local_name == "ScriptNote"
+        && stack.len() == 2
+        && stack[0].name.local_name == FDX_ROOT
+        && stack[1].name.local_name == "ScriptNotes";
     let direct_display_board = stack.len() == 2
         && stack[0].name.local_name == FDX_ROOT
         && stack[1].name.local_name == "DisplayBoards"
@@ -680,6 +686,8 @@ fn make_element<R: std::io::BufRead>(
                 || (direct_display_board && matches!(raw_name.as_str(), "Type" | "ScrollOrigin" | "ZoomLevel"));
         if !seen_raw_attributes.insert(raw_name.clone())
             && (!document_root || raw_name != "Version")
+            && !(direct_root_script_note && raw_name == "Range")
+            && !(direct_root_script_note && raw_name == "RefId")
             && !best_effort_view_attribute
         {
             return Err(FdxError::MalformedXml);
@@ -703,6 +711,8 @@ fn make_element<R: std::io::BufRead>(
                     || (direct_display_board && matches!(local_name.as_str(), "Type" | "ScrollOrigin" | "ZoomLevel")));
             if !seen_expanded_attributes.insert((attribute_namespace.clone(), local_name.clone()))
                 && (!document_root || attribute_namespace.is_some() || local_name != "Version")
+                && !(direct_root_script_note && attribute_namespace.is_none() && local_name == "Range")
+                && !(direct_root_script_note && attribute_namespace.is_none() && local_name == "RefId")
                 && !best_effort_view_attribute
             {
                 return Err(FdxError::MalformedXml);

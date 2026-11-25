@@ -6,7 +6,64 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{BuiltinTemplateValue, EditorSurface, PointerPhase, BeatCardIdValue, BeatSelectionValue,
-    BeatTextFieldValue, BeatTextPositionValue, BeatTextEditValue, BeatNavigationValue};
+    BeatTextFieldValue, BeatTextPositionValue, BeatTextEditValue, BeatNavigationValue,
+    ScriptNoteSelectionValue, ScriptNoteTextPositionValue, ScriptNoteFieldValue,
+    ScriptNoteTextOperationValue, ScriptNoteNavigationValue};
+
+pub fn script_note_selection_to_core(
+    value: &ScriptNoteSelectionValue,
+) -> Result<scriptcraft_session::editing::ScriptNoteSelection, PositionError> {
+    use scriptcraft_session::editing::{ScriptNoteField, ScriptNoteSelection, ScriptNoteTextPosition};
+    Ok(match value {
+        ScriptNoteSelectionValue::None => ScriptNoteSelection::None,
+        ScriptNoteSelectionValue::Text { note, field, anchor, focus } => ScriptNoteSelection::Text {
+            note: note.as_core().clone(),
+            field: match field { ScriptNoteFieldValue::Title => ScriptNoteField::Title, ScriptNoteFieldValue::Body => ScriptNoteField::Body },
+            anchor: ScriptNoteTextPosition {
+                paragraph: usize::try_from(anchor.paragraph).map_err(|_| PositionError::IndexOutOfRange)?,
+                offset: usize::try_from(anchor.offset).map_err(|_| PositionError::IndexOutOfRange)?,
+            },
+            focus: ScriptNoteTextPosition {
+                paragraph: usize::try_from(focus.paragraph).map_err(|_| PositionError::IndexOutOfRange)?,
+                offset: usize::try_from(focus.offset).map_err(|_| PositionError::IndexOutOfRange)?,
+            },
+        },
+    })
+}
+
+pub fn script_note_text_operation_to_core(
+    value: &ScriptNoteTextOperationValue,
+) -> scriptcraft_session::editing::ScriptNoteTextEditOperation {
+    use scriptcraft_session::editing::ScriptNoteTextEditOperation;
+    match value {
+        ScriptNoteTextOperationValue::Insert { text } => ScriptNoteTextEditOperation::Insert { text: text.clone() },
+        ScriptNoteTextOperationValue::Paste { text } => ScriptNoteTextEditOperation::Paste { text: text.clone() },
+        ScriptNoteTextOperationValue::DeleteBackward => ScriptNoteTextEditOperation::DeleteBackward,
+        ScriptNoteTextOperationValue::DeleteForward => ScriptNoteTextEditOperation::DeleteForward,
+        ScriptNoteTextOperationValue::Enter => ScriptNoteTextEditOperation::Enter,
+    }
+}
+
+pub fn script_note_navigation_to_core(
+    value: ScriptNoteNavigationValue,
+) -> (scriptcraft_session::editing::ScriptNoteHorizontalDirection, Option<scriptcraft_session::editing::ScriptNoteLineEdge>) {
+    use scriptcraft_session::editing::{ScriptNoteHorizontalDirection, ScriptNoteLineEdge};
+    match value {
+        ScriptNoteNavigationValue::Horizontal { direction: super::HorizontalDirection::Left } => (ScriptNoteHorizontalDirection::Left, None),
+        ScriptNoteNavigationValue::Horizontal { direction: super::HorizontalDirection::Right } => (ScriptNoteHorizontalDirection::Right, None),
+        ScriptNoteNavigationValue::LineEdge { edge: super::LineEdge::Start } => (ScriptNoteHorizontalDirection::Left, Some(ScriptNoteLineEdge::Start)),
+        ScriptNoteNavigationValue::LineEdge { edge: super::LineEdge::End } => (ScriptNoteHorizontalDirection::Right, Some(ScriptNoteLineEdge::End)),
+    }
+}
+
+impl ScriptNoteTextPositionValue {
+    pub fn from_core(value: scriptcraft_session::editing::ScriptNoteTextPosition) -> Result<Self, PositionError> {
+        Ok(Self {
+            paragraph: u32::try_from(value.paragraph).map_err(|_| PositionError::IndexOutOfRange)?,
+            offset: u32::try_from(value.offset).map_err(|_| PositionError::IndexOutOfRange)?,
+        })
+    }
+}
 
 /// Checked conversion from command selection payload to the session's canonical Beat selection.
 pub fn beat_selection_to_core(value: &BeatSelectionValue) -> Result<scriptcraft_session::editing::BeatSelection, PositionError> {

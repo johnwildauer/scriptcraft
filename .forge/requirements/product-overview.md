@@ -14,6 +14,8 @@ A title page can be edited alongside the screenplay while remaining a distinct p
 
 Writers can create a new document from the Screenplay, Stageplay, or Dramatists Guild Musical template, retaining that template's editable example body and title-page content. The read-only Elements inspector presents the current document's ordered definitions; Apply a Template changes only element definitions/settings and maps unmatched managed types to Action while preserving current writing. Opening an external FDXT creates new untitled content and does not make the template source a save target. Writers can open, save, and reopen native screenplay documents, retaining supported screenplay content and document information. They can also produce PDF page-layout copies and deliberately simpler plain-text copies. These exports serve different purposes and do not replace the editable native document. The desktop experience is designed for one writer working with a project at a time.
 
+Writers can attach private ScriptNotes to selected screenplay Body text or a caret, revisit those notes from the page margin, and edit their titles, rich-text bodies, colors, and types. Notes remain annotations rather than screenplay content and are excluded from screenplay pagination and exports. See [ScriptNotes](features/script-notes.md).
+
 ## Success outcomes
 
 - Writers can move from creating a screenplay to revising, saving, reopening, and sharing it in one focused workflow.
@@ -24,7 +26,7 @@ Writers can create a new document from the Screenplay, Stageplay, or Dramatists 
 
 ## Product boundaries
 
-**In scope:** screenplay-focused writing and revision; title-page editing; readable page presentation; native screenplay document open/save; PDF and plain-text exports; and the desktop workspace needed to use these capabilities. Bounded support for dual dialogue and conversion from Fountain text are included as focused writing workflows. The focused Beat Board is an explicit outlining exception: its independent cards have plain titles and rich, multi-paragraph bodies and do not enter screenplay exports.
+**In scope:** screenplay-focused writing and revision; title-page editing; readable page presentation; native screenplay document open/save; PDF and plain-text exports; private Body-anchored ScriptNotes; and the desktop workspace needed to use these capabilities. Bounded support for dual dialogue and conversion from Fountain text are included as focused writing workflows. The focused Beat Board is an explicit outlining exception: its independent cards have plain titles and rich, multi-paragraph bodies and do not enter screenplay exports.
 
 **Out of scope:** general-purpose word processing; guaranteed compatibility or pixel-perfect rendering for every screenplay file or application; collaboration, cloud services, and revision tracking; production planning and scheduling; broader outlining beyond the focused Beat Board, Story Map and other board views; and web-based editing. Unsupported source structures may be retained without becoming editable product features; unfamiliar element-type labels alone do not make managed paragraphs opaque.
 
@@ -39,5 +41,6 @@ Writers can create a new document from the Screenplay, Stageplay, or Dramatists 
 - [User settings](features/user-settings.md) — persistent global appearance, default-template, ruler-visibility, and main/Title Page toolbar-composition preferences.
 - [Dual dialogue](features/dual-dialogue.md) — write and present paired dialogue.
 - [Beat Board](features/beat-board.md) — organize independent rich-text cards on a finite board.
+- [ScriptNotes](features/script-notes.md) — annotate screenplay Body ranges without changing screenplay output.
 - [Fountain conversion](features/fountain-conversion.md) — bring Fountain screenplay text into ScriptCraft.
 - [macOS packaging](features/macos-packaging.md) — macOS app distribution.

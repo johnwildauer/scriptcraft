@@ -3,7 +3,9 @@
 use super::candidate::MutationValidationScope;
 use super::policy::{resolve_enter, resolve_tab, EnterAction, TabAction};
 use super::selection::SelectionOrdering;
-use super::text::{effective_runs, normalize_run_sequence, replace_range, slice_runs};
+use super::text::{
+    body_change, effective_runs, normalize_run_sequence, replace_range, slice_runs,
+};
 use super::{
     EditError, EditingSession, ParagraphKeyTarget, ParagraphKeyTargets, Position, Selection,
 };
@@ -115,7 +117,7 @@ impl EditingSession {
                         let new = ScreenplayElement::new(
                             id.clone(),
                             element_type,
-                            if automatic { "()" } else { "" },
+                            "",
                         )?;
                         if let Some(anchor) =
                             project.elements.get(element).map(|item| item.id.clone())
@@ -127,9 +129,15 @@ impl EditingSession {
                                 new.id.clone(),
                             )?;
                         }
-                        project.elements.insert(element, BodyOwner::shared(new));
+                        insert_body_owner(project, element, new)?;
                         if automatic {
                             generated.insert(id);
+                            replace_range(
+                                project,
+                                Position { element, offset: 0 },
+                                Position { element, offset: 0 },
+                                "()",
+                            )?;
                             Ok(Selection::caret(Position { element, offset: 1 }))
                         } else {
                             Ok(Selection::caret(Position { element, offset: 0 }))
@@ -139,11 +147,19 @@ impl EditingSession {
                         position,
                         element_type,
                     } => {
-                        BodyOwner::update(&mut project.elements[position.element], |element| {
-                            element.text.clear();
-                        });
+                        let old_len = project.elements[position.element].text.len();
+                        replace_range(
+                            project,
+                            Position { offset: 0, ..position },
+                            Position { offset: old_len, ..position },
+                            "",
+                        )?;
                         generated.remove(project.elements[position.element].id.as_str());
-                        split_at(project, position, element_type)
+                        split_at(
+                            project,
+                            Position { offset: 0, ..position },
+                            element_type,
+                        )
                     }
                     EnterAction::RepairAndInsert {
                         element,
@@ -204,9 +220,13 @@ impl EditingSession {
                         clear_generated_parenthetical,
                     } => {
                         if clear_generated_parenthetical {
-                            BodyOwner::update(&mut project.elements[position.element], |element| {
-                                element.text.clear();
-                            });
+                            let old_len = project.elements[position.element].text.len();
+                            replace_range(
+                                project,
+                                Position { offset: 0, ..position },
+                                Position { offset: old_len, ..position },
+                                "",
+                            )?;
                             generated.remove(project.elements[position.element].id.as_str());
                         }
                         let old_type = project.elements[position.element].element_type();
@@ -437,7 +457,7 @@ fn insert_dialogue_below(
         &anchor,
         new.id.clone(),
     )?;
-    project.elements.insert(element + 1, BodyOwner::shared(new));
+    insert_body_owner(project, element + 1, new)?;
     Ok(Selection::caret(Position {
         element: element + 1,
         offset: 0,
@@ -514,6 +534,21 @@ fn repair_parenthetical_in_project(
 }
 
 fn split_at(
+    project: &mut Project,
+    position: Position,
+    element_type: ElementTypeKey,
+) -> Result<Selection, EditError> {
+    // Splitting preserves all text and inserts exactly one virtual separator at
+    // the caret's pre-split flattened boundary, including either text boundary.
+    let flat_position = scriptcraft_model::position_to_flat_offset(project, position)
+        .ok_or(EditError::InvalidSelection)?;
+    let replacement = body_change::flat_replacement(project, flat_position, flat_position, 1)?;
+    let selection = split_at_raw(project, position, element_type)?;
+    body_change::apply(project, replacement)?;
+    Ok(selection)
+}
+
+fn split_at_raw(
     project: &mut Project,
     position: Position,
     element_type: ElementTypeKey,
@@ -656,7 +691,33 @@ fn ensure_join_types_match(project: &Project, index: usize) -> Result<(), EditEr
 
 /// Removes one semantic owner and its direct/group registrations. Source-tree
 /// cleanup remains in the transaction-level preservation reconciliation.
-pub(super) fn remove_body_owner(project: &mut Project, index: usize) {
+pub(super) fn remove_body_owner(project: &mut Project, index: usize) -> Result<(), EditError> {
+    let Some(_) = project.elements.get(index) else {
+        return Ok(());
+    };
+    let document_len = scriptcraft_model::flat_document_len(project)
+        .ok_or(EditError::InvalidSelection)?;
+    let start = scriptcraft_model::paragraph_flat_start(project, index)
+        .ok_or(EditError::InvalidSelection)?;
+    // A nonfinal removal consumes its text and following separator; a final
+    // removal consumes its text and preceding separator, never both.
+    let (start, end) = if index + 1 < project.elements.len() {
+        (
+            start,
+            scriptcraft_model::paragraph_flat_start(project, index + 1)
+                .ok_or(EditError::InvalidSelection)?,
+        )
+    } else if index > 0 {
+        (start.checked_sub(1).ok_or(EditError::InvalidSelection)?, document_len)
+    } else {
+        (start, document_len)
+    };
+    let replacement = body_change::flat_replacement(project, start, end, 0)?;
+    remove_body_owner_raw(project, index);
+    body_change::apply(project, replacement)
+}
+
+pub(super) fn remove_body_owner_raw(project: &mut Project, index: usize) {
     let Some(removed_id) = project
         .elements
         .get(index)
@@ -711,6 +772,24 @@ pub(super) fn join_at(project: &mut Project, index: usize) -> Result<(), EditErr
         return Err(EditError::InvalidElement);
     }
     ensure_join_types_match(project, index)?;
+    // Joining removes only the virtual separator at the left paragraph end.
+    let left_end = Position {
+        element: index,
+        offset: project.elements[index].text.len(),
+    };
+    let separator = scriptcraft_model::position_to_flat_offset(project, left_end)
+        .ok_or(EditError::InvalidSelection)?;
+    let separator_end = separator.checked_add(1).ok_or(EditError::InvalidSelection)?;
+    let replacement = body_change::flat_replacement(project, separator, separator_end, 0)?;
+    join_at_raw(project, index)?;
+    body_change::apply(project, replacement)
+}
+
+fn join_at_raw(project: &mut Project, index: usize) -> Result<(), EditError> {
+    if index + 1 >= project.elements.len() {
+        return Err(EditError::InvalidElement);
+    }
+    ensure_join_types_match(project, index)?;
     let right = project.elements[index + 1].text.clone();
     if project.elements[index]
         .text
@@ -728,6 +807,33 @@ pub(super) fn join_at(project: &mut Project, index: usize) -> Result<(), EditErr
         item.text = joined_text;
         item.runs = joined_runs;
     });
-    remove_body_owner(project, index + 1);
+    remove_body_owner_raw(project, index + 1);
     Ok(())
+}
+
+fn insert_body_owner(
+    project: &mut Project,
+    index: usize,
+    new: ScreenplayElement,
+) -> Result<(), EditError> {
+    if index > project.elements.len() {
+        return Err(EditError::InvalidElement);
+    }
+    let flat_position = if index < project.elements.len() {
+        scriptcraft_model::paragraph_flat_start(project, index)
+            .ok_or(EditError::InvalidSelection)?
+    } else {
+        scriptcraft_model::flat_document_len(project)
+            .ok_or(EditError::InvalidSelection)?
+    };
+    // Owner insertion changes flattened content only by its one virtual
+    // separator; any generated parenthetical is a separate text primitive.
+    let separator_len = if project.elements.is_empty() { 0 } else { 1 };
+    if !new.text.is_empty() {
+        return Err(EditError::InvalidSelection);
+    }
+    let inserted_len = separator_len;
+    let replacement = body_change::flat_replacement(project, flat_position, flat_position, inserted_len)?;
+    project.elements.insert(index, BodyOwner::shared(new));
+    body_change::apply(project, replacement)
 }

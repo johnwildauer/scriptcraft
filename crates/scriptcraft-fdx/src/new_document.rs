@@ -247,6 +247,7 @@ pub(crate) fn make_new_document_nodes(
         )));
     root.children.push(PreservedNode::Element(title_page));
     crate::beat_board_output::append_generated_board(&mut root, project, context)?;
+    crate::script_notes_output::append_generated_script_notes(&mut root, project)?;
     Ok(vec![PreservedNode::Element(root)])
 }
 

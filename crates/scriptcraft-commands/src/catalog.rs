@@ -31,7 +31,7 @@ const fn descriptor(
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 75] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 83] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -255,6 +255,14 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 75] = [
     descriptor(CommandId::BeatBoardRunFormattingSet, "beat-board", "patch: bounded Font/Size/Color/Background; active Body selection/caret"),
     descriptor(CommandId::BeatBoardCardDelete, "beat-board", "card: stable card ID"),
     descriptor(CommandId::FileExportFountain, "file", "none; host effect opens Fountain destination picker"),
+    descriptor(CommandId::ScriptNoteCreate, "script-note", "color, optional note_type, timestamp; current Body selection"),
+    descriptor(CommandId::ScriptNoteDelete, "script-note", "note: stable ScriptNote ID; explicit Trash action only"),
+    descriptor(CommandId::ScriptNotePropertiesSet, "script-note", "note, complete color/optional note_type, modified timestamp"),
+    descriptor(CommandId::ScriptNoteSelectionSet, "script-note", "none or validated note Title/Body text range"),
+    descriptor(CommandId::ScriptNoteTextEdit, "script-note", "insert, paste, backward/forward delete, or Enter; modified timestamp"),
+    descriptor(CommandId::ScriptNoteTextNavigate, "script-note", "horizontal direction or logical line edge; extend: bool"),
+    descriptor(CommandId::ScriptNotePresent, "script-note", "note, move_caret, focus_body; host effect opens note viewport"),
+    descriptor(CommandId::ScriptNoteDismiss, "script-note", "none; host effect closes note viewport"),
 ];
 
 pub fn descriptor_for(id: CommandId) -> Option<&'static CommandDescriptor> {

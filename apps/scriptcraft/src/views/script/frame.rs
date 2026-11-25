@@ -10,6 +10,9 @@ use std::time::Instant;
 use super::page_policy::{
     presented_page_policy, resolve_presentation_mode, viewport_paint_page_range,
 };
+use super::note_overlay::{
+    hovered_marker, marker_at, project_visible_markers, NoteLineKey, NoteMarkerGeometry,
+};
 use super::reveal;
 use super::ruler::{paint_ruler, RULER_ALLOCATED_HEIGHT};
 use super::zoom_scroll::{
@@ -193,6 +196,9 @@ impl ScriptCraftApp {
     }
 
     fn live_document_surface_inner(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
+        if surface == EditorSurface::Body {
+            self.script_note_workspace.marker_anchor = None;
+        }
         let element_windows_own_input = self.element_windows.owns_input();
         let presentation_mode = resolve_presentation_mode(surface, || self.script_view_mode);
         let layout = match self.layout_for_render(surface) {
@@ -253,6 +259,8 @@ impl ScriptCraftApp {
             .collect::<Vec<Option<Vec<Option<presentation_geometry::PresentationLine<'_>>>>>>();
         let mut rendered_scale = 1.0;
         let mut visible_pages = 0;
+        let mut frame_note_markers = Vec::<NoteMarkerGeometry>::new();
+        let mut hovered_note_marker: Option<NoteLineKey> = None;
         let reveal_intent = self.reveal_intent;
         let pending_zoom_anchor = self.pending_zoom_anchor;
         let zoom_compensation_offset = pending_zoom_anchor.and_then(|anchor| {
@@ -387,7 +395,7 @@ impl ScriptCraftApp {
                     pages_to_project.push(page_index);
                 }
             }
-            for page_index in pages_to_project {
+            for page_index in pages_to_project.iter().copied() {
                 if frame_projections[page_index].is_none() {
                     frame_projections[page_index] = Some(
                         layout.pages[page_index]
@@ -401,6 +409,51 @@ impl ScriptCraftApp {
                             .collect(),
                     );
                 }
+            }
+            if surface == EditorSurface::Body
+                && layout.purpose == scriptcraft_layout::LayoutPurpose::Editor
+            {
+                frame_note_markers = project_visible_markers(
+                    &layout,
+                    self.session.project(),
+                    &presented_pages,
+                    scale,
+                    editor_clip,
+                );
+                self.script_note_workspace.marker_anchor = self
+                    .script_note_workspace
+                    .open_note
+                    .as_ref()
+                    .and_then(|open_note| {
+                        frame_note_markers
+                            .iter()
+                            .find(|marker| marker.note_ids.contains(open_note))
+                    })
+                    .map(|marker| crate::widgets::script_note::state::MarkerAnchor {
+                        line_key: (marker.line_key.page_index, marker.line_key.line_index),
+                        baseline: marker.baseline,
+                        marker_left: marker.marker_left,
+                        marker_right: marker.marker_right,
+                        baseline_visible: marker.baseline_visible,
+                    });
+                if self.script_note_workspace.reveal_pending
+                    && self
+                        .script_note_workspace
+                        .marker_anchor
+                        .is_some_and(|anchor| anchor.baseline_visible)
+                {
+                    self.script_note_workspace.reveal_pending = false;
+                }
+            }
+            hovered_note_marker = hovered_marker(
+                &frame_note_markers,
+                ui.input(|input| input.pointer.latest_pos()),
+            );
+            let hovered_key = hovered_note_marker
+                .map(|key| (key.page_index, key.line_index));
+            if self.script_note_workspace.hovered_marker != hovered_key {
+                self.script_note_workspace.hovered_marker = hovered_key;
+                ui.ctx().request_repaint();
             }
             let caret_geometry = self.resolve_caret_geometry(
                 &layout,
@@ -431,6 +484,11 @@ impl ScriptCraftApp {
                     .take(last.saturating_add(1))
                     .skip(first)
                 {
+                    let page_markers = frame_note_markers
+                        .iter()
+                        .filter(|marker| marker.line_key.page_index == page_index)
+                        .cloned()
+                        .collect::<Vec<_>>();
                     self.paint_page(
                         ui,
                         &layout,
@@ -443,6 +501,8 @@ impl ScriptCraftApp {
                         caret_geometry,
                         surface,
                         presentation_mode,
+                        &page_markers,
+                        hovered_note_marker,
                     );
                 }
             }
@@ -531,8 +591,17 @@ impl ScriptCraftApp {
                     Sense::click_and_drag()
                 },
             )
-            .on_hover_cursor(document_cursor_icon());
+            .on_hover_cursor(if hovered_note_marker.is_some() {
+                egui::CursorIcon::PointingHand
+            } else {
+                document_cursor_icon()
+            });
         if !element_windows_own_input {
+            let secondary_on_note_marker = surface == EditorSurface::Body
+                && response.secondary_clicked()
+                && response
+                    .interact_pointer_pos()
+                    .is_some_and(|pointer| marker_at(&frame_note_markers, pointer).is_some());
             self.handle_pointer_response(
                 ui,
                 editor_id,
@@ -542,8 +611,9 @@ impl ScriptCraftApp {
                 scale,
                 &frame_projections,
                 surface,
+                &frame_note_markers,
             );
-            if surface == EditorSurface::Body {
+            if surface == EditorSurface::Body && !secondary_on_note_marker {
                 self.show_body_context_menu(&response, ui.ctx());
             }
         }

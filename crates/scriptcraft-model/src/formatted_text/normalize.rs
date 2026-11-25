@@ -234,6 +234,15 @@ pub fn normalize_project_runs(project: &Project) -> Result<Project, FormattedTex
     for paragraph in &mut candidate.title_page {
         paragraph.runs = normalize_runs(&paragraph.text, &paragraph.runs)?;
     }
+    let mut script_notes = candidate.script_notes().iter().cloned().collect::<Vec<_>>();
+    for note in &mut script_notes {
+        for paragraph in &mut note.paragraphs {
+            paragraph.normalize()?;
+        }
+    }
+    candidate
+        .replace_script_notes(crate::script_notes::ScriptNotes::new(script_notes))
+        .map_err(FormattedTextError::Model)?;
 
     if let Some(preservation) = candidate.preservation.as_mut() {
         for owner in &candidate.elements {

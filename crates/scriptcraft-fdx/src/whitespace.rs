@@ -156,6 +156,44 @@ pub(crate) fn format_inserted_paragraph_whitespace(
     }
 }
 
+/// Add deterministic indentation only around newly generated ScriptNote
+/// subtrees. Existing note/container whitespace and opaque source are untouched.
+pub(crate) fn format_script_note_insertions(
+    sections: &mut [PreservedSection],
+    project: &scriptcraft_model::Project,
+) {
+    let generated = project.script_notes().iter()
+        .filter(|note| note.source_note_ordinal.is_none())
+        .filter_map(|note| note.numeric_id.as_deref())
+        .collect::<BTreeSet<_>>();
+    if generated.is_empty() { return; }
+    let Some(root) = sections.iter_mut().flat_map(|section| &mut section.children).find_map(|node| match node {
+        PreservedNode::Element(root) if root.name.local_name == FDX_ROOT => Some(root),
+        _ => None,
+    }) else { return; };
+    let namespace = root.name.namespace_uri.clone();
+    let Some(container) = root.children.iter_mut().find_map(|node| match node {
+        PreservedNode::Element(container) if container.name.local_name == "ScriptNotes"
+            && container.name.namespace_uri == namespace => Some(container),
+        _ => None,
+    }) else { return; };
+    let mut formatted = Vec::new();
+    let mut inserted = false;
+    for node in std::mem::take(&mut container.children) {
+        let is_generated = matches!(&node,
+            PreservedNode::Element(note) if note.name.local_name == "ScriptNote"
+                && note.attributes.iter().any(|attribute| attribute.name.namespace_uri.is_none()
+                    && attribute.name.local_name == "Id" && generated.contains(attribute.value.as_str())));
+        if is_generated {
+            formatted.push(PreservedNode::Text("\n    ".into()));
+            formatted.push(node);
+            inserted = true;
+        } else { formatted.push(node); }
+    }
+    if inserted { formatted.push(PreservedNode::Text("\n  ".into())); }
+    container.children = formatted.into();
+}
+
 fn format_content_insertions(children: &mut Vec<PreservedNode>, inserted_ids: &BTreeSet<String>) {
     // Only the unambiguous element-only Content shape is eligible. Comments,
     // PIs, CDATA, non-whitespace text and non-Paragraph children make the

@@ -5,11 +5,16 @@ use crate::chrome::status_bar::PresentedPage;
 use crate::commands::CommandInvocation;
 use crate::presentation::geometry as presentation_geometry;
 use eframe::egui;
-use scriptcraft_commands::{Command, CommandOrigin, EditorSurface, PointerPhase};
+use scriptcraft_commands::{
+    Command, CommandOrigin, EditorSurface, PointerPhase, ScriptNoteIdValue,
+    ScriptNotePresentValue,
+};
 use scriptcraft_layout::{InteractionQueryDiagnostics, ScreenplayLayout};
 use scriptcraft_model::formatting::FixedPoint;
 use scriptcraft_session::editing::Position;
 use std::time::Instant;
+
+use super::note_overlay::{marker_at, NoteMarkerGeometry};
 
 impl ScriptCraftApp {
     fn caret_from_pointer(
@@ -122,6 +127,7 @@ impl ScriptCraftApp {
         scale: f32,
         projections: &[Option<Vec<Option<presentation_geometry::PresentationLine<'_>>>>],
         surface: EditorSurface,
+        note_markers: &[NoteMarkerGeometry],
     ) {
         match surface {
             EditorSurface::Body => self.editor_surface_id = Some(editor_id),
@@ -139,6 +145,69 @@ impl ScriptCraftApp {
         } else {
             self.reconcile_body_active_group();
         }
+        let pointer = response.interact_pointer_pos();
+        let marker_hit = (surface == EditorSurface::Body
+            && layout.purpose == scriptcraft_layout::LayoutPurpose::Editor)
+            .then(|| pointer.and_then(|position| marker_at(note_markers, position)))
+            .flatten();
+        if marker_hit.is_some() {
+            if response.secondary_clicked() {
+                // A marker's secondary click is inert; it must not become a note
+                // creation gesture or replace the screenplay range.
+                return;
+            }
+            if response.clicked() || response.double_clicked() || response.triple_clicked() {
+                let note = marker_hit
+                    .and_then(|marker| marker.note_ids.first())
+                    .cloned();
+                if let Some(note) = note {
+                    if let Some(marker) = marker_hit {
+                        self.script_note_workspace.marker_anchor = Some(
+                            crate::widgets::script_note::state::MarkerAnchor {
+                                line_key: (marker.line_key.page_index, marker.line_key.line_index),
+                                baseline: marker.baseline,
+                                marker_left: marker.marker_left,
+                                marker_right: marker.marker_right,
+                                baseline_visible: marker.baseline_visible,
+                            },
+                        );
+                    }
+                    self.dispatch_command(
+                        CommandInvocation::new(
+                            Command::ScriptNotePresent {
+                                presentation: ScriptNotePresentValue {
+                                    note: ScriptNoteIdValue::from_core(note),
+                                    move_caret: false,
+                                    focus_body: false,
+                                },
+                            },
+                            CommandOrigin::Pointer,
+                        ),
+                        ui.ctx(),
+                    );
+                }
+                return;
+            }
+            if response.drag_started() || response.dragged() {
+                return;
+            }
+        }
+        if self.script_note_workspace.open_note.is_some()
+            && pointer.is_some_and(|position| {
+                presented_pages
+                    .iter()
+                    .enumerate()
+                    .any(|(page_index, page)| {
+                        !layout.pages[page_index].title_page && page.rect.contains(position)
+                    })
+            })
+            && (response.clicked() || response.secondary_clicked())
+        {
+            self.dispatch_command(
+                CommandInvocation::new(Command::ScriptNoteDismiss, CommandOrigin::Pointer),
+                ui.ctx(),
+            );
+        }
         if surface == EditorSurface::Body && response.secondary_clicked() {
             self.native_input_diagnostics.pointer_activations = self
                 .native_input_diagnostics
@@ -149,7 +218,7 @@ impl ScriptCraftApp {
                 CommandInvocation::new(Command::EditorFocus, CommandOrigin::Pointer),
                 ui.ctx(),
             );
-            if let Some(pointer) = response.interact_pointer_pos() {
+            if let Some(pointer) = pointer {
                 if let Some(page_index) = Self::pointer_surface_page(
                     layout,
                     presented_pages,
@@ -197,7 +266,7 @@ impl ScriptCraftApp {
                     }
                 }
             }
-        } else if let Some(pointer) = response.interact_pointer_pos() {
+        } else if let Some(pointer) = pointer {
             let pointer_active = response.clicked()
                 || response.double_clicked()
                 || response.triple_clicked()

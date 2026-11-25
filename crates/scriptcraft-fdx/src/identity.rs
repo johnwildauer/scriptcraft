@@ -8,6 +8,7 @@ use scriptcraft_model::preservation::{
     is_user_paragraph_data_lookalike, BoardEntity, BoardEntityKind, BoardGraph, ForeignIdDomain,
     ForeignIdentity, ForeignReference, ReferencePolicy, SectionKind,
 };
+use scriptcraft_model::Project;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Map a raw FDX element name to its established foreign identity domain.
@@ -161,6 +162,7 @@ pub(crate) fn validate_user_paragraph_data_locations(
 /// FDX import uses these results to analyze source identities and board references.
 pub(crate) fn collect_identities(
     root: &RawElement,
+    project: &Project,
 ) -> Result<(Vec<ForeignIdentity>, BoardGraph), FdxError> {
     let mut identities = Vec::new();
     let mut board_graph = BoardGraph::default();
@@ -213,6 +215,39 @@ pub(crate) fn collect_identities(
         ));
         Ok(())
     })?;
+
+    // ScriptNote identities are collected only from the first direct managed
+    // container; no descendants under unsupported note ancestry are traversed.
+    let root_namespace = root.name.namespace_uri.as_deref();
+    let first_notes = root.children.iter().find_map(|node| match node {
+        RawNode::Element(element) if is_fdx_element(element, "ScriptNotes", root_namespace) => Some(element),
+        _ => None,
+    });
+    if let Some(container) = first_notes {
+        for note in container.children.iter().filter_map(|node| match node {
+            RawNode::Element(element) if is_fdx_element(element, "ScriptNote", root_namespace) => Some(element),
+            _ => None,
+        }) {
+            if !crate::script_notes::has_supported_range(note, project) { continue; }
+            if raw_identity_attribute_count(note) > 1 { return Err(FdxError::AmbiguousIdentity); }
+            if let Some(value) = raw_identity_attribute(note) {
+                let identity = ForeignIdentity::new(identity_domain("ScriptNote"), value.to_owned())
+                    .map_err(map_preservation_error)?;
+                definitions.push(("ScriptNote".to_owned(), identity, note.attributes.clone(), false));
+            }
+            for paragraph in note.children.iter().filter_map(|node| match node {
+                RawNode::Element(element) if is_fdx_element(element, "Paragraph", root_namespace) => Some(element),
+                _ => None,
+            }) {
+                if raw_identity_attribute_count(paragraph) > 1 { return Err(FdxError::AmbiguousIdentity); }
+                if let Some(value) = raw_identity_attribute(paragraph) {
+                    let identity = ForeignIdentity::new(ForeignIdDomain::Paragraph, value.to_owned())
+                        .map_err(map_preservation_error)?;
+                    definitions.push(("Paragraph".to_owned(), identity, paragraph.attributes.clone(), false));
+                }
+            }
+        }
+    }
 
     // Beat paragraphs remain opaque to screenplay reconciliation. Register only
     // the first Content of supported ListItems referenced by the winning board.
@@ -373,6 +408,17 @@ where
                 content::SourceClass::GenericOpaque
             };
         };
+
+        if depth == 1
+            && is_fdx_element(parent, FDX_ROOT, root_namespace)
+            && is_fdx_element(element, "ScriptNotes", root_namespace)
+            && parent.children.iter().find_map(|child| match child {
+                RawNode::Element(candidate) if is_fdx_element(candidate, "ScriptNotes", root_namespace) => Some(candidate),
+                _ => None,
+            }).is_some_and(|first| std::ptr::eq(first, element))
+        {
+            return content::SourceClass::Structural;
+        }
 
         // Only the exact supported DualDialogue container beneath a direct
         // General body Paragraph is structural for identity traversal.

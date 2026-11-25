@@ -19,6 +19,14 @@ pub(crate) use selection::{map_selection_to_project, map_title_selection_to_proj
 use selection::{validate_position, validate_selection};
 mod beat_rebase;
 pub use beat_rebase::{clamp_beat_text_offset, map_idless_beat_paragraph, BeatIdentityRebase};
+mod script_note_rebase;
+pub use script_note_rebase::ScriptNoteIdentityRebase;
+mod script_notes;
+pub use script_notes::{
+    ScriptNoteColorUpdate, ScriptNoteCreationInput, ScriptNoteField, ScriptNoteHorizontalDirection,
+    ScriptNoteLineEdge, ScriptNoteSelection, ScriptNoteTextEditOperation, ScriptNoteTextPosition,
+};
+mod rich_paragraph;
 mod beat_board;
 pub use beat_board::{BeatHorizontalDirection, BeatLineEdge, BeatSelection, BeatTextEditOperation, BeatTextField, BeatTextPosition};
 mod candidate;

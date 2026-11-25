@@ -363,6 +363,8 @@ fn write_v6_inner(
     let normalized_project =
         normalize_project_runs(project).map_err(map_inline_normalization_error)?;
     let normalized_project = crate::beat_board_candidate::finalize_beat_board_candidate(&normalized_project)?;
+    let (normalized_project, note_identity_changes) =
+        crate::script_notes_candidate::finalize_script_notes_candidate_with_changes(&normalized_project)?;
     let project = &normalized_project;
 
     // Project validation requires every retained definition anchor to resolve
@@ -458,11 +460,18 @@ fn write_v6_inner(
             &sections, project, context, state, original.project.beat_board(), original_state,
             normalize_duplicates,
         )?;
-        let mut sections = beat_projection.sections;
+        let mut sections = crate::script_notes_output::project_script_notes_source(
+            &beat_projection.sections,
+            project,
+            &original.project,
+        )?;
+        crate::whitespace::format_script_note_insertions(&mut sections, project);
         let beat_changes = beat_projection.paragraphs;
         let removed_boards = beat_projection.removed_boards;
         effective_identities.retain(|id| !beat_changes.removed.contains(id));
         effective_identities.extend(beat_changes.added);
+        effective_identities.retain(|id| !note_identity_changes.removed.contains(id));
+        effective_identities.extend(note_identity_changes.added);
         let original_paragraph_ids = original_state
             .identities
             .iter()
@@ -489,7 +498,7 @@ fn write_v6_inner(
     // Derive the complete intended graph from the detached tree, not from the
     // pre-reconciliation preservation registry or the eventual reread alone.
     *stage = WriterStage::IdentityComparison;
-    let (intended_identities, intended_graph) = intended_output_graph(&nodes, normalize_duplicates)?;
+    let (intended_identities, intended_graph) = intended_output_graph(&nodes, normalize_duplicates, project)?;
     verify_managed_beat_graph(project.beat_board(), &intended_identities, &intended_graph)?;
     if let Some((_, expected_identities, removed_boards, original_graph, original_board, _)) =
         &expected_preserved_sections

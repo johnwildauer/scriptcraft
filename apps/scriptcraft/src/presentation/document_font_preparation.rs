@@ -383,6 +383,22 @@ fn project_font_signature(
             collect_run_inputs(&mut families, &mut scalars, &paragraph.runs)?;
         }
     }
+    // ScriptNote titles and bodies are rendered only in the fixed native card.
+    // Keep note ranges, timestamps, writer names, and Type labels out of font
+    // identity: none of those values is measured by the card text layout.
+    collect_text_scalars(&mut scalars, "TitleBody…", false)?;
+    for note in project.script_notes().iter() {
+        collect_text_scalars(&mut scalars, &note.title, false)?;
+        for paragraph in &note.paragraphs {
+            collect_text_scalars(&mut scalars, &paragraph.text, false)?;
+            collect_run_inputs(&mut families, &mut scalars, &paragraph.runs)?;
+            for run in &paragraph.runs {
+                if run_has_all_caps(run) {
+                    collect_uppercase_scalars(&mut scalars, &run.text)?;
+                }
+            }
+        }
+    }
     scalars.insert('\u{fffd}');
     if scalars.len() > MAX_DOCUMENT_FONT_SCALARS {
         return Err(FontPreparationError::bounded("scalar-repertoire-limit"));

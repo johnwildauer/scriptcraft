@@ -16,12 +16,19 @@ pub use values::{
     ParagraphLeadingValue, SpaceBeforeLines, ParagraphFormattingPatchValue,
     BeatCardIdValue, BeatPointValue, BeatRectValue, BeatSelectionValue, BeatTextFieldValue,
     BeatTextPositionValue, BeatTextEditValue, BeatNavigationValue,
+    ScriptNoteIdValue, ScriptNoteColorValue, ScriptNoteTimestampValue,
+    ScriptNoteCreateValue, ScriptNotePropertiesValue, ScriptNoteTextPositionValue,
+    ScriptNoteFieldValue, ScriptNoteSelectionValue, ScriptNoteTextOperationValue,
+    ScriptNoteTextEditValue, ScriptNoteNavigationValue, ScriptNotePresentValue,
+    InvalidScriptNoteTimestamp, MAX_SCRIPT_NOTE_TYPE_BYTES, MAX_SCRIPT_NOTE_TEXT_BYTES,
 };
 
 mod conversions;
 pub use conversions::{
     builtin_template_id, builtin_template_value, beat_selection_to_core, beat_selection_from_core,
     beat_text_edit_to_core, beat_navigation_to_core, pointer_selection, DiagnosticMessage,
+    script_note_selection_to_core, script_note_text_operation_to_core,
+    script_note_navigation_to_core,
     DocumentPath, InvalidDiagnosticMessage, InvalidDocumentPath, InvalidZoomFactor,
     InvalidZoomPercent, Position, PositionError, Selection, SelectionError, ZoomFactor,
     ZoomPercent, MAX_DIAGNOSTIC_MESSAGE_BYTES,
